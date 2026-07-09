@@ -488,7 +488,7 @@ impl Shell {
     /// Atomically overwrite `path` with `bytes` through core's full
     /// `>`-redirect write recipe — symlink-resolved, mode-preserving,
     /// fsync-durable — while emitting no io event.  The public write door for a
-    /// host builtin (exarch's `edit`/`edit-str`) that must write *below* the
+    /// host builtin (exarch's `edit-hash`/`edit-replace`) that must write *below* the
     /// redirect frame and speak its own surface: it shares the one atomic
     /// recipe instead of forking a weaker temp-file write that silently narrows
     /// the target's mode, follows symlinks by replacing them, and skips the

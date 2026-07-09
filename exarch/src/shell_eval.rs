@@ -1038,18 +1038,18 @@ keep-bottom
         );
     }
 
-    /// `edit-str` notes the line(s) it changed the same way `edit-hash` does,
+    /// `edit-replace` notes the line(s) it changed the same way `edit-hash` does,
     /// computed from where its unique match starts: a single line reads
     /// `line n`, a match spanning a real newline in `from` reads `lines n-m`.
     #[test]
-    fn edit_str_notes_changed_line_range_on_stderr() {
+    fn edit_replace_notes_changed_line_range_on_stderr() {
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("edit-str-note", "f.txt", "x\nhello world\ny\n");
+        let (dir, path) = scratch_file("edit-replace-note", "f.txt", "x\nhello world\ny\n");
         let r = run_once(
             &mut shell,
-            &format!("edit-str '{path}' 'hello world' 'hi\\tthere'"),
+            &format!("edit-replace '{path}' 'hello world' 'hi\\tthere'"),
         );
-        assert_eq!(r.exit, 0, "edit-str must succeed");
+        assert_eq!(r.exit, 0, "edit-replace must succeed");
         assert_eq!(
             String::from_utf8_lossy(&r.stderr),
             format!(
@@ -1059,10 +1059,10 @@ keep-bottom
             "a single-line match notes the singular form with an escape warning"
         );
 
-        let (dir2, path2) = scratch_file("edit-str-note-span", "g.txt", "one\ntwo\nthree\n");
+        let (dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
         let spanning = run_once(
             &mut shell,
-            &format!("edit-str '{path2}' 'two\nthree' 'TWO\nTHREE'"),
+            &format!("edit-replace '{path2}' 'two\nthree' 'TWO\nTHREE'"),
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
@@ -1689,13 +1689,13 @@ return !{{length $hits}}"#
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `edit-str` (`data/agent.ral`) — the read/`string-replace`/write idiom
+    /// `edit-replace` (`data/agent.ral`) — the read/`string-replace`/write idiom
     /// collapsed into one call, kept honest by running it. A unique match
     /// rewrites the file; 0 or >1 matches error and leave it untouched.
     #[test]
-    fn edit_str_replaces_unique_match_and_rejects_ambiguity() {
+    fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
         let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir().join(format!("exarch-edit-str-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("exarch-edit-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("create temp dir");
         let file = tmp.join("config.txt");
@@ -1704,7 +1704,7 @@ return !{{length $hits}}"#
 
         let r = run_once(
             &mut shell,
-            &format!("edit-str '{file_str}' 'USE_OPENCV := 0' 'USE_OPENCV := 1'"),
+            &format!("edit-replace '{file_str}' 'USE_OPENCV := 0' 'USE_OPENCV := 1'"),
         );
         assert_eq!(
             r.exit,
@@ -1719,7 +1719,7 @@ return !{{length $hits}}"#
 
         let r = run_once(
             &mut shell,
-            &format!("edit-str '{file_str}' 'USE_MISSING := 0' 'x'"),
+            &format!("edit-replace '{file_str}' 'USE_MISSING := 0' 'x'"),
         );
         assert_ne!(r.exit, 0, "0 matches must error, not write");
         assert!(
@@ -1728,7 +1728,7 @@ return !{{length $hits}}"#
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let r = run_once(&mut shell, &format!("edit-str '{file_str}' ':=' '='"));
+        let r = run_once(&mut shell, &format!("edit-replace '{file_str}' ':=' '='"));
         assert_ne!(r.exit, 0, "a repeated match must error, not guess which one");
         assert_eq!(
             std::fs::read_to_string(&file).expect("read after failed edit"),
@@ -1739,7 +1739,7 @@ return !{{length $hits}}"#
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `edit-str` writes through core's atomic door and surfaces the SAME
+    /// `edit-replace` writes through core's atomic door and surfaces the SAME
     /// structural `write` io event a committed `>` raises: the old and new
     /// snapshots ride as `old_bytes`/`new_bytes`, so the write card renders a
     /// whole-file diff.  This is the forensic parity the old bare-diff-card
@@ -1747,18 +1747,18 @@ return !{{length $hits}}"#
     /// only its rendered diff — and the shared write door is what preserves the
     /// target's mode/symlink/durability that a hand-rolled temp-file persist dropped.
     #[test]
-    fn edit_str_surfaces_a_write_io_event_with_diff() {
+    fn edit_replace_surfaces_a_write_io_event_with_diff() {
         use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("edit-str-io", "b", "hello\nworld\n");
+        let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("edit-str '{path}' 'world' 'friend'"));
+        let (r, kinds) = run_capturing(&mut shell, &format!("edit-replace '{path}' 'world' 'friend'"));
         let wrote = std::fs::read_to_string(dir.join("b")).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
-            "edit-str must succeed; stderr was {:?}",
+            "edit-replace must succeed; stderr was {:?}",
             String::from_utf8_lossy(&r.stderr)
         );
         assert_eq!(
@@ -1771,7 +1771,7 @@ return !{{length $hits}}"#
         assert_eq!(
             ios.len(),
             1,
-            "edit-str raises exactly one write io event, got {ios:?}"
+            "edit-replace raises exactly one write io event, got {ios:?}"
         );
         assert_eq!(
             ios[0],
@@ -1791,27 +1791,27 @@ return !{{length $hits}}"#
         );
     }
 
-    /// The Diamond half of the atomic fix: `edit-str` writes through core's
+    /// The Diamond half of the atomic fix: `edit-replace` writes through core's
     /// mode-preserving atomic door, so editing an executable file leaves its
     /// `0o755` mode intact — where a hand-rolled temp-file persist silently
     /// narrowed it to tempfile's `0o600`, stripping the exec bit off a script.
     #[cfg(unix)]
     #[test]
-    fn edit_str_preserves_the_target_file_mode() {
+    fn edit_replace_preserves_the_target_file_mode() {
         use std::os::unix::fs::PermissionsExt;
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("edit-str-mode", "run.sh", "#!/bin/sh\necho old\n");
+        let (dir, path) = scratch_file("edit-replace-mode", "run.sh", "#!/bin/sh\necho old\n");
         std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755))
             .expect("chmod the fixture executable");
 
-        let r = run_once(&mut shell, &format!("edit-str '{path}' 'old' 'new'"));
+        let r = run_once(&mut shell, &format!("edit-replace '{path}' 'old' 'new'"));
         let mode = std::fs::metadata(dir.join("run.sh")).map(|m| m.permissions().mode() & 0o777);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
             r.exit,
             0,
-            "edit-str must succeed; stderr was {:?}",
+            "edit-replace must succeed; stderr was {:?}",
             String::from_utf8_lossy(&r.stderr)
         );
         assert_eq!(
@@ -1952,7 +1952,7 @@ return !{{length $hits}}"#
     /// recipe leaves the target untouched until the rename, so core reads it
     /// for free and threads it through as `old_bytes` alongside the usual
     /// `new_bytes` preview.  The card layer turns that pair into a whole-file
-    /// diff — the same `Mark::Diff` `edit-hash`/`edit-str` surface explicitly, here
+    /// diff — the same `Mark::Diff` `edit-hash`/`edit-replace` surface explicitly, here
     /// for any `>` redirect with no builtin required.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {

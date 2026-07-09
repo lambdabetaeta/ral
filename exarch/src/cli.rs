@@ -109,12 +109,25 @@ pub struct Cli {
     #[arg(long = "vi")]
     pub vi: bool,
 
-    /// Drop the line-hash editing scheme (`view-text`/`view-text-around`/`edit`)
-    /// from the system prompt, teaching the read/`string-replace`/write idiom
-    /// instead. The builtins themselves stay registered either way — this
-    /// only swaps which editing scheme the model is taught.
-    #[arg(long = "no-hashline")]
-    pub no_hashline: bool,
+    /// Which file-editing scheme the system prompt teaches. `hash` (the
+    /// default) teaches the witnessed line-hash scheme
+    /// (`view-text`/`view-text-around`/`edit-hash`); `replace` teaches literal
+    /// string-replacement via `edit-replace`. Both builtins stay registered
+    /// either way — this only swaps which scheme the model is taught, so the
+    /// unadvertised one still works if named.
+    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Hash)]
+    pub edit: EditScheme,
+}
+
+/// The file-editing scheme the system prompt advertises — see the `--edit`
+/// flag.  Selects a prompt section only; both editing builtins are always
+/// registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EditScheme {
+    /// Witnessed line-hash editing: `view-text`/`view-text-around`/`edit-hash`.
+    Hash,
+    /// Literal string-replacement editing: `edit-replace`.
+    Replace,
 }
 
 /// An out-of-band action that runs and exits instead of starting a session.

@@ -234,7 +234,7 @@ fn rows_of(body: &str) -> Vec<String> {
 /// Surface the one `{io:"read", path}` card for a whole-file read.  `view-text`
 /// and `witnesses` read in Rust below the ral line (no `< path` redirect), so
 /// they raise their own read card — one logical surface per read, matching the
-/// shape the redirect frame would have pushed.  `edit-hash`/`edit-str` are the
+/// shape the redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
 /// exception: they read silently and speak only their `write` event.
 fn surface_read(shell: &mut Shell, path: &str) {
     shell.surface(Value::map(vec![
@@ -412,7 +412,7 @@ struct ResolvedEdit {
 }
 
 /// Backslash letters that read as a C/Python-style escape but are not one:
-/// `edit-hash`/`edit-str` take their replacement text verbatim, with no escaping
+/// `edit-hash`/`edit-replace` take their replacement text verbatim, with no escaping
 /// of their own, so a literal `\n` in a replacement lands as two characters
 /// — backslash, n — not a newline.  A model reaching for a familiar escape
 /// syntax here almost always meant the real character; `has_suspicious_escapes`
@@ -577,11 +577,11 @@ fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// The largest either snapshot of an edit may reach before its `write` card
 /// falls back to a plain listing instead of a whole-file diff — mirrors core's
 /// write-preview cap (`PREVIEW_CAP` in `runtime/command/redirect.rs`), so an
-/// `edit-hash`/`edit-str` write and a committed `>` over the same file make the
+/// `edit-hash`/`edit-replace` write and a committed `>` over the same file make the
 /// identical diff-vs-listing choice.
 const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
 
-/// Surface the structural `write` io event an `edit-hash`/`edit-str` commit raises —
+/// Surface the structural `write` io event an `edit-hash`/`edit-replace` commit raises —
 /// the same event a committed `>` redirect emits, so the write card renders
 /// `old` vs `new` as a whole-file diff below its `write <path> committed`
 /// heading.  Both snapshots ride as `old_bytes`/`new_bytes`; `old_bytes` is
@@ -609,12 +609,12 @@ fn surface_write(shell: &mut Shell, path: &str, old: &str, new: &str) {
 /// the active grant the way a `< path` redirect would.  The shared read door of
 /// `view-text`, `witnesses`, and `edit-hash`: in Rust, below the ral line, so it
 /// never reaches the redirect frame.  Each caller decides its own surface —
-/// `view-text`/`witnesses` raise one read card, `edit-hash`/`edit-str` read silently
+/// `view-text`/`witnesses` raise one read card, `edit-hash`/`edit-replace` read silently
 /// and speak only their `write` event.  A non-UTF-8 file is named (the witness
 /// layer cannot address it); `tool` puts the calling builtin's name on the error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit-hash), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit-hash/edit-str read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
+    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit-hash), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit-hash/edit-replace read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
 )]
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
@@ -628,7 +628,7 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
     })
 }
 
-/// `edit-str <path> <from> <to>` — read `path`, replace the one literal
+/// `edit-replace <path> <from> <to>` — read `path`, replace the one literal
 /// occurrence of `from` with `to` via the same match/error logic as
 /// `string-replace` (0 or >1 matches errors, leaving the file untouched),
 /// and write the result back.  Composed over the same read/write doors as
@@ -637,12 +637,12 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// whose old/new snapshots the write card renders as a whole-file diff.  It
 /// notes the change on stderr the same way `edit-hash` does, with the line range
 /// computed from where the match started (see [`note_edit`]).
-fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 3, "edit-str")?;
+fn builtin_edit_replace(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 3, "edit-replace")?;
     let path = args[0].to_string();
     let from = args[1].to_string();
     let to = args[2].to_string();
-    let body = read_text_file(shell, &path, "edit-str")?;
+    let body = read_text_file(shell, &path, "edit-replace")?;
     let replaced = ral_core::builtins::strings::builtin_string_replace(&[
         Value::String(from.clone()),
         Value::String(to.clone()),
@@ -655,7 +655,7 @@ fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // `string_replace` above already proved `from` matches exactly once, so
     // the same offset it used is the one match here — safe to relocate for
     // the line-range note without re-validating uniqueness.
-    let start = body.find(&from).expect("edit-str: match vanished after string_replace confirmed it");
+    let start = body.find(&from).expect("edit-replace: match vanished after string_replace confirmed it");
     let start_line = body[..start].matches('\n').count() + 1;
     let end_line = start_line + from.matches('\n').count();
     let lines = if start_line == end_line {
@@ -796,9 +796,9 @@ fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `edit-str :: Str → Str → Str → F Unit` — `path`, `from`, `to`.  Returns
-/// Unit: `edit-str` writes and surfaces, it does not yield a value.
-fn scheme_edit_str(_u: &mut Unifier) -> Scheme {
+/// `edit-replace :: Str → Str → Str → F Unit` — `path`, `from`, `to`.  Returns
+/// Unit: `edit-replace` writes and surfaces, it does not yield a value.
+fn scheme_edit_replace(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
@@ -1113,10 +1113,10 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         body: BuiltinBody::Static(builtin_edit_hash),
     },
     BuiltinEntry {
-        name: Cow::Borrowed("edit-str"),
-        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_edit_str),
-        doc: "edit-str <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors, leaving the file untouched, if FROM matches zero times or more than once.",
-        body: BuiltinBody::Static(builtin_edit_str),
+        name: Cow::Borrowed("edit-replace"),
+        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_edit_replace),
+        doc: "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors, leaving the file untouched, if FROM matches zero times or more than once.",
+        body: BuiltinBody::Static(builtin_edit_replace),
     },
     BuiltinEntry {
         name: Cow::Borrowed("explore-dir"),

@@ -491,7 +491,7 @@ const WRITE_PREVIEW_LINES: usize = 10;
 /// Preview a committed write: a whole-file [`Mark::Diff`] against the prior
 /// content when `old` is present (core supplies it only for an atomic write
 /// that overwrote an existing file with neither side exceeding its read cap)
-/// and both sides are valid UTF-8 — the same diff `edit`/`edit-str` surface
+/// and both sides are valid UTF-8 — the same diff `edit-hash`/`edit-replace` surface
 /// explicitly, here computed directly from the two snapshots since this
 /// already sits in the rendering layer.  Otherwise, the first
 /// [`WRITE_PREVIEW_LINES`] lines of `new` as one [`Mark::Listing`], `more` set

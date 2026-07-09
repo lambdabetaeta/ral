@@ -5,6 +5,7 @@
 //! in `assemble`.  Headed sections get a `# heading` line; the persona
 //! section is unheaded — it sets the tone, not a topic.
 
+use crate::cli::EditScheme;
 use crate::host;
 use crate::skill;
 use ral_core::types::{Capabilities, ExecDir};
@@ -17,13 +18,13 @@ use std::path::{Path, PathBuf};
 ///    other section stands, so an operator can retune the voice without losing
 ///    the tool reference.
 /// 2. **Ral** (`data/ral.md`) — the language and tool reference.
-/// 3. **Editing** — the file-editing scheme, `hashline`-gated: the
-///    line-hash `view-text`/`view-text-around`/`edit` reference
-///    (`data/edit-hash.md`) by default, or the read/`string-replace`/write
-///    idiom (`data/edit-string-replace.md`) when `hashline` is `false`
-///    (the CLI's `--no-hashline`). Only the prompt text switches — both
-///    builtins stay registered either way, so `explain edit` still works
-///    under `--no-hashline`, just unadvertised.
+/// 3. **Editing** — the file-editing scheme, selected by `edit`: the
+///    line-hash `view-text`/`view-text-around`/`edit-hash` reference
+///    (`data/edit-hash.md`) for [`EditScheme::Hash`], or the
+///    read/`string-replace`/write idiom (`data/edit-replace.md`) for
+///    [`EditScheme::Replace`] (the CLI's `--edit replace`). Only the prompt
+///    text switches — both builtins stay registered either way, so
+///    `explain edit-hash` still works under `--edit replace`, just unadvertised.
 /// 4. **Builtins** — every builtin and prelude function's **name** only (see
 ///    [`builtin_index`]), a progressive-disclosure index right after the `Ral`
 ///    prose that points `help` at it: the agent reads the whole surface at a
@@ -58,7 +59,7 @@ pub fn assemble(
     cwd: &Path,
     config_dir: &Path,
     headless: bool,
-    hashline: bool,
+    edit: EditScheme,
 ) -> Result<String, String> {
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
     // Persona is the only section `--system` replaces; the rest stand.
@@ -73,10 +74,9 @@ pub fn assemble(
     sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
     sections.push((
         Some("Editing"),
-        if hashline {
-            include_str!("../data/edit-hash.md").into()
-        } else {
-            include_str!("../data/edit-string-replace.md").into()
+        match edit {
+            EditScheme::Hash => include_str!("../data/edit-hash.md").into(),
+            EditScheme::Replace => include_str!("../data/edit-replace.md").into(),
         },
     ));
     sections.push((Some("Builtins"), builtin_index()));
@@ -104,7 +104,7 @@ pub fn assemble(
 
 /// Every command the agent can name, as one comma-separated line of **names**:
 /// the registered builtins (core's plus exarch's own surface — `view-text`,
-/// `grep-files`, `edit`, …), the documented prelude functions, and
+/// `grep-files`, `edit-hash`, …), the documented prelude functions, and
 /// the agent library (`view-text-around`, which rides in as part of the prelude).
 /// Sorted and deduped, with `_`-prefixed internals filtered out — note
 /// `ral_core::builtins::builtin_names` does *not* drop the `_` names itself,

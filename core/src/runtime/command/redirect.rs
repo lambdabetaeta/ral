@@ -166,7 +166,7 @@ impl AtomicCommit {
     /// The pre-existing target's whole content, read before `commit()` — the
     /// atomic recipe leaves `target` completely untouched until the rename,
     /// so this is a free look at "what was there before", the same snapshot
-    /// `edit`/`edit-str` read explicitly to build their diff card.  `None`
+    /// `edit-hash`/`edit-replace` read explicitly to build their diff card.  `None`
     /// for a new file (nothing to diff against) or when either side would
     /// exceed [`PREVIEW_CAP`]: diffing only ever a truncated prefix of one
     /// side would describe a change that doesn't match what actually
@@ -343,7 +343,7 @@ pub(crate) fn open_file(
 /// symlink-resolved, mode-preserving, fsync-durable ([`open_atomic`] then
 /// [`AtomicCommit::commit`]) — while emitting no io event: the caller owns the
 /// surface.  The shared write door for a host builtin that must write *below*
-/// the redirect frame (exarch's `edit`/`edit-str`, which speak their own write
+/// the redirect frame (exarch's `edit-hash`/`edit-replace`, which speak their own write
 /// card) rather than fork a weaker temp-file recipe that drops the mode,
 /// symlink, and fsync steps.  A non-regular target (a TTY, `/dev/null`, a pipe)
 /// takes the streaming truncating write [`open_file`] already picks for it,

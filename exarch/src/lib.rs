@@ -211,7 +211,7 @@ pub fn run() -> Result<(), String> {
         &cwd_path,
         &config_dir,
         c.headless,
-        !c.no_hashline,
+        c.edit,
     )?;
     let system_size = system.len();
 
