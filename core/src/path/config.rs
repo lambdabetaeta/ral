@@ -27,29 +27,26 @@ fn base(kind: XdgKind) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// `config_base()` joined with `subpath` (e.g. `"ral/rc"`).
+/// The XDG config base joined with `subpath` (e.g. `"ral/rc"`).
 /// `None` when no config base resolves.
 pub fn xdg_config_subpath(subpath: &str) -> Option<PathBuf> {
     base(XdgKind::Config).map(|base| base.join(subpath))
 }
 
-/// `data_base()` joined with `subpath` (e.g. `"ral/exit-hints.txt"`).
+/// The XDG data base joined with `subpath` (e.g. `"ral/exit-hints.txt"`).
 /// `None` when no data base resolves.
 pub fn xdg_data_subpath(subpath: &str) -> Option<PathBuf> {
     base(XdgKind::Data).map(|base| base.join(subpath))
 }
 
-/// `$HOME/<dot_name>` (e.g. `home_dot(".ralrc")`), or `None` when
-/// `$HOME` is unset.
+/// `$HOME/<dot_name>` (e.g. `home_dot(".ralrc")`), or `None` when the
+/// result is not absolute — i.e. `$HOME` is empty or itself relative.
 ///
-/// Encodes the legacy single-file convention so
-/// rc loaders can probe `$XDG_CONFIG_HOME/<app>/<file>` *and* the
-/// home-dot form through one module.
+/// Encodes the legacy single-file convention so rc loaders can probe
+/// `$XDG_CONFIG_HOME/<app>/<file>` *and* the home-dot form through one
+/// module.  Applies the same absolute-path filter as [`base`].
 #[allow(clippy::disallowed_methods)]
 pub fn home_dot(dot_name: &str) -> Option<PathBuf> {
-    let h = home_from_env();
-    if h.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(h).join(dot_name))
+    let p = PathBuf::from(home_from_env()).join(dot_name);
+    p.is_absolute().then_some(p)
 }
