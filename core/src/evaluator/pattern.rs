@@ -102,11 +102,10 @@ fn stage_pattern(
     match pattern {
         IrPattern::Wildcard => Ok(()),
         IrPattern::Name(name) => {
-            if crate::syntax::ast::WordLiteral::classify(name).is_some() {
-                return Err(shell
-                    .err(format!("cannot assign to literal '{name}'"), 1)
-                    .into());
-            }
+            debug_assert!(
+                crate::syntax::ast::WordLiteral::classify(name).is_none(),
+                "parser guarantees a binding name is never a word literal",
+            );
             staged.push((
                 name.clone(),
                 Binding {
@@ -191,7 +190,7 @@ fn stage_pattern(
                     // A pattern default fills in a missing field; its
                     // value is bound, never the enclosing body's result,
                     // so it runs under a non-trivial continuation
-                    // ([`Tail::No`]) by construction (review finding E4).
+                    // ([`Tail::No`]) by construction.
                     (None, Some(default_comp)) => eval_comp(default_comp, shell, Tail::No)?,
                     (None, None) => {
                         let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
