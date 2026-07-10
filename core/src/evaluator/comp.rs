@@ -13,7 +13,9 @@
 
 use crate::io::strip_trailing_newline;
 use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
+use crate::mode::{ByteMode, Wire};
 use crate::source::Spanned;
+use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Raw, Shell, Tail, Value};
 use std::sync::Arc;
 
@@ -141,13 +143,8 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
 
 // ── Per-rule helpers ─────────────────────────────────────────────────────
 
-/// `return V` — produce the value of `V`.
-///
-/// A Bool return updates `last_status` (true → 0, false → 1),
-/// mirroring POSIX predicates like `test` that encode their result
-/// in the exit code. Non-Bool returns leave `last_status` untouched
-/// so it keeps reflecting the last command with status, exactly as
-/// `x=42` or `echo hi` would in a shell.
+/// `return V` — produce the value of `V`, updating `last_status` from
+/// the result via [`set_status_from_value`].
 fn eval_return(val: &Val, shell: &mut Shell) -> Raw<Value> {
     let v = eval_val(val, shell)?;
     set_status_from_value(&v, shell);
@@ -286,7 +283,7 @@ fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
 ///
 /// Computation-typed only because indexing can fail (key not found,
 /// out of bounds); the target and keys are themselves pure values.
-fn eval_index(target: &Val, keys: &[crate::source::Spanned<Val>], shell: &mut Shell) -> Raw<Value> {
+fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Value> {
     let mut v = eval_val(target, shell)?;
     for key in keys {
         v = expr::index_value(&v, &eval_val(&key.item, shell)?, shell)?;
@@ -300,12 +297,8 @@ fn eval_index(target: &Val, keys: &[crate::source::Spanned<Val>], shell: &mut Sh
 /// byte-mode so a command that writes bytes and returns `Unit` binds the
 /// decoded bytes.  Commands with a proper return value bind that value;
 /// non-final byte effects in a sequence are flushed by [`eval_seq`].
-fn eval_bind_rhs(
-    m: &Arc<Comp>,
-    rhs_output: crate::mode::ByteMode,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    if rhs_output != crate::mode::ByteMode::Bytes {
+fn eval_bind_rhs(m: &Arc<Comp>, rhs_output: ByteMode, shell: &mut Shell) -> Raw<Value> {
+    if rhs_output != ByteMode::Bytes {
         return eval_comp(m, shell, Tail::No);
     }
     let (result, mut bytes) =
@@ -337,12 +330,12 @@ fn eval_bind_rhs(
 /// then continue with `rest`.
 ///
 /// CBPV Bind sequences a computation with a continuation under a
-/// value binding. A Bool result also updates `last_status` so
-/// subsequent shell-level status checks see the predicate outcome.
-/// The RHS itself is evaluated by [`eval_bind_rhs`], which handles
-/// byte-mode capture per SPEC §4.3.  The node's scheme — the checker's
-/// verdict for this bind — installs together with the value, so the
-/// next turn's check is seeded from the live binding.
+/// value binding. The result also updates `last_status` via
+/// [`set_status_from_value`]. The RHS itself is evaluated by
+/// [`eval_bind_rhs`], which handles byte-mode capture per SPEC §4.3.
+/// The node's scheme — the checker's verdict for this bind — installs
+/// together with the value, so the next turn's check is seeded from the
+/// live binding.
 ///
 /// The bound computation `m` runs under a non-trivial continuation;
 /// the continuation `rest` inherits the bind's own tail position, so a
@@ -351,8 +344,8 @@ fn eval_bind(
     m: &Arc<Comp>,
     pattern: &IrPattern,
     rest: &Arc<Comp>,
-    scheme: Option<&crate::typecheck::Scheme>,
-    rhs_output: crate::mode::ByteMode,
+    scheme: Option<&Scheme>,
+    rhs_output: ByteMode,
     tail: Tail,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -377,7 +370,7 @@ fn eval_bind(
 /// edge, so its tail call must not discard downstream stages).
 fn eval_pipeline(
     stages: &[Arc<Comp>],
-    wires: &[crate::mode::Wire],
+    wires: &[Wire],
     tail: Tail,
     shell: &mut Shell,
 ) -> Raw<Value> {
