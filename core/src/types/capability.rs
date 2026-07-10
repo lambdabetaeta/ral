@@ -431,6 +431,11 @@ impl GrantStack {
         self.0.is_empty()
     }
 
+    /// Number of layers on the stack, including the ambient root.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, Capabilities> {
         self.0.iter()
     }
@@ -636,13 +641,7 @@ impl Meet for FsPolicy {
             write_prefixes: PrefixSet::from_frozen(&self.write_prefixes)
                 .meet(PrefixSet::from_frozen(&other.write_prefixes))
                 .surface(),
-            deny_paths: self
-                .deny_paths
-                .into_iter()
-                .chain(other.deny_paths)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+            deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
         }
     }
 }

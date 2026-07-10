@@ -505,7 +505,7 @@ impl Shell {
     /// call left no leaked frame behind.  The qualitative companion is
     /// [`Shell::has_active_capabilities`](Shell::has_active_capabilities).
     pub fn grant_depth(&self) -> usize {
-        self.mobile.context.grants.iter().count()
+        self.mobile.context.grants.len()
     }
 }
 
