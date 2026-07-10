@@ -1,9 +1,0 @@
-#!/usr/bin/env ral
-# Footgun: `tac` is GNU-only — on macOS/BSD it is absent, so the "portable"
-# script degrades to the write-only `sed '1!G;h;$!d'` incantation nobody
-# can read.  Here reversal is the prelude `reverse` on the list of lines:
-# one word, and the same everywhere ral runs.
-
-let [path] = $args
-
-to-lines !{reverse !{from-lines-list $path}}

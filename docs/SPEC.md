@@ -1717,7 +1717,7 @@ within [dir: $target] { git pull ? within [env: [PORT: $port]] { make deploy } }
 A common idiom is to self-locate relative to `$script`:
 
 ```
-let here = dir $script
+let here = dirname !{resolve-path $script}
 let repo_root = resolve-path "$here/.."
 ```
 

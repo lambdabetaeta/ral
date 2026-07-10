@@ -1,0 +1,10 @@
+#!/usr/bin/env ral
+# Footgun: bash locates its own directory by side effect — the incantation
+# ROOT="$(cd "$(dirname "$0")" && pwd)" cd's into $0's dir in a subshell
+# purely so `pwd` prints it absolute, guards on `&&`, and still never
+# resolves a symlinked $0.  Here `$script` is the running file; `resolve-path`
+# canonicalises it (absolute, symlinks followed) and `dirname` takes the dir.
+
+let here = dirname !{resolve-path $script}
+
+echo "$here/self-locate.sh"
