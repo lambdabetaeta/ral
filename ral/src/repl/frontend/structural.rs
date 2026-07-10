@@ -226,8 +226,13 @@ impl StructuralFrontend {
         // own (possibly multi-line) rows, and the projections.  Clamping to
         // `rows - 1` hugs the bottom — the prompt sits where a shell prompt
         // always sits — and `MAX_VIEWPORT` keeps scrollback in view.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+        )]
+        let lead_rows = prompt_lines.lead.len() as u16;
         let height = viewport_height(
-            prompt_lines.lead.len() as u16,
+            lead_rows,
             &prompt,
             &ws_rows,
             &matrix,
@@ -372,6 +377,10 @@ impl StructuralFrontend {
                             prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement);
                         }
                         _ => {
+                            #[allow(
+                                clippy::cast_possible_truncation,
+                                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+                            )]
                             let anchor_col =
                                 prompt_lines.last_w + line[..start].chars().count() as u16;
                             menu = Some(Menu {
@@ -984,6 +993,10 @@ fn split_prompt(prompt: &PromptText) -> PromptLines {
         .unwrap_or_else(|_| Text::from(prompt.raw().to_string()));
     let mut lines = text.lines;
     let last = lines.pop().unwrap_or_default();
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let last_w = last.width() as u16;
     PromptLines {
         lead: lines,
@@ -995,7 +1008,12 @@ fn split_prompt(prompt: &PromptText) -> PromptLines {
 /// The editor's own visible row count: one row per logical line.  (The
 /// `WrapMode::None` editor does not soft-wrap, so logical lines are rows.)
 fn prompt_rows(prompt: &PromptEditor) -> u16 {
-    prompt.row_count().max(1) as u16
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
+    let rows = prompt.row_count().max(1) as u16;
+    rows
 }
 
 /// Size the inline viewport to its content at entry — spine, prompt, and the
@@ -1016,7 +1034,15 @@ fn viewport_height(
     // so it must afford that row up front rather than steal it from the
     // projections when the error appears.
     let prompt = lead + prompt_rows(prompt);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let ws = 1 + worksheet.len().max(1) as u16;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let mx = 1 + matrix.len().max(1) as u16;
     // The lower band holds either the projections or a completion menu,
     // whichever is taller, so a menu opened on a fresh session (empty
@@ -1042,6 +1068,10 @@ fn render(
     highlights: &[HighlightSpan],
 ) {
     let area = frame.area();
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let lead_rows = prompt.lead.len() as u16;
     let editor_rows = prompt_rows(editor);
 
@@ -1049,7 +1079,14 @@ fn render(
     // caret/label row beneath it; the stage spine keeps its rows above and
     // claims no row below.
     let (spine_rows, caret_rows) = match spine {
-        Spine::Stages(rows) => (rows.len() as u16, 0),
+        Spine::Stages(rows) => {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+            )]
+            let n = rows.len() as u16;
+            (n, 0)
+        }
         Spine::TypeError { .. } => (0, 1),
         Spine::Empty => (0, 0),
     };
@@ -1153,9 +1190,17 @@ fn overlay_type_error(
         // A located error on the (single-line) prompt: underline it in place
         // and point a caret row at it.
         Some((start, end)) if *start <= first_row_len => {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+            )]
             let span_start_col = *start as u16;
             // Clamp the span's end to the first row — a span running past the
             // editor's first line still gets a sensible underline/caret.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+            )]
             let span_end_col = (*end).min(first_row_len) as u16;
             let span_w = span_end_col.saturating_sub(span_start_col).max(1);
 
@@ -1219,6 +1264,10 @@ fn overlay_ghost(
     }
     let row = editor.row();
     let col = editor.col();
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let y = band.y + row as u16;
     let max_x = band.x + band.width;
     if y >= band.y + band.height {
@@ -1226,6 +1275,10 @@ fn overlay_ghost(
     }
     let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
     let buf = frame.buffer_mut();
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let x0 = band.x + last_w + col as u16;
     for (x, ch) in (x0..).zip(ghost.chars()) {
         if x >= max_x {
@@ -1265,7 +1318,15 @@ fn overlay_highlights(
             let Some((row, col)) = abs_char_to_row_col(&lines, abs) else {
                 continue;
             };
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+            )]
             let x = band.x + last_w + col as u16;
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+            )]
             let y = band.y + row as u16;
             if x < max_x && y < max_y {
                 buf[(x, y)].set_style(style);
@@ -1442,10 +1503,21 @@ fn render_menu(frame: &mut ratatui::Frame, area: Rect, menu: &Menu) {
     let widest = menu
         .candidates
         .iter()
-        .map(|c| c.display.chars().count() as u16)
+        .map(|c| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+            )]
+            let w = c.display.chars().count() as u16;
+            w
+        })
         .max()
         .unwrap_or(0);
     let pop_w = (widest + 2).clamp(10, area.width);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let visible = (menu.candidates.len() as u16)
         .min(MENU_MAX_ROWS)
         .min(area.height - 2);
@@ -1502,6 +1574,10 @@ fn commit_line(
             lines.push(Line::from(Span::raw(line.to_string())));
         }
     }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+    )]
     let height = lines.len().max(1) as u16;
     terminal.insert_before(height, |b| {
         Paragraph::new(Text::from(lines))

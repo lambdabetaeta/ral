@@ -270,6 +270,10 @@ impl PromptEditor {
     /// the bottom of the screen, which moves it up, which shrinks `y`: a
     /// per-frame oscillation that reads as flashing.
     pub fn height_hint(&self, width: u16, max: u16) -> u16 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "box row count; terminal height is u16"
+        )]
         let visual = self
             .lines()
             .iter()

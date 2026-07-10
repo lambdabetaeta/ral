@@ -205,7 +205,12 @@ impl Session {
             .as_scope()
             .cause()
         {
-            self.exit_code = cause.exit_code().clamp(0, 255) as u8;
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "clamped to 0..=255, a byte exit status"
+            )]
+            let byte = cause.exit_code().clamp(0, 255) as u8;
+            self.exit_code = byte;
             return Flow::Break;
         }
 

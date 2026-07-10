@@ -203,7 +203,13 @@ pub(crate) fn apply_rc_config(
             }
             "recursion_limit" => {
                 if let Some(n) = val.as_int().filter(|n| *n > 0) {
-                    ctx.shell.set_recursion_limit(n as usize);
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "filtered > 0; a recursion limit far below usize::MAX on 64-bit"
+                    )]
+                    let limit = n as usize;
+                    ctx.shell.set_recursion_limit(limit);
                 }
             }
             "plugins" => {

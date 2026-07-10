@@ -96,13 +96,18 @@ pub(super) fn dispatch_keybinding(
         state_default_used: state_loaded,
     };
 
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "cursor char offset, far below i64::MAX"
+    )]
+    let cursor = cursor_chars as i64;
     let hr = call_plugin_hook(
         shell,
         HookFor { name: &pk.plugin },
         &hook,
         &[Value::map(vec![
             ("line".into(), Value::String(current.to_string())),
-            ("cursor".into(), Value::Int(cursor_chars as i64)),
+            ("cursor".into(), Value::Int(cursor)),
             (
                 "history".into(),
                 Value::List(

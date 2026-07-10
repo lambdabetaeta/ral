@@ -193,7 +193,14 @@ impl Cli {
             .filter(|p| !p.as_os_str().is_empty())
             .collect();
         let run = RunOpts {
-            recursion_limit: self.recursion_limit.map(|n| n as usize),
+            recursion_limit: self.recursion_limit.map(|n| {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "recursion limit; 64-bit target where usize == u64"
+                )]
+                let n = n as usize;
+                n
+            }),
             capabilities,
         };
         let batch = BatchOpts {

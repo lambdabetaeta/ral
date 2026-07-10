@@ -62,9 +62,14 @@ pub fn builtin_ed_get(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-get", shell)?;
     shell.check_editor_read("get")?;
     let pc = ctx(shell)?;
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "editor cursor is a buffer char offset, far below i64::MAX"
+    )]
+    let cursor = pc.editor_state.cursor as i64;
     Ok(Value::map(vec![
         ("text".into(), Value::String(pc.editor_state.text.clone())),
-        ("cursor".into(), Value::Int(pc.editor_state.cursor as i64)),
+        ("cursor".into(), Value::Int(cursor)),
         (
             "keymap".into(),
             Value::String(pc.editor_state.keymap.clone()),
@@ -87,7 +92,12 @@ pub fn builtin_ed_cursor(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-cursor", shell)?;
     shell.check_editor_read("cursor")?;
     let pc = ctx(shell)?;
-    Ok(Value::Int(pc.editor_state.cursor as i64))
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "editor cursor is a buffer char offset, far below i64::MAX"
+    )]
+    let cursor = pc.editor_state.cursor as i64;
+    Ok(Value::Int(cursor))
 }
 
 /// `_ed-keymap` → `Str` — current keymap name.
@@ -134,8 +144,18 @@ pub fn builtin_ed_set(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         pc.editor_state.text = text;
     }
     if let Some(n) = cursor {
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "buffer char count is far below i64::MAX"
+        )]
         let max = pc.editor_state.text.chars().count() as i64;
-        pc.editor_state.cursor = n.clamp(0, max) as usize;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to [0, char_count]; non-negative and within buffer length"
+        )]
+        let cursor = n.clamp(0, max) as usize;
+        pc.editor_state.cursor = cursor;
     }
     Ok(Value::Unit)
 }
@@ -286,7 +306,12 @@ pub fn builtin_ed_history(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     shell.check_editor_read("history")?;
     let prefix = args[0].to_string();
     let limit = match &args[1] {
-        Value::Int(n) => *n as usize,
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "negatives floored to 0 (the unbounded sentinel); count is far below usize::MAX"
+        )]
+        Value::Int(n) => (*n).max(0) as usize,
         _ => return Err(sig("_ed-history: limit must be Int")),
     };
     let pc = ctx(shell)?;
@@ -391,10 +416,20 @@ pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 
     let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::String(w)).collect();
 
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "word index, far below i64::MAX"
+    )]
+    let current_i = current as i64;
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "word index, far below i64::MAX"
+    )]
+    let offset_i = offset_chars as i64;
     Ok(Value::map(vec![
         ("words".into(), Value::list(word_values)),
-        ("current".into(), Value::Int(current as i64)),
-        ("offset".into(), Value::Int(offset_chars as i64)),
+        ("current".into(), Value::Int(current_i)),
+        ("offset".into(), Value::Int(offset_i)),
     ]))
 }
 
@@ -499,8 +534,14 @@ pub fn builtin_ed_highlight(args: &[Value], shell: &mut Shell) -> Settled<Value>
         if style_ansi(&style).is_none() {
             return Err(sig(format!("_ed-highlight: unknown style '{style}'")));
         }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "floored to 0 then clamped to text_len by Span::clamped; char offsets far below usize::MAX"
+        )]
+        let (lo, hi) = (start.max(0) as usize, end.max(0) as usize);
         spans.push(HighlightSpan {
-            span: Span::clamped(start.max(0) as usize, end.max(0) as usize, text_len),
+            span: Span::clamped(lo, hi, text_len),
             style,
         });
     }

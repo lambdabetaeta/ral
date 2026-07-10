@@ -71,7 +71,14 @@ pub(crate) fn apply_session_capabilities(
             diagnostic::cmd_error("ral", &format!("--capabilities: {}", e.message));
             Err(ExitCode::from(2))
         }
-        Err(Break::Escape(Escape::Exit(code))) => Err(ExitCode::from(code.clamp(0, 255) as u8)),
+        Err(Break::Escape(Escape::Exit(code))) => {
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "clamped to 0..=255, a byte exit status"
+            )]
+            let byte = code.clamp(0, 255) as u8;
+            Err(ExitCode::from(byte))
+        }
         #[cfg(unix)]
         Err(Break::Escape(Escape::Stopped { .. })) => Err(ExitCode::from(1)),
     }
@@ -264,5 +271,11 @@ pub(crate) fn run_batch(
         );
     }
 
-    ExitCode::from(exit_code as u8)
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "exit_code is clamped to 0..=255 at every arm above"
+    )]
+    let byte = exit_code as u8;
+    ExitCode::from(byte)
 }

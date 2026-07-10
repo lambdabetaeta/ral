@@ -547,10 +547,15 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         (old_buf, handlers, hook_env, history, keymap)
     }; // lock released
 
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "buffer char position, far below i64::MAX"
+    )]
+    let pos_i = pos as i64;
     let args = [Value::map(vec![
         ("old_buf".into(), Value::String(old_buf)),
         ("line".into(), Value::String(line.to_string())),
-        ("pos".into(), Value::Int(pos as i64)),
+        ("pos".into(), Value::Int(pos_i)),
         (
             "history".into(),
             Value::List(history.iter().cloned().map(Value::String).collect()),

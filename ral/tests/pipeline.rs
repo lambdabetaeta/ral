@@ -795,7 +795,7 @@ fn sigint_kills_external_child_in_pipeline() {
     }
     let mut child = cmd.spawn().expect("spawn");
 
-    let pid = child.id() as libc::pid_t;
+    let pid = child.id().cast_signed();
 
     // Let the pipeline start before sending the signal.  Either
     // outcome — SIGINT relayed to the spawned children, or
