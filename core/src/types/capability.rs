@@ -594,7 +594,7 @@ impl ExecPolicy {
 
     /// True iff this verdict is the lattice bottom `Deny`.
     pub fn is_denied(&self) -> bool {
-        matches!(self, ExecPolicy::Deny)
+        matches!(self, Self::Deny)
     }
 }
 

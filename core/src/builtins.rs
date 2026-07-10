@@ -485,8 +485,8 @@ enum BuiltinSet {
 impl BuiltinSet {
     fn entries(&self) -> &[BuiltinEntry] {
         match self {
-            BuiltinSet::Static(s) => s,
-            BuiltinSet::Captured(a) => a,
+            Self::Static(s) => s,
+            Self::Captured(a) => a,
         }
     }
 }

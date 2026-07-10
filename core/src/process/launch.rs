@@ -88,10 +88,10 @@ impl StdioSpec {
     #[cfg(not(windows))]
     fn into_stdio(self) -> std::process::Stdio {
         match self {
-            StdioSpec::Inherit => std::process::Stdio::inherit(),
-            StdioSpec::Null => std::process::Stdio::null(),
-            StdioSpec::Piped => std::process::Stdio::piped(),
-            StdioSpec::Stdio(stdio) => stdio,
+            Self::Inherit => std::process::Stdio::inherit(),
+            Self::Null => std::process::Stdio::null(),
+            Self::Piped => std::process::Stdio::piped(),
+            Self::Stdio(stdio) => stdio,
         }
     }
 

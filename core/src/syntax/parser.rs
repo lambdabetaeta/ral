@@ -88,7 +88,7 @@ impl std::error::Error for ParseError {}
 
 impl From<ParseError> for types::Error {
     fn from(e: ParseError) -> Self {
-        types::Error::new(e.to_string(), 2)
+        Self::new(e.to_string(), 2)
     }
 }
 
@@ -98,7 +98,7 @@ impl From<LexError> for ParseError {
             .kind
             .is_incomplete()
             .then_some(Incompleteness::UnclosedLexeme);
-        ParseError {
+        Self {
             message: e.kind.message(),
             span: Some(e.span),
             lex_kind: Some(e.kind),
@@ -160,7 +160,7 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<(Token, Span)>) -> Self {
-        Parser {
+        Self {
             tokens,
             pos: 0,
             depth: 0,
@@ -186,7 +186,7 @@ impl Parser {
         tokens: Vec<(Token, Span)>,
         body: impl FnOnce(&mut Self) -> Result<T, ParseError>,
     ) -> Result<T, ParseError> {
-        let mut parser = Parser::new(tokens);
+        let mut parser = Self::new(tokens);
         let value = body(&mut parser)?;
         if parser.peek() != &Token::Eof {
             if parser.peek() == &Token::RBrace {

@@ -92,37 +92,37 @@ pub(crate) type Raw<T> = Result<T, Control>;
 // ── From impls ───────────────────────────────────────────────────────
 
 impl From<Error> for Break {
-    fn from(e: Error) -> Break {
-        Break::Error(e)
+    fn from(e: Error) -> Self {
+        Self::Error(e)
     }
 }
 
 impl From<Escape> for Break {
-    fn from(e: Escape) -> Break {
-        Break::Escape(e)
+    fn from(e: Escape) -> Self {
+        Self::Escape(e)
     }
 }
 
 impl From<Break> for Control {
-    fn from(b: Break) -> Control {
-        Control::Break(b)
+    fn from(b: Break) -> Self {
+        Self::Break(b)
     }
 }
 
 impl From<Error> for Control {
-    fn from(e: Error) -> Control {
-        Control::Break(Break::Error(e))
+    fn from(e: Error) -> Self {
+        Self::Break(Break::Error(e))
     }
 }
 
 impl From<Escape> for Control {
-    fn from(e: Escape) -> Control {
-        Control::Break(Break::Escape(e))
+    fn from(e: Escape) -> Self {
+        Self::Break(Break::Escape(e))
     }
 }
 
 impl From<TailCall> for Control {
-    fn from(t: TailCall) -> Control {
-        Control::Tail(t)
+    fn from(t: TailCall) -> Self {
+        Self::Tail(t)
     }
 }

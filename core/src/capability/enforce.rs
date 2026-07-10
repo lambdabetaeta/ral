@@ -93,15 +93,15 @@ pub(crate) enum FsOp {
 impl FsOp {
     fn label(&self) -> &'static str {
         match self {
-            FsOp::Read => "read",
-            FsOp::Write => "write",
+            Self::Read => "read",
+            Self::Write => "write",
         }
     }
 
     fn prefixes<'a>(&self, fs: &'a FsPolicy) -> &'a [NormalizedPrefix] {
         match self {
-            FsOp::Read => &fs.read_prefixes,
-            FsOp::Write => &fs.write_prefixes,
+            Self::Read => &fs.read_prefixes,
+            Self::Write => &fs.write_prefixes,
         }
     }
 }

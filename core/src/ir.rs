@@ -50,8 +50,8 @@ pub enum CommandName {
 impl CommandName {
     pub fn bare(&self) -> Option<&str> {
         match self {
-            CommandName::Bare(name) => Some(name),
-            CommandName::Path(_) | CommandName::TildePath(_) => None,
+            Self::Bare(name) => Some(name),
+            Self::Path(_) | Self::TildePath(_) => None,
         }
     }
 }
@@ -93,7 +93,7 @@ pub enum Val {
     /// The label is stored without its leading backtick.
     Variant {
         label: String,
-        payload: Option<Box<Val>>,
+        payload: Option<Box<Self>>,
     },
     /// Home-directory expansion: `~`, `~user`, `~/path`, or `~user/path`.
     TildePath(TildePath),
@@ -111,14 +111,14 @@ impl Val {
     /// its source (`007` ⇒ `7`, `1.50` ⇒ `1.5`). The planned fix moves
     /// classification into type-directed inference; see
     /// `dev/docs/260611_overloaded-literals.md`.
-    pub fn from_word(s: &str) -> Val {
+    pub fn from_word(s: &str) -> Self {
         use crate::syntax::ast::WordLiteral;
         match WordLiteral::classify(s) {
-            Some(WordLiteral::Bool(b)) => Val::Bool(b),
-            Some(WordLiteral::Unit) => Val::Unit,
-            Some(WordLiteral::Int(n)) => Val::Int(n),
-            Some(WordLiteral::Float(f)) => Val::Float(f),
-            None => Val::String(s.to_string()),
+            Some(WordLiteral::Bool(b)) => Self::Bool(b),
+            Some(WordLiteral::Unit) => Self::Unit,
+            Some(WordLiteral::Int(n)) => Self::Int(n),
+            Some(WordLiteral::Float(f)) => Self::Float(f),
+            None => Self::String(s.to_string()),
         }
     }
 }
@@ -631,7 +631,7 @@ impl CommandWord {
     /// tag, not in a boolean projection.
     pub fn name(&self) -> &CommandName {
         match self {
-            CommandWord::Name(n) | CommandWord::External(n) => n,
+            Self::Name(n) | Self::External(n) => n,
         }
     }
 }

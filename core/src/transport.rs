@@ -277,14 +277,14 @@ pub enum Break {
 }
 
 impl From<crate::types::Break> for Break {
-    fn from(break_: crate::types::Break) -> Break {
+    fn from(break_: crate::types::Break) -> Self {
         use crate::types::{Break as EngineBreak, Escape};
         match break_ {
-            EngineBreak::Error(e) => Break::Error(e.message),
+            EngineBreak::Error(e) => Self::Error(e.message),
             EngineBreak::Escape(esc) => match esc {
-                Escape::Exit(code) => Break::Exit(code.clamp(0, 255)),
+                Escape::Exit(code) => Self::Exit(code.clamp(0, 255)),
                 #[cfg(unix)]
-                Escape::Stopped { pgid, signal, .. } => Break::Stopped {
+                Escape::Stopped { pgid, signal, .. } => Self::Stopped {
                     pgid: pgid.0,
                     signal: signal.number(),
                     signal_name: signal.name().unwrap_or("?").to_string(),
@@ -301,10 +301,10 @@ impl crate::driver::TurnReport {
     /// and rich diagnostics render to strings.  The one lossy step between
     /// the engine and the seam.
     pub fn into_report(self) -> Report {
-        use crate::driver::TurnReport;
+        
         use crate::turn::StaticDiagnostics;
         match self {
-            TurnReport::Static { diagnostics } => Report::Static {
+            Self::Static { diagnostics } => Report::Static {
                 diagnostics: match diagnostics {
                     StaticDiagnostics::Parse(e) => Diagnostics::Parse(e.message),
                     StaticDiagnostics::Types(errs) => {
@@ -313,7 +313,7 @@ impl crate::driver::TurnReport {
                     StaticDiagnostics::Host(e) => Diagnostics::Host(e.message),
                 },
             },
-            TurnReport::Ran {
+            Self::Ran {
                 result,
                 status,
                 single_command,
@@ -595,7 +595,7 @@ pub struct ControlSender {
 
 impl ControlSender {
     pub(crate) fn new(current_dispatch: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        ControlSender {
+        Self {
             #[cfg(unix)]
             wire: None,
             current_dispatch,
@@ -607,7 +607,7 @@ impl ControlSender {
         ch: Arc<Mutex<crate::wire::WireChannel>>,
         current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
-        ControlSender {
+        Self {
             wire: Some(ch),
             current_dispatch,
         }
@@ -664,7 +664,7 @@ pub struct EventReceiver {
 
 impl EventReceiver {
     fn new(rx: mpsc::Receiver<Frame>) -> Self {
-        EventReceiver {
+        Self {
             rx: std::sync::Mutex::new(rx),
             stash: std::sync::Mutex::new(std::collections::VecDeque::new()),
         }
@@ -825,7 +825,7 @@ impl IdentityTransport {
             current_dispatch,
         };
 
-        IdentityTransport {
+        Self {
             engine: SessionLock::new(engine),
             control,
             events_recv: EventReceiver::new(event_rx),
@@ -1071,7 +1071,7 @@ impl WireTransport {
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let control = ControlSender::new_wire(write_tx.clone(), current_dispatch.clone());
 
-        Ok(WireTransport {
+        Ok(Self {
             events_recv: EventReceiver::new(event_rx),
             control,
             write_tx,

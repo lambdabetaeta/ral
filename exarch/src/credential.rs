@@ -56,7 +56,7 @@ impl Credential {
     /// exactly the credential that carries no listable catalog (the Codex
     /// backend), which is why the picker keys its plan-model seeding on it.
     pub fn is_subscription(&self) -> bool {
-        matches!(self, Credential::OAuth(_))
+        matches!(self, Self::OAuth(_))
     }
 }
 

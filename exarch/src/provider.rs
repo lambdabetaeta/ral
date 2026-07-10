@@ -587,14 +587,14 @@ impl ProviderError {
                 let retry_after = headers
                     .and_then(retry_after_header)
                     .or_else(|| parse_retry_after(&msg));
-                ProviderError::RateLimited {
+                Self::RateLimited {
                     retry_after,
                     cause: msg,
                     body,
                 }
             }
             Fault::Status { status, body, .. } if status.is_server_error() => {
-                ProviderError::Transient {
+                Self::Transient {
                     cause: msg,
                     attempts: 1,
                     body,
@@ -602,7 +602,7 @@ impl ProviderError {
             }
             // Any remaining non-success status (4xx, redirects) is a
             // request the user must change — not retryable.
-            Fault::Status { status, body, .. } => ProviderError::Api {
+            Fault::Status { status, body, .. } => Self::Api {
                 status: Some(status.as_u16()),
                 model: model.to_string(),
                 message: msg.clone(),
@@ -612,14 +612,14 @@ impl ProviderError {
             // A genuine transport fault — connect, timeout, or a body that
             // dropped or failed to decode mid-flight — with no HTTP status
             // ever received.  The canonical retryable failure.
-            Fault::Transport => ProviderError::Transient {
+            Fault::Transport => Self::Transient {
                 cause: msg,
                 attempts: 1,
                 body: None,
             },
             // No status, no transport leaf: an input / auth / parse fault
             // the user must act on.  Rendered raw.
-            Fault::Terminal => ProviderError::Other(msg),
+            Fault::Terminal => Self::Other(msg),
         }
     }
 }
@@ -797,10 +797,10 @@ impl ProviderError {
     /// `Display`.
     fn brief(&self) -> String {
         match self {
-            ProviderError::Transient { cause, .. } | ProviderError::RateLimited { cause, .. } => {
+            Self::Transient { cause, .. } | Self::RateLimited { cause, .. } => {
                 cause.clone()
             }
-            ProviderError::Other(s) => s.clone(),
+            Self::Other(s) => s.clone(),
             other => other.to_string(),
         }
     }
@@ -816,14 +816,14 @@ impl ProviderError {
     /// is present.
     pub fn summary(&self) -> String {
         match self {
-            ProviderError::Cancelled(where_) => format!("cancelled {where_}"),
-            ProviderError::Transient { body, .. } => {
+            Self::Cancelled(where_) => format!("cancelled {where_}"),
+            Self::Transient { body, .. } => {
                 with_body_message("web stream failed", body.as_ref())
             }
-            ProviderError::RateLimited { body, .. } => {
+            Self::RateLimited { body, .. } => {
                 with_body_message("rate limited", body.as_ref())
             }
-            ProviderError::Api {
+            Self::Api {
                 status,
                 message,
                 body,
@@ -838,8 +838,8 @@ impl ProviderError {
                     None => format!("api error: {detail}"),
                 }
             }
-            ProviderError::Truncated { reason } => format!("reply cut off ({reason})"),
-            ProviderError::Other(s) => first_line(s).to_string(),
+            Self::Truncated { reason } => format!("reply cut off ({reason})"),
+            Self::Other(s) => first_line(s).to_string(),
         }
     }
 }
@@ -872,8 +872,8 @@ fn first_line(s: &str) -> &str {
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProviderError::Cancelled(where_) => write!(f, "cancelled {where_}"),
-            ProviderError::Transient {
+            Self::Cancelled(where_) => write!(f, "cancelled {where_}"),
+            Self::Transient {
                 cause, attempts, ..
             } => {
                 if *attempts > 1 {
@@ -882,10 +882,10 @@ impl fmt::Display for ProviderError {
                     write!(f, "transient error: {cause}")
                 }
             }
-            ProviderError::RateLimited { cause, .. } => {
+            Self::RateLimited { cause, .. } => {
                 write!(f, "rate limited: {cause}")
             }
-            ProviderError::Api {
+            Self::Api {
                 status,
                 model,
                 message,
@@ -894,10 +894,10 @@ impl fmt::Display for ProviderError {
                 Some(s) => write!(f, "api error {s} ({model}): {message}"),
                 None => write!(f, "api error ({model}): {message}"),
             },
-            ProviderError::Truncated { reason } => {
+            Self::Truncated { reason } => {
                 write!(f, "reply cut off before completion (reason={reason})")
             }
-            ProviderError::Other(s) => f.write_str(s),
+            Self::Other(s) => f.write_str(s),
         }
     }
 }

@@ -314,14 +314,14 @@ impl Audit {
     /// STT-in for a same-thread thunk body — see
     /// [`crate::types::Shell::inherit_from`].  Moves both the trail
     /// and the capture policy into the child.
-    pub fn inherit_from(&mut self, parent: &mut Audit) {
+    pub fn inherit_from(&mut self, parent: &mut Self) {
         self.trail = parent.trail.take();
         self.capture = parent.capture;
     }
 
     /// STT-out for a same-thread thunk body.  Returns the (possibly
     /// extended) trail and policy back to the parent.
-    pub fn return_to(&mut self, parent: &mut Audit) {
+    pub fn return_to(&mut self, parent: &mut Self) {
         parent.trail = self.trail.take();
         parent.capture = self.capture;
     }
@@ -365,7 +365,7 @@ pub struct ExecNode {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub value: Value,
-    pub children: Vec<ExecNode>,
+    pub children: Vec<Self>,
     pub start: i64,        // wall-clock start: microseconds since epoch
     pub end: i64,          // wall-clock end: microseconds since epoch
     pub principal: String, // $USER at time of recording
@@ -386,11 +386,11 @@ impl ExecNode {
         site: CallSite,
         io: AuditIo,
         value: Value,
-        children: Vec<ExecNode>,
+        children: Vec<Self>,
         time: AuditTime,
         principal: String,
     ) -> Self {
-        ExecNode {
+        Self {
             kind: ExecNodeKind::Command,
             cmd: cmd.into(),
             args,
@@ -427,7 +427,7 @@ impl ExecNode {
         for (k, v) in fields {
             value_pairs.push((k, v));
         }
-        ExecNode {
+        Self {
             kind: ExecNodeKind::CapabilityCheck,
             cmd: resource.into(),
             args: Vec::new(),
@@ -451,7 +451,7 @@ impl ExecNode {
     /// and the resource-specific fields appear alongside `cmd`/`status`.
     pub fn to_value(&self) -> Value {
         let args_list: Vec<Value> = self.args.iter().map(|a| Value::String(a.clone())).collect();
-        let children_list: Vec<Value> = self.children.iter().map(ExecNode::to_value).collect();
+        let children_list: Vec<Value> = self.children.iter().map(Self::to_value).collect();
         let mut pairs = vec![
             ("kind".into(), Value::String(self.kind.to_string())),
             ("cmd".into(), Value::String(self.cmd.clone())),

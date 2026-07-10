@@ -148,7 +148,7 @@ pub enum Token {
     /// Expression block `$[…]` outside of strings.  Carries the
     /// expression-block token stream (already with `&&`/`||` fused —
     /// see [`Lexer::scan_expr_block`]).
-    Expr(Vec<(Token, Span)>),
+    Expr(Vec<(Self, Span)>),
     Bang,
     Newline,
     Redirect {
@@ -162,7 +162,7 @@ pub enum Token {
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Word(Word::Tilde(path)) => {
+            Self::Word(Word::Tilde(path)) => {
                 let mut rendered = "~".to_string();
                 if let Some(user) = &path.user {
                     rendered.push_str(user);
@@ -172,35 +172,35 @@ impl fmt::Display for Token {
                 }
                 write!(f, "{rendered}")
             }
-            Token::Word(Word::Plain(s) | Word::Slash(s)) | Token::SingleQuoted(s) => {
+            Self::Word(Word::Plain(s) | Word::Slash(s)) | Self::SingleQuoted(s) => {
                 write!(f, "'{s}'")
             }
-            Token::DoubleQuoted(_) => write!(f, "\"...\""),
-            Token::Dollar => write!(f, "$"),
-            Token::Caret => write!(f, "^"),
-            Token::Pipe => write!(f, "|"),
-            Token::Ampersand => write!(f, "&"),
-            Token::Question => write!(f, "?"),
-            Token::Colon => write!(f, ":"),
-            Token::LBrace => write!(f, "{{"),
-            Token::RBrace => write!(f, "}}"),
-            Token::LBracket => write!(f, "["),
-            Token::RBracket => write!(f, "]"),
-            Token::LParen => write!(f, "("),
-            Token::RParen => write!(f, ")"),
-            Token::Comma => write!(f, ","),
-            Token::Spread => write!(f, "..."),
-            Token::Tag(s) => write!(f, "`{s}"),
-            Token::Deref(part) => match part {
+            Self::DoubleQuoted(_) => write!(f, "\"...\""),
+            Self::Dollar => write!(f, "$"),
+            Self::Caret => write!(f, "^"),
+            Self::Pipe => write!(f, "|"),
+            Self::Ampersand => write!(f, "&"),
+            Self::Question => write!(f, "?"),
+            Self::Colon => write!(f, ":"),
+            Self::LBrace => write!(f, "{{"),
+            Self::RBrace => write!(f, "}}"),
+            Self::LBracket => write!(f, "["),
+            Self::RBracket => write!(f, "]"),
+            Self::LParen => write!(f, "("),
+            Self::RParen => write!(f, ")"),
+            Self::Comma => write!(f, ","),
+            Self::Spread => write!(f, "..."),
+            Self::Tag(s) => write!(f, "`{s}"),
+            Self::Deref(part) => match part {
                 StringPart::Variable(n) => write!(f, "${n}"),
                 StringPart::Index { name, .. } => write!(f, "${}[...]", name.item),
                 _ => write!(f, "$..."),
             },
-            Token::Expr(_) => write!(f, "$[...]"),
-            Token::Bang => write!(f, "!"),
-            Token::Newline => write!(f, "newline"),
-            Token::Redirect { .. } => write!(f, "redirect"),
-            Token::Eof => write!(f, "end of input"),
+            Self::Expr(_) => write!(f, "$[...]"),
+            Self::Bang => write!(f, "!"),
+            Self::Newline => write!(f, "newline"),
+            Self::Redirect { .. } => write!(f, "redirect"),
+            Self::Eof => write!(f, "end of input"),
         }
     }
 }
@@ -208,7 +208,7 @@ impl fmt::Display for Token {
 impl Token {
     pub fn as_plain_word(&self) -> Option<&str> {
         match self {
-            Token::Word(word) => word.as_plain(),
+            Self::Word(word) => word.as_plain(),
             _ => None,
         }
     }
@@ -252,7 +252,7 @@ pub enum LexErrorKind {
     UnterminatedString {
         form: StringForm,
         opened: Span,
-        inner: Option<Box<LexErrorKind>>,
+        inner: Option<Box<Self>>,
     },
     /// A balanced delimiter pair (`{}`, `[]`) opened inside an
     /// interpolation or expression block was not closed.  Anchored at
@@ -381,8 +381,8 @@ impl DelimKind {
     /// building an [`LexErrorKind::UnterminatedBalanced`].
     fn chars(self) -> (char, char) {
         match self {
-            DelimKind::Brace => ('{', '}'),
-            DelimKind::Bracket => ('[', ']'),
+            Self::Brace => ('{', '}'),
+            Self::Bracket => ('[', ']'),
         }
     }
 }

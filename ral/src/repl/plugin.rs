@@ -68,8 +68,8 @@ pub(super) enum Keymap {
 impl From<EditMode> for Keymap {
     fn from(mode: EditMode) -> Self {
         match mode {
-            EditMode::Vi => Keymap::Vi,
-            _ => Keymap::Emacs,
+            EditMode::Vi => Self::Vi,
+            _ => Self::Emacs,
         }
     }
 }

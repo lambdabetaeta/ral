@@ -48,14 +48,14 @@ pub struct PipeSpec {
 impl PipeSpec {
     /// Pure: no pipeline I/O on either end.
     pub const fn none() -> Self {
-        PipeSpec {
+        Self {
             input: PipeMode::None,
             output: PipeMode::None,
         }
     }
     /// Decoder: consumes a byte stream, produces a value (no byte output).
     pub const fn decode() -> Self {
-        PipeSpec {
+        Self {
             input: PipeMode::Bytes,
             output: PipeMode::None,
         }
@@ -81,8 +81,8 @@ impl From<ByteMode> for PipeMode {
     /// same as the spec it was grounded from.
     fn from(mode: ByteMode) -> Self {
         match mode {
-            ByteMode::Bytes => PipeMode::Bytes,
-            ByteMode::Empty => PipeMode::None,
+            ByteMode::Bytes => Self::Bytes,
+            ByteMode::Empty => Self::None,
         }
     }
 }
@@ -104,7 +104,7 @@ impl Wire {
     /// the annotation pass grounds an unconstrained mode to.  A pipeline
     /// is born carrying one [`Wire::EMPTY`] per stage; the checker
     /// overwrites it with the inferred wire before evaluation.
-    pub const EMPTY: Wire = Wire {
+    pub const EMPTY: Self = Self {
         input: ByteMode::Empty,
         output: ByteMode::Empty,
     };
@@ -113,7 +113,7 @@ impl Wire {
     /// pinned by no neighbour, grounds to `∅`, and its output is bytes —
     /// an external command's bytes-out signature with its input variable
     /// grounded to the value edge.
-    pub const EXTERNAL: Wire = Wire {
+    pub const EXTERNAL: Self = Self {
         input: ByteMode::Empty,
         output: ByteMode::Bytes,
     };

@@ -99,17 +99,17 @@ impl HookSig {
     /// (Lambda).
     pub fn expected_arity(&self) -> usize {
         match self {
-            HookSig::Prompt => 0,
-            HookSig::Hook { .. } | HookSig::PluginFactory | HookSig::Lifecycle { .. } => 1,
+            Self::Prompt => 0,
+            Self::Hook { .. } | Self::PluginFactory | Self::Lifecycle { .. } => 1,
         }
     }
 
     /// Human-readable label for diagnostics ("prompt body", "prompt hook", …).
     pub fn label(&self) -> &str {
         match self {
-            HookSig::Prompt => "prompt body",
-            HookSig::Hook { kind } | HookSig::Lifecycle { kind } => kind.as_str(),
-            HookSig::PluginFactory => "plugin factory",
+            Self::Prompt => "prompt body",
+            Self::Hook { kind } | Self::Lifecycle { kind } => kind.as_str(),
+            Self::PluginFactory => "plugin factory",
         }
     }
 }
@@ -233,14 +233,14 @@ pub enum RegisterError {
 impl fmt::Display for RegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RegisterError::NotCallable { name, actual, .. } => {
+            Self::NotCallable { name, actual, .. } => {
                 write!(
                     f,
                     "cannot register '{name}' as a hook: \
                      expected a Block or Lambda, got {actual}"
                 )
             }
-            RegisterError::ArityMismatch {
+            Self::ArityMismatch {
                 name,
                 expected,
                 actual,
@@ -258,7 +258,7 @@ impl fmt::Display for RegisterError {
                     actual
                 )
             }
-            RegisterError::AlreadyRegistered { name, .. } => {
+            Self::AlreadyRegistered { name, .. } => {
                 write!(f, "hook '{name}' is already registered")
             }
         }

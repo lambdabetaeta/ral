@@ -162,7 +162,7 @@ impl Shell {
     pub fn run_with_mobile<R>(
         &mut self,
         mobile: Mobile,
-        f: impl FnOnce(&mut Shell) -> R,
+        f: impl FnOnce(&mut Self) -> R,
     ) -> (Mobile, R) {
         let saved = std::mem::replace(&mut self.mobile, mobile);
         let result = f(self);
@@ -247,7 +247,7 @@ impl Shell {
     /// throwaway reconstructed there ([`crate::child_eval`]), so the loan is
     /// repaid into that throwaway, not a live caller.  The per-call overhead
     /// benchmark also drives it directly to measure the bracket.
-    pub fn child_of(captured: &Env, parent: &mut Shell) -> Self {
+    pub fn child_of(captured: &Env, parent: &mut Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.inherit_from(parent);
         child
@@ -259,7 +259,7 @@ impl Shell {
     /// needed.  The source cursor and the builtin table — no longer
     /// part of `context` — are copied alongside so the aside resolves
     /// names and renders positions exactly as the parent would.
-    pub fn child_from(captured: &Env, parent: &Shell) -> Self {
+    pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();
         child.turn.loc = parent.turn.loc.clone();
@@ -320,7 +320,7 @@ impl Shell {
         f: F,
     ) -> (std::thread::JoinHandle<R>, crate::process::CancelScope)
     where
-        F: FnOnce(&mut Shell) -> R + Send + 'static,
+        F: FnOnce(&mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
@@ -348,7 +348,7 @@ impl Shell {
     /// Propagate runtime state from `parent` into this child shell
     /// for a same-thread thunk body.  Per-substate inherit rules; the
     /// asymmetry with [`Self::return_to`] is the flow matrix.
-    pub fn inherit_from(&mut self, parent: &mut Shell) {
+    pub fn inherit_from(&mut self, parent: &mut Self) {
         self.mobile.context = parent.mobile.context.clone();
         self.mobile.control.inherit_from(&parent.mobile.control);
         self.turn.inherit_from(&mut parent.turn);
@@ -366,7 +366,7 @@ impl Shell {
     /// `cwd` (both halves of the pair) flows back: a `cd` inside a
     /// thunk persists like every other shell.  Threads do not run
     /// `return_to`, so their own `cd`s stay private.
-    pub fn return_to(&mut self, parent: &mut Shell) {
+    pub fn return_to(&mut self, parent: &mut Self) {
         self.mobile.control.return_to(&mut parent.mobile.control);
         self.local.audit.return_to(&mut parent.local.audit);
         self.local.repl.return_to(&mut parent.local.repl);

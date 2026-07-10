@@ -116,12 +116,12 @@ enum TyKey {
     Int,
     Float,
     String,
-    List(Box<TyKey>),
-    Map(Box<TyKey>),
+    List(Box<Self>),
+    Map(Box<Self>),
     Record(RowKey),
     Variant(RowKey),
     Thunk(Box<CompTyKey>),
-    Handle(Box<TyKey>),
+    Handle(Box<Self>),
     Var(u32),
 }
 
@@ -129,7 +129,7 @@ enum TyKey {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum CompTyKey {
     Return(PipeMode, PipeMode, Box<TyKey>),
-    Fun(Box<TyKey>, Box<CompTyKey>),
+    Fun(Box<TyKey>, Box<Self>),
     Var(u32),
 }
 
@@ -138,7 +138,7 @@ enum CompTyKey {
 enum RowKey {
     Empty,
     Var(u32),
-    Extend(String, Box<TyKey>, Box<RowKey>),
+    Extend(String, Box<TyKey>, Box<Self>),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,54 +167,54 @@ trait Unifiable: Clone {
 impl Unifiable for Ty {
     fn as_var(&self) -> Option<u32> {
         match self {
-            Ty::Var(TyVar(i)) => Some(*i),
+            Self::Var(TyVar(i)) => Some(*i),
             _ => None,
         }
     }
     fn from_root(root: u32) -> Self {
-        Ty::Var(TyVar(root))
+        Self::Var(TyVar(root))
     }
 }
 
 impl Unifiable for CompTy {
     fn as_var(&self) -> Option<u32> {
         match self {
-            CompTy::Var(CompTyVar(i)) => Some(*i),
+            Self::Var(CompTyVar(i)) => Some(*i),
             _ => None,
         }
     }
     fn from_root(root: u32) -> Self {
-        CompTy::Var(CompTyVar(root))
+        Self::Var(CompTyVar(root))
     }
 }
 
 impl Unifiable for PipeMode {
     fn as_var(&self) -> Option<u32> {
         match self {
-            PipeMode::Var(ModeVar(i)) => Some(*i),
+            Self::Var(ModeVar(i)) => Some(*i),
             _ => None,
         }
     }
     fn from_root(root: u32) -> Self {
-        PipeMode::Var(ModeVar(root))
+        Self::Var(ModeVar(root))
     }
 }
 
 impl Unifiable for Row {
     fn as_var(&self) -> Option<u32> {
         match self {
-            Row::Var(RowVar(i)) => Some(*i),
+            Self::Var(RowVar(i)) => Some(*i),
             _ => None,
         }
     }
     fn from_root(root: u32) -> Self {
-        Row::Var(RowVar(root))
+        Self::Var(RowVar(root))
     }
 }
 
 impl<T: Clone> Store<T> {
     fn new() -> Self {
-        Store {
+        Self {
             slots: Vec::new(),
             next: 0,
         }
@@ -324,7 +324,7 @@ pub struct Unifier {
 
 impl Unifier {
     pub fn new() -> Self {
-        Unifier {
+        Self {
             tys: Store::new(),
             ctys: Store::new(),
             modes: Store::new(),

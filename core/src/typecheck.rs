@@ -66,7 +66,7 @@ impl SessionSchemes {
     /// Seed of checked bindings alone — the baked prelude list, for
     /// callers with no live shell (`--check`, batch scripts, tests).
     pub fn from_schemes(schemes: &[(String, Scheme)]) -> Self {
-        SessionSchemes {
+        Self {
             bindings: schemes
                 .iter()
                 .map(|(name, scheme)| (name.clone(), Some(scheme.clone())))

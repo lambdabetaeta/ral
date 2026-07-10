@@ -79,7 +79,7 @@ pub struct Scheme {
 impl Scheme {
     /// A monomorphic scheme: no quantified variables.
     pub fn mono(ty: Ty) -> Self {
-        Scheme {
+        Self {
             ty_vars: vec![],
             comp_ty_vars: vec![],
             mode_vars: vec![],
@@ -336,30 +336,30 @@ impl TypeErrorKind {
     /// Stable per-phase error code (`T####`).
     pub fn code(&self) -> &'static str {
         match self {
-            TypeErrorKind::RecursiveRow => "T0002",
-            TypeErrorKind::TypeTooDeep => "T0003",
-            TypeErrorKind::TyMismatch { .. } => "T0010",
-            TypeErrorKind::CompTyMismatch { .. } | TypeErrorKind::CommandNotCallable { .. } => {
+            Self::RecursiveRow => "T0002",
+            Self::TypeTooDeep => "T0003",
+            Self::TyMismatch { .. } => "T0010",
+            Self::CompTyMismatch { .. } | Self::CommandNotCallable { .. } => {
                 "T0011"
             }
-            TypeErrorKind::ModeMismatch { .. } => "T0012",
-            TypeErrorKind::RowExtraField { .. } => "T0020",
-            TypeErrorKind::RowMissingField { .. } => "T0021",
-            TypeErrorKind::CaseNotExhaustive { .. } => "T0030",
-            TypeErrorKind::CaseLabelTypeMismatch { .. } => "T0031",
-            TypeErrorKind::CaseOnNonVariant { .. } => "T0032",
-            TypeErrorKind::ControlOperatorAsValue { .. } => "T0040",
-            TypeErrorKind::HandlerNotFirstClass { .. } => "T0041",
-            TypeErrorKind::BuiltinNotFirstClass { .. } => "T0042",
-            TypeErrorKind::CannotRedefineBuiltin { .. } => "T0043",
-            TypeErrorKind::HandlerShadowedByBinding { .. } => "T0044",
-            TypeErrorKind::BuiltinArity { .. } => "T0050",
-            TypeErrorKind::FailStatusZero => "T0051",
-            TypeErrorKind::MalformedAlias { .. } => "T0052",
-            TypeErrorKind::MalformedUnalias { .. } => "T0053",
-            TypeErrorKind::IndexIntoThunk => "T0060",
-            TypeErrorKind::FieldOnNonRecord { .. } => "T0061",
-            TypeErrorKind::DynamicIndexOnScalar { .. } => "T0062",
+            Self::ModeMismatch { .. } => "T0012",
+            Self::RowExtraField { .. } => "T0020",
+            Self::RowMissingField { .. } => "T0021",
+            Self::CaseNotExhaustive { .. } => "T0030",
+            Self::CaseLabelTypeMismatch { .. } => "T0031",
+            Self::CaseOnNonVariant { .. } => "T0032",
+            Self::ControlOperatorAsValue { .. } => "T0040",
+            Self::HandlerNotFirstClass { .. } => "T0041",
+            Self::BuiltinNotFirstClass { .. } => "T0042",
+            Self::CannotRedefineBuiltin { .. } => "T0043",
+            Self::HandlerShadowedByBinding { .. } => "T0044",
+            Self::BuiltinArity { .. } => "T0050",
+            Self::FailStatusZero => "T0051",
+            Self::MalformedAlias { .. } => "T0052",
+            Self::MalformedUnalias { .. } => "T0053",
+            Self::IndexIntoThunk => "T0060",
+            Self::FieldOnNonRecord { .. } => "T0061",
+            Self::DynamicIndexOnScalar { .. } => "T0062",
         }
     }
 }

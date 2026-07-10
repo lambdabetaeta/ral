@@ -59,8 +59,8 @@ impl Action {
     /// Run the action.  Consumes `self`: a `Run` closure fires exactly once.
     fn fire(self) {
         match self {
-            Action::Cancel(scope) => scope.cancel(CancelCause::Deadline),
-            Action::Run(run) => run(),
+            Self::Cancel(scope) => scope.cancel(CancelCause::Deadline),
+            Self::Run(run) => run(),
         }
     }
 }

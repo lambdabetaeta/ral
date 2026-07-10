@@ -112,22 +112,22 @@ impl AgentOutcome {
     /// fresh turn, so the two render as the identical dialable block.
     pub fn breadcrumb(&self, text: &str) -> (String, Option<String>) {
         match self {
-            AgentOutcome::Complete => (text.to_string(), None),
-            AgentOutcome::Empty => (String::new(), None),
-            AgentOutcome::Stopped(r) => (String::new(), Some(r.clone())),
-            AgentOutcome::Cancelled => (String::new(), Some("cancelled".into())),
-            AgentOutcome::Failed(e) => (String::new(), Some(e.clone())),
+            Self::Complete => (text.to_string(), None),
+            Self::Empty => (String::new(), None),
+            Self::Stopped(r) => (String::new(), Some(r.clone())),
+            Self::Cancelled => (String::new(), Some("cancelled".into())),
+            Self::Failed(e) => (String::new(), Some(e.clone())),
         }
     }
 
     /// The synchronous `agent` tool_result text the parent sees in this turn.
     pub fn reply(&self, text: &str) -> String {
         match self {
-            AgentOutcome::Complete => text.to_string(),
-            AgentOutcome::Empty => "(child returned empty reply)".into(),
-            AgentOutcome::Stopped(r) => format!("(child stopped: {r})"),
-            AgentOutcome::Cancelled => "(child cancelled)".into(),
-            AgentOutcome::Failed(e) => format!("call error: {e}"),
+            Self::Complete => text.to_string(),
+            Self::Empty => "(child returned empty reply)".into(),
+            Self::Stopped(r) => format!("(child stopped: {r})"),
+            Self::Cancelled => "(child cancelled)".into(),
+            Self::Failed(e) => format!("call error: {e}"),
         }
     }
 
@@ -135,11 +135,11 @@ impl AgentOutcome {
     /// drained, titled with the child's tab label.
     pub fn marked_turn(&self, title: &str, text: &str) -> String {
         match self {
-            AgentOutcome::Complete => format!("[agent '{title}' finished]\n{text}"),
-            AgentOutcome::Empty => format!("[agent '{title}' finished with no output]"),
-            AgentOutcome::Stopped(r) => format!("[agent '{title}' stopped: {r}]"),
-            AgentOutcome::Cancelled => format!("[agent '{title}' was cancelled]"),
-            AgentOutcome::Failed(e) => format!("[agent '{title}' failed: {e}]"),
+            Self::Complete => format!("[agent '{title}' finished]\n{text}"),
+            Self::Empty => format!("[agent '{title}' finished with no output]"),
+            Self::Stopped(r) => format!("[agent '{title}' stopped: {r}]"),
+            Self::Cancelled => format!("[agent '{title}' was cancelled]"),
+            Self::Failed(e) => format!("[agent '{title}' failed: {e}]"),
         }
     }
 }
@@ -277,8 +277,8 @@ impl InboxMsg {
     /// next tool boundary.
     pub fn boundary(&self) -> Boundary {
         match self {
-            InboxMsg::Command(_) => Boundary::Turn,
-            InboxMsg::UserSteering(s) if is_slash(s) => Boundary::Turn,
+            Self::Command(_) => Boundary::Turn,
+            Self::UserSteering(s) if is_slash(s) => Boundary::Turn,
             _ => Boundary::Tool,
         }
     }
@@ -288,7 +288,7 @@ impl InboxMsg {
     /// next occurrence — the overlap-skip holds only until the wakeup is
     /// taken.  Other messages have none.
     fn on_drain(&self) {
-        if let InboxMsg::ScheduledWakeup { pending, .. } = self {
+        if let Self::ScheduledWakeup { pending, .. } = self {
             pending.store(false, Ordering::Release);
         }
     }
@@ -346,11 +346,11 @@ pub enum InboxReject {
 impl std::fmt::Display for InboxReject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InboxReject::SourceFull { source, cap } => write!(
+            Self::SourceFull { source, cap } => write!(
                 f,
                 "inbox[{source}] is full ({cap} queued) — drain before sending more"
             ),
-            InboxReject::TotalFull { cap } => write!(
+            Self::TotalFull { cap } => write!(
                 f,
                 "inbox is full ({cap} messages queued) — drain before sending more"
             ),
@@ -426,10 +426,10 @@ impl Turn {
     /// that `await` yields its value.
     pub fn text(&self) -> String {
         match self {
-            Turn::Human(s) | Turn::Wakeup(s) | Turn::Nudge(s) | Turn::Command(s) => s.clone(),
-            Turn::Agent(r) => r.render(),
-            Turn::Message(m) => m.render(),
-            Turn::Surface { values, .. } => surface_notice(values),
+            Self::Human(s) | Self::Wakeup(s) | Self::Nudge(s) | Self::Command(s) => s.clone(),
+            Self::Agent(r) => r.render(),
+            Self::Message(m) => m.render(),
+            Self::Surface { values, .. } => surface_notice(values),
         }
     }
 
@@ -438,7 +438,7 @@ impl Turn {
     /// the same turn continuing, so it resets nothing; every other source is
     /// a genuine turn boundary.
     pub fn resets_turn(&self) -> bool {
-        !matches!(self, Turn::Nudge(_))
+        !matches!(self, Self::Nudge(_))
     }
 }
 
@@ -1175,7 +1175,7 @@ impl Row {
     /// The row's segments, whatever its kind.
     pub fn segs(&self) -> &[Seg] {
         match self {
-            Row::Context(s) | Row::Del(s) | Row::Add(s) => s,
+            Self::Context(s) | Self::Del(s) | Self::Add(s) => s,
         }
     }
 

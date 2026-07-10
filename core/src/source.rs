@@ -44,9 +44,9 @@ impl Span {
     }
 
     /// Smallest span covering both `self` and `other`. Files must match.
-    pub fn join(self, other: Span) -> Span {
+    pub fn join(self, other: Self) -> Self {
         debug_assert!(self.file == other.file, "join across files");
-        Span {
+        Self {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
             file: self.file,
@@ -80,7 +80,7 @@ impl FileId {
     /// A non-registered placeholder. Spans tagged `DUMMY` are tolerated but
     /// render without source context. Prefer a real `FileId` wherever we
     /// actually know the source.
-    pub const DUMMY: FileId = FileId(u32::MAX);
+    pub const DUMMY: Self = Self(u32::MAX);
 }
 
 impl Default for FileId {
@@ -116,7 +116,7 @@ pub struct Spanned<T> {
 impl<T> Spanned<T> {
     /// Construct with an explicit real span.
     pub fn new(span: Span, item: T) -> Self {
-        Spanned {
+        Self {
             span: Some(span),
             item,
         }
@@ -126,14 +126,14 @@ impl<T> Spanned<T> {
     /// elaborator-internal positions (hoisted applications, synthetic
     /// list/map elements) that have no source range to attribute.
     pub fn synthetic(item: T) -> Self {
-        Spanned { span: None, item }
+        Self { span: None, item }
     }
 
     /// Construct with an already-optional span — used when threading
     /// a span from another `Spanned` or from elaborator state without
     /// repeated wrap/unwrap noise.
     pub fn with_span(span: Option<Span>, item: T) -> Self {
-        Spanned { span, item }
+        Self { span, item }
     }
 }
 

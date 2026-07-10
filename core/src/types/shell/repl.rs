@@ -69,7 +69,7 @@ impl ReplScratch {
     /// simultaneously.  `pending_chpwd` starts fresh.  (The `_ed-tui`
     /// foreground signal now rides the turn's `TerminalAccess`, flowed by
     /// `TurnState::inherit_from`, so it is no longer carried here.)
-    pub fn inherit_from(&mut self, parent: &mut ReplScratch) {
+    pub fn inherit_from(&mut self, parent: &mut Self) {
         self.plugin_context = parent.plugin_context.take();
     }
 
@@ -78,7 +78,7 @@ impl ReplScratch {
     /// change — flow it up to the parent so the REPL can fire `chpwd`
     /// after the top-level `evaluate` returns.  Don't clobber an outer
     /// pending pair: only overwrite when the child has one queued.
-    pub fn return_to(&mut self, parent: &mut ReplScratch) {
+    pub fn return_to(&mut self, parent: &mut Self) {
         parent.plugin_context = self.plugin_context.take();
         if let Some(pair) = self.pending_chpwd.take() {
             parent.pending_chpwd = Some(pair);

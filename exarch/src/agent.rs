@@ -562,7 +562,7 @@ impl Agent {
         Ok(())
     }
 
-    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Agent> {
+    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Self> {
         self.fork_with(caps, true)
     }
 
@@ -574,7 +574,7 @@ impl Agent {
         &self,
         caps: ral_core::types::Capabilities,
         returns: bool,
-    ) -> io::Result<Agent> {
+    ) -> io::Result<Self> {
         // The child is an independent fork of the parent: it snapshots the
         // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
@@ -625,7 +625,7 @@ impl Agent {
     /// verbatim, but `reply` withheld so it parks for the human (a /branch tab)
     /// instead of returning a value.  Mnemon-style context import, like
     /// `fork_remembering`.
-    pub(crate) fn branch(&self) -> io::Result<Agent> {
+    pub(crate) fn branch(&self) -> io::Result<Self> {
         let mut child = self.fork_with(self.caps.clone(), false)?;
         self.inherit_context(&mut child)?;
         Ok(child)
@@ -639,7 +639,7 @@ impl Agent {
     pub(crate) fn fork_remembering(
         &self,
         caps: ral_core::types::Capabilities,
-    ) -> io::Result<Agent> {
+    ) -> io::Result<Self> {
         let mut child = self.fork(caps)?;
         self.inherit_context(&mut child)?;
         Ok(child)
@@ -647,7 +647,7 @@ impl Agent {
 
     /// Import the creator's model-visible context into `child`, mnemon-style —
     /// the shared step behind `fork_remembering` and `branch()`.
-    fn inherit_context(&self, child: &mut Agent) -> io::Result<()> {
+    fn inherit_context(&self, child: &mut Self) -> io::Result<()> {
         child
             .log
             .import_context(self.log.inherited_context_messages())

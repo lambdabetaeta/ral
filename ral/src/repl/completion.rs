@@ -82,7 +82,7 @@ impl Sources {
 
         commands.sort();
         commands.dedup();
-        Sources {
+        Self {
             commands,
             variables,
             cwd,

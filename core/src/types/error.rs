@@ -28,7 +28,7 @@ pub enum Status {
 
 impl Error {
     pub fn new(message: impl Into<String>, status: i32) -> Self {
-        Error {
+        Self {
             message: message.into(),
             status: Status::Code(status),
             loc: None,

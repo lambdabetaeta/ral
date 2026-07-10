@@ -31,9 +31,9 @@ pub(crate) enum WriteOutcome {
 impl WriteOutcome {
     fn as_str(self) -> &'static str {
         match self {
-            WriteOutcome::Committed => "committed",
-            WriteOutcome::Aborted => "aborted",
-            WriteOutcome::Failed => "failed",
+            Self::Committed => "committed",
+            Self::Aborted => "aborted",
+            Self::Failed => "failed",
         }
     }
 }

@@ -357,11 +357,11 @@ impl CancelCause {
     /// value outside the escalation order yield `None`.
     fn from_u8(flag: u8) -> Option<Self> {
         match flag {
-            1 => Some(CancelCause::Interrupt),
-            2 => Some(CancelCause::Explicit),
-            3 => Some(CancelCause::Deadline),
-            4 => Some(CancelCause::Terminate),
-            5 => Some(CancelCause::RootAbort),
+            1 => Some(Self::Interrupt),
+            2 => Some(Self::Explicit),
+            3 => Some(Self::Deadline),
+            4 => Some(Self::Terminate),
+            5 => Some(Self::RootAbort),
             _ => None,
         }
     }
@@ -372,11 +372,11 @@ impl CancelCause {
     /// waits — so the wording cannot drift between them.
     pub fn message(self) -> &'static str {
         match self {
-            CancelCause::Interrupt => "interrupted",
-            CancelCause::Explicit => "cancelled",
-            CancelCause::Deadline => "timed out",
-            CancelCause::Terminate => "terminated",
-            CancelCause::RootAbort => "aborted",
+            Self::Interrupt => "interrupted",
+            Self::Explicit => "cancelled",
+            Self::Deadline => "timed out",
+            Self::Terminate => "terminated",
+            Self::RootAbort => "aborted",
         }
     }
 
@@ -386,7 +386,7 @@ impl CancelCause {
     /// that SIGTERMed the process expects to read back.
     pub fn exit_code(self) -> i32 {
         match self {
-            CancelCause::Terminate => 143,
+            Self::Terminate => 143,
             _ => 130,
         }
     }
@@ -397,7 +397,7 @@ impl CancelCause {
 #[derive(Debug)]
 struct ScopeNode {
     flag: AtomicU8,
-    parent: Option<std::sync::Arc<ScopeNode>>,
+    parent: Option<std::sync::Arc<Self>>,
 }
 
 /// A handle into the cancel-scope tree.  Cheap to clone (one `Arc` bump);
@@ -671,8 +671,8 @@ pub struct ForegroundScope(CancelScope);
 impl ForegroundScope {
     /// Nest a child foreground scope: a deadline window over a turn, or the
     /// shared scope a same-thread body inherits.  Still root-descended.
-    pub fn child(&self) -> ForegroundScope {
-        ForegroundScope(self.0.child())
+    pub fn child(&self) -> Self {
+        Self(self.0.child())
     }
 
     /// Record `cause` on this scope.

@@ -116,7 +116,7 @@ impl<T: serde::Serialize + Send + 'static> PendingFrame<T> {
     /// child.  Visible to the `pipeline` module so the launcher's
     /// release loop can call it directly on `PendingFrame<ChildEvalRequest>`.
     pub(in super::super) fn release(self) -> Settled<()> {
-        let PendingFrame {
+        let Self {
             mut writer,
             payload,
         } = self;
@@ -205,7 +205,7 @@ impl HelperProtocol {
         self,
         job: ChildEvalRequest,
     ) -> (FrameReader<ChildEvalResponse>, DeferredFrame) {
-        let HelperProtocol {
+        let Self {
             job_gate,
             mut child_report_writer,
             report_reader,

@@ -102,7 +102,7 @@ pub enum Sink {
     /// In-memory buffer used by command substitution (`let x = cmd`).
     Buffer(ByteBuffer),
     /// Duplicate bytes to both A and B in turn.
-    Tee(Box<Sink>, Box<Sink>),
+    Tee(Box<Self>, Box<Self>),
     /// Frontend-provided sink, typically rustyline's external printer.
     /// Used by the interactive REPL so background-thread output does not
     /// clobber the active prompt.
@@ -114,7 +114,7 @@ pub enum Sink {
     /// line across writes; `flush_pending` emits whatever is left at thread
     /// teardown.
     LineFramed {
-        inner: Box<Sink>,
+        inner: Box<Self>,
         prefix: String,
         pending: Vec<u8>,
     },
@@ -127,7 +127,7 @@ impl Sink {
     /// line is not silently dropped.
     pub fn flush_pending(&mut self) -> io::Result<()> {
         match self {
-            Sink::LineFramed {
+            Self::LineFramed {
                 inner,
                 prefix,
                 pending,
@@ -138,7 +138,7 @@ impl Sink {
                 let tail = std::mem::take(pending);
                 emit_framed(inner, prefix, &tail)
             }
-            Sink::Tee(a, b) => {
+            Self::Tee(a, b) => {
                 a.flush_pending()?;
                 b.flush_pending()
             }
@@ -167,8 +167,8 @@ impl Sink {
         // has verified TTY ownership.  `Sink::Stderr` here means "swap fd 1
         // for fd 2" (audit mode); inheriting is correct only when the
         // caller knows the child won't try to re-grab the TTY from fd 1.
-        if matches!(self, Sink::Terminal)
-            || (inherit_tty && matches!(self, Sink::Stderr | Sink::External(_)))
+        if matches!(self, Self::Terminal)
+            || (inherit_tty && matches!(self, Self::Stderr | Self::External(_)))
         {
             return Ok(ChildStdioPlan::inherit());
         }
@@ -181,7 +181,7 @@ impl Sink {
     /// sinks drain via a pump.  No `inherit_tty` parameter: stderr never
     /// owns the TTY in any pipeline shape.
     pub fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
-        if matches!(self, Sink::Stderr) {
+        if matches!(self, Self::Stderr) {
             return Ok(ChildStdioPlan::inherit());
         }
         ChildStdioPlan::for_sink(self)
@@ -206,8 +206,8 @@ impl Sink {
     ///
     /// Used by `Comp::Seq` to route non-final commands' byte output to the
     /// outer (visible) stdout when running inside a capture context (§4.3).
-    pub fn flush_to(&self, target: &Sink) -> io::Result<()> {
-        if let Sink::Buffer(buf) = self
+    pub fn flush_to(&self, target: &Self) -> io::Result<()> {
+        if let Self::Buffer(buf) = self
             && let Ok(mut g) = buf.lock()
             && !g.is_empty()
         {
@@ -236,17 +236,17 @@ impl Sink {
 
     pub fn try_clone(&self) -> io::Result<Self> {
         match self {
-            Sink::Terminal => Ok(Sink::Terminal),
-            Sink::Stderr => Ok(Sink::Stderr),
-            Sink::Pipe(w) => Ok(Sink::Pipe(w.try_clone()?)),
-            Sink::File(f) => Ok(Sink::File(f.try_clone()?)),
-            Sink::Buffer(b) => Ok(Sink::Buffer(b.clone())),
-            Sink::Tee(a, b) => Ok(Sink::Tee(
+            Self::Terminal => Ok(Self::Terminal),
+            Self::Stderr => Ok(Self::Stderr),
+            Self::Pipe(w) => Ok(Self::Pipe(w.try_clone()?)),
+            Self::File(f) => Ok(Self::File(f.try_clone()?)),
+            Self::Buffer(b) => Ok(Self::Buffer(b.clone())),
+            Self::Tee(a, b) => Ok(Self::Tee(
                 Box::new(a.try_clone()?),
                 Box::new(b.try_clone()?),
             )),
-            Sink::External(w) => Ok(Sink::External(w.clone())),
-            Sink::LineFramed { inner, prefix, .. } => Ok(Sink::LineFramed {
+            Self::External(w) => Ok(Self::External(w.clone())),
+            Self::LineFramed { inner, prefix, .. } => Ok(Self::LineFramed {
                 inner: Box::new(inner.try_clone()?),
                 prefix: prefix.clone(),
                 // Each cloned `LineFramed` owns its own partial-line carry —
@@ -379,20 +379,20 @@ impl Write for Sink {
 
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         match self {
-            Sink::Terminal => io::stdout().write_all(bytes),
-            Sink::Stderr => io::stderr().write_all(bytes),
-            Sink::Pipe(w) => w.write_all(bytes),
-            Sink::File(f) => f.write_all(bytes),
-            Sink::Buffer(b) => {
+            Self::Terminal => io::stdout().write_all(bytes),
+            Self::Stderr => io::stderr().write_all(bytes),
+            Self::Pipe(w) => w.write_all(bytes),
+            Self::File(f) => f.write_all(bytes),
+            Self::Buffer(b) => {
                 write_capped(b, bytes);
                 Ok(())
             }
-            Sink::Tee(a, b) => {
+            Self::Tee(a, b) => {
                 a.write_all(bytes)?;
                 b.write_all(bytes)
             }
-            Sink::External(w) => w.write(bytes),
-            Sink::LineFramed {
+            Self::External(w) => w.write(bytes),
+            Self::LineFramed {
                 inner,
                 prefix,
                 pending,
@@ -423,11 +423,11 @@ impl Write for Sink {
     /// chunk as a new line, breaking the line-atomicity guarantee.
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Sink::Terminal => io::stdout().flush(),
-            Sink::Stderr => io::stderr().flush(),
-            Sink::Pipe(w) => w.flush(),
-            Sink::File(f) => f.flush(),
-            Sink::Tee(a, b) => {
+            Self::Terminal => io::stdout().flush(),
+            Self::Stderr => io::stderr().flush(),
+            Self::Pipe(w) => w.flush(),
+            Self::File(f) => f.flush(),
+            Self::Tee(a, b) => {
                 a.flush()?;
                 b.flush()
             }

@@ -486,7 +486,7 @@ impl Shell {
         foreground: &crate::process::ForegroundScope,
         wall: Option<crate::process::Deadline>,
         single_command: bool,
-        body: impl FnOnce(&mut Shell) -> Settled<Value>,
+        body: impl FnOnce(&mut Self) -> Settled<Value>,
     ) -> TurnReport {
         let TurnRequest {
             turn,

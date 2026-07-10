@@ -35,7 +35,7 @@ pub(super) struct RalHelper {
 
 impl RalHelper {
     pub(super) fn new(shell: &Shell, plugin_runtime: Arc<Mutex<PluginRuntime>>) -> Self {
-        RalHelper {
+        Self {
             sources: Sources::from_shell(shell),
             plugin_runtime,
             terminal: shell.terminal(),

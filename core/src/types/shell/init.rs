@@ -27,7 +27,7 @@ impl Shell {
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         crate::builtins::ensure_core_builtins_registered();
         let root = crate::process::DurableRoot::new();
-        let mut shell = Shell {
+        let mut shell = Self {
             mobile: Mobile {
                 scope: Env::new(),
                 control: ControlState::default(),

@@ -49,14 +49,14 @@ impl Source {
     /// no fd-0 fall-through; a consumer that must distinguish the two markers
     /// inspects the `Source` itself.
     pub fn take_reader(&mut self) -> Option<SourceReader> {
-        match std::mem::replace(self, Source::Terminal) {
-            Source::Terminal => None,
-            Source::Empty => {
-                *self = Source::Empty;
+        match std::mem::replace(self, Self::Terminal) {
+            Self::Terminal => None,
+            Self::Empty => {
+                *self = Self::Empty;
                 None
             }
-            Source::Pipe(r) => Some(SourceReader::Pipe(r)),
-            Source::File(f) => Some(SourceReader::File(f)),
+            Self::Pipe(r) => Some(SourceReader::Pipe(r)),
+            Self::File(f) => Some(SourceReader::File(f)),
         }
     }
 }
@@ -64,8 +64,8 @@ impl Source {
 impl Read for SourceReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            SourceReader::Pipe(r) => r.read(buf),
-            SourceReader::File(f) => f.read(buf),
+            Self::Pipe(r) => r.read(buf),
+            Self::File(f) => f.read(buf),
         }
     }
 }
@@ -73,8 +73,8 @@ impl Read for SourceReader {
 impl From<SourceReader> for std::process::Stdio {
     fn from(r: SourceReader) -> Self {
         match r {
-            SourceReader::Pipe(r) => std::process::Stdio::from(r),
-            SourceReader::File(f) => std::process::Stdio::from(f),
+            SourceReader::Pipe(r) => Self::from(r),
+            SourceReader::File(f) => Self::from(f),
         }
     }
 }
@@ -83,8 +83,8 @@ impl From<SourceReader> for std::process::Stdio {
 impl std::os::unix::io::AsRawFd for SourceReader {
     fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         match self {
-            SourceReader::Pipe(r) => r.as_raw_fd(),
-            SourceReader::File(f) => f.as_raw_fd(),
+            Self::Pipe(r) => r.as_raw_fd(),
+            Self::File(f) => f.as_raw_fd(),
         }
     }
 }

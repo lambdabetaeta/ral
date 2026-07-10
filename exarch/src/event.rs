@@ -243,8 +243,8 @@ impl SessionEvent {
     /// usage).  Tool result batches expand to one message per result.
     fn into_chat_messages(self) -> Vec<ChatMessage> {
         match self {
-            SessionEvent::UserPrompt { text } => vec![ChatMessage::user(text)],
-            SessionEvent::ContextMessage { message }
+            Self::UserPrompt { text } => vec![ChatMessage::user(text)],
+            Self::ContextMessage { message }
             // Pass the assistant message back whole — reasoning included.
             // genai owns the per-adapter reasoning policy: Anthropic drops
             // it, the OpenAI Responses adapter ignores it, but the OpenAI
@@ -252,8 +252,8 @@ impl SessionEvent {
             // `reasoning_content` echoed back across a tool-use sequence or
             // it 400s. Stripping it here would break those and buy nothing
             // elsewhere.
-            | SessionEvent::AssistantMessage { message, .. } => vec![message],
-            SessionEvent::ToolResults { results } => results
+            | Self::AssistantMessage { message, .. } => vec![message],
+            Self::ToolResults { results } => results
                 .into_iter()
                 .map(|r| ChatMessage::from(ToolResponse::new(&r.id, &r.content)))
                 .collect(),

@@ -53,10 +53,10 @@ impl Span {
     /// offsets and the text's character count `bound`.  Orders the pair,
     /// clamps both ends to `[0, bound]`, and stores the result as
     /// `start + len`.
-    pub fn clamped(a: usize, b: usize, bound: usize) -> Span {
+    pub fn clamped(a: usize, b: usize, bound: usize) -> Self {
         let start = a.min(b).min(bound);
         let end = a.max(b).min(bound);
-        Span {
+        Self {
             start,
             len: end - start,
         }
@@ -65,9 +65,9 @@ impl Span {
     /// Re-clamp the range against a (possibly smaller) `bound`, so a range
     /// minted against one character count stays valid for a slice of a
     /// different one.
-    pub fn clamp_to(self, bound: usize) -> Span {
+    pub fn clamp_to(self, bound: usize) -> Self {
         let start = self.start.min(bound);
-        Span {
+        Self {
             start,
             len: self.len.min(bound - start),
         }

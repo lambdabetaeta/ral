@@ -765,7 +765,7 @@ pub(crate) enum StdinRedirectGuard {
 
 impl StdinRedirectGuard {
     pub(crate) fn restore(self, shell: &mut Shell) {
-        if let StdinRedirectGuard::Installed(prior) = self {
+        if let Self::Installed(prior) = self {
             shell.turn.io.stdin = prior;
         }
     }

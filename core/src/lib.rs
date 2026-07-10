@@ -121,9 +121,9 @@ impl CompileOutcome {
     /// output, so the structured errors flatten to newline-joined text.
     pub fn into_comp_or_message(self) -> Result<Comp, String> {
         match self {
-            CompileOutcome::Compiled(comp) => Ok(comp),
-            CompileOutcome::Parse(e) => Err(e.to_string()),
-            CompileOutcome::Types(errors) => Err(errors
+            Self::Compiled(comp) => Ok(comp),
+            Self::Parse(e) => Err(e.to_string()),
+            Self::Types(errors) => Err(errors
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()

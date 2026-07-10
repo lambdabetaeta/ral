@@ -101,7 +101,7 @@ impl Io {
     /// `stdin` is not propagated: it is a read-once resource consumed by the
     /// child that spawns it.  The caller must set `child.io.stdin` explicitly.
     pub fn try_clone(&self) -> io::Result<Self> {
-        Ok(Io {
+        Ok(Self {
             stdin: Source::Terminal,
             stdout: self.stdout.try_clone()?,
             stderr: self.stderr.try_clone()?,
@@ -124,7 +124,7 @@ impl Io {
     /// the parent's FDs are already gone, and `Sink::Terminal` routes
     /// through the sink machinery to the inherited fd 1, which this
     /// same-thread child shares with the parent.
-    pub fn inherit_from(&mut self, parent: &mut Io) {
+    pub fn inherit_from(&mut self, parent: &mut Self) {
         self.stdout = parent.stdout.try_clone().unwrap_or(Sink::Terminal);
         self.stderr = parent.stderr.try_clone().unwrap_or(Sink::Stderr);
         self.capture_outer = parent
@@ -143,14 +143,14 @@ impl Io {
 
     /// STT-out: return the read-once stdin to `parent` so subsequent
     /// sibling calls see the unconsumed pipe.  Mirror of `inherit_from`.
-    pub fn return_to(&mut self, parent: &mut Io) {
+    pub fn return_to(&mut self, parent: &mut Self) {
         parent.stdin = std::mem::replace(&mut self.stdin, Source::Terminal);
     }
 }
 
 impl Default for Io {
     fn default() -> Self {
-        Io {
+        Self {
             stdin: Source::Terminal,
             stdout: Sink::Terminal,
             stderr: Sink::Stderr,

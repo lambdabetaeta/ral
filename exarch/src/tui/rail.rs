@@ -63,16 +63,16 @@ impl RailKind {
     /// the rail stays a fixed 2-col width (glyph + space) across kinds.
     fn glyph(self) -> &'static str {
         match self {
-            RailKind::Patch => "▎",
-            RailKind::ToolCall(true) => "▽",
-            RailKind::ToolCall(false) => "▸",
-            RailKind::Markdown => "·",
-            RailKind::Thinking => "∴",
-            RailKind::Subagent => "↘",
-            RailKind::Step => "━",
-            RailKind::Error => "╳",
-            RailKind::Prompt => "❖",
-            RailKind::Note => "▪",
+            Self::Patch => "▎",
+            Self::ToolCall(true) => "▽",
+            Self::ToolCall(false) => "▸",
+            Self::Markdown => "·",
+            Self::Thinking => "∴",
+            Self::Subagent => "↘",
+            Self::Step => "━",
+            Self::Error => "╳",
+            Self::Prompt => "❖",
+            Self::Note => "▪",
         }
     }
 }

@@ -207,7 +207,7 @@ impl Cli {
         if self.code {
             let mut it = self.rest.into_iter();
             let code = it.next().unwrap_or_else(|| {
-                Cli::command()
+                Self::command()
                     .error(
                         clap::error::ErrorKind::MissingRequiredArgument,
                         "-c requires an argument",

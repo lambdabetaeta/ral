@@ -41,8 +41,8 @@ pub enum Word {
 impl Word {
     pub fn as_plain(&self) -> Option<&str> {
         match self {
-            Word::Plain(s) => Some(s),
-            Word::Slash(_) | Word::Tilde(_) => None,
+            Self::Plain(s) => Some(s),
+            Self::Slash(_) | Self::Tilde(_) => None,
         }
     }
 }
@@ -72,14 +72,14 @@ pub enum Ast {
     /// instead of the entire `let` statement.
     Let {
         pattern: Spanned<Pattern>,
-        value: Spanned<Box<Ast>>,
+        value: Spanned<Box<Self>>,
     },
     /// Explicit value-to-command lift: `return [<value>]`.  The
     /// wrapping `Spanned` covers the value expression's parsed range
     /// so a diagnostic that fires while inferring the value (a
     /// heterogeneous list, a wrong-variant payload, …) underlines
     /// that expression rather than the whole `return …` statement.
-    Return(Option<Spanned<Box<Ast>>>),
+    Return(Option<Spanned<Box<Self>>>),
     /// Command-position invocation: a head applied to arguments, with
     /// an optional run of trailing I/O redirects.  At the surface
     /// level this is a single form — the elaborator decides whether
@@ -93,7 +93,7 @@ pub enum Ast {
     /// test fixtures use [`Spanned::synthetic`] to elide span tracking.
     Call {
         head: Head,
-        args: Vec<Spanned<Ast>>,
+        args: Vec<Spanned<Self>>,
         redirects: Vec<Redirect>,
     },
     /// Control-operator scope form (`try`/`guard`/`within`/`grant`/`audit`),
@@ -109,11 +109,11 @@ pub enum Ast {
     /// Chained commands: cmd1 ? cmd2 ? cmd3.  Each stage carries its
     /// parsed range so a per-stage diagnostic narrows onto the stage
     /// rather than the whole chain.
-    Chain(Vec<Spanned<Ast>>),
+    Chain(Vec<Spanned<Self>>),
     /// Background execution: `command &`.  The `Spanned` covers the
     /// backgrounded expression's parsed range so a diagnostic on the
     /// expression itself underlines just that fragment.
-    Background(Spanned<Box<Ast>>),
+    Background(Spanned<Box<Self>>),
     /// A block: { ... }.  The body is a statement sequence — see [`Stmt`].
     Block(Vec<Stmt>),
     /// A lambda: { |params| body }.  The body is a statement sequence.
@@ -133,7 +133,7 @@ pub enum Ast {
     /// string fragment or a `$name` / `$[expr]` insertion) carries its
     /// parsed range so a per-segment diagnostic narrows onto the
     /// offending segment rather than the whole interpolation.
-    Interpolation(Vec<Spanned<Ast>>),
+    Interpolation(Vec<Spanned<Self>>),
     /// Variant constructor: `` `label `` (nullary) or `` `label payload `` where the
     /// payload is the next adjacent atom.  The `label` is stored without its
     /// leading backtick.  Tag-keyed record entries are *not* `Ast::Tag` —
@@ -142,7 +142,7 @@ pub enum Ast {
     /// diagnostic underlines just that fragment.
     Tag {
         label: String,
-        payload: Option<Spanned<Box<Ast>>>,
+        payload: Option<Spanned<Box<Self>>>,
     },
     /// Sum eliminator: `case <scrutinee> [`l₁: h₁, …, `lₙ: hₙ]`.  The
     /// `table` is required to be a tag-keyed record literal whose values
@@ -154,8 +154,8 @@ pub enum Ast {
     /// narrow a "case needs a variant" diagnostic onto the scrutinee
     /// expression, and any handler-shape diagnostic onto the table.
     Case {
-        scrutinee: Spanned<Box<Ast>>,
-        table: Spanned<Box<Ast>>,
+        scrutinee: Spanned<Box<Self>>,
+        table: Spanned<Box<Self>>,
     },
     /// Expression block: `$[expr]`
     Expr(Box<Expr>),
@@ -169,14 +169,14 @@ pub enum Ast {
     /// underlines the offending key instead of the whole indexing
     /// chain.  Synthetic test fixtures use [`Spanned::synthetic`].
     Index {
-        target: Spanned<Box<Ast>>,
-        keys: Vec<Spanned<Ast>>,
+        target: Spanned<Box<Self>>,
+        keys: Vec<Spanned<Self>>,
     },
     /// Force: ! atom.  The wrapping `Spanned` covers the whole
     /// `!atom` extent (the `!` token plus the forced operand), so a
     /// force-on-non-thunk diagnostic underlines just that fragment.
     /// `None` in synthetic test fixtures via [`Spanned::synthetic`].
-    Force(Spanned<Box<Ast>>),
+    Force(Spanned<Box<Self>>),
     /// Argument-position spread: `f ...x`.  Distinct from
     /// [`ListElem::Spread`] (a list-literal element) so the elaborator
     /// can splice `x`'s elements into the call's argument list while
@@ -184,7 +184,7 @@ pub enum Ast {
     /// immediate child of [`Ast::Call`]'s `args`; elaboration rejects
     /// it elsewhere.  The `Spanned` covers the spread operand so a
     /// "spread of non-list" diagnostic underlines `$x`.
-    Spread(Spanned<Box<Ast>>),
+    Spread(Spanned<Box<Self>>),
     /// Conditional: `if cond then [elsif cond then]* [else else_]`.
     /// One-armed form (single branch, no `else`) has type Unit; multi-
     /// armed form requires every branch and the `else` to agree on
@@ -199,7 +199,7 @@ pub enum Ast {
     /// spanned.
     If {
         branches: Vec<IfBranch>,
-        else_: Option<Spanned<Box<Ast>>>,
+        else_: Option<Spanned<Box<Self>>>,
     },
 }
 
@@ -268,7 +268,7 @@ pub enum Pattern<D = Ast> {
     /// `[a, b, ...rest]` -- destructure a list. The optional `rest`
     /// captures the tail as a new list.
     List {
-        elems: Vec<Pattern<D>>,
+        elems: Vec<Self>,
         rest: Option<String>,
     },
     /// `[key: pat = default, ...]` -- destructure a map. Each entry is
@@ -345,15 +345,15 @@ impl MapKey {
     /// label prefixed via [`crate::syntax::tag::tag_row_label`].
     pub fn row_label(&self) -> String {
         match self {
-            MapKey::Bare(s) => s.clone(),
-            MapKey::Tag(label) => tag_row_label(label),
+            Self::Bare(s) => s.clone(),
+            Self::Tag(label) => tag_row_label(label),
         }
     }
 
     /// True for tag-alphabet keys.  The parser uses this to enforce
     /// that a single map literal / pattern doesn't mix alphabets.
     pub fn is_tag(&self) -> bool {
-        matches!(self, MapKey::Tag(_))
+        matches!(self, Self::Tag(_))
     }
 }
 
@@ -372,15 +372,15 @@ pub enum Expr {
     /// so a force-on-non-thunk diagnostic underlines just the operand,
     /// matching [`Ast::Force`].
     Force(Spanned<Box<Ast>>),
-    BinOp(Box<Expr>, BinaryOp, Box<Expr>),
+    BinOp(Box<Self>, BinaryOp, Box<Self>),
     /// Unary logical negation: `not e` (strict).
-    Not(Box<Expr>),
+    Not(Box<Self>),
     /// Short-circuit conjunction: `a && b`.  RHS is evaluated only if
     /// LHS is `true`.  Desugars in the elaborator to `_if a { b } { return false }`.
-    And(Box<Expr>, Box<Expr>),
+    And(Box<Self>, Box<Self>),
     /// Short-circuit disjunction: `a || b`.  RHS is evaluated only if
     /// LHS is `false`.
-    Or(Box<Expr>, Box<Expr>),
+    Or(Box<Self>, Box<Self>),
 }
 
 /// Binary primitive operator on values (arithmetic, comparison, equality).
@@ -448,17 +448,17 @@ pub enum BinaryOpKind {
 impl BinaryOp {
     pub fn kind(self) -> BinaryOpKind {
         match self {
-            BinaryOp::Add => BinaryOpKind::Arith(ArithOp::Add),
-            BinaryOp::Sub => BinaryOpKind::Arith(ArithOp::Sub),
-            BinaryOp::Mul => BinaryOpKind::Arith(ArithOp::Mul),
-            BinaryOp::Div => BinaryOpKind::Arith(ArithOp::Div),
-            BinaryOp::Mod => BinaryOpKind::Arith(ArithOp::Mod),
-            BinaryOp::Lt => BinaryOpKind::Compare(CompareOp::Lt),
-            BinaryOp::Gt => BinaryOpKind::Compare(CompareOp::Gt),
-            BinaryOp::Le => BinaryOpKind::Compare(CompareOp::Le),
-            BinaryOp::Ge => BinaryOpKind::Compare(CompareOp::Ge),
-            BinaryOp::Eq => BinaryOpKind::Eq(EqOp::Eq),
-            BinaryOp::Ne => BinaryOpKind::Eq(EqOp::Ne),
+            Self::Add => BinaryOpKind::Arith(ArithOp::Add),
+            Self::Sub => BinaryOpKind::Arith(ArithOp::Sub),
+            Self::Mul => BinaryOpKind::Arith(ArithOp::Mul),
+            Self::Div => BinaryOpKind::Arith(ArithOp::Div),
+            Self::Mod => BinaryOpKind::Arith(ArithOp::Mod),
+            Self::Lt => BinaryOpKind::Compare(CompareOp::Lt),
+            Self::Gt => BinaryOpKind::Compare(CompareOp::Gt),
+            Self::Le => BinaryOpKind::Compare(CompareOp::Le),
+            Self::Ge => BinaryOpKind::Compare(CompareOp::Ge),
+            Self::Eq => BinaryOpKind::Eq(EqOp::Eq),
+            Self::Ne => BinaryOpKind::Eq(EqOp::Ne),
         }
     }
 }
@@ -538,7 +538,7 @@ impl ScopeAst {
             operand_desc: "body, handler",
             build: |ops| {
                 let [body, handler]: [Ast; 2] = ops.try_into().expect("arity validated");
-                ScopeAst::Try {
+                Self::Try {
                     body: Box::new(body),
                     handler: Box::new(handler),
                 }
@@ -550,7 +550,7 @@ impl ScopeAst {
             operand_desc: "body, cleanup",
             build: |ops| {
                 let [body, cleanup]: [Ast; 2] = ops.try_into().expect("arity validated");
-                ScopeAst::Guard {
+                Self::Guard {
                     body: Box::new(body),
                     cleanup: Box::new(cleanup),
                 }
@@ -562,7 +562,7 @@ impl ScopeAst {
             operand_desc: "options, body",
             build: |ops| {
                 let [opts, body]: [Ast; 2] = ops.try_into().expect("arity validated");
-                ScopeAst::Within {
+                Self::Within {
                     opts: Box::new(opts),
                     body: Box::new(body),
                 }
@@ -574,7 +574,7 @@ impl ScopeAst {
             operand_desc: "capabilities, body",
             build: |ops| {
                 let [caps, body]: [Ast; 2] = ops.try_into().expect("arity validated");
-                ScopeAst::Grant {
+                Self::Grant {
                     caps: Box::new(caps),
                     body: Box::new(body),
                 }
@@ -586,7 +586,7 @@ impl ScopeAst {
             operand_desc: "body",
             build: |ops| {
                 let [body]: [Ast; 1] = ops.try_into().expect("arity validated");
-                ScopeAst::Audit {
+                Self::Audit {
                     body: Box::new(body),
                 }
             },
@@ -620,11 +620,11 @@ pub enum WordLiteral {
 }
 
 impl WordLiteral {
-    pub fn classify(s: &str) -> Option<WordLiteral> {
+    pub fn classify(s: &str) -> Option<Self> {
         match s {
-            "true" => Some(WordLiteral::Bool(true)),
-            "false" => Some(WordLiteral::Bool(false)),
-            "unit" => Some(WordLiteral::Unit),
+            "true" => Some(Self::Bool(true)),
+            "false" => Some(Self::Bool(false)),
+            "unit" => Some(Self::Unit),
             _ if s.parse::<i64>().is_ok() => s.parse().ok().map(WordLiteral::Int),
             _ if s.contains('.') => s.parse().ok().map(WordLiteral::Float),
             _ => None,
@@ -635,11 +635,11 @@ impl WordLiteral {
 impl<D> Pattern<D> {
     pub fn collect_names(&self, set: &mut HashSet<String>) {
         match self {
-            Pattern::Wildcard => {}
-            Pattern::Name(n) => {
+            Self::Wildcard => {}
+            Self::Name(n) => {
                 set.insert(n.clone());
             }
-            Pattern::List { elems, rest } => {
+            Self::List { elems, rest } => {
                 for e in elems {
                     e.collect_names(set);
                 }
@@ -647,7 +647,7 @@ impl<D> Pattern<D> {
                     set.insert(r.clone());
                 }
             }
-            Pattern::Map(entries) => {
+            Self::Map(entries) => {
                 for entry in entries {
                     entry.pattern.collect_names(set);
                 }
@@ -664,7 +664,7 @@ impl Ast {
     /// thunk value can close over forward references without
     /// requiring the binding to be settled first.
     pub fn is_thunk_form(&self) -> bool {
-        matches!(self, Ast::Lambda { .. } | Ast::Block(_))
+        matches!(self, Self::Lambda { .. } | Self::Block(_))
     }
 }
 
@@ -675,11 +675,11 @@ impl ScopeAst {
     /// collection.
     pub fn operands(&self) -> Vec<&Ast> {
         match self {
-            ScopeAst::Try { body, handler } => vec![body, handler],
-            ScopeAst::Guard { body, cleanup } => vec![body, cleanup],
-            ScopeAst::Within { opts, body } => vec![opts, body],
-            ScopeAst::Grant { caps, body } => vec![caps, body],
-            ScopeAst::Audit { body } => vec![body],
+            Self::Try { body, handler } => vec![body, handler],
+            Self::Guard { body, cleanup } => vec![body, cleanup],
+            Self::Within { opts, body } => vec![opts, body],
+            Self::Grant { caps, body } => vec![caps, body],
+            Self::Audit { body } => vec![body],
         }
     }
 }

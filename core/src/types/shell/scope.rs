@@ -318,7 +318,7 @@ impl Shell {
     /// use [`Self::audit_forced_child`] instead.
     pub fn audit_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
     where
-        F: FnOnce(&mut Shell) -> R,
+        F: FnOnce(&mut Self) -> R,
     {
         if !self.local.audit.active() {
             let result = f(self);
@@ -337,7 +337,7 @@ impl Shell {
     /// audit is active.
     pub fn audit_forced_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
     where
-        F: FnOnce(&mut Shell) -> R,
+        F: FnOnce(&mut Self) -> R,
     {
         let parent = self.local.audit.enter_forced_child();
         let result = f(self);

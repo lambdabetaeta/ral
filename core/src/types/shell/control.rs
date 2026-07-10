@@ -50,7 +50,7 @@ impl ControlState {
     /// STT-in: copy the two context counters from parent.  `last_status`
     /// is *not* inherited — it starts fresh at default and rejoins on
     /// `return_to`.
-    pub fn inherit_from(&mut self, parent: &ControlState) {
+    pub fn inherit_from(&mut self, parent: &Self) {
         self.call_depth = parent.call_depth;
         self.recursion_limit = parent.recursion_limit;
     }
@@ -58,7 +58,7 @@ impl ControlState {
     /// STT-out: rejoin `last_status` to the parent.  The two context
     /// counters stay the parent's — depth and limit both kept climbing on
     /// the same OS stack.
-    pub fn return_to(&self, parent: &mut ControlState) {
+    pub fn return_to(&self, parent: &mut Self) {
         parent.last_status = self.last_status;
     }
 }

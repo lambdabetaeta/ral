@@ -309,7 +309,7 @@ impl PipelineBuild {
     /// last, after the anchor can observe channel EOF (or the abort
     /// kill) and be waited without forming a cycle.
     fn abort(self) {
-        let PipelineBuild { resources, .. } = self;
+        let Self { resources, .. } = self;
         resources.signal_group();
         drop(resources);
     }
@@ -319,7 +319,7 @@ impl PipelineBuild {
     /// `PipelineGroup` alongside so its anchor, foreground guard, and
     /// relay stay alive through collect.
     fn finish(self, shell: &mut Shell) -> Result<(PipelineGroup, RunningPipeline), Break> {
-        let PipelineBuild { mut resources, .. } = self;
+        let Self { mut resources, .. } = self;
         // Hand the controlling tty to the pipeline pgid (interactive
         // only) *before* releasing the gate frames so the kernel's
         // foreground decision is settled when stages start running

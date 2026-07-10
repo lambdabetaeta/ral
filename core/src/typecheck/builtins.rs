@@ -73,7 +73,7 @@ pub enum ArgTemplate {
     Ty(TyTemplate),
     Any,
     BlockOrLambda,
-    OneOf(&'static [ArgTemplate]),
+    OneOf(&'static [Self]),
 }
 
 /// Small type-template vocabulary used by command signatures.

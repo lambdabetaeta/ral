@@ -61,7 +61,7 @@ impl WorkerId {
     /// constructing an id of its own.
     pub(crate) fn mint() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        WorkerId(NEXT.fetch_add(1, Ordering::Relaxed))
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 

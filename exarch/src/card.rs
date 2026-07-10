@@ -173,7 +173,7 @@ impl Card {
     /// untouched so the caller can push it as its own block.
     pub fn into_single_diff(self) -> Result<(String, Vec<Hunk>), Self> {
         if self.single_diff().is_some() {
-            let Card(mut marks) = self;
+            let Self(mut marks) = self;
             match marks.pop() {
                 Some(Mark::Diff { path, hunks }) => Ok((path, hunks)),
                 _ => unreachable!("single_diff checked exactly one diff mark"),

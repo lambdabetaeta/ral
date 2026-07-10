@@ -311,7 +311,7 @@ impl TurnState {
     /// Same-thread child flow-in: clone the byte sinks, move the read-once
     /// stdin out of the parent, and share the foreground scope and source
     /// cursor.  Mirror of [`Self::return_to`].
-    pub fn inherit_from(&mut self, parent: &mut TurnState) {
+    pub fn inherit_from(&mut self, parent: &mut Self) {
         self.io.inherit_from(&mut parent.io);
         self.surface = parent.surface.clone();
         self.deferred = parent.deferred.clone();
@@ -330,7 +330,7 @@ impl TurnState {
     /// Same-thread child flow-out: return the read-once stdin to the parent
     /// so sibling calls see the unconsumed pipe.  The cursor and foreground
     /// do not flow back — the asymmetry is the point.
-    pub fn return_to(&mut self, parent: &mut TurnState) {
+    pub fn return_to(&mut self, parent: &mut Self) {
         self.io.return_to(&mut parent.io);
     }
 }

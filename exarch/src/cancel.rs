@@ -74,7 +74,7 @@ impl Token {
     /// A fresh, un-cancelled token.  Each agent owns one for its life; the
     /// trunk additionally [`publish`]es its token to the signal slot.
     pub fn new() -> Self {
-        Token(Arc::new(AtomicU8::new(0)))
+        Self(Arc::new(AtomicU8::new(0)))
     }
 
     /// True once this token (or, since clones share the flag, any of its

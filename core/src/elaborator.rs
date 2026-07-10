@@ -88,7 +88,7 @@ impl Elaborator {
     /// exports and the given `bindings` (e.g. names already defined in
     /// a REPL session).
     fn new_with_bindings(bindings: HashSet<String>) -> Self {
-        Elaborator {
+        Self {
             counter: 0,
             lexical_scopes: vec![prelude_scope(), bindings],
             current_span: None,

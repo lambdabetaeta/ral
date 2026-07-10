@@ -97,7 +97,7 @@ impl CronSchedule {
         if dow & (1 << 7) != 0 {
             dow = (dow & !(1 << 7)) | 1;
         }
-        Ok(CronSchedule {
+        Ok(Self {
             minute,
             hour,
             dom,
@@ -256,7 +256,7 @@ impl Trigger {
     /// Whether the trigger re-arms after firing.  Cron recurs; `after` is
     /// one-shot.
     pub fn is_recurring(&self) -> bool {
-        matches!(self, Trigger::Cron { .. })
+        matches!(self, Self::Cron { .. })
     }
 
     /// The monotonic delay from now to the next fire, computed fresh each
@@ -264,8 +264,8 @@ impl Trigger {
     /// for a cron whose next occurrence is beyond the search horizon.
     pub fn next_delay(&self) -> Option<Duration> {
         match self {
-            Trigger::After(d) => Some(*d),
-            Trigger::Cron { schedule, .. } => {
+            Self::After(d) => Some(*d),
+            Self::Cron { schedule, .. } => {
                 let now = Zoned::now();
                 let next = schedule.next_after(&now)?;
                 let secs = next.timestamp().duration_since(now.timestamp()).as_secs();
@@ -278,8 +278,8 @@ impl Trigger {
     /// wakeup render.
     pub fn describe(&self) -> String {
         match self {
-            Trigger::Cron { expr, .. } => expr.clone(),
-            Trigger::After(d) => format!("after {}", fmt_duration(*d)),
+            Self::Cron { expr, .. } => expr.clone(),
+            Self::After(d) => format!("after {}", fmt_duration(*d)),
         }
     }
 }

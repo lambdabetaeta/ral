@@ -65,14 +65,14 @@ pub enum FOValue<X = NoExt> {
         value: Vec<u8>,
     },
     List {
-        items: Vec<FOValue<X>>,
+        items: Vec<Self>,
     },
     Map {
-        entries: Vec<(std::string::String, FOValue<X>)>,
+        entries: Vec<(std::string::String, Self)>,
     },
     Variant {
         label: std::string::String,
-        payload: Option<Box<FOValue<X>>>,
+        payload: Option<Box<Self>>,
     },
     Ext(X),
 }
@@ -447,28 +447,28 @@ impl TryFrom<&Value> for FOValue {
     /// are rejected outright.
     fn try_from(v: &Value) -> Result<Self, Error> {
         Ok(match v {
-            Value::Unit => FOValue::Unit,
-            Value::Bool(v) => FOValue::Bool { value: *v },
-            Value::Int(v) => FOValue::Int { value: *v },
-            Value::Float(v) => FOValue::Float { value: *v },
-            Value::String(v) => FOValue::String { value: v.clone() },
-            Value::Bytes(v) => FOValue::Bytes { value: v.clone() },
-            Value::List(items) => FOValue::List {
+            Value::Unit => Self::Unit,
+            Value::Bool(v) => Self::Bool { value: *v },
+            Value::Int(v) => Self::Int { value: *v },
+            Value::Float(v) => Self::Float { value: *v },
+            Value::String(v) => Self::String { value: v.clone() },
+            Value::Bytes(v) => Self::Bytes { value: v.clone() },
+            Value::List(items) => Self::List {
                 items: items
                     .iter()
-                    .map(FOValue::try_from)
+                    .map(Self::try_from)
                     .collect::<Result<_, _>>()?,
             },
-            Value::Map(items) => FOValue::Map {
+            Value::Map(items) => Self::Map {
                 entries: items
                     .iter()
-                    .map(|(k, v)| Ok((k.clone(), FOValue::try_from(v)?)))
+                    .map(|(k, v)| Ok((k.clone(), Self::try_from(v)?)))
                     .collect::<Result<_, Error>>()?,
             },
-            Value::Variant { label, payload } => FOValue::Variant {
+            Value::Variant { label, payload } => Self::Variant {
                 label: label.clone(),
                 payload: match payload {
-                    Some(p) => Some(Box::new(FOValue::try_from(p.as_ref())?)),
+                    Some(p) => Some(Box::new(Self::try_from(p.as_ref())?)),
                     None => None,
                 },
             },
@@ -487,21 +487,21 @@ impl From<FOValue> for Value {
     /// Total: first-order values are a subset of `Value`.  `Ext` is
     /// unreachable for `X = NoExt` — `match x {}` discharges it without
     /// a catch-all.
-    fn from(fo: FOValue) -> Value {
+    fn from(fo: FOValue) -> Self {
         match fo {
-            FOValue::Unit => Value::Unit,
-            FOValue::Bool { value } => Value::Bool(value),
-            FOValue::Int { value } => Value::Int(value),
-            FOValue::Float { value } => Value::Float(value),
-            FOValue::String { value } => Value::String(value),
-            FOValue::Bytes { value } => Value::Bytes(value),
-            FOValue::List { items } => Value::list(items.into_iter().map(Value::from).collect()),
+            FOValue::Unit => Self::Unit,
+            FOValue::Bool { value } => Self::Bool(value),
+            FOValue::Int { value } => Self::Int(value),
+            FOValue::Float { value } => Self::Float(value),
+            FOValue::String { value } => Self::String(value),
+            FOValue::Bytes { value } => Self::Bytes(value),
+            FOValue::List { items } => Self::list(items.into_iter().map(Self::from).collect()),
             FOValue::Map { entries } => {
-                Value::Map(entries.into_iter().map(|(k, v)| (k, Value::from(v))).collect())
+                Self::Map(entries.into_iter().map(|(k, v)| (k, Self::from(v))).collect())
             }
-            FOValue::Variant { label, payload } => Value::Variant {
+            FOValue::Variant { label, payload } => Self::Variant {
                 label,
-                payload: payload.map(|p| Box::new(Value::from(*p))),
+                payload: payload.map(|p| Box::new(Self::from(*p))),
             },
             FOValue::Ext(x) => match x {},
         }
@@ -515,26 +515,26 @@ impl FOValue {
     /// collision (E0119) with `impl<X> From<FOValue<X>> for FOValue<X>`.
     pub fn embed<X>(self) -> FOValue<X> {
         match self {
-            FOValue::Unit => FOValue::Unit,
-            FOValue::Bool { value } => FOValue::Bool { value },
-            FOValue::Int { value } => FOValue::Int { value },
-            FOValue::Float { value } => FOValue::Float { value },
-            FOValue::String { value } => FOValue::String { value },
-            FOValue::Bytes { value } => FOValue::Bytes { value },
-            FOValue::List { items } => FOValue::List {
-                items: items.into_iter().map(FOValue::embed).collect(),
+            Self::Unit => FOValue::Unit,
+            Self::Bool { value } => FOValue::Bool { value },
+            Self::Int { value } => FOValue::Int { value },
+            Self::Float { value } => FOValue::Float { value },
+            Self::String { value } => FOValue::String { value },
+            Self::Bytes { value } => FOValue::Bytes { value },
+            Self::List { items } => FOValue::List {
+                items: items.into_iter().map(Self::embed).collect(),
             },
-            FOValue::Map { entries } => FOValue::Map {
+            Self::Map { entries } => FOValue::Map {
                 entries: entries
                     .into_iter()
                     .map(|(k, v)| (k, v.embed()))
                     .collect(),
             },
-            FOValue::Variant { label, payload } => FOValue::Variant {
+            Self::Variant { label, payload } => FOValue::Variant {
                 label,
                 payload: payload.map(|p| Box::new(p.embed())),
             },
-            FOValue::Ext(x) => match x {},
+            Self::Ext(x) => match x {},
         }
     }
 }

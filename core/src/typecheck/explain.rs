@@ -23,11 +23,11 @@ impl TypeErrorKind {
     /// `Couldn't match type ‘Int’ with ‘String’`.
     pub fn render_message(&self) -> String {
         match self {
-            TypeErrorKind::RecursiveRow => {
+            Self::RecursiveRow => {
                 "infinite row — a record's field list would refer back to itself".into()
             }
-            TypeErrorKind::TypeTooDeep => "type nesting exceeds the supported depth".into(),
-            TypeErrorKind::TyMismatch { expected, actual } => {
+            Self::TypeTooDeep => "type nesting exceeds the supported depth".into(),
+            Self::TyMismatch { expected, actual } => {
                 let ctx = FmtCtx::for_value_types(&[expected, actual]);
                 format!(
                     "couldn't match type {} with type {}",
@@ -35,8 +35,8 @@ impl TypeErrorKind {
                     fmt_ty_ctx(actual, &ctx)
                 )
             }
-            TypeErrorKind::CompTyMismatch { diffs, .. } => fmt_comp_mismatch(diffs),
-            TypeErrorKind::ModeMismatch { expected, actual } => {
+            Self::CompTyMismatch { diffs, .. } => fmt_comp_mismatch(diffs),
+            Self::ModeMismatch { expected, actual } => {
                 let ctx = FmtCtx::default();
                 format!(
                     "pipeline channels don't agree: one side is {}, the other is {}",
@@ -44,23 +44,23 @@ impl TypeErrorKind {
                     fmt_mode_ctx(actual, &ctx)
                 )
             }
-            TypeErrorKind::RowExtraField { label } => {
+            Self::RowExtraField { label } => {
                 format!("this record has no field named '{label}'")
             }
-            TypeErrorKind::RowMissingField { label } => {
+            Self::RowMissingField { label } => {
                 format!("this record is missing a field named '{label}'")
             }
-            TypeErrorKind::CommandNotCallable { ty, .. } => {
+            Self::CommandNotCallable { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
                     "value of type {} cannot be used as a command head",
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
-            TypeErrorKind::CaseNotExhaustive { missing, extra } => {
+            Self::CaseNotExhaustive { missing, extra } => {
                 fmt_case_exhaustiveness(missing, extra)
             }
-            TypeErrorKind::CaseLabelTypeMismatch {
+            Self::CaseLabelTypeMismatch {
                 label,
                 expected,
                 found,
@@ -72,54 +72,54 @@ impl TypeErrorKind {
                     fmt_ty_ctx(found, &ctx)
                 )
             }
-            TypeErrorKind::CaseOnNonVariant { ty } => {
+            Self::CaseOnNonVariant { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
                     "`case` needs a variant value (something built with a backtick, like `` `ok 1 `` or `` `err msg ``), but this is a value of type {}",
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
-            TypeErrorKind::ControlOperatorAsValue { name } => format!(
+            Self::ControlOperatorAsValue { name } => format!(
                 "'{name}' is a control operator, not a value; it can only appear in command position"
             ),
-            TypeErrorKind::HandlerNotFirstClass { name } => {
+            Self::HandlerNotFirstClass { name } => {
                 format!("`{name}` is a handler entry, not a first-class value")
             }
-            TypeErrorKind::BuiltinNotFirstClass { name } => {
+            Self::BuiltinNotFirstClass { name } => {
                 format!("`{name}` is a builtin command, not a first-class value")
             }
-            TypeErrorKind::CannotRedefineBuiltin { name, verb } => {
+            Self::CannotRedefineBuiltin { name, verb } => {
                 format!("cannot {verb} builtin `{name}`")
             }
-            TypeErrorKind::HandlerShadowedByBinding { name } => {
+            Self::HandlerShadowedByBinding { name } => {
                 format!("handler `{name}` is hidden by a lexical binding in this scope")
             }
-            TypeErrorKind::BuiltinArity {
+            Self::BuiltinArity {
                 expected,
                 got,
                 at_most: false,
             } => format!("builtin expected {expected} argument(s), got {got}"),
-            TypeErrorKind::BuiltinArity {
+            Self::BuiltinArity {
                 expected,
                 got,
                 at_most: true,
             } => format!("builtin expected at most {expected} argument(s), got {got}"),
-            TypeErrorKind::FailStatusZero => {
+            Self::FailStatusZero => {
                 "`fail [status: 0]` is not allowed — fail requires a nonzero status".into()
             }
-            TypeErrorKind::MalformedAlias { .. } => "malformed alias definition".into(),
-            TypeErrorKind::MalformedUnalias { .. } => "malformed unalias".into(),
-            TypeErrorKind::IndexIntoThunk => {
+            Self::MalformedAlias { .. } => "malformed alias definition".into(),
+            Self::MalformedUnalias { .. } => "malformed unalias".into(),
+            Self::IndexIntoThunk => {
                 "this is a block — you can't read a field from it directly".into()
             }
-            TypeErrorKind::FieldOnNonRecord { label, ty } => {
+            Self::FieldOnNonRecord { label, ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
                     "you tried to read the field `{label}` from a value of type {}, but only records have fields",
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
-            TypeErrorKind::DynamicIndexOnScalar { ty } => {
+            Self::DynamicIndexOnScalar { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
                     "can't index a value of type {} with a runtime key",

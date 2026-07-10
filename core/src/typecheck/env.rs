@@ -21,7 +21,7 @@ pub struct FreeVars {
 
 impl FreeVars {
     pub fn new() -> Self {
-        FreeVars {
+        Self {
             tys: HashSet::new(),
             comps: HashSet::new(),
             modes: HashSet::new(),
@@ -39,7 +39,7 @@ impl FreeVars {
     }
 
     /// Move all four sets into `target`, leaving `self` empty.
-    pub fn merge_into(self, target: &mut FreeVars) {
+    pub fn merge_into(self, target: &mut Self) {
         target.tys.extend(self.tys);
         target.comps.extend(self.comps);
         target.modes.extend(self.modes);
@@ -66,7 +66,7 @@ impl FreeVars {
     /// Intersect with `env` and persist as a [`CachedFreeVars`] — the
     /// "residual" free vars of a scheme, those visible in the
     /// surrounding environment and therefore not quantified.
-    pub fn intersect_into_cached(&self, env: &FreeVars) -> super::scheme::CachedFreeVars {
+    pub fn intersect_into_cached(&self, env: &Self) -> super::scheme::CachedFreeVars {
         super::scheme::CachedFreeVars {
             ty_fv: self.tys.intersection(&env.tys).copied().collect(),
             comp_fv: self.comps.intersection(&env.comps).copied().collect(),
@@ -202,7 +202,7 @@ impl Default for TyEnv {
 
 impl TyEnv {
     pub fn new() -> Self {
-        TyEnv {
+        Self {
             scopes: vec![NameScope::default()],
         }
     }
@@ -336,7 +336,7 @@ impl Default for InferCtx {
 
 impl InferCtx {
     pub fn new() -> Self {
-        InferCtx {
+        Self {
             unifier: Unifier::new(),
             errors: Vec::new(),
             pos: None,

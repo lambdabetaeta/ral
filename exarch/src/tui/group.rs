@@ -78,7 +78,7 @@ impl Tally {
     }
 
     /// Sum another call's tally into this one.
-    fn merge(&mut self, other: Tally) {
+    fn merge(&mut self, other: Self) {
         self.binaries += other.binaries;
         self.files += other.files;
         self.searches += other.searches;

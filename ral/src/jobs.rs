@@ -118,7 +118,7 @@ impl Default for JobTable {
 
 impl JobTable {
     pub fn new() -> Self {
-        JobTable {
+        Self {
             jobs: HashMap::new(),
         }
     }

@@ -171,7 +171,7 @@ pub(crate) struct WireExecNode {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub value: SerialValue,
-    pub children: Vec<WireExecNode>,
+    pub children: Vec<Self>,
     pub start: i64,
     pub end: i64,
     pub principal: String,

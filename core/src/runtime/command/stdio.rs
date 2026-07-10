@@ -87,10 +87,10 @@ pub enum StdinRoute {
 impl StdinRoute {
     pub fn into_stdio(self) -> crate::process::StdioSpec {
         match self {
-            StdinRoute::Inherit(_) => crate::process::StdioSpec::inherit(),
-            StdinRoute::Pipe(r) => crate::process::StdioSpec::from_pipe_reader(r),
-            StdinRoute::File(f) => crate::process::StdioSpec::from_file(f),
-            StdinRoute::Null => crate::process::StdioSpec::null(),
+            Self::Inherit(_) => crate::process::StdioSpec::inherit(),
+            Self::Pipe(r) => crate::process::StdioSpec::from_pipe_reader(r),
+            Self::File(f) => crate::process::StdioSpec::from_file(f),
+            Self::Null => crate::process::StdioSpec::null(),
         }
     }
 }

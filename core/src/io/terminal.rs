@@ -160,7 +160,7 @@ impl TerminalState {
             matches!(mode, InteractiveMode::Full) || anstyle_query::term_supports_ansi_color();
         let modern_osc = env.recognises_modern_osc();
 
-        TerminalState {
+        Self {
             startup_stdin_tty,
             startup_stdout_tty,
             startup_stderr_tty,
@@ -368,7 +368,7 @@ impl TerminalEnv {
     // KITTY_WINDOW_ID / WT_SESSION are presence probes, not basedirs.
     #[allow(clippy::disallowed_methods)]
     fn from_process() -> Self {
-        TerminalEnv {
+        Self {
             term: std::env::var("TERM").ok(),
             term_program: std::env::var("TERM_PROGRAM").ok(),
             colorterm: std::env::var("COLORTERM").ok(),

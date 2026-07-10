@@ -134,7 +134,7 @@ impl PipelineRelay {
                 .compare_exchange(0, pgid, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
-                return Some(PipelineRelay(i));
+                return Some(Self(i));
             }
         }
         None
@@ -247,10 +247,10 @@ impl PgidPolicy {
         // `setpgid` returns 0.  Both signal failure with `-1`.
         let rc = unsafe {
             match self {
-                PgidPolicy::Inherit => 0,
-                PgidPolicy::NewLeader => libc::setpgid(0, 0),
-                PgidPolicy::NewSession => libc::setsid(),
-                PgidPolicy::Join(Pgid(leader)) => libc::setpgid(0, leader),
+                Self::Inherit => 0,
+                Self::NewLeader => libc::setpgid(0, 0),
+                Self::NewSession => libc::setsid(),
+                Self::Join(Pgid(leader)) => libc::setpgid(0, leader),
             }
         };
         if rc == -1 {

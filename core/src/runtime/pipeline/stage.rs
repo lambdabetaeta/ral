@@ -62,7 +62,7 @@ impl HelperStageHandle {
         is_last: bool,
         started: std::time::Instant,
     ) -> Settled<StageObservation> {
-        let HelperStageHandle {
+        let Self {
             running,
             loc,
             report,

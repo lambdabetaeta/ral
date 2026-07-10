@@ -50,11 +50,11 @@ impl Ast {
         out: &mut HashSet<String>,
     ) {
         match self {
-            Ast::Variable(n) => note_free(n, candidates, scopes, out),
-            Ast::Literal(_)
-            | Ast::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
-            | Ast::Return(None) => {}
-            Ast::Lambda { param, body } => {
+            Self::Variable(n) => note_free(n, candidates, scopes, out),
+            Self::Literal(_)
+            | Self::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
+            | Self::Return(None) => {}
+            Self::Lambda { param, body } => {
                 param
                     .item
                     .collect_default_free_refs(candidates, scopes, out);
@@ -66,11 +66,11 @@ impl Ast {
                 }
                 scopes.pop();
             }
-            Ast::Block(stmts) => {
+            Self::Block(stmts) => {
                 let mut pushed = 0;
                 for stmt in stmts {
                     stmt.item.collect_free_refs(candidates, scopes, out);
-                    if let Ast::Let { pattern, .. } = &stmt.item {
+                    if let Self::Let { pattern, .. } = &stmt.item {
                         let mut names = HashSet::new();
                         pattern.item.collect_names(&mut names);
                         scopes.push(names);
@@ -81,19 +81,19 @@ impl Ast {
                     scopes.pop();
                 }
             }
-            Ast::Let { pattern, value } => {
+            Self::Let { pattern, value } => {
                 pattern
                     .item
                     .collect_default_free_refs(candidates, scopes, out);
                 value.item.collect_free_refs(candidates, scopes, out);
             }
-            Ast::Return(Some(value))
-            | Ast::Background(value)
-            | Ast::Spread(value)
-            | Ast::Force(value) => {
+            Self::Return(Some(value))
+            | Self::Background(value)
+            | Self::Spread(value)
+            | Self::Force(value) => {
                 value.item.collect_free_refs(candidates, scopes, out);
             }
-            Ast::Call {
+            Self::Call {
                 head,
                 args,
                 redirects,
@@ -106,36 +106,36 @@ impl Ast {
                     r.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Ast::Scope { op, redirects } => {
+            Self::Scope { op, redirects } => {
                 op.collect_free_refs(candidates, scopes, out);
                 for r in redirects {
                     r.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Ast::Pipeline(stages) | Ast::Chain(stages) | Ast::Interpolation(stages) => {
+            Self::Pipeline(stages) | Self::Chain(stages) | Self::Interpolation(stages) => {
                 for s in stages {
                     s.item.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Ast::Tag { payload, .. } => {
+            Self::Tag { payload, .. } => {
                 if let Some(p) = payload {
                     p.item.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Ast::Case { scrutinee, table } => {
+            Self::Case { scrutinee, table } => {
                 scrutinee.item.collect_free_refs(candidates, scopes, out);
                 table.item.collect_free_refs(candidates, scopes, out);
             }
-            Ast::Expr(expr) => {
+            Self::Expr(expr) => {
                 expr.collect_free_refs(candidates, scopes, out);
             }
-            Ast::Index { target, keys } => {
+            Self::Index { target, keys } => {
                 target.item.collect_free_refs(candidates, scopes, out);
                 for k in keys {
                     k.item.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Ast::List(elems) => {
+            Self::List(elems) => {
                 for elem in elems {
                     match elem {
                         ListElem::Single(a) | ListElem::Spread(a) => {
@@ -144,7 +144,7 @@ impl Ast {
                     }
                 }
             }
-            Ast::Map(entries) => {
+            Self::Map(entries) => {
                 for entry in entries {
                     match entry {
                         MapEntry::Entry { value, .. } => {
@@ -160,7 +160,7 @@ impl Ast {
                     }
                 }
             }
-            Ast::If { branches, else_ } => {
+            Self::If { branches, else_ } => {
                 for branch in branches {
                     branch.cond.item.collect_free_refs(candidates, scopes, out);
                     branch.body.item.collect_free_refs(candidates, scopes, out);
@@ -186,13 +186,13 @@ impl Pattern {
         out: &mut HashSet<String>,
     ) {
         match self {
-            Pattern::Wildcard | Pattern::Name(_) => {}
-            Pattern::List { elems, .. } => {
+            Self::Wildcard | Self::Name(_) => {}
+            Self::List { elems, .. } => {
                 for e in elems {
                     e.collect_default_free_refs(candidates, scopes, out);
                 }
             }
-            Pattern::Map(entries) => {
+            Self::Map(entries) => {
                 for entry in entries {
                     if let Some(default) = &entry.default {
                         default.collect_free_refs(candidates, scopes, out);
@@ -214,22 +214,22 @@ impl Expr {
         out: &mut HashSet<String>,
     ) {
         match self {
-            Expr::Integer(_) | Expr::Number(_) | Expr::Bool(_) => {}
-            Expr::Variable(n) => note_free(n, candidates, scopes, out),
-            Expr::Index(n, keys) => {
+            Self::Integer(_) | Self::Number(_) | Self::Bool(_) => {}
+            Self::Variable(n) => note_free(n, candidates, scopes, out),
+            Self::Index(n, keys) => {
                 note_free(n, candidates, scopes, out);
                 for k in keys {
                     k.item.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Expr::Force(inner) => {
+            Self::Force(inner) => {
                 inner.item.collect_free_refs(candidates, scopes, out);
             }
-            Expr::BinOp(l, _, r) | Expr::And(l, r) | Expr::Or(l, r) => {
+            Self::BinOp(l, _, r) | Self::And(l, r) | Self::Or(l, r) => {
                 l.collect_free_refs(candidates, scopes, out);
                 r.collect_free_refs(candidates, scopes, out);
             }
-            Expr::Not(inner) => {
+            Self::Not(inner) => {
                 inner.collect_free_refs(candidates, scopes, out);
             }
         }
@@ -244,9 +244,9 @@ impl Head {
         out: &mut HashSet<String>,
     ) {
         match self {
-            Head::Bare(n) => note_free(n, candidates, scopes, out),
-            Head::Value(ast) => ast.collect_free_refs(candidates, scopes, out),
-            Head::ExternalName(_) | Head::Path(_) | Head::TildePath(_) => {}
+            Self::Bare(n) => note_free(n, candidates, scopes, out),
+            Self::Value(ast) => ast.collect_free_refs(candidates, scopes, out),
+            Self::ExternalName(_) | Self::Path(_) | Self::TildePath(_) => {}
         }
     }
 }

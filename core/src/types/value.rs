@@ -37,8 +37,8 @@ impl BuiltinBody {
     /// Call the body with the given arguments and shell.
     pub fn call(&self, args: &[Value], shell: &mut crate::types::Shell) -> Settled<Value> {
         match self {
-            BuiltinBody::Static(f) => f(args, shell),
-            BuiltinBody::Captured(f) => f(args, shell),
+            Self::Static(f) => f(args, shell),
+            Self::Captured(f) => f(args, shell),
         }
     }
 }
@@ -46,8 +46,8 @@ impl BuiltinBody {
 impl fmt::Debug for BuiltinBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BuiltinBody::Static(_) => f.write_str("BuiltinBody::Static(<fn>)"),
-            BuiltinBody::Captured(_) => f.write_str("BuiltinBody::Captured(<closure>)"),
+            Self::Static(_) => f.write_str("BuiltinBody::Static(<fn>)"),
+            Self::Captured(_) => f.write_str("BuiltinBody::Captured(<closure>)"),
         }
     }
 }
@@ -155,7 +155,7 @@ pub enum Value {
     /// prints it as `` `label `` for consistency with the surface syntax.
     Variant {
         label: std::string::String,
-        payload: Option<Box<Value>>,
+        payload: Option<Box<Self>>,
     },
     /// A first-class function value.  `body` is the lambda's inner
     /// computation (the result-producing comp after the parameter has
@@ -183,8 +183,8 @@ impl Value {
     /// silently parsed.  Use the `int` builtin for explicit conversion.
     pub fn as_int(&self) -> Option<i64> {
         match self {
-            Value::Int(n) => Some(*n),
-            Value::Float(f) if *f == f.floor() => Some(*f as i64),
+            Self::Int(n) => Some(*n),
+            Self::Float(f) if *f == f.floor() => Some(*f as i64),
             _ => None,
         }
     }
@@ -195,8 +195,8 @@ impl Value {
     /// parsed.  Use the `float` builtin for explicit conversion.
     pub fn as_float(&self) -> Option<f64> {
         match self {
-            Value::Int(n) => Some(*n as f64),
-            Value::Float(f) => Some(*f),
+            Self::Int(n) => Some(*n as f64),
+            Self::Float(f) => Some(*f),
             _ => None,
         }
     }
@@ -204,8 +204,8 @@ impl Value {
     /// Build a `Value::List` from an owned `Vec<Value>`.  Every list-construction
     /// site goes through this so the persistent-vector wrapping stays invisible
     /// to callers.  Sites that already hold a `List` use `Value::List(v)` directly.
-    pub fn list(items: Vec<Value>) -> Value {
-        Value::List(items.into())
+    pub fn list(items: Vec<Self>) -> Self {
+        Self::List(items.into())
     }
 
     /// Build a `Value::Map` from an owned `Vec<(String, Value)>`.  The pair-list
@@ -213,25 +213,25 @@ impl Value {
     /// JSON, REPL config); this wraps it once into the persistent `Map`.  On
     /// duplicate keys the *last* pair wins — callers that need first-wins (e.g.
     /// `eval_map`'s explicit-before-spread priority) must dedup before calling.
-    pub fn map(pairs: Vec<(String, Value)>) -> Value {
-        Value::Map(pairs.into())
+    pub fn map(pairs: Vec<(String, Self)>) -> Self {
+        Self::Map(pairs.into())
     }
 
     /// Human-readable runtime type name used in diagnostics.
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Unit => "Unit",
-            Value::Bool(_) => "Bool",
-            Value::Int(_) => "Int",
-            Value::Float(_) => "Float",
-            Value::String(_) => "String",
-            Value::Bytes(_) => "Bytes",
-            Value::List(_) => "List",
-            Value::Map(_) => "Map",
-            Value::Variant { .. } => "Variant",
-            Value::Lambda { .. } => "Lambda",
-            Value::Block { .. } => "Block",
-            Value::Handle(_) => "Handle",
+            Self::Unit => "Unit",
+            Self::Bool(_) => "Bool",
+            Self::Int(_) => "Int",
+            Self::Float(_) => "Float",
+            Self::String(_) => "String",
+            Self::Bytes(_) => "Bytes",
+            Self::List(_) => "List",
+            Self::Map(_) => "Map",
+            Self::Variant { .. } => "Variant",
+            Self::Lambda { .. } => "Lambda",
+            Self::Block { .. } => "Block",
+            Self::Handle(_) => "Handle",
         }
     }
 
@@ -245,7 +245,7 @@ impl Value {
     /// it is the principled arity to validate against at the install
     /// boundary.
     pub fn lambda_arity(&self) -> Option<usize> {
-        let Value::Lambda { body, .. } = self else {
+        let Self::Lambda { body, .. } = self else {
             return None;
         };
         let mut arity = 1;
@@ -277,17 +277,17 @@ impl Value {
         /// estimate without pretending to measure what they capture.
         const OPAQUE_CONSTANT: usize = 32;
         match self {
-            Value::Unit => 0,
-            Value::Bool(_) => 1,
-            Value::Int(_) | Value::Float(_) => 8,
-            Value::String(s) => s.len(),
-            Value::Bytes(b) => b.len(),
-            Value::List(items) => items.iter().map(Self::shallow_size).sum(),
-            Value::Map(pairs) => pairs.iter().map(|(k, v)| k.len() + v.shallow_size()).sum(),
-            Value::Variant { label, payload } => {
+            Self::Unit => 0,
+            Self::Bool(_) => 1,
+            Self::Int(_) | Self::Float(_) => 8,
+            Self::String(s) => s.len(),
+            Self::Bytes(b) => b.len(),
+            Self::List(items) => items.iter().map(Self::shallow_size).sum(),
+            Self::Map(pairs) => pairs.iter().map(|(k, v)| k.len() + v.shallow_size()).sum(),
+            Self::Variant { label, payload } => {
                 label.len() + payload.as_deref().map_or(0, Self::shallow_size)
             }
-            Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => OPAQUE_CONSTANT,
+            Self::Lambda { .. } | Self::Block { .. } | Self::Handle(_) => OPAQUE_CONSTANT,
         }
     }
 }
@@ -408,20 +408,20 @@ impl PartialEq for HandleInner {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Unit, Value::Unit) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
-            (Value::Bytes(a), Value::Bytes(b)) => a == b,
-            (Value::List(a), Value::List(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
+            (Self::Unit, Self::Unit) => true,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::Map(a), Self::Map(b)) => a == b,
             (
-                Value::Variant {
+                Self::Variant {
                     label: la,
                     payload: pa,
                 },
-                Value::Variant {
+                Self::Variant {
                     label: lb,
                     payload: pb,
                 },
@@ -435,13 +435,13 @@ impl PartialEq for Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Unit => write!(f, ""),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Int(n) => write!(f, "{n}"),
-            Value::Float(n) => write!(f, "{n}"),
-            Value::String(s) => write!(f, "{s}"),
-            Value::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
-            Value::List(items) => {
+            Self::Unit => write!(f, ""),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::Int(n) => write!(f, "{n}"),
+            Self::Float(n) => write!(f, "{n}"),
+            Self::String(s) => write!(f, "{s}"),
+            Self::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
+            Self::List(items) => {
                 if items.is_empty() {
                     return write!(f, "[]");
                 }
@@ -454,7 +454,7 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Map(m) => {
+            Self::Map(m) => {
                 if m.is_empty() {
                     return write!(f, "[:]");
                 }
@@ -467,13 +467,13 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Variant { label, payload } => match payload {
+            Self::Variant { label, payload } => match payload {
                 None => write!(f, "`{label}"),
                 Some(p) => write!(f, "`{label} {p}"),
             },
-            Value::Lambda { param, body, .. } => write!(f, "{}", fmt_lambda(param, body)),
-            Value::Block { .. } => write!(f, "<block>"),
-            Value::Handle(h) => write!(f, "<handle:{}>", h.cmd),
+            Self::Lambda { param, body, .. } => write!(f, "{}", fmt_lambda(param, body)),
+            Self::Block { .. } => write!(f, "<block>"),
+            Self::Handle(h) => write!(f, "<handle:{}>", h.cmd),
         }
     }
 }
@@ -656,13 +656,13 @@ pub enum HandlerRole {
 impl HandlerRole {
     fn label(self) -> &'static str {
         match self {
-            HandlerRole::Alias => "alias",
-            HandlerRole::Scoped => "within handlers",
+            Self::Alias => "alias",
+            Self::Scoped => "within handlers",
         }
     }
 
     fn persists_scheme(self) -> bool {
-        matches!(self, HandlerRole::Alias)
+        matches!(self, Self::Alias)
     }
 }
 

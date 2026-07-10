@@ -40,7 +40,7 @@ impl PromptEditor {
             EditMode::Vi => EditorEventHandler::vim_mode(),
         };
         state.mode = EditorMode::Insert;
-        PromptEditor {
+        Self {
             state,
             handler,
             highlights: Vec::new(),

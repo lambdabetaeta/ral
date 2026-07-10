@@ -59,8 +59,8 @@ pub enum Ty {
     Int,
     Float,
     String,
-    List(Box<Ty>),
-    Map(Box<Ty>), // String-keyed; values are homogeneous
+    List(Box<Self>),
+    Map(Box<Self>), // String-keyed; values are homogeneous
     Record(Row),  // row-typed record {l₁:A₁, …, lₙ:Aₙ | ρ}
     /// Tagged sum: a value carrying one of `{`l₁: A₁, …, `lₙ: Aₙ | ρ}`.
     /// Dual to `Record`; shares the `Row` data structure.  By convention
@@ -69,7 +69,7 @@ pub enum Ty {
     /// two alphabets do not unify.
     Variant(Row),
     Thunk(Box<CompTy>), // U B — suspended computation
-    Handle(Box<Ty>),    // Handle α — await produces a record with `value: α`
+    Handle(Box<Self>),    // Handle α — await produces a record with `value: α`
     Var(TyVar),
 }
 
@@ -84,7 +84,7 @@ pub enum Ty {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
-    Extend(String, Box<Ty>, Box<Row>),
+    Extend(String, Box<Ty>, Box<Self>),
     Var(RowVar),
 }
 
@@ -103,7 +103,7 @@ pub enum CompTy {
     /// `F[I,O] A` — effectful command with pipeline modes and a return type.
     Return(PipeSpec, Box<Ty>),
     /// `A -> B` — function from a value type to a computation type.
-    Fun(Box<Ty>, Box<CompTy>),
+    Fun(Box<Ty>, Box<Self>),
     /// Unification variable.
     Var(CompTyVar),
 }
@@ -111,6 +111,6 @@ pub enum CompTy {
 impl CompTy {
     /// Pure computation: no pipeline I/O.
     pub fn pure(ty: Ty) -> Self {
-        CompTy::Return(PipeSpec::none(), Box::new(ty))
+        Self::Return(PipeSpec::none(), Box::new(ty))
     }
 }

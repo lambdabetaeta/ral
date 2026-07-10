@@ -754,9 +754,9 @@ enum MxState {
 impl From<HandleState> for MxState {
     fn from(s: HandleState) -> Self {
         match s {
-            HandleState::Running => MxState::Running,
-            HandleState::Completed => MxState::Completed,
-            HandleState::Cancelled => MxState::Cancelled,
+            HandleState::Running => Self::Running,
+            HandleState::Completed => Self::Completed,
+            HandleState::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -765,8 +765,8 @@ impl From<HandleState> for MxState {
 impl From<crate::jobs::JobState> for MxState {
     fn from(s: crate::jobs::JobState) -> Self {
         match s {
-            crate::jobs::JobState::Running => MxState::Running,
-            crate::jobs::JobState::Stopped => MxState::Stopped,
+            crate::jobs::JobState::Running => Self::Running,
+            crate::jobs::JobState::Stopped => Self::Stopped,
         }
     }
 }
