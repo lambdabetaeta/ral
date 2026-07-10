@@ -445,7 +445,7 @@ mod tests {
         install();
         let token = Token::new();
         let _slot = publish(&token);
-        let threaded = token.clone();
+        let threaded = token;
         assert!(!threaded.is_cancelled());
         raise_interrupt();
         assert!(

@@ -696,7 +696,7 @@ mod tests {
         );
         assert!(
             commitment_settle(
-                CommitmentIntent::Verify(key.clone()),
+                CommitmentIntent::Verify(key),
                 &AgentOutcome::Failed("provider error".into()),
                 &Some(pass)
             )

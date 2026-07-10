@@ -181,7 +181,7 @@ impl Session {
             None, // rc_path
             crate::ENGINE_INSTALLER_TAG.to_string(),
         );
-        while let Flow::Continue = self.turn() {}
+        while matches!(self.turn(), Flow::Continue) {}
         ExitCode::from(self.exit_code)
     }
 

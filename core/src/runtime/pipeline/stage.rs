@@ -112,7 +112,7 @@ impl HelperStageHandle {
                     ),
                     helper_exit,
                 )
-                .at_loc(loc.clone());
+                .at_loc(loc);
                 return Ok(StageObservation::failure(err).with_audit(audit));
             }
             let final_value = if is_last { value } else { None };

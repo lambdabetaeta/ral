@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(flat.shallow_size(), 2 + 3);
 
         // A list of lists sums all the way down.
-        let nested = Value::list(vec![flat.clone(), flat.clone()]);
+        let nested = Value::list(vec![flat.clone(), flat]);
         assert_eq!(nested.shallow_size(), 2 * (2 + 3));
 
         // A map counts its keys' bytes alongside its values' estimates.
@@ -1039,7 +1039,7 @@ mod tests {
             body: std::sync::Arc::new(crate::source::Spanned::synthetic(
                 crate::ir::CompKind::Return(crate::ir::Val::Unit),
             )),
-            captured: empty_capture.clone(),
+            captured: empty_capture,
         };
         let block_size = block.shallow_size();
         assert!(block_size > 0, "a closure is a small nonzero constant");
@@ -1062,7 +1062,7 @@ mod tests {
         );
 
         // Nested inside a list, a closure contributes only the constant.
-        let list_of_one_closure = Value::list(vec![block.clone()]);
+        let list_of_one_closure = Value::list(vec![block]);
         assert_eq!(list_of_one_closure.shallow_size(), block_size);
     }
 }

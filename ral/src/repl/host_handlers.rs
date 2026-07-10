@@ -26,9 +26,9 @@ pub fn build(
         build_jobs(jobs.clone()),
         build_fg(jobs.clone()),
         build_bg(jobs.clone()),
-        build_disown(jobs.clone()),
+        build_disown(jobs),
         build_load_plugin(runtime.clone()),
-        build_unload_plugin(runtime.clone()),
+        build_unload_plugin(runtime),
     ]
     .into()
 }

@@ -195,7 +195,7 @@ fn meet_idempotent_subcommands_ignore_order() {
 #[test]
 fn meet_top_is_identity() {
     let a = witness_a();
-    assert_eq!(a.clone().meet(Capabilities::default()), a.clone());
+    assert_eq!(a.clone().meet(Capabilities::default()), a);
     assert_eq!(Capabilities::default().meet(a.clone()), a);
 }
 
@@ -556,7 +556,7 @@ fn join_idempotent() {
 #[test]
 fn join_none_is_identity() {
     let a = witness_a();
-    assert_eq!(a.clone().join(Capabilities::default()), a.clone());
+    assert_eq!(a.clone().join(Capabilities::default()), a);
     assert_eq!(Capabilities::default().join(a.clone()), a);
 }
 

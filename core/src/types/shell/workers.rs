@@ -552,6 +552,10 @@ mod tests {
         let registry = WorkerRegistry::default();
         let barrier = Arc::new(std::sync::Barrier::new(8));
 
+        #[allow(
+            clippy::needless_collect,
+            reason = "all 8 threads must be spawned before any is joined, to race"
+        )]
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 let registry = registry.clone();

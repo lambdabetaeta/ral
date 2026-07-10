@@ -297,7 +297,7 @@ fn ranked_entries(
             let display = if e.is_dir {
                 format!("{}/", e.name)
             } else {
-                e.name.clone()
+                e.name
             };
             let body = format!("{replacement_prefix}{display}");
             let replacement = if quote {

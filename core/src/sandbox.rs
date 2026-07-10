@@ -336,7 +336,7 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
                     rlim_cur: 512,
                     rlim_max: 512,
                 };
-                libc::setrlimit(libc::RLIMIT_NPROC, &nproc);
+                libc::setrlimit(libc::RLIMIT_NPROC, &raw const nproc);
             }
             Ok(())
         });

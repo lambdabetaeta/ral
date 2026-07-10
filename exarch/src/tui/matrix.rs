@@ -71,7 +71,7 @@ pub(super) fn matrix_bar(
         })
         .max()
         .unwrap_or(0);
-    let mut display_rows: Vec<MatrixRow> = order
+    let display_rows: Vec<MatrixRow> = order
         .into_iter()
         .map(|i| {
             MatrixRow::new(
@@ -81,7 +81,7 @@ pub(super) fn matrix_bar(
         .collect();
     let widths = MatrixWidths::measure(&display_rows);
     display_rows
-        .drain(..)
+        .into_iter()
         .map(|row| row.render(widths))
         .collect()
 }

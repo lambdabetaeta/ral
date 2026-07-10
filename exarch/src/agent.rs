@@ -1329,7 +1329,7 @@ impl Agent {
         if let Some(p) = prompt {
             self.log
                 .append_user(p)
-                .map_err(|e| ProviderError::Other(e.clone()))?;
+                .map_err(ProviderError::Other)?;
         }
         let mut n = 0u32;
         loop {
@@ -1350,7 +1350,7 @@ impl Agent {
             let messages = self
                 .log
                 .render_messages()
-                .map_err(|e| ProviderError::Other(e.clone()))?;
+                .map_err(ProviderError::Other)?;
             ral_core::dbg_trace!(
                 "turn",
                 "render_messages: {} msgs in {:?}",
@@ -1453,7 +1453,7 @@ impl Agent {
                     tool_ids,
                     stop_reason.as_ref().map(|r| r.raw().to_string()),
                 )
-                .map_err(|e| ProviderError::Other(e.clone()))?;
+                .map_err(ProviderError::Other)?;
             let truncated = cut_short.is_some();
             // The assistant turn was cut short — the output cap or a
             // mid-stream stall.  With no captured tool call there is nothing
@@ -1519,7 +1519,7 @@ impl Agent {
             let Dispatch { results, injected } = self.dispatch(provider, tool_calls, token, emit);
             self.log
                 .append_tool_results(results)
-                .map_err(|e| ProviderError::Other(e.clone()))?;
+                .map_err(ProviderError::Other)?;
             // Everything that arrived during the batch lands now, mid-turn:
             // each source renders its own chrome (a `↘` block for a subagent, a
             // marked wakeup, a `spawn`'s cards), and their texts coalesce into
@@ -1535,7 +1535,7 @@ impl Agent {
                 }
                 self.log
                     .append_steering(text)
-                    .map_err(|e| ProviderError::Other(e.clone()))?;
+                    .map_err(ProviderError::Other)?;
             }
             if token.is_cancelled() {
                 return Ok(self.cancelled(emit));
@@ -3060,7 +3060,7 @@ mod tests {
 
         match session.apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Open {
             key: key.clone(),
-            card: card.clone(),
+            card,
         })) {
             Some(Kind::Pin { key: k, .. }) => assert_eq!(k, key),
             Some(_) => panic!("expected a Pin event for a fresh open, got some other Kind"),

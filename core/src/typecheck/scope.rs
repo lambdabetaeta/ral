@@ -146,7 +146,7 @@ impl Inferencer<'_> {
         let handler_ty = self.infer_val(handler);
         self.ctx.unify_ty(
             &handler_ty,
-            &Ty::Thunk(Box::new(handler_inner.clone())),
+            &Ty::Thunk(Box::new(handler_inner)),
             Reason::TryHandler,
         );
 

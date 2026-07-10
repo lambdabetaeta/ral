@@ -124,7 +124,7 @@ pub(super) fn dispatch_keybinding(
                 "keymap".into(),
                 Value::String(keymap_name(keymap).to_string()),
             ),
-            ("state".into(), state_cell.clone().unwrap_or(Value::Unit)),
+            ("state".into(), state_cell.unwrap_or(Value::Unit)),
         ])],
         Some(ctx_in),
         HookFraming::Framed(FramedHook {

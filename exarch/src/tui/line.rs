@@ -933,12 +933,11 @@ fn render_framed(
         top.extend(spans.iter().cloned());
         let fill = interior.saturating_sub(3 + title_w); // "─ " + title + " "
         top.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
-        top.push(Span::styled("╮", border));
     } else {
         top.push(Span::styled("╭", border));
         top.push(Span::styled("─".repeat(interior), border));
-        top.push(Span::styled("╮", border));
     }
+    top.push(Span::styled("╮", border));
     out.push(Line::from(top));
 
     // Content rows, each padded out to the inner width inside the borders.

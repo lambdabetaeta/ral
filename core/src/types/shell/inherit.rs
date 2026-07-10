@@ -202,7 +202,7 @@ impl Shell {
         let mut mobile = self.mobile.clone();
         mobile.scope = captured.clone();
         mobile.scope.push_scope();
-        if let ThunkBody::Lambda = kind {
+        if matches!(kind, ThunkBody::Lambda) {
             // A lambda body enters with a fresh `$?`; a block keeps the
             // caller's, cloned above.
             mobile.control.last_status = ControlState::default().last_status;
@@ -212,11 +212,11 @@ impl Shell {
             ThunkBody::Lambda => None,
         };
         let (post, result) = f(self, mobile);
-        if let ThunkBody::Block = kind {
+        if matches!(kind, ThunkBody::Block) {
             self.local.repl.pending_chpwd = saved_pending_chpwd;
         }
         self.mobile.control.last_status = post.control.last_status;
-        if let ThunkBody::Lambda = kind {
+        if matches!(kind, ThunkBody::Lambda) {
             self.mobile.context.cwd.current = post.context.cwd.current;
             self.mobile.context.cwd.previous = post.context.cwd.previous;
         }

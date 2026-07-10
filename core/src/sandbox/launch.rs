@@ -108,9 +108,7 @@ fn linux_sandboxed_command(
         LaunchTarget::BundledTool { tool } => {
             let self_path = super::reexec::SANDBOX_SELF
                 .get()
-                .map(|s| s.arg0.clone())
-                .map(Ok)
-                .unwrap_or_else(std::env::current_exe)
+                .map(|s| s.arg0.clone()).map_or_else(std::env::current_exe, Ok)
                 .map_err(|e| {
                     Break::Error(Error::new(
                         format!("sandbox: cannot resolve self exe for bundled tool: {e}"),

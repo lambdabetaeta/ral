@@ -171,7 +171,7 @@ fn top_level_cd_persists_across_calls() {
     // `Shell::cwd()` returns the canonicalised path; comparing string
     // forms tolerates the macOS `/var` ↔ `/private/var` firmlink the
     // same way `within_dir_carries_to_external_command` does.
-    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or(tmp.clone()));
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     let got = match result {
         Value::String(s) => s,
         other => panic!("cwd must return a String, got {other:?}"),
@@ -521,7 +521,7 @@ fn sandbox_parity_top_level_cd() {
     top_level_under(&mut shell, caps.clone(), &format!("cd '{tmp_disp}'"))
         .expect("cd under projection");
     let result = top_level_under(&mut shell, caps, "cwd").expect("cwd under projection");
-    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or(tmp.clone()));
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     let got = match result {
         Value::String(s) => s,
         other => panic!("cwd returned non-String: {other:?}"),
@@ -623,7 +623,7 @@ fn lambda_cd_persists() {
     let after = shell.cwd();
 
     assert_ne!(before, after, "a `cd` inside a lambda body must persist");
-    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or(tmp.clone()));
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     assert!(
         after == tmp_disp || after == canon,
         "lambda `cd` must land in the temp dir: expected {tmp_disp:?} or {canon:?}, got {after:?}"

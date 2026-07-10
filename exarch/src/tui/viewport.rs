@@ -1399,19 +1399,18 @@ mod tests {
         let height = 8;
         let live = vp.render_window(READ_W, height);
         let live_offset = live.offset;
-        let live_text = live.lines.iter().map(plain).collect::<Vec<_>>();
+        let live_text_len = live.lines.iter().map(plain).count();
 
         vp.commit_thinking("hidden trace\nline two\n".into(), 0);
         let committed = vp.render_window(READ_W, height);
-        let committed_text = committed.lines.iter().map(plain).collect::<Vec<_>>();
+        let committed_text_len = committed.lines.iter().map(plain).count();
 
         assert_eq!(
             committed.offset, live_offset,
             "committing the hidden trace keeps the scrollback offset stable"
         );
         assert_eq!(
-            committed_text.len(),
-            live_text.len(),
+            committed_text_len, live_text_len,
             "the live header and collapsed block occupy the same row budget"
         );
     }

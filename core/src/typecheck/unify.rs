@@ -975,12 +975,12 @@ impl Unifier {
                     if is_tag_label(&l1) != is_tag_label(&l2) {
                         return Err(TypeErrorKind::TyMismatch {
                             expected: Ty::Record(Row::Extend(
-                                l1.clone(),
+                                l1,
                                 t1.clone(),
                                 Box::new(Row::Empty),
                             )),
                             actual: Ty::Record(Row::Extend(
-                                l2.clone(),
+                                l2,
                                 t2.clone(),
                                 Box::new(Row::Empty),
                             )),
@@ -1013,8 +1013,8 @@ impl Unifier {
                         }
                     }
                     let rho = self.fresh_row_var();
-                    let new_r1 = Row::Extend(l2.clone(), t2.clone(), Box::new(Row::Var(rho)));
-                    let new_r2 = Row::Extend(l1.clone(), t1.clone(), Box::new(Row::Var(rho)));
+                    let new_r1 = Row::Extend(l2, t2.clone(), Box::new(Row::Var(rho)));
+                    let new_r2 = Row::Extend(l1, t1.clone(), Box::new(Row::Var(rho)));
                     self.unify_row_inner(&r1, &new_r1, pairs, depth)?;
                     return self.unify_row_inner(&r2, &new_r2, pairs, depth);
                 }

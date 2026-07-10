@@ -834,7 +834,7 @@ mod tests {
         );
         let pwd = run_once(&mut shell, "cwd");
         assert_eq!(pwd.exit, 0, "cwd in the second call should succeed");
-        let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or(tmp.clone()));
+        let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
         let got = pwd
             .value
             .as_deref()
@@ -1777,7 +1777,7 @@ return !{{length $hits}}"
         assert_eq!(
             ios[0],
             &IoEvent::Write {
-                path: path.clone(),
+                path,
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"hello\nfriend\n".to_vec()),
@@ -1898,7 +1898,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             ios[0],
-            &IoEvent::Read { path: path.clone() },
+            &IoEvent::Read { path },
             "the one io event is a read of the redirect path"
         );
     }
@@ -1936,7 +1936,7 @@ return !{{length $hits}}"
         assert_eq!(
             ios[0],
             &IoEvent::Write {
-                path: path.clone(),
+                path,
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 // The committed content rides as `new_bytes`, seeding the write
@@ -1988,7 +1988,7 @@ return !{{length $hits}}"
         assert_eq!(
             ios[0],
             &IoEvent::Write {
-                path: path.clone(),
+                path,
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"hello\nfriend\n".to_vec()),
@@ -2157,7 +2157,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             ios[0],
-            &IoEvent::Read { path: path.clone() },
+            &IoEvent::Read { path },
             "the read installs first, before the body runs"
         );
         assert_eq!(
@@ -2226,7 +2226,7 @@ return !{{length $hits}}"
         };
         let card = io_card(&event);
         let kind = Kind::Io {
-            event: event.clone(),
+            event,
             card,
         };
         let rec = crate::transcript::event_record(7, 3, &kind).expect("an io event records");

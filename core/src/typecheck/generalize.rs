@@ -18,8 +18,8 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     free_ty(u, &applied, &mut fvs);
     let env_fvs = env_free_vars(u, env);
 
-    let ty_vars: Vec<TyVar> = fvs.tys.difference(&env_fvs.tys).copied().collect();
-    let comp_ty_vars: Vec<CompTyVar> = fvs.comps.difference(&env_fvs.comps).copied().collect();
+    let ty_vars = fvs.tys.difference(&env_fvs.tys).copied();
+    let comp_ty_vars = fvs.comps.difference(&env_fvs.comps).copied();
     let mode_vars: Vec<ModeVar> = fvs.modes.difference(&env_fvs.modes).copied().collect();
     let row_vars: Vec<RowVar> = fvs.rows.difference(&env_fvs.rows).copied().collect();
 
@@ -81,13 +81,11 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     let cyclic_comp_roots: std::collections::HashSet<u32> =
         comp_ty_bindings.iter().map(|(r, _)| *r).collect();
     let comp_ty_vars: Vec<CompTyVar> = comp_ty_vars
-        .into_iter()
         .filter(|v| !cyclic_comp_roots.contains(&v.0))
         .collect();
     let cyclic_ty_roots: std::collections::HashSet<u32> =
         ty_bindings.iter().map(|(r, _)| *r).collect();
     let ty_vars: Vec<TyVar> = ty_vars
-        .into_iter()
         .filter(|v| !cyclic_ty_roots.contains(&v.0))
         .collect();
 

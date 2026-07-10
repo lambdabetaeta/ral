@@ -1360,12 +1360,12 @@ mod tests {
         for c in "openai".chars() {
             p.key(KeyCode::Char(c));
         }
-        let model_rows: Vec<_> = p
+        let model_rows = p
             .rows()
             .into_iter()
             .filter(|r| matches!(r, Row::Model(..)))
-            .collect();
-        assert_eq!(model_rows.len(), 1);
+            .count();
+        assert_eq!(model_rows, 1);
     }
 
     /// A flat-rate provider (opencode Go) renders the generic

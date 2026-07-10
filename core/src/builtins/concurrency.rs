@@ -1274,7 +1274,7 @@ mod tests {
         )
         .expect("spawn must succeed");
         let entry = shell.local.workers.snapshot().pop().expect("registered");
-        let scope = handle.cancel.clone();
+        let scope = handle.cancel;
 
         let mut fired = false;
         for _ in 0..200 {
@@ -1320,7 +1320,7 @@ mod tests {
             |_child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
-        let scope = handle.cancel.clone();
+        let scope = handle.cancel;
 
         std::thread::sleep(std::time::Duration::from_millis(60));
         assert!(
@@ -1530,7 +1530,7 @@ mod tests {
             check_loop,
         )
         .expect("spawn must succeed");
-        let scope = handle.cancel.clone();
+        let scope = handle.cancel;
 
         let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !scope.is_cancelled() {
@@ -2396,7 +2396,7 @@ mod tests {
         shell.advance_worker_epoch(1, 256);
         assert_eq!(shell.local.workers.snapshot()[0].settled_epoch, Some(1));
 
-        builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll ok");
+        builtin_poll(&[Value::Handle(handle)], &mut shell).expect("poll ok");
         assert_eq!(
             shell.local.workers.count(),
             0,

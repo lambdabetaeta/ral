@@ -1809,7 +1809,7 @@ fn run_pty_repl_until(
     let mut cmd = Command::new(ral_bin());
     cmd.arg("-i").arg("--norc");
     cmd.env("RAL_INTERACTIVE_MODE", "minimal");
-    let slave_path_for_child = slave_path.clone();
+    let slave_path_for_child = slave_path;
     unsafe {
         cmd.pre_exec(move || {
             // New session, then make the pty our controlling terminal

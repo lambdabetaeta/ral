@@ -723,7 +723,7 @@ fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                 let rel = entry
                     .path()
                     .strip_prefix(&root)
-                    .unwrap_or(entry.path())
+                    .unwrap_or_else(|_| entry.path())
                     .to_string_lossy()
                     .into_owned();
                 // Honour the grant's deny_paths, skipping a denied entry
@@ -1010,7 +1010,7 @@ fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             // a load that did not happen.
             shell.surface(Value::map(vec![
                 ("io".into(), Value::String("skill".into())),
-                ("name".into(), Value::String(name.clone())),
+                ("name".into(), Value::String(name)),
                 (
                     "dir".into(),
                     Value::String(dir.to_string_lossy().into_owned()),

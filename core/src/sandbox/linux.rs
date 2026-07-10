@@ -219,7 +219,7 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
             while written < filter.len() {
                 let n = libc::write(
                     fd,
-                    filter[written..].as_ptr() as *const libc::c_void,
+                    filter[written..].as_ptr().cast::<libc::c_void>(),
                     filter.len() - written,
                 );
                 if n < 0 {

@@ -325,11 +325,9 @@ impl PipelineBuild {
         // foreground decision is settled when stages start running
         // user code.
         resources.group.claim_foreground(shell);
-        let mut deferred_jobs = std::mem::take(&mut resources.deferred_jobs);
-        for deferred in deferred_jobs.drain(..) {
+        for deferred in std::mem::take(&mut resources.deferred_jobs) {
             deferred.release()?;
         }
-        drop(deferred_jobs);
         let PipelineResources {
             deferred_jobs,
             routes,

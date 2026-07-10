@@ -2167,7 +2167,7 @@ mod tests {
 
         let worker_inbox = inbox.clone();
         let token = cancel::Token::new();
-        let worker_token = token.clone();
+        let worker_token = token;
         let handle =
             std::thread::spawn(move || worker_inbox.next_or_idle(|| ParkMode::Held, &worker_token));
 
@@ -2382,7 +2382,7 @@ mod tests {
         // A reserved kind (never merged) keeps each send its own queue entry,
         // so this test isolates the batch cap from the merge rule, which has
         // its own coverage below (`bus_queue_token_flood_coalesces_...`).
-        let background = tx.clone();
+        let background = tx;
         for _ in 0..200 {
             background
                 .send(Event {

@@ -1563,15 +1563,14 @@ impl Inferencer<'_> {
                     let concretely_non_record = !matches!(resolved, Ty::Record(_) | Ty::Var(_));
                     if concretely_non_record {
                         self.ctx.diagnose(TypeErrorKind::FieldOnNonRecord {
-                            label: label.clone(),
+                            label,
                             ty: resolved,
                         });
-                        field_ty
                     } else {
                         self.ctx
                             .unify_ty(current_ty, &record_ty, Reason::RecordFieldRead);
-                        field_ty
                     }
+                    field_ty
                 } else {
                     // Dynamic-key index on a non-List/Map/Thunk
                     // target.  Catching this case is what makes

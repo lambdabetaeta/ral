@@ -1035,7 +1035,7 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
         // Place the pending gap only between words on a started row; drop it
         // when it would lead the row.
         if started {
-            for (s, style) in gap.drain(..) {
+            for (s, style) in std::mem::take(&mut gap) {
                 row.push(Span::styled(s, style));
             }
             col += gap_w;
