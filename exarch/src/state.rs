@@ -126,6 +126,10 @@ pub fn load(dir: &Path) -> Option<State> {
 /// message on failure so the picker can note it without aborting the
 /// switch — the switch already took effect in memory; only its persistence
 /// failed.
+///
+/// # Errors
+/// Returns `Err` if creating `dir`, serialising the state, or writing
+/// `state.json` fails.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:state-write] persists the picker selection; recoverable session state, not turn-time data I/O"

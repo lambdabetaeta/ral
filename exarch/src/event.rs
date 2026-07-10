@@ -371,6 +371,10 @@ impl AgentLog {
     /// Build a fresh root session log under `sessions_root` (typically
     /// `<scratch>/sessions/`).  Wipes any prior directory with the same
     /// session id so the events file starts empty.
+    ///
+    /// # Errors
+    /// Returns `Err` if re-creating the session directory or writing the
+    /// initial `SessionStarted` event fails.
     pub fn root(
         sessions_root: &Path,
         session_id: AgentId,
@@ -392,6 +396,10 @@ impl AgentLog {
     /// `sessions_root`, `model`, and `provider`, recording the parent
     /// id inside the child's `SessionStarted` event so the on-disk file
     /// is self-describing.
+    ///
+    /// # Errors
+    /// Returns `Err` if creating the child's session directory or writing
+    /// its initial `SessionStarted` event fails.
     pub fn fork(&self, child_id: AgentId, system_prompt_bytes: usize) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             self.sessions_root.clone(),
@@ -446,6 +454,9 @@ impl AgentLog {
     /// Render the model-view messages for the next provider request.
     ///
     /// Valid only when the state machine is awaiting an assistant reply.
+    ///
+    /// # Errors
+    /// Returns `Err` if the session is not awaiting an assistant reply.
     pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
         if !matches!(
             self.state,
@@ -500,6 +511,10 @@ impl AgentLog {
     /// A `mnemon` child receives its launch prompt through its inbox, so
     /// the drive loop commits it through [`append_user`] at apply time: the
     /// same path every other turn takes.
+    ///
+    /// # Errors
+    /// Returns `Err` if the session is not at a ready turn boundary, or if
+    /// recording an imported context message fails.
     pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
             return Err(format!(
@@ -515,6 +530,11 @@ impl AgentLog {
 
     // ── Protocol mutations ────────────────────────────────────────────────
 
+    /// Commit a top-level user prompt, opening a new turn.
+    ///
+    /// # Errors
+    /// Returns `Err` if the session is not at a ready turn boundary (tool
+    /// results are still pending), or if recording the prompt fails.
     pub fn append_user(&mut self, text: String) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
             return Err(format!(
@@ -532,6 +552,10 @@ impl AgentLog {
     /// tool protocol is first brought back to
     /// `AwaitingAssistantAfterToolResults`, then the queued prompt becomes the
     /// next model-visible message.
+    ///
+    /// # Errors
+    /// Returns `Err` if the current tool-result batch is not yet complete, or
+    /// if recording the steering prompt fails.
     pub fn append_steering(&mut self, text: String) -> Result<(), String> {
         if !matches!(self.state, State::AwaitingAssistantAfterToolResults) {
             return Err(format!(
@@ -544,6 +568,13 @@ impl AgentLog {
         Ok(())
     }
 
+    /// Commit an assistant reply, moving the turn to await tool results or
+    /// (when no tools were called) back to a ready boundary.
+    ///
+    /// # Errors
+    /// Returns `Err` if an assistant message is not expected in the current
+    /// state, if `message`'s role is not `Assistant`, or if recording the
+    /// message fails.
     pub fn append_assistant(
         &mut self,
         message: ChatMessage,
@@ -581,6 +612,12 @@ impl AgentLog {
         Ok(())
     }
 
+    /// Commit the tool-result batch answering the pending tool calls.
+    ///
+    /// # Errors
+    /// Returns `Err` if tool results are not expected in the current state,
+    /// if the results do not match the pending ids (count mismatch, unknown
+    /// id, or duplicate), or if recording the batch fails.
     pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), String> {
         let pending_ids = match &self.state {
             State::AwaitingToolResults { pending_ids } => pending_ids.clone(),
@@ -735,6 +772,10 @@ impl AgentLog {
     /// the model prefix in memory"). The durable `events.json` is untouched;
     /// `events.len()` and `history_bytes()` both shrink to summary + suffix
     /// on success, and nothing is dropped on the early-return failure path.
+    ///
+    /// # Errors
+    /// Returns `Err` if the session is not at a ready boundary (tool results
+    /// are pending), or if recording the `Compacted` marker fails.
     pub fn apply_compaction(&mut self, summary: String, suffix_start: usize) -> Result<(), String> {
         if !self.can_compact() {
             return Err("cannot compact while tool results are pending".into());
@@ -765,6 +806,10 @@ impl AgentLog {
     /// fresh `SessionStarted` so the log file is internally consistent.
     /// `parent` is dropped — a cleared session is rooted again — but
     /// the model/provider metadata is preserved across the wipe.
+    ///
+    /// # Errors
+    /// Returns `Err` if truncating/reopening `events.json` or writing the
+    /// fresh `SessionStarted` event fails.
     pub fn clear(&mut self, system_prompt_bytes: usize) -> io::Result<()> {
         self.events.clear();
         self.state = State::ReadyForUser;
@@ -775,27 +820,42 @@ impl AgentLog {
     }
 
     // ── Meta-events ───────────────────────────────────────────────────────
+    //
+    // Each appends one non-protocol breadcrumb to the log; all return `Err`
+    // if serialising the event or writing it to `events.json` fails.
 
+    /// # Errors
+    /// See the meta-events note above.
     pub fn record_step(&mut self, n: u32, tuning: Tuning) -> io::Result<()> {
         self.record(SessionEvent::StepStarted { n, tuning })
     }
 
+    /// # Errors
+    /// See the meta-events note above.
     pub fn record_usage(&mut self, usage: UsageDelta) -> io::Result<()> {
         self.record(SessionEvent::UsageDelta { usage })
     }
 
+    /// # Errors
+    /// See the meta-events note above.
     pub fn record_session_ended(&mut self) -> io::Result<()> {
         self.record(SessionEvent::SessionEnded)
     }
 
+    /// # Errors
+    /// See the meta-events note above.
     pub fn record_error(&mut self, text: String) -> io::Result<()> {
         self.record(SessionEvent::Error { text })
     }
 
+    /// # Errors
+    /// See the meta-events note above.
     pub fn record_nudge(&mut self, used: u32, max: u32, cause: String) -> io::Result<()> {
         self.record(SessionEvent::Nudge { used, max, cause })
     }
 
+    /// # Errors
+    /// See the meta-events note above.
     pub fn record_provider_error(&mut self, e: &ProviderError) -> io::Result<()> {
         self.record(SessionEvent::ProviderError { error: e.into() })
     }

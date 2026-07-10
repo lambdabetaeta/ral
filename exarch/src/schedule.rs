@@ -79,6 +79,10 @@ impl CronSchedule {
     /// Each field is a comma list of `*`, `N`, `a-b`, `*/step`, `a-b/step`,
     /// or `N/step` (N to the field max).  Month and day-of-week also accept
     /// three-letter names; day-of-week accepts `7` for Sunday.
+    ///
+    /// # Errors
+    /// Returns `Err` if the expression does not have exactly five fields, or
+    /// if any field is malformed.
     pub fn parse(expr: &str) -> Result<Self, String> {
         let fields: Vec<&str> = expr.split_whitespace().collect();
         if fields.len() != 5 {
@@ -286,6 +290,10 @@ impl Trigger {
 
 /// Parse a relative-delay string for `after`: an integer followed by one of
 /// `s`, `m`, `h`, `d` (e.g. `30m`, `2h`).
+///
+/// # Errors
+/// Returns `Err` if the string lacks a unit, its count is not a number, the
+/// unit is not one of `s`/`m`/`h`/`d`, or the duration is zero.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     let (num, unit) = s.split_at(
@@ -388,6 +396,10 @@ impl ScheduleRegistry {
     /// the new id, or an error when a cron expression never fires.  `label`
     /// defaults to `sched-{id}`.  `mailbox` is the *owning session's* mailbox
     /// the fired wakeup is posted to — a session schedules only itself.
+    ///
+    /// # Errors
+    /// Returns `Err` if `trigger` has no next occurrence (e.g. a cron
+    /// expression that never fires).
     pub fn schedule(
         &self,
         trigger: Trigger,

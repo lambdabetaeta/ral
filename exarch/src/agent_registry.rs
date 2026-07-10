@@ -242,6 +242,11 @@ impl AgentRegistry {
     /// the process-wide lock order is inbox → registry (see `bus`'s
     /// module docs), because a park verdict reads this registry under the
     /// consumer's inbox mutex.
+    ///
+    /// # Errors
+    /// Returns `Err` if `from` or `to` is not a live agent (`UnknownSender` /
+    /// `UnknownRecipient`), or if the recipient's inbox is at quota
+    /// (`RecipientInboxFull`).
     pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
         let (mailbox, from_title) = {
             let g = self.lock();

@@ -41,6 +41,10 @@ use std::path::{Path, PathBuf};
 /// unreachable to the agent.  The extend-base file
 /// is *not* added to `deny_paths`: it widens authority, so denying
 /// writes to it is a trust-source concern.
+///
+/// # Errors
+/// Returns `Err` if `base_name` is unknown, or if loading the extend-base or
+/// any restrict file (or adding its deny-paths) fails.
 pub fn for_invocation(
     cwd: &str,
     base_name: &str,
@@ -100,6 +104,9 @@ pub fn for_invocation(
 /// (e.g. a network-off parent stays offline even under `minimal`).
 /// `base_name` is one of the five bake-ins; an unknown name returns the
 /// same diagnostic [`for_invocation`] gives.
+///
+/// # Errors
+/// Returns `Err` if `base_name` is not one of the bake-in profiles.
 pub fn narrow(parent: &Capabilities, base_name: &str, cwd: &str) -> Result<Capabilities, String> {
     let cwd_path = PathBuf::from(cwd);
     let home = home_from_env();

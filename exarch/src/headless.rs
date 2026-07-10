@@ -326,6 +326,13 @@ impl Sink for Headless {
     }
 }
 
+/// Drive a one-shot headless run of `session` from `seed` to quiescence,
+/// emitting the trace and (for `Json`) the final `result` to stdout.
+///
+/// # Errors
+/// Returns `Err` if no launch prompt was supplied, if the drive worker
+/// panics, if the sink's drive fails, or if the run ends without a `reply`
+/// (stopped, cancelled, or failed).
 pub fn run(
     session: &mut Agent,
     info: &SessionInfo<'_>,

@@ -46,6 +46,9 @@ struct Inner {
 
 impl Transcript {
     /// Open `path` for this session's trace, truncating any prior file.
+    ///
+    /// # Errors
+    /// Returns `Err` if creating (truncating) the transcript file fails.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:transcript-file] creates the session's transcript.jsonl; output infra, not turn-time data I/O"

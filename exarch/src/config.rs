@@ -74,6 +74,11 @@ pub fn disk_warn_bytes() -> Option<u64> {
 /// config is a value to compute, not bindings to leak into the agent's scope.
 /// This mirrors [`crate::policy::base`]'s built-in-profile loader, which
 /// likewise runs a capability `.ral` script in a fresh `Shell::new`.
+///
+/// # Errors
+/// Returns `Err` if the config file is present but unreadable, if evaluating
+/// it raises an error, or if its terminal map fails to decode into
+/// [`CustomProvider`]s.
 pub fn load() -> Result<Vec<CustomProvider>, String> {
     let path =
         crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config).join(CONFIG_FILE);

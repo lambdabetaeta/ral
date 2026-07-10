@@ -59,12 +59,18 @@ pub trait ModelSource {
     /// Fetch the full model-name list for `id`, or an error message
     /// describing why the fetch failed (the caller degrades to manual
     /// entry).
+    ///
+    /// # Errors
+    /// Returns `Err` with a message describing why the fetch failed.
     fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
 
     /// Fetch the upstream serving providers `OpenRouter` lists for `model`, or an
     /// error message. Only meaningful for `OpenRouter` `vendor/model` ids — the
     /// only provider that routes — so the picker calls this solely for an
     /// `OpenRouter` selection.
+    ///
+    /// # Errors
+    /// Returns `Err` with a message describing why the endpoint fetch failed.
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String>;
 }
 
@@ -406,6 +412,10 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
 /// `catalog.list` may fetch, so this is a network-touching call when the
 /// name is not yet cached — it runs only on an explicit `--model` override,
 /// never on the common path.
+///
+/// # Errors
+/// Returns `Err` if no provider is available, or if no available provider
+/// lists or plausibly serves `name`.
 pub fn resolve_model_provider<S: ModelSource>(
     name: &str,
     available: &[ProviderId],
@@ -455,6 +465,10 @@ pub fn resolve_model_provider<S: ModelSource>(
 /// whole point of pinning — so the caller may then name a model the provider
 /// does not advertise. Errors clearly when the label matches no available
 /// provider.
+///
+/// # Errors
+/// Returns `Err` if no provider is available, or if no available provider's
+/// label matches `name`.
 pub fn resolve_pinned_provider(
     name: &str,
     available: &[ProviderId],

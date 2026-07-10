@@ -574,6 +574,10 @@ impl Mailbox {
     /// Takes the inbox queue mutex — callers must not hold a registry lock
     /// (the module's [lock order](self)): clone the mailbox out and push
     /// after the guard drops.
+    ///
+    /// # Errors
+    /// Returns `Err(InboxReject)` when a non-idempotent source is already at
+    /// its queue quota.
     pub fn push(&self, msg: InboxMsg) -> Result<(), InboxReject> {
         self.shared.try_push(msg)
     }
@@ -638,6 +642,10 @@ impl Inbox {
     /// nudge, a self-armed wakeup landing in the agent's own box).  Equivalent
     /// to `self.mailbox().push(msg)`; see [`Mailbox::push`] for the
     /// coalesce/quota rule and the rejection contract.
+    ///
+    /// # Errors
+    /// Returns `Err(InboxReject)` when a non-idempotent source is already at
+    /// its queue quota.
     pub fn push(&self, msg: InboxMsg) -> Result<(), InboxReject> {
         self.shared.try_push(msg)
     }
@@ -1505,6 +1513,9 @@ impl BusSender {
     /// `mpsc`'s "send to a dropped receiver fails" contract, which is what
     /// lets [`Emitter::muted_child`] swallow a display stream forever without
     /// leaking it.
+    ///
+    /// # Errors
+    /// Returns `Err(SendError(ev))` when the receiver has been dropped.
     pub fn send(&self, ev: Event) -> Result<(), SendError<Event>> {
         if !self.0.receiver_alive.load(Ordering::Acquire) {
             return Err(SendError(ev));
@@ -1527,6 +1538,10 @@ impl BusReceiver {
     /// Block until an event arrives or every sender has dropped. The
     /// `mpsc::Receiver::recv` replacement — [`Iterator`] is implemented off
     /// this, so `for ev in rx` / `rx.into_iter()` still work unchanged.
+    ///
+    /// # Errors
+    /// Returns `Err(RecvError)` once the queue is empty and every sender has
+    /// dropped.
     pub fn recv(&self) -> Result<Event, std::sync::mpsc::RecvError> {
         let mut q = self.0.state.lock().expect("bus queue poisoned");
         loop {
@@ -1540,6 +1555,12 @@ impl BusReceiver {
         }
     }
 
+    /// Non-blocking [`Self::recv`].
+    ///
+    /// # Errors
+    /// Returns `Err(TryRecvError::Empty)` when no event is queued but senders
+    /// remain, or `Err(TryRecvError::Disconnected)` when the queue is empty
+    /// and every sender has dropped.
     pub fn try_recv(&self) -> Result<Event, TryRecvError> {
         let mut q = self.0.state.lock().expect("bus queue poisoned");
         match pop_one(&mut q) {
@@ -1549,6 +1570,12 @@ impl BusReceiver {
         }
     }
 
+    /// [`Self::recv`] bounded by `timeout`.
+    ///
+    /// # Errors
+    /// Returns `Err(RecvTimeoutError::Timeout)` when `timeout` elapses before
+    /// an event arrives, or `Err(RecvTimeoutError::Disconnected)` when the
+    /// queue is empty and every sender has dropped.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
         let deadline = Instant::now() + timeout;
         let mut q = self.0.state.lock().expect("bus queue poisoned");
@@ -1913,6 +1940,9 @@ pub trait Sink {
         Inbox::new()
     }
 
+    /// # Errors
+    /// Returns `Err` if an implementation's surface write fails; the default
+    /// drain-and-render loop is infallible.
     fn drive(&mut self, rx: &BusReceiver, done: &AtomicBool) -> io::Result<()> {
         loop {
             // The shared completion contract. `None` max drains every buffered
@@ -1947,6 +1977,10 @@ pub trait Sink {
 /// returns (or unwinds), and the drain stops on that flag, never on the
 /// channel's state.  A detached worker holding a sender clone forever, on
 /// either bus, cannot keep the loop — hence the turn — from ending.
+///
+/// # Errors
+/// Returns `Err` if driving `sink` over the bus fails (propagated from
+/// [`Sink::drive`]).
 pub fn pump<S, R>(
     sink: &mut S,
     bus: &FleetBus,

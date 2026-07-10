@@ -107,6 +107,12 @@ fn init_lib_test_binary() {
 /// Parses the CLI, composes the
 /// capability lattice, builds a [`Agent`] + [`Provider`], and hands
 /// off to a frontend.
+///
+/// # Errors
+/// Returns `Err` if the CLI is misused, if no provider is available, or if
+/// loading the provider config, resolving the model selection, building the
+/// capability policy, setting up the scratch/log directories, or the chosen
+/// frontend fails.
 pub fn run() -> Result<(), String> {
     let c = cli::Cli::parse();
     // A subcommand runs its action and exits before any session setup —

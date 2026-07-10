@@ -118,6 +118,10 @@ pub(super) struct RawTokens {
 
 /// Run interactive login (browser flow, or device code when `device`), then
 /// persist the token. Progress is printed to stderr.
+///
+/// # Errors
+/// Returns `Err` if the tokio runtime or HTTP client cannot be built, if the
+/// browser/device flow fails, or if finalising or persisting the token fails.
 pub fn login(device: bool) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -149,6 +153,10 @@ pub fn login(device: bool) -> Result<(), String> {
 /// sole account when exactly one is signed in, and otherwise errors asking
 /// which — so a stray `logout` cannot silently drop the wrong account when
 /// several are present. Progress is printed to stderr.
+///
+/// # Errors
+/// Returns `Err` if rewriting the token store fails, if several accounts are
+/// signed in but none is named, or if the named account matches nothing.
 pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     if all {
         clear_at(&token_path())?;

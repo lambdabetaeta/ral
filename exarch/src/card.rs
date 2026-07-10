@@ -177,6 +177,9 @@ impl Card {
     /// Consume a single-`diff` card into its owned `(path, hunks)` for the
     /// patch-aggregation buffer; `Err(self)` hands a richer card back
     /// untouched so the caller can push it as its own block.
+    ///
+    /// # Errors
+    /// Returns `Err(self)` if the card is not exactly one `diff` mark.
     pub fn into_single_diff(self) -> Result<(String, Vec<Hunk>), Self> {
         if self.single_diff().is_some() {
             let Self(mut marks) = self;

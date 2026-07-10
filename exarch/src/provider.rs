@@ -1486,6 +1486,10 @@ impl Provider {
     /// Retries unconditionally on Transient/RateLimited — there is no
     /// streamed side effect to worry about.  `cancel` is the request-local
     /// handle, as for [`Provider::complete`].
+    ///
+    /// # Errors
+    /// Returns `Err` if the summarisation round-trip fails (after retrying
+    /// transient and rate-limited responses).
     pub fn summarize(
         &self,
         system: &str,

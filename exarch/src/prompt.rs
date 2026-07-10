@@ -63,6 +63,10 @@ pub const CHAT_SYSTEM: &str = ".";
 ///     readable under the grant: `name: description` per skill, plus a
 ///     note telling the agent to call `skill <name>` to load and
 ///     `skill-list` to refresh mid-session.
+///
+/// # Errors
+/// Returns `Err` if reading a `--system` file or a discovered workspace
+/// `AGENTS.md` fails.
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,

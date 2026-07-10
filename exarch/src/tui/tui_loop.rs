@@ -138,6 +138,10 @@ budget is too low to seat both"
 
 /// Build the [`Tui`], banner, run the worker + UI loop, flush logs, print log
 /// paths + usage on the restored shell.
+///
+/// # Errors
+/// Returns `Err` if terminal setup fails, if drawing the banner fails, or if
+/// the UI render/input loop hits a fatal terminal error.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut Agent,

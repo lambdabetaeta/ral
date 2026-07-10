@@ -94,6 +94,12 @@ const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
 ];
 
 impl Scratch {
+    /// Create the process's disposable scratch directory, wiping any stale
+    /// dir left by a prior run with the same pid.
+    ///
+    /// # Errors
+    /// Returns `Err` if removing a stale scratch directory or creating the
+    /// fresh one fails.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
@@ -156,6 +162,9 @@ impl Scratch {
 /// `sessions/<id>/{events.json,transcript.jsonl,user.log}`.  Unlike the disposable
 /// [`Scratch`] this is durable state under the user's XDG state home, so
 /// it survives an abnormal exit and stays findable without a symlink.
+///
+/// # Errors
+/// Returns `Err` if creating the per-run log directory fails.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"

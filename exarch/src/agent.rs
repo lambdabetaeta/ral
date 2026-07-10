@@ -712,6 +712,9 @@ impl Agent {
     /// `tests/` uses this to drive [`Self::apply`] and [`Self::drive`] through
     /// a [`Provider::scripted`] backend.  Non-interactive, so it terminates at
     /// quiescence like any returning agent and `drive` never blocks.
+    ///
+    /// # Errors
+    /// Returns `Err` if creating the throwaway session log under `dir` fails.
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
         let shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
@@ -1283,6 +1286,14 @@ impl Agent {
         digest
     }
 
+    /// Run one turn: optionally commit `prompt`, then step the provider
+    /// round-trip loop to quiescence, returning the turn's outcome.
+    ///
+    /// # Errors
+    /// Returns `Err` if a provider round-trip fails, or if a session-log
+    /// mutation fails and is surfaced as `ProviderError::Other` (committing
+    /// the prompt, recording a step or usage, rendering the request, or
+    /// appending the reply).
     pub fn apply(
         &mut self,
         provider: &Arc<Provider>,

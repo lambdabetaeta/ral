@@ -64,6 +64,10 @@ pub fn install_on(shell: &mut ral_core::Shell) {
 }
 
 /// Source the embedded agent helper library into the live shell.
+///
+/// # Errors
+/// Returns `Err` if sourcing the embedded library raises a ral error
+/// (re-surfaced as a signal) or propagates a non-error escape.
 pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
     ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>").map_err(
         |e| match e {
