@@ -111,7 +111,7 @@ impl Default for FileId {
 /// Parser test fixtures normalise every `Spanned`'s span to `None`
 /// via `parser::tests::strip_one` (recurses through all
 /// `Spanned`-bearing variants).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spanned<T> {
     pub span: Option<Span>,
     pub item: T,

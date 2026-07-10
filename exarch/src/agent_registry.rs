@@ -486,6 +486,10 @@ mod tests {
     /// two children of the same parent arm a reaper deadline iff their
     /// `ceiling` flag is set (a branch passes `false`, a worker `true`).
     #[test]
+    #[allow(
+        clippy::used_underscore_binding,
+        reason = "RAII guard field; the leading underscore marks it as held for Drop, not read — the test deliberately peeks at whether it is armed"
+    )]
     fn register_arms_a_ceiling_only_when_asked() {
         let reg = AgentRegistry::new();
         reg.register(

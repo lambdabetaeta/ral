@@ -113,7 +113,7 @@ pub(crate) fn run_uutils_in_process(
     // caught below, and `reset_exit_code` immediately clears the cell),
     // so proceed under the poisoned guard exactly as the other
     // process-local serialisation mutexes in the tree do.
-    let _exit_code_guard = INLINE_UUTILS_LOCK
+    let exit_code_guard = INLINE_UUTILS_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -158,7 +158,7 @@ pub(crate) fn run_uutils_in_process(
         // surfaces as status 1, outcome "bad".  Emit before propagating
         // so this completion door fires exactly once, like the normal
         // branch below.
-        drop(_exit_code_guard);
+        drop(exit_code_guard);
         shell.emit_io(super::io_event::exec(tool, arg_strs, 1));
         return Err(Break::Error(
             Error::new(format!("bundled tool '{tool}' panicked"), 1)
@@ -168,7 +168,7 @@ pub(crate) fn run_uutils_in_process(
 
     // The exit-code cell has been read; release the lock before the
     // status bookkeeping below so unrelated inline work does not wait.
-    drop(_exit_code_guard);
+    drop(exit_code_guard);
 
     // Door 3 — EXEC (inline bundled completion): the sole inline-uutils
     // door.  The caller (`command::run`) returns before its spawn path for

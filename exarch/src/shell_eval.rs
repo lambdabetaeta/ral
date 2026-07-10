@@ -455,7 +455,7 @@ pub fn run_shell(
         Report::Ran {
             result,
             status: _status,
-            single_command: _single_command,
+            single_command,
             captured,
             timed_out,
         } => {
@@ -499,7 +499,7 @@ pub fn run_shell(
                             &mut stderr_bytes,
                             &sources,
                             &e,
-                            _single_command,
+                            single_command,
                         );
 
                         // Add recovery tip for command exits
@@ -517,7 +517,7 @@ pub fn run_shell(
                                  data with `audit { … }`, which does not raise, or catch with \
                                  `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
                             );
-                            if !_single_command {
+                            if !single_command {
                                 tip.push_str(
                                     " A non-zero exit also aborts the rest of this command and discards earlier \
                                      bindings; wrap risky tools in `audit`/`try`, or split them out.",

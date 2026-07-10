@@ -178,7 +178,7 @@ pub enum Event {
 /// which also carries a `loc` core has no business shipping across the
 /// seam) so a refused enquiry raises the same error under both transports;
 /// its location is stamped engine-side, at the enquiring builtin.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnquiryError {
     pub message: String,
     pub status: i32,
@@ -1022,7 +1022,7 @@ pub struct WireTransport {
     /// Shared write end, behind a mutex for concurrent access.
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
     /// The engine child process.
-    _child: ChildHandle,
+    child: ChildHandle,
     /// Reader thread handle (never joined — the thread exits when the
     /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -1117,7 +1117,7 @@ impl WireTransport {
             events_recv: EventReceiver::new(event_rx),
             control,
             write_tx,
-            _child: ChildHandle::from_std(child),
+            child: ChildHandle::from_std(child),
             _reader: Mutex::new(Some(reader)),
             death,
             current_dispatch,
@@ -1140,8 +1140,8 @@ impl WireTransport {
 impl Drop for WireTransport {
     fn drop(&mut self) {
         // Kill the engine child so the reader thread sees EOF and exits.
-        let _ = self._child.kill();
-        let _ = self._child.wait_handling_stop(None, false);
+        let _ = self.child.kill();
+        let _ = self.child.wait_handling_stop(None, false);
     }
 }
 

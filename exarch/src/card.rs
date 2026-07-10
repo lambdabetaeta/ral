@@ -740,7 +740,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 /// *polled* accessors (`take_worker_reap_notices`, `prune_idle_bindings`'s
 /// notice half, `take_large_binding_notices`) that a host drained and
 /// composed into cards itself.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Notice {
     /// A worker's registry entry was removed by policy — the lease chain's
     /// idle bound or backstop, or the retention sweep expiring a settled

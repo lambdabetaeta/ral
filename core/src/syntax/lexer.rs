@@ -219,7 +219,7 @@ impl Token {
 /// Which lexical form a string came from.  Used in
 /// [`LexErrorKind::UnterminatedString`] so the diagnostic can name the
 /// shape that wasn't closed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringForm {
     SingleQuoted,
     DoubleQuoted,

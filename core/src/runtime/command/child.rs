@@ -364,9 +364,9 @@ impl RunningChild {
             // gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
             let cap = std::time::Duration::from_millis(100);
-            let mut _polls: u32 = 0;
+            let mut polls: u32 = 0;
             loop {
-                _polls += 1;
+                polls += 1;
                 match child.try_wait_handling_stop(self.pgid, self.park_on_stop) {
                     Ok(Some(o)) => {
                         crate::dbg_trace!(
@@ -374,7 +374,7 @@ impl RunningChild {
                             "exit-via-try_wait name={} pid={} polls={} elapsed={:?} outcome={:?}",
                             self.name,
                             pid,
-                            _polls,
+                            polls,
                             t_enter.elapsed(),
                             o,
                         );
@@ -387,7 +387,7 @@ impl RunningChild {
                             "try_wait err name={} pid={} polls={} elapsed={:?} err={e}",
                             self.name,
                             pid,
-                            _polls,
+                            polls,
                             t_enter.elapsed(),
                         );
                         // Re-arm `Drop`'s kill/reap by handing the child
@@ -403,7 +403,7 @@ impl RunningChild {
                         "cancel-fired name={} pid={} polls={} elapsed={:?} cause={cause:?}",
                         self.name,
                         pid,
-                        _polls,
+                        polls,
                         t_enter.elapsed(),
                     );
                     // Teardown by cause: SIGINT-first for an interrupt,

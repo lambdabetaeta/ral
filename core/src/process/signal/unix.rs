@@ -33,11 +33,11 @@ pub fn install_handlers() {
     }
 }
 
-extern "C" fn handler(_sig: libc::c_int) {
+extern "C" fn handler(sig: libc::c_int) {
     let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
     if prev >= 2 {
         // Third signal: force exit. Use _exit to avoid atexit deadlocks.
-        unsafe { libc::_exit(128 + _sig) };
+        unsafe { libc::_exit(128 + sig) };
     }
     // Translate the signal into a cause on the published cancel slots —
     // async-signal-safe (a slot load plus a `fetch_max`).  SIGINT is an
@@ -45,7 +45,7 @@ extern "C" fn handler(_sig: libc::c_int) {
     // shutdown request and land on the durable root, reaching detached
     // workers too.  Every wait loop already polls its scope, so this is
     // what preempts a blocked external child.
-    if _sig == libc::SIGINT {
+    if sig == libc::SIGINT {
         super::request_foreground_cancel(super::CancelCause::Interrupt);
     } else {
         super::request_root_cancel(super::CancelCause::Terminate);
@@ -58,7 +58,7 @@ extern "C" fn handler(_sig: libc::c_int) {
         let pgid = slot.load(Ordering::Acquire);
         if pgid != 0 {
             unsafe {
-                libc::kill(-pgid, _sig);
+                libc::kill(-pgid, sig);
             }
         }
     }
