@@ -1,9 +1,9 @@
-//! Typing rules for the five structural scope nodes.
+//! Typing rules for the five structural scope nodes (`within`, `grant`,
+//! `try`, `guard`, `audit`) — the sole typing rules for these IR nodes.
 //!
-//! Each rule mirrors the polymorphic scheme the corresponding builtin
-//! carries today (`typecheck/builtins.rs`).  Lifting them out is a
-//! preparatory step: once the elaborator constructs the scope IR nodes
-//! directly, the schemes go away and these rules become the only path.
+//! Also here: the `within`/`grant` option-map field schemas
+//! (`within_field_ty`, `grant_field_ty`) consulted when a map is a literal,
+//! and the shared opts-walk and body-passthrough inference helpers.
 //!
 //! Conventions:
 //!
@@ -30,28 +30,35 @@ use super::unify::Unifier;
 use crate::ir::{Val, ValMapEntry};
 
 impl Inferencer<'_> {
-    /// Walk a literal `Val::Map` for `within` opts and collect handler
-    /// result schemes from recognisable `handlers:` entries.
+    /// Walk a `within` opts value once, collecting handler-result schemes
+    /// from recognisable `handlers:` entries while inferring every value for
+    /// side-effects — each handler thunk inferred exactly once, so a type
+    /// error inside a handler body is reported once rather than twice.
     ///
     /// Rules per the design doc:
     ///
-    /// - `Entry(String("handlers"), Map(entries))` — for each inner entry whose
-    ///   key is a literal `String(name)` and value is a literal `Thunk(comp)`,
-    ///   infer the handler under the runtime calling convention, generalise
-    ///   the resulting computation result, and collect `(name, scheme)`.
-    ///   Non-literal inner keys or values are inferred for side-effects only.
+    /// - `Entry(String("handlers"), Map(entries))` — for each inner entry
+    ///   whose key is a literal `String(name)` and value is a literal
+    ///   `Thunk(comp)`, infer the handler under the runtime calling
+    ///   convention, generalise the resulting computation result, and collect
+    ///   `(name, scheme)`.  A name that cannot be bound (a builtin or a name
+    ///   shadowed by a binding) still has its body inferred once for
+    ///   side-effects.  Non-literal inner keys or values are inferred for
+    ///   side-effects only.
     ///
     /// - `Entry(String("handler"), Thunk(comp))` — catch-all handler: infer
-    ///   for side-effects (so type errors inside it surface); no binding, since
-    ///   catch-alls match all names and the type system cannot say anything
-    ///   specific about them.
+    ///   for side-effects (so type errors inside it surface); no binding,
+    ///   since catch-alls match all names and the type system cannot say
+    ///   anything specific about them.
     ///
-    /// - All other entries (`env`, `dir`, spreads, dynamic keys): not touched
-    ///   here — handled by `infer_scope_opts` / `within_field_ty` as before.
+    /// - All other entries (`env`, `dir`, spreads, dynamic keys): validated
+    ///   against [`within_field_ty`] and inferred once.
     ///
-    /// Non-literal `opts` (variable, function call, etc.): return empty.
-    fn collect_within_handler_bindings(&mut self, opts: &Val) -> Vec<(String, Scheme)> {
+    /// Non-literal `opts` (variable, function call, etc.): inferred for
+    /// side-effects, yielding no bindings.
+    fn infer_within_opts(&mut self, opts: &Val) -> Vec<(String, Scheme)> {
         let Val::Map(outer_entries) = opts else {
+            let _ = self.infer_val(opts);
             return Vec::new();
         };
 
@@ -66,7 +73,11 @@ impl Inferencer<'_> {
                     for inner_entry in inner_entries {
                         match inner_entry {
                             ValMapEntry::Entry(Val::String(name), Val::Thunk(comp)) => {
-                                if !self.reject_handler_for_binding(name, "install handler for") {
+                                if self.reject_handler_for_binding(name, "install handler for") {
+                                    // Name cannot be bound; still infer the
+                                    // body once so type errors inside surface.
+                                    let _ = self.with_scope(|this| this.infer_comp(comp));
+                                } else {
                                     bindings
                                         .push((name.clone(), self.handler_comp_scheme(name, comp)));
                                 }
@@ -92,9 +103,15 @@ impl Inferencer<'_> {
                     let _ = self.with_scope(|this| this.infer_comp(comp));
                 }
 
-                // `env:`, `dir:`, spreads, dynamic keys — not our concern here.
-                // `infer_scope_opts` handles them via `within_field_ty`.
-                _ => {}
+                // `env:`, `dir:`, spreads, dynamic keys — validate the field
+                // shape and infer the value once.
+                entry => {
+                    self.check_map_entry_fields(
+                        std::slice::from_ref(entry),
+                        "within",
+                        within_field_ty,
+                    );
+                }
             }
         }
 
@@ -102,15 +119,7 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_within(&mut self, opts: &Val, body: &Val) -> CompTy {
-        // Collect static handler bindings from a literal opts map.
-        let bindings = self.collect_within_handler_bindings(opts);
-
-        // Validate non-handler entries (env/dir) and infer all values for
-        // side-effects, including handler entries a second time.  The second
-        // infer of handler thunks is idempotent (unify on already-solved vars
-        // is a no-op) and ensures that type errors inside handlers surface
-        // even when the handler key isn't statically recognisable.
-        self.infer_scope_opts(opts, "within", within_field_ty);
+        let bindings = self.infer_within_opts(opts);
 
         self.env.push();
         for (name, scheme) in bindings {
