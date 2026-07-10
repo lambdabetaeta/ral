@@ -329,12 +329,8 @@ fn resolve_plugin_path(name_or_path: &str) -> Result<String, Error> {
 /// absolute (or literal cwd-relative), so the empty cwd anchors nothing
 /// it should not; `None` when the candidate does not name a file.
 fn canonicalise_candidate(cand: &std::path::Path) -> Option<std::path::PathBuf> {
-    ral_core::path::Resolver {
-        home: String::new(),
-        cwd: None,
-        mode: ral_core::path::CanonMode::Lenient,
-    }
-    .resolve(&cand.to_string_lossy())
-    .canonicalise_strict()
-    .ok()
+    ral_core::path::Resolver::shell_less()
+        .resolve(&cand.to_string_lossy())
+        .canonicalise_strict()
+        .ok()
 }

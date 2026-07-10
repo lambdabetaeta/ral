@@ -23,8 +23,8 @@ use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs;
 use std::fmt::Write as _;
+use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -256,7 +256,11 @@ fn surface_read(shell: &Shell, path: &str) {
 fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
     match arg.as_int() {
         Some(n) if n >= 1 => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason="guarded n >= 1; exarch is 64-bit so usize == u64")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "guarded n >= 1; exarch is 64-bit so usize == u64"
+            )]
             let bound = n as usize;
             Ok(bound)
         }
@@ -288,7 +292,10 @@ fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut result_rows = Vec::new();
     if lo < hi {
         for i in lo..hi {
-            #[allow(clippy::cast_possible_wrap, reason="line index bounded by file length; no i64 wrap")]
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "line index bounded by file length; no i64 wrap"
+            )]
             let line = i as i64 + 1;
             result_rows.push(Value::map(vec![
                 ("line".into(), Value::Int(line)),
@@ -404,7 +411,10 @@ fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let results = search_tree(shell, &pattern)?
         .into_iter()
         .map(|hit| {
-            #[allow(clippy::cast_possible_wrap, reason="line number bounded by file length; no i64 wrap")]
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "line number bounded by file length; no i64 wrap"
+            )]
             let line = hit.line as i64;
             Value::map(vec![
                 ("file".into(), Value::String(hit.file)),
@@ -666,7 +676,9 @@ fn builtin_edit_replace(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // `string_replace` above already proved `from` matches exactly once, so
     // the same offset it used is the one match here — safe to relocate for
     // the line-range note without re-validating uniqueness.
-    let start = body.find(&from).expect("edit-replace: match vanished after string_replace confirmed it");
+    let start = body
+        .find(&from)
+        .expect("edit-replace: match vanished after string_replace confirmed it");
     let start_line = body[..start].matches('\n').count() + 1;
     let end_line = start_line + from.matches('\n').count();
     let lines = if start_line == end_line {
@@ -689,7 +701,11 @@ fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "explore-dir")?;
     let depth: usize = match &args[0] {
         Value::Int(n) if *n >= 0 => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason="guarded n >= 0; exarch is 64-bit so usize == u64")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "guarded n >= 0; exarch is 64-bit so usize == u64"
+            )]
             let depth = *n as usize;
             depth
         }
@@ -847,12 +863,7 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, &'static Index>> {
 }
 
 fn resolve_base(base: &Path) -> ral_core::path::ResolvedPath {
-    ral_core::path::Resolver {
-        home: String::new(),
-        cwd: None,
-        mode: ral_core::path::CanonMode::Lenient,
-    }
-    .resolve(&base.to_string_lossy())
+    ral_core::path::Resolver::shell_less().resolve(&base.to_string_lossy())
 }
 
 /// Get-or-create the index for `base`.  Blocks the caller while the
@@ -1055,7 +1066,10 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
             let _ = write!(out, "{}: {}", s.name, s.description);
         }
     }
-    #[allow(clippy::cast_possible_wrap, reason="skill-list line count bounded; no i64 wrap")]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "skill-list line count bounded; no i64 wrap"
+    )]
     let count = out.lines().count() as i64;
     shell.surface(&Value::map(vec![
         ("io".into(), Value::String("skill-list".into())),
@@ -1095,7 +1109,7 @@ fn builtin_service_handle(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "service-handle")?;
     let id = match args[0].as_int() {
         Some(n) if n >= 0 => {
-            #[allow(clippy::cast_sign_loss, reason="guarded n >= 0")]
+            #[allow(clippy::cast_sign_loss, reason = "guarded n >= 0")]
             let id = n as u64;
             ral_core::types::WorkerId(id)
         }
@@ -1330,8 +1344,8 @@ mod tests {
     /// static (parse/type) failure or a runtime error — every source this
     /// helper runs is expected to compile and complete cleanly.
     fn run_top_level(shell: &mut Shell, src: &str) {
-        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
         use ral_core::transport::{Program, Turn};
+        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
         let req = TurnRequest {
             turn: Turn {
                 program: Program::Source(src.to_string()),
@@ -1366,7 +1380,10 @@ mod tests {
         install_on(&mut shell);
         ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
-        run_top_level(&mut shell, r#"service "watch the thing" { test-block-forever }"#);
+        run_top_level(
+            &mut shell,
+            r#"service "watch the thing" { test-block-forever }"#,
+        );
 
         let entries = shell.workers();
         assert_eq!(entries.len(), 1, "exactly one registered service");
@@ -1392,7 +1409,10 @@ mod tests {
         let entry = shell.workers().pop().expect("the service registered");
         assert_eq!(entry.class, ral_core::types::LeaseClass::Durable);
 
-        #[allow(clippy::cast_possible_wrap, reason="test WorkerId is small; no i64 wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "test WorkerId is small; no i64 wrap"
+        )]
         let id = entry.id.0 as i64;
         let handle = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
             Ok(Value::Handle(h)) => h,
@@ -1440,7 +1460,10 @@ mod tests {
             "settled but unclaimed, the entry still lingers"
         );
 
-        #[allow(clippy::cast_possible_wrap, reason="test WorkerId is small; no i64 wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "test WorkerId is small; no i64 wrap"
+        )]
         let id = entry.id.0 as i64;
         let handle = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
             Ok(Value::Handle(h)) => h,
@@ -1486,7 +1509,10 @@ mod tests {
         let entry = shell.workers().pop().expect("the spawn registered");
         assert_eq!(entry.class, ral_core::types::LeaseClass::Worker);
 
-        #[allow(clippy::cast_possible_wrap, reason="test WorkerId is small; no i64 wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "test WorkerId is small; no i64 wrap"
+        )]
         let id = entry.id.0 as i64;
         let err = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
             Err(Break::Error(e)) => e,

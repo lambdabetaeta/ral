@@ -1,12 +1,11 @@
 //! Pipeline orchestration: compose stages 1–3 in one place.
 //!
-//! `Resolver` bundles the per-call resolution context (`HOME`,
-//! cwd, canonicalisation mode) and exposes two entry points:
+//! `Resolver` bundles the per-call resolution context (`HOME`, cwd) and
+//! exposes two entry points:
 //!
 //!   * [`Resolver::resolve`] — sigil-expand then lexically resolve,
 //!     yielding a [`ResolvedPath`].
-//!   * [`Resolver::check`]   — resolve, then canonicalise according
-//!     to [`CanonMode`].
+//!   * [`Resolver::check`]   — resolve, then leniently canonicalise.
 //!
 //! [`Resolver::resolve`] is the *sole* constructor of a
 //! [`ResolvedPath`], and a `ResolvedPath` is the only thing a
@@ -22,33 +21,25 @@ use std::path::{Path, PathBuf};
 
 use super::{ResolvedPath, lex, sigil};
 
-/// How [`Resolver::check`] and [`ResolvedPath::canonicalise`] perform
-/// stage 3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CanonMode {
-    /// Realpath; on missing components, walk up to an existing
-    /// ancestor and re-attach the unresolved tail.  Default for
-    /// grant prefixes (which may name not-yet-created targets)
-    /// and for grant-side access checks outside a sandboxed
-    /// child.
-    Lenient,
-    /// Skip canonicalisation entirely.  Used inside a sandboxed
-    /// child where the OS sandbox is the real gate and
-    /// `realpath(3)` may fail spuriously on intermediate
-    /// components.  Containment then relies on alias awareness
-    /// (`/tmp` ↔ `/private/tmp` on macOS) to bridge the gap.
-    LexicalOnly,
-}
-
-/// Per-call resolution context: `HOME`, scoped cwd, and
-/// canonicalisation mode.  See module doc for the pipeline.
+/// Per-call resolution context: `HOME` and scoped cwd.  See module doc
+/// for the pipeline.
 pub struct Resolver<'a> {
     pub home: String,
     pub cwd: Option<&'a Path>,
-    pub mode: CanonMode,
 }
 
 impl Resolver<'_> {
+    /// A resolver with no shell context: empty `HOME`, no scoped cwd.
+    /// For shell-less callers (the `RAL_PATH` walker, the plugin loader,
+    /// the exarch file-picker) that hold an already-absolute candidate
+    /// and only need the sigil/lex/canon kernel, not a `Context`.
+    pub fn shell_less() -> Self {
+        Resolver {
+            home: String::new(),
+            cwd: None,
+        }
+    }
+
     /// Stage 1 + 2: expand `~` / `xdg:` sigils, then lexically
     /// resolve against `cwd`, minting a [`ResolvedPath`].  Pure: no
     /// filesystem access.  The sole constructor of a `ResolvedPath`.
@@ -57,12 +48,11 @@ impl Resolver<'_> {
         ResolvedPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
     }
 
-    /// Stage 1 + 2 + 3: full pipeline.  Touches the filesystem
-    /// only in [`CanonMode::Lenient`]; in [`CanonMode::LexicalOnly`]
-    /// it is identical to the [`ResolvedPath`] [`Resolver::resolve`]
-    /// returns.
+    /// Stage 1 + 2 + 3: full pipeline.  Resolves, then leniently
+    /// canonicalises — following symlinks across the existing prefix and
+    /// re-appending the unresolved tail.
     pub fn check(&self, raw: &str) -> PathBuf {
-        self.resolve(raw).canonicalise(self.mode)
+        self.resolve(raw).canonicalise_lenient()
     }
 }
 
@@ -84,7 +74,6 @@ mod tests {
         let r = Resolver {
             home: "/h".into(),
             cwd: None,
-            mode: CanonMode::LexicalOnly,
         };
         assert_eq!(
             r.resolve("~/foo/./bar/../baz").as_path(),
@@ -101,7 +90,6 @@ mod tests {
         let r = Resolver {
             home: "/h".into(),
             cwd: Some(cwd),
-            mode: CanonMode::LexicalOnly,
         };
         assert_eq!(
             r.resolve("src/lib.rs").as_path(),
@@ -109,16 +97,15 @@ mod tests {
         );
     }
 
-    /// `check` in `Lenient` mode walks up to an existing ancestor
-    /// when the full path is missing.  We use a child of `/tmp`
-    /// (an ancestor that always exists) to assert the suffix is
-    /// re-appended after the lenient canonicalisation.
+    /// `check` walks up to an existing ancestor when the full path is
+    /// missing.  We use a child of `/tmp` (an ancestor that always
+    /// exists) to assert the suffix is re-appended after the lenient
+    /// canonicalisation.
     #[test]
-    fn check_lenient_resolves_partial_paths_against_existing_ancestor() {
+    fn check_resolves_partial_paths_against_existing_ancestor() {
         let r = Resolver {
             home: "/h".into(),
             cwd: None,
-            mode: CanonMode::Lenient,
         };
         let suffix = format!("ral-resolver-probe-{}/leaf", std::process::id());
         let probe = format!("/tmp/{suffix}");
@@ -129,39 +116,11 @@ mod tests {
         );
     }
 
-    /// `check` in `LexicalOnly` mode stops at stage 2.  This is
-    /// the in-sandbox path: never touches the filesystem, never
-    /// canonicalises.  Result must equal what `resolve` returned.
-    #[test]
-    fn check_lexical_only_is_identical_to_resolve() {
-        let r_lenient = Resolver {
-            home: "/h".into(),
-            cwd: None,
-            mode: CanonMode::Lenient,
-        };
-        let r_lex_only = Resolver {
-            home: "/h".into(),
-            cwd: None,
-            mode: CanonMode::LexicalOnly,
-        };
-        // Use a path that doesn't exist so canonicalise_lenient
-        // walks up to `/` — its output and `resolve`'s output diverge
-        // only when an ancestor is a symlink (e.g. /tmp on macOS).
-        // For lexical-only mode, the input shape is preserved.
-        let p = "/no/such/path/at/all";
-        assert_eq!(r_lex_only.check(p), r_lex_only.resolve(p).into_inner());
-        // And both modes agree on the lexical part.
-        assert_eq!(
-            r_lex_only.resolve(p).into_inner(),
-            r_lenient.resolve(p).into_inner()
-        );
-    }
-
     /// End-to-end: `xdg:` token through every stage when the env
     /// var is unset (so the Linux default `~/.local/share` kicks
     /// in) and the path doesn't exist on disk.  `check` returns
     /// the lenient canonicalisation, which for a non-existent
-    /// path under HOME ends in the expected suffix.
+    /// path under a non-existent HOME falls back to the lexical form.
     // Unix-only: Linux XDG default, Unix path shapes throughout.
     #[cfg(unix)]
     #[test]
@@ -174,7 +133,6 @@ mod tests {
         let r = Resolver {
             home: "/h".into(),
             cwd: None,
-            mode: CanonMode::LexicalOnly,
         };
         let out = r.check("xdg:data/agda");
         match prev {
@@ -183,13 +141,14 @@ mod tests {
         }
         // Default xdg:data is ${XDG_DATA_HOME:-~/.local/share}.
         // With the var unset and home=/h, expansion gives
-        // /h/.local/share, suffix /agda is appended.
+        // /h/.local/share, suffix /agda is appended.  /h does not exist,
+        // so lenient canonicalisation returns the lexical form.
         assert_eq!(out, Path::new("/h/.local/share/agda"));
     }
 
-    /// Plain absolute paths pass through every stage unchanged
-    /// (in `LexicalOnly` mode).  No sigil to expand, already
-    /// absolute, no `.`/`..` to collapse.
+    /// Plain absolute paths are a fixed point of the lexical pipeline
+    /// (`resolve`): no sigil to expand, already absolute, no `.`/`..`
+    /// to collapse.
     // Unix-only: `/etc/hostname` is a Unix-style absolute that Windows
     // reinterprets relative to the current drive (→ `C:\etc\hostname`).
     #[cfg(unix)]
@@ -198,8 +157,10 @@ mod tests {
         let r = Resolver {
             home: "/h".into(),
             cwd: None,
-            mode: CanonMode::LexicalOnly,
         };
-        assert_eq!(r.check("/etc/hostname"), Path::new("/etc/hostname"));
+        assert_eq!(
+            r.resolve("/etc/hostname").as_path(),
+            Path::new("/etc/hostname")
+        );
     }
 }

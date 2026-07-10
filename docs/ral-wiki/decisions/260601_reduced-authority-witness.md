@@ -36,9 +36,9 @@ projection — tuned for the OS profile renderer — does not:
 - the three-valued exec verdict (`Allow` / `Subcommands` / `Deny`, which the
   projection flattens into `allow_paths`);
 - the per-layer short-circuit on the first denying layer;
-- the sandbox-vs-host resolver distinction (`Context::resolver_for_check` is
-  `LexicalOnly` inside a sandboxed child, `Lenient` outside, and re-resolves each
-  prefix per access — the projection canonicalises prefixes once at fold time).
+- the per-access resolution cadence (`Context::resolver` canonicalises each
+  prefix leniently on every access — the projection canonicalises prefixes once
+  at fold time).
 
 Collapsing them would change resolution behaviour and lose diagnostics, so the
 witness *gates* the walk, it does not replace it. The meet remains spelled in the

@@ -15,8 +15,7 @@
 use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::NormalizedPrefix;
 use crate::types::{
-    Audit, CallSite, Capabilities, Context, ExecNode, FsPolicy, Map, Settled, Value, sig,
-    sig_hint,
+    Audit, CallSite, Capabilities, Context, ExecNode, FsPolicy, Map, Settled, Value, sig, sig_hint,
 };
 
 /// Validate an exec capability check against the active stack and emit
@@ -122,11 +121,10 @@ impl FsOp {
 /// the gate cannot see an un-resolved string.  `/dev/null` is a literal
 /// contract — always permitted — and a `ResolvedPath` of `/dev/null` is
 /// that absolute literal, so the short-circuit reads it off `path`
-/// directly.  Symlink-following on both sides goes through the resolver
-/// mode: the access path canonicalises, each [`NormalizedPrefix`]
-/// canonicalises (idempotent on its already-folded form), so a grant on
-/// `/tmp/foo` still covers an access resolving through `/tmp` →
-/// `/private/tmp`.
+/// directly.  Symlink-following is lenient on both sides: the access
+/// path canonicalises, each [`NormalizedPrefix`] canonicalises
+/// (idempotent on its already-folded form), so a grant on `/tmp/foo`
+/// still covers an access resolving through `/tmp` → `/private/tmp`.
 pub(crate) fn check_fs_op(
     ctx: &Context,
     path: &crate::path::ResolvedPath,
@@ -137,8 +135,8 @@ pub(crate) fn check_fs_op(
     if path.as_path().as_os_str() == "/dev/null" {
         return Ok(());
     }
-    let resolver = ctx.resolver_for_check();
-    let resolved = path.canonicalise(resolver.mode);
+    let resolver = ctx.resolver();
+    let resolved = path.canonicalise_lenient();
     let mut denied = false;
     let mut granted_prefix: Option<String> = None;
     let mut has_fs_policy = false;

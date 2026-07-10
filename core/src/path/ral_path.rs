@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use super::{CanonMode, Resolver};
+use super::Resolver;
 
 /// `RAL_PATH` directories in declaration order.  Empty when the
 /// variable is unset.  Uses the platform's path separator (`:` on
@@ -33,26 +33,21 @@ pub fn entries() -> Vec<PathBuf> {
     std::env::split_paths(&raw).collect()
 }
 
-/// First `$dir/$name` that resolves under
-/// [`ResolvedPath::canonicalise_strict`](super::ResolvedPath::canonicalise_strict),
-/// scanning [`entries`] in order.
+/// First `$dir/$name` that resolves strictly, scanning [`entries`] in
+/// order.
 ///
-/// `None` when nothing in
-/// `RAL_PATH` names an existing file (including the case where the
-/// variable is unset).  Each candidate reaches the canonicaliser
-/// only through a shell-less [`ResolvedPath`](super::ResolvedPath).
+/// Canonicalises through
+/// [`ResolvedPath::canonicalise_strict`](super::ResolvedPath::canonicalise_strict);
+/// `None` when nothing in `RAL_PATH` names an existing file (including
+/// the case where the variable is unset).
 pub fn find_file(name: &str) -> Option<PathBuf> {
     entries()
         .into_iter()
         .map(|dir| dir.join(name))
         .find_map(|cand| {
-            Resolver {
-                home: String::new(),
-                cwd: None,
-                mode: CanonMode::Lenient,
-            }
-            .resolve(&cand.to_string_lossy())
-            .canonicalise_strict()
-            .ok()
+            Resolver::shell_less()
+                .resolve(&cand.to_string_lossy())
+                .canonicalise_strict()
+                .ok()
         })
 }

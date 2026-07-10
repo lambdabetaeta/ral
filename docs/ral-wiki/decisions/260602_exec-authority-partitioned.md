@@ -74,10 +74,9 @@ originals:
 - the **argv-level three-valued verdict** — `Subcommands` is checked against
   runtime `args`, which do not exist at projection time; the projection
   faithfully flattens it onto the coarser path-level OS lattice;
-- the **process-split, per-access, mode-dependent resolver** —
-  `resolver_for_check` is `LexicalOnly` in the sandboxed child and re-resolves
-  each access, while the projection canonicalises once `Lenient` in the parent;
-  a single fold must pick one mode and is wrong on the other side.
+- the **per-access resolver** — `Context::resolver` re-resolves and leniently
+  canonicalises each access, while the projection canonicalises prefixes once at
+  fold time; a single fold would have to pick one cadence and lose the other.
 
 Collapsing them would force an intermediate that is a superset of both
 representations plus a coupling layer — a hack the no-duct-tape rule forbids, and

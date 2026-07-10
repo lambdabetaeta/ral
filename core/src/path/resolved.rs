@@ -97,16 +97,6 @@ impl ResolvedPath {
     pub fn canonicalise_lenient(&self) -> PathBuf {
         super::canon::canonicalise_lenient(&self.0)
     }
-
-    /// Stage 3 under the resolver's [`CanonMode`](super::CanonMode):
-    /// lenient canonicalisation outside a sandboxed child, lexical-only
-    /// inside it.
-    pub fn canonicalise(&self, mode: super::CanonMode) -> PathBuf {
-        match mode {
-            super::CanonMode::Lenient => self.canonicalise_lenient(),
-            super::CanonMode::LexicalOnly => self.0.clone(),
-        }
-    }
 }
 
 /// A frozen grant prefix in the same normal form a [`ResolvedPath`]

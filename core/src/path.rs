@@ -50,7 +50,7 @@ pub use lex::{
 };
 pub use prefix_set::PrefixSet;
 pub use resolved::{NormalizedPrefix, ResolvedPath};
-pub use resolver::{CanonMode, Resolver};
+pub use resolver::Resolver;
 pub use which::{commands_on_path, file_exists_on_path, locate, resolve_in_path};
 
 /// Process working directory.

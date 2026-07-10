@@ -216,7 +216,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinked_grant_cannot_escape_a_shallower_ceiling() {
-        use crate::path::{CanonMode, Resolver};
+        use crate::path::Resolver;
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!("ral-prefix-escape-{}", std::process::id()));
@@ -231,7 +231,6 @@ mod tests {
         let r = Resolver {
             home: "/h".into(),
             cwd: None,
-            mode: CanonMode::Lenient,
         };
         let base = PrefixSet::resolve(&r, &[ceiling.to_string_lossy().into_owned()]);
         let inner = PrefixSet::resolve(&r, &[escape.to_string_lossy().into_owned()]);
@@ -250,7 +249,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legitimate_nesting_survives_the_meet() {
-        use crate::path::{CanonMode, Resolver};
+        use crate::path::Resolver;
 
         let root = std::env::temp_dir().join(format!("ral-prefix-nest-{}", std::process::id()));
         let ceiling = root.join("a");
@@ -260,7 +259,6 @@ mod tests {
         let r = Resolver {
             home: "/h".into(),
             cwd: None,
-            mode: CanonMode::Lenient,
         };
         let base = PrefixSet::resolve(&r, &[ceiling.to_string_lossy().into_owned()]);
         let sub_surface = sub.to_string_lossy().into_owned();

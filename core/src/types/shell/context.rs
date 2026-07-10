@@ -12,7 +12,7 @@
 //! the active cwd / home pair.
 
 use super::Context;
-use crate::path::{CanonMode, Resolver};
+use crate::path::Resolver;
 use crate::types::{Audit, EnvVars};
 use std::path::Path;
 
@@ -74,39 +74,26 @@ impl Context {
     /// `None` (the caller falls back through `process_cwd`).
     ///
     /// Single source of truth for the `dir > cwd.current` precedence
-    /// rule.  [`Self::resolver`], [`Self::resolver_for_check`], and
-    /// [`Shell::cwd`](super::Shell::cwd) all consume this — keeping
-    /// the rule in one place means a future tweak (a third source, a
-    /// different policy) ports once.
+    /// rule.  [`Self::resolver`] and [`Shell::cwd`](super::Shell::cwd)
+    /// both consume this — keeping the rule in one place means a future
+    /// tweak (a third source, a different policy) ports once.
     pub(crate) fn cwd_chain(&self) -> Option<&Path> {
         self.dir.as_deref().or(self.cwd.current.as_deref())
     }
 
-    /// Build a [`Resolver`] tied to this dynamic layer.  Lenient
-    /// canonicalisation: missing components fall back through the
-    /// ancestor walk.  Used for grant-prefix resolution, deny-path
-    /// canonicalisation, and any check that runs outside a sandboxed
-    /// child.
-    pub(crate) fn resolver(&self) -> Resolver<'_> {
-        self.resolver_with(CanonMode::Lenient)
-    }
-
-    /// Build a [`Resolver`] for an access-side capability check.
+    /// Build a [`Resolver`] tied to this dynamic layer, binding the
+    /// active home / cwd pair.  Used for grant-prefix resolution,
+    /// deny-path canonicalisation, and access-side fs checks.
     ///
-    /// The interpreter always runs unconfined now (a `grant` body
-    /// evaluates locally; only the per-command launcher enters the OS
-    /// sandbox, in a separate child process), so the in-process fs gate
-    /// uses canonicalise-based resolution unconditionally and grants
-    /// follow symlinks.
-    pub(crate) fn resolver_for_check(&self) -> Resolver<'_> {
-        self.resolver_with(CanonMode::Lenient)
-    }
-
-    fn resolver_with(&self, mode: CanonMode) -> Resolver<'_> {
+    /// The interpreter always runs unconfined (a `grant` body evaluates
+    /// locally; only the per-command launcher enters the OS sandbox, in
+    /// a separate child process), so the in-process fs gate canonicalises
+    /// leniently — missing components fall back through the ancestor
+    /// walk — and grants follow symlinks.
+    pub(crate) fn resolver(&self) -> Resolver<'_> {
         Resolver {
             home: self.home(),
             cwd: self.cwd_chain(),
-            mode,
         }
     }
 }
