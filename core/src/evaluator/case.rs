@@ -10,8 +10,9 @@
 //! computation granted it the tail position — the matched handler is
 //! returned as a [`TailCall`] signal rather than being applied via a
 //! fresh trampoline frame.  The surrounding trampoline loop catches the
-//! signal and continues in O(1) host stack frames — exactly the same
-//! mechanism `if`/`else` uses for its arms.
+//! signal and continues in O(1) host stack frames — the same direct-emit
+//! path [`eval_app`](super::call) takes for a tail-positioned
+//! application.
 
 use super::apply;
 use super::val::eval_val;
@@ -22,10 +23,7 @@ use crate::types::{Raw, Shell, Tail, TailCall, Value};
 /// Evaluate `case scrutinee table`: force the matching handler thunk on
 /// the variant's payload (or `Unit` for nullary tags).
 ///
-/// The selected arm inherits the case's tail position: when handed
-/// [`Tail::Yes`] the handler application is returned as a [`TailCall`]
-/// so the trampoline loop handles it without pushing a new host stack
-/// frame.
+/// The selected arm inherits the case's tail position.
 pub(crate) fn eval_case(scrutinee: &Val, table: &Val, tail: Tail, shell: &mut Shell) -> Raw<Value> {
     let scrutinee_val = eval_val(scrutinee, shell)?;
     let (label, payload) = match scrutinee_val {
@@ -73,9 +71,6 @@ pub(crate) fn eval_case(scrutinee: &Val, table: &Val, tail: Tail, shell: &mut Sh
         None => Value::Unit,
     };
 
-    // TCO: when granted the tail position, surface a [`TailCall`] so the
-    // enclosing trampoline loop picks up the handler without a new host
-    // frame.
     if tail == Tail::Yes {
         return Err(TailCall {
             callee: handler,

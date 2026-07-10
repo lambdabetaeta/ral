@@ -94,11 +94,6 @@ impl std::error::Error for Error {}
 /// (success), or a recoverable runtime error (catchable by `try`,
 /// recorded as a non-zero-status node by `audit`/`grant`/`within`/
 /// `guard`).
-///
-/// `record_scope` attaches `last_status` onto the `ExecNode` it builds
-/// from this: for `BodyResult::Value`, status comes from
-/// `shell.mobile.control.last_status`; for `BodyResult::Error`, status
-/// comes from `e.exit_code()`.
 #[derive(Debug)]
 pub enum BodyResult {
     Value(Value),

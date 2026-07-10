@@ -1,29 +1,7 @@
-//! Implements application according to the kind of computation:
-//! `App` is CBPV function application; `Exec` is external command
-//! execution. The same code path is used in pipelines, so the entry
-//! points carry an `upstream` argument which may carry a value
-//! produced by the previous pipeline stage.
-//!
-//! Two crate-visible entry points:
-//!
-//! - [`invoke`] — dispatches `App`, `Exec`, and redirect-scoped
-//!   calls. When `upstream` is present, it is appended to the call's
-//!   argument list. Computations that are not call-shaped (a bare
-//!   variable reference `$f`, a literal block, ...) fall through to
-//!   `eval_comp`; any upstream value is then applied to the
-//!   resulting value via [`apply`].
-//!
-//! - [`eval_call_parts`] — evaluates the arguments and trailing
-//!   redirects of an `Exec` together. Shared with the pipeline
-//!   External case in [`crate::runtime::pipeline::resolve`].
-//!
-//! Internals: [`eval_app`] is the eliminator for CBPV application —
-//! a Lambda or Block handed [`Tail::Yes`] emits [`TailCall`] for the
-//! trampoline, otherwise it applies directly, and any other value is a
-//! type error. [`eval_call_args`] walks the `Args` list, splicing
-//! `Spread` elements. The head and arguments are always evaluated under
-//! a non-trivial continuation ([`Tail::No`]); only the call itself
-//! carries the enclosing computation's tail-ness.
+//! Application dispatch: `App` is CBPV function application and `Exec`
+//! is external command execution. The same code path serves pipelines,
+//! so the entry points thread an `upstream` value from the previous
+//! stage into the call's argument list.
 
 use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
 use crate::types::{Error, Raw, Shell, Tail, TailCall, Value};
@@ -35,6 +13,10 @@ use super::{apply, redirect};
 use crate::runtime::command::EvalRedirectV;
 use crate::runtime::command_call;
 
+/// Dispatches `App`, `Exec`, and redirect-scoped calls. A present
+/// `upstream` value is appended to the call's argument list;
+/// computations that are not call-shaped fall through to [`eval_comp`],
+/// and any upstream value is then applied to the result via [`apply`].
 pub(crate) fn invoke(
     comp: &Arc<Comp>,
     upstream: Option<Value>,

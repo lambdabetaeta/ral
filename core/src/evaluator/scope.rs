@@ -45,7 +45,7 @@ pub(crate) struct Outcome {
 /// message, line, col}`.  Bytes are absent by design (§10.1): use `audit`
 /// for forensic capture.  Shared by `try`'s handler call and `poll`'s
 /// `` `err `` outcome so a caught error and a polled failure read the same
-/// shape; the field order matches `typecheck::builtins::try_error_record`.
+/// shape; the field set and types match `typecheck::builtins::try_error_record`.
 pub(crate) fn error_record(
     cmd: &str,
     status: i32,
@@ -217,13 +217,6 @@ impl WithinScope {
 }
 
 // ── Lifted `eval_comp` arms ──────────────────────────────────────────────
-//
-// Each helper below was the body of one match arm in
-// `crate::evaluator::eval_comp`.  Pulling them out keeps `eval_comp`'s
-// debug-mode stack frame small — the unoptimised compiler reserves
-// space for every arm's locals on entry regardless of which arm is
-// taken, and these scope arms each carry several `Value` / `Comp` /
-// closure locals.  See the module comment for the deeper rationale.
 
 pub(crate) fn eval_within(opts: &Val, body: &Val, shell: &mut Shell) -> Raw<Value> {
     let opts_val = eval_val(opts, shell)?;

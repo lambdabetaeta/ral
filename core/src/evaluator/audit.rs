@@ -192,6 +192,10 @@ pub(crate) struct ScopeRecord {
 /// runs; the previous policy is restored on return.  Bytes captured
 /// at the dispatcher level by `with_audit_capture` flow into the
 /// children, so this policy is what they observe.
+///
+/// The node's `last_status` comes from `shell.mobile.control.last_status`
+/// for a [`BodyResult::Value`] and from `e.exit_code()` for a
+/// [`BodyResult::Error`].
 pub(crate) fn record_scope(
     shell: &mut Shell,
     cmd: &str,
