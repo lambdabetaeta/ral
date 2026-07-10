@@ -235,6 +235,11 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 /// current executable path for subprocess re-invocation; entering the OS
 /// process sandbox when --sandbox-projection was given (Unix only — on
 /// Windows the sandbox is applied by the parent at child spawn time).
+///
+/// # Errors
+/// Returns `Err` if `--sandbox-projection` is malformed (its JSON argument
+/// missing, the flag repeated, or the JSON invalid), or if entering the OS
+/// process sandbox fails.
 pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
     // Pin this binary's executable so a per-command `--sandbox-projection`

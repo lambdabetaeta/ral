@@ -116,6 +116,12 @@ impl Shell {
     /// scope and closed against its own unifier.  This covers all three
     /// install paths uniformly (the `alias` statement, rc `aliases:`
     /// maps, plugin loads).
+    ///
+    /// # Errors
+    /// Propagates the [`HandlerEntry::vet`](crate::types::HandlerEntry::vet)
+    /// failure: `Err` if `name` is already a lexical binding or a builtin,
+    /// if `thunk` is not a unary lambda, or if its body changes the head's
+    /// pipeline mode.
     pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<()> {
         let entry = HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)?;
         self.mobile.context.handlers.remove_alias(&entry.name);

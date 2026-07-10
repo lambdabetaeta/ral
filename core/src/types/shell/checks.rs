@@ -26,21 +26,37 @@ impl Shell {
 
     /// Check `editor.read` capability — forwards to
     /// [`capability::check_editor_read`](crate::capability::check_editor_read).
+    ///
+    /// # Errors
+    /// Returns `Err` if some layer of the active capabilities stack denies
+    /// `editor.read`.
     pub fn check_editor_read(&self, subcmd: &str) -> Settled<()> {
         crate::capability::check_editor_read(&self.mobile.context, subcmd)
     }
 
     /// Check `editor.write` capability.
+    ///
+    /// # Errors
+    /// Returns `Err` if some layer of the active capabilities stack denies
+    /// `editor.write`.
     pub fn check_editor_write(&self, subcmd: &str) -> Settled<()> {
         crate::capability::check_editor_write(&self.mobile.context, subcmd)
     }
 
     /// Check `editor.tui` capability.
+    ///
+    /// # Errors
+    /// Returns `Err` if some layer of the active capabilities stack denies
+    /// `editor.tui`.
     pub fn check_editor_tui(&self) -> Settled<()> {
         crate::capability::check_editor_tui(&self.mobile.context)
     }
 
     /// Check `shell.chdir` capability.
+    ///
+    /// # Errors
+    /// Returns `Err` if some layer of the active capabilities stack denies
+    /// `shell.chdir`.
     pub fn check_shell_chdir(&self) -> Settled<()> {
         crate::capability::check_shell_chdir(&self.mobile.context)
     }
@@ -63,6 +79,11 @@ impl Shell {
     /// The runtime dispatch path, where a head's resolved/as-invoked
     /// basenames widen the veto surface, goes through
     /// [`Self::check_exec_call`].
+    ///
+    /// # Errors
+    /// Returns `Err` if the active grant denies the command outright, or
+    /// admits only a subcommand set that `args`'s first element is not in
+    /// (or that `args` is empty against).
     pub fn check_exec_args(
         &mut self,
         display_name: &str,
@@ -78,6 +99,11 @@ impl Shell {
     /// `deny_names` is the broad identity set consulted for vetoes;
     /// `policy_names` is the narrow set that may admit.  See
     /// [`CommandIdentity::deny_names`](crate::runtime::command::CommandIdentity::deny_names).
+    ///
+    /// # Errors
+    /// Returns `Err` if the active grant denies the command outright, or
+    /// admits only a subcommand set that `args`'s first element is not in
+    /// (or that `args` is empty against).
     pub fn check_exec_call(
         &mut self,
         display_name: &str,
@@ -102,6 +128,10 @@ impl Shell {
     /// [`ResolvedPath`](crate::path::ResolvedPath) the caller minted via
     /// [`Shell::resolve`](super::Shell::resolve), so the gate's sole
     /// input is already cwd-anchored and `.`/`..`-collapsed.
+    ///
+    /// # Errors
+    /// Returns `Err` if, at some layer with an `fs` opinion, `path` falls
+    /// under a `deny_paths` entry or outside every read prefix.
     pub fn check_fs_read(&mut self, path: &crate::path::ResolvedPath) -> Settled<()> {
         self.audit_call(|ctx, audit, site| {
             crate::capability::check_fs_op(ctx, path, FsOp::Read, audit, site)
@@ -109,6 +139,10 @@ impl Shell {
     }
 
     /// Validate an fs write against the active capability stack.
+    ///
+    /// # Errors
+    /// Returns `Err` if, at some layer with an `fs` opinion, `path` falls
+    /// under a `deny_paths` entry or outside every write prefix.
     pub fn check_fs_write(&mut self, path: &crate::path::ResolvedPath) -> Settled<()> {
         self.audit_call(|ctx, audit, site| {
             crate::capability::check_fs_op(ctx, path, FsOp::Write, audit, site)

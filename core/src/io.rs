@@ -100,6 +100,10 @@ impl Io {
     ///
     /// `stdin` is not propagated: it is a read-once resource consumed by the
     /// child that spawns it.  The caller must set `child.io.stdin` explicitly.
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating the `stdout`, `stderr`, or `capture_outer`
+    /// sink's underlying file descriptor fails.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stdin: Source::Terminal,

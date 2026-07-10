@@ -336,11 +336,21 @@ impl fmt::Display for LexError {
 }
 
 /// Tokenise `source` with a placeholder file id.
+///
+/// # Errors
+/// Returns `Err` if a string, balanced delimiter, or `$(…)` runs to EOF
+/// unterminated, or on a free-form lexical fault — an invalid escape or an
+/// unexpected character.
 pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
     lex_with(source, FileId::DUMMY)
 }
 
 /// Tokenise `source` attributing every token's byte-range to `file`.
+///
+/// # Errors
+/// Returns `Err` if a string, balanced delimiter, or `$(…)` runs to EOF
+/// unterminated, or on a free-form lexical fault — an invalid escape or an
+/// unexpected character.
 pub fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexError> {
     let mut lexer = Lexer::new(source, file);
     let mut tokens = Vec::new();

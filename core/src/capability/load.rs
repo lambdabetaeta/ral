@@ -27,6 +27,13 @@ use crate::types::{Break, Capabilities, Settled, Shell, sig};
 /// `virtual_path` labels the file in error messages and in the
 /// cycle-detection stack — pass the absolute path for files on disk, or
 /// a synthetic identifier (`<built-in:NAME>`) for embedded profiles.
+///
+/// # Errors
+/// Returns `Err` if evaluating `source` fails (a parse, elaboration, or
+/// runtime error, wrapped with `virtual_path`), or if its terminal value
+/// does not decode as a capability map (a non-map value, an unknown key, or
+/// a sigil that fails to freeze). A propagated escape (`exit`, a stopped
+/// child) passes through unchanged.
 pub fn load_capabilities_from_str(
     shell: &mut Shell,
     source: &str,
@@ -44,6 +51,11 @@ pub fn load_capabilities_from_str(
 /// A missing file is reported as `file not found`; any other IO failure is
 /// wrapped with the file path so the user sees which profile could not be
 /// opened.
+///
+/// # Errors
+/// Returns `Err` if the file cannot be read (`file not found`, or any other
+/// IO failure wrapped with the path), or for any failure of
+/// [`load_capabilities_from_str`] on its contents.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
@@ -90,6 +102,11 @@ pub fn load_capabilities_from_path(
 /// flag, a config key — as appropriate.  An escape raised while a profile
 /// evaluates (`exit`, a stopped child) propagates unchanged, exactly as it
 /// would from a `source`d file.
+///
+/// # Errors
+/// Returns `Err` at the first profile that fails to load — a missing file,
+/// or a decode/freeze error (an `xdg:` path escaping `$HOME`) — or forwards
+/// an escape raised while a profile evaluates.
 pub fn apply_session_profiles(shell: &mut Shell, paths: &[std::path::PathBuf]) -> Settled<()> {
     if paths.is_empty() {
         return Ok(());

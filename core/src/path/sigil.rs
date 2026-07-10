@@ -131,6 +131,11 @@ pub struct FreezeCtx<'a> {
 /// `.`/`..`-collapsed — so subsequent grant matching reads concrete
 /// paths in the same normal form a [`ResolvedPath`](crate::path::ResolvedPath)
 /// carries, ignoring later env or cwd changes.
+///
+/// # Errors
+/// Returns `Err` if any entry fails to freeze (see [`freeze_one`]): an
+/// unknown `xdg:` token, an `xdg:` path that escapes `$HOME` after folding,
+/// or an unset `$HOME` under a home-relative sigil (`~`, `xdg:`).
 pub fn freeze_path_list(
     paths: Vec<String>,
     ctx: &FreezeCtx<'_>,
@@ -155,6 +160,11 @@ pub fn freeze_path_list(
 /// under, so this is not fail-open).  A sigil-free entry is folded and
 /// wrapped verbatim.  An unset HOME is a configuration error for the two
 /// home-relative sigils (`~`, `xdg:`).
+///
+/// # Errors
+/// Returns `Err` if the entry names an unknown `xdg:` token, if an `xdg:`
+/// path escapes `$HOME` after folding, or if `$HOME` is unset while the
+/// entry uses a home-relative sigil (`~`, `xdg:`).
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, String> {
     if looks_like_xdg(entry) {

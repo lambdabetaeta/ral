@@ -181,8 +181,12 @@ pub struct Hook {
 impl Hook {
     /// Validate arity: the handler's parameter count must match
     /// the signature's expected arity (0 for Prompt, 1 for Hook/
-    /// Lifecycle/PluginFactory).  Returns `Err(RegisterError)` on
-    /// arity mismatch or non-callable value.
+    /// Lifecycle/PluginFactory).
+    ///
+    /// # Errors
+    /// Returns [`RegisterError::NotCallable`] if the bound value is neither
+    /// a `Block` nor a `Lambda`, or [`RegisterError::ArityMismatch`] if its
+    /// parameter count differs from the signature's expected arity.
     pub fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
         let actual = match &self.binding.value {

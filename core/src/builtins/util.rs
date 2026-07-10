@@ -4,6 +4,9 @@ use crate::types::{Value, Settled, sig, HandleInner, Break, Error, Env, sig_hint
 use std::sync::Arc;
 
 /// Return an error if `args` has fewer than `min` elements.
+///
+/// # Errors
+/// Returns `Err` if `args.len() < min`.
 pub fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
     if args.len() < min {
         let noun = if min == 1 { "argument" } else { "arguments" };
@@ -47,6 +50,10 @@ pub(crate) fn decode_utf8_strict(bytes: Vec<u8>, context: &str, hint: &str) -> S
     String::from_utf8(bytes).map_err(|e| sig_hint(format!("{context}: {e}"), hint))
 }
 
+/// Extract the elements of a `List`, or return a typed error.
+///
+/// # Errors
+/// Returns `Err` if `val` is not a `List`.
 pub fn as_list(val: &Value, ctx: &str) -> Settled<List> {
     match val {
         Value::List(items) => Ok(items.clone()),
@@ -57,6 +64,10 @@ pub fn as_list(val: &Value, ctx: &str) -> Settled<List> {
     }
 }
 
+/// Borrow the underlying `Map`, or return a typed error.
+///
+/// # Errors
+/// Returns `Err` if `val` is not a `Map`.
 pub fn as_map<'a>(val: &'a Value, ctx: &str) -> Settled<&'a crate::types::Map> {
     match val {
         Value::Map(m) => Ok(m),
@@ -210,6 +221,10 @@ pub(crate) fn order_cmp(
     Ok(Value::Bool(r))
 }
 
+/// Render the first argument as a `String`.
+///
+/// # Errors
+/// Returns `Err` if `args` is empty.
 pub fn arg0_str(args: &[Value], name: &str) -> Settled<String> {
     check_arity(args, 1, name)?;
     Ok(args[0].to_string())
@@ -244,6 +259,10 @@ pub(crate) fn stdin_reader(name: &str, shell: &mut Shell) -> Settled<Box<dyn std
 
 /// Iterate the shell's stdin one line at a time, invoking `f` per line.
 /// `name` rides the error messages.
+///
+/// # Errors
+/// Returns `Err` if stdin cannot be resolved (see [`stdin_reader`]), if
+/// reading a line fails, or if `f` returns `Err`.
 pub fn for_each_stdin_line(
     name: &str,
     shell: &mut Shell,
@@ -309,6 +328,11 @@ pub(crate) fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
 /// errors.  Bytes render as an integer array, the form `from-bytes`
 /// round-trips.  Mirrors `from-json`, which errors on the analogous shape
 /// mistake on the way in.
+///
+/// # Errors
+/// Returns `Err` if `v`, or any value nested within it, is a non-finite
+/// `Float` (NaN / ±Infinity) or a computation value (`Lambda` / `Block` /
+/// `Handle`).
 pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
     Ok(match v {
         Value::Unit => serde_json::Value::Null,

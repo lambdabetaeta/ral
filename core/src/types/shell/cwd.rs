@@ -91,6 +91,10 @@ impl Shell {
     /// `.` / `..` components are normalised).  Returns
     /// `(old_path, new_path)` so the caller can fire the `chpwd`
     /// hook.
+    ///
+    /// # Errors
+    /// Returns `Err` if the resolved target cannot be stat'd (e.g. it does
+    /// not exist), or if it exists but is not a directory.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."

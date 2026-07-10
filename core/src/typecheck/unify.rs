@@ -799,6 +799,13 @@ impl Unifier {
 
     // ── Unification ──────────────────────────────────────────────────────────
 
+    /// Unify value types `a` and `b`, binding variables in place.
+    ///
+    /// # Errors
+    /// Returns `Err` if the two types have mismatched structure
+    /// ([`TypeErrorKind::TyMismatch`]), if an embedded row unification forms
+    /// a recursive row ([`TypeErrorKind::RecursiveRow`]), or if the terms
+    /// nest past the depth budget ([`TypeErrorKind::TypeTooDeep`]).
     pub fn unify_ty(&mut self, a: &Ty, b: &Ty) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_ty_inner(a, b, &mut pairs, 0)
@@ -882,6 +889,15 @@ impl Unifier {
     }
 
     /// Row unification using the Rémy rewrite rule.
+    ///
+    /// # Errors
+    /// Returns `Err` if a closed row is missing or carries an extra label the
+    /// other requires ([`TypeErrorKind::RowMissingField`] /
+    /// [`RowExtraField`](TypeErrorKind::RowExtraField)), if a shared label's
+    /// field types clash or a tag/bare label alphabet is mixed
+    /// ([`TypeErrorKind::TyMismatch`]), if the rewrite forms a recursive row
+    /// ([`TypeErrorKind::RecursiveRow`]), or if the row nests past the depth
+    /// budget ([`TypeErrorKind::TypeTooDeep`]).
     pub fn unify_row(&mut self, a: &Row, b: &Row) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_row_inner(a, b, &mut pairs, 0)
@@ -1003,6 +1019,13 @@ impl Unifier {
         }
     }
 
+    /// Unify computation types `a` and `b`, binding variables in place.
+    ///
+    /// # Errors
+    /// Returns `Err` if the two computation types have mismatched structure or
+    /// their pipeline modes or return types disagree
+    /// ([`TypeErrorKind::CompTyMismatch`]), or if a component value type nests
+    /// past the depth budget ([`TypeErrorKind::TypeTooDeep`]).
     pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_comp_ty_inner(a, b, &mut pairs, 0)
@@ -1124,6 +1147,10 @@ impl Unifier {
     /// — a value edge cannot silently meet a byte edge (§4.2.1) — so a
     /// clash surfaces as a [`crate::mode::ModeMismatch`], which each caller
     /// maps onto its own diagnostic.
+    ///
+    /// # Errors
+    /// Returns `Err` if the two modes are distinct ground modes — `None`
+    /// against `Bytes`.
     pub fn unify_mode(
         &mut self,
         a: &PipeMode,

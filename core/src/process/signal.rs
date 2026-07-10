@@ -99,6 +99,10 @@ impl ChildHandle {
         }
     }
 
+    /// Kill the child (SIGKILL on Unix, `TerminateProcess` on Windows).
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying platform kill fails.
     pub fn kill(&mut self) -> std::io::Result<()> {
         match &mut self.0 {
             ChildRepr::Std(child) => child.kill(),
@@ -143,6 +147,10 @@ impl ChildHandle {
     /// Blocking wait that observes `WIFSTOPPED` on Unix.  See the
     /// platform `wait_handling_stop` for the park / kill-and-reap
     /// dispatch on stop.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying `waitpid` (Windows: the wait, or the
+    /// kill-and-reap on a stop) fails.
     pub fn wait_handling_stop(
         &mut self,
         pgid: Option<Pgid>,
@@ -166,6 +174,10 @@ impl ChildHandle {
     /// [`Self::wait_handling_stop`]: returns `Ok(None)` when nothing is
     /// pending, otherwise classifies and (on no-park stop) kills and
     /// reaps inline.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying `waitpid` (Windows: the poll, or the
+    /// kill-and-reap on a stop) fails.
     pub fn try_wait_handling_stop(
         &mut self,
         pgid: Option<Pgid>,
@@ -190,6 +202,9 @@ impl ChildHandle {
     /// stop-aware ceremony of `wait_handling_stop` is pure overhead
     /// here.  This is the one place inside `ChildHandle` that calls
     /// the raw `Child::wait`.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying `wait` fails.
     #[allow(clippy::disallowed_methods)]
     pub fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match &mut self.0 {
@@ -227,6 +242,11 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 /// error (`Break::Error`) or a non-catchable escape (`Break::Escape`).
 /// They never carry a tail call, hence the `Break` return type rather
 /// than the richer `Control`.
+///
+/// # Errors
+/// Returns `Err` if the shell's [`CancelScope`] (or any ancestor) is
+/// cancelled, carrying the strongest cause's message and exit code; `Ok(())`
+/// while the chain is uncancelled.
 pub fn check(shell: &crate::types::Shell) -> Result<(), crate::types::Break> {
     if let Some(cause) = shell.turn.cancel.cause() {
         return Err(crate::types::Break::Error(

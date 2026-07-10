@@ -113,6 +113,10 @@ pub enum BodyResult {
 /// encode a tail call — `Tail` lives only in the evaluator-private
 /// `Control` enum and is absorbed by the trampoline before any
 /// `Settled` value is built — so every arm is reachable.
+///
+/// # Errors
+/// Returns `Err` if `settled` is a non-local escape (`Break::Escape`); a
+/// value or a recoverable runtime error (`Break::Error`) becomes `Ok`.
 pub fn split(settled: super::flow::Settled<Value>) -> Result<BodyResult, Escape> {
     match settled {
         Ok(v) => Ok(BodyResult::Value(v)),

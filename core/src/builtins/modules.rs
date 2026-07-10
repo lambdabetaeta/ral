@@ -100,6 +100,11 @@ impl Drop for ScriptContextGuard<'_> {
 /// Errors are returned raw — callers add their own surface prefix so the
 /// same machinery can serve every loader without baking one caller's
 /// identity into the others.
+///
+/// # Errors
+/// Returns `Err` if `virtual_path` is already on the module stack (a
+/// circular dependency), if the recursion-depth limit is exceeded, or if
+/// evaluating `comp` fails.
 pub fn evaluate_checked(
     shell: &mut Shell,
     comp: &std::sync::Arc<Comp>,
@@ -148,6 +153,11 @@ pub fn evaluate_checked(
 /// (`source:`, `use:`, `capability file <path>:`) so the same machinery
 /// can serve every loader without baking one caller's identity into
 /// the others.
+///
+/// # Errors
+/// Returns `Err` if parsing, elaboration, or typechecking `source` fails,
+/// or if the subsequent guarded evaluation fails (see
+/// [`evaluate_checked`]).
 pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> Settled<Value> {
     let comp = check_source(source, shell)?;
     evaluate_checked(shell, &comp, source, virtual_path)

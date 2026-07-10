@@ -412,6 +412,11 @@ impl Shell {
     /// On success the hook is inserted into `context.hooks`,
     /// keyed by `name`.  On failure a [`RegisterError`] is returned;
     /// callers render it as a diagnostic at `origin`.
+    ///
+    /// # Errors
+    /// Returns `Err` if `value` is not a `Block` or `Lambda`, if its arity
+    /// does not match `sig`, if a hook named `name` is already registered, or
+    /// if [`Hook::validate`] rejects it.
     pub fn register_hook(
         &mut self,
         name: HookName,

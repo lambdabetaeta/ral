@@ -161,6 +161,10 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
 /// dollars, and backslashes carry no special meaning.  `pub` (not
 /// `pub(super)`) so exarch's `edit-replace` builtin can share this exact
 /// match/error logic rather than duplicating it.
+///
+/// # Errors
+/// Returns `Err` if fewer than three arguments are given, if `from` is
+/// empty, or if `from` occurs zero or more than one time in the input.
 pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     check_arity(args, 3, "string-replace")?;
     let from = args[0].to_string();

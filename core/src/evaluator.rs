@@ -81,6 +81,11 @@ pub(crate) fn absorb_tail(raw: crate::types::Raw<Value>, shell: &mut Shell) -> S
 /// prelude bootstrap, capability profiles, REPL plugin / config files.
 /// Wrapping them in a turn boundary would round-trip a mobile they
 /// never wanted snapshotted.
+///
+/// # Errors
+/// Returns `Err` if evaluating `comp` raises a `Break` — a recoverable
+/// runtime error (`Break::Error`) or a non-local escape (`Break::Escape`,
+/// e.g. `exit`).
 pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
     debug_assert!(
         !shell.mobile.context.grants.is_empty(),

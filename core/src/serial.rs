@@ -250,6 +250,13 @@ fn value_carries_handle(value: &Value) -> bool {
 /// is reported rather than silently producing a dangling reference.
 pub type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 
+/// Topologically reconstruct one `Arc<HashMap>` per scope from a scope table,
+/// building each scope only once all of its dependencies are built.
+///
+/// # Errors
+/// Returns `Err` if a scope reference is out of range or unresolved, if
+/// reconstructing a binding's value fails, or if the dependency graph is
+/// cyclic (no scope makes progress in a pass).
 pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
     let n = scope_table.len();
     let mut arcs: ScopeArcs = vec![None; n];
@@ -347,6 +354,13 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
 // ── Value conversions ─────────────────────────────────────────────────────
 
 impl FOValue<Closure> {
+    /// Encode a runtime [`Value`] into its serialisable first-order form,
+    /// interning any captured closure environments through `ctx`.
+    ///
+    /// # Errors
+    /// Returns `Err` if `value` is or transitively contains a `Value::Handle`
+    /// (a process-local resource that cannot cross a sandbox boundary), or if
+    /// interning a captured environment encounters a cyclic scope reference.
     pub fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(match value {
             Value::Unit => Self::Unit,
@@ -404,6 +418,13 @@ impl FOValue<Closure> {
         })
     }
 
+    /// Decode this first-order form back into a runtime [`Value`], resolving
+    /// captured closure environments against the reconstructed scope `arcs`.
+    ///
+    /// # Errors
+    /// Returns `Err` if a nested value fails to decode, or if a captured
+    /// environment references a scope id that is out of range or unresolved
+    /// in `arcs`.
     pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,
@@ -546,6 +567,11 @@ impl FOValue {
 }
 
 impl SerialEnvSnapshot {
+    /// Intern every scope of `env` into `ctx`, recording their table ids.
+    ///
+    /// # Errors
+    /// Returns `Err` if interning a scope encounters a cyclic scope reference
+    /// or if encoding one of its bindings' values fails.
     pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Result<Self, Error> {
         let scopes = env
             .scope_iter()
@@ -554,6 +580,11 @@ impl SerialEnvSnapshot {
         Ok(Self { scopes })
     }
 
+    /// Rebuild an [`Env`] from this snapshot's scope ids against `arcs`.
+    ///
+    /// # Errors
+    /// Returns `Err` if any recorded scope id is out of range or unresolved
+    /// in `arcs`.
     pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Env, Error> {
         let scopes = self
             .scopes

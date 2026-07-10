@@ -112,6 +112,11 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
 /// with the turn and its variable ids restart at zero, so an open scheme
 /// from turn *N* would alias turn *N+1*'s fresh variables (see the ADR
 /// session-scheme-continuity).
+///
+/// # Errors
+/// Returns `Err` with every diagnostic the inference pass collected —
+/// unbound identifiers, type/row/mode unification mismatches, arity and
+/// application errors — whenever that list is non-empty.
 pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
@@ -475,6 +480,10 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
 /// inference errors keep today's behaviour — an `alias` statement's arm was
 /// already checked by its turn, and rc/plugin arms surface their failures
 /// at use.
+///
+/// # Errors
+/// Returns `Err` if pinning the arm to the head's spec finds a mode clash
+/// — a value-output body under a byte-output head.
 pub fn alias_arm_scheme(
     head: &str,
     param: &crate::ir::IrPattern,

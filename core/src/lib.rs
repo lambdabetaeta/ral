@@ -97,6 +97,9 @@ pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 ///
 /// Bundled so each call site says "compile this
 /// source" rather than re-spelling the ladder.
+///
+/// # Errors
+/// Returns `Err` if `source` fails to parse; elaboration is infallible.
 pub fn compile(source: &str) -> Result<Comp, ParseError> {
     parse(source).map(|ast| elaborate(&ast, std::collections::HashSet::default()))
 }
@@ -123,6 +126,10 @@ impl CompileOutcome {
     /// the shape the `source`/`use`/plugin loaders want, which report a
     /// failed load as one fatal error rather than per-error ariadne
     /// output, so the structured errors flatten to newline-joined text.
+    ///
+    /// # Errors
+    /// Returns `Err` (a rendered message) if the outcome is a parse error, or
+    /// the newline-joined type errors if it is a typecheck failure.
     pub fn into_comp_or_message(self) -> Result<Comp, String> {
         match self {
             Self::Compiled(comp) => Ok(comp),

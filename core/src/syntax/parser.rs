@@ -109,6 +109,12 @@ impl From<LexError> for ParseError {
 
 // ── Public API ───────────────────────────────────────────────────────────
 
+/// Parse `source` into a statement list under a placeholder file id.
+///
+/// # Errors
+/// Returns `Err` if lexing fails, or if the token stream is not a valid
+/// program — an unexpected token, an unclosed construct, or input that ends
+/// before a production completes.
 pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
     parse_with(source, crate::source::FileId::DUMMY)
 }
@@ -131,6 +137,12 @@ pub fn needs_continuation(input: &str) -> bool {
     )
 }
 
+/// Parse `source` into a statement list, attributing spans to `file`.
+///
+/// # Errors
+/// Returns `Err` if lexing fails, or if the token stream is not a valid
+/// program — an unexpected token, an unclosed construct, or input that ends
+/// before a production completes.
 pub fn parse_with(source: &str, file: crate::source::FileId) -> Result<Vec<Stmt>, ParseError> {
     let tokens = lexer::lex_with(source, file)?;
     Parser::run_complete(tokens, Parser::parse_program)

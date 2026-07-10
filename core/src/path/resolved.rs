@@ -83,6 +83,11 @@ impl ResolvedPath {
     /// Strict `realpath(3)`: errors when the path or an intermediate
     /// component is missing.  The input is already absolute and folded,
     /// so `realpath` has nothing to anchor against the *process* cwd.
+    ///
+    /// # Errors
+    /// Returns `Err` if the path or any intermediate component does not
+    /// exist, or on any other `realpath(3)` failure (a non-directory in the
+    /// prefix, a permission or symlink-loop error).
     pub fn canonicalise_strict(&self) -> std::io::Result<PathBuf> {
         super::canon::canonicalise_strict(&self.0)
     }

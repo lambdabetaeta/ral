@@ -28,6 +28,12 @@ pub(crate) fn as_map_ref<'a>(val: &'a Value, ctx: &str) -> Settled<&'a Map> {
     }
 }
 
+/// Clone `val` into an owned `Map`, or fail with the shared
+/// `"{ctx} expects a Map, got …"` sigil error — the owning variant of
+/// [`as_map_ref`].
+///
+/// # Errors
+/// Returns `Err` if `val` is not a `Value::Map`.
 pub fn as_map(val: &Value, ctx: &str) -> Settled<Map> {
     as_map_ref(val, ctx).cloned()
 }

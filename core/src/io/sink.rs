@@ -35,6 +35,10 @@ const SINK_BUFFER_TRUNC_MARKER: &[u8] =
 /// Implementations must be `Send + Sync` because a single `External` sink can
 /// be cloned into many threads (each backgrounded watcher, each pump).
 pub trait ExternalWrite: Send + Sync {
+    /// Write `bytes` through the frontend printer.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying frontend write fails.
     fn write(&self, bytes: &[u8]) -> io::Result<()>;
 }
 
@@ -129,6 +133,10 @@ impl Sink {
     /// `LineFramed`, which may hold a tail of bytes without a terminating
     /// newline.  Called at the end of a watched block's lifetime so the last
     /// line is not silently dropped.
+    ///
+    /// # Errors
+    /// Returns `Err` if writing the buffered tail to the inner sink fails, or
+    /// if either branch of a `Tee` fails to flush.
     pub fn flush_pending(&mut self) -> io::Result<()> {
         match self {
             Self::LineFramed {
@@ -166,6 +174,10 @@ impl Sink {
     /// `sink.pump(stdout)`.  The two-method asymmetry between stdout and
     /// stderr lives here in [`ChildStdioPlan`] alone, so the rest of the
     /// codebase routes through one shape.
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating the pipe writer (for a direct `Pipe`) or
+    /// the sink to be pumped fails.
     pub fn child_stdout(&self, inherit_tty: bool) -> io::Result<ChildStdioPlan> {
         // Sinks already targeting fd 1 inherit directly when the caller
         // has verified TTY ownership.  `Sink::Stderr` here means "swap fd 1
@@ -184,6 +196,10 @@ impl Sink {
     /// Default-inherit for `Sink::Stderr` (the natural fd 2 target); other
     /// sinks drain via a pump.  No `inherit_tty` parameter: stderr never
     /// owns the TTY in any pipeline shape.
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating the pipe writer (for a direct `Pipe`) or
+    /// the sink to be pumped fails.
     pub fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
         if matches!(self, Self::Stderr) {
             return Ok(ChildStdioPlan::inherit());
@@ -210,6 +226,11 @@ impl Sink {
     ///
     /// Used by `Comp::Seq` to route non-final commands' byte output to the
     /// outer (visible) stdout when running inside a capture context (§4.3).
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating `target` fails, or if writing the drained
+    /// bytes to it fails (the drained bytes are restored to the buffer first),
+    /// or if flushing the clone's pending tail fails.
     pub fn flush_to(&self, target: &Self) -> io::Result<()> {
         if let Self::Buffer(buf) = self
             && let Ok(mut g) = buf.lock()
@@ -238,6 +259,11 @@ impl Sink {
         Ok(())
     }
 
+    /// Duplicate this sink, sharing the same ultimate destination.
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating the underlying file descriptor of a
+    /// `Pipe`, `File`, `Tee` branch, or `LineFramed` inner sink fails.
     pub fn try_clone(&self) -> io::Result<Self> {
         match self {
             Self::Terminal => Ok(Self::Terminal),

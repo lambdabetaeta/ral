@@ -521,6 +521,10 @@ pub fn register_builtins(entries: &'static [BuiltinEntry]) {
 }
 
 /// Fallible form of [`register_builtins`].
+///
+/// # Errors
+/// Returns `Err` if a name appears twice within `entries`, or if a name in
+/// `entries` collides with an already-registered builtin.
 pub fn register_builtins_checked(entries: &'static [BuiltinEntry]) -> Result<(), String> {
     ensure_core_builtins_registered();
     let mut sets = REGISTERED_BUILTINS
@@ -773,6 +777,10 @@ pub use misc::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 /// Any other `Value` produces a descriptive error.  Used
 /// by builtins that accept function arguments and by the turn door's hook
 /// arm ([`crate::Shell::run_turn`]), which establishes the frame first.
+///
+/// # Errors
+/// Returns `Err` if `val` is neither a `Block` nor a `Lambda`, or if
+/// evaluating the applied thunk fails.
 pub fn apply(val: &Value, args: &[Value], shell: &mut Shell) -> Settled<Value> {
     match val {
         Value::Lambda { .. } | Value::Block { .. } => {

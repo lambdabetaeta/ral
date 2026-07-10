@@ -242,6 +242,13 @@ impl Launch {
         }
     }
 
+    /// Lower this launch to a `std::process::Command` and spawn it with the
+    /// requested process-group placement, returning the child handle and its
+    /// leader pgid.
+    ///
+    /// # Errors
+    /// Returns `Err` if the spawn fails — the `fork`/`exec` itself or the
+    /// pre-exec `setpgid`/`setsid` installed by [`spawn_with_pgid`](crate::process::spawn_with_pgid).
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,
@@ -345,6 +352,15 @@ impl Launch {
         }
     }
 
+    /// Lower this launch through the raw `CreateProcessW` boundary and spawn
+    /// it with the requested process-group placement, returning the child
+    /// handle and its leader pgid.
+    ///
+    /// # Errors
+    /// Returns `Err` if the program is a `.bat`/`.cmd` file (refused), if any
+    /// argument, path, or environment entry contains a NUL, if handle
+    /// admission or the `CreateProcessW` call fails, or if placing the child
+    /// in its pipeline Job Object fails.
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,

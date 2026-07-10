@@ -35,6 +35,9 @@ pub enum BuiltinBody {
 
 impl BuiltinBody {
     /// Call the body with the given arguments and shell.
+    ///
+    /// # Errors
+    /// Returns `Err` if the invoked body raises a runtime `Break`.
     pub fn call(&self, args: &[Value], shell: &mut crate::types::Shell) -> Settled<Value> {
         match self {
             Self::Static(f) => f(args, shell),
@@ -603,6 +606,12 @@ impl HandlerEntry {
     /// installing turn and needs it seeded for the next turn's check; a
     /// `within [handlers: …]` frame is popped before the turn ends and
     /// needs none.
+    ///
+    /// # Errors
+    /// Returns `Err` if `name` is already a lexical binding in scope, if
+    /// `name` is a builtin, if `thunk` is not a unary lambda (per
+    /// [`validate_handler_arity`]), or if the arm's body changes the head's
+    /// pipeline mode (per [`crate::typecheck::alias_arm_scheme`]).
     pub fn vet(
         name: String,
         thunk: Value,
@@ -680,6 +689,10 @@ impl HandlerRole {
 /// …]`).  A non-lambda value or a lambda of the wrong arity is rejected
 /// with a message that names what was wrong and `context` (e.g. ``alias:
 /// `greet` ``) so the diagnostic points at the offending install site.
+///
+/// # Errors
+/// Returns `Err` if `value` is not a lambda, or is a lambda whose
+/// curry-chain arity is not exactly `arity`.
 pub fn validate_handler_arity(value: &Value, arity: usize, context: &str) -> Settled<()> {
     let form = match arity {
         1 => "a unary lambda `{ |args| ... }`",

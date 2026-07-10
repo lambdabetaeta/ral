@@ -244,6 +244,11 @@ impl PgidPolicy {
     /// is the single funnel that installs this policy and mirrors it in
     /// the parent.  Searching for `setpgid` should yield this method plus
     /// the parent-side mirror inside [`spawn_with_pgid`].
+    ///
+    /// # Errors
+    /// Returns `Err` if the `setpgid` / `setsid` syscall fails (`errno` via
+    /// `last_os_error`); [`Inherit`](PgidPolicy::Inherit) makes no syscall
+    /// and never fails.
     pub fn apply(self) -> std::io::Result<()> {
         // `setsid` returns the new sid (the caller's pid) on success;
         // `setpgid` returns 0.  Both signal failure with `-1`.
@@ -281,6 +286,10 @@ impl PgidPolicy {
 /// closure this function adds.  That order is intentional: fd plumbing
 /// and rlimits are independent of pgid placement, and `reset_child_signals`
 /// is the last thing we want to happen before `execve` clears the slate.
+///
+/// # Errors
+/// Returns `Err` if the spawn fails — either the child's `setpgid` / `setsid`
+/// in the pre-exec closure, or the `fork` / `exec` itself.
 pub fn spawn_with_pgid(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
@@ -294,6 +303,10 @@ pub fn spawn_with_pgid(
 /// The hook runs inside the child, after `setpgid` and signal reset, still
 /// before `execve`. Callers must therefore restrict it to async-signal-safe
 /// work such as `read`, `close`, or `dup2` on already-open fds.
+///
+/// # Errors
+/// Returns `Err` if the child's `setpgid` / `setsid` fails, if the `after`
+/// hook returns an error, or if the `fork` / `exec` itself fails.
 pub fn spawn_with_pgid_after<F>(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,

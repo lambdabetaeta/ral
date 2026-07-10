@@ -200,6 +200,11 @@ pub type SurfaceSink = Arc<dyn EventSink>;
 /// is blocking and short by contract (§3): a start receipt, a ledger read,
 /// a confirmation, a verdict — never a long-running result.
 pub trait EnquiryDesk: Send + Sync {
+    /// Answer one enquiry synchronously.
+    ///
+    /// # Errors
+    /// Returns `Err` when the host cannot answer `req` — a malformed or
+    /// unrecognised request, or a failure while producing the answer.
     fn enquire(
         &self,
         req: crate::serial::FOValue,
@@ -481,6 +486,10 @@ impl Shell {
     /// Put one enquiry to this turn's host desk and block for the answer.
     /// The absent-desk error is the honest answer of a host that answers none
     /// (the bare REPL, and any host before the migration installs its desk).
+    ///
+    /// # Errors
+    /// Returns `Err` if no desk is installed on this turn, or if the
+    /// installed desk's [`EnquiryDesk::enquire`] returns one.
     pub fn enquire(
         &self,
         req: crate::serial::FOValue,
@@ -509,6 +518,11 @@ impl Shell {
     /// recipe instead of forking a weaker temp-file write that silently narrows
     /// the target's mode, follows symlinks by replacing them, and skips the
     /// durability flush.
+    ///
+    /// # Errors
+    /// Returns `Err` if the target cannot be opened for writing, if the
+    /// write fails, or if the atomic commit (temp-file rename and fsync)
+    /// fails.
     pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> crate::types::Settled<()> {
         crate::runtime::command::atomic_write(path, bytes, self)
     }
@@ -656,6 +670,10 @@ impl Shell {
     /// writer as a failure that warrants tearing the pgid down with
     /// `SIGKILL` — a teardown that would surface as exit status 137
     /// on sibling stages that had themselves exited cleanly.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying write fails with anything other than
+    /// `BrokenPipe`, which is swallowed as a clean shutdown.
     pub fn write_stdout(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self.turn.io.stdout.write_all(bytes) {
             Ok(()) => Ok(()),

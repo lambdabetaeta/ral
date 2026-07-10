@@ -357,6 +357,10 @@ pub trait Transport: Send + Sync {
     /// return its answer. Serialises with `dispatch` on the same rendezvous
     /// (busy → the same "engine busy" error a second dispatch would get);
     /// an unrecognised reading class answers `Err` naming the class.
+    ///
+    /// # Errors
+    /// Returns `Err` if the engine is busy on the rendezvous (the "engine
+    /// busy" error), or if the reading class is unrecognised (naming it).
     fn probe(&self, reading: FOValue) -> Result<FOValue, String>;
 
     /// The out-of-band control sender — writable while a dispatch is in
@@ -471,6 +475,10 @@ fn mint_dispatch_id() -> DispatchId {
 /// `` `worker-count ``, `` `binding-count ``, `` `leased-binding-count ``,
 /// `` `env-var [name] ``, `` `cwd ``, `` `grant-depth ``, `` `workers ``. An
 /// unrecognised class answers `Err` naming it, never a silent default.
+///
+/// # Errors
+/// Returns `Err` if `req` is not a variant, if the `` `env-var `` class lacks
+/// a string payload, or if the reading class is unrecognised (naming it).
 pub fn answer_probe(shell: &mut crate::types::Shell, req: FOValue) -> Result<FOValue, String> {
     let FOValue::Variant { label, payload } = &req else {
         return Err(format!("probe request must be a variant, got {req:?}"));
@@ -1010,6 +1018,11 @@ impl WireTransport {
     /// Creates a `WireChannel` socketpair, passes one end to the engine
     /// child as fd 3, and starts a reader thread that funnels incoming
     /// `Event` frames into the event receiver.
+    ///
+    /// # Errors
+    /// Returns `Err` if creating the socketpair fails, if duplicating the
+    /// front-end fd fails, if resolving the current executable path fails, or
+    /// if spawning the engine child process fails.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
