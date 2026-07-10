@@ -8,7 +8,7 @@
 //! unit-testable and reviewable in one place.
 
 use super::fmt::{FmtCtx, fmt_mode_ctx, fmt_ty_ctx};
-use super::scheme::{CompDiff, Reason, TypeErrorKind};
+use super::error::{CompDiff, Reason, TypeErrorKind};
 use super::ty::Ty;
 use crate::syntax::ast::BinaryOpKind;
 

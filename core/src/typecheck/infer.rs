@@ -5,14 +5,11 @@
 //! Both are mutually recursive: thunk bodies are inferred as computations,
 //! and return values are inferred as values.
 
-use super::builtins::{
-    ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, FieldSchema, TyTemplate,
-    fail_status_is_zero_literal, plugin_entry_field_ty, sig_pipe_spec,
-};
+use super::builtins::{FieldSchema, plugin_entry_field_ty};
 use super::env::{InferCtx, TyEnv};
-use super::fmt::fmt_ty;
+use super::error::{Reason, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
-use super::scheme::{Reason, Scheme, TypeErrorKind};
+use super::scheme::Scheme;
 use super::ty::{CompTy, PipeMode, PipeSpec, Row, Ty};
 use crate::ir::{
     CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val, ValListElem, ValMapEntry,
@@ -21,7 +18,7 @@ use crate::source::Span;
 use crate::source::WithSpan;
 use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
 use crate::syntax::ast::{BinaryOp, BinaryOpKind};
-use crate::syntax::tag::tag_row_label;
+use crate::syntax::tag::{is_tag_label, tag_row_label};
 use std::sync::Arc;
 
 /// Walk a row spine and collect (label, `payload_ty`) pairs in order of first
@@ -85,10 +82,7 @@ fn collect_handler_spans(table: &Val) -> std::collections::HashMap<String, crate
             Val::String(s) => s.as_str(),
             _ => continue,
         };
-        // Row labels are stored with their leading backtick (see
-        // `tag_row_label`); the surface map key is already tag-shaped
-        // (`'\`ok'`), so we can match against it directly.
-        if !raw_key.starts_with('`') {
+        if !is_tag_label(raw_key) {
             continue;
         }
         let Val::Thunk(inner) = value else { continue };
@@ -175,11 +169,9 @@ pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
     Inferencer { ctx, env }.infer_comp(comp)
 }
 
-/// Inference state.  The struct itself is `pub` so the
-/// builtin signature interpreter can name it, but both fields remain
-/// `pub(super)` — only code inside `typecheck/` can read or mutate
-/// them.
-pub struct Inferencer<'a> {
+/// Inference state.  Both the struct and its fields are `pub(super)` —
+/// only code inside `typecheck/` can name it or read/mutate its fields.
+pub(super) struct Inferencer<'a> {
     pub(super) ctx: &'a mut InferCtx,
     pub(super) env: &'a mut TyEnv,
 }
@@ -795,7 +787,7 @@ impl Inferencer<'_> {
         }
     }
 
-    /// The ordinary calling convention for a callable installed as a
+    /// The ordinary calling convention for a value binding installed as a
     /// lexical scope binding: a lambda is a function `Fun(param, body)`
     /// whose parameter binds a fresh value type (independent per
     /// parameter) inside a fresh scope, a block is its bare body inferred
@@ -841,157 +833,6 @@ impl Inferencer<'_> {
         };
         self.ctx.diagnose(kind);
         true
-    }
-
-    fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
-        match template {
-            TyTemplate::String => Ty::String,
-            TyTemplate::Int => Ty::Int,
-            TyTemplate::Float => Ty::Float,
-            TyTemplate::Bool => Ty::Bool,
-            TyTemplate::Bytes => Ty::Bytes,
-            TyTemplate::Unit => Ty::Unit,
-            TyTemplate::Any => self.ctx.unifier.fresh_ty(),
-            TyTemplate::ListAny => {
-                let elem = self.ctx.unifier.fresh_ty();
-                Ty::List(Box::new(elem))
-            }
-            TyTemplate::ListInt => Ty::List(Box::new(Ty::Int)),
-        }
-    }
-
-    fn builtin_sig_result(&mut self, sig: BuiltinSig) -> CompTy {
-        let pipe = sig_pipe_spec(&sig.result, &mut self.ctx.unifier);
-        let value = match sig.result {
-            CompTemplate::Pure(ty) | CompTemplate::Return { value: ty, .. } => {
-                self.ty_from_template(ty)
-            }
-            CompTemplate::Never => self.ctx.unifier.fresh_ty(),
-            CompTemplate::LinesStep => self.lines_step_ty(),
-        };
-        CompTy::Return(pipe, Box::new(value))
-    }
-
-    fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
-        match template {
-            ArgTemplate::Any => {}
-            ArgTemplate::Ty(ty) => {
-                let expected = self.ty_from_template(ty);
-                self.ctx
-                    .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
-            }
-            ArgTemplate::BlockOrLambda => {
-                let result = self.ctx.unifier.fresh_comp_ty();
-                let expected = Ty::Thunk(Box::new(result));
-                self.ctx
-                    .unify_ty(actual, &expected, Reason::BuiltinBlockArg);
-            }
-            ArgTemplate::OneOf(options) => {
-                let resolved = self.ctx.unifier.apply_ty(actual);
-                match resolved {
-                    Ty::Bytes
-                        if options
-                            .iter()
-                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) => {}
-                    Ty::List(_)
-                        if options
-                            .iter()
-                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::ListInt))) =>
-                    {
-                        self.ctx.unify_ty(
-                            actual,
-                            &Ty::List(Box::new(Ty::Int)),
-                            Reason::BuiltinTypedArg,
-                        );
-                    }
-                    Ty::Var(_)
-                        if options
-                            .iter()
-                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) =>
-                    {
-                        self.ctx
-                            .unify_ty(actual, &Ty::Bytes, Reason::BuiltinTypedArg);
-                    }
-                    _ => {
-                        if let Some(ArgTemplate::Ty(ty)) = options.first() {
-                            let expected = self.ty_from_template(*ty);
-                            self.ctx
-                                .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn apply_builtin_sig(&mut self, sig: BuiltinSig, args: &crate::ir::Args) -> CompTy {
-        if sig.diagnostic == BuiltinDiagnostic::FailStatusNonzero
-            && fail_status_is_zero_literal(args)
-        {
-            self.ctx.diagnose(TypeErrorKind::FailStatusZero);
-        }
-
-        let mut type_probe_arg = None;
-        match crate::ir::args::positional(args) {
-            Some(positional) => match sig.args {
-                ArgSig::Exact(expected) | ArgSig::DataLast(expected) => {
-                    let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
-                        && positional.len() + 1 == expected.len();
-                    if positional.len() != expected.len() && !missing_data_last {
-                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
-                            expected: expected.len(),
-                            got: positional.len(),
-                            at_most: false,
-                        });
-                    }
-                    for (arg, template) in positional.iter().zip(expected.iter()) {
-                        let actual = self.infer_val(arg);
-                        if sig.diagnostic == BuiltinDiagnostic::TypeProbe {
-                            type_probe_arg = Some(actual.clone());
-                        }
-                        self.unify_arg_template(&actual, *template);
-                    }
-                    for arg in positional.iter().skip(expected.len()) {
-                        let _ = self.infer_val(arg);
-                    }
-                }
-                ArgSig::Optional(template) => {
-                    if positional.len() > 1 {
-                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
-                            expected: 1,
-                            got: positional.len(),
-                            at_most: true,
-                        });
-                    }
-                    for arg in &positional {
-                        let actual = self.infer_val(arg);
-                        self.unify_arg_template(&actual, template);
-                    }
-                }
-                ArgSig::Any => self.infer_args(args),
-            },
-            None => self.infer_args(args),
-        }
-
-        let result = self.builtin_sig_result(sig);
-        if sig.diagnostic == BuiltinDiagnostic::TypeProbe
-            && let Some(arg_ty) = type_probe_arg
-        {
-            // `_type` is `α → F α`: thread the argument's type through to
-            // the result so the probe is transparent to downstream
-            // inference, then print the resolved α.
-            if let CompTy::Return(_, value_ty) = &result {
-                self.ctx.unify_ty(value_ty, &arg_ty, Reason::TypeProbe);
-            }
-            let resolved = self.ctx.unifier.apply_ty(&arg_ty);
-            let pos = self
-                .ctx
-                .pos
-                .map(|sp| format!("@{}..{}: ", sp.start, sp.end))
-                .unwrap_or_default();
-            eprintln!("_type: {}{}", pos, fmt_ty(&resolved));
-        }
-        result
     }
 
     fn infer_not(&mut self, val: &Val) -> Ty {
@@ -1767,7 +1608,7 @@ impl Inferencer<'_> {
                 .unifier
                 .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
         {
-            use crate::typecheck::scheme::TypeErrorKind;
+            use crate::typecheck::error::TypeErrorKind;
             let translated = match kind {
                 TypeErrorKind::RowExtraField { label } => TypeErrorKind::CaseNotExhaustive {
                     missing: vec![],
@@ -1922,14 +1763,7 @@ impl Inferencer<'_> {
 
         let cty = match &comp.item {
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
-            CompKind::Lam { param, body } => {
-                let param_ty = self.ctx.unifier.fresh_ty();
-                let body_ty = self.with_scope(|this| {
-                    this.bind_pattern(param, &param_ty);
-                    this.infer_comp(body)
-                });
-                CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
-            }
+            CompKind::Lam { param, body } => self.infer_binding_value(Some(param), body),
             CompKind::Force(value) => {
                 let val_ty = self.infer_val(value);
                 let cty = self.ctx.unifier.fresh_comp_ty();

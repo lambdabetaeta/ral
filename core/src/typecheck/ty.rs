@@ -47,7 +47,8 @@ pub struct CompTyVar(pub u32);
 ///
 /// Ground types (`Unit`, `Bool`, `Int`, `Float`, `String`, `Bytes`) are leaves.
 /// Compound types are `List`, `Map` (homogeneous, string-keyed), `Record`
-/// (row-polymorphic), `Thunk` (suspended computation), and `Handle` (a running
+/// (row-polymorphic), `Variant` (row-polymorphic tagged sum, dual to
+/// `Record`), `Thunk` (suspended computation), and `Handle` (a running
 /// concurrent block parameterized by the type its body returns — `await` of a
 /// `Handle α` resolves to a record with a `value: α` field).  `Var` is a unification
 /// variable, eliminated during inference.

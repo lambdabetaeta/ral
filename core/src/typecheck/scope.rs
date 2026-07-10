@@ -21,12 +21,12 @@
 //!     `within_field_ty` / `grant_field_ty` when the map is a literal;
 //!     unknown-key rejection stays at runtime in `WithinScope::parse`.
 
-use super::builtins::{
-    FieldSchema, audit_record, grant_field_ty, try_error_record, within_field_ty,
-};
+use super::builtins::{FieldSchema, audit_record, try_error_record};
+use super::error::Reason;
 use super::infer::Inferencer;
-use super::scheme::{Reason, Scheme};
+use super::scheme::Scheme;
 use super::ty::{CompTy, PipeSpec, Ty};
+use super::unify::Unifier;
 use crate::ir::{Val, ValMapEntry};
 
 impl Inferencer<'_> {
@@ -211,5 +211,35 @@ impl Inferencer<'_> {
             CompTy::Return(_, alpha) => *alpha,
             _ => unreachable!("infer_scope_body_passthrough always returns CompTy::Return"),
         }
+    }
+}
+
+/// Schema for the `within [env:, dir:]` options map.  `handlers`/`handler`
+/// are thunk-typed and dispatch at runtime.
+fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
+    match key {
+        "env" => Some(Ty::Map(Box::new(u.fresh_ty()))),
+        "dir" => Some(Ty::String),
+        _ => None,
+    }
+}
+
+/// Schema for the `grant [exec:, fs:, net:, editor:, env:, audit:]` map.
+///
+/// `net`/`audit` are booleans and `editor`/`shell` are `String → Bool` maps,
+/// so each carries a homogeneous type the checker can pin.  `exec`/`fs`
+/// cannot: their per-key policy value is a `String` (`'allow'`/`'deny'`), a
+/// subcommand list, or — for `fs` — a `read`/`write`/`deny` map, and these
+/// shapes mix freely within one policy map (TUTORIAL §16, SPEC §11.1).  No
+/// single homogeneous element type captures that union, so they are left to
+/// the runtime decoder (`None`) — like `within`'s `handlers:`.  Each value is
+/// still inferred by `check_map_entry_fields`, so a type error inside a policy
+/// expression still surfaces; only the outer shape is unconstrained.
+fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
+    let bool_map = || Ty::Map(Box::new(Ty::Bool));
+    match key {
+        "net" | "audit" => Some(Ty::Bool),
+        "editor" | "shell" => Some(bool_map()),
+        _ => None,
     }
 }

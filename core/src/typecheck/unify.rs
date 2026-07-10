@@ -21,7 +21,7 @@
 //! when the same equi-recursive type is anchored at a ty-var on one side and
 //! a comp-var on the other.  No occurs check is needed in either kind.
 
-use super::scheme::{CompDiff, TypeErrorKind};
+use super::error::{CompDiff, TypeErrorKind};
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use crate::syntax::tag::is_tag_label;
 use std::collections::HashSet;
@@ -614,10 +614,7 @@ impl Unifier {
         }
         let out = match resolved {
             CompTy::Return(spec, a) => CompTy::Return(
-                PipeSpec {
-                    input: self.resolve_mode(&spec.input),
-                    output: self.resolve_mode(&spec.output),
-                },
+                self.resolve_spec(&spec),
                 Box::new(self.apply_ty_inner(&a, visited)),
             ),
             CompTy::Fun(a, b) => CompTy::Fun(
@@ -1133,16 +1130,19 @@ impl Unifier {
         }
     }
 
+    /// Resolve both channel modes of a `PipeSpec` against the current
+    /// substitution.
+    fn resolve_spec(&mut self, spec: &PipeSpec) -> PipeSpec {
+        PipeSpec {
+            input: self.resolve_mode(&spec.input),
+            output: self.resolve_mode(&spec.output),
+        }
+    }
+
     /// Reconstruct a `CompTy::Return` after substitutions have been applied
     /// — used to render the post-resolution form for mismatch diagnostics.
     fn apply_return(&mut self, spec: &PipeSpec, ty: &Ty) -> CompTy {
-        CompTy::Return(
-            PipeSpec {
-                input: self.resolve_mode(&spec.input),
-                output: self.resolve_mode(&spec.output),
-            },
-            Box::new(self.apply_ty(ty)),
-        )
+        CompTy::Return(self.resolve_spec(spec), Box::new(self.apply_ty(ty)))
     }
 
     /// Unify two pipeline modes under the equality rule of `docs/SPEC.md`

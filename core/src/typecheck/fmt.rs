@@ -5,13 +5,14 @@
 //! human-readable string.  `fmt_scheme` handles the quantifier prefix and
 //! assigns Greek-letter names to quantified variables.
 //!
-//! Diagnostic-side rendering goes through [`FmtCtx::for_value_types`] or one
-//! of its siblings: it walks the type(s) you're about to print, mints a
-//! Greek letter for every distinct free unification variable in
-//! first-appearance order, and gives back a context you pass to
-//! [`fmt_ty_ctx`].  The same variable then prints as the same letter
-//! everywhere it appears, on both sides of a `couldn't match` message —
-//! GHC's "rigid type variable" trick, minus the rigidity.
+//! Diagnostic-side rendering goes through [`FmtCtx::for_value_types`]: it
+//! walks the type(s) you're about to print, mints a Greek letter for every
+//! distinct free unification variable in first-appearance order, and gives
+//! back a context you pass to [`fmt_ty_ctx`].  The same variable then prints
+//! as the same letter everywhere it appears, on both sides of a `couldn't
+//! match` message — GHC's "rigid type variable" trick, minus the rigidity.
+//! This first-appearance naming is the one rule the `absorb_*` walkers and
+//! [`fmt_scheme`] both follow.
 
 use super::scheme::Scheme;
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, Row, RowVar, Ty, TyVar};
@@ -45,8 +46,8 @@ fn pick(letters: &[&str], idx: usize) -> String {
 /// `...` for rows) — appropriate for `:type` output where the user is
 /// looking at *one* type and the variable identity isn't load-bearing.
 /// Diagnostics that mention multiple types should always pre-populate
-/// via [`FmtCtx::for_value_types`] or a sibling so the same variable
-/// prints the same way on both sides.
+/// via [`FmtCtx::for_value_types`] so the same variable prints the same
+/// way on both sides.
 #[derive(Default)]
 pub struct FmtCtx {
     pub ty_names: HashMap<TyVar, String>,
@@ -73,11 +74,10 @@ impl FmtCtx {
     }
 
     /// Build a context that names every free unification variable
-    /// appearing in the given types, in first-appearance order.  The
-    /// caller passes whichever types will be rendered side-by-side so
-    /// shared variables get one consistent name — the same trick GHC
-    /// uses to give matching pairs of types coordinated variable names
-    /// in `Couldn't match type ‘a’ with ‘b’` errors.
+    /// appearing in the given types (see the module doc for the
+    /// first-appearance naming rule).  The caller passes whichever types
+    /// will be rendered side-by-side so shared variables get one
+    /// consistent name.
     pub fn for_value_types(types: &[&Ty]) -> Self {
         let mut ctx = Self::default();
         for t in types {
@@ -87,9 +87,8 @@ impl FmtCtx {
     }
 
     /// Walk `ty` and assign a Greek letter to every unification variable
-    /// (value, computation, mode, row) we haven't seen yet.  Insertion
-    /// order is preserved, so the first variable we encounter prints as
-    /// α (or its cousin in the comp/mode/row alphabets).
+    /// (value, computation, mode, row) we haven't seen yet, in
+    /// first-appearance order.
     pub(super) fn absorb_ty(&mut self, ty: &Ty) {
         match ty {
             Ty::Var(v) => {
@@ -269,13 +268,30 @@ pub fn fmt_mode_ctx(mode: &PipeMode, ctx: &FmtCtx) -> String {
     }
 }
 
+/// Assign each variable in `order` its Greek letter by position — the
+/// shared body of the four scheme naming maps.
+fn names_in_order<V: Copy + Eq + std::hash::Hash>(
+    order: &[V],
+    letters: &[&str],
+) -> HashMap<V, String> {
+    order
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (*v, pick(letters, i)))
+        .collect()
+}
+
 /// Format a type scheme with proper quantifier prefix and named variables.
 ///
 /// Type variables are assigned Greek letters (α, β, γ, …); computation-type
-/// variables get ϕ, χ, ψ, ω, …; mode variables get μ, ν, ξ, π, …; row
-/// variables get ρ, σ, τ, …  The body strips the outer `Thunk` wrapper so that
-/// the displayed form is a `Cmd` type rather than `{Cmd …}`.
+/// variables get ϕ, χ, ψ, ω, …; row variables get ρ, σ, τ, …  Mode variables
+/// never surface in the Command body rendering (a `Var` channel prints as
+/// nothing, only `Bytes` shows), so they are omitted from the ∀ prefix.  The
+/// body strips the outer `Thunk` wrapper so the displayed form is a `Command`
+/// type rather than `{Command …}`.
 pub fn fmt_scheme(scheme: &Scheme) -> String {
+    // Cyclic-binding roots quantify alongside the plain vars, appended
+    // after them in first-appearance order.
     let mut ty_order: Vec<TyVar> = scheme.ty_vars.clone();
     for (root, _) in &scheme.ty_bindings {
         let v = TyVar(*root);
@@ -283,23 +299,6 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
             ty_order.push(v);
         }
     }
-    let ty_names: HashMap<TyVar, String> = ty_order
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (*v, pick(TY_LETTERS, i)))
-        .collect();
-    let mode_names: HashMap<ModeVar, String> = scheme
-        .mode_vars
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (*v, pick(MODE_LETTERS, i)))
-        .collect();
-    let row_names: HashMap<RowVar, String> = scheme
-        .row_vars
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (*v, pick(ROW_LETTERS, i)))
-        .collect();
     let mut comp_order: Vec<CompTyVar> = scheme.comp_ty_vars.clone();
     for (root, _) in &scheme.comp_ty_bindings {
         let v = CompTyVar(*root);
@@ -307,24 +306,21 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
             comp_order.push(v);
         }
     }
-    let comp_names: HashMap<CompTyVar, String> = comp_order
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (*v, pick(COMP_LETTERS, i)))
-        .collect();
 
     let ctx = FmtCtx {
-        ty_names,
-        comp_names,
-        mode_names,
-        row_names,
+        ty_names: names_in_order(&ty_order, TY_LETTERS),
+        comp_names: names_in_order(&comp_order, COMP_LETTERS),
+        mode_names: names_in_order(&scheme.mode_vars, MODE_LETTERS),
+        row_names: names_in_order(&scheme.row_vars, ROW_LETTERS),
     };
 
+    // Mode variables are named (for any body that shows them) but left out
+    // of the prefix: none surface in the Command form, and a quantifier
+    // with no occurrence in the body would be a dangling binder.
     let quant_parts: Vec<String> = ty_order
         .iter()
         .map(|v| ctx.ty_names[v].clone())
         .chain(comp_order.iter().map(|v| ctx.comp_names[v].clone()))
-        .chain(scheme.mode_vars.iter().map(|v| ctx.mode_names[v].clone()))
         .chain(scheme.row_vars.iter().map(|v| ctx.row_names[v].clone()))
         .collect();
 

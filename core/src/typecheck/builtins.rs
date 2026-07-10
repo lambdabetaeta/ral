@@ -13,7 +13,9 @@
 //!
 //! [`Scheme`]: BuiltinTypeRule::Scheme
 
-use super::fmt::fmt_scheme;
+use super::error::{Reason, TypeErrorKind};
+use super::fmt::{fmt_scheme, fmt_ty};
+use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
 use super::ty::{CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
@@ -1133,36 +1135,6 @@ pub fn check_arity_consistency(name: &str, registry_arity: Option<usize>) -> boo
 /// for side-effects, but not unified against anything).
 pub type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
 
-/// Schema for the `within [env:, dir:]` options map.  `handlers`/`handler`
-/// are thunk-typed and dispatch at runtime.
-pub fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
-    match key {
-        "env" => Some(Ty::Map(Box::new(u.fresh_ty()))),
-        "dir" => Some(Ty::String),
-        _ => None,
-    }
-}
-
-/// Schema for the `grant [exec:, fs:, net:, editor:, env:, audit:]` map.
-///
-/// `net`/`audit` are booleans and `editor`/`shell` are `String → Bool` maps,
-/// so each carries a homogeneous type the checker can pin.  `exec`/`fs`
-/// cannot: their per-key policy value is a `String` (`'allow'`/`'deny'`), a
-/// subcommand list, or — for `fs` — a `read`/`write`/`deny` map, and these
-/// shapes mix freely within one policy map (TUTORIAL §16, SPEC §11.1).  No
-/// single homogeneous element type captures that union, so they are left to
-/// the runtime decoder (`None`) — like `within`'s `handlers:`.  Each value is
-/// still inferred by `check_map_entry_fields`, so a type error inside a policy
-/// expression still surfaces; only the outer shape is unconstrained.
-pub fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
-    let bool_map = || Ty::Map(Box::new(Ty::Bool));
-    match key {
-        "net" | "audit" => Some(Ty::Bool),
-        "editor" | "shell" => Some(bool_map()),
-        _ => None,
-    }
-}
-
 /// Schema for rc plugin entries `[plugin: Str, options: Map]`.
 pub fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     match key {
@@ -1194,6 +1166,161 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
             ) if k == "status"
         ))
     )
+}
+
+/// The builtin-signature interpreter: turns a data-only [`BuiltinSig`] into
+/// an inferred [`CompTy`], colocated with the templates it consumes.
+impl Inferencer<'_> {
+    fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
+        match template {
+            TyTemplate::String => Ty::String,
+            TyTemplate::Int => Ty::Int,
+            TyTemplate::Float => Ty::Float,
+            TyTemplate::Bool => Ty::Bool,
+            TyTemplate::Bytes => Ty::Bytes,
+            TyTemplate::Unit => Ty::Unit,
+            TyTemplate::Any => self.ctx.unifier.fresh_ty(),
+            TyTemplate::ListAny => {
+                let elem = self.ctx.unifier.fresh_ty();
+                Ty::List(Box::new(elem))
+            }
+            TyTemplate::ListInt => Ty::List(Box::new(Ty::Int)),
+        }
+    }
+
+    fn builtin_sig_result(&mut self, sig: BuiltinSig) -> CompTy {
+        let pipe = sig_pipe_spec(&sig.result, &mut self.ctx.unifier);
+        let value = match sig.result {
+            CompTemplate::Pure(ty) | CompTemplate::Return { value: ty, .. } => {
+                self.ty_from_template(ty)
+            }
+            CompTemplate::Never => self.ctx.unifier.fresh_ty(),
+            CompTemplate::LinesStep => self.lines_step_ty(),
+        };
+        CompTy::Return(pipe, Box::new(value))
+    }
+
+    fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
+        match template {
+            ArgTemplate::Any => {}
+            ArgTemplate::Ty(ty) => {
+                let expected = self.ty_from_template(ty);
+                self.ctx
+                    .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
+            }
+            ArgTemplate::BlockOrLambda => {
+                let result = self.ctx.unifier.fresh_comp_ty();
+                let expected = Ty::Thunk(Box::new(result));
+                self.ctx
+                    .unify_ty(actual, &expected, Reason::BuiltinBlockArg);
+            }
+            ArgTemplate::OneOf(options) => {
+                let resolved = self.ctx.unifier.apply_ty(actual);
+                match resolved {
+                    Ty::Bytes
+                        if options
+                            .iter()
+                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) => {}
+                    Ty::List(_)
+                        if options
+                            .iter()
+                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::ListInt))) =>
+                    {
+                        self.ctx.unify_ty(
+                            actual,
+                            &Ty::List(Box::new(Ty::Int)),
+                            Reason::BuiltinTypedArg,
+                        );
+                    }
+                    Ty::Var(_)
+                        if options
+                            .iter()
+                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) =>
+                    {
+                        self.ctx
+                            .unify_ty(actual, &Ty::Bytes, Reason::BuiltinTypedArg);
+                    }
+                    _ => {
+                        if let Some(ArgTemplate::Ty(ty)) = options.first() {
+                            let expected = self.ty_from_template(*ty);
+                            self.ctx
+                                .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn apply_builtin_sig(&mut self, sig: BuiltinSig, args: &crate::ir::Args) -> CompTy {
+        if sig.diagnostic == BuiltinDiagnostic::FailStatusNonzero
+            && fail_status_is_zero_literal(args)
+        {
+            self.ctx.diagnose(TypeErrorKind::FailStatusZero);
+        }
+
+        let mut type_probe_arg = None;
+        match crate::ir::args::positional(args) {
+            Some(positional) => match sig.args {
+                ArgSig::Exact(expected) | ArgSig::DataLast(expected) => {
+                    let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
+                        && positional.len() + 1 == expected.len();
+                    if positional.len() != expected.len() && !missing_data_last {
+                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
+                            expected: expected.len(),
+                            got: positional.len(),
+                            at_most: false,
+                        });
+                    }
+                    for (arg, template) in positional.iter().zip(expected.iter()) {
+                        let actual = self.infer_val(arg);
+                        if sig.diagnostic == BuiltinDiagnostic::TypeProbe {
+                            type_probe_arg = Some(actual.clone());
+                        }
+                        self.unify_arg_template(&actual, *template);
+                    }
+                    for arg in positional.iter().skip(expected.len()) {
+                        let _ = self.infer_val(arg);
+                    }
+                }
+                ArgSig::Optional(template) => {
+                    if positional.len() > 1 {
+                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
+                            expected: 1,
+                            got: positional.len(),
+                            at_most: true,
+                        });
+                    }
+                    for arg in &positional {
+                        let actual = self.infer_val(arg);
+                        self.unify_arg_template(&actual, template);
+                    }
+                }
+                ArgSig::Any => self.infer_args(args),
+            },
+            None => self.infer_args(args),
+        }
+
+        let result = self.builtin_sig_result(sig);
+        if sig.diagnostic == BuiltinDiagnostic::TypeProbe
+            && let Some(arg_ty) = type_probe_arg
+        {
+            // `_type` is `α → F α`: thread the argument's type through to
+            // the result so the probe is transparent to downstream
+            // inference, then print the resolved α.
+            if let CompTy::Return(_, value_ty) = &result {
+                self.ctx.unify_ty(value_ty, &arg_ty, Reason::TypeProbe);
+            }
+            let resolved = self.ctx.unifier.apply_ty(&arg_ty);
+            let pos = self
+                .ctx
+                .pos
+                .map(|sp| format!("@{}..{}: ", sp.start, sp.end))
+                .unwrap_or_default();
+            eprintln!("_type: {}{}", pos, fmt_ty(&resolved));
+        }
+        result
+    }
 }
 
 #[cfg(test)]
