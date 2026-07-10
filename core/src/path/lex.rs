@@ -79,18 +79,21 @@ pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
 }
 
 /// Fold `.`/`..` components lexically, without touching the filesystem or
-/// the cwd: `CurDir` drops, `ParentDir` pops (or is kept when there is
-/// nothing to pop, so a leading `..` survives), every other component is
-/// pushed.  The shared kernel of [`resolve_path`] (which joins a cwd
-/// first) and [`super::canon::canonicalise_lenient`] (which folds cwd-free
-/// before its existing-ancestor walk).
+/// the cwd: `CurDir` drops, `ParentDir` pops, every other component is
+/// pushed.  A `..` that cannot pop is kept only on a *relative* path (so a
+/// leading `..` survives); on a rooted path it is dropped, since `/` has no
+/// parent (`/..` folds to `/`, `/a/../../x` to `/x`).  The shared kernel of
+/// [`resolve_path`] (which joins a cwd first) and
+/// [`super::canon::canonicalise_lenient`] (which folds cwd-free before its
+/// existing-ancestor walk).
 pub(crate) fn fold_dots(path: &Path) -> PathBuf {
+    let rooted = path.has_root();
     let mut normalized = PathBuf::new();
     for comp in path.components() {
         match comp {
             Component::CurDir => {}
             Component::ParentDir => {
-                if !normalized.pop() {
+                if !normalized.pop() && !rooted {
                     normalized.push(comp.as_os_str());
                 }
             }
@@ -243,6 +246,25 @@ mod tests {
 
     fn pb(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    // Rooted-path shapes: `/` has no parent, so a `..` that reaches the
+    // root is dropped rather than preserved.  Unix-only: `/`-rooted
+    // inputs are the shape the grant pipeline folds.
+    #[cfg(unix)]
+    #[test]
+    fn fold_dots_drops_dotdot_at_root() {
+        assert_eq!(fold_dots(Path::new("/..")), pb("/"));
+        assert_eq!(fold_dots(Path::new("/a/../../x")), pb("/x"));
+        assert_eq!(fold_dots(Path::new("/../..")), pb("/"));
+    }
+
+    // A relative path keeps a `..` it cannot pop, so upward references
+    // survive for a later cwd join.
+    #[test]
+    fn fold_dots_keeps_leading_dotdot_on_relative_path() {
+        assert_eq!(fold_dots(Path::new("../x")), pb("../x"));
+        assert_eq!(fold_dots(Path::new("a/../../x")), pb("../x"));
     }
 
     #[test]
