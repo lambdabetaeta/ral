@@ -9,14 +9,16 @@
 //!
 //! The traversal is split across one `collect_free_refs` method per node
 //! type that can hold a sub-Ast (`Ast`, `Expr`, `Head`, `Redirect`,
-//! `ScopeAst`).  This is mechanical recursion over the AST shape; the only
-//! interesting logic is the `note_free` helper that gates name recording on
-//! the enclosing lambda-parameter scopes, and the `Ast::Lambda` arm that
-//! pushes the parameter names onto that scope stack before recursing into
-//! the body.
+//! `ScopeAst`), plus `Pattern::collect_default_free_refs` for the defaults
+//! carried on map patterns.  This is mechanical recursion over the AST
+//! shape; the only interesting logic is the `note_free` helper that gates
+//! name recording on the enclosing binding scopes, and
+//! `collect_stmts_free_refs`, which walks a block or lambda body while
+//! bringing each `let`'s names into scope for the statements that follow
+//! (the `Ast::Lambda` arm first pushes the parameter names).
 
 use crate::syntax::ast::{
-    Ast, Expr, Head, ListElem, MapEntry, Pattern, Redirect, RedirectTarget, ScopeAst, Word,
+    Ast, Expr, Head, ListElem, MapEntry, Pattern, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
 };
 use std::collections::HashSet;
 
@@ -31,6 +33,31 @@ fn note_free(
 ) {
     if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
         out.insert(n.to_string());
+    }
+}
+
+/// Walk a statement sequence (a block or a lambda body), collecting free
+/// references and bringing each `let`'s bound names into scope for the
+/// statements that follow it.  Names pushed here are popped before
+/// returning, so `scopes` is restored to its entry state.
+fn collect_stmts_free_refs(
+    stmts: &[Stmt],
+    candidates: &HashSet<String>,
+    scopes: &mut Vec<HashSet<String>>,
+    out: &mut HashSet<String>,
+) {
+    let mut pushed = 0;
+    for stmt in stmts {
+        stmt.item.collect_free_refs(candidates, scopes, out);
+        if let Ast::Let { pattern, .. } = &stmt.item {
+            let mut names = HashSet::new();
+            pattern.item.collect_names(&mut names);
+            scopes.push(names);
+            pushed += 1;
+        }
+    }
+    for _ in 0..pushed {
+        scopes.pop();
     }
 }
 
@@ -61,25 +88,11 @@ impl Ast {
                 let mut names = HashSet::new();
                 param.item.collect_names(&mut names);
                 scopes.push(names);
-                for stmt in body {
-                    stmt.item.collect_free_refs(candidates, scopes, out);
-                }
+                collect_stmts_free_refs(body, candidates, scopes, out);
                 scopes.pop();
             }
             Self::Block(stmts) => {
-                let mut pushed = 0;
-                for stmt in stmts {
-                    stmt.item.collect_free_refs(candidates, scopes, out);
-                    if let Self::Let { pattern, .. } = &stmt.item {
-                        let mut names = HashSet::new();
-                        pattern.item.collect_names(&mut names);
-                        scopes.push(names);
-                        pushed += 1;
-                    }
-                }
-                for _ in 0..pushed {
-                    scopes.pop();
-                }
+                collect_stmts_free_refs(stmts, candidates, scopes, out);
             }
             Self::Let { pattern, value } => {
                 pattern
@@ -334,6 +347,17 @@ mod tests {
     fn references_through_collections_and_interpolation() {
         assert_eq!(refs_of("[$a, $b]", &["a", "b", "c"]), vec!["a", "b"]);
         assert_eq!(refs_of("\"x $a y\"", &["a"]), vec!["a"]);
+    }
+
+    #[test]
+    fn let_binding_in_lambda_body_scopes_over_later_statements() {
+        // A `let` inside a lambda body binds `y` for the statements that
+        // follow, so the later `$y` is not a free reference to the outer
+        // candidate `y`.
+        assert!(refs_of("{ |x| let y = 1\n $y }", &["y"]).is_empty());
+        // A reference before the local `let`, and one to a genuine outer
+        // name, still escape.
+        assert_eq!(refs_of("{ |x| $g\n let y = 1 }", &["g", "y"]), vec!["g"]);
     }
 
     #[test]
