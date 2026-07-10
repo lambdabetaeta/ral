@@ -9,9 +9,7 @@
 //! `types/`; only the operations listed here are exposed to the rest
 //! of the tree.
 //!
-//! Iteration order is **sorted by key**.  The previous representation
-//! (`Vec<(String, Value)>`) preserved insertion order; this one trades
-//! that for a deterministic order that makes structural equality
+//! Iteration order is **sorted by key**, so structural equality is
 //! order-independent for free, unifying `Value::PartialEq` with the
 //! semantic `equal` builtin.
 
@@ -73,12 +71,6 @@ impl PartialEq for Map {
 impl FromIterator<(String, Value)> for Map {
     fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
-    }
-}
-
-impl Extend<(String, Value)> for Map {
-    fn extend<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
-        self.0.extend(iter);
     }
 }
 
