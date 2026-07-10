@@ -570,9 +570,8 @@ fn block_on_bundled_tool_gate() {}
 /// then the OS sandbox is already entered, so the tool runs confined.
 /// The child reads no `ChildEvalRequest` and emits no `ChildEvalResponse`:
 /// its inherited env/cwd/stdio/process-group/sandbox are the execution
-/// context.  The exit code combines `uutils_invoke`'s direct return with
-/// uucore's process-global cell exactly as `run_uutils_in_process` does
-/// (`if global == 0 { code } else { global }`).
+/// context.  The exit code comes from [`uutils::invoke_bundled`] — the same
+/// bundled-tool exit-code protocol the inline `run_uutils_in_process` uses.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     use crate::builtins::uutils;
@@ -592,19 +591,7 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
 
     block_on_bundled_tool_gate();
 
-    // Slot 0 carries the tool name for every tool — `uutils_invoke`'s `rg`
-    // arm drops it internally (`ral-ripgrep-core` wants argv without
-    // argv[0]); coreutils/diffutils keep it.  This matches exactly how
-    // `run_uutils_in_process` builds `os_args`, so there is no per-family
-    // branching here and no double-adjustment of ripgrep's argv.
-    let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool.as_str()))
-        .chain(tool_args.iter().map(std::ffi::OsString::from))
-        .collect();
-
-    uutils::reset_exit_code();
-    let code = uutils::uutils_invoke(tool, os_args);
-    let global = uutils::get_exit_code();
-    let exit_code = if global == 0 { code } else { global };
+    let exit_code = uutils::invoke_bundled(tool, tool_args);
     #[allow(clippy::cast_sign_loss, reason = "clamp(0, 255) bounds the value to the u8 range before the cast")]
     Some(exit_code.clamp(0, 255) as u8)
 }

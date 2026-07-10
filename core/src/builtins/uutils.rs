@@ -157,6 +157,33 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     }
 }
 
+/// Invoke bundled `tool` in this process and return its exit code.  Builds
+/// argv (`tool` in slot 0, then `args`), resets uucore's exit-code cell,
+/// dispatches via [`uutils_invoke`], then combines the direct return with
+/// the cell (`if global == 0 { code } else { global }`, since a utility's
+/// error machinery reports through the cell rather than the `uumain`
+/// return).
+///
+/// Slot 0 carries the tool name for every tool — [`uutils_invoke`]'s `rg`
+/// arm drops it internally (`ral-ripgrep-core` wants argv without argv[0]);
+/// coreutils/diffutils keep it.
+///
+/// This is the bare exit-code protocol shared by the two bundled-tool
+/// placements.  Callers own the concerns the placements differ on: the
+/// inline path (`run_uutils_in_process`) serialises the exit-code cell,
+/// saves/restores cwd, and isolates panics; the child placement
+/// (`try_run_bundled_tool`) relies on its inherited execution context.
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
+pub(crate) fn invoke_bundled(tool: &str, args: &[String]) -> i32 {
+    let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
+        .chain(args.iter().map(std::ffi::OsString::from))
+        .collect();
+    reset_exit_code();
+    let code = uutils_invoke(tool, os_args);
+    let global = get_exit_code();
+    if global == 0 { code } else { global }
+}
+
 /// `rg` shim, dispatched via [`uutils_invoke`] — from the in-process
 /// fast path or from the `ral --ral-bundled-tool rg` child placement.
 /// `ral-ripgrep-core` expects argv without argv[0], so we drop the

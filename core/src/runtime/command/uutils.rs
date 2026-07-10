@@ -58,6 +58,25 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
         && shell.sandbox_projection().is_none()
 }
 
+/// Serialises the inline `invoke_bundled` path so the uucore exit-code
+/// cell cannot interleave across threads.  `reset_exit_code`,
+/// `uutils_invoke`, and `get_exit_code` (all folded into `invoke_bundled`)
+/// touch one process-global cell; two clean-terminal inline invocations on
+/// different threads (the REPL thread plus a `spawn` / `watch` / `par`
+/// worker) would otherwise reset/invoke/read out of order and read each
+/// other's status.
+///
+/// Per ADR `260616_bundled-tools-as-exec-images` §"Two placements", this
+/// mutex guards ONLY the exit-code cell.  It is not an authority
+/// mechanism and must never be used to admit fd/env/cwd mutation: those
+/// stay thread-local solely by the inline gate excluding every state the
+/// child placement owns.
+#[cfg(all(
+    any(unix, windows),
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
+static INLINE_UUTILS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Call `uumain` for `tool` in this process.  Stdio is restored before
 /// return; a panicking tool surfaces as a 1-status error.
 ///
@@ -71,24 +90,11 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
 /// forces child placement, where the child receives the real stdin
 /// handle through ordinary stdio plumbing — the parent never rewires
 /// its own fd 0 to make this in-process call look like an exec.
-/// Serialises the inline `uutils_invoke` path so the uucore exit-code
-/// cell cannot interleave across threads.  `reset_exit_code`,
-/// `uutils_invoke`, and `get_exit_code` all touch one process-global
-/// cell; two clean-terminal inline invocations on different threads (the
-/// REPL thread plus a `spawn` / `watch` / `par` worker) would otherwise
-/// reset/invoke/read out of order and read each other's status.
 ///
-/// Per ADR `260616_bundled-tools-as-exec-images` §"Two placements", this
-/// mutex guards ONLY the exit-code cell.  It is not an authority
-/// mechanism and must never be used to admit fd/env/cwd mutation: those
-/// stay thread-local solely by the inline gate excluding every state the
-/// child placement owns.
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-static INLINE_UUTILS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// The bare exit-code protocol (argv build, reset/invoke/read, combine)
+/// lives in [`uutils::invoke_bundled`]; this path adds the concerns the
+/// inline placement owns: exit-code-cell serialisation, cwd save/restore,
+/// and panic isolation.
 #[cfg(all(
     any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
@@ -117,8 +123,6 @@ pub(crate) fn run_uutils_in_process(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    uutils::reset_exit_code();
-
     // `can_run_uutils_in_process` already gates on
     // `cwd.current == process_cwd`, so a well-behaved tool sees an
     // unchanged cwd.  Snapshot it anyway: a misbehaving tool that
@@ -130,12 +134,11 @@ pub(crate) fn run_uutils_in_process(
     )]
     let saved_cwd = std::env::current_dir().ok();
 
-    let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
-        .chain(arg_strs.iter().map(std::ffi::OsString::from))
-        .collect();
-
+    // Reset/invoke/read of the uucore exit-code cell runs inside
+    // `invoke_bundled`, held under the guard above and isolated here so a
+    // panicking tool surfaces as a 1-status error below.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        uutils::uutils_invoke(tool, os_args)
+        uutils::invoke_bundled(tool, arg_strs)
     }));
 
     if let Some(cwd) = saved_cwd {
@@ -150,10 +153,7 @@ pub(crate) fn run_uutils_in_process(
     std::io::stdout().flush().ok();
     std::io::stderr().flush().ok();
 
-    let exit_code = if let Ok(code) = result {
-        let global = uutils::get_exit_code();
-        if global == 0 { code } else { global }
-    } else {
+    let Ok(exit_code) = result else {
         // Door 3 — EXEC (inline bundled, panic branch): a panicking tool
         // surfaces as status 1, outcome "bad".  Emit before propagating
         // so this completion door fires exactly once, like the normal
