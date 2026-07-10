@@ -25,7 +25,7 @@
 
 use super::Shell;
 use crate::types::{
-    AuditFragment, Binding, BuiltinEntry, Capabilities, HandlerEntry, HandlerRole, Settled, Value,
+    AuditFragment, Binding, Capabilities, HandlerEntry, HandlerRole, Settled, Value,
 };
 
 impl Shell {
@@ -289,26 +289,11 @@ impl Shell {
             .any(|f| f.is_alias_for(name))
     }
 
-    /// Install process-static builtin commands into this shell.
-    pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
-        self.session.builtins.install_static(entries);
-    }
-
-    /// Install captured builtin commands into this shell.
-    pub fn install_captured_builtins(&mut self, entries: std::sync::Arc<[BuiltinEntry]>) {
-        self.session.builtins.install_arc(entries);
-    }
-
     /// Look up the innermost handler entry for `name` across the
     /// handler stack.  Thin Shell-side accessor over
     /// [`HandlerStack::lookup`](crate::types::HandlerStack::lookup).
     pub fn lookup_handler(&self, name: &str) -> Option<(HandlerEntry, usize)> {
         self.mobile.context.handlers.lookup(name)
-    }
-
-    /// Look up a builtin command binding installed in this shell.
-    pub fn lookup_builtin(&self, name: &str) -> Option<BuiltinEntry> {
-        self.session.builtins.get(name)
     }
 
     /// Run `f` inside a fresh audit subtree, returning the body's

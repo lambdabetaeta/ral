@@ -409,7 +409,7 @@ pub struct LocalState {
     pub(crate) audit: Audit,
     /// REPL-only scratch state (editor plugin context + queued chpwd
     /// notification).  Doesn't flow across threads or IPC; moved on
-    /// same-thread thunk boundary.  See `types/repl.rs`.
+    /// cross-process pipeline-stage boundary.  See `types/shell/repl.rs`.
     pub(crate) repl: ReplScratch,
     /// Directory of every worker (`spawn`, `watch`, `service`) detached
     /// from this shell, keyed by nothing but the handle it registered with — see
@@ -574,10 +574,10 @@ impl Shell {
         self.turn.loc.source = Some(source);
     }
 
-    /// Resolve the seven pseudo-variables (`$env`, `$args`,
-    /// `$script`, `$nproc`, `$CWD`, `$STATUS`, `$USER`).  These are
-    /// rather than stored in scope, so they sit between the env
-    /// check and the handler-stack walk in [`Self::lookup_value_name`].
+    /// Resolve the seven pseudo-variables (`$env`, `$args`, `$script`,
+    /// `$nproc`, `$CWD`, `$STATUS`, `$USER`).  These are computed on
+    /// demand rather than stored in scope, so [`Self::lookup_value_name`]
+    /// consults them after lexical scope and before the builtin table.
     /// Any other name returns `None`.
     pub fn pseudo_var(&self, name: &str) -> Option<Value> {
         match name {
@@ -631,15 +631,9 @@ impl Shell {
             ))),
             "CWD" => {
                 let p = self.cwd();
-                let s = p.to_string_lossy().to_string();
                 let home = crate::path::home_from_env();
-                let cwd_str = if !home.is_empty() && s.starts_with(&home) {
-                    format!("~{}", &s[home.len()..])
-                } else if s.is_empty() {
-                    "?".into()
-                } else {
-                    s
-                };
+                let cwd_str = crate::path::abbreviate_home(&p, &home);
+                let cwd_str = if cwd_str.is_empty() { "?".into() } else { cwd_str };
                 Some(Value::String(cwd_str))
             }
             "STATUS" => Some(Value::Int(i64::from(self.mobile.control.last_status))),

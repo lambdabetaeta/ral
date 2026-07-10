@@ -18,7 +18,8 @@ use crate::source::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
-use crate::types::{AuditFragment, ReapNotice, Value, WorkerEntry, WorkerId};
+use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, WorkerId};
+use std::sync::Arc;
 
 /// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
 /// surrendered to [`Shell::end_terminal_loan`].
@@ -41,8 +42,8 @@ impl Shell {
 
     /// The session's durable cancel root.  A turn door mints a turn's
     /// foreground scope from it (`self.durable_root().child()`); the typed
-    /// relation keeps that scope rooted here.  No longer a host accessor —
-    /// frame assembly moved behind the turn doors, so this is `pub(crate)`.
+    /// relation keeps that scope rooted here.  Crate-private: frame
+    /// assembly lives behind the turn doors.
     pub(crate) fn durable_root(&self) -> &DurableRoot {
         &self.session.root
     }
@@ -119,6 +120,21 @@ impl Shell {
         self.session.builtins.names()
     }
 
+    /// Install process-static builtin commands into this shell.
+    pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
+        self.session.builtins.install_static(entries);
+    }
+
+    /// Install captured builtin commands into this shell.
+    pub fn install_captured_builtins(&mut self, entries: Arc<[BuiltinEntry]>) {
+        self.session.builtins.install_arc(entries);
+    }
+
+    /// Look up a builtin command binding installed in this shell.
+    pub fn lookup_builtin(&self, name: &str) -> Option<BuiltinEntry> {
+        self.session.builtins.get(name)
+    }
+
     /// Read-only access to REPL/editor scratch (plugin context, TUI flag,
     /// queued chpwd notification).
     pub fn repl(&self) -> &ReplScratch {
@@ -156,12 +172,10 @@ impl Shell {
     /// Drain the reap notices recorded since the last drain — one compact
     /// record per entry removed by policy (the lease chain's idle bound or
     /// backstop, the retention sweep's expiry), never one for an entry an
-    /// eliminator observed away first. Crate-private: this used to be a host
-    /// accessor a frontend polled at its own ready boundary and composed into
-    /// a transcript event itself; [`Self::emit_ready_boundary_notices`] is now
-    /// the one caller, pushing the fact as a `` `notice `` surface class from
-    /// *inside* the turn that produced it instead
-    /// (`decisions/260706_enquiry-channel` §4.2).
+    /// eliminator observed away first. Crate-private:
+    /// [`Self::emit_ready_boundary_notices`] is the one caller, pushing the
+    /// fact as a `` `notice `` surface class from *inside* the turn that
+    /// produced it (`decisions/260706_enquiry-channel` §4.2).
     pub(crate) fn take_worker_reap_notices(&self) -> Vec<ReapNotice> {
         self.local.workers.take_reap_notices()
     }
@@ -188,12 +202,13 @@ impl Shell {
         self.local.workers.cancel_all()
     }
 
-    /// Number of lexical bindings in the session scope, innermost shadowing
-    /// counted once — the binding chapter's probe figure for a host's
-    /// resource fold. A count, never the values: enumeration renews
-    /// nothing, exactly as listing workers renews no lease.
+    /// Number of distinct lexical bindings visible in scope, a name
+    /// shadowed by an inner scope counted once — the `/resources` probe's
+    /// binding figure. A count, never the values: it folds names without
+    /// cloning, and counting renews nothing (as listing workers renews no
+    /// lease).
     pub fn binding_count(&self) -> usize {
-        self.bindings().len()
+        self.mobile.scope.distinct_name_count()
     }
 
     /// Number of names currently leased (tracked, non-baseline) by the
@@ -236,8 +251,8 @@ impl Shell {
     /// [`MobileSnapshot`] a panic-recovery baseline needs, which cannot
     /// itself cross the turn/surface/Report seam) — with no turn installed
     /// at that call site, there is no live surface sink to push through
-    /// either. It stays the one notice a host still composes itself from
-    /// the polled return, an acknowledged residue of this migration.
+    /// either. It stays the one notice a host composes itself from the
+    /// polled return.
     ///
     /// The pushed shapes — `` `notice [kind: `reap, cmd, cause] `` and
     /// `` `notice [kind: `large-binding, name, bytes] `` — are what the
@@ -396,7 +411,6 @@ impl Shell {
     /// a `Denied` turn is left untouched, so the loan can only raise an
     /// authorised turn, never mint authority. The returned [`TerminalLoan`]
     /// restores the prior access when surrendered to [`Self::end_terminal_loan`].
-    /// Mirrors the within-turn set/clear of the retired `tui_active` flag.
     pub fn begin_terminal_loan(&mut self) -> TerminalLoan {
         let prev = self.turn.terminal_access;
         // The loan may only *raise* an already-authorised turn; it never mints
@@ -550,8 +564,7 @@ mod tests {
     }
 
     /// The loan token raises the turn to `ExplicitLoan` and restores the prior
-    /// access on surrender — the within-turn `_ed-tui` elevation, mirroring the
-    /// retired `tui_active` set/clear.
+    /// access on surrender — the within-turn `_ed-tui` elevation.
     #[test]
     fn terminal_loan_round_trips_access() {
         let mut shell = Shell::default();

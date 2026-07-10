@@ -180,6 +180,18 @@ impl Env {
         self.fold_innermost_wins(|b| b.value.clone())
     }
 
+    /// Number of distinct bound names across the whole scope chain, a
+    /// name shadowed by an inner scope counted once. The clone-free
+    /// companion of [`Self::all_bindings`] for a caller that wants only
+    /// the count: it borrows each name rather than cloning its value.
+    pub fn distinct_name_count(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for scope in &self.scopes {
+            seen.extend(scope.keys().map(String::as_str));
+        }
+        seen.len()
+    }
+
     /// Every bound name with its installed scheme, innermost binding
     /// wins.  The seed of the next turn's check: a name with a scheme is
     /// bound to it, a name without one is checked as a bare name.

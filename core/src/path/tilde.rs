@@ -110,6 +110,25 @@ pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -
     }
 }
 
+/// Abbreviate `path` for display by folding a leading `home` prefix to
+/// `~`. The inverse of [`expand_tilde_path`] for the `~` case.
+///
+/// `home` must match on a path-component boundary: home `/home/al`
+/// abbreviates `/home/al` and `/home/al/src`, but leaves `/home/alex`
+/// untouched (a `starts_with` on the raw string would wrongly clip it).
+/// Returns the path's own string form when `home` is empty or is not a
+/// component prefix.
+pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
+    if home.is_empty() {
+        return path.to_string_lossy().into_owned();
+    }
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
 // ── $HOME / $USER lookup ──────────────────────────────────────────────
 
 /// Look up `HOME`, preferring the supplied dynamic env overrides:

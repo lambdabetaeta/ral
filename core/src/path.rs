@@ -38,7 +38,9 @@ pub mod sigil;
 pub mod tilde;
 pub mod which;
 
-pub use tilde::{home, home_from_env, home_from_env_or_dot, user_name, user_name_from_env};
+pub use tilde::{
+    abbreviate_home, home, home_from_env, home_from_env_or_dot, user_name, user_name_from_env,
+};
 
 pub use canon::match_variants_list;
 pub use git::{discover_git_dir, find_git_entry};
