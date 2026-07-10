@@ -304,10 +304,10 @@ pub struct ExecNode {
 impl ExecNode {
     /// Build a command node.  Every audit-tree command node — every
     /// builtin, every external command, every scope (`grant`, `try`,
-    /// `audit`, …) — flows through this constructor, so the only
-    /// places that synthesise `ExecNode` by struct literal are
-    /// (a) `subprocess::WireExecNode::into_runtime` rehydrating a
-    /// wire-transported node, and (b) the tests' fixture helpers.
+    /// `audit`, …) — and the batch-mode root in `ral::batch` flow through
+    /// this constructor, so the only other place that synthesises
+    /// `ExecNode` by struct literal is `subprocess::WireExecNode::into_runtime`,
+    /// rehydrating a wire-transported node.
     #[allow(clippy::too_many_arguments)]
     pub fn command(
         cmd: impl Into<String>,

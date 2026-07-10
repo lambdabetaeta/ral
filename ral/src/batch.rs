@@ -22,28 +22,33 @@ fn emit_audit_tree(
     pretty: bool,
     principal: String,
 ) {
-    use ral_core::types::{ExecNode, ExecNodeKind, Value};
+    use ral_core::types::{AuditIo, AuditTime, CallSite, ExecNode, Value};
     let (value, err_msg) = match result {
         Ok(v) => (v.clone(), String::new()),
         Err(Break::Error(e)) => (Value::Unit, e.message.clone()),
         Err(Break::Escape(_)) => (Value::Unit, String::new()),
     };
-    let root = ExecNode {
-        kind: ExecNodeKind::Command,
-        cmd: name.to_string(),
-        args: Vec::new(),
-        status: exit_code,
-        script: name.to_string(),
-        line: 0,
-        col: 0,
-        stdout: Vec::new(),
-        stderr: err_msg.into_bytes(),
+    let root = ExecNode::command(
+        name,
+        Vec::new(),
+        exit_code,
+        CallSite {
+            script: name.to_string(),
+            line: 0,
+            col: 0,
+        },
+        AuditIo {
+            stdout: Vec::new(),
+            stderr: err_msg.into_bytes(),
+        },
         value,
-        children: tree_children,
-        start: audit_start,
-        end: ral_core::types::epoch_us(),
+        tree_children,
+        AuditTime {
+            start: audit_start,
+            end: ral_core::types::epoch_us(),
+        },
         principal,
-    };
+    );
     let json_val = ral_core::builtins::value_to_json_lossy_bytes(&root.to_value());
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
