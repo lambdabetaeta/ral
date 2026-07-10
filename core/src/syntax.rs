@@ -12,10 +12,14 @@ pub mod tag;
 
 pub use quote::{is_bare_word, quote_word, quote_word_if_needed};
 
-/// True when `word` is a ral keyword: a control-flow keyword (`if`, `elsif`,
+/// True when `word` is a ral keyword:
+///
+/// a control-flow keyword (`if`, `elsif`,
 /// `else`, `let`, `return`, `case`) or a control-operator keyword
 /// ([`ast::ScopeAst::KEYWORDS`] — `try`, `guard`, `within`, `grant`,
-/// `audit`).  The single source of truth for the keyword vocabulary: the
+/// `audit`).
+///
+/// The single source of truth for the keyword vocabulary: the
 /// parser's reserved-name check (`parser::is_reserved`) and the exarch
 /// syntax highlighter both consult it, so the two cannot drift.  Value
 /// literals (`true`, `false`, `unit`) are *not* keywords — they classify

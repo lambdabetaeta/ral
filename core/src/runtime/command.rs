@@ -1,4 +1,6 @@
-//! Executes an external command. Where `runtime/command_call` decides
+//! Executes an external command.
+//!
+//! Where `runtime/command_call` decides
 //! which arm — Handler, Builtin, or External — serves a given call,
 //! this module owns the External arm: vetting the resolved identity,
 //! spawning the OS process, and wiring its stdio per the call's

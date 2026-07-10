@@ -18,7 +18,9 @@ use super::process_cwd;
 
 /// Return `p` together with any alternate lexical forms that the
 /// host filesystem treats as identical (e.g. `/tmp/foo` ↔
-/// `/private/tmp/foo` on macOS).  Pure: no filesystem access.
+/// `/private/tmp/foo` on macOS).
+///
+/// Pure: no filesystem access.
 /// macOS-only — the firmlink table is empty elsewhere, so this is
 /// `[p]` on Linux and Windows.
 ///
@@ -37,7 +39,9 @@ pub fn path_aliases(p: &Path) -> Vec<PathBuf> {
 
 /// True iff some alias of `path` starts with some alias of
 /// `prefix`, i.e. `path` lies inside `prefix` modulo the host's
-/// known firmlinks.  Pure helper used by both the runtime grant
+/// known firmlinks.
+///
+/// Pure helper used by both the runtime grant
 /// matcher and the nested grant intersector.
 pub fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
@@ -46,7 +50,9 @@ pub fn path_within(path: &Path, prefix: &Path) -> bool {
 }
 
 /// Resolve `path` against `cwd`, normalising `.` and `..`
-/// components.  If `path` is already absolute it is normalised in
+/// components.
+///
+/// If `path` is already absolute it is normalised in
 /// place; otherwise it is joined to `cwd` (or to
 /// `std::env::current_dir` when `cwd` is `None`).  Purely
 /// lexical — no symlink resolution — so the result may differ
@@ -132,6 +138,7 @@ pub(in crate::path) fn meet_prefix_sets_by<T: Clone>(
 }
 
 /// Resolve `path` relative to the directory containing `script`.
+///
 /// If `path` is absolute it is returned unchanged.  If `script` is
 /// empty or starts with `<` (the synthetic-source convention used
 /// by the REPL, `eval`, etc.) the input is returned unchanged so
@@ -156,7 +163,9 @@ pub fn resolve_relative_to_script(path: &str, script: &str) -> PathBuf {
 
 /// `path.parent()`, or the literal current directory (`.`) when
 /// `path` has no parent (i.e. is a bare filename) or the parent is
-/// the empty path.  The fallback exists so callers that immediately
+/// the empty path.
+///
+/// The fallback exists so callers that immediately
 /// pass the result to a `*_in(parent)` API (`tempfile::Builder::tempfile_in`,
 /// `fs::File::open` of a directory for fsync, …) don't blow up on
 /// bare filenames.
@@ -169,7 +178,9 @@ pub fn parent_or_cwd(path: &Path) -> &Path {
 
 /// `Path::new(path).exists()` behind a named helper so call sites
 /// that already hold the path as a string don't reach into the
-/// stdlib path constructors directly.  Pure existence probe —
+/// stdlib path constructors directly.
+///
+/// Pure existence probe —
 /// follows symlinks, does not canonicalise.
 #[allow(clippy::disallowed_methods)]
 pub fn exists(path: &str) -> bool {
@@ -187,7 +198,9 @@ pub fn is_absolute(path: &str) -> bool {
 
 /// Final path component of `path`, decoded as UTF-8 with a fallback
 /// to the original string when the path has no file name or the
-/// name is not valid UTF-8.  Used by callers that key on a command
+/// name is not valid UTF-8.
+///
+/// Used by callers that key on a command
 /// basename (exit hint lookup, login-shell detection).
 #[allow(clippy::disallowed_methods)]
 pub fn basename(path: &str) -> &str {
@@ -197,7 +210,9 @@ pub fn basename(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-/// Proper ancestors of `paths`, dedup'd, root excluded.  For each
+/// Proper ancestors of `paths`, dedup'd, root excluded.
+///
+/// For each
 /// input path, walk `Path::ancestors()` upward stopping above `/` and
 /// collect every intermediate directory.  Output is sorted (`BTreeSet`
 /// iteration order) and free of duplicates across inputs.

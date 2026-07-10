@@ -35,7 +35,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 
 /// A build-time-baked prelude: the two postcard blobs and their
-/// once-decoded forms.  `ir` is the annotated prelude [`Comp`] whose
+/// once-decoded forms.
+///
+/// `ir` is the annotated prelude [`Comp`] whose
 /// `Bind` nodes carry the checker's schemes; `scheme_bytes` is the
 /// top-level scheme list harvested in the same pass.  Both decode lazily
 /// on first access and memoise.
@@ -91,6 +93,7 @@ impl BakedPrelude {
 
 /// Expand in a host crate whose build script called
 /// [`bake_prelude_to_out_dir`](crate::driver::bake_prelude_to_out_dir).
+///
 /// The `include_bytes!` must expand in the host crate, against its own
 /// `OUT_DIR`; pinning the filename contract here keeps it in the same
 /// crate as the writer.
@@ -104,7 +107,9 @@ macro_rules! baked_prelude {
     };
 }
 
-/// Construct, seed, and load the prelude into a fresh `Shell`.  Everything
+/// Construct, seed, and load the prelude into a fresh `Shell`.
+///
+/// Everything
 /// a turn-evaluating host needs before its own builtins, rc files, or
 /// capability frames; terminal handling, output capture, and watchdogs
 /// remain host concerns interposed around this call.
@@ -118,6 +123,7 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude) -> Shell {
 
 /// The build-script half of the bake: parse, elaborate, and
 /// [`bake_prelude`](crate::bake_prelude) the embedded prelude source,
+///
 /// write both postcard blobs to `OUT_DIR`, and emit rerun-if-changed
 /// lines for every shape-defining file (absolute paths via
 /// `CARGO_MANIFEST_DIR`, so the lines are host-independent).
@@ -227,7 +233,9 @@ pub enum TurnStdin {
 }
 
 /// The engine door for one turn: the protocol [`Turn`] plus the live,
-/// non-transportable handles the host lends it.  Composition, not
+/// non-transportable handles the host lends it.
+///
+/// Composition, not
 /// mirroring — a field added to [`Turn`] crosses the seam and reaches the
 /// engine in one declaration.
 pub struct TurnRequest<'a> {

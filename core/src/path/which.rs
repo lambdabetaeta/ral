@@ -25,7 +25,9 @@
 use std::path::{Path, PathBuf};
 
 /// Walk `path` (a colon-separated `PATH` string) looking for an
-/// executable file named `name`.  Returns the absolute path of
+/// executable file named `name`.
+///
+/// Returns the absolute path of
 /// the first hit, or `None` if none of `path`'s directories
 /// contain an executable `name`.
 ///
@@ -110,7 +112,9 @@ fn is_executable_file(p: &Path) -> bool {
 }
 
 /// Enumerate names of executable files reachable through `path_value`,
-/// in PATH-entry order.  Each directory is anchored to `cwd` if it is
+/// in PATH-entry order.
+///
+/// Each directory is anchored to `cwd` if it is
 /// relative (matching [`locate`]'s rule).  Inaccessible or non-directory
 /// entries are skipped; entries within a directory are not sorted.
 ///
@@ -145,7 +149,9 @@ pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
 }
 
 /// Walk PATH looking for a regular file named `name`, ignoring the
-/// executable bit.  Used to improve error messages: when PATH search
+/// executable bit.
+///
+/// Used to improve error messages: when PATH search
 /// skips a file because it lacks `+x`, we can report "permission
 /// denied" (126) instead of "command not found" (127).
 pub fn file_exists_on_path(name: &str, path: &str) -> Option<PathBuf> {

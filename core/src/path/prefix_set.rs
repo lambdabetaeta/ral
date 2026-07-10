@@ -1,7 +1,11 @@
-//! A set of path prefixes that carries each path in both forms: the
+//! A set of path prefixes that carries each path in both forms:
+//!
+//! the
 //! *surface* form the author wrote (sigil- and `~`-expanded, `.`/`..`
 //! normalised, symlinks intact) and the *resolved* form (symlinks
-//! followed).  Containment and intersection are judged on the resolved
+//! followed).
+//!
+//! Containment and intersection are judged on the resolved
 //! form, so two spellings of one directory (`/tmp` and `/private/tmp`)
 //! unify; [`surface`](PrefixSet::surface) returns the surface form, so a
 //! consumer that must reproduce the author's path — an OS sandbox

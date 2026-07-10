@@ -42,7 +42,9 @@ mod float_bits {
 
 /// A serialisable *first-order* ral value: unit, bool, int, float (by
 /// bits), string, bytes, and lists/maps/variants thereof — data all the
-/// way down.  `X` is the extension slot, uninhabited by default: a bare
+/// way down.
+///
+/// `X` is the extension slot, uninhabited by default: a bare
 /// `FOValue` is first-order by construction, not by a checked invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -107,7 +109,9 @@ pub struct SerialThunk {
     pub captured: SerialEnvSnapshot,
 }
 
-/// A shell snapshot in serialised form.  Each element of `scopes` is an
+/// A shell snapshot in serialised form.
+///
+/// Each element of `scopes` is an
 /// index into a companion scope table (owned by the request/response
 /// envelope — see `child_eval`).  The table is a flat `Vec` of scope
 /// entries, serialised at most once per `Arc`-shared allocation.
@@ -126,7 +130,9 @@ pub struct SerialBinding {
 }
 
 /// The interned scope table: one row of `(name, SerialBinding)` pairs
-/// per `Arc`-shared scope allocation, in DFS intern order.  Owned by
+/// per `Arc`-shared scope allocation, in DFS intern order.
+///
+/// Owned by
 /// the request/response envelope and rebuilt into [`ScopeArcs`] by
 /// [`build_arcs`] on the receiving side.
 pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;

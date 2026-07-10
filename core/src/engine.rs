@@ -18,7 +18,9 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 /// One compiled-in shell-parity target the engine child can be told, at
 /// `Attach`, to become: the prelude to boot with and the host builtin
-/// installer to apply afterward. Both halves of the single binary
+/// installer to apply afterward.
+///
+/// Both halves of the single binary
 /// (exarch, the REPL) pass their own table; the tag on the wire is the
 /// only thing that names one, never the installer function itself —
 /// code never crosses the seam.

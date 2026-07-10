@@ -13,7 +13,9 @@
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 
-/// Hard cap on in-memory `Sink::Buffer` growth.  Past this point we append a
+/// Hard cap on in-memory `Sink::Buffer` growth.
+///
+/// Past this point we append a
 /// one-line truncation marker and drop further bytes.  Chosen small relative
 /// to disk so high-volume spawn / command-substitution captures push the user
 /// toward an explicit redirect (`cmd > log`).  Enforced in `Write::write_all`
@@ -37,7 +39,9 @@ pub trait ExternalWrite: Send + Sync {
 }
 
 /// In-memory byte buffer shared between Sink writers and the eventual
-/// reader.  Always wrapped in `Arc<Mutex<…>>`: writers run on background
+/// reader.
+///
+/// Always wrapped in `Arc<Mutex<…>>`: writers run on background
 /// threads (`Sink::pump` workers, parallel pipeline stages), readers run
 /// on the main eval thread once writers have joined.
 pub type ByteBuffer = Arc<Mutex<Vec<u8>>>;

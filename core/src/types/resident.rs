@@ -54,7 +54,9 @@
 //! trait.
 
 /// One resident's signature, projected from whatever representation its
-/// own chapter keeps. Every method takes `&self`: a fold reaches a
+/// own chapter keeps.
+///
+/// Every method takes `&self`: a fold reaches a
 /// resident's facets through the value it already has in hand (an entry
 /// from a listing snapshot), never by also threading back a registry and
 /// an id.

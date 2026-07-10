@@ -178,7 +178,9 @@ fn arm(action: Action, after: Duration) -> Deadline {
     }
 }
 
-/// A handle to an armed deadline.  Dropping it *disarms* the deadline,
+/// A handle to an armed deadline.
+///
+/// Dropping it *disarms* the deadline,
 /// so work that completes before its ceiling is never cancelled —
 /// the reaper skips a disarmed entry when it comes due.  Call
 /// [`Deadline::keep`] for a fire-and-forget ceiling that must fire

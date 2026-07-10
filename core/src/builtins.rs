@@ -127,6 +127,7 @@ macro_rules! builtin_registry {
 
         /// Core builtins: every host-implemented name the language ships
         /// with, expanded from the registry into a single static slice.
+        ///
         /// Installed into every fresh [`Shell`] by [`Shell::new`] (via
         /// [`Shell::install_builtins`]) and registered globally for
         /// typecheck-time lookups by [`ensure_core_builtins_registered`].
@@ -495,7 +496,9 @@ static REGISTERED_BUILTINS: RwLock<Vec<BuiltinSet>> = RwLock::new(Vec::new());
 static CORE_BUILTINS_REGISTER: std::sync::Once = std::sync::Once::new();
 
 /// Register [`CORE_BUILTINS`] into the process-level registry the first
-/// time this is called.  Invoked from [`Shell::new`] and from every
+/// time this is called.
+///
+/// Invoked from [`Shell::new`] and from every
 /// helper that consults the registry, so consumers don't need to
 /// remember a separate init step.
 pub fn ensure_core_builtins_registered() {
@@ -507,7 +510,9 @@ pub fn ensure_core_builtins_registered() {
     });
 }
 
-/// Register static host builtins.  Idempotent: re-registering the same
+/// Register static host builtins.
+///
+/// Idempotent: re-registering the same
 /// `&'static` slice (by pointer identity) is a no-op.  Name collisions
 /// with already-registered builtins panic — host crates must own
 /// disjoint surfaces.
@@ -638,7 +643,9 @@ pub fn builtin_names() -> Vec<&'static str> {
 }
 
 /// Synthesise a first-class thunk for a [`BuiltinEntry`] so a
-/// `$name` reference resolves to a callable value.  The thunk
+/// `$name` reference resolves to a callable value.
+///
+/// The thunk
 /// wraps an n-ary lambda around a name-dispatched
 /// [`crate::ir::CompKind::Exec`], where `n` is the entry's fixed
 /// arity, so the resulting value plays the same role as any
@@ -761,7 +768,9 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
 pub use misc::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 
 /// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
-/// already installed.  Any other `Value` produces a descriptive error.  Used
+/// already installed.
+///
+/// Any other `Value` produces a descriptive error.  Used
 /// by builtins that accept function arguments and by the turn door's hook
 /// arm ([`crate::Shell::run_turn`]), which establishes the frame first.
 pub fn apply(val: &Value, args: &[Value], shell: &mut Shell) -> Settled<Value> {

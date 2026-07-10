@@ -104,7 +104,9 @@ pub(super) fn prelude_doc(name: &str) -> Option<String> {
 }
 
 /// The documented prelude function names (the keys of [`prelude_docs`]),
-/// unsorted.  An embedding host folds these into its own at-a-glance command
+/// unsorted.
+///
+/// An embedding host folds these into its own at-a-glance command
 /// index beside the builtins; `explain <name>` then resolves each through
 /// [`prelude_doc`].
 pub fn prelude_names() -> Vec<&'static str> {
@@ -340,7 +342,9 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
     }
 }
 
-/// Tuning knobs for [`pretty_print`]. Two callers, two shapes: the REPL wants
+/// Tuning knobs for [`pretty_print`].
+///
+/// Two callers, two shapes: the REPL wants
 /// narrow, `'`-quoted output for a terminal; exarch's tool-result `VALUE`
 /// section wants wider, always-`#`-fenced output because its system prompt
 /// only teaches the model the hash-quoted string form.

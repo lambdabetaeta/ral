@@ -48,7 +48,9 @@ pub(crate) fn is_ident_cont(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
 }
 
-/// True when `ch` may appear in a bare word.  The complementary
+/// True when `ch` may appear in a bare word.
+///
+/// The complementary
 /// metacharacters (whitespace, the brackets/braces, quote markers,
 /// operators) terminate or refuse a bare word and so always need
 /// quoting in source.
@@ -235,7 +237,9 @@ impl fmt::Display for StringForm {
     }
 }
 
-/// Structured lexer error.  The `Other` arm preserves the original
+/// Structured lexer error.
+///
+/// The `Other` arm preserves the original
 /// free-form messages; the named arms exist so consumers (REPL
 /// continuation, Ariadne renderer) can reason about *what* was
 /// unterminated and *where* it opened.

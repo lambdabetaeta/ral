@@ -148,7 +148,9 @@ pub fn sig_pipe_spec(result: &CompTemplate, u: &mut Unifier) -> PipeSpec {
 }
 
 /// The boundary [`PipeSpec`] of a streaming reducer (`fold-lines`): bytes
-/// in, output following the callback's output mode.  The checker supplies
+/// in, output following the callback's output mode.
+///
+/// The checker supplies
 /// `callback_output` from the callback's quantified mode variable.
 pub fn reducer_spec(callback_output: PipeMode) -> PipeSpec {
     PipeSpec {
@@ -562,7 +564,9 @@ pub fn fs_list_entry_ty() -> Ty {
     ])
 }
 
-/// The record type returned by `file-info`.  Superset of
+/// The record type returned by `file-info`.
+///
+/// Superset of
 /// `fs_list_entry_ty` — same `name/type/size/mtime` plus access /
 /// birth times, the readonly bit, and the symlink `target` (empty
 /// string for non-symlinks).
@@ -628,7 +632,9 @@ pub mod scheme {
     }
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the
-    /// host's structured-event sink.  The row is open and otherwise
+    /// host's structured-event sink.
+    ///
+    /// The row is open and otherwise
     /// unconstrained: any variant is accepted, and the host decides which
     /// tags it understands.
     pub fn surface_op(u: &mut Unifier) -> Scheme {
@@ -913,7 +919,9 @@ pub mod scheme {
 
     /// `service :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)` —
     /// `watch`'s scheme, with the leading `String` now the mandatory birth
-    /// description. The durable lease class is a runtime fact, invisible
+    /// description.
+    ///
+    /// The durable lease class is a runtime fact, invisible
     /// to the types.
     pub fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
@@ -984,7 +992,9 @@ pub mod scheme {
 
     scheme!(exit_op: [Ty::Int] -> Ty::Unit);
 
-    /// `fail :: ∀α ρ. [status: Int | ρ] → F α`.  Always diverges; the
+    /// `fail :: ∀α ρ. [status: Int | ρ] → F α`.
+    ///
+    /// Always diverges; the
     /// result type is unconstrained.  Argument is an open record
     /// requiring at least `status: Int`; the row tail accepts arbitrary
     /// further fields (`message`, …) so a caught error record can be
@@ -1068,7 +1078,9 @@ pub fn builtin_type_hint(name: &str) -> Option<String> {
 }
 
 /// Number of value arguments the builtin's scheme declares (count of nested
-/// `Fun` layers under the outer `Thunk`).  Used to η-expand first-class
+/// `Fun` layers under the outer `Thunk`).
+    ///
+    /// Used to η-expand first-class
 /// builtin references (`$upper`) into curried lambda thunks.  `None` for
 /// builtins without an arity — typically variadic ones like `echo` or
 /// command-only dispatchers.

@@ -204,7 +204,9 @@ pub enum Ast {
 }
 
 /// One branch of an [`Ast::If`]: a condition expression paired with
-/// the body to run when that condition is the first to match.  Both
+/// the body to run when that condition is the first to match.
+///
+/// Both
 /// halves carry spans so the typechecker can narrow a non-Bool cond
 /// or a branch-body type mismatch onto the offending fragment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,7 +216,9 @@ pub struct IfBranch {
 }
 
 /// One statement in a statement-sequence position (top-level program, block
-/// body, lambda body, pipeline stage).  The wrapping `Spanned` carries the
+/// body, lambda body, pipeline stage).
+///
+/// The wrapping `Spanned` carries the
 /// statement's span — `start_of_first_token .. end_of_last_token` — so the
 /// elaborator can stamp it on emitted IR for diagnostics.  Covering the
 /// full extent matters: when an error fires at the outermost `Comp` (e.g.
@@ -293,7 +297,9 @@ pub struct MapPatternEntry<D = Ast> {
 /// (currying).
 pub type Param = Pattern;
 
-/// Element of a list literal. A spread (`...expr`) splices another list
+/// Element of a list literal.
+///
+/// A spread (`...expr`) splices another list
 /// into the enclosing one.  Each variant's inner `Spanned<Ast>` covers
 /// the element's parsed range so a per-element diagnostic (a
 /// heterogeneous-list type mismatch, a spread of a non-list) narrows
@@ -306,7 +312,9 @@ pub enum ListElem {
     Spread(Spanned<Ast>),
 }
 
-/// Entry of a map literal.  Each variant's value-side `Spanned<Ast>`
+/// Entry of a map literal.
+///
+/// Each variant's value-side `Spanned<Ast>`
 /// covers the value expression's parsed range so a per-entry diagnostic
 /// (a wrong-shape value, a spread of a non-map) narrows onto the
 /// offending value rather than the whole map.
@@ -434,7 +442,9 @@ pub enum EqOp {
     Ne,
 }
 
-/// Category-tagged projection of [`BinaryOp`].  Constructed via
+/// Category-tagged projection of [`BinaryOp`].
+///
+/// Constructed via
 /// [`BinaryOp::kind`].  Dispatching on this rather than the flat enum
 /// lets each category's handler accept its own narrowed sub-enum, so
 /// the match arms inside are exhaustive without a wildcard fallback.
@@ -494,7 +504,9 @@ pub struct Redirect {
     pub target: RedirectTarget,
 }
 
-/// Operand shape of a control-operator scope form.  Each variant
+/// Operand shape of a control-operator scope form.
+///
+/// Each variant
 /// matches a surface keyword (`try`/`guard`/`within`/`grant`/`audit`);
 /// arity, operand description, and constructor-from-operands are
 /// declared together in [`ScopeAst::KEYWORDS`].
@@ -512,7 +524,9 @@ pub enum ScopeAst {
     Audit { body: Box<Ast> },
 }
 
-/// Parser metadata for one control-operator keyword: the surface
+/// Parser metadata for one control-operator keyword:
+///
+/// the surface
 /// name, its operand arity, a human-readable operand description for
 /// arity-mismatch diagnostics, and a constructor that destructures
 /// the arity-validated operand vector into the matching [`ScopeAst`].
@@ -603,7 +617,9 @@ impl ScopeAst {
 // ── Utilities ────────────────────────────────────────────────────────────
 
 /// Syntactic classification of a bare-word string into a value-literal
-/// shape.  The single source of truth for "does this bare word look like
+/// shape.
+///
+/// The single source of truth for "does this bare word look like
 /// a literal rather than a command name?" — used at parse time to skip
 /// the [`Ast::Call`] wrapper, and again at elaboration to choose the
 /// appropriate typed [`crate::ir::Val`] variant (see

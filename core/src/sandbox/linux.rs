@@ -19,7 +19,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Build a [`Command`] that runs `name` inside a `bwrap` sandbox
-/// configured by `policy`.  Read-only and read-write bind mounts are
+/// configured by `policy`.
+///
+/// Read-only and read-write bind mounts are
 /// derived from the policy prefixes, with `deny_paths` overlaid read-only
 /// after broad writable binds.
 ///

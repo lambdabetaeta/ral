@@ -49,7 +49,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 /// Stable identifier for a registered worker, unique across every `Shell`
-/// in this process. Minted from a process-global counter rather than a
+/// in this process.
+///
+/// Minted from a process-global counter rather than a
 /// per-registry one, so an id never collides even when compared across
 /// shells — a fleet listing folds several agents' registries together.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -66,7 +68,9 @@ impl WorkerId {
 }
 
 /// The lifetime a frame grants the workers its turns detach: an idle bound
-/// on the observation clock under an absolute backstop. A lease, not a
+/// on the observation clock under an absolute backstop.
+///
+/// A lease, not a
 /// death-clock — the worker is reaped when *unobserved* for `idle`, not
 /// when `idle` old, and each eliminator naming the handle (`poll`, a
 /// blocked `await`/`race` sweep) renews it. The two travel as one value so
@@ -113,7 +117,9 @@ pub enum ReapCause {
     Retention,
 }
 
-/// The compact record a reap leaves behind — the facts a transcript event
+/// The compact record a reap leaves behind
+///
+/// — the facts a transcript event
 /// needs (which worker, spelled how, of what class, reaped why) without the
 /// handle, which the reap deliberately does not keep alive. Recorded only
 /// for an entry that was actually present at reap time: an entry an
@@ -128,7 +134,9 @@ pub struct ReapNotice {
 
 /// One registered worker: the [`WorkerRegistry`]'s record of a `spawn`/
 /// `watch` call, paired with the handle a caller uses to observe or cancel
-/// it. Storing the handle itself — rather than exposing a second by-id
+/// it.
+///
+/// Storing the handle itself — rather than exposing a second by-id
 /// control plane — is the decisive design point: `poll`, `await`, `race`,
 /// and `cancel` remain the only verbs that touch a worker, so "rediscover a
 /// worker" is just list, then take the handle back and resume the ordinary

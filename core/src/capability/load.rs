@@ -23,6 +23,7 @@ use crate::types::{Break, Capabilities, Settled, Shell, sig};
 
 /// Evaluate `source` as a `.ral` script and walk its terminal value
 /// into a frozen [`Capabilities`], resolving sigils against `ctx`.
+///
 /// `virtual_path` labels the file in error messages and in the
 /// cycle-detection stack — pass the absolute path for files on disk, or
 /// a synthetic identifier (`<built-in:NAME>`) for embedded profiles.
@@ -39,6 +40,7 @@ pub fn load_capabilities_from_str(
 }
 
 /// Read `path` from disk and forward to [`load_capabilities_from_str`].
+///
 /// A missing file is reported as `file not found`; any other IO failure is
 /// wrapped with the file path so the user sees which profile could not be
 /// opened.
@@ -69,7 +71,9 @@ pub fn load_capabilities_from_path(
 }
 
 /// Load each profile in `paths`, freezing each against the session's
-/// `$HOME` and working directory, compose them left-to-right by `meet`
+/// `$HOME` and working directory,
+///
+/// compose them left-to-right by `meet`
 /// (each successive file narrows authority), and push the result onto
 /// `shell` as a permanent session-wide ceiling.  No-op when `paths` is
 /// empty.

@@ -43,6 +43,7 @@ impl TildePath {
 /// Look up `username`'s home directory via the reentrant
 /// `getpwnam_r(3)`, which writes into a caller-owned buffer rather
 /// than the shared static `passwd` that `getpwnam(3)` returns.
+///
 /// Falls back to `/home/<name>` when the lookup fails or the
 /// username contains a NUL byte.
 #[cfg(unix)]

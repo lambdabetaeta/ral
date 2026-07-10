@@ -18,7 +18,9 @@ use super::{ESCALATION, Pgid, PgidPolicy};
 
 // ── Termination handler ────────────────────────────────────────────────────
 
-/// Install handlers for SIGINT, SIGTERM, SIGHUP.  Snapshots inherited
+/// Install handlers for SIGINT, SIGTERM, SIGHUP.
+///
+/// Snapshots inherited
 /// `SIG_IGN` dispositions *before* installing ral's own handlers so the
 /// nohup rule (preserve dispositions the parent deliberately ignored) can
 /// be honored in spawned children — see [`reset_child_signals`].
@@ -372,7 +374,9 @@ pub(super) fn wait_handling_stop(
     classify_wait_status(status, pid, pgid, park_on_stop, child)
 }
 
-/// `waitpid(target, flags)` with implicit `EINTR` retry.  Returns the raw
+/// `waitpid(target, flags)` with implicit `EINTR` retry.
+///
+/// Returns the raw
 /// `(ret, status)`: `ret > 0` reaped a child, `ret == 0` is `WNOHANG` with
 /// nothing pending, `ret < 0` is a terminal errno (e.g. `ECHILD`) with
 /// `errno` set.  `EINTR` is retried and never reaches the caller, so a

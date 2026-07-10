@@ -106,7 +106,9 @@ pub enum BodyResult {
 }
 
 /// Decompose a body's `Settled<Value>` outcome into the
-/// (`BodyResult`, `Escape`) split that scope helpers consume.  Total
+/// (`BodyResult`, `Escape`) split that scope helpers consume.
+///
+/// Total
 /// by construction: `Settled<Value> = Result<Value, Break>` cannot
 /// encode a tail call — `Tail` lives only in the evaluator-private
 /// `Control` enum and is absorbed by the trampoline before any

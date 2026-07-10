@@ -79,7 +79,9 @@ pub(crate) fn is_uutils_tool(_name: &str) -> bool {
     false
 }
 
-/// Restore SIGPIPE to its default disposition.  Rust's runtime sets
+/// Restore SIGPIPE to its default disposition.
+///
+/// Rust's runtime sets
 /// SIGPIPE=IGN before main; uucore writes therefore see EPIPE and return 1
 /// instead of dying from SIGPIPE.  A non-final pipeline stage that exits 1
 /// is indistinguishable from a real error — `yes | head` would mis-report
@@ -92,7 +94,9 @@ pub fn init_signal_dispositions() {
     }
 }
 
-/// Reset uucore's process-global `EXIT_CODE` to 0.  Must be called before
+/// Reset uucore's process-global `EXIT_CODE` to 0.
+///
+/// Must be called before
 /// each in-process `uumain` invocation since the previous call may have
 /// left a non-zero code.  When `coreutils` is not active (only diffutils
 /// or ripgrep are bundled), this is a no-op.
@@ -102,7 +106,9 @@ pub fn reset_exit_code() {
     uucore::error::set_exit_code(0);
 }
 
-/// Read uucore's process-global `EXIT_CODE`.  The return value of `uumain`
+/// Read uucore's process-global `EXIT_CODE`.
+///
+/// The return value of `uumain`
 /// is not the exit code seen by the utility's own error machinery — the
 /// true exit code is tracked in this atomic.  When `coreutils` is not
 /// active, returns 0 (diffutils / ripgrep don't use the uucore exit code).

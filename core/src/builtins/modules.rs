@@ -34,8 +34,12 @@ const MAX_SOURCE_DEPTH: usize = 100;
 
 /// Save the script context (script name on both `script` and
 /// `call_site.script`, plus the `source`-text cache used for
-/// byte-span → (line, col) resolution), swap to the loaded file's
-/// for the guard's lifetime, and restore on drop.  `?`-returns from
+/// byte-span → (line, col) resolution),
+///
+/// swap to the loaded file's
+/// for the guard's lifetime, and restore on drop.
+///
+/// `?`-returns from
 /// the body roll the swap back automatically.  Shared between
 /// `source`, `use`, and the REPL plugin loader.
 ///
@@ -85,7 +89,9 @@ impl Drop for ScriptContextGuard<'_> {
 
 /// Run an already-checked `comp` under a `ScriptContextGuard` keyed on
 /// `virtual_path`, sharing the cycle-detection stack and recursion-depth
-/// guard with [`evaluate_source`].  Split out for callers that need their
+/// guard with [`evaluate_source`].
+///
+/// Split out for callers that need their
 /// own compile/typecheck error surface ahead of evaluation — the REPL's
 /// rc-config loader reports type errors through ariadne before ever
 /// reaching this point — but still want the guarded evaluate every other
@@ -130,7 +136,9 @@ pub fn evaluate_checked(
 }
 
 /// Parse + elaborate + evaluate `source` under a `ScriptContextGuard`
-/// keyed on `virtual_path`.  The path is virtual in the sense that the
+/// keyed on `virtual_path`.
+///
+/// The path is virtual in the sense that the
 /// caller is responsible for any filesystem read; this function only
 /// uses it to label `shell.turn.loc.script` (so error messages and
 /// nested `source`/`use` resolutions point back to the right file) and

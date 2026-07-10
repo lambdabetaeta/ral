@@ -40,6 +40,7 @@ fn pick(letters: &[&str], idx: usize) -> String {
 }
 
 /// Formatting context: maps unification variables to display names.
+///
 /// Variables not in the map fall back to placeholders (`_` for types,
 /// `...` for rows) — appropriate for `:type` output where the user is
 /// looking at *one* type and the variable identity isn't load-bearing.
@@ -255,7 +256,9 @@ pub fn fmt_mode(mode: &PipeMode) -> String {
 }
 
 /// Like [`fmt_mode`] but consults `ctx` for a friendly name on
-/// unbound mode variables.  When the variable has been pre-named by
+/// unbound mode variables.
+///
+/// When the variable has been pre-named by
 /// [`FmtCtx::for_value_types`], it prints as `μ`/`ν`/…;
 /// otherwise it falls back to `_`.
 pub fn fmt_mode_ctx(mode: &PipeMode, ctx: &FmtCtx) -> String {

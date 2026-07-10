@@ -601,7 +601,9 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
 }
 
 /// No-bundled-features fallback so the binary entrypoint stays
-/// feature-clean.  Without any bundled tool linked in there is nothing
+/// feature-clean.
+///
+/// Without any bundled tool linked in there is nothing
 /// `--ral-bundled-tool` could dispatch, so it is unreachable; recognise
 /// the sentinel anyway to turn it into a clear diagnostic rather than an
 /// opaque clap usage error, mirroring [`RETIRED_EXEC_FLAG`].

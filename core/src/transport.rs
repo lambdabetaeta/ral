@@ -44,7 +44,9 @@ static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DispatchId(pub u64);
 
-/// Correlation token for one outstanding enquiry. Unused under the identity
+/// Correlation token for one outstanding enquiry.
+///
+/// Unused under the identity
 /// transport (a direct call, no frames to correlate); minted per enquiry by
 /// the wire engine's desk and carried on both `Event::Enquiry` and its
 /// answering `Frame::Answer`.
@@ -171,6 +173,7 @@ pub enum Event {
 }
 
 /// What crosses the wire when an enquiry is refused or its handler fails.
+///
 /// Kept as message *and* status (never collapsed into `crate::types::Error`,
 /// which also carries a `loc` core has no business shipping across the
 /// seam) so a refused enquiry raises the same error under both transports;
@@ -460,7 +463,9 @@ fn mint_dispatch_id() -> DispatchId {
 
 /// The one decoder for every probe reading, shared by `IdentityTransport`
 /// and the wire engine (`core/src/engine.rs`) so a new reading class costs
-/// one arm here, never a second copy per transport. Each class is an
+/// one arm here, never a second copy per transport.
+///
+/// Each class is an
 /// `FOValue::Variant` label, matching the accessor traffic
 /// `exarch/src/agent.rs` used to read straight through `shell_mut()`:
 /// `` `worker-count ``, `` `binding-count ``, `` `leased-binding-count ``,

@@ -120,7 +120,9 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
 }
 
 /// Every path string by which a kernel sandbox MAC hook might
-/// present the same VFS object as `p`.  Always includes `p`
+/// present the same VFS object as `p`.
+///
+/// Always includes `p`
 /// itself; on macOS also includes the lenient canonical form
 /// and any firmlink-toggled variant.  Sorted, deduped.
 ///
@@ -141,7 +143,9 @@ pub fn match_variants(p: &Path) -> Vec<PathBuf> {
 }
 
 /// List-shaped [`match_variants`]: expand every entry to its firmlink
-/// equivalents, flatten, dedupe.  A grant for `/tmp/work` produces
+/// equivalents, flatten, dedupe.
+///
+/// A grant for `/tmp/work` produces
 /// `[/tmp/work, /private/tmp/work]`, since Seatbelt may present either
 /// form to the MAC hook depending on the syscall.  Used by the macOS
 /// sandbox profile builder when laying out subpath rules.  Accepts the

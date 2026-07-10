@@ -35,7 +35,9 @@ pub fn entries() -> Vec<PathBuf> {
 
 /// First `$dir/$name` that resolves under
 /// [`ResolvedPath::canonicalise_strict`](super::ResolvedPath::canonicalise_strict),
-/// scanning [`entries`] in order.  `None` when nothing in
+/// scanning [`entries`] in order.
+///
+/// `None` when nothing in
 /// `RAL_PATH` names an existing file (including the case where the
 /// variable is unset).  Each candidate reaches the canonicaliser
 /// only through a shell-less [`ResolvedPath`](super::ResolvedPath).

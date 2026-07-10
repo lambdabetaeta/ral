@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use crate::text::floor_char_boundary;
 
-/// Source text bundled with a precomputed line-start index.  Binary search
+/// Source text bundled with a precomputed line-start index.
+///
+/// Binary search
 /// over the index resolves a `(byte_offset → line, col)` lookup in
 /// O(log lines), independent of file size; `eval_comp` recomputes `Location`
 /// from a span on every node it visits, so the per-lookup cost is on a hot
@@ -95,7 +97,9 @@ impl Source {
 }
 
 /// Registry of every source text the current turn has loaded, keyed by
-/// [`FileId`].  A [`SourceLoc`] carries the `FileId` of the source whose
+/// [`FileId`].
+///
+/// A [`SourceLoc`] carries the `FileId` of the source whose
 /// `line`/`col` index it holds, and the runtime renderer resolves that id
 /// here so a `source`d module's error draws its caret into the module's own
 /// bytes rather than the top-level script's.
@@ -143,6 +147,7 @@ impl SourceDb {
 }
 
 /// Convert a byte offset within `source` into a 1-indexed (line, col) pair.
+///
 /// Linear-scan version retained for one-off callers that do not have a
 /// cached `Source` to hand; hot paths should build a [`Source`] once and
 /// call [`Source::byte_to_line_col`] instead.
@@ -307,7 +312,9 @@ fn caret_range(source: &str, start: usize, width: usize) -> std::ops::Range<usiz
     s..e
 }
 
-/// Render a parse error via ariadne.  When the error originated in the
+/// Render a parse error via ariadne.
+///
+/// When the error originated in the
 /// lexer the structured kind drives a dual-label render (opening
 /// delimiter + EOF position + nested-form note); otherwise a single
 /// red label points at the offending token.
@@ -473,7 +480,9 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
 }
 
 /// Short phrase placed next to the primary label, describing the immediate
-/// nature of the mismatch.  The kind's full message goes on the Report;
+/// nature of the mismatch.
+///
+/// The kind's full message goes on the Report;
 /// the label is the bite-size pointer that fits next to the underline.
 ///
 /// The label is symmetric in `expected`/`actual` — see the note on
@@ -567,7 +576,9 @@ pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) 
         .collect()
 }
 
-/// Render a runtime error via ariadne.  Resolves the location's source
+/// Render a runtime error via ariadne.
+///
+/// Resolves the location's source
 /// identity against `db` to recover the file name and text the `line`/`col`
 /// index, then draws the caret there; `len` is a byte length, converted to a
 /// character width for the underline.  Falls back to a messageless render when
@@ -619,8 +630,11 @@ pub fn format_runtime_error_auto(
 }
 
 /// Turn-result epilogue shared by every host that runs a top-level turn:
+///
 /// render the caught runtime error via [`format_runtime_error_auto`] into
-/// `out`, then hand back the process-exit-code-clamped status. A host that
+/// `out`, then hand back the process-exit-code-clamped status.
+///
+/// A host that
 /// wants to suppress the rendering (e.g. under an audit trace that reports
 /// the error itself) passes [`std::io::sink`] and still gets the exit code.
 pub fn report_runtime_error(

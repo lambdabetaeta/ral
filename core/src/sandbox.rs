@@ -247,7 +247,9 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 }
 
 /// The OS-sandbox stage of the pre-`main` dispatch, as an `Option<u8>`
-/// building block: run [`early_init`] over the process argv and, when this
+/// building block:
+///
+/// run [`early_init`] over the process argv and, when this
 /// process is the Linux bwrap respawn child, surface its exit code so the
 /// caller can terminate. A normal top-level invocation yields `None`.
 /// `early_init` also pins `SANDBOX_SELF` here. The stripped argv is

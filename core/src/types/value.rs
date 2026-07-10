@@ -329,7 +329,9 @@ pub enum HandleState {
 
 /// The observable outcome of a finished concurrent block: the bytes it
 /// wrote, drained exactly once from the handle's buffers, paired with its
-/// raw result.  Every eliminator (`await`, `race`, `poll`) projects this
+/// raw result.
+///
+/// Every eliminator (`await`, `race`, `poll`) projects this
 /// one cached value rather than re-reading the live buffers, so a failed
 /// block's bytes are captured on completion and repeated observations stay
 /// consistent.  `outcome` is `Ok(value)` for a block that returned and
@@ -346,7 +348,9 @@ pub struct CompletedHandle {
 }
 
 /// Bounded buffer of structured-event values a *detached* worker defers
-/// instead of emitting live.  The turn that spawned the worker may already
+/// instead of emitting live.
+///
+/// The turn that spawned the worker may already
 /// have ended, so its `surface` events are buffered here and replayed through
 /// the awaiting turn's surface on the first `await`/`race`.  Bounded so a
 /// runaway detached emitter cannot grow it without limit (see
@@ -532,6 +536,7 @@ pub struct FrameHandle(pub(crate) u64);
 
 /// Calling convention of a handler invocation — fixed by the surface
 /// form at install time, never inferred from the value's runtime shape.
+///
 /// A per-name handler (`within [handlers: …]`) and an alias are always
 /// [`Unary`]: a unary lambda `{ |args| … }` invoked with the command's
 /// argument list.  A catch-all (`within [handler: …]`) is always

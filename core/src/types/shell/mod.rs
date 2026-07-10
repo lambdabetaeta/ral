@@ -69,7 +69,9 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default cap on non-tail closure-call depth.  Insurance against
+/// Default cap on non-tail closure-call depth.
+///
+/// Insurance against
 /// stack-guard SIGABRT from runaway recursion the typechecker can't
 /// catch.  Tail calls are landed in the trampoline loop and don't
 /// count.  Overridable via rc / CLI; in practice never tuned.
@@ -77,7 +79,9 @@ pub const DEFAULT_RECURSION_LIMIT: usize = 1024;
 
 /// The Send+Clone dynamic context carried by every child computation — a
 /// thunk body, a spawned thread (`spawn`, `par`, pipeline stage), or a REPL
-/// aside.  Lives as the `context` field of [`Mobile`] and clones wholesale
+/// aside.
+///
+/// Lives as the `context` field of [`Mobile`] and clones wholesale
 /// into a child; the source cursor and builtin table are deliberately *not*
 /// here (they are turn- and session-state respectively), so a `Context` clone
 /// carries no render registry and no host dispatch.
@@ -140,7 +144,9 @@ pub struct Context {
 // borrows this Context and folds the whole stack from there.
 
 /// The persistable half of a [`Shell`]: lexical scope, control
-/// counters, dynamic [`Context`].  Cloned on every
+/// counters, dynamic [`Context`].
+///
+/// Cloned on every
 /// [`Shell::inherit_from`] / [`Shell::spawn_thread`] and snapshotted
 /// across evaluation boundaries via [`Shell::mobile`] /
 /// [`Shell::install_mobile`].
@@ -162,7 +168,9 @@ pub struct Mobile {
 }
 
 /// A sink for structured host events: the value-typed dual of the byte
-/// [`Io`](crate::io::Io) sinks.  A *synchronous* trait taking a borrowed
+/// [`Io`](crate::io::Io) sinks.
+///
+/// A *synchronous* trait taking a borrowed
 /// [`Value`]; the `surface` builtin forwards its argument to "the current
 /// turn's sink", and is the identity when none is installed.  Core names no
 /// host runtime type — the host decides whether `emit` prints, blocks,
@@ -180,7 +188,9 @@ impl EventSink for () {
     fn emit(&self, _ev: &crate::serial::FOValue) {}
 }
 
-/// Shared handle to the turn-local structured-event sink.  Turn-scoped, not a
+/// Shared handle to the turn-local structured-event sink.
+///
+/// Turn-scoped, not a
 /// persistent `Shell` capability: installed only by a turn door
 /// ([`Shell::run_turn`](crate::Shell::run_turn)), it has no liveness
 /// role, so a clone can never decide that a turn is over.
@@ -202,7 +212,9 @@ pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
 /// Host-installed destination for a deferred worker's surface batch,
 /// delivered when the worker settles and rendered by the host at the next
-/// turn boundary. `None` outside an agent host: a bare REPL installs none,
+/// turn boundary.
+///
+/// `None` outside an agent host: a bare REPL installs none,
 /// so a deferred worker's surface still reaches a sink only via
 /// `await`/`race`.  Carried on the turn beside [`SurfaceSink`] and cloned
 /// into spawned workers (so a nested `spawn` delivers at its own
@@ -243,7 +255,9 @@ pub(crate) enum TerminalAccess {
     ExplicitLoan,
 }
 
-/// The whole dynamic frame a top-level turn installs.  A turn builds one,
+/// The whole dynamic frame a top-level turn installs.
+///
+/// A turn builds one,
 /// swaps it into `shell.turn`, runs, and restores the previous one on
 /// teardown; the field is the invariant "the turn-local part" used to be a
 /// scattered save/restore.  Same-thread bodies flow these through
@@ -408,7 +422,9 @@ pub struct LocalState {
     pub(crate) bindings: BindingLedger,
 }
 
-/// The runtime, partitioned by lifetime.  A field either moves as a turn
+/// The runtime, partitioned by lifetime.
+///
+/// A field either moves as a turn
 /// ([`TurnState`]), survives a turn ([`SessionState`]), crosses evaluation
 /// boundaries ([`Mobile`]), or stays as host scratch ([`LocalState`]).
 ///

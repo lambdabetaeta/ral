@@ -18,7 +18,9 @@ use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
 
-/// IR-side pattern.  Identical in shape to [`crate::syntax::ast::Pattern`] but with
+/// IR-side pattern.
+///
+/// Identical in shape to [`crate::syntax::ast::Pattern`] but with
 /// map-pattern defaults represented as pre-elaborated computations
 /// ([`Arc<Comp>`]) instead of raw [`crate::syntax::ast::Ast`].  This is what the
 /// elaborator hands to the typechecker and the evaluator — no parser
@@ -162,7 +164,9 @@ pub mod args {
     use super::{Args, Val, ValListElem};
 
     /// Walk every sub-value in the args list, regardless of whether each
-    /// element is `Single` or `Spread`.  Used by passes that need to
+    /// element is `Single` or `Spread`.
+    ///
+    /// Used by passes that need to
     /// visit every Val in argument position without distinguishing the
     /// two (mode analysis, best-effort sub-expression typing).
     pub fn iter_subvals(args: &Args) -> impl Iterator<Item = &Val> {
@@ -196,6 +200,7 @@ pub enum ValRedirectTarget {
 }
 
 /// IR-side I/O redirect: file descriptor, mode, and target value.
+///
 /// Owned as a field of [`CompKind::Exec`] (fused into the spawn syscall,
 /// which installs descriptors and execs atomically) or
 /// [`ScopeOp::Redirect`] (a redirect-frame scope wrapping an arbitrary
@@ -606,7 +611,9 @@ pub struct Exec {
     pub redirects: Vec<RedirectV>,
 }
 
-/// Dispatch shape of an [`Exec`] head.  Two variants, two rules:
+/// Dispatch shape of an [`Exec`] head.
+///
+/// Two variants, two rules:
 /// `Name` goes through binding, handler, then PATH lookup;
 /// `External` is the `^name` form, which skips binding but is still
 /// contained by any enclosing
@@ -636,7 +643,9 @@ impl CommandWord {
     }
 }
 
-/// The effect-frame variants.  Each describes a particular effect
+/// The effect-frame variants.
+///
+/// Each describes a particular effect
 /// installed for the duration of a body computation, then restored
 /// when the body returns or escapes.  Carried directly by
 /// [`CompKind::Scope`] — there is no wrapper struct, since no

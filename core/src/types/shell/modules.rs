@@ -7,7 +7,9 @@
 //! hooks and keybindings only fire inside the rustyline-driven REPL.
 
 /// Module-loader state for `use` and `source`: the active-load stack (for
-/// cycle detection) and the current recursion depth.  Both are push/pop
+/// cycle detection) and the current recursion depth.
+///
+/// Both are push/pop
 /// balanced within a single load, so neither flows back from a child
 /// computation to its parent.
 #[derive(Clone, Default, Debug)]

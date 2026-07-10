@@ -89,7 +89,9 @@ impl From<ByteMode> for PipeMode {
 
 /// The checker's instantiated, ground verdict for one pipeline stage:
 /// the input and output [`ByteMode`]s of a `F[input, output]` computation
-/// type with no variable arm.  Where a [`PipeSpec`] admits a `PipeMode::Var`
+/// type with no variable arm.
+///
+/// Where a [`PipeSpec`] admits a `PipeMode::Var`
 /// resolved during inference, a `Wire` is the two-valued image of that spec
 /// once the variable is grounded — so "annotations are ground" is a fact of
 /// the type rather than an invariant the reader must trust.
@@ -130,7 +132,9 @@ impl Wire {
 }
 
 /// A mode-unification failure: a `None`/`Bytes` clash the checker's
-/// `unify_mode` raises and each caller maps onto its own diagnostic — the
+/// `unify_mode` raises and each caller maps onto its own diagnostic.
+///
+/// The
 /// static checker's [`crate::typecheck::TypeErrorKind::ModeMismatch`], or
 /// the install-time `alias_arm_scheme` rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

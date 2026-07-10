@@ -287,6 +287,7 @@ impl TyEnv {
 
 /// The `bind_tys`/`stage_specs`/`bind_outputs` maps are keyed by node
 /// address and are valid only for the exact tree passed to `infer_comp`,
+///
 /// read by `annotate` before any node is freed; a clone between the two
 /// passes would silently miss.
 pub struct InferCtx {

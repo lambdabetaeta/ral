@@ -31,7 +31,9 @@ pub struct CallSite {
     pub col: usize,
 }
 
-/// Turn-local source cursor for diagnostics.  Holds where execution is,
+/// Turn-local source cursor for diagnostics.
+///
+/// Holds where execution is,
 /// where it was called from (saved before entering prelude wrappers so
 /// `audit`/`try` name the user's line, not the prelude's), and the cached
 /// source text of the current script for structured spans.
@@ -118,7 +120,9 @@ pub struct AuditTime {
     pub end: i64,
 }
 
-/// Byte-capture policy.  `Off` is the default — fd 1 and fd 2 stream
+/// Byte-capture policy.
+///
+/// `Off` is the default — fd 1 and fd 2 stream
 /// live with no buffering, the normal §4.3 path.  `Bytes` installs the
 /// dispatcher-level tee that captures each command's stdout / stderr
 /// into its audit node (§10.3).  Set by `audit`; inherited by nested
@@ -147,7 +151,9 @@ impl AuditTrail {
     }
 }
 
-/// Audit nodes detached from a trail.  Process boundaries (sandbox
+/// Audit nodes detached from a trail.
+///
+/// Process boundaries (sandbox
 /// child, pipeline helper, internal builtins) produce a fragment;
 /// the receiving side merges it into the surrounding scope.  Distinct
 /// from [`AuditTrail`] only in ownership: the trail belongs to a live

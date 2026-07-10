@@ -19,7 +19,9 @@ use std::collections::BTreeSet;
 
 /// Cached residual free variables for a scheme — those free in the scheme's
 /// type that were NOT quantified because they appeared in the environment at
-/// generalisation time.  For fully-generalised (top-level) schemes all three
+/// generalisation time.
+///
+/// For fully-generalised (top-level) schemes all three
 /// sets are empty.
 ///
 /// Stored on generalised schemes so that `env_free_vars` can skip a full

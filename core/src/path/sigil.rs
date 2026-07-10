@@ -37,10 +37,14 @@ pub fn looks_like_xdg(s: &str) -> bool {
     s.starts_with("xdg:")
 }
 
-/// True when `s` is shaped like a path or path-prefix sigil — it
+/// True when `s` is shaped like a path or path-prefix sigil
+///
+/// — it
 /// either contains a path separator or starts with one of the four
 /// sigil tokens recognised by [`freeze_one`] (`~`, `xdg:`, `cwd:`,
-/// `tempdir:`, `gitdir:`).  Used by the unified exec map: bare command names
+/// `tempdir:`, `gitdir:`).
+///
+/// Used by the unified exec map: bare command names
 /// (no `/`, no sigil) pass through freeze unchanged; everything else
 /// gets sigil-resolved.
 pub fn looks_like_path_or_sigil(s: &str) -> bool {
@@ -92,7 +96,9 @@ pub fn expand_path_prefix(input: &str, home: &str) -> String {
     input.to_string()
 }
 
-/// Per-call inputs for the freeze pass.  `home` and `cwd` are
+/// Per-call inputs for the freeze pass.
+///
+/// `home` and `cwd` are
 /// supplied by the caller; `tempdir` is read from the process env
 /// (`std::env::temp_dir`) the same way XDG sigils read
 /// `XDG_*_HOME`; `gitdir:` resolves via [`crate::path::discover_git_dir`]
@@ -105,7 +111,9 @@ pub struct FreezeCtx<'a> {
 }
 
 /// Resolve every sigil-bearing entry in `paths` against `ctx`,
-/// rewriting it in place.  Tilde paths expand against `home`;
+/// rewriting it in place.
+///
+/// Tilde paths expand against `home`;
 /// `xdg:NAME[/sub]` resolves via the XDG env vars (and is required
 /// to land under `home`); `cwd:[/sub]` resolves to `ctx.cwd`;
 /// `tempdir:[/sub]` resolves to `std::env::temp_dir()`.
@@ -134,7 +142,9 @@ pub fn freeze_path_list(
 }
 
 /// Freeze one entry into a [`NormalizedPrefix`]: expand any sigil
-/// against `ctx`, then fold `.`/`..` and wrap.  Tilde paths expand
+/// against `ctx`, then fold `.`/`..` and wrap.
+///
+/// Tilde paths expand
 /// against `home`; `xdg:NAME[/sub]` resolves via the XDG env vars (and
 /// is required to land under `home` *after folding*, closing the
 /// `xdg:config/../../etc` escape); `cwd:[/sub]` resolves to `ctx.cwd`;

@@ -51,7 +51,9 @@ pub use resolved::{NormalizedPrefix, ResolvedPath};
 pub use resolver::{CanonMode, Resolver};
 pub use which::{commands_on_path, file_exists_on_path, locate, resolve_in_path};
 
-/// Process working directory.  The one syscall behind the lint —
+/// Process working directory.
+///
+/// The one syscall behind the lint —
 /// `Shell::cwd` is the canonical accessor for shells; this helper is
 /// for the few shell-less callers (path resolver fallback, sandbox
 /// host snapshot, [`Resolver::resolve`] when no logical cwd is bound).
@@ -60,7 +62,9 @@ pub fn process_cwd() -> Option<std::path::PathBuf> {
     std::env::current_dir().ok()
 }
 
-/// `/proc/self/fd/<raw>` as a `PathBuf`.  Linux-only: the magic
+/// `/proc/self/fd/<raw>` as a `PathBuf`.
+///
+/// Linux-only: the magic
 /// procfs entry that names an open file descriptor by path, which
 /// the sandbox re-exec uses to pin the ral binary across the
 /// `execve` into the child.

@@ -23,7 +23,9 @@ pub struct GitStatus {
 }
 
 /// The git working-tree state when the current directory is inside a
-/// repository; `None` otherwise.  Two cheap subprocesses:
+/// repository; `None` otherwise.
+///
+/// Two cheap subprocesses:
 /// `git rev-parse --abbrev-ref HEAD` for the branch and
 /// `git status --porcelain` for the dirty bit (non-empty output ⇒
 /// dirty).  Best-effort — any failure yields `None`.

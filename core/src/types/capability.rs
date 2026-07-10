@@ -52,7 +52,9 @@ pub trait Meet {
 }
 
 /// Widen a base ceiling with an extension at load time, before any
-/// attenuation runs (`base.join(extension)`).  Adds the extension's
+/// attenuation runs (`base.join(extension)`).
+///
+/// Adds the extension's
 /// positive authority but preserves every veto — `Deny`s and
 /// `deny_paths` are sticky on both sides — so this is a widening
 /// join-semilattice, not the strict order-dual of [`Meet`]: a deny

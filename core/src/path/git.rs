@@ -19,7 +19,9 @@ pub fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Discover the real git directory for `cwd`, handling worktrees where
-/// `.git` is a file pointing elsewhere.  Calls [`find_git_entry`] to
+/// `.git` is a file pointing elsewhere.
+///
+/// Calls [`find_git_entry`] to
 /// locate the first `.git`; if it is a directory, returns it; if it is a
 /// file, parses the `gitdir:` pointer and resolves it.
 ///

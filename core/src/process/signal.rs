@@ -66,6 +66,7 @@ pub(crate) use windows::{
 // exceptions are tagged with `#[allow]` at the call site.
 
 /// Wrapper around a spawned child that hides the raw `wait` / `try_wait`
+///
 /// and only exposes [`Self::wait_handling_stop`] /
 /// [`Self::try_wait_handling_stop`] — the WUNTRACED-aware peers that
 /// can't misclassify a stopped child as "still running".
@@ -237,14 +238,18 @@ pub fn check(shell: &crate::types::Shell) -> Result<(), crate::types::Break> {
 }
 
 /// Reset the escalation ladder at an acknowledgment boundary — a fresh
-/// prompt, a turn compile, a session reboot — so signals already handled
+/// prompt, a turn compile, a session reboot —
+///
+/// so signals already handled
 /// cooperatively don't creep toward the third-delivery force-exit.
 pub fn clear() {
     ESCALATION.store(0, Ordering::Relaxed);
 }
 
 /// True once a termination signal has been delivered since the last
-/// [`clear`] — the escalation ladder has at least one tick.  Observability
+/// [`clear`] — the escalation ladder has at least one tick.
+///
+/// Observability
 /// only: nothing gates delivery on this (hosts and tests use it to prove a
 /// cancel path did, or deliberately did not, engage the ladder).
 pub fn escalation_pending() -> bool {
@@ -506,7 +511,9 @@ static FOREGROUND_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut
 static DURABLE_ROOT_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Publishes a scope's flag into [`FOREGROUND_SCOPE`] for its lifetime,
-/// restoring the previous publication on drop. Held by the turn doors for the
+/// restoring the previous publication on drop.
+///
+/// Held by the turn doors for the
 /// turn's extent; the scope it points at (the turn's `shell.turn.cancel`)
 /// must outlive the guard, which it does — the guard is dropped before the
 /// frame restores `turn.cancel`.
@@ -515,7 +522,9 @@ pub struct ForegroundCancelSlot {
 }
 
 /// Publish `scope`'s flag as the foreground-cancel target for the returned
-/// guard's lifetime. The prior publication is saved and restored on drop —
+/// guard's lifetime.
+///
+/// The prior publication is saved and restored on drop —
 /// a swap, not a clear — so a re-entrant turn nests its scope above the
 /// outer turn's and reveals it again when the inner guard drops.
 ///
@@ -536,7 +545,9 @@ impl Drop for ForegroundCancelSlot {
 }
 
 /// Publishes a scope's flag into [`DURABLE_ROOT_SCOPE`] for its lifetime,
-/// restoring the previous publication on drop. Held by the session for its
+/// restoring the previous publication on drop.
+///
+/// Held by the session for its
 /// whole life; the durable root scope must outlive the guard.
 pub struct RootCancelSlot {
     prev: *mut AtomicU8,
@@ -555,7 +566,9 @@ impl Drop for RootCancelSlot {
     }
 }
 
-/// Deliver `cause` to the current turn's foreground scope. Signal-safe: a
+/// Deliver `cause` to the current turn's foreground scope.
+///
+/// Signal-safe: a
 /// lock-free slot load and an atomic `fetch_max`. A no-op between turns
 /// (null slot). The foreground scope is the only thing affected — detached
 /// workers poll their own scopes, not this one, so they are spared.
@@ -571,7 +584,9 @@ pub fn request_foreground_cancel(cause: CancelCause) {
     }
 }
 
-/// Read [`FOREGROUND_SCOPE`] without a [`CancelScope`] in hand: the read-side
+/// Read [`FOREGROUND_SCOPE`] without a [`CancelScope`] in hand:
+///
+/// the read-side
 /// dual of [`request_foreground_cancel`], for a context parked outside the
 /// evaluator's own `shell.turn.cancel` — the wire engine's enquiry desk,
 /// parked on a rendezvous, has no `&Shell` to poll [`check`] with, but runs
@@ -590,7 +605,9 @@ pub fn foreground_cancel_cause() -> Option<CancelCause> {
 }
 
 /// Deliver `cause` to the session's durable root, reaching the foreground
-/// turn and every detached worker (all parented under it). Signal-safe: a
+/// turn and every detached worker (all parented under it).
+///
+/// Signal-safe: a
 /// lock-free slot load and an atomic `fetch_max`. A no-op when no root is
 /// published.
 pub fn request_root_cancel(cause: CancelCause) {
@@ -621,7 +638,9 @@ impl Default for CancelScope {
 // `as_scope` borrows it for the few places that still need the bare handle
 // (signal-slot publication, a worker's returned cancel token).
 
-/// The session's durable cancel root.  Detached workers (`spawn`, `watch`,
+/// The session's durable cancel root.
+///
+/// Detached workers (`spawn`, `watch`,
 /// `par`) parent under it, and every foreground scope is one of its
 /// descendants, so a foreground cancel never reaches a detached worker.  Only
 /// a [`RootAbort`](CancelCause::RootAbort) on the root (Ctrl-\), or a cancel
@@ -661,7 +680,9 @@ impl Default for DurableRoot {
     }
 }
 
-/// A cancel scope installed as a turn's foreground work scope.  Constructed
+/// A cancel scope installed as a turn's foreground work scope.
+///
+/// Constructed
 /// only from a [`DurableRoot`] or by nesting another `ForegroundScope`, so it
 /// is always a descendant of the session root.  A foreground cancel — a turn
 /// timeout, a Ctrl-C — reaches it and its same-thread descendants.

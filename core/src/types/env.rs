@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 /// One scope entry: the runtime value together with the checker's
 /// scheme for the binding, where one survived the turn that installed
-/// it.  Value and scheme are installed together by the statement-level
+/// it.
+///
+/// Value and scheme are installed together by the statement-level
 /// rule (`eval_bind`): a rebind replaces both, a statement that never
 /// ran installs neither — there is nothing to keep in sync.
 #[derive(Debug, Clone)]
@@ -210,7 +212,9 @@ impl Default for Env {
 
 // ── EnvVars: process-environment override map ───────────────────────────
 
-/// Persistent string→string map for env-var overrides.  Cheap to
+/// Persistent string→string map for env-var overrides.
+///
+/// Cheap to
 /// clone; copy-on-write on mutation.  `Serialize` / `Deserialize` are
 /// required because [`crate::subprocess::WireContext`] embeds this
 /// type and round-trips it as JSON across IPC boundaries.

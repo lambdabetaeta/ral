@@ -40,7 +40,9 @@ pub fn xdg_data_subpath(subpath: &str) -> Option<PathBuf> {
 }
 
 /// `$HOME/<dot_name>` (e.g. `home_dot(".ralrc")`), or `None` when
-/// `$HOME` is unset.  Encodes the legacy single-file convention so
+/// `$HOME` is unset.
+///
+/// Encodes the legacy single-file convention so
 /// rc loaders can probe `$XDG_CONFIG_HOME/<app>/<file>` *and* the
 /// home-dot form through one module.
 #[allow(clippy::disallowed_methods)]

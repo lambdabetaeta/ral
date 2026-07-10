@@ -48,7 +48,9 @@ use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
 use std::sync::Arc;
 
-/// The live session as the checker sees it: every top-level name with
+/// The live session as the checker sees it:
+///
+/// every top-level name with
 /// the scheme on its runtime binding (`None` for a name installed by an
 /// unchecked path — a `source`d file, a plugin), plus the persistent
 /// alias arms' schemes off the handler stack.
@@ -458,7 +460,9 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
 }
 
 /// The scheme stored on a persistent alias frame at install
-/// (`Shell::install_alias`): the arm body for head `head` inferred under
+/// (`Shell::install_alias`):
+///
+/// the arm body for head `head` inferred under
 /// the runtime handler calling convention (a lambda arm receives the argv
 /// list), seeded from the live session and closed against its own unifier
 /// so later turns' checks can be seeded with it.
@@ -496,7 +500,9 @@ pub fn alias_arm_scheme(
 }
 
 /// The scheme stored for a callable installed as a lexical scope binding
-/// (`Shell::bind_value`, the rc `bindings:` path): the value's type
+/// (`Shell::bind_value`, the rc `bindings:` path):
+///
+/// the value's type
 /// inferred under the ordinary value/function-application convention — a
 /// lambda is a function `Fun(param, body)` whose parameter binds an
 /// independent value type, not an argv-forced arm — seeded from the live

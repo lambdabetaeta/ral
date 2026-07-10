@@ -93,14 +93,18 @@ pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 
 /// The two ahead-of-time phases — parse and elaborate — that every entry
 /// point (script, `-c`, REPL line, rc file, plugin module) performs before
-/// typecheck and eval.  Bundled so each call site says "compile this
+/// typecheck and eval.
+///
+/// Bundled so each call site says "compile this
 /// source" rather than re-spelling the ladder.
 pub fn compile(source: &str) -> Result<Comp, ParseError> {
     parse(source).map(|ast| elaborate(&ast, std::collections::HashSet::default()))
 }
 
 /// Outcome of [`compile_and_typecheck`]: either a compiled program, a parse
-/// error, or one or more type errors.  Callers render diagnostics in the
+/// error, or one or more type errors.
+///
+/// Callers render diagnostics in the
 /// shape that suits their UI (compact REPL, ariadne-rendered text for
 /// tool calls, etc.) — this enum carries the structured errors so the
 /// rendering choice stays at the call site.

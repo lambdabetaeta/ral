@@ -151,7 +151,9 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
 }
 
 /// Literal-string replace of the unique occurrence of `from` in `s`
-/// with `to`.  Errors when `from` is empty, absent, or matches more
+/// with `to`.
+///
+/// Errors when `from` is empty, absent, or matches more
 /// than once: surgical replacement operations only mean anything when
 /// the target is unique, and silently
 /// accepting a 0- or many-match request would be a footgun.  No regex

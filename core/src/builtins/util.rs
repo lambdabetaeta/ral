@@ -300,7 +300,9 @@ pub(crate) fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
     })
 }
 
-/// Encode `v` as JSON for `to-json`.  A typed byte↔value crossing must
+/// Encode `v` as JSON for `to-json`.
+///
+/// A typed byte↔value crossing must
 /// refuse what it cannot faithfully represent rather than erase it: a
 /// non-finite Float (NaN / ±Infinity) has no JSON number, and a
 /// computation value (Lambda / Block / Handle) has no data shape, so each
@@ -346,7 +348,9 @@ pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
     })
 }
 
-/// Variant for the `--audit` JSON dump: total, never failing.  Byte fields
+/// Variant for the `--audit` JSON dump: total, never failing.
+///
+/// Byte fields
 /// render as lossy-UTF-8 strings rather than integer arrays so the
 /// execution tree stays readable, non-finite Floats fall to `null`, and
 /// computation values become type-tagged stubs.  The audit tree is a

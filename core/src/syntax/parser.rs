@@ -114,7 +114,9 @@ pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
 }
 
 /// Returns `true` when `input` is incomplete and the user's next line should
-/// be joined to it before parsing.  This runs the real parser and asks
+/// be joined to it before parsing.
+///
+/// This runs the real parser and asks
 /// whether it failed because the input ran short — an open `'…'`, `"…"`,
 /// `!{…}`, `$(…)`, or an unbalanced `{` / `[`, or a `let` still awaiting
 /// its right-hand side.  The verdict is the parser's own structured

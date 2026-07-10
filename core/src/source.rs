@@ -69,7 +69,9 @@ impl Span {
     }
 }
 
-/// Opaque handle into a [`SourceDb`](crate::diagnostic::SourceDb). Each
+/// Opaque handle into a [`SourceDb`](crate::diagnostic::SourceDb).
+///
+/// Each
 /// registered source text gets a unique `FileId`; spans and runtime
 /// locations carry these so diagnostics can recover the originating file at
 /// render time.
@@ -91,7 +93,9 @@ impl Default for FileId {
 
 /// A value paired with its optional source span — the uniform wrapper
 /// used at every sub-position where a downstream pass may know a
-/// narrower byte range than the enclosing node.  Shared by the lexer,
+/// narrower byte range than the enclosing node.
+///
+/// Shared by the lexer,
 /// AST, IR, and typechecker: each per-position narrowing site
 /// (`If.cond`, `Case.scrutinee`/`table`, per-arg and per-key positions,
 /// `Force` operand, interpolation segments, …) is a [`Spanned<_>`]

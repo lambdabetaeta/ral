@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 /// A lexically-resolved path: absolute, `.`/`..`-collapsed, anchored
-/// against the logical cwd.  The stage-2 (`lex`) output of the grant
+/// against the logical cwd.
+///
+/// The stage-2 (`lex`) output of the grant
 /// pipeline, reified so that canonicalisation can only follow
 /// resolution — there is no way to `realpath` a path that has not
 /// first been resolved against the logical cwd.
@@ -103,7 +105,9 @@ impl ResolvedPath {
 }
 
 /// A frozen grant prefix in the same normal form a [`ResolvedPath`]
-/// carries: absolute and `.`/`..`-collapsed.  Held as a `String`
+/// carries: absolute and `.`/`..`-collapsed.
+///
+/// Held as a `String`
 /// because grant prefixes freeze against a different cwd/home than the
 /// access, but minted by the same `fold_dots` kernel so they match
 /// like-for-like.  Private field; sole constructor is the freeze lexer.
