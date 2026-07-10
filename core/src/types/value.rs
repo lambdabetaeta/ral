@@ -80,7 +80,7 @@ impl fmt::Debug for BuiltinEntry {
         f.debug_struct("BuiltinEntry")
             .field("name", &self.name)
             .field("body", &self.body)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -730,7 +730,7 @@ impl fmt::Debug for HandlerEntry {
             .field("name", &self.name)
             .field("arity", &self.arity)
             .field("thunk", &self.thunk)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

@@ -80,7 +80,7 @@ pub enum FOValue<X = NoExt> {
 }
 
 /// Uninhabited: no `Ext` arm can exist for a bare `FOValue`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoExt {}
 
 /// What the in-kernel helper IPC (`child_eval` / pipeline stages) adds to
@@ -115,7 +115,7 @@ pub struct SerialThunk {
 /// index into a companion scope table (owned by the request/response
 /// envelope — see `child_eval`).  The table is a flat `Vec` of scope
 /// entries, serialised at most once per `Arc`-shared allocation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialEnvSnapshot {
     pub scopes: Vec<u32>,
 }

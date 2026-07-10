@@ -45,7 +45,7 @@ use std::fmt;
 /// [`LexErrorKind`] kinds (see [`LexErrorKind::is_incomplete`]); the
 /// parser-origin arm covers a binder that has its `=` but no right-hand
 /// side yet.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Incompleteness {
     /// A string, balanced `{}` / `[]`, or `$(…)` ran past end of input.
     UnclosedLexeme,

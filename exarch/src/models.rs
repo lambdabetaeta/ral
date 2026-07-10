@@ -33,7 +33,7 @@ const TTL: Duration = Duration::from_hours(24);
 /// providers per model (`DeepInfra`, Novita, …) that differ in context window and
 /// quantization; this is the picker's view of one such endpoint, distilled from
 /// `OpenRouter`'s per-model `/endpoints` listing.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderEndpoint {
     /// The human display name, e.g. `"DeepInfra"`.
     pub provider_name: String,

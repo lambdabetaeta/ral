@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 ///
 /// Stored on generalised schemes so that `env_free_vars` can skip a full
 /// type-tree traversal and read the cached sets directly.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CachedFreeVars {
     pub ty_fv: BTreeSet<TyVar>,
     #[serde(default)]

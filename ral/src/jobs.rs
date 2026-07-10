@@ -52,7 +52,7 @@ pub struct Job {
     pub state: JobState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
     Running,
     Stopped,

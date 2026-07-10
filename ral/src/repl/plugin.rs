@@ -673,13 +673,13 @@ impl ConditionalEventHandler for PluginKeyHandler {
         _evt: &Event,
         _n: RepeatCount,
         _positive: bool,
-        _ctx: &EventContext,
+        ctx: &EventContext,
     ) -> Option<Cmd> {
         if let Ok(mut rt) = self.runtime.lock() {
             rt.keybindings.pending = Some(PendingKeybinding {
                 plugin: self.plugin.clone(),
                 binding_idx: self.binding_idx,
-                cursor_byte: _ctx.pos(),
+                cursor_byte: ctx.pos(),
             });
         }
         Some(Cmd::AcceptLine)

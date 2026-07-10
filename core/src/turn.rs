@@ -107,6 +107,10 @@ impl<'s> TurnGuard<'s> {
     /// foreground scope and the session's durable root into the
     /// signal-reachable slots (signal-facing session only), and hold the
     /// displaced frame for restoration on `Drop`.
+    #[allow(
+        clippy::used_underscore_binding,
+        reason = "RAII guard field; the leading underscore marks it as held for Drop, not read"
+    )]
     fn install(shell: &'s mut Shell, next: TurnState) -> Self {
         let saved = std::mem::replace(&mut shell.turn, next);
         let publish = shell.session.publishes_signal_slots;

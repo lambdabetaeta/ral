@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Structured command head for external dispatch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandName {
     /// Ordinary unresolved head, subject to alias/builtin/PATH lookup.
     Bare(String),
@@ -620,7 +620,7 @@ pub struct Exec {
 /// `within [handlers:]` frame.  The `^name` form is its own variant
 /// rather than a flag on `Name` so the IR shape carries the dispatch
 /// decision instead of burying it as a boolean.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandWord {
     /// Name-dispatched call: binding → handler → PATH at evaluation
     /// time.

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Structured unquoted word shape, determined once by the lexer.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Word {
     /// Slash-free unquoted word.
     Plain(String),
@@ -342,7 +342,7 @@ pub enum MapEntry {
 ///
 /// The typed key keeps the alphabet readable off the variant rather
 /// than by inspecting the leading character of a stringly-typed key.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MapKey {
     Bare(String),
     Tag(String),
@@ -400,7 +400,7 @@ pub enum Expr {
 /// use [`BinaryOp::kind`] to project into [`BinaryOpKind`], whose
 /// per-category sub-enums make the helpers' invariants type-enforced
 /// instead of asserted via `unreachable!`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -417,7 +417,7 @@ pub enum BinaryOp {
 
 /// Arithmetic sub-operations: numeric, may overflow, division and modulo
 /// reject a zero divisor, modulo additionally rejects floats.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -427,7 +427,7 @@ pub enum ArithOp {
 }
 
 /// Ordering sub-operations: numeric only, always return [`bool`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
     Lt,
     Gt,
@@ -436,7 +436,7 @@ pub enum CompareOp {
 }
 
 /// Equality sub-operations: structural on any value, always return [`bool`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EqOp {
     Eq,
     Ne,
@@ -448,7 +448,7 @@ pub enum EqOp {
 /// [`BinaryOp::kind`].  Dispatching on this rather than the flat enum
 /// lets each category's handler accept its own narrowed sub-enum, so
 /// the match arms inside are exhaustive without a wildcard fallback.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOpKind {
     Arith(ArithOp),
     Compare(CompareOp),
@@ -473,7 +473,7 @@ impl BinaryOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RedirectMode {
     Write,
     StreamWrite,

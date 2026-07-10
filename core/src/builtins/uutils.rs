@@ -63,17 +63,17 @@ pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 /// context where stdout/stderr are plain Terminal/Stderr sinks, so the
 /// in-binary implementation is authoritative on every platform
 /// regardless of what PATH would have turned up.
-pub(crate) fn is_uutils_tool(_name: &str) -> bool {
+pub(crate) fn is_uutils_tool(name: &str) -> bool {
     #[cfg(feature = "coreutils")]
-    if COREUTILS_TOOLS.contains(&_name) {
+    if COREUTILS_TOOLS.contains(&name) {
         return true;
     }
     #[cfg(feature = "diffutils")]
-    if DIFFUTILS_TOOLS.contains(&_name) {
+    if DIFFUTILS_TOOLS.contains(&name) {
         return true;
     }
     #[cfg(feature = "ripgrep")]
-    if RIPGREP_TOOLS.contains(&_name) {
+    if RIPGREP_TOOLS.contains(&name) {
         return true;
     }
     false
