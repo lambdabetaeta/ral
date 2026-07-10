@@ -1,26 +1,15 @@
 //! `PATH` search: locate a bare command name on disk.
 //!
-//! Sibling to the four-stage grant pipeline: command resolution
-//! shares the "given a string, find the absolute file" question
-//! but skips the sigil/lex/canon stages — `$PATH` is a colon-
-//! separated list of directories and we just look in each.
+//! Sibling to the grant pipeline — same "given a string, find the
+//! absolute file" question, but `$PATH` is just a colon-separated list
+//! of directories walked in turn ([`path_dirs`]), so the sigil/lex/canon
+//! stages don't apply.  `runtime::command::CommandIdentity` builds on
+//! [`locate`] so dispatch and grant admission see one walk per call.
 //!
-//! `runtime::command::CommandIdentity` builds on this so dispatch
-//! and grant admission see one PATH walk per call.
-//!
-//! Two entry points:
-//!
-//!   * [`resolve_in_path`] — pure-string PATH walker; bare names only.
-//!     Used by exec-gate keying where `name` is already known to be
-//!     bare and there is no shell-context cwd to anchor against.
-//!
-//!   * [`locate`] — full command resolution: handles names that
-//!     contain a separator (cwd-anchored or absolute) as well as bare
-//!     names, takes an explicit `cwd` so relative `PATH` entries
-//!     resolve consistently with the caller's notion of "here."
-//!     Used by `which`, by the dispatch error path (so a deny message
-//!     can distinguish "exists and denied" from "not installed"), and
-//!     anywhere else that needs the same answer the OS would give.
+//! The primary entry points are [`resolve_in_path`] (pure-string walker,
+//! bare names only) and [`locate`] (full resolution: separator-bearing
+//! names, an explicit `cwd` to anchor relative `PATH` entries, and the
+//! executable-bit check the OS would apply).
 
 use std::path::{Path, PathBuf};
 
@@ -62,8 +51,8 @@ pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&Path>) -> Optio
         return is_executable_file(&candidate).then_some(candidate);
     }
     let path_value = path_value?;
-    for dir in std::env::split_paths(&std::ffi::OsString::from(path_value)) {
-        let candidate = anchor_to_cwd(dir, cwd).join(name);
+    for dir in path_dirs(path_value, cwd) {
+        let candidate = dir.join(name);
         #[cfg(windows)]
         for c in windows_command_candidates(&candidate) {
             if is_executable_file(&c) {
@@ -92,6 +81,15 @@ fn anchor_to_cwd(p: PathBuf, cwd: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Split a colon-separated `PATH` string into directories, anchoring each
+/// relative entry against `cwd` (matching [`locate`]'s rule).  The shared
+/// walk behind [`locate`], [`commands_on_path`], and [`file_exists_on_path`].
+fn path_dirs(path_value: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    std::env::split_paths(&std::ffi::OsString::from(path_value))
+        .map(|dir| anchor_to_cwd(dir, cwd))
+        .collect()
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:which-stat] `which`/PATH probe: stats a candidate to read its executable bit; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
@@ -118,20 +116,17 @@ fn is_executable_file(p: &Path) -> bool {
 /// relative (matching [`locate`]'s rule).  Inaccessible or non-directory
 /// entries are skipped; entries within a directory are not sorted.
 ///
-/// Used by completion to mirror what `locate` will find: walking the
-/// same dirs through the same anchor and filtering on the same
-/// executable-bit rule means the prompt offers exactly the commands
-/// the shell can actually run.  Callers that want stable order or
-/// deduplication should sort/dedup the result; doing so here would be
-/// premature for hot paths that only sample a prefix.
+/// Used by completion to mirror what `locate` will find: same dirs, same
+/// anchor, same executable-bit rule.  The result is unsorted and may
+/// repeat a name across directories; callers that want stable order or
+/// deduplication apply their own.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
 )]
 pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
     let mut out = Vec::new();
-    for dir in std::env::split_paths(&std::ffi::OsString::from(path_value)) {
-        let dir = anchor_to_cwd(dir, cwd);
+    for dir in path_dirs(path_value, cwd) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -149,22 +144,45 @@ pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
 }
 
 /// Walk PATH looking for a regular file named `name`, ignoring the
-/// executable bit.
+/// executable bit and anchoring relative PATH entries against `cwd`
+/// (like [`locate`]).
 ///
-/// Used to improve error messages: when PATH search
-/// skips a file because it lacks `+x`, we can report "permission
-/// denied" (126) instead of "command not found" (127).
-pub fn file_exists_on_path(name: &str, path: &str) -> Option<PathBuf> {
+/// Used to improve error messages: when PATH search skips a file because
+/// it lacks `+x`, we can report "permission denied" (126) instead of
+/// "command not found" (127).
+pub fn file_exists_on_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     if name_has_separator(name) {
         return None;
     }
-    for dir in std::env::split_paths(&std::ffi::OsString::from(path)) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+    path_dirs(path, cwd)
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Windows PATHEXT expansion.  When invoked without an explicit
+/// extension, the Windows command resolver tries each suffix in
+/// `%PATHEXT%` (defaulting to `.COM;.EXE;.BAT;.CMD`).  We mirror the
+/// same fallback so `locate("python")` finds `python.exe`.
+#[cfg(windows)]
+fn windows_command_candidates(base: &Path) -> Vec<PathBuf> {
+    use std::ffi::OsStr;
+    let mut out = Vec::new();
+    if base.extension().is_some() {
+        out.push(base.to_path_buf());
     }
-    None
+    let pathext = std::env::var_os("PATHEXT")
+        .unwrap_or_else(|| OsStr::new(".COM;.EXE;.BAT;.CMD").to_os_string());
+    for ext in pathext
+        .to_string_lossy()
+        .split(';')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        let ext = ext.trim_start_matches('.');
+        out.push(base.with_extension(ext));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -221,29 +239,4 @@ mod tests {
         let names = commands_on_path(absent.to_str().unwrap(), None);
         assert!(names.is_empty(), "got {names:?}");
     }
-}
-
-/// Windows PATHEXT expansion.  When invoked without an explicit
-/// extension, the Windows command resolver tries each suffix in
-/// `%PATHEXT%` (defaulting to `.COM;.EXE;.BAT;.CMD`).  We mirror the
-/// same fallback so `locate("python")` finds `python.exe`.
-#[cfg(windows)]
-fn windows_command_candidates(base: &Path) -> Vec<PathBuf> {
-    use std::ffi::OsStr;
-    let mut out = Vec::new();
-    if base.extension().is_some() {
-        out.push(base.to_path_buf());
-    }
-    let pathext = std::env::var_os("PATHEXT")
-        .unwrap_or_else(|| OsStr::new(".COM;.EXE;.BAT;.CMD").to_os_string());
-    for ext in pathext
-        .to_string_lossy()
-        .split(';')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-    {
-        let ext = ext.trim_start_matches('.');
-        out.push(base.with_extension(ext));
-    }
-    out
 }

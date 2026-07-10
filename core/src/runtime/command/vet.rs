@@ -83,7 +83,7 @@ fn check_existence(id: &CommandIdentity, ctx: &Context) -> Settled<()> {
         return Ok(());
     }
     let path = ctx.env_overrides().get_or_host("PATH").unwrap_or_default();
-    if crate::path::file_exists_on_path(bare, &path).is_some() {
+    if crate::path::file_exists_on_path(bare, &path, ctx.cwd_chain()).is_some() {
         return Err(Break::Error(Error::new(
             format!("{}: permission denied", id.shown),
             126,
