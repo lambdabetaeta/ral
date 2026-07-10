@@ -682,8 +682,10 @@ pub fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
     Some(outcome)
 }
 
-/// Compose a `` `done `` event into a one-line [`Card`] using only the existing
-/// [`Mark::Text`] vocabulary: an outcome span roled by how it settled — a clean
+/// Compose a `` `done `` event into a one-line [`Card`] using only the
+/// existing [`Mark::Text`] vocabulary.
+///
+/// The card is an outcome span roled by how it settled — a clean
 /// return is `Ok`, a raise is `Bad` carrying the message and status, a panic is
 /// `Bad` carrying the message — followed by a plain gloss naming it as a
 /// background block.
@@ -721,10 +723,11 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 
 /// The decoded body of a `` `notice `` surface event core's own engine
 /// pushes at a turn's ready boundary
-/// (`decisions/260706_enquiry-channel` §4.2): a worker the lease chain
+/// (`decisions/260706_enquiry-channel` §4.2).
+///
+/// The notice names a worker the lease chain
 /// reaped, a run of idle top-level bindings the ledger pruned, or a
 /// session-scope install past the large-binding threshold.
-///
 /// Like
 /// [`DoneOutcome`], the raw record [`value_to_notice`] decodes once and
 /// [`notice_card`] composes the matching one-line card — core emits the

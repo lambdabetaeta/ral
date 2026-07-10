@@ -48,7 +48,9 @@ use ral_core::types::{Break, Capabilities, Value};
 const CONFIG_FILE: &str = "config.ral";
 
 /// The operator-set disk-warn ceiling, in bytes, or `None` if unset or
-/// unparseable — absent means [`crate::agent::Agent::check_disk_warn`] never
+/// unparseable.
+///
+/// Absent means [`crate::agent::Agent::check_disk_warn`] never
 /// walks the log/scratch dirs at all, no cost paid ever
 /// (`decisions/260705_leases-and-budgets`, "Disk: report and warn only").
 /// Read once at startup, like every other launch setting; there is

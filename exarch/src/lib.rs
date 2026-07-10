@@ -78,7 +78,9 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
 }
 
 /// The full pre-`main` re-exec dispatch, shared by the binary's `main` and
-/// every test `#[ctor]`: serve helper re-execs
+/// every test `#[ctor]`.
+///
+/// Serves helper re-execs
 /// ([`install_child_hooks_and_serve_helpers`] — which also sets the
 /// child-shell extension), then the OS-sandbox stage
 /// ([`ral_core::sandbox::serve_sandbox_early_init`]). Returns `Some(code)`

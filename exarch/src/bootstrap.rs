@@ -147,8 +147,9 @@ impl Scratch {
     }
 }
 
-/// The per-run log directory:
-/// `$XDG_STATE_HOME/exarch/<project>/<run>/`, where `<project>` is the
+/// The per-run log directory: `$XDG_STATE_HOME/exarch/<project>/<run>/`.
+///
+/// `<project>` is the
 /// slugified absolute `cwd` (see [`project_slug`]) and `<run>` is
 /// `<YYYY-MM-DD-HHMMSS>-<pid>`, unique per launch so successive runs in the
 /// same project never overwrite one another.  Holds `stderr.log` and

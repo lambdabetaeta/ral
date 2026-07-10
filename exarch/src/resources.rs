@@ -151,7 +151,9 @@ pub struct ViewportFigures {
 }
 
 /// The fleet's view counts: how many per-agent views the frontend holds,
-/// split live/dead, plus the live-agent tab count — a distinct row
+/// split live/dead, plus the live-agent tab count.
+///
+/// The tab count is a distinct row
 /// (`fleet.agents`) even when its figure coincides with `live`, because
 /// the registry, not the tab bar, is the authority on agents.
 pub struct ViewFigures {

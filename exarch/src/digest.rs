@@ -82,9 +82,10 @@ pub fn compaction_due(used: u64, window: u64) -> bool {
 }
 
 /// Summary output cap for a known `window`: four-fifths of the reserve
-/// (oh-my-pi's `0.8 * reserve`), clamped so a small window still allows a
-/// usable summary and a huge one does not invite a rambling one.
+/// (oh-my-pi's `0.8 * reserve`).
 ///
+/// Clamped so a small window still allows a
+/// usable summary and a huge one does not invite a rambling one.
 /// exarch
 /// keeps a recent suffix verbatim, so the summary covers only the dropped
 /// prefix and stays concise.

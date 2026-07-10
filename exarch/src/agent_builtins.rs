@@ -34,12 +34,16 @@ use std::time::Duration;
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
 /// The tag `Frame::Attach` carries to name this module's [`install_on`] as
-/// the wire engine child's builtin installer — see `core/src/engine.rs`'s
-/// installer table and the enquiry-channel ADR's shell-parity item.
+/// the wire engine child's builtin installer.
+///
+/// See `core/src/engine.rs`'s installer table and the enquiry-channel ADR's
+/// shell-parity item.
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
 /// The builtin sets the exarch agent host installs on top of core's
-/// `CORE_BUILTINS`: exarch's own surface ([`EXARCH_BUILTINS`]) and core's
+/// `CORE_BUILTINS`.
+///
+/// These are exarch's own surface ([`EXARCH_BUILTINS`]) and core's
 /// host-selected `service` ([`ral_core::builtins::SERVICE_BUILTIN`] — the
 /// `watch` mechanism with the hosts swapped, kept out of `CORE_BUILTINS` so
 /// that only the agent host, under whose worker lease a durable birth means

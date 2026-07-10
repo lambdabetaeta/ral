@@ -120,7 +120,9 @@ impl PinDigest {
 }
 
 /// What a settled `commit`/`verify_commitment` child should do to the
-/// protected pin register, decided by the worker thread that drove it while
+/// protected pin register.
+///
+/// Decided by the worker thread that drove it while
 /// it still holds the child's raw structured reply
 /// ([`spawn_async`](crate::tools::agent::spawn_async)).  Carried on
 /// [`AgentResult`](crate::bus::AgentResult) and applied only on the parent's
@@ -138,7 +140,9 @@ pub enum CommitmentSettle {
     Clear(String),
 }
 
-/// A shared, session-owned register of current pinned-state digests, written
+/// A shared, session-owned register of current pinned-state digests.
+///
+/// Written
 /// by the live surface sink as `` `pin ``/`` `unpin `` flow by and read by the
 /// nudge facility to describe what the model has pinned.  The session clones a
 /// handle into each turn's turn surface sink; `None` (tests, any path with no
@@ -338,13 +342,6 @@ pub fn deferred_sink(
     })
 }
 
-/// Evaluate `cmd` against `shell`, wrapped in `caps`, capturing
-/// stdout and stderr into buffers.
-///
-/// Returns the result as named pieces
-/// so the caller can render it twice — once full for the terminal,
-/// once with per-section caps for the conversation history — without
-/// having to parse the rendered form back apart.
 /// Evaluate `cmd` against `transport`, wrapped in `caps`, capturing
 /// stdout and stderr into buffers. Returns the result as an [`Outcome`].
 ///

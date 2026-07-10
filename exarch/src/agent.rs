@@ -290,8 +290,10 @@ pub enum ControlFlow {
 }
 
 /// The frontend hook the drive loop calls for a session-affecting slash
-/// command ([`Turn::Command`]) drained at the turn boundary — the drive thread
-/// owns the session the command mutates, so it cannot run on the UI thread.
+/// command ([`Turn::Command`]) drained at the turn boundary.
+///
+/// The drive thread owns the session the command mutates, so it cannot run on
+/// the UI thread.
 /// Only the non-interactive session commands route here (`/clear`, `/compact`,
 /// `/discuss`, `/quit`); `/model` swaps the [`ProviderHandle`] directly on the
 /// UI thread, and view-only commands (`/help`, `/copy`, …) are handled

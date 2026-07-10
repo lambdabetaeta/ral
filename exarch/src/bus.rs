@@ -321,10 +321,10 @@ fn source_name(msg: &InboxMsg) -> &'static str {
 }
 
 /// Per-agent, per-source cap on a *non-idempotent* inbox message
-/// (`AgentResult`, `AgentMessage`, `Command`, `Surface`) — generous, so an
-/// ordinary burst never rejects, but a runaway producer cannot grow one
-/// source without bound.
+/// (`AgentResult`, `AgentMessage`, `Command`, `Surface`).
 ///
+/// Generous, so an ordinary burst never rejects, but a runaway producer
+/// cannot grow one source without bound.
 /// The idempotent sources (`user`, `schedule`,
 /// `nudge`) coalesce instead of counting toward this and never reject
 /// (`decisions/260705_leases-and-budgets`, "Inboxes get quotas without
@@ -1135,10 +1135,11 @@ pub enum Kind {
 }
 
 /// One grouped hunk of a whole-file diff, carried by a
-/// [`crate::card::Mark::Diff`]: a flat unified list of [`Row`]s — context,
+/// [`crate::card::Mark::Diff`].
+///
+/// A flat unified list of [`Row`]s — context,
 /// deletions, and insertions interleaved exactly as `similar`'s grouped ops
 /// yield them.
-///
 /// `start` is the 1-indexed original line of the hunk's first
 /// row; the sink walks the rows from there, advancing an old- and a
 /// new-side counter — a `Context` advances both, a `Del` advances the old
