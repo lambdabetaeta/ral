@@ -381,6 +381,7 @@ impl Drop for BackupFd {
     fn drop(&mut self) {
         // Best-effort: dup2 / close failures inside Drop have nowhere to go.
         unsafe {
+            #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
             libc::dup2(self.backup, self.fd as i32);
             libc::close(self.backup);
         }
@@ -530,6 +531,7 @@ pub(crate) fn apply_redirects(
                 unsafe { libc::close(raw) };
             }
             EvalRedirect::Fd(target_fd) => {
+                #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
                 install_dup2(*target_fd as i32, *fd, &mut guard)?;
             }
         }
@@ -554,6 +556,7 @@ fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<
     // child — a child spawned while the guard is live (a nested external
     // launched from inside the redirected builtin body) must not inherit
     // it.
+    #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
     let backup = unsafe { libc::fcntl(dst_fd as i32, libc::F_DUPFD_CLOEXEC, 0) };
     if backup < 0 {
         return Err(Break::Error(Error::new(
@@ -566,6 +569,7 @@ fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<
         )));
     }
     guard.saved.push(BackupFd { fd: dst_fd, backup });
+    #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
     if unsafe { libc::dup2(src_fd, dst_fd as i32) } < 0 {
         return Err(Break::Error(Error::new(
             format!(
@@ -793,11 +797,11 @@ mod tests {
     fn pinned_unopened_fd() -> (u32, BarrierFd) {
         let barrier = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 32) };
         assert!(barrier >= 0, "could not pin a high barrier fd");
+        #[allow(clippy::cast_sign_loss, reason = "barrier is a fcntl-returned fd asserted >= 0 on the line above, so no sign is lost")]
         let target = barrier as u32 + 1;
-        assert!(
-            !fd_is_open(target as i32),
-            "target fd {target} must start free"
-        );
+        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        let target_fd = target as i32;
+        assert!(!fd_is_open(target_fd), "target fd {target} must start free");
         (target, BarrierFd(barrier))
     }
 
@@ -828,8 +832,10 @@ mod tests {
         let result = apply_redirects(&redirects, &mut shell);
 
         assert!(result.is_err(), "redirect to unopened fd {fd} must error");
+        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        let fd_i32 = fd as i32;
         assert!(
-            !fd_is_open(fd as i32),
+            !fd_is_open(fd_i32),
             "fd {fd} must stay unopened — no unrestorable redirect installed",
         );
     }
@@ -850,8 +856,10 @@ mod tests {
         let result = apply_redirects(&redirects, &mut shell);
 
         assert!(result.is_err(), "redirect to unopened fd {fd} must error");
+        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        let fd_i32 = fd as i32;
         assert!(
-            !fd_is_open(fd as i32),
+            !fd_is_open(fd_i32),
             "fd {fd} must stay unopened — no unrestorable redirect installed",
         );
     }

@@ -251,6 +251,7 @@ impl RunningChild {
                     crate::process::CancelCause::Interrupt => libc::SIGINT,
                     _ => libc::SIGTERM,
                 };
+                #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
                 unsafe { libc::kill(child.id() as libc::pid_t, signal) };
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
                 let mut reaped = None;

@@ -146,7 +146,9 @@ impl ForegroundDecision {
         let lease = shell.terminal_lease()?;
         #[cfg(unix)]
         {
-            ForegroundGuard::try_acquire(child_id as libc::pid_t, lease)
+            #[allow(clippy::cast_possible_wrap, reason = "child_id is a live OS pid from Child::id(): positive and below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
+            let pid = child_id as libc::pid_t;
+            ForegroundGuard::try_acquire(pid, lease)
         }
         #[cfg(windows)]
         {

@@ -202,6 +202,7 @@ impl AnchorProcess {
     }
 
     fn pgid(&self) -> Pgid {
+        #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
         let pid = self.child.as_ref().expect("anchor child").id() as libc::pid_t;
         Pgid(pid)
     }
@@ -219,6 +220,7 @@ impl AnchorProcess {
     fn finish(mut self) {
         let _ = self.release.take();
         if let Some(mut child) = self.child.take() {
+            #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
             let pid = child.id() as libc::pid_t;
             unsafe {
                 libc::kill(pid, libc::SIGCONT);

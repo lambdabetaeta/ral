@@ -329,6 +329,7 @@ where
     // it runs, either the child already applied the policy (a mirror
     // failure is then the benign post-`execve` `EACCES` race) or the
     // child's `pre_exec` failed and the spawn above returned the error.
+    #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
     let leader = match pgid {
         PgidPolicy::Inherit => None,
         PgidPolicy::NewLeader => {
@@ -379,6 +380,7 @@ pub(super) fn wait_handling_stop(
     pgid: Option<Pgid>,
     park_on_stop: bool,
 ) -> std::io::Result<crate::process::WaitOutcome> {
+    #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
     let pid = child.id() as libc::pid_t;
     let (r, status) = waitpid_eintr(pid, libc::WUNTRACED);
     if r < 0 {
@@ -418,6 +420,7 @@ pub(super) fn try_wait_handling_stop(
     pgid: Option<Pgid>,
     park_on_stop: bool,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
+    #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
     let pid = child.id() as libc::pid_t;
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG | libc::WUNTRACED) };
@@ -780,6 +783,7 @@ mod tests {
         let _lock = RELAY_TEST_LOCK.lock().unwrap();
 
         // Claim all 8 slots with distinct pgids.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
         let guards: Vec<_> = (1..=MAX_RELAY as i32)
             .map(|pgid| PipelineRelay::install(pgid).expect("slot should be free"))
             .collect();
@@ -823,6 +827,7 @@ mod tests {
                     let b = barrier.clone();
                     std::thread::spawn(move || {
                         b.wait(); // all threads start together
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
                         let pgid = (round * MAX_RELAY + t + 1) as i32;
                         let g = PipelineRelay::install(pgid)
                             .expect("slot unavailable — possible double-claim");
@@ -845,6 +850,7 @@ mod tests {
         // or corrupt state.
         let _lock = RELAY_TEST_LOCK.lock().unwrap();
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
         let _guards: Vec<_> = (1..=MAX_RELAY as i32)
             .map(|p| PipelineRelay::install(p).unwrap())
             .collect();
@@ -961,6 +967,7 @@ mod tests {
             });
         }
         let mut child = cmd.spawn().expect("spawn sleep");
+        #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
         let child_pid = child.id() as libc::pid_t;
 
         // Parent mirrors setpgid to close the race.

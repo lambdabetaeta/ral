@@ -597,6 +597,7 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     let code = uutils::uutils_invoke(tool, os_args);
     let global = uutils::get_exit_code();
     let exit_code = if global == 0 { code } else { global };
+    #[allow(clippy::cast_sign_loss, reason = "clamp(0, 255) bounds the value to the u8 range before the cast")]
     Some(exit_code.clamp(0, 255) as u8)
 }
 
