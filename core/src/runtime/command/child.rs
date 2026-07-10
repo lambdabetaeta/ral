@@ -110,7 +110,7 @@ pub(crate) struct WaitedChild {
     /// Trace context carried over from the originating `RunningChild`
     /// so `drain`'s pump-join timings can be attributed to the same
     /// command instance.  Debug-only; release builds compile the
-    /// dbg_trace calls away but the fields are cheap enough to keep
+    /// `dbg_trace` calls away but the fields are cheap enough to keep
     /// unconditional.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     name: String,

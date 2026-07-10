@@ -175,8 +175,8 @@ fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<Stri
 }
 
 /// Map a wire-protocol name onto the genai [`AdapterKind`] it is. The three
-/// the config admits map 1:1 — `completions` is OpenAI v1, `responses` is
-/// OpenAI v2, `anthropic` is the Anthropic native protocol.
+/// the config admits map 1:1 — `completions` is `OpenAI` v1, `responses` is
+/// `OpenAI` v2, `anthropic` is the Anthropic native protocol.
 fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind, String> {
     match protocol {
         "completions" => Ok(AdapterKind::OpenAI),

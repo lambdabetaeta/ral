@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// Every restrict file's absolute lexical path is added to
 /// `fs.deny_paths`, making the input bytes structurally
 /// unreachable to the agent.  The extend-base file
-/// is *not* added to deny_paths: it widens authority, so denying
+/// is *not* added to `deny_paths`: it widens authority, so denying
 /// writes to it is a trust-source concern.
 pub fn for_invocation(
     cwd: &str,

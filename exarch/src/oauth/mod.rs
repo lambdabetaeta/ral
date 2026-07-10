@@ -1,12 +1,12 @@
 //! "Sign in with ChatGPT": ChatGPT-plan accounts as OAuth-backed providers.
 //!
-//! A ChatGPT plan subscription is authorised through OpenAI's OAuth issuer
+//! A `ChatGPT` plan subscription is authorised through `OpenAI`'s OAuth issuer
 //! rather than an API key. Two interactive flows obtain the initial token:
 //! a browser redirect to a loopback listener ([`browser`]), and a device
 //! code typed into a verification page ([`device`]). Both end in an
 //! authorization-code exchange against the token endpoint, yielding an
-//! id_token, an access_token, and a refresh_token. The access_token is a
-//! JWT whose `exp` claim sets the expiry; the id_token carries the ChatGPT
+//! `id_token`, an `access_token`, and a `refresh_token`. The `access_token` is a
+//! JWT whose `exp` claim sets the expiry; the `id_token` carries the `ChatGPT`
 //! account id and the login email.
 //!
 //! Several accounts can be signed in at once. The store ([`load_all`] /
@@ -33,7 +33,7 @@ pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-/// The models the ChatGPT plan serves through the Codex backend, newest
+/// The models the `ChatGPT` plan serves through the Codex backend, newest
 /// first. The plan exposes no catalog endpoint, so this curated list is
 /// the picker's source for a subscription provider's models — the
 /// API-key path lists live via genai instead.
@@ -46,7 +46,7 @@ pub(crate) const PLAN_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 pub enum Subscription {
     /// A metered API key — turns are billed per token.
     Metered,
-    /// A ChatGPT plan login authorised over OAuth.
+    /// A `ChatGPT` plan login authorised over OAuth.
     ChatGpt,
     /// A flat-rate plan declared by the provider's [`crate::provider::ProviderId`]
     /// (opencode Go's $10/mo gateway).
@@ -69,18 +69,18 @@ pub(crate) fn provider_label(subscription: Subscription, base: &str) -> String {
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
-/// A persisted ChatGPT OAuth token. The access token is a short-lived JWT;
+/// A persisted `ChatGPT` OAuth token. The access token is a short-lived JWT;
 /// the refresh token mints fresh access tokens once it expires. Several of
-/// these can be stored at once — one per signed-in ChatGPT account — keyed
+/// these can be stored at once — one per signed-in `ChatGPT` account — keyed
 /// by [`Self::account_id`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OAuthToken {
     pub access_token: String,
     pub refresh_token: String,
     pub account_id: String,
-    /// The account's login email, from the id_token's `email` claim. The
+    /// The account's login email, from the `id_token`'s `email` claim. The
     /// human-readable handle the picker and `/model` switch select by;
-    /// `None` when the id_token carried none, in which case the opaque
+    /// `None` when the `id_token` carried none, in which case the opaque
     /// [`Self::account_id`] stands in (see [`Self::label`]).
     pub email: Option<String>,
     /// Unix seconds at which `access_token` expires (its JWT `exp`).
@@ -189,7 +189,7 @@ pub fn labels(accounts: &[OAuthToken]) -> String {
         .join(", ")
 }
 
-/// Every persisted ChatGPT login, in stored order. An absent or unparseable
+/// Every persisted `ChatGPT` login, in stored order. An absent or unparseable
 /// store yields an empty list.
 pub fn load_all() -> Vec<OAuthToken> {
     load_all_at(&token_path())
@@ -452,12 +452,12 @@ struct ExpClaims {
     exp: Option<i64>,
 }
 
-/// The ChatGPT account id carried by an id_token's auth claim.
+/// The `ChatGPT` account id carried by an `id_token`'s auth claim.
 fn account_id_from_jwt(jwt: &str) -> Option<String> {
     jwt_payload::<IdClaims>(jwt).ok()?.auth?.chatgpt_account_id
 }
 
-/// The login email carried by an id_token's standard `email` claim.
+/// The login email carried by an `id_token`'s standard `email` claim.
 fn email_from_jwt(jwt: &str) -> Option<String> {
     jwt_payload::<IdClaims>(jwt).ok()?.email
 }
@@ -469,7 +469,7 @@ fn jwt_exp(jwt: &str) -> Option<u64> {
 }
 
 /// When the access token expires, as unix seconds: its own JWT `exp`, then the
-/// id_token's, then one hour out when neither carries one.
+/// `id_token`'s, then one hour out when neither carries one.
 fn expiry_secs(access_token: &str, id_token: Option<&str>) -> u64 {
     jwt_exp(access_token)
         .or_else(|| id_token.and_then(jwt_exp))
@@ -477,8 +477,8 @@ fn expiry_secs(access_token: &str, id_token: Option<&str>) -> u64 {
 }
 
 /// Turn a token-endpoint response into a persisted [`OAuthToken`]. The
-/// account id comes from the id_token; the expiry is the access token's
-/// `exp`, falling back to the id_token's `exp`, then to one hour out.
+/// account id comes from the `id_token`; the expiry is the access token's
+/// `exp`, falling back to the `id_token`'s `exp`, then to one hour out.
 fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
     let account_id = account_id_from_jwt(&raw.id_token)
         .ok_or_else(|| "login did not return a ChatGPT account id".to_string())?;
@@ -547,7 +547,7 @@ mod tests {
     }
 
     /// An account labels by its email, falling back to the opaque account id
-    /// when the id_token carried none.
+    /// when the `id_token` carried none.
     #[test]
     fn label_prefers_email_then_account_id() {
         let with_email = OAuthToken {
@@ -625,7 +625,7 @@ mod tests {
     }
 
     /// The single source of truth for the subscription decoration: a metered
-    /// provider keeps its bare name, a ChatGPT login carries the OpenAI plan
+    /// provider keeps its bare name, a `ChatGPT` login carries the `OpenAI` plan
     /// suffix, and a flat-rate plan the generic one — so the status bar, the
     /// `/model` switch, and the picker cannot drift across flavours.
     #[test]

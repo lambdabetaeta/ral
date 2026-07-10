@@ -197,7 +197,7 @@ mod tests {
     }
 
     /// Unknown top-level keys are caught by the shared walker — no
-    /// silent drop, matching the deny_unknown_fields discipline the
+    /// silent drop, matching the `deny_unknown_fields` discipline the
     /// schema enforces.
     #[test]
     fn unknown_top_level_key_errors() {

@@ -92,7 +92,7 @@ pub fn init_signal_dispositions() {
     }
 }
 
-/// Reset uucore's process-global EXIT_CODE to 0.  Must be called before
+/// Reset uucore's process-global `EXIT_CODE` to 0.  Must be called before
 /// each in-process `uumain` invocation since the previous call may have
 /// left a non-zero code.  When `coreutils` is not active (only diffutils
 /// or ripgrep are bundled), this is a no-op.
@@ -102,7 +102,7 @@ pub fn reset_exit_code() {
     uucore::error::set_exit_code(0);
 }
 
-/// Read uucore's process-global EXIT_CODE.  The return value of `uumain`
+/// Read uucore's process-global `EXIT_CODE`.  The return value of `uumain`
 /// is not the exit code seen by the utility's own error machinery — the
 /// true exit code is tracked in this atomic.  When `coreutils` is not
 /// active, returns 0 (diffutils / ripgrep don't use the uucore exit code).
@@ -124,7 +124,7 @@ pub fn get_exit_code() -> i32 {
 /// `diffutils` (or only `coreutils`, or only `ripgrep`) compiles down to a
 /// single arm.
 ///
-/// Callers must handle fd redirection, EXIT_CODE reset, panic isolation,
+/// Callers must handle fd redirection, `EXIT_CODE` reset, panic isolation,
 /// and CWD save/restore.  This function is the bare dispatch.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {

@@ -1,10 +1,10 @@
-//! Per-token pricing, fetched once per process from OpenRouter's
+//! Per-token pricing, fetched once per process from `OpenRouter`'s
 //! `GET /api/v1/models` and cached.
 //!
-//! The catalog backs Anthropic, OpenAI, and the OpenRouter wire itself
-//! — OR republishes those upstream cards verbatim.  DeepSeek is the
+//! The catalog backs Anthropic, `OpenAI`, and the `OpenRouter` wire itself
+//! — OR republishes those upstream cards verbatim.  `DeepSeek` is the
 //! exception: OR lists its generic aliases as $0 (its own free-tier
-//! promotion), so native DeepSeek traffic consults a hardcoded table
+//! promotion), so native `DeepSeek` traffic consults a hardcoded table
 //! sourced from <https://api-docs.deepseek.com/quick_start/pricing>,
 //! which also carries a peak-hour surcharge on top of the regular
 //! rate (see [`is_peak_hour`]).
@@ -39,7 +39,7 @@ impl ModelPricing {
     /// from `input` before billing uncached tokens at the base rate —
     /// genai's Anthropic adapter reports `prompt_tokens` as the *sum*
     /// of all three so the same split is correct for every provider
-    /// (OpenAI / DeepSeek pass `cache_creation = 0`, leaving the
+    /// (`OpenAI` / `DeepSeek` pass `cache_creation = 0`, leaving the
     /// uncached term unchanged).  When the catalog publishes no
     /// separate cache rate, those tokens fall back to the base input
     /// rate — matching OR's own accounting for models without
@@ -65,7 +65,7 @@ impl ModelPricing {
     }
 }
 
-/// Model capability snapshot pulled from OpenRouter's
+/// Model capability snapshot pulled from `OpenRouter`'s
 /// `/api/v1/models` response.  `None` / empty fields mean the catalog
 /// entry omitted them (or the catalog has not been fetched).
 ///
@@ -125,10 +125,10 @@ impl ModelCaps {
 /// HTTP call (and tear if only one were populated).
 static CATALOG: OnceCell<Snapshot> = OnceCell::const_new();
 
-/// Populate the OpenRouter pricing and capability caches from
+/// Populate the `OpenRouter` pricing and capability caches from
 /// `/api/v1/models` if they haven't already been populated.  Safe to
 /// call concurrently; only the first caller does the fetch.  On
-/// failure (network down, OpenRouter changed the response shape, etc.)
+/// failure (network down, `OpenRouter` changed the response shape, etc.)
 /// both caches initialise empty so [`lookup`] / [`caps`] return `None`
 /// and the renderer falls back to `—` exactly as it did before.
 pub async fn ensure_loaded() {
@@ -141,9 +141,9 @@ pub async fn ensure_loaded() {
 /// awaited and `model` is in the catalog.  Returns `None` otherwise.
 ///
 /// Prefer [`lookup_for`] when the caller knows the wire adapter: the
-/// OpenRouter catalog is authoritative for Anthropic / OpenAI / OR
-/// itself, but DeepSeek's generic aliases are listed as $0 in OR
-/// (OpenRouter's own free-tier promotion) while the native DeepSeek
+/// `OpenRouter` catalog is authoritative for Anthropic / `OpenAI` / OR
+/// itself, but `DeepSeek`'s generic aliases are listed as $0 in OR
+/// (`OpenRouter`'s own free-tier promotion) while the native `DeepSeek`
 /// API charges.  [`lookup_for`] routes to the correct source.
 pub fn lookup(model: &str) -> Option<ModelPricing> {
     CATALOG.get()?.prices.get(model).copied()
@@ -151,7 +151,7 @@ pub fn lookup(model: &str) -> Option<ModelPricing> {
 
 // region:    --- DeepSeek hardcoded pricing
 
-/// One side (regular or peak) of a DeepSeek rate card, in dollars per
+/// One side (regular or peak) of a `DeepSeek` rate card, in dollars per
 /// 1M tokens.
 #[derive(Clone, Copy)]
 struct DeepSeekRates {
@@ -160,20 +160,20 @@ struct DeepSeekRates {
     cache_read: f64,
 }
 
-/// True when `hour` (0..=23, UTC) falls in one of DeepSeek's
+/// True when `hour` (0..=23, UTC) falls in one of `DeepSeek`'s
 /// peak-pricing windows: 01:00-04:00 and 06:00-10:00 UTC.  Peak
 /// pricing was announced alongside the v4 rate card but is not live
 /// yet; wiring the window in now means exarch bills the right rate
-/// the moment DeepSeek turns it on, with no code change needed then.
+/// the moment `DeepSeek` turns it on, with no code change needed then.
 fn is_peak_hour(hour: i8) -> bool {
     (1..4).contains(&hour) || (6..10).contains(&hour)
 }
 
-/// Return the official DeepSeek API per-token pricing for `model`.
+/// Return the official `DeepSeek` API per-token pricing for `model`.
 ///
-/// OpenRouter lists many DeepSeek aliases as $0 (its own free-tier
+/// `OpenRouter` lists many `DeepSeek` aliases as $0 (its own free-tier
 /// promotion), so the OR catalog is not authoritative for native
-/// DeepSeek traffic.  These rates, including the peak-hour surcharge,
+/// `DeepSeek` traffic.  These rates, including the peak-hour surcharge,
 /// come from <https://api-docs.deepseek.com/quick_start/pricing>.
 fn deepseek_price(model: &str) -> Option<ModelPricing> {
     // `deepseek-chat` / `deepseek-reasoner` are aliases for
@@ -231,8 +231,8 @@ fn deepseek_price(model: &str) -> Option<ModelPricing> {
 }
 
 /// Return the per-token pricing for `model` from the correct source
-/// for `adapter`.  For DeepSeek this consults the official DeepSeek
-/// API rates first and falls back to the OpenRouter catalog; for
+/// for `adapter`.  For `DeepSeek` this consults the official `DeepSeek`
+/// API rates first and falls back to the `OpenRouter` catalog; for
 /// every other adapter it uses the OR catalog directly.
 pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<ModelPricing> {
     if adapter == genai::adapter::AdapterKind::DeepSeek {
@@ -244,16 +244,16 @@ pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<M
 
 // endregion: --- DeepSeek hardcoded pricing
 
-/// Return a cloned capability snapshot for `model` if the OpenRouter
+/// Return a cloned capability snapshot for `model` if the `OpenRouter`
 /// catalog has been fetched.  `None` for native-provider models —
-/// OpenRouter is the only catalog exarch pulls.  `ModelCaps` holds
+/// `OpenRouter` is the only catalog exarch pulls.  `ModelCaps` holds
 /// owned `String`/`Vec` fields so this clones; the caller usually
 /// pulls one or two fields and drops the rest.
 pub fn caps(model: &str) -> Option<ModelCaps> {
     CATALOG.get()?.caps.get(model).cloned()
 }
 
-/// The total context window in tokens for `model`, when the OpenRouter
+/// The total context window in tokens for `model`, when the `OpenRouter`
 /// catalog has been fetched and lists it.  A targeted accessor that skips
 /// the `ModelCaps` clone [`caps`] makes — the compaction trigger reads
 /// only this one field, at every turn boundary.  `None` for a native
@@ -338,7 +338,7 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
     Snapshot { prices, caps }
 }
 
-/// OpenRouter accepts both the prefixed form (`inception/mercury-2`) and
+/// `OpenRouter` accepts both the prefixed form (`inception/mercury-2`) and
 /// the bare suffix (`mercury-2`) on the wire — its alias router resolves
 /// the latter to the former.  The local catalog is keyed by the full id,
 /// so a user who passes the bare name on the command line gets a lookup
@@ -347,7 +347,7 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
 /// across the catalog: an ambiguous bare alias would silently bind to
 /// whichever vendor sorted first, which is worse than a miss.
 ///
-/// OpenRouter additionally separates a model's version with a dot
+/// `OpenRouter` additionally separates a model's version with a dot
 /// (`anthropic/claude-opus-4.8`), whereas the native Anthropic provider
 /// names the very same model with a dash (`claude-opus-4-8`) — exarch
 /// passes the native id through, so the dotted catalog key never matches.
@@ -402,7 +402,7 @@ fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     map.extend(aliases);
 }
 
-/// OpenRouter posts prices as strings (in $/token) so they can carry
+/// `OpenRouter` posts prices as strings (in $/token) so they can carry
 /// more precision than an f32 round-trip would preserve.  Anything we
 /// can't parse becomes `0.0`, which is filtered out by the caller for
 /// base rates and treated as "no separate rate" for cache rates.
@@ -459,7 +459,7 @@ mod tests {
 
     /// Peak windows are 01:00-04:00 and 06:00-10:00 UTC; every other
     /// hour is regular-priced.  Boundaries are half-open (start
-    /// inclusive, end exclusive), matching how DeepSeek documents
+    /// inclusive, end exclusive), matching how `DeepSeek` documents
     /// the windows.
     #[test]
     fn is_peak_hour_matches_documented_windows() {
@@ -478,7 +478,7 @@ mod tests {
     }
 
     /// Verify the response shape matches a realistic /models payload.
-    /// Anchors the deserialise against the OpenRouter contract so a
+    /// Anchors the deserialise against the `OpenRouter` contract so a
     /// breaking change there fails this test rather than silently
     /// emptying the cache at runtime.
     #[test]
@@ -509,8 +509,8 @@ mod tests {
         assert!(resp.data[1].pricing.input_cache_read.is_some());
     }
 
-    /// Capability fields (context_length, top_provider.max_completion_tokens,
-    /// architecture.tokenizer, supported_parameters, canonical_slug) must
+    /// Capability fields (`context_length`, `top_provider.max_completion_tokens`,
+    /// architecture.tokenizer, `supported_parameters`, `canonical_slug`) must
     /// all be `#[serde(default)]` so a missing field on any entry doesn't
     /// nuke the whole catalog parse.
     #[test]
@@ -585,9 +585,9 @@ mod tests {
     }
 
     /// Anthropic claude-opus-4 rates as OR publishes them: input
-    /// $15/M, output $75/M, cache_write 1.25× input, cache_read 0.10×
-    /// input.  Bills uncached input + cache_creation × cache_write +
-    /// cache_read × cache_read + output × output, with cache tokens
+    /// $15/M, output $75/M, `cache_write` 1.25× input, `cache_read` 0.10×
+    /// input.  Bills uncached input + `cache_creation` × `cache_write` +
+    /// `cache_read` × `cache_read` + output × output, with cache tokens
     /// stripped from `input` first (genai sums all three on
     /// `prompt_tokens` for the Anthropic adapter).
     #[test]
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(m.get("foo"), Some(&10));
     }
 
-    /// OpenRouter separates a version with a dot
+    /// `OpenRouter` separates a version with a dot
     /// (`anthropic/claude-opus-4.8`); the native Anthropic provider uses
     /// a dash (`claude-opus-4-8`) for the same model.  A unique dotted
     /// suffix must resolve under its dotted bare form, its dash form, AND

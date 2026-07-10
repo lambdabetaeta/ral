@@ -9,7 +9,7 @@
 //! design/pipelines), not a pgid job, and is not tracked here.
 //!
 //! A single-process job places its child in its own pgid (set in the
-//! pre_exec hook of every pipeline stage on Unix; via
+//! `pre_exec` hook of every pipeline stage on Unix; via
 //! `CREATE_NEW_PROCESS_GROUP` + a Job Object on Windows), so every
 //! signal, wait, and foreground handoff in this module operates on the
 //! whole group regardless of whether the job has one stage or many.
@@ -18,7 +18,7 @@
 //!
 //! Provides jobs/fg/bg/disown.  On shell exit, the group is taken down
 //! gracefully first (`SIGTERM` to the pgid on Unix; `Ctrl-Break`
-//! fan-out is already wired through the SetConsoleCtrlHandler on
+//! fan-out is already wired through the `SetConsoleCtrlHandler` on
 //! Windows, with `TerminateJobObject` as the hard stop), then a 5-second
 //! grace, then forcibly (`SIGKILL` / `TerminateJobObject`).
 //!
@@ -30,7 +30,7 @@
 //!     be entered spontaneously — `Escape::Stopped` is a Unix-only
 //!     evaluator escape.  The table still compiles and operates: `fg`
 //!     blocks on the leader's process handle, `cleanup` is wired
-//!     through the existing Job Object KILL_ON_JOB_CLOSE machinery, and
+//!     through the existing Job Object `KILL_ON_JOB_CLOSE` machinery, and
 //!     `disown` clears that flag so members survive.  This keeps every
 //!     downstream caller (and the pipeline lifecycle) cfg-free.
 
@@ -237,7 +237,7 @@ impl JobTable {
     /// `KILL_ON_JOB_CLOSE`.  This collapses the whole pipeline as soon
     /// as the leader exits — strictly aggressive compared to Unix's
     /// "wait for every member to be reaped" semantics, but acceptable
-    /// while the JobTable on Windows can only ever hold a single-stage
+    /// while the `JobTable` on Windows can only ever hold a single-stage
     /// foreground job (no SIGTSTP, no `&`-flow yet).  When `&` is wired
     /// through, this should grow into a Job-Object-`ACTIVE_PROCESS_ZERO`
     /// poll instead.

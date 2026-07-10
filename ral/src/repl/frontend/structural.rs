@@ -1113,9 +1113,9 @@ fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
 
 /// Underline the offending span in place on the prompt (ariadne's squiggle),
 /// then draw a caret-and-label row directly beneath it, aligned under the
-/// span.  Char offsets, not bytes — they match the TextArea's char cursor.
+/// span.  Char offsets, not bytes — they match the `TextArea`'s char cursor.
 ///
-/// The underline is overlaid onto the cells the TextArea already painted:
+/// The underline is overlaid onto the cells the `TextArea` already painted:
 /// for each char of the span on the prompt's first row, we add
 /// [`Modifier::UNDERLINED`] and the flare hue to the existing cell rather
 /// than fighting the widget's styling API.  The common one-line prompt is
@@ -1199,7 +1199,7 @@ fn underline_cells(frame: &mut ratatui::Frame, area: Rect, col: u16, span_w: u16
 }
 
 /// Paint the autosuggestion ghost dim, starting at the cursor's screen cell
-/// and running right along its row, onto the cells the TextArea already
+/// and running right along its row, onto the cells the `TextArea` already
 /// painted.  Same coordinate model as [`overlay_type_error`]: every editor row
 /// begins `last_w` columns into the band, including continuation rows.  The
 /// cursor sits over the first ghost cell — fish-style — and Right-arrow accepts

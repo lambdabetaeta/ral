@@ -1,7 +1,7 @@
 //! Shared helpers for tag syntax and tag-keyed row labels.
 //!
 //! Runtime variants keep bare labels (`ok`, `err`, `more`, `done`).
-//! Surface syntax and row/map keys use a backtick sigil (`\`ok`).
+//! Surface syntax and row/map keys use a backtick sigil (`` `ok ``).
 
 /// Prefix used by surface tags and tag-keyed row labels.
 pub const TAG_PREFIX: char = '`';

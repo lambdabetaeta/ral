@@ -1,7 +1,7 @@
 //! Provider auto-discovery and credential resolution.
 //!
 //! A famous provider whose conventional key variable
-//! ([`ProviderKind::info`]`.2`) holds a usable value is *available*. At
+//! (field `.2` of [`ProviderKind::info`]) holds a usable value is *available*. At
 //! startup every available provider's key is read from its variable into
 //! the in-memory [`CredentialStore`], and every key variable that fed a
 //! credential — or was present but malformed — is then scrubbed from the
@@ -19,11 +19,11 @@
 //! env var is read and scrubbed exactly like a famous provider's, so a custom
 //! endpoint becomes available the moment its key is in the environment.
 //!
-//! Signed-in ChatGPT accounts ([`crate::oauth`]) are the one source that does
+//! Signed-in `ChatGPT` accounts ([`crate::oauth`]) are the one source that does
 //! *not* come from the environment: each persisted login becomes its own
 //! [`ProviderId::ChatGpt`] bound to an [`Credential::OAuth`], loaded from the
 //! token store. Several can be available at once, and an account is a distinct
-//! identity from the API-key OpenAI provider — so a login and an
+//! identity from the API-key `OpenAI` provider — so a login and an
 //! `OPENAI_API_KEY` coexist as separate selectable providers.
 
 use crate::provider::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind};
@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 /// A resolved credential — what a provider's requests authenticate with.
 ///
 /// An [`ApiKey`](Self::ApiKey) is the bearer string read from a provider's
-/// key variable. An [`OAuth`](Self::OAuth) credential is a ChatGPT plan
+/// key variable. An [`OAuth`](Self::OAuth) credential is a `ChatGPT` plan
 /// login held behind a shared cell: a turn reads the current access token
 /// through it, and a refresh (in [`crate::provider`]) writes a renewed token
 /// back into the same cell, so a session that outlives the access token keeps
@@ -43,13 +43,13 @@ use std::sync::{Arc, Mutex};
 pub enum Credential {
     /// An API key read from the environment at startup.
     ApiKey(String),
-    /// A signed-in ChatGPT account's plan login, shared so a mid-session
+    /// A signed-in `ChatGPT` account's plan login, shared so a mid-session
     /// refresh is visible to the request path.
     OAuth(Arc<Mutex<crate::oauth::OAuthToken>>),
 }
 
 impl Credential {
-    /// Whether this credential is a ChatGPT plan login rather than an API
+    /// Whether this credential is a `ChatGPT` plan login rather than an API
     /// key. This is the OAuth-vs-key distinction the store answers — narrower
     /// than "is a flat subscription", since a flat rate can also be a
     /// `ProviderId` property (opencode Go) with an ordinary API key. It marks
@@ -65,7 +65,7 @@ impl Credential {
 pub struct CredentialStore {
     ready: BTreeMap<ProviderId, Credential>,
     /// The famous providers, in [`ProviderKind`] declaration order, then the
-    /// signed-in ChatGPT accounts (by label), then the custom providers in
+    /// signed-in `ChatGPT` accounts (by label), then the custom providers in
     /// config order — the order [`Self::available`] preserves. Holds every
     /// known provider, available or not, so iteration order is stable
     /// regardless of which keys happen to be set.
@@ -217,7 +217,7 @@ mod tests {
     /// restores. A process-wide lock serialises env-mutating tests under
     /// `RUST_TEST_THREADS > 1` so they cannot interleave their mutations.
     ///
-    /// `resolve_and_scrub` also reads the persisted ChatGPT login from the
+    /// `resolve_and_scrub` also reads the persisted `ChatGPT` login from the
     /// XDG state dir, so the guard points `XDG_STATE_HOME` at a fresh empty
     /// temp dir: a scenario that does not set up a login then sees no
     /// credential there, isolated from any real `oauth.json` on the
@@ -460,7 +460,7 @@ mod tests {
         );
     }
 
-    /// A signed-in ChatGPT account, keyed by its login email.
+    /// A signed-in `ChatGPT` account, keyed by its login email.
     fn account(account_id: &str, email: &str) -> ProviderId {
         ProviderId::ChatGpt(std::sync::Arc::new(ChatGptAccount {
             account_id: account_id.into(),
@@ -468,9 +468,9 @@ mod tests {
         }))
     }
 
-    /// A stored ChatGPT login resolves to its own OAuth-backed provider
+    /// A stored `ChatGPT` login resolves to its own OAuth-backed provider
     /// identity, keyed by the account's email — distinct from the API-key
-    /// OpenAI provider, so a present `OPENAI_API_KEY` *also* resolves (as an
+    /// `OpenAI` provider, so a present `OPENAI_API_KEY` *also* resolves (as an
     /// `ApiKey`) and the two coexist. The key var is still scrubbed.
     #[test]
     fn oauth_login_is_a_distinct_account_coexisting_with_openai_key() {
@@ -520,7 +520,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Several signed-in ChatGPT accounts are each available as their own
+    /// Several signed-in `ChatGPT` accounts are each available as their own
     /// provider, ordered by label and placed after the famous providers (here
     /// anthropic) and before any custom one.
     #[test]

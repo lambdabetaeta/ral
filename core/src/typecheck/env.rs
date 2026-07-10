@@ -29,8 +29,8 @@ impl FreeVars {
         }
     }
 
-    /// Pull cached residual free vars (BTreeSet, persisted form) into
-    /// this `FreeVars` (HashSet, in-flight form).
+    /// Pull cached residual free vars (`BTreeSet`, persisted form) into
+    /// this `FreeVars` (`HashSet`, in-flight form).
     pub fn merge_cached(&mut self, cached: &super::scheme::CachedFreeVars) {
         self.tys.extend(&cached.ty_fv);
         self.comps.extend(&cached.comp_fv);

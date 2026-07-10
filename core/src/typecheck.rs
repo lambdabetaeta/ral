@@ -12,7 +12,7 @@
 //!   `Comp ::= F[I,O] Value | Value → Comp | CompVar`
 //!   `I,O ::= ∅ | Bytes | IOVar`
 //!
-//! Generalisation happens at Bind (let) nodes, and also at LetRec: each
+//! Generalisation happens at Bind (let) nodes, and also at `LetRec`: each
 //! recursive binding is typed monomorphically against itself first
 //! (`infer_letrec_betas`), then generalised once the group's mono
 //! self-bindings are dropped from scope, so mutually recursive bindings

@@ -21,7 +21,7 @@ pub struct Cli {
     ///
     /// Optional initial-model override for headless/scripted use. Its
     /// provider is resolved as the available provider whose model list
-    /// contains the name, or — for a `vendor/model` slug — OpenRouter,
+    /// contains the name, or — for a `vendor/model` slug — `OpenRouter`,
     /// or the sole available provider; unknown names error clearly.
     /// Unset, the selection comes from the saved state or the first available
     /// provider's default model. The interactive `/model` picker is the
@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long)]
     pub model: Option<String>,
     /// Pin the provider by label — `anthropic`, `openai`, `openrouter`, …, a
-    /// custom `config.ral` key, or a signed-in ChatGPT account handle —
+    /// custom `config.ral` key, or a signed-in `ChatGPT` account handle —
     /// bypassing the model-listing resolution `--model` performs on its own.
     /// With `--model` it pins the pair verbatim, so you can reach a model the
     /// provider does not advertise; alone it takes the provider's default
@@ -155,7 +155,7 @@ pub enum EditScheme {
 /// An out-of-band action that runs and exits instead of starting a session.
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Sign in with ChatGPT, adding the account as a provider that runs off
+    /// Sign in with `ChatGPT`, adding the account as a provider that runs off
     /// the plan subscription.  Several accounts can be signed in at once; the
     /// `/model` picker switches between them.  Signing in again with the same
     /// account refreshes its tokens.  Opens a browser by default;
@@ -165,7 +165,7 @@ pub enum Command {
         #[arg(long = "device-auth")]
         device_auth: bool,
     },
-    /// Remove a stored ChatGPT login.  Names the account to remove (by its
+    /// Remove a stored `ChatGPT` login.  Names the account to remove (by its
     /// email or account id); with no account it removes the sole login when
     /// exactly one is signed in, and otherwise asks which.  `--all` removes
     /// every account.
@@ -176,7 +176,7 @@ pub enum Command {
         #[arg(long, conflicts_with = "account")]
         all: bool,
     },
-    /// List the signed-in ChatGPT accounts.
+    /// List the signed-in `ChatGPT` accounts.
     Accounts,
 }
 

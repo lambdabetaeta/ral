@@ -1,15 +1,15 @@
 //! Unified stream plumbing.
 //!
 //! Three submodules carry the building blocks.  [`terminal`] caches the
-//! startup isatty / ANSI / NO_COLOR / mode bits.  [`source`] is a stage's
+//! startup isatty / ANSI / `NO_COLOR` / mode bits.  [`source`] is a stage's
 //! byte input.  [`sink`] is its byte output, together with the child-process
 //! routing plan and the in-memory buffer primitives.  Public items from each
 //! are re-exported below so callers spell them `crate::io::Sink`,
 //! `crate::io::TerminalState`, etc.
 //!
 //! This file holds [`Io`] — the per-Shell IO bundle (stdin / stdout /
-//! stderr / interactive / terminal / launch_role / capture_outer /
-//! capture_depth) — and
+//! stderr / interactive / terminal / `launch_role` / `capture_outer` /
+//! `capture_depth`) — and
 //! [`LaunchRole`], the process-group role that distinguishes the top-level
 //! orchestrator from a pipeline-local child. Terminal-foreground authority is
 //! no longer carried here — that is the session's

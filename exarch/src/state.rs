@@ -44,16 +44,16 @@ pub struct State {
     /// The nucleus-sampling top-p, or absent for "auto".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-    /// The chosen OpenRouter serving-provider slug (`provider.order` routing),
-    /// or absent for "auto" (OpenRouter decides). Routing, not sampling, so it
+    /// The chosen `OpenRouter` serving-provider slug (`provider.order` routing),
+    /// or absent for "auto" (`OpenRouter` decides). Routing, not sampling, so it
     /// is its own field rather than part of the tuning — meaningful only for an
-    /// OpenRouter selection.
+    /// `OpenRouter` selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
 }
 
 impl State {
-    /// Build state from a resolved selection, its tuning, and its OpenRouter
+    /// Build state from a resolved selection, its tuning, and its `OpenRouter`
     /// route (the chosen serving-provider slug, `None` for auto). An effort that
     /// has no keyword (genai's `Budget`, which the overlay never produces) is
     /// dropped to "auto" rather than persisted opaquely.

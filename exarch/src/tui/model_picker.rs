@@ -111,7 +111,7 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
 
 /// Poll keys and background-fetch results until the picker resolves.  Returns
 /// the chosen `(provider, model, tuning, route)`, or `None` on cancel. The
-/// `route` is the chosen OpenRouter serving-provider slug (`None` for auto).
+/// `route` is the chosen `OpenRouter` serving-provider slug (`None` for auto).
 fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,

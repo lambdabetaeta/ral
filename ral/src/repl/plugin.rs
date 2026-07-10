@@ -358,7 +358,7 @@ pub(super) struct FramedHook {
 ///   2. install `ctx_in` (when `Some`) so `_ed-*` builtins resolve correctly
 ///   3. apply the handler to `args`, framed per `framing` (no capability
 ///      attenuation; plugins run with host authority)
-///   4. take the context back out (now carrying outputs and any state_cell mutation)
+///   4. take the context back out (now carrying outputs and any `state_cell` mutation)
 ///   5. restore the pre-existing context
 ///
 /// The context install/restore is local-state bookkeeping that a turn frame
@@ -919,7 +919,7 @@ impl PluginRuntime {
 /// accumulator through each call.  The `step` closure receives `shell`,
 /// a [`HookFor`] view of the plugin, the handler value, and the current
 /// accumulator; it returns the next accumulator.  Typical bodies invoke
-/// [`call_plugin_hook`] to install the PluginContext around the call —
+/// [`call_plugin_hook`] to install the `PluginContext` around the call —
 /// `fold_hook` itself only collects handlers and threads `acc`.
 pub(crate) fn fold_hook<T>(
     runtime: &Arc<Mutex<PluginRuntime>>,

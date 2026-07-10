@@ -183,7 +183,7 @@ pub fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
 }
 
 /// Shared body for record/variant row rendering.  `sep` is the
-/// separator between field/arm entries; an open tail (Row::Var) prints
+/// separator between field/arm entries; an open tail (`Row::Var`) prints
 /// as ` ...` (or ` ...ρ` when the variable has a name in `ctx`) so the
 /// tail is visually distinct from the labelled fields — `[a: Int, b:
 /// String, ...]` reads as "two known fields, possibly more", which is

@@ -30,12 +30,12 @@ use crate::jobs;
 /// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
 ///   foreground turn and every detached worker — instead of core-dumping;
 ///   installed by `jobs::setup_signals`, a no-op between turns)
-/// - SIGTSTP → SIG_IGN  (shell handles Ctrl+Z via waitpid, not self-stop)
-/// - SIGTTOU → SIG_IGN  (shell writes terminal settings without being stopped)
-/// - SIGTTIN → SIG_IGN  (shell reads stdin without being stopped if not fg)
-/// - SIGPIPE → SIG_IGN  (writing to a closed pipe yields an error, not death)
+/// - SIGTSTP → `SIG_IGN`  (shell handles Ctrl+Z via waitpid, not self-stop)
+/// - SIGTTOU → `SIG_IGN`  (shell writes terminal settings without being stopped)
+/// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
+/// - SIGPIPE → `SIG_IGN`  (writing to a closed pipe yields an error, not death)
 ///
-/// Windows: installs SetConsoleCtrlHandler via `signal::install_handlers`.
+/// Windows: installs `SetConsoleCtrlHandler` via `signal::install_handlers`.
 pub(super) fn setup_signals() {
     #[cfg(unix)]
     {

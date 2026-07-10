@@ -118,7 +118,7 @@ impl SourceDb {
     }
 
     /// Drop every registered source, returning the registry to empty so the
-    /// next [`register`](Self::register) hands out [`FileId`]`(0)` again.
+    /// next [`register`](Self::register) hands out [`FileId`] with index `0` again.
     /// Called at each top-level turn boundary so a long interactive session
     /// reclaims the prior turn's sources instead of growing without bound.
     pub fn reset(&mut self) {

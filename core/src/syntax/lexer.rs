@@ -140,7 +140,7 @@ pub enum Token {
     Comma,
     Spread,
     /// Variant tag `` `ident `` — the label is stored without its backtick.
-    /// Construction (`` `ok 5 ``), tag-keyed record keys (`[`ok: 5]`), and case
+    /// Construction (`` `ok 5 ``), tag-keyed record keys (`` [`ok: 5] ``), and case
     /// handler tables share this token.
     Tag(String),
     /// Deref resolved by lexer: `$name`, `$(name)`, `$name[key]`.
@@ -352,7 +352,7 @@ pub fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexErr
 }
 
 struct Lexer {
-    /// (byte_offset, char) for each char. Byte offsets let us stamp byte-range
+    /// (`byte_offset`, char) for each char. Byte offsets let us stamp byte-range
     /// spans while keeping O(1) peek-by-char-index semantics.
     chars: Vec<(usize, char)>,
     source_len: u32,

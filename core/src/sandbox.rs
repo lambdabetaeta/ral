@@ -171,9 +171,9 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
 
 /// Assign OS-level resource limits to an already-spawned child process.
 ///
-/// On Unix the limits are applied before exec via a pre_exec hook in
-/// make_command; this function is a no-op there.  On Windows, where
-/// pre_exec does not exist, a Job Object is attached post-spawn to cap
+/// On Unix the limits are applied before exec via a `pre_exec` hook in
+/// `make_command`; this function is a no-op there.  On Windows, where
+/// `pre_exec` does not exist, a Job Object is attached post-spawn to cap
 /// the process tree at 512 processes (preventing fork bombs).
 pub fn apply_child_limits(_child: &crate::process::ChildHandle) {
     #[cfg(windows)]

@@ -102,7 +102,7 @@ impl ForegroundDecision {
     ///
     /// Every spawned external child also gets default disposition for
     /// SIGINT / SIGQUIT / SIGTSTP / SIGTTIN / SIGTTOU / SIGPIPE — that
-    /// is universal and lives in `signal::spawn_with_pgid`'s pre_exec,
+    /// is universal and lives in `signal::spawn_with_pgid`'s `pre_exec`,
     /// not here.
     pub(super) fn pgid_policy(&self) -> PgidPolicy {
         if self.want_fg {

@@ -954,7 +954,7 @@ fn within_env_and_dir_still_typecheck() {
 // ignores; extra argv is inferred for local errors and then consumed by
 // the static handler-call rule. The handler's return type is still pinned.
 
-/// An args-ignoring alias binds in TyEnv:
+/// An args-ignoring alias binds in `TyEnv`:
 /// `alias greet { |args| return "hi" }; greet` typechecks without error.
 /// If the body returned an Int, using the result in a String context
 /// (e.g. `str_concat "x" (greet)`) would be a type error; here we verify
@@ -1018,7 +1018,7 @@ fn alias_argument_checked_against_arm_parameter() {
 }
 
 /// Last-pushed alias shadows earlier alias at typecheck: the second
-/// `alias greet` re-binds in TyEnv (last-pushed wins).  The final `greet`
+/// `alias greet` re-binds in `TyEnv` (last-pushed wins).  The final `greet`
 /// should see the second alias's Int return type.
 #[test]
 fn alias_last_pushed_shadows_earlier() {
@@ -1041,7 +1041,7 @@ fn alias_last_pushed_shadows_earlier() {
 
 /// Alias inside a conditional does NOT leak to subsequent Seq statements.
 /// The alias is inside an `if` branch, not at Seq level, so the follow-up
-/// call `greet` does not see the TyEnv binding.  Assert: no panic; the
+/// call `greet` does not see the `TyEnv` binding.  Assert: no panic; the
 /// program compiles.  (The call falls through to the external dispatcher
 /// and gets a fresh type.)
 #[test]

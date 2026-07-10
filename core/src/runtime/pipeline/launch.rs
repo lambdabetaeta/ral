@@ -343,7 +343,7 @@ impl PipelineBuild {
 }
 
 /// Spawn a direct external stage: no stage helper, no
-/// serialisation.  Only used for NoTerminal pipelines where there
+/// serialisation.  Only used for `NoTerminal` pipelines where there
 /// is no foreground gating and no ral code to evaluate.
 fn launch_external_stage_direct(
     ext: &ExternalStage,

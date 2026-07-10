@@ -851,7 +851,7 @@ fn grant_fs_read_denies_builtin_read() {
 /// `deny` is symmetric: a region named in the deny list blocks
 /// reads as well as writes.  This test puts a file inside an
 /// otherwise readable region and a deny entry on the file; the
-/// read must fail.  Earlier shapes only consulted deny_paths on
+/// read must fail.  Earlier shapes only consulted `deny_paths` on
 /// writes — this regression-locks the symmetric semantics.
 #[cfg(unix)]
 #[test]
@@ -2761,7 +2761,7 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
 /// stage, where it is forced once.  `"abc\n"` has four characters, so a
 /// correct single force yields 4 — a missing or double force would not.
 /// (`scope_escapes::pipeline_non_final_stage_is_not_tail_emitting` pins
-/// the same equation for the *in-process* PureValue fold; this is its
+/// the same equation for the *in-process* `PureValue` fold; this is its
 /// cross-process counterpart.)
 #[cfg(unix)]
 #[test]

@@ -259,7 +259,7 @@ fn load_rc_plugin(entry: Value, shell: &mut Shell, runtime: &Arc<Mutex<PluginRun
 /// Shape-check an rc plugin entry, dispatch to the plugin loader, and
 /// return the load error (if any) as a formatted string — the Result lets
 /// each field check short-circuit with `?` instead of repeating the
-/// cmd_error boilerplate per key.
+/// `cmd_error` boilerplate per key.
 fn parse_and_load_rc_plugin(
     entry: Value,
     shell: &mut Shell,

@@ -31,7 +31,7 @@
 //!
 //! The signal handler cannot hold a token by value, so the trunk
 //! [`publish`]es its token's flag into a process-global *slot* (an
-//! `AtomicPtr`, the lock-free ArcSwap analogue — a signal handler must
+//! `AtomicPtr`, the lock-free `ArcSwap` analogue — a signal handler must
 //! not lock) for the handler to set.  The slot points into the trunk's
 //! own sticky [`Token`]'s `Arc<AtomicU8>`; [`publish`] leaks one strong
 //! share of that `Arc` so the pointee outlives every guard and every other
@@ -192,7 +192,7 @@ pub fn raise_interrupt() {
 /// the front-end owns signal handlers and translates SIGINT/SIGTSTP/
 /// SIGWINCH into `Control` frames sent through the `ControlSender`.
 /// The `RAL_SIGINT_HANDLER`/`RAL_TERM_HANDLER` cross-process chaining
-/// below is for the `IdentityTransport` path only — WireTransport
+/// below is for the `IdentityTransport` path only — `WireTransport`
 /// must not install these; the engine receives cancellation through
 /// the wire, not a shared flag.
 #[cfg(unix)]
@@ -356,7 +356,7 @@ mod tests {
     }
 
     /// Esc cancels the trunk's published token (and, via `deliver_interrupt`,
-    /// the current turn's foreground scope — exercised by ral_core's own
+    /// the current turn's foreground scope — exercised by `ral_core`'s own
     /// slot tests), but never ticks ral's escalation ladder: detached
     /// workers are cancelled through the registry cascade, not the
     /// foreground, so they survive an Esc that stops the trunk alone.

@@ -1158,7 +1158,7 @@ mod tests {
         assert_eq!(line_hash("x"), line_hash("x   "));
     }
 
-    /// Every witness folds in at least ±MIN_RADIUS of context (the freshness
+    /// Every witness folds in at least ±`MIN_RADIUS` of context (the freshness
     /// floor).  In a file shorter than a full floor window every line's window
     /// clamps to the whole file, so the lines are told apart by their offset
     /// within it, each resolved at the floor radius.
@@ -1182,7 +1182,7 @@ mod tests {
     }
 
     /// Two identical lines, each deep enough in the interior to share the same
-    /// offset within its ±MIN_RADIUS window, are told apart only by the context
+    /// offset within its ±`MIN_RADIUS` window, are told apart only by the context
     /// folded into the witness — what a bare line hash could not do.
     #[test]
     fn window_hashes_distinguish_repeated_lines_by_context() {

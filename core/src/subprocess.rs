@@ -254,7 +254,7 @@ pub(crate) struct WireMobile {
 /// All other fields ride their runtime types directly: `grants` is
 /// `#[serde(transparent)]` over `Vec<Capabilities>`, `modules` and
 /// `cwd` are local `Serialize`-implementing wrappers, and the bare
-/// fields (env_overrides, dir, args) are serde-friendly already.
+/// fields (`env_overrides`, dir, args) are serde-friendly already.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireContext {
     pub env_overrides: crate::types::EnvVars,

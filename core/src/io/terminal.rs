@@ -2,7 +2,7 @@
 //!
 //! [`InteractiveMode`] resolves `RAL_INTERACTIVE_MODE` once at startup and
 //! [`TerminalState`] caches the shell's entry-time isatty results plus the
-//! ANSI / NO_COLOR / tmux / asciinema / CI bits and a small set of opt-in
+//! ANSI / `NO_COLOR` / tmux / asciinema / CI bits and a small set of opt-in
 //! capability flags (truecolor, OSC 8 hyperlinks, OSC 52 clipboard write,
 //! bracketed paste).  Everything here is a snapshot — nothing re-queries
 //! the OS mid-session.
@@ -12,14 +12,14 @@
 //! line mode": each flag has a pure probe over an explicit
 //! [`TerminalEnv`] record so tests can drive them as data, and a public
 //! `ui_*_ok` predicate that mixes the raw probe with the active mode and
-//! NO_COLOR policy.
+//! `NO_COLOR` policy.
 //!
 //! Windows console / VTP detection ([`is_console`],
 //! [`enable_virtual_terminal_processing`], and the `STD_*_HANDLE`
 //! constants) lives at the bottom of this file.  `GetConsoleMode`
 //! succeeds only on real console handles, making it a reliable
 //! `isatty` substitute; `ENABLE_VIRTUAL_TERMINAL_PROCESSING` must be set
-//! before any ANSI output because bundled uutils (uu_ls etc.) emit
+//! before any ANSI output because bundled uutils (`uu_ls` etc.) emit
 //! escape codes but rely on the host process to have switched the
 //! console into VTP mode first.
 use serde::{Deserialize, Serialize};
@@ -186,7 +186,7 @@ impl TerminalState {
     // override policy (e.g. force OSC 8 emission while debugging) can read
     // the raw field; everyday code uses the predicate.
 
-    /// UI may emit styling.  False under NO_COLOR, TERM=dumb, non-tty, or
+    /// UI may emit styling.  False under `NO_COLOR`, TERM=dumb, non-tty, or
     /// `RAL_INTERACTIVE_MODE=minimal`.
     pub fn ui_ansi_ok(&self) -> bool {
         !self.mode.is_minimal() && self.supports_ansi && !self.no_color
@@ -204,12 +204,12 @@ impl TerminalState {
     }
 
     /// 24-bit foreground/background colors may be emitted.  Subsumes
-    /// `ui_ansi_ok`; NO_COLOR turns this off too.
+    /// `ui_ansi_ok`; `NO_COLOR` turns this off too.
     pub fn ui_truecolor_ok(&self) -> bool {
         self.ui_ansi_ok() && self.truecolor
     }
 
-    /// OSC 8 hyperlinks may be emitted.  NO_COLOR does not block hyperlinks
+    /// OSC 8 hyperlinks may be emitted.  `NO_COLOR` does not block hyperlinks
     /// — they are structural, not color — but minimal mode and non-tty
     /// stdout both do.
     pub fn ui_hyperlinks_ok(&self) -> bool {
@@ -229,7 +229,7 @@ impl TerminalState {
 
     /// Diagnostics (stderr) may emit ANSI.  Independent of `ui_ansi_ok`
     /// because stderr may be a tty while stdout is piped to a pager; we still
-    /// want colored errors in that case.  False under NO_COLOR, TERM=dumb on
+    /// want colored errors in that case.  False under `NO_COLOR`, TERM=dumb on
     /// Auto, non-tty stderr, or minimal mode.
     pub fn stderr_ansi_ok(&self) -> bool {
         !self.mode.is_minimal()
@@ -388,7 +388,7 @@ impl TerminalEnv {
     /// OSC 8 hyperlinks and OSC 52 clipboard writes.  Any one source of
     /// evidence suffices:
     ///
-    /// * `TERM_PROGRAM` ∈ {iTerm.app, WezTerm, vscode, ghostty}
+    /// * `TERM_PROGRAM` ∈ {iTerm.app, `WezTerm`, vscode, ghostty}
     /// * `TERM` ∈ {xterm-kitty, foot, xterm-ghostty}
     /// * `KITTY_WINDOW_ID` is set
     /// * `WT_SESSION` is set (Windows Terminal)

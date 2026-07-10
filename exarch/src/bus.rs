@@ -120,7 +120,7 @@ impl AgentOutcome {
         }
     }
 
-    /// The synchronous `agent` tool_result text the parent sees in this turn.
+    /// The synchronous `agent` `tool_result` text the parent sees in this turn.
     pub fn reply(&self, text: &str) -> String {
         match self {
             Self::Complete => text.to_string(),
@@ -1072,7 +1072,7 @@ pub enum Kind {
         card: Card,
     },
     /// Kit-authored *state* pinned to a keyed register slot — the
-    /// model-authored dual of the matrix.  `surface `` `pin [key, body] ``
+    /// model-authored dual of the matrix.  The `` `pin [key, body] `` surface
     /// decodes here, writing `card` to slot `key` and **overwriting in place**
     /// on re-pin.  Unlike [`Kind::Card`], a pin is neither logged nor landed in
     /// scrollback: it is what is *currently true*, not a thing that happened, so
@@ -1082,7 +1082,7 @@ pub enum Kind {
         key: String,
         card: Card,
     },
-    /// Drop a pinned register slot: `surface `` `unpin [key] ``, or a `` `pin ``
+    /// Drop a pinned register slot: the `` `unpin [key] `` surface, or a `` `pin ``
     /// whose body is absent or empty.  A finished plan clears its gauge.
     Unpin {
         key: String,

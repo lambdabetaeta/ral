@@ -17,7 +17,7 @@ use std::collections::HashMap;
 /// Load with [`ExitHints::from_text`]; install into [`crate::types::Shell`].
 #[derive(Default)]
 pub struct ExitHints {
-    /// Key: (command_basename, status).  `"*"` matches any command.
+    /// Key: (`command_basename`, status).  `"*"` matches any command.
     table: HashMap<(String, i32), String>,
 }
 

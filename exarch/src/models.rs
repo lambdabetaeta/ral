@@ -26,11 +26,11 @@ use std::time::Duration;
 /// while still picking up new models within a session or two.
 const TTL: Duration = Duration::from_hours(24);
 
-/// One upstream provider OpenRouter can route a given model to — a row of the
-/// `/model` overlay's provider control. OpenRouter fronts several serving
-/// providers per model (DeepInfra, Novita, …) that differ in context window and
+/// One upstream provider `OpenRouter` can route a given model to — a row of the
+/// `/model` overlay's provider control. `OpenRouter` fronts several serving
+/// providers per model (`DeepInfra`, Novita, …) that differ in context window and
 /// quantization; this is the picker's view of one such endpoint, distilled from
-/// OpenRouter's per-model `/endpoints` listing.
+/// `OpenRouter`'s per-model `/endpoints` listing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderEndpoint {
     /// The human display name, e.g. `"DeepInfra"`.
@@ -48,7 +48,7 @@ pub struct ProviderEndpoint {
 }
 
 /// The seam every fetch of a provider's model list goes through. The live
-/// implementation talks to genai (model lists) and OpenRouter's REST API
+/// implementation talks to genai (model lists) and `OpenRouter`'s REST API
 /// (per-model endpoints); tests substitute an in-memory fake so no suite ever
 /// reaches the network.
 pub trait ModelSource {
@@ -57,10 +57,10 @@ pub trait ModelSource {
     /// entry).
     fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
 
-    /// Fetch the upstream serving providers OpenRouter lists for `model`, or an
-    /// error message. Only meaningful for OpenRouter `vendor/model` ids — the
+    /// Fetch the upstream serving providers `OpenRouter` lists for `model`, or an
+    /// error message. Only meaningful for `OpenRouter` `vendor/model` ids — the
     /// only provider that routes — so the picker calls this solely for an
-    /// OpenRouter selection.
+    /// `OpenRouter` selection.
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String>;
 }
 
@@ -76,7 +76,7 @@ pub trait ModelSource {
 #[derive(Clone)]
 pub struct LiveSource {
     /// Each available API-key provider's key, cloned out of the store so the
-    /// source can build a listing client without holding the store. A ChatGPT
+    /// source can build a listing client without holding the store. A `ChatGPT`
     /// login carries no listable key — its Codex backend exposes no catalog —
     /// so that provider is absent here and the picker falls back to manual
     /// entry.
@@ -132,7 +132,7 @@ impl ModelSource for LiveSource {
     }
 
     /// `GET https://openrouter.ai/api/v1/models/{model}/endpoints`. The listing
-    /// is public, but the OpenRouter key is sent when available so the call
+    /// is public, but the `OpenRouter` key is sent when available so the call
     /// shares the account's rate budget rather than the anonymous one. A
     /// short-lived current-thread runtime backs the request, as for [`Self::list`].
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
@@ -172,7 +172,7 @@ impl ModelSource for LiveSource {
     }
 }
 
-/// OpenRouter's `/endpoints` envelope: the model object carries the serving
+/// `OpenRouter`'s `/endpoints` envelope: the model object carries the serving
 /// `endpoints` array. Only the fields the picker shows (and the routing slug)
 /// are read; the rest of each entry (pricing, uptime, latency) is ignored.
 #[derive(Deserialize)]
@@ -227,7 +227,7 @@ struct CacheEntry {
 /// XDG cache dir.
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
-    /// Keyed by the provider's stable label ([`ProviderKind::info`]`.0`),
+    /// Keyed by the provider's stable label (field `.0` of [`ProviderKind::info`]),
     /// so the file stays readable and survives reordering the enum.
     providers: BTreeMap<String, CacheEntry>,
 }
@@ -242,7 +242,7 @@ pub struct ModelCatalog<S: ModelSource> {
     /// file path under `$XDG_CACHE_HOME/exarch/models.json`.
     cache_path: Option<PathBuf>,
     memo: BTreeMap<ProviderId, Vec<String>>,
-    /// In-session per-model serving-provider lists, keyed by OpenRouter model
+    /// In-session per-model serving-provider lists, keyed by `OpenRouter` model
     /// id. Memo-only (no disk cache): provider availability is volatile and the
     /// fetch is cheap, so it is refetched once per session rather than persisted.
     endpoints_memo: BTreeMap<String, Vec<ProviderEndpoint>>,
@@ -390,7 +390,7 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
 /// Resolve a user-supplied `--model` name to the provider that should
 /// serve it. Prefers the available provider whose live list contains the
 /// name; failing that, falls back to a name-shape match (an `openrouter`
-/// slug like `vendor/model` resolves to OpenRouter when available). Errors
+/// slug like `vendor/model` resolves to `OpenRouter` when available). Errors
 /// clearly when no available provider can plausibly serve the name.
 ///
 /// `catalog.list` may fetch, so this is a network-touching call when the
@@ -669,7 +669,7 @@ mod tests {
         );
     }
 
-    /// A `vendor/model` slug falls back to OpenRouter when no list matches.
+    /// A `vendor/model` slug falls back to `OpenRouter` when no list matches.
     #[test]
     fn resolve_slug_falls_back_to_openrouter() {
         let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));

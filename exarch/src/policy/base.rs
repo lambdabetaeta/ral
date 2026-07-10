@@ -25,7 +25,7 @@
 //! - `read-only`  — `reasonable` reads/exec, but writes only to scratch.
 //! - `minimal`    — coreutils + cwd + /tmp + tempdir + net + chdir.
 //!   Small base for additive `--extend-base` composition.
-//! - `confined`   — build-jail shape (after BrianSwift's `confined.sb`):
+//! - `confined`   — build-jail shape (after `BrianSwift`'s `confined.sb`):
 //!   tight reads/writes, no network, exec by subpath only.
 //!
 //! `minimal`, `confined`, `read-only`, `edit-only`, and `reasonable` use `cwd:` and
@@ -181,7 +181,7 @@ mod tests {
 
     /// `read-only` differs from `reasonable` only in that writes
     /// don't include the working tree.  Fold a future regression
-    /// where someone re-adds `cwd:` to write_prefixes.  `cwd:` freezes
+    /// where someone re-adds `cwd:` to `write_prefixes`.  `cwd:` freezes
     /// to the synthetic working dir, independent of the environment.
     #[cfg(unix)]
     #[test]

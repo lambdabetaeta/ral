@@ -3,7 +3,7 @@
 //! Owns the frame geometry (updated each draw), the drag-selection state,
 //! the copy-confirmation toast, and the hover/press tracking for the
 //! focused viewport.  Methods that need viewport access receive it as a
-//! parameter — GestureState is a pure data+policy bundle.
+//! parameter — `GestureState` is a pure data+policy bundle.
 
 use super::render::FrameGeom;
 use super::render::contains;
@@ -201,13 +201,13 @@ impl GestureState {
         self.selection = None;
         self.press = None;
     }
-    /// The active drag-selection, if any, as ((anchor_row, anchor_col), (head_row, head_col))
+    /// The active drag-selection, if any, as ((`anchor_row`, `anchor_col`), (`head_row`, `head_col`))
     /// in buffer coordinates.  Rendered reversed; copied on release.
     pub(super) fn selection(&self) -> Option<((usize, u16), (usize, u16))> {
         self.selection
     }
 
-    /// The copy-confirmation toast, if still live: (char_count, born_at).
+    /// The copy-confirmation toast, if still live: (`char_count`, `born_at`).
     pub(super) fn copy_toast(&self) -> Option<&(usize, Instant)> {
         self.copy_toast.as_ref()
     }

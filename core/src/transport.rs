@@ -66,7 +66,7 @@ pub enum Frame {
         home: PathBuf,
         /// Optional rc file to load at session start.
         rc_path: Option<PathBuf>,
-        /// Protocol version the front-end speaks (checked against PROTOCOL_VERSION).
+        /// Protocol version the front-end speaks (checked against `PROTOCOL_VERSION`).
         proto_version: u32,
         /// Tag naming the compiled-in builtin installer the engine child
         /// must apply after booting its shell — e.g. `"exarch-agent"` or
@@ -690,7 +690,7 @@ struct TransportSink {
     /// sets and both impls read. A live surface value emitted while it reads
     /// `0` has no dispatch to correlate to and is dropped; a deferred batch
     /// is stamped with whatever is in flight — `0` when it settles between
-    /// turns.  // Phase 2: correlate by DispatchId
+    /// turns.  // Phase 2: correlate by `DispatchId`
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1151,7 +1151,7 @@ impl Transport for WireTransport {
     }
 
     /// TODO Phase 2 Task 6: When the endpoint has a lease, pass the
-    /// controlling terminal fds over the socket via SCM_RIGHTS (Unix
+    /// controlling terminal fds over the socket via `SCM_RIGHTS` (Unix
     /// ancillary data).  For now the endpoint's lease field is
     /// `#[serde(skip)]` and the engine stores it as a placeholder.
     fn attach(

@@ -37,9 +37,9 @@ use std::time::Duration;
 
 /// Best-effort capability lookup for `model`.  Consults the OR
 /// catalog regardless of provider — OR republishes upstream cards for
-/// every vendor it routes, so a native Anthropic / OpenAI launch hits
+/// every vendor it routes, so a native Anthropic / `OpenAI` launch hits
 /// the same context-window / tokenizer / canonical-slug data as the
-/// OR-fronted equivalent.  (DeepSeek is the pricing exception, not a
+/// OR-fronted equivalent.  (`DeepSeek` is the pricing exception, not a
 /// capabilities exception — capabilities still come from OR.)
 /// Missing entries default the record so the banner renders `—` for
 /// unknown fields.
@@ -156,7 +156,7 @@ impl ProviderKind {
 
     /// Whether this provider bills as a flat subscription rather than per
     /// token. opencode Go is a flat $10/mo plan over an OpenAI-compatible
-    /// gateway; opencode Zen on the same gateway is pay-as-you-go. A ChatGPT
+    /// gateway; opencode Zen on the same gateway is pay-as-you-go. A `ChatGPT`
     /// plan login is a flat subscription too, but it rides the OAuth
     /// credential rather than this `ProviderKind` property.
     pub fn flat_rate(self) -> bool {
@@ -184,9 +184,9 @@ pub struct CustomProvider {
     pub adapter: AdapterKind,
 }
 
-/// A signed-in ChatGPT account, as a selectable provider identity.
+/// A signed-in `ChatGPT` account, as a selectable provider identity.
 ///
-/// A ChatGPT plan authorises over OAuth rather than an API key, and several
+/// A `ChatGPT` plan authorises over OAuth rather than an API key, and several
 /// accounts can be signed in at once. Each is its own [`ProviderId`] so the
 /// `/model` picker, the persisted selection, and the credential store carry it
 /// exactly like any other provider — switching accounts *is* switching the
@@ -199,7 +199,7 @@ pub struct CustomProvider {
 /// request carries is read from that bound token, not from this struct.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatGptAccount {
-    /// The OpenAI account id this selection maps to.
+    /// The `OpenAI` account id this selection maps to.
     pub account_id: String,
     /// The account's stable, human-readable handle — its login email, or the
     /// account id when none was issued. Its unique key in the store/picker.
@@ -217,10 +217,10 @@ impl ChatGptAccount {
 }
 
 /// A provider identity: a famous [`ProviderKind`], a custom-declared one, or a
-/// signed-in ChatGPT account ([`ChatGptAccount`]).
+/// signed-in `ChatGPT` account ([`ChatGptAccount`]).
 ///
 /// This is the single abstraction credential resolution, model listing, and
-/// transport building consume, so a custom provider — or a ChatGPT account —
+/// transport building consume, so a custom provider — or a `ChatGPT` account —
 /// flows through exactly the same machinery as a famous one. Each downstream
 /// call site reads the facts it needs through [`Self::label`] /
 /// [`Self::key_env`] / [`Self::endpoint`] / [`Self::default_adapter`] and
@@ -236,13 +236,13 @@ pub enum ProviderId {
     Famous(ProviderKind),
     /// An unusual provider declared in `config.ral`.
     Custom(Arc<CustomProvider>),
-    /// A signed-in ChatGPT account, authorising over OAuth.
+    /// A signed-in `ChatGPT` account, authorising over OAuth.
     ChatGpt(Arc<ChatGptAccount>),
 }
 
 impl ProviderId {
     /// The stable label — `ProviderKind::info().0` for a famous provider, the
-    /// config map key for a custom one, the account handle for a ChatGPT login.
+    /// config map key for a custom one, the account handle for a `ChatGPT` login.
     pub fn label(&self) -> &str {
         match self {
             Self::Famous(kind) => kind.info().0,
@@ -253,7 +253,7 @@ impl ProviderId {
 
     /// The environment variable this provider's API key is read from, or
     /// `None` for a provider that does not authenticate off an env key — a
-    /// ChatGPT account authorises over OAuth, so it is loaded from the token
+    /// `ChatGPT` account authorises over OAuth, so it is loaded from the token
     /// store rather than swept from the environment.
     pub fn key_env(&self) -> Option<&str> {
         match self {
@@ -265,7 +265,7 @@ impl ProviderId {
 
     /// The base URL for a provider that needs a custom endpoint, or `None`
     /// when the native adapter's default target is used. A custom provider
-    /// always has one; a ChatGPT account redirects to the Codex backend
+    /// always has one; a `ChatGPT` account redirects to the Codex backend
     /// through its OAuth client, not through this endpoint.
     pub fn endpoint(&self) -> Option<&str> {
         match self {
@@ -277,8 +277,8 @@ impl ProviderId {
 
     /// The genai adapter this provider speaks by default. For a famous
     /// provider this is the per-kind default; a custom provider names its
-    /// wire protocol in the config and carries the resolved adapter; a ChatGPT
-    /// account speaks the OpenAI Responses adapter to the Codex backend.
+    /// wire protocol in the config and carries the resolved adapter; a `ChatGPT`
+    /// account speaks the `OpenAI` Responses adapter to the Codex backend.
     pub fn default_adapter(&self) -> AdapterKind {
         match self {
             Self::Famous(kind) => kind.default_adapter(),
@@ -290,7 +290,7 @@ impl ProviderId {
     /// Whether this provider bills as a flat subscription rather than per
     /// token. A famous provider delegates to [`ProviderKind::flat_rate`]; a
     /// custom provider is never flat-rate yet — the `config.ral` schema does
-    /// not declare it, so this is a future slice's extension point. A ChatGPT
+    /// not declare it, so this is a future slice's extension point. A `ChatGPT`
     /// account is unmetered too, but rides its OAuth credential (the bound
     /// `token_cell`) rather than this property — so it is not `flat_rate`.
     pub fn flat_rate(&self) -> bool {
@@ -301,7 +301,7 @@ impl ProviderId {
     }
 
     /// The famous kind, when this is a built-in provider — the few sites that
-    /// genuinely need the enum (the OpenAI per-model adapter refinement, the
+    /// genuinely need the enum (the `OpenAI` per-model adapter refinement, the
     /// persisted-selection round-trip) ask for it; everything else reads the
     /// facts above.
     pub fn famous(&self) -> Option<ProviderKind> {
@@ -351,7 +351,7 @@ pub struct Usage {
     /// distinction as [`Self::cache_creation`].
     pub cache_read: Option<u64>,
     pub dollars: f64,
-    /// Whether this turn's cost is off the meter: a ChatGPT plan login is
+    /// Whether this turn's cost is off the meter: a `ChatGPT` plan login is
     /// a flat subscription, so the per-token dollar figure is meaningless
     /// and the cost slot reads "subscription" rather than a price.
     /// Defaults to `false` — an API-key turn is metered.
@@ -750,7 +750,7 @@ fn parse_json_body(s: &str) -> Option<serde_json::Value> {
 }
 
 /// The error-detail object inside a provider JSON body.  Providers wrap
-/// differently — OpenAI nests the detail under `error`, Anthropic sends
+/// differently — `OpenAI` nests the detail under `error`, Anthropic sends
 /// `{"type":"error","error":{…}}` — so prefer the inner `error` object,
 /// falling back to the body itself when there is no such nesting.  The one
 /// home of the nest-or-flat convention: classification
@@ -1069,7 +1069,7 @@ impl PartialEq for Tuning {
     }
 }
 
-/// The `extra_body` fragment that pins an OpenRouter request to a single
+/// The `extra_body` fragment that pins an `OpenRouter` request to a single
 /// serving provider: `{"provider": {"order": ["<slug>"], "allow_fallbacks":
 /// false}}`. `order` lists the provider in priority and `allow_fallbacks:false`
 /// forbids routing elsewhere, so the request lands on exactly that upstream.
@@ -1094,11 +1094,11 @@ pub struct Provider {
     /// The reasoning-effort + temperature tuning for this selection, set by
     /// the `/model` overlay (or restored from persisted state at startup).
     tuning: Tuning,
-    /// The chosen OpenRouter serving-provider slug for this selection, or `None`
-    /// for "auto" (OpenRouter routes). Set by the `/model` overlay's provider
+    /// The chosen `OpenRouter` serving-provider slug for this selection, or `None`
+    /// for "auto" (`OpenRouter` routes). Set by the `/model` overlay's provider
     /// control and restored from persisted state; folded into the request as
     /// `provider.order` routing by [`Engine::complete`], and only for an
-    /// OpenRouter selection — it is inert on any other provider.
+    /// `OpenRouter` selection — it is inert on any other provider.
     route: Option<String>,
 }
 
@@ -1117,7 +1117,7 @@ enum Backend {
 
 /// Identifies a cached transport by the three things that fix a genai client:
 /// the credential's label, its secret (as a [`CredFingerprint`]), and the wire
-/// `adapter`.  An OpenAI key spans both adapters — `gpt-4o` speaks chat
+/// `adapter`.  An `OpenAI` key spans both adapters — `gpt-4o` speaks chat
 /// completions, `gpt-5` the Responses API — so they must not share one client
 /// even though they share a credential; every other provider resolves a single,
 /// model-independent adapter and so keeps one entry per (label, secret).
@@ -1187,7 +1187,7 @@ pub(crate) struct Transport {
     /// property of the transport — the same value [`TransportKey`] keyed on —
     /// so the request path reads it here rather than recomputing it per turn.
     adapter: AdapterKind,
-    /// The shared login cell when this credential authenticates off a ChatGPT
+    /// The shared login cell when this credential authenticates off a `ChatGPT`
     /// plan; `None` for an API-key credential.  A turn refreshes through it
     /// before a request when the access token is near expiry.
     token_cell: Option<Arc<Mutex<oauth::OAuthToken>>>,
@@ -1204,7 +1204,7 @@ pub(crate) struct Transport {
 /// the cold warm path, never per request.
 pub struct Engine {
     runtime: tokio::runtime::Runtime,
-    /// Stable per-process identifier sent as OpenAI's `prompt_cache_key` on
+    /// Stable per-process identifier sent as `OpenAI`'s `prompt_cache_key` on
     /// every request — a routing hint so all calls from one exarch process
     /// land on the same backend shard, raising cache-hit rate.  Other
     /// providers ignore unknown fields, so it is harmless elsewhere.
@@ -1246,15 +1246,15 @@ fn adapter_for_provider_model(id: &ProviderId, model: &str) -> AdapterKind {
 /// API key the adapter is always the provider's native one
 /// ([`adapter_for_provider_model`]) — it decides the wire format, so an
 /// Anthropic provider speaks Anthropic even at a custom base URL. A
-/// provider with a custom `endpoint` (OpenRouter) redirects the *service
+/// provider with a custom `endpoint` (`OpenRouter`) redirects the *service
 /// target* through a [`ServiceTargetResolver`] that keeps the native
 /// adapter and binds the key; with no endpoint the native adapter's
 /// default target is used, gated by an [`AuthResolver`] that hands the key
 /// only to that adapter.
 ///
 /// genai's model-name heuristic falls back to local Ollama for unknown
-/// names; the provider is the authority instead, so a misspelled DeepSeek
-/// model fails at DeepSeek rather than being silently sent to
+/// names; the provider is the authority instead, so a misspelled `DeepSeek`
+/// model fails at `DeepSeek` rather than being silently sent to
 /// `localhost:11434`.
 fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, AdapterKind) {
     let key = match cred {
@@ -1298,7 +1298,7 @@ fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, Ada
     (client, adapter)
 }
 
-/// Build the genai client for a ChatGPT plan login. The OpenAI Responses
+/// Build the genai client for a `ChatGPT` plan login. The `OpenAI` Responses
 /// adapter renders the request body; an [`AuthResolver`] redirects every
 /// request to the Codex backend with the login's bearer and account headers,
 /// read live from `cell` so a token refreshed mid-session is picked up on the
@@ -1376,7 +1376,7 @@ impl Provider {
         &self.tuning
     }
 
-    /// The OpenRouter serving-provider slug bound at build time, or `None` for
+    /// The `OpenRouter` serving-provider slug bound at build time, or `None` for
     /// auto — read by the `/model` overlay to seed the provider control, and
     /// folded into the request by [`Engine::complete`].
     pub fn route(&self) -> Option<&str> {
@@ -1407,7 +1407,7 @@ impl Provider {
     /// How this provider's plan reads — a flat subscription (and which
     /// flavour) or a metered API key. A subscription's turns carry no
     /// per-token price; the flavour drives the status/picker label
-    /// ([`oauth::provider_label`]). A ChatGPT plan login is the OAuth
+    /// ([`oauth::provider_label`]). A `ChatGPT` plan login is the OAuth
     /// flavour (login cell present), an [`ProviderId::flat_rate`] provider
     /// the generic flavour; a scripted backend is never a subscription.
     pub fn subscription(&self) -> oauth::Subscription {
@@ -1458,8 +1458,8 @@ impl Provider {
         }
     }
 
-    /// The serving-provider slug to route through, but only for an OpenRouter
-    /// selection — `provider.order` is OpenRouter's wire contract, meaningless
+    /// The serving-provider slug to route through, but only for an `OpenRouter`
+    /// selection — `provider.order` is `OpenRouter`'s wire contract, meaningless
     /// elsewhere, so a stray route on any other provider is dropped rather than
     /// injected into a body that would not understand it.
     fn openrouter_route(&self) -> Option<&str> {
@@ -1492,7 +1492,7 @@ impl Provider {
 
 impl Transport {
     /// Build the genai client + auth for `cred`, bound to `id`+`model`.  The
-    /// model only seeds the adapter pin (OpenAI chat vs. responses); every
+    /// model only seeds the adapter pin (`OpenAI` chat vs. responses); every
     /// other provider's adapter is model-independent.
     fn build(id: &ProviderId, model: &str, cred: &Credential) -> Arc<Self> {
         let token_cell = match cred {
@@ -1509,7 +1509,7 @@ impl Transport {
     }
 
     /// Whether this transport's turns are billed per token. An API-key
-    /// credential is metered; a flat subscription — a ChatGPT plan login
+    /// credential is metered; a flat subscription — a `ChatGPT` plan login
     /// ([`Self::token_cell`]) or an [`ProviderId::flat_rate`] plan
     /// ([`Self::flat_rate`]) — is unmetered.
     fn metered(&self) -> bool {
@@ -1557,7 +1557,7 @@ impl Engine {
             .clone()
     }
 
-    /// Renew the ChatGPT access token when it is near expiry, so the request
+    /// Renew the `ChatGPT` access token when it is near expiry, so the request
     /// that follows authenticates with a live token.  A no-op for an API-key
     /// transport.  A refresh failure is logged and left to surface as the
     /// request's own auth error rather than aborting the turn here.
@@ -1857,11 +1857,11 @@ fn stamp_attempts(err: ProviderError, attempts: u32) -> ProviderError {
 
 /// Project a captured [`StreamEnd`] into a [`StepOut`], preserving the
 /// provider's reasoning trace on the assistant message so it round-trips
-/// on the next request.  DeepSeek's thinking mode *requires*
+/// on the next request.  `DeepSeek`'s thinking mode *requires*
 /// `reasoning_content` to be echoed back on any assistant turn that
 /// precedes tool results — dropping it returns a 400 ("the
 /// `reasoning_content` in the thinking mode must be passed back to the
-/// API").  genai's OpenAI adapter emits the field only when the message
+/// API").  genai's `OpenAI` adapter emits the field only when the message
 /// carries a `ReasoningContent` part, which `with_reasoning_content`
 /// attaches; `with_reasoning_content(None)` is a no-op, so providers that
 /// surface no reasoning are unaffected.  `captured_into_tool_calls`
@@ -1925,10 +1925,10 @@ fn stalled_step_out(
 /// `cache_control: ephemeral` breakpoints: one on the system block
 /// (caches `tools + system`, which never changes across a session) and
 /// one on the final message (caches the growing transcript so the inner
-/// tool-use loop pays cache_read rate on the prefix and cache_creation
+/// tool-use loop pays `cache_read` rate on the prefix and `cache_creation`
 /// only on the delta).
 ///
-/// Anthropic honours these breakpoints directly.  OpenAI auto-caches any
+/// Anthropic honours these breakpoints directly.  `OpenAI` auto-caches any
 /// prompt ≥ 1024 tokens with no client opt-in; the per-request lever that
 /// actually matters there is `prompt_cache_key` (set in [`ChatOptions`]
 /// above, derived from [`Provider::cache_key`]), which routes repeat
@@ -1939,7 +1939,7 @@ fn stalled_step_out(
 /// sources from [`ChatRequest::system`].  A `ChatRole::System` message
 /// would instead land in `input`, leaving `instructions` empty — which the
 /// Codex backend rejects ("Instructions are required").  That adapter
-/// caches off `prompt_cache_key` and ignores message-level cache_control,
+/// caches off `prompt_cache_key` and ignores message-level `cache_control`,
 /// so routing the system prompt to the field costs no caching.
 fn build_cached_request(
     adapter: AdapterKind,
@@ -2132,7 +2132,7 @@ pub mod scripted {
             }
         }
 
-        /// An empty assistant turn — no text, no tool calls, end_turn —
+        /// An empty assistant turn — no text, no tool calls, `end_turn` —
         /// the X7 shape.  Mirrors the live path's
         /// `captured_content.unwrap_or_default()`: a zero-part
         /// `MessageContent`, which genai's Anthropic adapter serialises as
@@ -2278,8 +2278,8 @@ mod tests {
 
     /// A custom provider's id reports the four facts its config declares,
     /// and `adapter_for_provider_model` returns the declared adapter
-    /// verbatim — the OpenAI per-model refinement applies only to the
-    /// famous OpenAI kind, never to a custom OpenAI-compatible endpoint.
+    /// verbatim — the `OpenAI` per-model refinement applies only to the
+    /// famous `OpenAI` kind, never to a custom OpenAI-compatible endpoint.
     #[test]
     fn custom_provider_id_reports_declared_facts() {
         let id = ProviderId::Custom(Arc::new(CustomProvider {
@@ -2457,7 +2457,7 @@ mod tests {
         assert_eq!(e.summary(), "rate limited");
     }
 
-    /// The DeepSeek failure from the session log: a hard 400 arriving on
+    /// The `DeepSeek` failure from the session log: a hard 400 arriving on
     /// the streaming path (`WebStream` boxing `HttpError`) must classify
     /// as a non-retryable `Api` error, not `Transient` — otherwise the
     /// retry loop burns its whole budget on an unfixable request.
@@ -2474,7 +2474,7 @@ mod tests {
         }
     }
 
-    /// DeepSeek thinking mode rejects a follow-up request unless the prior
+    /// `DeepSeek` thinking mode rejects a follow-up request unless the prior
     /// assistant turn's `reasoning_content` is echoed back.  The step
     /// projection must therefore attach the captured reasoning as a
     /// `ReasoningContent` part on the assistant message.
@@ -2497,7 +2497,7 @@ mod tests {
 
     /// When the provider surfaces no reasoning, no `ReasoningContent` part
     /// is attached — `with_reasoning_content(None)` is a no-op, keeping
-    /// non-thinking providers (and DeepSeek's non-thinking models) clean.
+    /// non-thinking providers (and `DeepSeek`'s non-thinking models) clean.
     #[test]
     fn step_out_without_reasoning_attaches_nothing() {
         let end = StreamEnd {
@@ -2532,7 +2532,7 @@ mod tests {
     }
 
     /// A mid-stream SSE error frame (`ChatResponse`) whose body is the
-    /// OpenRouter `{"error":{"code":NNN}}` JSON shape — the status is read
+    /// `OpenRouter` `{"error":{"code":NNN}}` JSON shape — the status is read
     /// structurally from the `serde_json::Value` and routed like any other
     /// 4xx.
     #[test]
@@ -2601,7 +2601,7 @@ mod tests {
         );
     }
 
-    /// An unmetered turn (a ChatGPT plan login) reports its cost slot as
+    /// An unmetered turn (a `ChatGPT` plan login) reports its cost slot as
     /// "subscription" rather than a dollar figure or `—`.  The token
     /// counts still render, so the line stays informative; the price just
     /// makes no sense for a flat subscription.  Both `parts` and the
@@ -2662,7 +2662,7 @@ mod tests {
         assert_eq!(measured_zero.to_string(), "total 100 in / 50 out · —");
     }
 
-    /// AddAssign keeps the `Some` flavour once any turn has populated
+    /// `AddAssign` keeps the `Some` flavour once any turn has populated
     /// it.  Critical: a later `None` turn must not collapse the
     /// accumulator back to `None`, or the session total would lose the
     /// "we know about this" signal.
@@ -2847,7 +2847,7 @@ mod tests {
     }
 
     /// The provider-routing fragment pins exactly the chosen slug and forbids
-    /// fallback — the shape OpenRouter reads off the request body.
+    /// fallback — the shape `OpenRouter` reads off the request body.
     #[test]
     fn or_provider_extra_body_pins_slug_without_fallback() {
         assert_eq!(

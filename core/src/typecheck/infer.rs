@@ -1,7 +1,7 @@
-//! Type inference: infer_val, infer_comp, and supporting helpers.
+//! Type inference: `infer_val`, `infer_comp`, and supporting helpers.
 //!
 //! `infer_val` synthesizes a value type (Ty) for a Val node.
-//! `infer_comp` synthesizes a computation type (CompTy) for a Comp node.
+//! `infer_comp` synthesizes a computation type (`CompTy`) for a Comp node.
 //! Both are mutually recursive: thunk bodies are inferred as computations,
 //! and return values are inferred as values.
 
@@ -24,7 +24,7 @@ use crate::syntax::ast::{BinaryOp, BinaryOpKind};
 use crate::syntax::tag::tag_row_label;
 use std::sync::Arc;
 
-/// Walk a row spine and collect (label, payload_ty) pairs in order of first
+/// Walk a row spine and collect (label, `payload_ty`) pairs in order of first
 /// appearance, stopping at the first non-Extend node (Empty or unresolved
 /// variable).  Caller is expected to have applied substitutions; a duplicated
 /// label resolves last-wins (the deeper, later occurrence's payload type),
@@ -541,7 +541,7 @@ impl Inferencer<'_> {
 
     /// The value shape returned by `from-lines`: a recursive Step stream
     /// of Strings, i.e. `` `more {head: String, tail: Thunk(F Step)}`` or
-    /// `` `done ``.  The recursion closes through a comp-var root, not a TyVar.
+    /// `` `done ``.  The recursion closes through a comp-var root, not a `TyVar`.
     pub(super) fn lines_step_ty(&mut self) -> Ty {
         let tail_comp = self.ctx.unifier.fresh_comp_ty();
         let more_tag = more_tag();

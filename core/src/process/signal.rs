@@ -383,7 +383,7 @@ impl CancelCause {
     /// The exit status paired with [`message`](Self::message): 130
     /// (`128 + SIGINT`) for every interactive-shaped cancellation, 143
     /// (`128 + SIGTERM`) for a termination request — what a supervisor
-    /// that SIGTERMed the process expects to read back.
+    /// that `SIGTERMed` the process expects to read back.
     pub fn exit_code(self) -> i32 {
         match self {
             Self::Terminate => 143,

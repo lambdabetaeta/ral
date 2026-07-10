@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     /// An `IoEvent` serialises structurally — tagged by its `io` field, with
-    /// the mode/outcome enums as snake_case strings — so the raw effect is
+    /// the mode/outcome enums as `snake_case` strings — so the raw effect is
     /// recorded in `transcript.jsonl` (the card it renders is not).
     #[test]
     fn io_event_serialises_structurally() {

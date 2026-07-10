@@ -34,7 +34,7 @@ pub struct EngineInstaller {
     pub install: fn(&mut Shell),
 }
 
-/// A surface sink that writes Event::Surface frames live to the wire
+/// A surface sink that writes `Event::Surface` frames live to the wire
 /// as values are produced, rather than buffering.
 struct ChannelSurfaceSink {
     id: crate::transport::DispatchId,
@@ -51,7 +51,7 @@ impl crate::types::EventSink for ChannelSurfaceSink {
     }
 }
 
-/// A deferred sink that writes Event::DeferredSurface frames to the wire.
+/// A deferred sink that writes `Event::DeferredSurface` frames to the wire.
 struct ChannelDeferredSink {
     id: DispatchId,
     writer: Arc<Mutex<WireChannel>>,

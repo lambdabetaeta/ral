@@ -81,7 +81,7 @@ pub enum FOValue<X = NoExt> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NoExt {}
 
-/// What the in-kernel helper IPC (child_eval / pipeline stages) adds to
+/// What the in-kernel helper IPC (`child_eval` / pipeline stages) adds to
 /// [`FOValue`]: closures with interned scopes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Closure {

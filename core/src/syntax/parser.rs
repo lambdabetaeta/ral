@@ -922,7 +922,7 @@ impl Parser {
 
     /// Enforce that `is_tag` matches the previously-seen alphabet (or
     /// record it on the first key).  Used by both map literals and map
-    /// patterns to reject alphabet mixing such as `[host: ..., ` + "`" + `dev: ...]`.
+    /// patterns to reject alphabet mixing such as `` [host: ..., `dev: ...] ``.
     fn check_key_alphabet(
         &self,
         seen_is_tag: &mut Option<bool>,
@@ -955,7 +955,7 @@ impl Parser {
         })
     }
 
-    /// atom = primary ('[' word ']')*
+    /// `atom = primary ('[' word ']')*`
     ///
     /// Postfix indexing is folded directly into a single
     /// `Ast::Index { target, keys }` node — building nested

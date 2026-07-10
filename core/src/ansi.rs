@@ -218,7 +218,7 @@ pub fn use_color() -> bool {
 
 /// Whether to emit ANSI color on stdout (REPL value output, help, etc.).
 ///
-/// Checks `ui_ansi_ok()` — stdout tty + TERM + NO_COLOR — rather than the
+/// Checks `ui_ansi_ok()` — stdout tty + TERM + `NO_COLOR` — rather than the
 /// stderr-oriented `stderr_ansi_ok()` used by `use_color`.
 pub fn use_ui_color() -> bool {
     CACHED_TERMINAL.get().is_some_and(TerminalState::ui_ansi_ok)

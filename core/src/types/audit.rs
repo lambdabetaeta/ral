@@ -245,7 +245,7 @@ impl Audit {
     /// policy on the receiver, enabling the trail when `Some` and
     /// leaving the audit inactive when `None`.  Used by the sandbox
     /// child and pipeline-helper subprocesses to mirror the parent's
-    /// audit state — the two-step (enable + set_capture) sequence is
+    /// audit state — the two-step (enable + `set_capture`) sequence is
     /// awkward to keep in sync at every call site.
     pub fn install_active_policy(&mut self, policy: Option<CapturePolicy>) {
         if let Some(policy) = policy {
@@ -445,7 +445,7 @@ impl ExecNode {
         }
     }
 
-    /// Convert to a Value::Map matching the execution tree node shape.
+    /// Convert to a `Value::Map` matching the execution tree node shape.
     /// For `capability-check` nodes the fields stored in `self.value` are
     /// also spliced into the top-level map so that `resource`, `decision`,
     /// and the resource-specific fields appear alongside `cmd`/`status`.

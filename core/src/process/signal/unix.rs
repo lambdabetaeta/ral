@@ -19,7 +19,7 @@ use super::{ESCALATION, Pgid, PgidPolicy};
 // ── Termination handler ────────────────────────────────────────────────────
 
 /// Install handlers for SIGINT, SIGTERM, SIGHUP.  Snapshots inherited
-/// SIG_IGN dispositions *before* installing ral's own handlers so the
+/// `SIG_IGN` dispositions *before* installing ral's own handlers so the
 /// nohup rule (preserve dispositions the parent deliberately ignored) can
 /// be honored in spawned children — see [`reset_child_signals`].
 pub fn install_handlers() {
@@ -156,7 +156,7 @@ impl Drop for PipelineRelay {
 /// SIGPIPE is deliberately absent: Rust's runtime sets SIGPIPE=IGN at startup
 /// so panics on broken-pipe writes are graceful, and that disposition would
 /// falsely register as "parent intent" by the time ral reads it.  SIGPIPE is
-/// reset unconditionally to SIG_DFL — see [`reset_child_signals`].
+/// reset unconditionally to `SIG_DFL` — see [`reset_child_signals`].
 const MANAGED_SIGNALS: &[libc::c_int] = &[
     libc::SIGINT,
     libc::SIGQUIT,
@@ -166,11 +166,11 @@ const MANAGED_SIGNALS: &[libc::c_int] = &[
     libc::SIGHUP,
 ];
 
-/// Bitmask of signals that were SIG_IGN when ral started, indexed by signal
+/// Bitmask of signals that were `SIG_IGN` when ral started, indexed by signal
 /// number.  Captured by [`install_handlers`] before any of ral's own
 /// dispositions are installed.  Read in [`reset_child_signals`] to honor the
-/// POSIX nohup rule: a signal the parent deliberately set to SIG_IGN must
-/// remain SIG_IGN in spawned children.
+/// POSIX nohup rule: a signal the parent deliberately set to `SIG_IGN` must
+/// remain `SIG_IGN` in spawned children.
 ///
 /// All managed signal numbers are < 64, so a single u64 suffices.
 static INHERITED_IGNORED: AtomicU64 = AtomicU64::new(0);

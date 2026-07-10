@@ -24,14 +24,14 @@
 //!   (length) alone encodes the value, the same chassis as the temperature
 //!   track with the hue held constant.
 //!
-//! When the highlighted model is an OpenRouter `vendor/model`, a fifth control
+//! When the highlighted model is an `OpenRouter` `vendor/model`, a fifth control
 //! appears — the **provider** row → **hue**: the upstream serving providers
-//! OpenRouter lists for *that* model (DeepInfra, Novita, …), one hue-coded tag
+//! `OpenRouter` lists for *that* model (`DeepInfra`, Novita, …), one hue-coded tag
 //! each annotated with its context window and quantization, plus an `auto`
 //! default. Choosing one pins the request's `provider.order` route; it is a
 //! routing choice, not a filter, so it never moves the highlighted model. The
 //! row is inert (and skipped by `Tab`) for any non-OpenRouter model — only
-//! OpenRouter routes.
+//! `OpenRouter` routes.
 //!
 //! Which field has the keyboard is itself shown with **value**: the active
 //! field brightens, the others dim. `Tab`/`BackTab` cycle the field; typing
@@ -82,14 +82,14 @@ pub enum ModelsState {
     Failed(String),
 }
 
-/// One model's serving-provider (OpenRouter `/endpoints`) fetch state. Keyed by
+/// One model's serving-provider (`OpenRouter` `/endpoints`) fetch state. Keyed by
 /// model id, fetched intent-driven when the provider control is focused on it.
 pub enum EndpointsState {
     /// The background fetch is in flight — the row reads "loading…".
     Loading,
-    /// The serving providers OpenRouter lists for this model.
+    /// The serving providers `OpenRouter` lists for this model.
     Loaded(Vec<ProviderEndpoint>),
-    /// The fetch failed; the route stays `auto` (OpenRouter decides).
+    /// The fetch failed; the route stays `auto` (`OpenRouter` decides).
     Failed(String),
 }
 
@@ -109,7 +109,7 @@ pub enum PickAction {
     /// Keep the picker open; redraw.
     None,
     /// A listed `provider / model` row was chosen, with the live tuning and the
-    /// chosen OpenRouter serving-provider slug (`None` for auto / non-OpenRouter).
+    /// chosen `OpenRouter` serving-provider slug (`None` for auto / non-OpenRouter).
     Selected(ProviderId, String, Tuning, Option<String>),
     /// Enter on the synthetic manual row: take the raw query as a model
     /// name and let the REPL resolve its provider (the listing-or-name
@@ -337,7 +337,7 @@ pub struct Picker {
     /// metered and renders its bare name.
     subscription: BTreeMap<ProviderId, Subscription>,
     models: BTreeMap<ProviderId, ModelsState>,
-    /// Per-model serving-provider lists, keyed by OpenRouter model id, as they
+    /// Per-model serving-provider lists, keyed by `OpenRouter` model id, as they
     /// arrive from the REPL's intent-driven fetch. Absent until the provider
     /// control is first focused on that model.
     endpoints: BTreeMap<String, EndpointsState>,
@@ -345,9 +345,9 @@ pub struct Picker {
     selected: usize,
     /// Which control has the keyboard.
     focus: Focus,
-    /// The chosen OpenRouter serving provider, paired with the model it was
+    /// The chosen `OpenRouter` serving provider, paired with the model it was
     /// chosen for (see [`Route`]). Active — shown and emitted — only while that
-    /// model is highlighted; `None` is "auto" (OpenRouter decides).
+    /// model is highlighted; `None` is "auto" (`OpenRouter` decides).
     route: Option<Route>,
     /// Index into [`LADDER`] — the chosen effort rung.
     effort_idx: usize,
@@ -437,9 +437,9 @@ impl Picker {
         self.endpoints.insert(model.to_string(), state);
     }
 
-    /// The OpenRouter model the provider control is focused on and whose serving
+    /// The `OpenRouter` model the provider control is focused on and whose serving
     /// providers have not yet been requested — the REPL's cue to spawn the
-    /// fetch. `None` unless the provider control holds focus, an OpenRouter
+    /// fetch. `None` unless the provider control holds focus, an `OpenRouter`
     /// model is highlighted, and no [`EndpointsState`] is recorded for it yet
     /// (so seeding `Loading` before spawning naturally dedups the fetch).
     pub fn focused_or_model_needing_endpoints(&self) -> Option<String> {
@@ -466,7 +466,7 @@ impl Picker {
         }
     }
 
-    /// The highlighted model iff it is served through OpenRouter — the only
+    /// The highlighted model iff it is served through `OpenRouter` — the only
     /// provider that routes, so the only one the provider control applies to.
     fn highlighted_or_model(&self) -> Option<String> {
         match self.rows().into_iter().nth(self.selected) {
@@ -477,7 +477,7 @@ impl Picker {
         }
     }
 
-    /// The routing slugs the highlighted OpenRouter model's loaded endpoints
+    /// The routing slugs the highlighted `OpenRouter` model's loaded endpoints
     /// offer, in listed order — the options the provider control cycles after
     /// `auto`. Empty while loading/failed/unfetched or for a non-OpenRouter row.
     fn endpoint_slugs(&self) -> Vec<String> {
@@ -576,7 +576,7 @@ impl Picker {
 
     /// The next focus in cycle order
     /// (`Search → Provider → Effort → Temperature → TopP → …`). The provider
-    /// control joins the cycle only when an OpenRouter model is highlighted —
+    /// control joins the cycle only when an `OpenRouter` model is highlighted —
     /// the only model the route applies to; for any other model it is skipped.
     fn cycle(&self, forward: bool) -> Focus {
         let has_provider = self.highlighted_or_model().is_some();
@@ -957,7 +957,7 @@ impl Picker {
 
     /// The serving-provider row, rendered for the highlighted model:
     /// * a non-OpenRouter model → a dim note (the row is inert; `Tab` skips it);
-    /// * an OpenRouter model whose providers are still loading → "loading…";
+    /// * an `OpenRouter` model whose providers are still loading → "loading…";
     /// * a failed fetch → `auto`, with a dim note (the route stays auto);
     /// * loaded → an `auto` tag plus one hue-coded tag per serving provider,
     ///   each annotated with its context window and quantization (nominal data
@@ -1257,7 +1257,7 @@ mod tests {
         }
     }
 
-    /// An OpenRouter provider whose models carry `vendor/model` ids — the case
+    /// An `OpenRouter` provider whose models carry `vendor/model` ids — the case
     /// the serving-provider control exists for.
     fn openrouter_picker() -> Picker {
         let mut p = Picker::new(
@@ -1338,9 +1338,9 @@ mod tests {
     }
 
     /// A flat-rate provider (opencode Go) renders the generic
-    /// `(subscription)` suffix — distinct from the ChatGPT plan's decoration
+    /// `(subscription)` suffix — distinct from the `ChatGPT` plan's decoration
     /// — so the picker reads its plan correctly without claiming it is a
-    /// ChatGPT login.
+    /// `ChatGPT` login.
     #[test]
     fn flat_rate_provider_rows_carry_generic_subscription_label() {
         let mut p = Picker::new(
@@ -1458,9 +1458,9 @@ mod tests {
         assert!(matches!(p.key(KeyCode::Esc), PickAction::Cancelled));
     }
 
-    /// `Tab` cycles the focus Search → Effort → Temperature → TopP → Search,
+    /// `Tab` cycles the focus Search → Effort → Temperature → `TopP` → Search,
     /// and the arrows then drive the focused control: in Effort they climb the
-    /// ladder, in Temperature they warm the value, in TopP they fill the track.
+    /// ladder, in Temperature they warm the value, in `TopP` they fill the track.
     #[test]
     fn tab_cycles_focus_and_arrows_drive_the_focused_control() {
         let mut p = loaded_picker();
@@ -1655,7 +1655,7 @@ mod tests {
         );
     }
 
-    /// For a highlighted OpenRouter model with its serving providers loaded, Tab
+    /// For a highlighted `OpenRouter` model with its serving providers loaded, Tab
     /// reaches the provider control and Right cycles `auto → deepinfra → novita`,
     /// clamping at the end; Left walks back to auto. Crucially, cycling the
     /// provider never moves the highlighted model, and the chosen slug rides Enter.
@@ -1750,7 +1750,7 @@ mod tests {
         assert!(p.focused_or_model_needing_endpoints().is_none());
     }
 
-    /// Focusing the provider control on an OpenRouter model is the cue to fetch
+    /// Focusing the provider control on an `OpenRouter` model is the cue to fetch
     /// its serving providers — and once the REPL seeds the in-flight state, the
     /// fetch is not requested again.
     #[test]

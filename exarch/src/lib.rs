@@ -302,7 +302,7 @@ pub fn run() -> Result<(), String> {
 /// reach a model the provider does not advertise), and alone it takes the
 /// provider's default model.
 ///
-/// A custom provider (or a ChatGPT account) has no built-in default model, so
+/// A custom provider (or a `ChatGPT` account) has no built-in default model, so
 /// when the selection would fall to one with no saved selection and no
 /// `--model` — whether pinned by `--provider` or defaulted to — the user is
 /// asked to name a model, since there is nothing to assume.

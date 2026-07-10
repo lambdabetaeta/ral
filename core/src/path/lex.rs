@@ -199,7 +199,7 @@ pub fn basename(path: &str) -> &str {
 
 /// Proper ancestors of `paths`, dedup'd, root excluded.  For each
 /// input path, walk `Path::ancestors()` upward stopping above `/` and
-/// collect every intermediate directory.  Output is sorted (BTreeSet
+/// collect every intermediate directory.  Output is sorted (`BTreeSet`
 /// iteration order) and free of duplicates across inputs.
 ///
 /// Used by the macOS Seatbelt builder to emit `file-read-metadata`

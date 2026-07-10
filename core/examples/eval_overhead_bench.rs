@@ -7,12 +7,12 @@
 //! Pre-migration this was the dominant cost behind O(n²)-ish recursive
 //! prelude code: each call deep-cloned a `HashMap` of 50–200 process-env
 //! entries, and n recursive calls compounded to O(n²).  Post-migration
-//! (env_vars + aliases + module-cache as `imbl::HashMap`) the snapshot is
+//! (`env_vars` + aliases + module-cache as `imbl::HashMap`) the snapshot is
 //! an Arc-bump per field — the per-call wall-clock should be flat in N.
 //!
 //! Run:
 //!     docker exec shell-dev bash -c \
-//!       'cd /work && cargo run --release --example eval_overhead_bench'
+//!       'cd /work && cargo run --release --example `eval_overhead_bench`'
 
 use ral_core::Shell;
 use ral_core::io::TerminalState;

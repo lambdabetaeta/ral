@@ -176,7 +176,7 @@ struct Flat {
 ///
 /// Fence depth toggles on lines whose first non-whitespace token is
 /// three-or-more backticks or tildes; nested fences are not a thing in
-/// CommonMark, so a single bit suffices.
+/// `CommonMark`, so a single bit suffices.
 fn safe_paragraph_break(open: &str) -> Option<usize> {
     let bytes = open.as_bytes();
     let mut depth = 0u8;
@@ -916,7 +916,7 @@ impl Viewport {
 
     /// The provisional seat for in-flight reasoning, matching the committed
     /// block's collapsed (L1) header: a blank separator, then the deliberation
-    /// grain beside a size_bar — no prose.  The caller seats the `∴` rail glyph
+    /// grain beside a `size_bar` — no prose.  The caller seats the `∴` rail glyph
     /// on the first content row (matching `render_with`).
     fn thinking_seat(&self) -> Vec<Line<'static>> {
         if self.thinking.trim().is_empty() {

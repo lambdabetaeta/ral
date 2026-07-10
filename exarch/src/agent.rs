@@ -128,8 +128,8 @@ pub struct Agent {
     /// draining — never mid-batch, so the session reaches a clean boundary
     /// with every `call_id` answered.  Held as the faithful
     /// [`serde_json::Value`] the model passed, so the consuming edge renders it
-    /// (a null or empty value settles as
-    /// [`AgentOutcome`](crate::bus::AgentOutcome)`::Empty`).  Every returning
+    /// (a null or empty value settles as the `Empty` variant of
+    /// [`AgentOutcome`](crate::bus::AgentOutcome)).  Every returning
     /// agent sets it — a peer and the headless root; `reply` is withheld only
     /// from the interactive root.
     reply: Option<serde_json::Value>,
@@ -2315,7 +2315,7 @@ mod tests {
     //! preserve the bindings completed tool calls left behind and leave the
     //! dynamic context clean.  Driven through the scripted provider and the
     //! shared `drive` loop — the real path: `drive` catches the unwind,
-    //! ral_core's own frame guard self-heals the IO frame, and `drive`
+    //! `ral_core`'s own frame guard self-heals the IO frame, and `drive`
     //! rebuilds the live context from the durable snapshot.
 
     use super::*;

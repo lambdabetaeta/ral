@@ -85,7 +85,7 @@ use windows_sys::Win32::System::Console::{
 ///   old contents.  Every editor accepts this tradeoff — preserving
 ///   the inode would mean truncate-and-write, which is non-atomic.
 ///   Pick one.
-/// - **Owner/group, xattrs, ACLs, SELinux contexts** are not copied
+/// - **Owner/group, xattrs, ACLs, `SELinux` contexts** are not copied
 ///   over.  Kernel default-inheritance handles the common case;
 ///   explicit copying belongs in a separate "preserve" path if it's
 ///   ever needed.

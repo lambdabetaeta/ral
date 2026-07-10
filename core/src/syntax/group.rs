@@ -29,7 +29,7 @@
 //! let-polymorphism over `f`'s scheme).  An older WCC pass conflated
 //! these two cases and forced `g` to be mono inside an `f, g` knot.
 //!
-//! # How LetRec handles both forward and backward references
+//! # How `LetRec` handles both forward and backward references
 //!
 //! When the evaluator encounters `Comp::LetRec`, it:
 //!
@@ -303,8 +303,8 @@ fn emit_scc(
 }
 
 /// Given a reference to a name from a definition at `use_stmt_idx`, and a
-/// list of def_list indices for all definitions of that name (in stmt_idx
-/// order), return the def_list index that is "visible" from `use_stmt_idx`.
+/// list of `def_list` indices for all definitions of that name (in `stmt_idx`
+/// order), return the `def_list` index that is "visible" from `use_stmt_idx`.
 ///
 /// The visible definition is the last one whose statement index is ≤
 /// `use_stmt_idx` (nearest preceding).  If all definitions come after

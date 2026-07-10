@@ -223,7 +223,7 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 /// bwrap respawn path), `None` to continue normally.
 ///
 /// On Windows per-command process sandboxing is unimplemented: there is
-/// no AppContainer / restricted-token runner.  When a policy is supplied
+/// no `AppContainer` / restricted-token runner.  When a policy is supplied
 /// it cannot be enforced, so this entrypoint fails closed rather than
 /// running unconfined.  With no policy there is nothing to enforce and it
 /// returns `Ok(None)` to continue normally.
