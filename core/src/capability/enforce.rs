@@ -15,7 +15,7 @@
 use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::NormalizedPrefix;
 use crate::types::{
-    Audit, Break, CallSite, Capabilities, Context, ExecNode, FsPolicy, Map, Settled, Value, sig,
+    Audit, CallSite, Capabilities, Context, ExecNode, FsPolicy, Map, Settled, Value, sig,
     sig_hint,
 };
 
@@ -106,11 +106,10 @@ impl FsOp {
     }
 }
 
-/// Decide an `op` (read / write) on a single resolved path against the
-/// active capabilities stack.  An access succeeds when, at every layer
-/// that has an `fs` opinion, the path falls inside some prefix in the
-/// op's region and outside every entry in `deny_paths`.  Region
-/// membership is alias-aware containment via
+/// Decide an `op` (read / write) on a single resolved path.  The access
+/// succeeds when, at every layer with an `fs` opinion, the path falls
+/// inside some prefix in the op's region and outside every entry in
+/// `deny_paths`.  Region membership is alias-aware containment via
 /// [`crate::path::path_within`], so a deny on `/etc/secrets` covers
 /// `/etc/secrets/foo` and a grant on `~/.local` (post-freeze:
 /// `/Users/.../.local`) covers everything underneath.
@@ -255,7 +254,7 @@ fn check_grant_bool(
 ) -> Settled<()> {
     for caps in &ctx.grants {
         if test(caps) == Some(false) {
-            return Err(Break::Error(crate::types::Error::new(msg(), 1)));
+            return Err(sig(msg()));
         }
     }
     Ok(())
