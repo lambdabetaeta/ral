@@ -88,7 +88,7 @@ fn main() -> ExitCode {
         }
     }
 
-    ral_core::builtins::misc::register_prelude_type_hints(PRELUDE.schemes());
+    ral_core::builtins::help::register_prelude_type_hints(PRELUDE.schemes());
 
     // Publish the ral host surface (`_ed-*` editor builtins and `watch`) before
     // any builtin lookup runs. All modes go through builtin dispatch and type

@@ -62,7 +62,7 @@ pub(crate) use flow::{Control, Raw, Tail, TailCall};
 
 // Error constructors and Value→Map coercions.
 mod coerce;
-pub use coerce::{as_map, sig};
+pub use coerce::{as_list, as_map, sig};
 pub(crate) use coerce::{as_map_ref, sig_hint};
 
 // Module-loader state.

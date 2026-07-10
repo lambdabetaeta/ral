@@ -1,11 +1,11 @@
 //! String, regex, shell-word, and value-coercion builtins.
 
-use crate::types::{Settled, Shell, Value, sig, sig_hint};
+use crate::types::{Settled, Shell, Value, as_list, sig, sig_hint};
 use std::borrow::Cow;
 
 #[cfg(feature = "grep")]
 use super::util::regex_err;
-use super::util::{arg0_str, as_list, check_arity};
+use super::util::{arg0_str, check_arity, f64_to_i64};
 
 #[cfg(not(feature = "grep"))]
 const NO_GREP: &str = "regex operations require the grep feature — rebuild with --features grep";
@@ -304,22 +304,9 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
     let val = &args[0];
     match val {
         Value::Int(n) => Ok(Value::Int(*n)),
-        // `as i64` saturates a float beyond i64 to the nearest bound; an
-        // integral magnitude that large is not representable, so refuse it
-        // rather than report a silently clamped value.  The half-open
-        // bound is `2^63`: i64::MAX (`2^63 - 1`) rounds up to `2^63` as an
-        // f64, so the comparison must be strict against `2^63`.
-        Value::Float(f) if f.fract() == 0.0 => {
-            if *f >= 9_223_372_036_854_775_808.0 || *f < -9_223_372_036_854_775_808.0 {
-                Err(sig(format!("int: {f} is outside the integer range")))
-            } else {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "guarded by the |f| < 2^63 check on lines 309-310; the cast is exact"
-                )]
-                Ok(Value::Int(*f as i64))
-            }
-        }
+        // An integral magnitude too large for `i64` is not representable, so
+        // refuse it rather than report a silently clamped value.
+        Value::Float(f) if f.fract() == 0.0 => f64_to_i64("int", *f).map(Value::Int),
         Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
             sig_hint(
                 format!("int: '{s}' is not a valid integer"),

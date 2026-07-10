@@ -17,14 +17,12 @@ use crate::diagnostic;
 use crate::types::{
     Binding, Break, BuiltinBody, BuiltinEntry, Env, Error, Escape, Settled, Shell, Value,
 };
-// `BuiltinTypeRule` is brought into scope via `use ... ::*` below so registry
-// entries can write `ty: Scheme(None, scheme::length)` or `ty: Sig(sig::RANGE)`
+// The registry names its type rules explicitly here — `BuiltinTypeRule` and
+// its `Scheme`/`Sig` variants, plus the `scheme`/`sig` factory modules — so
+// an entry can write `ty: Scheme(None, scheme::length)` or `ty: Sig(sig::RANGE)`
 // without the `BuiltinTypeRule::` prefix on every line.
-#[allow(unused_imports)]
 use crate::typecheck::builtins::BuiltinTypeRule;
-#[allow(unused_imports)]
 use crate::typecheck::builtins::BuiltinTypeRule::{Scheme, Sig};
-#[allow(unused_imports)]
 use crate::typecheck::builtins::{scheme, sig};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -35,13 +33,16 @@ mod codecs;
 mod collections;
 pub(crate) mod concurrency;
 mod fs;
+pub mod help;
 mod math;
-pub mod misc;
+mod misc;
 pub mod modules;
 mod predicates;
+mod print;
 mod shell;
 pub mod strings;
-pub use util::{value_to_json, value_to_json_lossy_bytes};
+pub use codecs::value_to_json;
+pub use util::value_to_json_lossy_bytes;
 pub mod util;
 pub mod uutils;
 
@@ -252,7 +253,7 @@ builtin_registry! {
         call: |args, shell| misc::builtin_surface(args, shell), },
     FoldLines { names: ["fold-lines"], arity: 2, ty: Scheme(None, scheme::fold_lines),
         doc: "fold-lines <fn> <init>  — fold over stdin lines.",
-        call: |args, shell| codecs::builtin_fold_lines(args, shell), },
+        call: |args, shell| collections::builtin_fold_lines(args, shell), },
     FromBytes { names: ["from-bytes"], arity: _, ty: Sig(sig::FROM_BYTES),
         doc: "from-bytes  — read raw bytes from the channel (stdin / `< file` / pipe) as Bytes.",
         call: |args, shell| codecs::builtin_from_bytes(args, shell), },
@@ -315,22 +316,22 @@ builtin_registry! {
         call: |args, shell| predicates::builtin_is_empty(args, shell), },
     Exists { names: ["exists"], arity: 1, ty: Sig(sig::PATH_BOOL),
         doc: "exists <path>  — true if path exists (any type); resolves against the within-scoped cwd.",
-        call: |args, shell| predicates::builtin_exists(args, shell), },
+        call: |args, shell| fs::builtin_exists(args, shell), },
     IsFile { names: ["is-file"], arity: 1, ty: Sig(sig::PATH_BOOL),
         doc: "is-file <path>  — true if path is a regular file (follows symlinks).",
-        call: |args, shell| predicates::builtin_is_file(args, shell), },
+        call: |args, shell| fs::builtin_is_file(args, shell), },
     IsDir { names: ["is-dir"], arity: 1, ty: Sig(sig::PATH_BOOL),
         doc: "is-dir <path>  — true if path is a directory (follows symlinks).",
-        call: |args, shell| predicates::builtin_is_dir(args, shell), },
+        call: |args, shell| fs::builtin_is_dir(args, shell), },
     IsLink { names: ["is-link"], arity: 1, ty: Sig(sig::PATH_BOOL),
         doc: "is-link <path>  — true if path is a symbolic link.",
-        call: |args, shell| predicates::builtin_is_link(args, shell), },
+        call: |args, shell| fs::builtin_is_link(args, shell), },
     IsReadable { names: ["is-readable"], arity: 1, ty: Sig(sig::PATH_BOOL),
         doc: "is-readable <path>  — true if path is readable by the caller.",
-        call: |args, shell| predicates::builtin_is_readable(args, shell), },
+        call: |args, shell| fs::builtin_is_readable(args, shell), },
     IsWritable { names: ["is-writable"], arity: 1, ty: Sig(sig::PATH_BOOL),
         doc: "is-writable <path>  — true if path is writable by the caller.",
-        call: |args, shell| predicates::builtin_is_writable(args, shell), },
+        call: |args, shell| fs::builtin_is_writable(args, shell), },
     Equal { names: ["equal"], arity: 2, ty: Scheme(None, scheme::compare),
         doc: "equal <a> <b>  — true if a and b are equal.",
         call: |args, shell| predicates::builtin_equal(args, shell), },
@@ -403,10 +404,10 @@ builtin_registry! {
         call: |args, _shell| Ok(args.first().cloned().unwrap_or(Value::Unit)), },
     Help { names: ["help"], arity: 0, ty: Sig(sig::HELP),
         doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
-        call: |args, shell| Ok(misc::builtin_help(args, shell)), },
+        call: |args, shell| Ok(help::builtin_help(args, shell)), },
     Explain { names: ["explain"], arity: 1, ty: Sig(sig::EXPLAIN),
         doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
-        call: |args, shell| Ok(misc::builtin_explain(args, shell)), },
+        call: |args, shell| Ok(help::builtin_explain(args, shell)), },
     // `_ed-*` builtins (16 entries) are registered by the `ral` crate's
     // host-builtins table at REPL startup; see
     // `ral::repl::plugin_ed_builtins::HOST_BUILTINS`.
@@ -779,7 +780,7 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
     shell.mobile.scope.push_scope();
 }
 
-pub use misc::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
+pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 
 /// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
 /// already installed.

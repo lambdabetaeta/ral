@@ -132,9 +132,8 @@ impl Audit {
         }
     }
 
-    /// Set the current byte-capture policy.  Use
-    /// [`crate::evaluator::audit::with_capture_policy`] for scoped
-    /// switching instead of poking this directly.
+    /// Set the current byte-capture policy.  Use the scoped switch in
+    /// [`crate::evaluator::audit`] instead of poking this directly.
     pub fn set_capture(&mut self, policy: CapturePolicy) {
         self.capture = policy;
     }

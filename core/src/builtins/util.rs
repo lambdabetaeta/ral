@@ -1,7 +1,30 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
-use crate::types::{Value, Settled, sig, HandleInner, Break, Error, Env, sig_hint, List, Shell};
+use crate::types::{Value, Settled, sig, HandleInner, Break, Error, Env, sig_hint, Shell};
 use std::sync::Arc;
+
+/// `2^63`: the half-open upper bound an `f64` magnitude must stay under to be
+/// representable as `i64`.  `i64::MAX` (`2^63 - 1`) rounds up to `2^63` as an
+/// `f64`, so the comparison is strict against this value.
+pub(crate) const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
+
+/// Cast a finite, integral `f64` to `i64`, refusing a magnitude outside the
+/// `i64` range rather than saturating it silently (`as i64` clamps to the
+/// nearest bound, which would misreport the input).  `name` rides the error.
+///
+/// # Errors
+/// Returns `Err` if `f` is not in `[-2^63, 2^63)`.
+pub(crate) fn f64_to_i64(name: &str, f: f64) -> Settled<i64> {
+    if (-I64_BOUND..I64_BOUND).contains(&f) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "f is range-checked into [-2^63, 2^63) just above; the cast is exact"
+        )]
+        Ok(f as i64)
+    } else {
+        Err(sig(format!("{name}: {f} is outside the integer range")))
+    }
+}
 
 /// Return an error if `args` has fewer than `min` elements.
 ///
@@ -50,36 +73,11 @@ pub(crate) fn decode_utf8_strict(bytes: Vec<u8>, context: &str, hint: &str) -> S
     String::from_utf8(bytes).map_err(|e| sig_hint(format!("{context}: {e}"), hint))
 }
 
-/// Extract the elements of a `List`, or return a typed error.
-///
-/// # Errors
-/// Returns `Err` if `val` is not a `List`.
-pub fn as_list(val: &Value, ctx: &str) -> Settled<List> {
-    match val {
-        Value::List(items) => Ok(items.clone()),
-        _ => Err(sig(format!(
-            "{ctx} expects a List, got {}",
-            val.type_name()
-        ))),
-    }
-}
-
-/// Borrow the underlying `Map`, or return a typed error.
-///
-/// # Errors
-/// Returns `Err` if `val` is not a `Map`.
-pub fn as_map<'a>(val: &'a Value, ctx: &str) -> Settled<&'a crate::types::Map> {
-    match val {
-        Value::Map(m) => Ok(m),
-        _ => Err(sig(format!("{ctx} expects a Map, got {}", val.type_name()))),
-    }
-}
-
 pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     if let Value::Bytes(b) = val {
         return Ok(b.clone());
     }
-    let items = as_list(val, ctx)?;
+    let items = crate::types::as_list(val, ctx)?;
     let mut out = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         match item {
@@ -218,7 +216,14 @@ pub(crate) fn value_ordering(a: &Value, b: &Value, op: &str) -> Settled<std::cmp
                 .ok_or_else(|| sig(format!("{op}: cannot order NaN")))
         }
         (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
-        _ => Err(uncomparable(a, b, op)),
+        _ => Err(sig_hint(
+            format!(
+                "{op}: cannot compare {} with {}",
+                a.type_name(),
+                b.type_name()
+            ),
+            "ordering is defined on numbers and strings",
+        )),
     }
 }
 
@@ -241,6 +246,28 @@ pub(crate) fn order_cmp(
 pub fn arg0_str(args: &[Value], name: &str) -> Settled<String> {
     check_arity(args, 1, name)?;
     Ok(args[0].to_string())
+}
+
+/// Resolve `path` against the within-scoped cwd and capability-check it for
+/// read, returning the resolved path.
+///
+/// The resolve+`check_fs_read` idiom every fs query builtin opens with, so
+/// probing honours `within [dir: …]` rather than resolving against the OS cwd.
+///
+/// # Errors
+/// Returns `Err` if the read capability check denies the resolved path.
+pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::ResolvedPath> {
+    let rp = shell.resolve(path);
+    shell.check_fs_read(&rp)?;
+    Ok(rp)
+}
+
+/// True if `path` resolves and passes the read capability check — the
+/// skip-denied test a directory-walk loop uses to drop an off-limits entry
+/// without aborting the whole walk.
+pub fn admits_read(shell: &mut Shell, path: &str) -> bool {
+    let rp = shell.resolve(path);
+    shell.check_fs_read(&rp).is_ok()
 }
 
 /// Resolve the shell's stdin to one buffered byte reader, applying the
@@ -301,97 +328,11 @@ pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
     format!("{ctx}: invalid pattern '{pattern}': {cause}")
 }
 
-pub(crate) fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
-    Ok(match j {
-        serde_json::Value::Null => Value::Unit,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if n.is_f64() {
-                // A genuine JSON float; `as_f64` cannot fail here.
-                Value::Float(n.as_f64().unwrap())
-            } else {
-                // An integer literal that overflowed `i64` (a `u64` above
-                // `i64::MAX`).  Reading it as `f64` would silently round
-                // away its low bits, so refuse rather than corrupt it.
-                return Err(sig(format!(
-                    "from-json: integer {n} is outside the supported range"
-                )));
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            Value::list(arr.iter().map(json_to_value).collect::<Settled<Vec<_>>>()?)
-        }
-        serde_json::Value::Object(obj) => Value::Map(
-            obj.iter()
-                .map(|(k, v)| Ok((k.clone(), json_to_value(v)?)))
-                .collect::<Settled<_>>()?,
-        ),
-    })
-}
-
-/// Encode `v` as JSON for `to-json`.
+/// Total, never-failing JSON projection for the `--audit` dump.
 ///
-/// A typed byte↔value crossing must
-/// refuse what it cannot faithfully represent rather than erase it: a
-/// non-finite Float (NaN / ±Infinity) has no JSON number, and a
-/// computation value (Lambda / Block / Handle) has no data shape, so each
-/// errors.  Bytes render as an integer array, the form `from-bytes`
-/// round-trips.  Mirrors `from-json`, which errors on the analogous shape
-/// mistake on the way in.
-///
-/// # Errors
-/// Returns `Err` if `v`, or any value nested within it, is a non-finite
-/// `Float` (NaN / ±Infinity) or a computation value (`Lambda` / `Block` /
-/// `Handle`).
-pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
-    Ok(match v {
-        Value::Unit => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(n) => serde_json::json!(*n),
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| sig(format!("to-json: {f} has no JSON representation")))?,
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::List(items) => {
-            serde_json::Value::Array(items.iter().map(value_to_json).collect::<Settled<_>>()?)
-        }
-        Value::Map(pairs) => {
-            let obj: serde_json::Map<String, serde_json::Value> = pairs
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), value_to_json(v)?)))
-                .collect::<Settled<_>>()?;
-            serde_json::Value::Object(obj)
-        }
-        Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => {
-            return Err(sig(format!(
-                "to-json: {} has no JSON representation",
-                v.type_name()
-            )));
-        }
-        Value::Bytes(b) => {
-            serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
-        }
-        Value::Variant { label, payload } => {
-            let mut obj = serde_json::Map::new();
-            obj.insert("tag".into(), serde_json::Value::String(label.clone()));
-            if let Some(p) = payload {
-                obj.insert("payload".into(), value_to_json(p)?);
-            }
-            serde_json::Value::Object(obj)
-        }
-    })
-}
-
-/// Variant for the `--audit` JSON dump: total, never failing.
-///
-/// Byte fields
-/// render as lossy-UTF-8 strings rather than integer arrays so the
-/// execution tree stays readable, non-finite Floats fall to `null`, and
-/// computation values become type-tagged stubs.  The audit tree is a
-/// debug surface, so legibility wins over round-trip fidelity here.
+/// Byte fields render as lossy-UTF-8 strings, non-finite Floats fall to
+/// `null`, and computation values become type-tagged stubs — legibility
+/// over round-trip fidelity.
 pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
     match v {
         Value::Unit => serde_json::Value::Null,

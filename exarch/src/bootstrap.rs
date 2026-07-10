@@ -40,7 +40,7 @@ pub fn boot_shell() -> Shell {
     agent_builtins::install_on(&mut shell);
     agent_builtins::install_agent_library(&mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
-    ral_core::builtins::misc::register_library_docs(agent_builtins::agent_library_docs());
+    ral_core::builtins::help::register_library_docs(agent_builtins::agent_library_docs());
     seed_no_color(&mut shell);
     shell.set_exit_hints(ral_core::exit_hints::ExitHints::from_text(include_str!(
         "../../data/exit-hints.txt"

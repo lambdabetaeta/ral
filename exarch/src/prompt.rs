@@ -145,7 +145,7 @@ fn builtin_index() -> String {
                 .flat_map(|set| set.iter())
                 .map(|e| e.name.to_string()),
         );
-    let prelude = ral_core::builtins::misc::prelude_names()
+    let prelude = ral_core::builtins::help::prelude_names()
         .into_iter()
         .map(str::to_string);
     let library = crate::agent_builtins::agent_library_docs()

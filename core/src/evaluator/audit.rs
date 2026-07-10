@@ -8,9 +8,14 @@
 //!   children.  [`record_scope`] is the lower-level form that returns
 //!   the constructed node so `try` and `audit` can override fields
 //!   before pushing.
-//! - [`start`] / [`finish_command`] is the command lifecycle for every
-//!   non-scope node (builtins, externals, uutils stages).  Capability
-//!   checks go through [`record_capability`].
+//! - [`start`] / `finish_command` is the command lifecycle for every
+//!   non-scope node (builtins, externals, uutils stages); [`frame_call`]
+//!   wraps a body in that lifecycle in one call.  Capability checks go
+//!   through [`record_capability`].
+//!
+//! [`scope_node`] is the shared node-assembly the scope recorder and the
+//! `builtins::collections` combinator recorder both build through, so the
+//! two cannot drift on the stderr cap or node shape.
 //!
 //! All functions are no-ops when `shell.local.audit.active()` is `false`, so
 //! the dispatcher path can call them unconditionally.
@@ -64,7 +69,56 @@ fn cap_stderr(buf: &mut Vec<u8>) {
 /// the node's `value`; on `Break::Error`, the error's message is
 /// used as `stderr` when the caller didn't capture stderr.  Exit /
 /// Stopped propagate without recording.
-pub(crate) fn finish_command(
+/// The already-derived outcome a scope/combinator node records: the exit
+/// status, the value to record (a partial accumulation or `Unit`, the
+/// caller's error-value policy), and any captured stderr.
+pub(crate) struct NodeOutcome {
+    pub status: i32,
+    pub value: Value,
+    pub stderr: Vec<u8>,
+}
+
+/// Assemble one recorded scope/combinator node from its already-derived
+/// `outcome`, capping the stderr under the active byte-capture policy
+/// before the node is built.  Shared by [`record_scope`] and the
+/// combinator recorder in `builtins::collections` so the two cannot drift
+/// on the cap or the node shape.
+pub(crate) fn scope_node(
+    shell: &Shell,
+    cmd: &str,
+    start: &AuditStart,
+    principal: String,
+    outcome: NodeOutcome,
+    children: Vec<ExecNode>,
+) -> ExecNode {
+    let NodeOutcome {
+        status,
+        value,
+        mut stderr,
+    } = outcome;
+    if shell.local.audit.captures_bytes() {
+        cap_stderr(&mut stderr);
+    }
+    ExecNode::command(
+        cmd,
+        Vec::new(),
+        status,
+        start.site.clone(),
+        AuditIo {
+            stdout: Vec::new(),
+            stderr,
+        },
+        value,
+        children,
+        AuditTime {
+            start: start.time,
+            end: epoch_us(),
+        },
+        principal,
+    )
+}
+
+fn finish_command(
     shell: &mut Shell,
     start: AuditStart,
     cmd: &str,
@@ -212,31 +266,24 @@ pub(crate) fn record_scope(
     // trampoline before any `Settled` is built), so every arm of the
     // match is reachable.
     let body_result = crate::types::split(settled)?;
-    let (status, value, mut stderr) = match &body_result {
+    // Scope nodes record `Unit` for a failed body and carry no serialised
+    // `args`: the structural IR node *is* the record of what the scope
+    // received.
+    let (status, value, stderr) = match &body_result {
         BodyResult::Value(v) => (shell.mobile.control.last_status, v.clone(), Vec::new()),
         BodyResult::Error(e) => (e.exit_code(), Value::Unit, e.message.clone().into_bytes()),
     };
-    if shell.local.audit.captures_bytes() {
-        cap_stderr(&mut stderr);
-    }
-    // Scope nodes carry no serialised `args`: the structural IR
-    // node *is* the record of what the scope received.
-    let node = ExecNode::command(
+    let node = scope_node(
+        shell,
         cmd,
-        Vec::new(),
-        status,
-        start.site,
-        AuditIo {
-            stdout: Vec::new(),
+        &start,
+        principal,
+        NodeOutcome {
+            status,
+            value,
             stderr,
         },
-        value,
         fragment.into_nodes(),
-        AuditTime {
-            start: start.time,
-            end: epoch_us(),
-        },
-        principal,
     );
     Ok(ScopeRecord {
         body: body_result,
@@ -270,7 +317,7 @@ pub(crate) fn with_scope(
 /// Bytes capture is monotonic: an inner `try` with
 /// `CapturePolicy::Off` does not override an outer `audit`'s
 /// `Bytes`.  The previous policy is restored after `f` returns.
-pub(crate) fn with_capture_policy<R>(
+fn with_capture_policy<R>(
     shell: &mut Shell,
     policy: CapturePolicy,
     f: impl FnOnce(&mut Shell) -> R,

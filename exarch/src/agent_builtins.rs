@@ -80,7 +80,7 @@ pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
 /// One-line docs for the helper-library functions sourced from
 /// `agent.ral`.  These are ral closures, not registered builtins, so
 /// `help` cannot find them on its own; the host hands them to
-/// [`ral_core::builtins::misc::register_library_docs`] at boot so the
+/// [`ral_core::builtins::help::register_library_docs`] at boot so the
 /// agent library is as discoverable as the prelude.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
@@ -745,9 +745,7 @@ fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<std::path::PathBuf> {
-    let rp = shell.resolve(path);
-    shell.check_fs_read(&rp)?;
-    Ok(rp.into_inner())
+    Ok(ral_core::builtins::util::checked_read_path(shell, path)?.into_inner())
 }
 
 fn scheme_grep_files(_u: &mut Unifier) -> Scheme {

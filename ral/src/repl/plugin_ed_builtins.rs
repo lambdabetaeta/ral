@@ -13,7 +13,8 @@
 //! core via [`ED_BUILTINS`] at REPL startup
 //! (see [`super::register_host_surface`]).
 
-use ral_core::builtins::util::{arg0_str, as_list, check_arity};
+use ral_core::builtins::util::{arg0_str, check_arity};
+use ral_core::types::as_list;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{

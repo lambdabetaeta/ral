@@ -9,21 +9,20 @@
 //! decoder takes no argument: its bytes always come from the channel
 //! (stdin, a `< file` redirect, or a pipeline).  A `to-X` encoder takes
 //! exactly one value and writes its encoded form to stdout, returning
-//! Bytes — except `to-line`, which returns Unit.  To decode a value
-//! already in hand, put it on the channel with
-//! the matching encoder — `to-string $s | from-json`.  The cached-tty
-//! gate fires only when stdin is genuinely unset — see `read_stdin_bytes`.
+//! Bytes — except `to-line`, which returns Unit.  Decoding is strict
+//! UTF-8, except `from-lines`, which decodes lossily so a line stream
+//! survives invalid bytes.  To decode a value already in hand, put it on
+//! the channel with the matching encoder — `to-string $s | from-json`.
+//! The three-arm stdin policy (installed source / tty refusal / fd-0
+//! fall-through) lives in [`super::util::stdin_reader`].
 
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
 use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-use crate::types::{Shell, Settled, sig, Value, sig_hint, Env};
+use crate::types::{Shell, Settled, sig, Value, sig_hint, Env, as_list, as_map_ref};
 use std::sync::Arc;
 
-use super::apply;
-use super::util::{
-    as_byte_list, as_list, as_map, check_arity, decode_utf8_strict, json_to_value, value_to_json,
-};
+use super::util::{as_byte_list, check_arity, decode_utf8_strict};
 
 fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -47,17 +46,6 @@ fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>
         ));
     }
     read_stdin_bytes(name, shell)
-}
-
-pub(super) fn builtin_fold_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "fold-lines")?;
-    let func = args[0].clone();
-    let mut acc = args[1].clone();
-    super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {
-        acc = apply(&func, &[acc.clone(), Value::String(line)], shell)?;
-        Ok(())
-    })?;
-    Ok(acc)
 }
 
 pub(super) fn builtin_from_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -128,6 +116,37 @@ pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Settled<V
     Ok(s)
 }
 
+fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
+    Ok(match j {
+        serde_json::Value::Null => Value::Unit,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if n.is_f64() {
+                // A genuine JSON float; `as_f64` cannot fail here.
+                Value::Float(n.as_f64().unwrap())
+            } else {
+                // An integer literal that overflowed `i64` (a `u64` above
+                // `i64::MAX`).  Reading it as `f64` would silently round
+                // away its low bits, so refuse rather than corrupt it.
+                return Err(sig(format!(
+                    "from-json: integer {n} is outside the supported range"
+                )));
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            Value::list(arr.iter().map(json_to_value).collect::<Settled<Vec<_>>>()?)
+        }
+        serde_json::Value::Object(obj) => Value::Map(
+            obj.iter()
+                .map(|(k, v)| Ok((k.clone(), json_to_value(v)?)))
+                .collect::<Settled<_>>()?,
+        ),
+    })
+}
+
 pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-json", shell)?;
     let text = decode_utf8_strict(
@@ -193,11 +212,11 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     let rows = as_list(&args[0], "to-csv")?;
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
-        let headers: Vec<String> = as_map(first, "to-csv")?.keys().cloned().collect();
+        let headers: Vec<String> = as_map_ref(first, "to-csv")?.keys().cloned().collect();
         wtr.write_record(&headers)
             .map_err(|e| sig(format!("to-csv: {e}")))?;
         for row in &rows {
-            let map = as_map(row, "to-csv")?;
+            let map = as_map_ref(row, "to-csv")?;
             let fields: Vec<String> = headers
                 .iter()
                 .map(|h| map.get(h).map_or_else(String::new, Value::to_string))
@@ -210,13 +229,20 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     write_encoded("to-csv", bytes, shell)
 }
 
+/// The write-success convention every `to-X` encoder shares: write `bytes`
+/// to stdout and mark the codec's exit status a success.
+fn write_stdout_ok(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
+    shell
+        .write_stdout(bytes)
+        .map_err(|e| sig(format!("{name}: {e}")))?;
+    shell.mobile.control.last_status = 0;
+    Ok(())
+}
+
 /// Common tail for every `to-X` builtin: write encoded bytes to stdout and
 /// return them as `Value::Bytes`.
 fn write_encoded(name: &str, bytes: Vec<u8>, shell: &mut Shell) -> Settled<Value> {
-    shell
-        .write_stdout(&bytes)
-        .map_err(|e| sig(format!("{name}: {e}")))?;
-    shell.mobile.control.last_status = 0;
+    write_stdout_ok(name, &bytes, shell)?;
     Ok(Value::Bytes(bytes))
 }
 
@@ -235,10 +261,7 @@ pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Valu
     check_arity(args, 1, "to-line")?;
     let mut s = args[0].to_string();
     s.push('\n');
-    shell
-        .write_stdout(s.as_bytes())
-        .map_err(|e| sig(format!("to-line: {e}")))?;
-    shell.mobile.control.last_status = 0;
+    write_stdout_ok("to-line", s.as_bytes(), shell)?;
     Ok(Value::Unit)
 }
 
@@ -251,6 +274,55 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
         .collect::<Vec<_>>()
         .join("\n");
     write_encoded("to-lines", joined.into_bytes(), shell)
+}
+
+/// Encode `v` as JSON for `to-json`.
+///
+/// Refuses any value with no faithful JSON form rather than erasing it (a
+/// non-finite Float, or a computation value); Bytes render as the integer
+/// array `from-bytes` round-trips.
+///
+/// # Errors
+/// Returns `Err` if `v`, or any value nested within it, is a non-finite
+/// `Float` (NaN / ±Infinity) or a computation value (`Lambda` / `Block` /
+/// `Handle`).
+pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
+    Ok(match v {
+        Value::Unit => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(n) => serde_json::json!(*n),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| sig(format!("to-json: {f} has no JSON representation")))?,
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::List(items) => {
+            serde_json::Value::Array(items.iter().map(value_to_json).collect::<Settled<_>>()?)
+        }
+        Value::Map(pairs) => {
+            let obj: serde_json::Map<String, serde_json::Value> = pairs
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), value_to_json(v)?)))
+                .collect::<Settled<_>>()?;
+            serde_json::Value::Object(obj)
+        }
+        Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => {
+            return Err(sig(format!(
+                "to-json: {} has no JSON representation",
+                v.type_name()
+            )));
+        }
+        Value::Bytes(b) => {
+            serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
+        }
+        Value::Variant { label, payload } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("tag".into(), serde_json::Value::String(label.clone()));
+            if let Some(p) = payload {
+                obj.insert("payload".into(), value_to_json(p)?);
+            }
+            serde_json::Value::Object(obj)
+        }
+    })
 }
 
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {

@@ -1,16 +1,18 @@
 //! List and collection combinators: `each`, `map`, `filter`, `sort-list`,
-//! `sort-list-by`, and `fold`.
+//! `sort-list-by`, `fold`, and `fold-lines`, plus the `range` list
+//! constructor.
 //!
 //! These builtins provide the standard higher-order iteration primitives
-//! over ral lists.  `each` and `map` participate in the audit tree when
-//! auditing is active, recording their execution as interior nodes; the
-//! other combinators run their per-element applications directly, so those
-//! children land in the enclosing trail without a wrapping combinator node.
+//! over ral lists, together with `range`, which builds a list of integers.
+//! `each` and `map` participate in the audit tree when auditing is active,
+//! recording their execution as interior nodes; the other combinators run
+//! their per-element applications directly, so those children land in the
+//! enclosing trail without a wrapping combinator node.
 
-use crate::types::{Value, Shell, Settled, Break, ExecNode, AuditIo, AuditTime, sig};
+use crate::types::{Value, Shell, Settled, Break, as_list, sig};
 
 use super::apply;
-use super::util::{as_list, check_arity, value_ordering};
+use super::util::{check_arity, value_ordering};
 
 /// How many `range` steps run between cancellation polls.  The
 /// higher-order combinators poll once per element — negligible beside the
@@ -83,27 +85,24 @@ fn iterate_audited(
         let start = crate::evaluator::audit::start(shell);
         let principal = shell.mobile.context.principal();
         let (fragment, (value, err)) = shell.audit_child(body);
-        let last_status = shell.mobile.control.last_status;
-        let (stderr, status) = match &err {
-            Some(Break::Error(e)) => (e.message.clone().into_bytes(), e.exit_code()),
-            _ => (Vec::new(), last_status),
+        // A failed combinator records the partial value it accumulated up
+        // to the failure, unlike a scope node's `Unit` — the caller's
+        // error-value policy, passed through to the shared assembly.
+        let (status, stderr) = match &err {
+            Some(Break::Error(e)) => (e.exit_code(), e.message.clone().into_bytes()),
+            _ => (shell.mobile.control.last_status, Vec::new()),
         };
-        let node = ExecNode::command(
+        let node = crate::evaluator::audit::scope_node(
+            shell,
             cmd,
-            Vec::new(),
-            status,
-            start.site.clone(),
-            AuditIo {
-                stdout: Vec::new(),
+            &start,
+            principal,
+            crate::evaluator::audit::NodeOutcome {
+                status,
+                value: value.clone(),
                 stderr,
             },
-            value.clone(),
             fragment.into_nodes(),
-            AuditTime {
-                start: start.time,
-                end: crate::types::epoch_us(),
-            },
-            principal,
         );
         shell.local.audit.push(node);
         (value, err)
@@ -246,6 +245,20 @@ pub(super) fn builtin_fold(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         crate::process::check(shell)?;
         acc = apply(func, &[acc, item.clone()], shell)?;
     }
+    Ok(acc)
+}
+
+/// `fold-lines <fn> <init>` — left fold over stdin lines, the channel-fed
+/// sibling of `fold`: the data comes one line at a time from the byte
+/// channel rather than an in-hand list.
+pub(super) fn builtin_fold_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 2, "fold-lines")?;
+    let func = args[0].clone();
+    let mut acc = args[1].clone();
+    super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {
+        acc = apply(&func, &[acc.clone(), Value::String(line)], shell)?;
+        Ok(())
+    })?;
     Ok(acc)
 }
 

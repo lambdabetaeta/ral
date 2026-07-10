@@ -404,8 +404,8 @@ pub struct LocalState {
     /// Audit collector: the in-flight execution tree plus the current
     /// byte-capture policy.  Scope-introducing builtins (`grant`, `within`,
     /// `guard`, `try`, `audit`) own the children their bodies produce; the
-    /// dispatcher posts one node per command via
-    /// [`crate::evaluator::audit::finish_command`].
+    /// dispatcher posts one node per command via the command lifecycle
+    /// in [`crate::evaluator::audit`].
     pub(crate) audit: Audit,
     /// REPL-only scratch state (editor plugin context + queued chpwd
     /// notification).  Doesn't flow across threads or IPC; moved on

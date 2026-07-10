@@ -33,7 +33,8 @@ use crate::types::{SurfaceBuffer, DeferredSink, EventSink, Value, Shell, Raw, En
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
-use super::util::{as_list, check_arity, expect_handle, expect_thunk};
+use super::util::{check_arity, expect_handle, expect_thunk};
+use crate::types::as_list;
 
 /// How a child concurrent block's stdout/stderr are wired.
 pub(super) enum ChildIoMode {

@@ -1,11 +1,22 @@
-//! Filesystem query and temporary-path builtins.
+//! Filesystem query and temporary-path builtins, plus the filesystem
+//! predicates `exists`, `is-file`, `is-dir`, `is-link`, `is-readable`, and
+//! `is-writable`.
+//!
+//! Every query resolves its path argument through
+//! [`super::util::checked_read_path`], which resolves against the
+//! `within [dir: …]` scoped `dynamic.ambient.cwd` (via `shell.resolve`) and
+//! capability-checks the read.  Probing via `Path::new(p).exists()` would
+//! resolve against the OS cwd instead, returning false for files written
+//! via redirects inside a within-scoped directory.  The predicates each
+//! record their boolean outcome in `shell.last_status`, so pipeline `?`
+//! chaining and `if` see an exit-code-shaped signal alongside the `Bool`.
 
 use crate::types::{Break, Settled, Shell, Value, sig};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::util::{arg0_str, check_arity};
+use super::util::{admits_read, arg0_str, check_arity, checked_read_path};
 
 /// Classify a `FileType` against the four labels exposed in ral —
 /// `file`, `dir`, `symlink`, or `other`.  Symlinks are detected first
@@ -48,16 +59,16 @@ fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "list-dir")?;
     let path = checked_read_path(shell, &args[0].to_string())?;
+    let dir = path.as_path();
     let mut entries: Vec<(String, Value)> = Vec::new();
-    for entry in fs::read_dir(&path).map_err(|e| io_err("list-dir", &path, &e))? {
-        let entry = entry.map_err(|e| io_err("list-dir", &path, &e))?;
+    for entry in fs::read_dir(dir).map_err(|e| io_err("list-dir", dir, &e))? {
+        let entry = entry.map_err(|e| io_err("list-dir", dir, &e))?;
         // `checked_read_path` admitted the directory, but each entry is
         // a distinct path whose metadata (size/mtime/type) this stats and
         // returns, so a deny on a subpath must drop that entry.  Skip a
         // denied entry rather than abort the listing — the same policy
         // `_search-files` / `explore-dir` apply to their walked entries.
-        let rp = shell.resolve(&entry.path().to_string_lossy());
-        if shell.check_fs_read(&rp).is_err() {
+        if !admits_read(shell, &entry.path().to_string_lossy()) {
             continue;
         }
         entries.push(dir_entry_value(&entry)?);
@@ -100,6 +111,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     let expanded = crate::path::sigil::expand_path_prefix(&raw, &shell.mobile.context.home());
     let input_is_cwd_relative = !crate::path::is_absolute(&expanded);
     let pattern = checked_read_path(shell, &raw)?
+        .as_path()
         .to_string_lossy()
         .into_owned();
     let strip_prefix = input_is_cwd_relative.then(|| shell.cwd());
@@ -126,8 +138,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
                 // matching hits.  Skip a denied match rather than abort
                 // the whole glob — the same policy `_search-files` /
                 // `explore-dir` apply to their walked entries.
-                let rp = shell.resolve(&path.to_string_lossy());
-                if shell.check_fs_read(&rp).is_err() {
+                if !admits_read(shell, &path.to_string_lossy()) {
                     continue;
                 }
                 let rendered = match &strip_prefix {
@@ -144,12 +155,6 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     }
     results.sort_by_key(std::string::ToString::to_string);
     Ok(Value::list(results))
-}
-
-fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<PathBuf> {
-    let rp = shell.resolve(path);
-    shell.check_fs_read(&rp)?;
-    Ok(rp.into_inner())
 }
 
 /// Wrap a `std::io::Error` with the operation label and the path that
@@ -201,12 +206,12 @@ fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
 )]
 pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "file-info")?;
-    let path_arg = args[0].to_string();
-    let path = checked_read_path(shell, &path_arg)?;
-    let meta = fs::symlink_metadata(&path).map_err(|e| io_err("file-info", &path, &e))?;
+    let resolved = checked_read_path(shell, &args[0].to_string())?;
+    let path = resolved.as_path();
+    let meta = fs::symlink_metadata(path).map_err(|e| io_err("file-info", path, &e))?;
     let ft = meta.file_type();
     let target = if ft.is_symlink() {
-        fs::read_link(&path)
+        fs::read_link(path)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default()
     } else {
@@ -247,10 +252,135 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
 pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "resolve-path")?;
     let s = args[0].to_string();
-    let rp = shell.resolve(&s);
-    shell.check_fs_read(&rp)?;
-    let resolved = rp
+    let resolved = checked_read_path(shell, &s)?
         .canonicalise_strict()
         .map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
     Ok(Value::String(resolved.to_string_lossy().into_owned()))
+}
+
+/// Shared probe: read `path` through [`checked_read_path`] (which honours
+/// `dynamic.ambient.cwd` via `shell.resolve`), then run `probe` against the
+/// metadata produced by `read_meta`.  `probe` receives `None` when the path
+/// doesn't exist or metadata can't be read, so predicates uniformly return
+/// `false` for missing paths rather than surfacing the I/O error.
+fn fs_probe_with(
+    args: &[Value],
+    shell: &mut Shell,
+    name: &str,
+    read_meta: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+    probe: impl FnOnce(Option<fs::Metadata>) -> bool,
+) -> Settled<Value> {
+    check_arity(args, 1, name)?;
+    let rp = checked_read_path(shell, &args[0].to_string())?;
+    let meta = read_meta(rp.as_path()).ok();
+    let r = probe(meta);
+    shell.set_status_from_bool(r);
+    Ok(Value::Bool(r))
+}
+
+/// Probe that *does not* follow symlinks (uses `symlink_metadata`).  A
+/// dangling symlink still satisfies `exists`; a symlink to a regular file
+/// reports `is-link` true.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:stat-nofollow] `exists`/stat predicates: `symlink_metadata` stats a path without following symlinks, gated by `check_fs_read`; a metadata predicate, not turn-time model data I/O, raises no surface card."
+)]
+fn fs_probe(
+    args: &[Value],
+    shell: &mut Shell,
+    name: &str,
+    probe: impl FnOnce(Option<fs::Metadata>) -> bool,
+) -> Settled<Value> {
+    fs_probe_with(args, shell, name, |p| fs::symlink_metadata(p), probe)
+}
+
+/// Probe that *does* follow symlinks (uses `metadata`).  Mirrors `test -f` /
+/// `test -d` / `test -r` semantics: a symlink-to-a-file satisfies `is-file`,
+/// a dangling symlink fails every probe.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:stat-follow] `is-file`/`is-dir` predicates: `metadata` stats a path following symlinks, gated by `check_fs_read`; a metadata predicate, not turn-time model data I/O, raises no surface card."
+)]
+fn fs_probe_follow(
+    args: &[Value],
+    shell: &mut Shell,
+    name: &str,
+    probe: impl FnOnce(Option<fs::Metadata>) -> bool,
+) -> Settled<Value> {
+    fs_probe_with(args, shell, name, |p| fs::metadata(p), probe)
+}
+
+pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    fs_probe(args, shell, "exists", |m| m.is_some())
+}
+
+pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    fs_probe_follow(args, shell, "is-file", |m| m.is_some_and(|m| m.is_file()))
+}
+
+pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    fs_probe_follow(args, shell, "is-dir", |m| m.is_some_and(|m| m.is_dir()))
+}
+
+pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    fs_probe(args, shell, "is-link", |m| {
+        m.is_some_and(|m| m.file_type().is_symlink())
+    })
+}
+
+pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    // Portable readability test: `metadata()` is sufficient on Windows
+    // (where `readonly` only governs writes) and approximates `test -r`
+    // on Unix (a true permission probe would need uid/gid/acl logic).
+    fs_probe_follow(args, shell, "is-readable", |m| m.is_some())
+}
+
+/// Resolve and capability-check `path`, then answer `probe` against the
+/// resolved path itself (symlinks intact in the string, but a following
+/// probe is free to resolve them).  The path-level sibling of
+/// [`fs_probe_with`], for predicates whose honest answer needs more than
+/// `Metadata` — e.g. an `access(2)` query against the real uid/gid.
+fn fs_probe_path(
+    args: &[Value],
+    shell: &mut Shell,
+    name: &str,
+    probe: impl FnOnce(&Path) -> bool,
+) -> Settled<Value> {
+    check_arity(args, 1, name)?;
+    let rp = checked_read_path(shell, &args[0].to_string())?;
+    let r = probe(rp.as_path());
+    shell.set_status_from_bool(r);
+    Ok(Value::Bool(r))
+}
+
+/// True if `path` is writable by the calling process.  Follows symlinks
+/// (answering about the target, like `is-readable`/`is-file`/`is-dir`),
+/// and reports honestly: `permissions().readonly()` ignores ownership, so
+/// a 0644 file owned by another user would read writable; `access(2)`
+/// with `W_OK` evaluates the real uid/gid against the file's mode.
+#[cfg(unix)]
+fn is_writable_path(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Windows has no `access(2)`; `readonly()` on the followed target's
+/// metadata is the portable test there (the OS governs writes by the
+/// read-only attribute, not a uid/gid mode).
+#[cfg(not(unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:writable-stat-nonunix] Stat behind the `is-writable` predicate on non-unix (readonly-attribute test). A stat predicate, not turn-time model data I/O — raises no card, like its unix sibling."
+)]
+fn is_writable_path(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| !m.permissions().readonly())
+        .unwrap_or(false)
+}
+
+pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    fs_probe_path(args, shell, "is-writable", is_writable_path)
 }

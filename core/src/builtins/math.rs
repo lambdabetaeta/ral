@@ -13,12 +13,7 @@
 
 use crate::types::{Settled, Value, sig, sig_hint};
 
-use super::util::check_arity;
-
-/// `2^63`: the half-open upper bound an `f64` magnitude must stay under to be
-/// representable as `i64`.  `i64::MAX` (`2^63 - 1`) rounds up to `2^63` as an
-/// `f64`, so the comparison is strict against this value (mirrors `int`).
-const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
+use super::util::{check_arity, f64_to_i64};
 
 /// The most decimal places `f64` can carry before `10^places` overflows to
 /// infinity; beyond ~15 significant digits the extra places are noise.
@@ -41,16 +36,7 @@ fn finite_float(name: &str, val: &Value) -> Settled<f64> {
 fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
     check_arity(args, 1, name)?;
     let x = finite_float(name, &args[0])?;
-    let r = op(x);
-    if (-I64_BOUND..I64_BOUND).contains(&r) {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "r is integral and range-checked into [-2^63, 2^63) on line 45; the cast is exact"
-        )]
-        Ok(Value::Int(r as i64))
-    } else {
-        Err(sig(format!("{name}: {x} is outside the integer range")))
-    }
+    Ok(Value::Int(f64_to_i64(name, op(x))?))
 }
 
 pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
@@ -73,7 +59,7 @@ pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
     }
     #[allow(
         clippy::cast_possible_truncation,
-        reason = "places is range-checked to 0..=308 on lines 64-68"
+        reason = "places is range-checked to 0..=MAX_PLACES just above"
     )]
     let factor = 10f64.powi(places as i32);
     let r = (x * factor).round() / factor;
