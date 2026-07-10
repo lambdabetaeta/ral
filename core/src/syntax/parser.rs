@@ -9,10 +9,8 @@
 //! `return`, `if`, `case`, or a command.  `|`, `?`, `,`, and `=` are
 //! continuation tokens — newlines around them are absorbed.
 //!
-//! The let-RHS chain is intentionally narrower than the statement chain:
-//! its arms are bare `pipeline`s rather than `bg-pipeline`s, so per-arm
-//! `&` is rejected and a single trailing `&` always backgrounds the whole
-//! RHS.  See [`Parser::parse_chain_no_bg`].
+//! The let-RHS chain is intentionally narrower than the statement chain —
+//! see [`Parser::parse_binding_opt`].
 //!
 //! Each statement-list element is wrapped in an [`Stmt`] that carries the
 //! source span of the statement's first token.  The elaborator stamps that
@@ -304,6 +302,17 @@ impl Parser {
         }
     }
 
+    /// Like [`Self::error`] but attaches an explicit `span` rather than
+    /// the span of the current token.
+    fn error_at(span: Span, message: impl Into<String>) -> ParseError {
+        ParseError {
+            message: message.into(),
+            span: Some(span),
+            lex_kind: None,
+            incompleteness: None,
+        }
+    }
+
     /// Guard the point just after a continuation token (`|`, `?`, `if`,
     /// `elsif`, `else`) has been consumed and is about to demand a stage,
     /// branch, or body.  If the input ran out here, report it as
@@ -426,10 +435,8 @@ impl Parser {
         self.parse_chain_of(Self::parse_bg_pipeline)
     }
 
-    /// Variant of `parse_chain` for `let` RHS: arms are bare pipelines.
-    /// Per-arm `&` is rejected by construction, so `let x = a & ? b` is
-    /// a parse error and `let x = a ? b &` always backgrounds the whole
-    /// RHS (the trailing `&` is consumed in `parse_binding_opt`, not here).
+    /// Variant of `parse_chain` for `let` RHS: arms are bare pipelines, so
+    /// per-arm `&` is rejected — see [`Self::parse_binding_opt`].
     fn parse_chain_no_bg(&mut self) -> Result<Ast, ParseError> {
         self.parse_chain_of(Self::parse_pipeline)
     }
@@ -759,7 +766,7 @@ impl Parser {
         // outer `value_span` extends to include the `&` token so the
         // `Spanned<Box<Ast>>` on `Let.value` covers the full RHS.
         let (inner_span, mut value) = self.capture_span(Self::parse_chain_no_bg)?;
-        // `let x = expr &` backgrounds the RHS so the variable binds a handle.
+        // Trailing `&` backgrounds the whole RHS — see the fn doc.
         if self.peek() == &Token::Ampersand {
             self.advance();
             value = Ast::Background(Spanned::boxed(inner_span, value));
@@ -787,7 +794,7 @@ impl Parser {
             Token::Word(Word::Plain(name)) if is_reserved(name) => Err(p.error(format!(
                 "'{name}' is a reserved keyword and cannot be used as a binding name"
             ))),
-            Token::Word(Word::Plain(name)) if is_ident(name) => {
+            Token::Word(Word::Plain(name)) if lexer::is_ident(name) => {
                 let name = name.clone();
                 p.advance();
                 Ok(Pattern::Name(name))
@@ -839,7 +846,7 @@ impl Parser {
                         "'{name}' is a reserved keyword and cannot be used as a binding name"
                     )));
                 }
-                if !is_ident(&name) {
+                if !lexer::is_ident(&name) {
                     return Err(p.error(
                         "rest pattern `...name` needs a plain identifier after the dots, \
                          e.g. `...rest`",
@@ -894,7 +901,7 @@ impl Parser {
     /// also accept `$deref`; that lives in [`Self::parse_map_key`].
     fn parse_static_key(&mut self) -> Result<MapKey, ParseError> {
         match self.peek().clone() {
-            Token::Word(Word::Plain(k)) if is_ident(&k) => {
+            Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
                 self.advance();
                 Ok(MapKey::Bare(k))
             }
@@ -917,7 +924,7 @@ impl Parser {
     /// (for `$name`) after the `:` and value are consumed.
     fn parse_map_key(&mut self) -> Result<MapKeyForm, ParseError> {
         match self.peek().clone() {
-            Token::Word(Word::Plain(k)) if is_ident(&k) => {
+            Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
                 Ok(MapKeyForm::Static(self.parse_static_key()?))
             }
             Token::SingleQuoted(_) | Token::Tag(_) => {
@@ -1037,13 +1044,10 @@ impl Parser {
                 let op_span = self.span();
                 self.advance();
                 if mode == RedirectMode::HereString && fd.is_some_and(|n| n != 0) {
-                    return Err(ParseError {
-                        message: "`<<` always feeds stdin — drop the file-descriptor prefix"
-                            .into(),
-                        span: Some(op_span),
-                        lex_kind: None,
-                        incompleteness: None,
-                    });
+                    return Err(Self::error_at(
+                        op_span,
+                        "`<<` always feeds stdin — drop the file-descriptor prefix",
+                    ));
                 }
                 let default_fd =
                     u32::from(!matches!(mode, RedirectMode::Read | RedirectMode::HereString));
@@ -1054,7 +1058,7 @@ impl Parser {
                     if mode == RedirectMode::HereString
                         && let Ast::Word(w) = &word
                     {
-                        let message = match w {
+                        let message: String = match w {
                             Word::Plain(_) => {
                                 "ral has no heredocs: `<<` feeds a string to \
                                  stdin. Use a raw string: `cmd << #' ... '#`, \
@@ -1067,12 +1071,7 @@ impl Parser {
                                     .into()
                             }
                         };
-                        return Err(ParseError {
-                            message,
-                            span: Some(word_span),
-                            lex_kind: None,
-                            incompleteness: None,
-                        });
+                        return Err(Self::error_at(word_span, message));
                     }
                     RedirectTarget::File(Box::new(word))
                 };
@@ -1747,17 +1746,6 @@ fn is_reserved(s: &str) -> bool {
 enum MapKeyForm {
     Static(MapKey),
     Deref(String),
-}
-
-/// IDENT = [a-zA-Z_][a-zA-Z0-9_-]*.  Validates a whole candidate string
-/// against the shared identifier alphabet defined in the lexer.
-fn is_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if lexer::is_ident_start(c) => {}
-        _ => return false,
-    }
-    chars.all(lexer::is_ident_cont)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

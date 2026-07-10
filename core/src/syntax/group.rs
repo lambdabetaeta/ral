@@ -26,23 +26,14 @@
 //! Concretely, `g = { … f … }; f = { |x| f x }` forms two SCCs:
 //! `{f}` (self-recursive — emitted as a one-binding `LetRec`) and `{g}`
 //! (acyclic — emitted as a normal `let` so `g` gets ordinary
-//! let-polymorphism over `f`'s scheme).  An older WCC pass conflated
-//! these two cases and forced `g` to be mono inside an `f, g` knot.
+//! let-polymorphism over `f`'s scheme).
 //!
-//! # How `LetRec` handles both forward and backward references
+//! # Forward and backward references
 //!
-//! When the evaluator encounters `Comp::LetRec`, it:
-//!
-//! 1. Installs a *placeholder* thunk for each binding name.  The placeholder,
-//!    when forced, re-evaluates the whole group and returns the real lambda for
-//!    that slot.
-//! 2. Evaluates each lambda body *with the placeholders in scope*, capturing
-//!    the environment (including placeholders) in each thunk's closure.
-//! 3. Replaces the placeholders with the actual lambdas.
-//!
-//! This means any lambda in the group can freely reference any other group
-//! member — whether that member is defined earlier or later in the source —
-//! because at call time the placeholder resolves to the real lambda.
+//! A `LetRec` member may reference any other member regardless of source
+//! order.  This is safe because the evaluator (see `eval_letrec`) installs a
+//! placeholder thunk for every binding name before evaluating any body, so a
+//! reference resolves to the real lambda at call time.
 //!
 //! # Shadow handling
 //!

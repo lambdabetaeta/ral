@@ -37,15 +37,25 @@ use std::fmt;
 
 /// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`: a name may start
 /// with an ASCII letter or `_`, and continue with those plus digits and
-/// `-`.  The lexer scans names char-by-char; the parser validates a whole
-/// candidate string ([`is_ident`]).  Both share these predicates so the
-/// alphabet is defined once.
+/// `-`.  The lexer scans names char-by-char; [`is_ident`] validates a
+/// whole candidate string.  Both forms live here so the alphabet is
+/// defined once.
 pub(crate) fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_'
 }
 
 pub(crate) fn is_ident_cont(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+/// Validate a whole candidate string against the identifier alphabet.
+pub(crate) fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if is_ident_start(c) => {}
+        _ => return false,
+    }
+    chars.all(is_ident_cont)
 }
 
 /// True when `ch` may appear in a bare word.
@@ -64,10 +74,12 @@ pub(crate) fn is_ident_cont(ch: char) -> bool {
 ///   don't know the surrounding context, so callers that need a
 ///   context-free decision should consider `,` non-bare too.
 ///
-/// This is the single source of truth; the lexer's internal predicate
-/// and [`crate::syntax::quote::is_bare_word`] both delegate here, and
-/// the tree-sitter grammar mirrors it.
-pub fn is_bare_char(ch: char) -> bool {
+/// This is the single source of truth for the per-character bare-word
+/// alphabet: the lexer's own scanning ([`Lexer::scan_bare_word`]) consults
+/// it directly, and the tree-sitter grammar mirrors it.  Context-sensitive
+/// bareness ([`crate::syntax::quote::is_bare_word`]) is decided by full
+/// lexing via [`lex`], not by this predicate.
+pub(crate) fn is_bare_char(ch: char) -> bool {
     !matches!(
         ch,
         ' ' | '\t'

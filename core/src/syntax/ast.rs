@@ -12,11 +12,11 @@
 //! and pipeline stages — is a `Vec<Stmt>`, with each `Stmt` carrying the span
 //! of its first token.  The elaborator stamps that span as its
 //! `current_span` before processing the underlying `Ast`, so diagnostic spans
-//! attach at the statement boundary.  Sub-expressions (inside `Call` args,
-//! `Let` values, list elements, etc.) inherit the enclosing statement's span
-//! through that stamping; the [`Ast::Call`] and [`Ast::Scope`] variants also
-//! carry their own spans because their extents differ from the enclosing
-//! statement (head + args + redirects vs. a single-statement boundary).
+//! attach at the statement boundary.  Narrower spans, where they matter, live
+//! on the inner [`Spanned`] nodes a form carries (per-argument on `Call`,
+//! per-operand on `Case`, the value on `Let`, list/map elements, …); a form
+//! with no narrower span of its own inherits the enclosing statement's span
+//! through that stamping.
 //!
 //! The tree is serialisable (via `serde`) for debugging and the `to-json`
 //! builtin.
@@ -63,22 +63,15 @@ pub enum Ast {
     Variable(String),
     /// Variable binding: pattern = expr.
     ///
-    /// The wrapping `Spanned` on `pattern` covers the pattern's parsed
-    /// range — used downstream to narrow a pattern-shape diagnostic
-    /// (e.g. `let [a, b] = 42` complaining the value isn't a list)
-    /// onto the pattern fragment that triggered it.  The wrapping
-    /// `Spanned` on `value` covers the right-hand expression's parsed
-    /// range so a value-side unify failure underlines the value alone
-    /// instead of the entire `let` statement.
+    /// `pattern`'s span narrows a pattern-shape diagnostic (`let [a, b] = 42`
+    /// against a non-list value) onto the pattern; `value`'s span narrows a
+    /// value-side unify failure onto the right-hand expression.
     Let {
         pattern: Spanned<Pattern>,
         value: Spanned<Box<Self>>,
     },
-    /// Explicit value-to-command lift: `return [<value>]`.  The
-    /// wrapping `Spanned` covers the value expression's parsed range
-    /// so a diagnostic that fires while inferring the value (a
-    /// heterogeneous list, a wrong-variant payload, …) underlines
-    /// that expression rather than the whole `return …` statement.
+    /// Explicit value-to-command lift: `return [<value>]`.  The value's
+    /// span narrows a value-inference diagnostic onto the expression.
     Return(Option<Spanned<Box<Self>>>),
     /// Command-position invocation: a head applied to arguments, with
     /// an optional run of trailing I/O redirects.  At the surface
@@ -87,10 +80,9 @@ pub enum Ast {
     /// or a [`crate::ir::CompKind::App`] (CBPV elimination, when the head
     /// resolves to a bound value).
     ///
-    /// Each argument is a [`Spanned<Ast>`] so the typechecker can
-    /// narrow a per-argument unification failure's caret onto the
-    /// offending argument rather than the whole call.  Synthetic
-    /// test fixtures use [`Spanned::synthetic`] to elide span tracking.
+    /// Each argument is a [`Spanned<Ast>`] so a per-argument unification
+    /// failure narrows onto that argument; synthetic test fixtures use
+    /// [`Spanned::synthetic`].
     Call {
         head: Head,
         args: Vec<Spanned<Self>>,
@@ -106,13 +98,11 @@ pub enum Ast {
     /// A pipeline: cmd1 | cmd2 | cmd3.  Each stage is a [`Stmt`] so the
     /// elaborator can stamp each stage's span before lowering it.
     Pipeline(Vec<Stmt>),
-    /// Chained commands: cmd1 ? cmd2 ? cmd3.  Each stage carries its
-    /// parsed range so a per-stage diagnostic narrows onto the stage
-    /// rather than the whole chain.
+    /// Chained commands: cmd1 ? cmd2 ? cmd3.  Each stage's span narrows a
+    /// per-stage diagnostic onto that stage.
     Chain(Vec<Spanned<Self>>),
-    /// Background execution: `command &`.  The `Spanned` covers the
-    /// backgrounded expression's parsed range so a diagnostic on the
-    /// expression itself underlines just that fragment.
+    /// Background execution: `command &`.  The `Spanned` narrows a
+    /// diagnostic onto the backgrounded expression.
     Background(Spanned<Box<Self>>),
     /// A block: { ... }.  The body is a statement sequence — see [`Stmt`].
     Block(Vec<Stmt>),
@@ -130,16 +120,14 @@ pub enum Ast {
     /// A map literal: [key: val, key: val]
     Map(Vec<MapEntry>),
     /// String interpolation: "hello $name".  Each segment (a literal
-    /// string fragment or a `$name` / `$[expr]` insertion) carries its
-    /// parsed range so a per-segment diagnostic narrows onto the
-    /// offending segment rather than the whole interpolation.
+    /// fragment or a `$name` / `$[expr]` insertion) carries its span so a
+    /// per-segment diagnostic narrows onto that segment.
     Interpolation(Vec<Spanned<Self>>),
     /// Variant constructor: `` `label `` (nullary) or `` `label payload `` where the
     /// payload is the next adjacent atom.  The `label` is stored without its
     /// leading backtick.  Tag-keyed record entries are *not* `Ast::Tag` —
-    /// they go through `Ast::Map` with [`MapKey::Tag`] keys.  The `Spanned`
-    /// on the payload covers the payload expression so a wrong-payload
-    /// diagnostic underlines just that fragment.
+    /// they go through `Ast::Map` with [`MapKey::Tag`] keys.  The payload's
+    /// span narrows a wrong-payload diagnostic onto it.
     Tag {
         label: String,
         payload: Option<Spanned<Box<Self>>>,
@@ -161,29 +149,26 @@ pub enum Ast {
     Expr(Box<Expr>),
     /// Indexing: `$name[k1][k2]`
     ///
-    /// `target` carries its own `Spanned` span so a diagnostic that
-    /// fires on the target (block-target indexing, etc.) underlines
-    /// just the target.  Each key is a [`Spanned<Ast>`] carrying the
-    /// byte range the parser read for that `[k]` (including the
-    /// surrounding brackets), so a per-key unification failure
-    /// underlines the offending key instead of the whole indexing
-    /// chain.  Synthetic test fixtures use [`Spanned::synthetic`].
+    /// `target`'s span narrows a target diagnostic (block-target
+    /// indexing, …) onto the target; each key's span (covering `[k]`
+    /// including the brackets) narrows a per-key unification failure onto
+    /// that key.  Synthetic test fixtures use [`Spanned::synthetic`].
     Index {
         target: Spanned<Box<Self>>,
         keys: Vec<Spanned<Self>>,
     },
-    /// Force: ! atom.  The wrapping `Spanned` covers the whole
-    /// `!atom` extent (the `!` token plus the forced operand), so a
-    /// force-on-non-thunk diagnostic underlines just that fragment.
-    /// `None` in synthetic test fixtures via [`Spanned::synthetic`].
+    /// Force: ! atom.  The `Spanned` covers the whole `!atom` extent (the
+    /// `!` token plus the forced operand) so a force-on-non-thunk
+    /// diagnostic underlines it; synthetic fixtures elide the span via
+    /// [`Spanned::synthetic`].
     Force(Spanned<Box<Self>>),
     /// Argument-position spread: `f ...x`.  Distinct from
     /// [`ListElem::Spread`] (a list-literal element) so the elaborator
     /// can splice `x`'s elements into the call's argument list while
     /// keeping `f [...x]` as a single list argument.  Only valid as an
     /// immediate child of [`Ast::Call`]'s `args`; elaboration rejects
-    /// it elsewhere.  The `Spanned` covers the spread operand so a
-    /// "spread of non-list" diagnostic underlines `$x`.
+    /// it elsewhere.  The operand's span narrows a spread-of-non-list
+    /// diagnostic onto it.
     Spread(Spanned<Box<Self>>),
     /// Conditional: `if cond then [elsif cond then]* [else else_]`.
     /// One-armed form (single branch, no `else`) has type Unit; multi-
@@ -192,11 +177,9 @@ pub enum Ast {
     ///
     /// The leading `if` and any `elsif`s collapse into one `branches`
     /// vector — they are semantically identical (a cond paired with a
-    /// body, evaluated in order until one matches).  Each branch
-    /// carries spans on both cond and body so a diagnostic on any cond
-    /// or any body narrows onto that fragment rather than the whole
-    /// `if … else …` form.  `else_` is the optional final body, also
-    /// spanned.
+    /// body, evaluated in order until one matches).  Each branch spans
+    /// both cond and body so a diagnostic narrows onto the offending
+    /// fragment; `else_` is the optional final body, also spanned.
     If {
         branches: Vec<IfBranch>,
         else_: Option<Spanned<Box<Self>>>,
@@ -641,9 +624,15 @@ impl WordLiteral {
             "true" => Some(Self::Bool(true)),
             "false" => Some(Self::Bool(false)),
             "unit" => Some(Self::Unit),
-            _ if s.parse::<i64>().is_ok() => s.parse().ok().map(WordLiteral::Int),
-            _ if s.contains('.') => s.parse().ok().map(WordLiteral::Float),
-            _ => None,
+            _ => {
+                if let Ok(i) = s.parse::<i64>() {
+                    Some(Self::Int(i))
+                } else if s.contains('.') {
+                    s.parse().ok().map(Self::Float)
+                } else {
+                    None
+                }
+            }
         }
     }
 }
