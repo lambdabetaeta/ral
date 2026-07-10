@@ -36,7 +36,9 @@ pub struct Skill {
 // ---------------------------------------------------------------------------
 
 /// Discover all skill directories from both roots — directory names only,
-/// no file reads.  The caller parses frontmatter after a grant check.
+/// no file reads.
+///
+/// The caller parses frontmatter after a grant check.
 /// Returns `(name, dir)` pairs where `name` is the directory basename.
 /// Duplicate names: local (cwd) overrides global (config).
 pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
@@ -56,7 +58,9 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// Discover skills from both roots, filter by `caps` readability, and
-/// parse frontmatter — for the prompt's Skills section.  Called once at
+/// parse frontmatter — for the prompt's Skills section.
+///
+/// Called once at
 /// startup (pre-turn); file reads here are `silent`, gated by the
 /// static capability set rather than a live shell.
 #[allow(

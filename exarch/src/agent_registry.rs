@@ -58,7 +58,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The detached-worker default ceiling: one hour
-/// ([[concurrency-primitives-detached-vs-structured]]).  An async agent
+/// ([[concurrency-primitives-detached-vs-structured]]).
+///
+/// An async agent
 /// doing genuinely long work may want a different bound — that is
 /// long-running-work's open regime question, surfacing here for a tool
 /// rather than a ral verb — but a uniform ceiling keeps an abandoned worker
@@ -73,7 +75,9 @@ pub struct AgentInfo {
     pub elapsed: Duration,
 }
 
-/// The fleet's live agents.  Cheap to clone — the inner `Arc` makes a clone
+/// The fleet's live agents.
+///
+/// Cheap to clone — the inner `Arc` makes a clone
 /// share the same map, so the trunk, every forked child, and the frontend all
 /// hold one registry, and a detached worker holds a handle it can settle
 /// through after its turn has ended.

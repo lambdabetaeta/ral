@@ -180,7 +180,9 @@ pub enum Command {
     Accounts,
 }
 
-/// Resolve `-p/-f` into an optional initial prompt.  A blank seed (empty
+/// Resolve `-p/-f` into an optional initial prompt.
+///
+/// A blank seed (empty
 /// or whitespace-only) collapses to `None` here, so the frontends do not
 /// each re-filter: the headless frontend rejects a missing seed, the TUI
 /// simply opens to a prompt.

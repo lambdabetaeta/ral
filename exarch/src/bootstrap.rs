@@ -185,6 +185,7 @@ fn stamp_from_secs(secs: u64) -> String {
 
 /// The per-project directory `$XDG_STATE_HOME/exarch/<project>/`, where
 /// `<project>` is the slugified absolute `cwd` (see [`project_slug`]).
+///
 /// Both the persisted model selection (`state.json`) and the per-run
 /// session logs live under it, so a project's exarch state is one findable
 /// directory keyed by where it was launched — never scattered into cwd.
@@ -192,7 +193,9 @@ pub fn project_dir(cwd: &str) -> PathBuf {
     xdg_app_dir(ral_core::path::basedir::XdgKind::State).join(project_slug(cwd))
 }
 
-/// The exarch directory under an XDG base: `$XDG_<kind>_HOME/exarch/`. The
+/// The exarch directory under an XDG base: `$XDG_<kind>_HOME/exarch/`.
+///
+/// The
 /// one spelling of the app-subdir convention — [`project_dir`] (state home)
 /// and the model cache (`models::cache_path`, cache home) both build on it.
 pub fn xdg_app_dir(kind: ral_core::path::basedir::XdgKind) -> PathBuf {

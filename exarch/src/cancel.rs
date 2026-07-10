@@ -63,7 +63,9 @@ use ral_core::process::CancelCause;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
-/// An agent's cancellation handle.  Cloning shares the same flag (an
+/// An agent's cancellation handle.
+///
+/// Cloning shares the same flag (an
 /// `Arc<AtomicU8>`, holding the [`CancelCause`] a cancel was raised with, `0`
 /// while un-cancelled), so the registry entry's clone and the drive loop's
 /// clone are one token — cancelling either halts the agent's turn.
@@ -114,7 +116,9 @@ impl Token {
 static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Publish an existing token to the signal slot for as long as the returned
-/// guard lives.  The trunk (the parent-less agent) calls it once, holding the
+/// guard lives.
+///
+/// The trunk (the parent-less agent) calls it once, holding the
 /// guard for its whole drive, so a SIGINT/SIGTERM/Ctrl-C cancels the trunk's
 /// current turn through the token it already threads — without the
 /// per-turn-mint dance, because the boundary [`reset`](Token::reset)s the same
@@ -135,7 +139,9 @@ pub fn publish(token: &Token) -> SlotGuard {
 }
 
 /// RAII handle for the published slot: nulls [`CURRENT`] on drop so the slot
-/// stops tracking a retired trunk's token.  The pointee is immortal (leaked
+/// stops tracking a retired trunk's token.
+///
+/// The pointee is immortal (leaked
 /// by [`publish`]), so the guard bounds only *when* the slot fires, not how
 /// long the allocation behind it lives.
 pub struct SlotGuard;
@@ -180,7 +186,9 @@ pub fn raise_interrupt() {
     deliver_interrupt();
 }
 
-/// Install the chained signal handler.  Must run *after*
+/// Install the chained signal handler.
+///
+/// Must run *after*
 /// `ral_core::process::install_handlers` — we capture ral's dispositions
 /// and forward into them so its cancel semantics are preserved.  SIGINT
 /// forwards into the non-escalating [`relay_handler`], which requests the

@@ -1,6 +1,8 @@
 //! The uniform agent node: canonical event log, persistent shell, capability
 //! set, an owned hot-swappable provider, and the shared turn driver every node
-//! runs.  An exarch run is a *fleet* of these arranged in a tree
+//! runs.
+//!
+//! An exarch run is a *fleet* of these arranged in a tree
 //! ([[decisions/260624_uniform-agent-nodes]]); the [`Fleet`](crate::fleet::Fleet)
 //! holds what is shared (the registry, the one event bus, the focused-agent
 //! handle, whether a human is attached), and each `Agent` is one node.
@@ -249,7 +251,9 @@ pub(crate) fn fresh_id() -> AgentId {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A shared, swappable handle to the active provider.  The drive loop reads
+/// A shared, swappable handle to the active provider.
+///
+/// The drive loop reads
 /// the current provider once per turn through [`Self::current`]; a `/model`
 /// switch on the frontend's UI thread swaps it through [`Self::swap`].  Live
 /// provider replacement across the UI / drive thread boundary needs a shared

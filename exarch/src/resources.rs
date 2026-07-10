@@ -124,7 +124,9 @@ pub fn section_mark(title: &str) -> Mark {
 }
 
 /// Compose the agent's probe rows into the `/resources` card: a `resources`
-/// heading over one [`rows_mark`] matrix. The frontend appends its own
+/// heading over one [`rows_mark`] matrix.
+///
+/// The frontend appends its own
 /// section to this card at render time; the raw rows ride beside it on the
 /// bus for `transcript.jsonl`.
 pub fn resources_card(rows: &[ProbeRow]) -> Card {
@@ -162,7 +164,9 @@ pub struct ViewFigures {
     pub agents: u64,
 }
 
-/// The presentation bus's two probe figures. Neither carries a `cap`: the
+/// The presentation bus's two probe figures.
+///
+/// Neither carries a `cap`: the
 /// bounded transport's one enforced number is a *per-entry* text cap
 /// (`bus::MERGE_TEXT_CAP`), a different axis from either figure's
 /// aggregate, so cramming it into `cap` would read as a false ceiling on a
@@ -176,7 +180,9 @@ pub struct BusFigures {
 }
 
 /// The rows for the accumulators the frontend owns — the probed agent's
-/// viewport window, the fleet's view counts, and the bus. Pure in its
+/// viewport window, the fleet's view counts, and the bus.
+///
+/// Pure in its
 /// figures so the row shapes are unit-testable without a terminal: the
 /// caller (the TUI's `Kind::Resources` arm) reads the figures off the
 /// tabs/viewport/bus structures it holds.
@@ -263,7 +269,9 @@ pub fn terse_duration(d: Duration) -> String {
 
 /// Total size in bytes of every regular file under `root`, recursively —
 /// the disk probe's figure, walked at invocation and never periodically,
-/// so the probe's cost is paid exactly when the operator asks. Symlinks
+/// so the probe's cost is paid exactly when the operator asks.
+///
+/// Symlinks
 /// are not followed (their target may leave the probed tree); unreadable
 /// entries count zero rather than fail the fold.
 #[allow(

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 /// The state file name within a project's [`crate::bootstrap::project_dir`].
 const STATE_FILE: &str = "state.json";
 
-/// The persisted runtime state: the model selection plus its tuning. The
+/// The persisted runtime state: the model selection plus its tuning.
+///
+/// The
 /// tuning fields are `#[serde(default)]` so a state file written by an older
 /// binary (model only) still loads — its tuning reads as "auto" — and a
 /// hand-edited or future file with unknown keys is tolerated by [`load`].
@@ -104,7 +106,9 @@ fn path_in(dir: &Path) -> PathBuf {
 }
 
 /// Load the selection from `dir/state.json`, or `None` when the file is
-/// absent or unreadable as state. A malformed file is treated as absent
+/// absent or unreadable as state.
+///
+/// A malformed file is treated as absent
 /// (the default selection applies) rather than failing startup — the
 /// selection is recoverable state, not load-bearing config.
 #[allow(
@@ -116,7 +120,9 @@ pub fn load(dir: &Path) -> Option<State> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Persist `state` to `dir/state.json`, creating `dir` if needed. Returns a
+/// Persist `state` to `dir/state.json`, creating `dir` if needed.
+///
+/// Returns a
 /// message on failure so the picker can note it without aborting the
 /// switch — the switch already took effect in memory; only its persistence
 /// failed.

@@ -49,6 +49,7 @@ use std::sync::Arc;
 use tui::SessionInfo;
 
 /// Pre-`main` trampoline shared by the binary and every test binary.
+///
 /// A byte-mode pipeline stage re-execs the running binary with
 /// `--ral-pipeline-stage-helper`; under `cargo test` that is the test
 /// harness binary, which libtest would reject.  Teach core how to dress
@@ -99,7 +100,9 @@ fn init_lib_test_binary() {
 }
 
 /// The binary's entry point, lifted into the library so integration
-/// tests can link the whole crate.  Parses the CLI, composes the
+/// tests can link the whole crate.
+///
+/// Parses the CLI, composes the
 /// capability lattice, builds a [`Agent`] + [`Provider`], and hands
 /// off to a frontend.
 pub fn run() -> Result<(), String> {

@@ -19,7 +19,9 @@ use crate::provider;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The focus sentinel: no agent is attached.  Off the TUI the focus handle
+/// The focus sentinel: no agent is attached.
+///
+/// Off the TUI the focus handle
 /// holds this for the whole run (there is no `TAB`); in the TUI it means the
 /// frontend resolves focus to the trunk.  Distinct from any real [`AgentId`].
 pub const NO_FOCUS: AgentId = AgentId::MAX;

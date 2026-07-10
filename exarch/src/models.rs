@@ -27,7 +27,9 @@ use std::time::Duration;
 const TTL: Duration = Duration::from_hours(24);
 
 /// One upstream provider `OpenRouter` can route a given model to — a row of the
-/// `/model` overlay's provider control. `OpenRouter` fronts several serving
+/// `/model` overlay's provider control.
+///
+/// `OpenRouter` fronts several serving
 /// providers per model (`DeepInfra`, Novita, …) that differ in context window and
 /// quantization; this is the picker's view of one such endpoint, distilled from
 /// `OpenRouter`'s per-model `/endpoints` listing.
@@ -47,7 +49,9 @@ pub struct ProviderEndpoint {
     pub quantization: Option<String>,
 }
 
-/// The seam every fetch of a provider's model list goes through. The live
+/// The seam every fetch of a provider's model list goes through.
+///
+/// The live
 /// implementation talks to genai (model lists) and `OpenRouter`'s REST API
 /// (per-model endpoints); tests substitute an in-memory fake so no suite ever
 /// reaches the network.
@@ -65,7 +69,9 @@ pub trait ModelSource {
 }
 
 /// The live source: builds a genai client per provider from the in-memory
-/// credentials and calls `all_model_names`. One short-lived tokio runtime
+/// credentials and calls `all_model_names`.
+///
+/// One short-lived tokio runtime
 /// backs each fetch — model listing happens at most a handful of times per
 /// session, so a dedicated runtime per call is cheaper than holding one
 /// open for the picker's whole lifetime.
@@ -233,7 +239,9 @@ struct CacheFile {
 }
 
 /// The model catalog: a live (or fake) [`ModelSource`] in front of the
-/// XDG-cached, TTL'd lists. Holds a per-process in-memory copy too, so a
+/// XDG-cached, TTL'd lists.
+///
+/// Holds a per-process in-memory copy too, so a
 /// provider's list is fetched at most once per session even before the
 /// disk cache is consulted again.
 pub struct ModelCatalog<S: ModelSource> {
@@ -388,7 +396,9 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
 }
 
 /// Resolve a user-supplied `--model` name to the provider that should
-/// serve it. Prefers the available provider whose live list contains the
+/// serve it.
+///
+/// Prefers the available provider whose live list contains the
 /// name; failing that, falls back to a name-shape match (an `openrouter`
 /// slug like `vendor/model` resolves to `OpenRouter` when available). Errors
 /// clearly when no available provider can plausibly serve the name.
@@ -439,7 +449,9 @@ pub fn resolve_model_provider<S: ModelSource>(
 }
 
 /// Resolve an explicit `--provider` label to the matching available provider,
-/// pinning it verbatim. No model-listing lookup happens here — that is the
+/// pinning it verbatim.
+///
+/// No model-listing lookup happens here — that is the
 /// whole point of pinning — so the caller may then name a model the provider
 /// does not advertise. Errors clearly when the label matches no available
 /// provider.

@@ -13,6 +13,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 /// The stand-in system prompt for `--chat` mode ([`crate::cli::Cli::chat`]).
+///
 /// Chat obliterates the assembled prompt entirely; this is not a persona but
 /// the minimal non-empty string, present only because some provider backends
 /// (the Codex/Responses adapter) reject an empty system prompt, and Anthropic

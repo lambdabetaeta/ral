@@ -338,7 +338,9 @@ pub struct ScheduleInfo {
     pub fires: u64,
 }
 
-/// A session's live scheduled wakeups.  Cheap to clone — the inner `Arc`
+/// A session's live scheduled wakeups.
+///
+/// Cheap to clone — the inner `Arc`
 /// shares the map, so the reaper closure that fires a schedule holds a
 /// handle it re-arms and posts through after the arming turn has ended.
 #[derive(Clone)]

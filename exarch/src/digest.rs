@@ -36,7 +36,9 @@ pub const OPAQUE_CAP: usize = 3000;
 
 /// Cap for the payload a child agent returns through `reply` — a curated,
 /// deliberately-constructed report, not a scraped tail, so it keeps by far
-/// the most room.  An observed good explorer brief already ran to 5787 bytes
+/// the most room.
+///
+/// An observed good explorer brief already ran to 5787 bytes
 /// against the former 6000 cap; the cap is now wide enough that a thorough
 /// report fits whole, with middle-elision (the [`clip`] backstop) reserved
 /// for the genuinely oversized reply rather than the common case.
@@ -45,13 +47,16 @@ pub const AGENT_REPLY_CAP: usize = 16_000;
 /// Fallback compaction trigger, in serialised model-view bytes, for
 /// [`crate::agent::Agent::compact`] — used only when the model's
 /// context window is unknown (a native provider with no fetched catalog).
+///
 /// When the window *is* known, compaction tracks real token pressure
 /// against the window via [`compaction_due`].  500 KB keeps roughly a
 /// dozen tool results in flight before compaction.
 pub const COMPACT_THRESHOLD: usize = 500 * 1024;
 
 /// Summary output cap, in tokens, when the window is unknown — the
-/// companion to [`COMPACT_THRESHOLD`]'s byte trigger.  A generous fixed
+/// companion to [`COMPACT_THRESHOLD`]'s byte trigger.
+///
+/// A generous fixed
 /// ceiling: a faithful summary is far smaller, but it must be wide enough
 /// that a verbose summariser finishes, since a truncated summary aborts
 /// the whole compaction.
@@ -67,7 +72,9 @@ fn reserve_tokens(window: u64) -> u64 {
 }
 
 /// Whether the live context (`used` input tokens) has grown into the
-/// reserve — i.e. crossed `window − reserve`.  The window-aware
+/// reserve — i.e. crossed `window − reserve`.
+///
+/// The window-aware
 /// compaction trigger; an unknown window falls back to
 /// [`COMPACT_THRESHOLD`] on the serialised history bytes at the call site.
 pub fn compaction_due(used: u64, window: u64) -> bool {
@@ -76,7 +83,9 @@ pub fn compaction_due(used: u64, window: u64) -> bool {
 
 /// Summary output cap for a known `window`: four-fifths of the reserve
 /// (oh-my-pi's `0.8 * reserve`), clamped so a small window still allows a
-/// usable summary and a huge one does not invite a rambling one.  exarch
+/// usable summary and a huge one does not invite a rambling one.
+///
+/// exarch
 /// keeps a recent suffix verbatim, so the summary covers only the dropped
 /// prefix and stays concise.
 pub fn summary_cap_tokens(window: u64) -> u32 {
@@ -87,7 +96,9 @@ pub fn summary_cap_tokens(window: u64) -> u32 {
 
 /// Byte budget for the verbatim suffix kept across a compaction: half the
 /// current model-view bytes, so compaction summarises the older half and
-/// keeps the recent half intact.  Window-agnostic by design — it splits
+/// keeps the recent half intact.
+///
+/// Window-agnostic by design — it splits
 /// whatever is in context, which the token trigger already bounds.
 pub fn suffix_keep_budget(history_bytes: usize) -> usize {
     history_bytes / 2
@@ -116,7 +127,9 @@ pub fn clip(text: &str, cap: usize) -> String {
 
 /// Render `r` as the named-section block the model receives on later
 /// turns — `STDOUT:` / `STDERR:` / `VALUE:` / `EXIT:`, each
-/// body clipped at its own cap.  This is also the string the transcript
+/// body clipped at its own cap.
+///
+/// This is also the string the transcript
 /// records, so the user never sees more of a result than the model.
 pub fn render(r: &shell_eval::ToolResult) -> String {
     let mut out = String::new();

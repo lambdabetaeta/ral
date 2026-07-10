@@ -23,7 +23,9 @@ use std::borrow::Cow;
 use std::fmt::Write;
 
 /// The closed nominal role set — the *selective* (identity) channel a
-/// [`Span`] may carry.  The renderer holds the one binding table mapping
+/// [`Span`] may carry.
+///
+/// The renderer holds the one binding table mapping
 /// each role to a hue/shape; the kit names a role, never a colour, so
 /// identity can never masquerade as a magnitude.  An unknown role tag
 /// renders as plain ink rather than dropping.
@@ -55,7 +57,9 @@ impl Role {
     }
 }
 
-/// A run of text optionally carrying a nominal [`Role`].  A heading is
+/// A run of text optionally carrying a nominal [`Role`].
+///
+/// A heading is
 /// just a `Strong` span; a path is a `Path` span.  A span never carries a
 /// magnitude — that is the job of [`Measure`] and [`Mark::Diff`].
 #[derive(Clone, Debug, Serialize)]
@@ -66,7 +70,9 @@ pub struct Span {
 }
 
 /// The quantitative mark `[label, value, max?, unit?]`, rendered with the
-/// two ordered Bertin variables — size (a bar) and value (lightness).  A
+/// two ordered Bertin variables — size (a bar) and value (lightness).
+///
+/// A
 /// bounded magnitude (`max` present) reads as a proportional fill (the old
 /// progress meter); an unbounded one (`max` absent) reads as a `log2` size
 /// bar (the old header size-bar).  Both apply the value ramp, so a larger
@@ -260,7 +266,9 @@ impl WriteOutcome {
     }
 }
 
-/// Whether an exec ran cleanly (`ok`) or not (`bad`).  The exec card pairs
+/// Whether an exec ran cleanly (`ok`) or not (`bad`).
+///
+/// The exec card pairs
 /// this with the numeric status; the status span is roled by the status code
 /// (0→`Ok`, nonzero→`Bad`), so the outcome tag is the structural twin of that
 /// readout in the recorded event.
@@ -283,7 +291,9 @@ impl ExecOutcome {
 }
 
 /// A structural I/O event core surfaces onto the `surface` sink: a read, a
-/// write, an exec, or a grep.  Unlike a [`Card`] (which the kit composes in
+/// write, an exec, or a grep.
+///
+/// Unlike a [`Card`] (which the kit composes in
 /// ral and exarch only renders), an `IoEvent` is the raw effect record —
 /// `surface` decodes it once ([`value_to_io`]) and composes the matching card
 /// ([`io_card`]).  Both ride the bus together (`Kind::Io`) so the recorded
@@ -325,7 +335,9 @@ pub enum IoEvent {
 
 /// Which `|>` effect a surfaced observation is — the census bucket it counts
 /// toward when a coalesced run reduces to its tally (the L0 census in
-/// [`super::tui`]).  Reads, execs, and greps fold into a run and tally here; a
+/// [`super::tui`]).
+///
+/// Reads, execs, and greps fold into a run and tally here; a
 /// write is a barrier that ends a run, so it is not an observation kind — it is
 /// tracked by its card origin instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -368,7 +380,9 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
     })
 }
 
-/// Compose an [`IoEvent`] into a [`Card`].  The heading is one [`Mark::Text`]
+/// Compose an [`IoEvent`] into a [`Card`].
+///
+/// The heading is one [`Mark::Text`]
 /// of roled spans: a dim verb naming the operation (a nominal category, carried
 /// by a word rather than a mirror-orientation glyph) followed by the path or
 /// program as the subject — lifted by [`Role::Path`]'s hue against the muted
@@ -530,7 +544,9 @@ fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark
 
 /// Compose a run of buffered observation surfaces — even interleaved, grouped
 /// by the TUI into per-kind buckets — into one [`Card`] *per non-empty kind*,
-/// in a fixed Read → Exec → Grep order.  Each card is a single [`Mark::Text`]
+/// in a fixed Read → Exec → Grep order.
+///
+/// Each card is a single [`Mark::Text`]
 /// reusing the exact `io_card` span vocabulary, so hues match; a lone surface
 /// (a group of one) renders identically to its `io_card`, modulo the deliberate
 /// exec departure below — no special case.  Writes never reach here: a write is
@@ -607,7 +623,9 @@ fn span_plain(text: &str) -> Span {
 // ── `done`: the completion event a detached worker flushes at the boundary ───
 
 /// How a detached `spawn` worker settled, as the final `` `done `` event core
-/// appends to the worker's deferred buffer at completion.  Like an [`IoEvent`]
+/// appends to the worker's deferred buffer at completion.
+///
+/// Like an [`IoEvent`]
 /// it is the raw record — [`value_to_done`] decodes it once and [`done_card`]
 /// composes the matching one-line card.  Core names the event (`` `ok ``,
 /// `` `err ``, `` `panic ``); exarch names its appearance: a fixed-position
@@ -624,7 +642,9 @@ pub enum DoneOutcome {
 }
 
 /// Decode the `` `done `` value a detached worker flushes at completion into
-/// its [`DoneOutcome`].  The shape is `` `done [cmd: "…", outcome: …] `` where
+/// its [`DoneOutcome`].
+///
+/// The shape is `` `done [cmd: "…", outcome: …] `` where
 /// `outcome` is the closed `` `ok ``/`` `err ``/`` `panic `` variant core mints;
 /// `err` carries the `{cmd, status, message, line, col}` error record.  The
 /// `cmd` field is no longer surfaced — the card names the worker generically —
@@ -666,7 +686,9 @@ pub fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
 /// [`Mark::Text`] vocabulary: an outcome span roled by how it settled — a clean
 /// return is `Ok`, a raise is `Bad` carrying the message and status, a panic is
 /// `Bad` carrying the message — followed by a plain gloss naming it as a
-/// background block.  The outcome is a fixed-position value mark, not an
+/// background block.
+///
+/// The outcome is a fixed-position value mark, not an
 /// animation — the worker has already settled when this renders.
 pub fn done_card(outcome: &DoneOutcome) -> Card {
     let mut spans = Vec::new();
@@ -701,7 +723,9 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 /// pushes at a turn's ready boundary
 /// (`decisions/260706_enquiry-channel` §4.2): a worker the lease chain
 /// reaped, a run of idle top-level bindings the ledger pruned, or a
-/// session-scope install past the large-binding threshold. Like
+/// session-scope install past the large-binding threshold.
+///
+/// Like
 /// [`DoneOutcome`], the raw record [`value_to_notice`] decodes once and
 /// [`notice_card`] composes the matching one-line card — core emits the
 /// fact, exarch renders it; the three variants used to be three separately
@@ -727,7 +751,9 @@ pub enum Notice {
     LargeBinding { name: String, bytes: u64 },
 }
 
-/// Decode a `` `notice `` value into its [`Notice`]. The shape is
+/// Decode a `` `notice `` value into its [`Notice`].
+///
+/// The shape is
 /// `` `notice [kind: `reap|`large-binding, …fields] `` where `kind` selects
 /// the fields read below — exactly the two classes core's
 /// `emit_ready_boundary_notices` pushes. [`Notice::Prune`] deliberately has
@@ -857,7 +883,9 @@ pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card
 
 /// A [`Card`] as a compact one-line summary — the session-layer digest the
 /// nudge facility shows when reminding the model of its pinned state, where the
-/// TUI's framed rendering is out of reach.  Text marks concatenate their span
+/// TUI's framed rendering is out of reach.
+///
+/// Text marks concatenate their span
 /// runs (whitespace collapsed); a measure reads `label value/maxunit`; a fields
 /// matrix reads `label value` pairs; a diff names its path; raw ink is its
 /// bytes, lossily.  Marks join with a space.
@@ -949,7 +977,9 @@ pub fn value_to_card(v: &RalValue) -> Option<Card> {
 }
 
 /// Decode a `` `pin ``/`` `unpin `` *disposition wrapper* into its register key
-/// and optional body card.  The shape is `` `pin [key: "…", body: `card […]] ``
+/// and optional body card.
+///
+/// The shape is `` `pin [key: "…", body: `card […]] ``
 /// — a render document keyed to a register slot — or `` `unpin [key: "…"] `` to
 /// drop the slot.  The `body` is decoded by the **unchanged** [`value_to_card`],
 /// so the wrapper carries only *placement*; an absent — or empty — body is the

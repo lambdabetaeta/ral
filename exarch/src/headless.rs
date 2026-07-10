@@ -1,4 +1,6 @@
-//! One-shot frontend over the bus event stream.  In text mode the root
+//! One-shot frontend over the bus event stream.
+//!
+//! In text mode the root
 //! agent's assistant tokens stream to stdout as live narration; under
 //! `--output-format json` they are dropped and a single result object —
 //! built from the root's deliberate `reply` value — is emitted at the end

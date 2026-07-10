@@ -69,7 +69,9 @@ pub(crate) fn provider_label(subscription: Subscription, base: &str) -> String {
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
-/// A persisted `ChatGPT` OAuth token. The access token is a short-lived JWT;
+/// A persisted `ChatGPT` OAuth token.
+///
+/// The access token is a short-lived JWT;
 /// the refresh token mints fresh access tokens once it expires. Several of
 /// these can be stored at once — one per signed-in `ChatGPT` account — keyed
 /// by [`Self::account_id`].
@@ -141,7 +143,9 @@ pub fn login(device: bool) -> Result<(), String> {
 }
 
 /// Remove one signed-in account (matched by its label or account id), or
-/// every account when `all`. With neither an account nor `--all`: removes the
+/// every account when `all`.
+///
+/// With neither an account nor `--all`: removes the
 /// sole account when exactly one is signed in, and otherwise errors asking
 /// which — so a stray `logout` cannot silently drop the wrong account when
 /// several are present. Progress is printed to stderr.

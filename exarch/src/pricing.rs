@@ -126,7 +126,9 @@ impl ModelCaps {
 static CATALOG: OnceCell<Snapshot> = OnceCell::const_new();
 
 /// Populate the `OpenRouter` pricing and capability caches from
-/// `/api/v1/models` if they haven't already been populated.  Safe to
+/// `/api/v1/models` if they haven't already been populated.
+///
+/// Safe to
 /// call concurrently; only the first caller does the fetch.  On
 /// failure (network down, `OpenRouter` changed the response shape, etc.)
 /// both caches initialise empty so [`lookup`] / [`caps`] return `None`
@@ -231,7 +233,9 @@ fn deepseek_price(model: &str) -> Option<ModelPricing> {
 }
 
 /// Return the per-token pricing for `model` from the correct source
-/// for `adapter`.  For `DeepSeek` this consults the official `DeepSeek`
+/// for `adapter`.
+///
+/// For `DeepSeek` this consults the official `DeepSeek`
 /// API rates first and falls back to the `OpenRouter` catalog; for
 /// every other adapter it uses the OR catalog directly.
 pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<ModelPricing> {
@@ -245,7 +249,9 @@ pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<M
 // endregion: --- DeepSeek hardcoded pricing
 
 /// Return a cloned capability snapshot for `model` if the `OpenRouter`
-/// catalog has been fetched.  `None` for native-provider models —
+/// catalog has been fetched.
+///
+/// `None` for native-provider models —
 /// `OpenRouter` is the only catalog exarch pulls.  `ModelCaps` holds
 /// owned `String`/`Vec` fields so this clones; the caller usually
 /// pulls one or two fields and drops the rest.
@@ -254,7 +260,9 @@ pub fn caps(model: &str) -> Option<ModelCaps> {
 }
 
 /// The total context window in tokens for `model`, when the `OpenRouter`
-/// catalog has been fetched and lists it.  A targeted accessor that skips
+/// catalog has been fetched and lists it.
+///
+/// A targeted accessor that skips
 /// the `ModelCaps` clone [`caps`] makes — the compaction trigger reads
 /// only this one field, at every turn boundary.  `None` for a native
 /// provider or before the catalog loads, so the caller falls back to the

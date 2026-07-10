@@ -1,6 +1,8 @@
 //! Host environment snapshot — gathered once at startup and stitched
 //! into the system prompt so the model knows what kind of machine it
-//! is on, where it stands on disk, and when "now" is.  Each probe is
+//! is on, where it stands on disk, and when "now" is.
+//!
+//! Each probe is
 //! best-effort: missing values silently drop their line rather than
 //! erroring, so the prompt stays well-formed on bare or exotic hosts.
 //!

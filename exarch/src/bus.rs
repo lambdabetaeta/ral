@@ -37,7 +37,9 @@ use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// The identity of an agent node.  Every agent — the trunk and every forked
+/// The identity of an agent node.
+///
+/// Every agent — the trunk and every forked
 /// child alike — has one; a child's id *is* its `AgentId`, so the `agents`
 /// listing and `agent_cancel` reuse the node identity rather than minting a
 /// parallel one.  Opaque: a capability for status and cancellation, not a
@@ -321,7 +323,9 @@ fn source_name(msg: &InboxMsg) -> &'static str {
 /// Per-agent, per-source cap on a *non-idempotent* inbox message
 /// (`AgentResult`, `AgentMessage`, `Command`, `Surface`) — generous, so an
 /// ordinary burst never rejects, but a runaway producer cannot grow one
-/// source without bound. The idempotent sources (`user`, `schedule`,
+/// source without bound.
+///
+/// The idempotent sources (`user`, `schedule`,
 /// `nudge`) coalesce instead of counting toward this and never reject
 /// (`decisions/260705_leases-and-budgets`, "Inboxes get quotas without
 /// silent loss").
@@ -331,7 +335,9 @@ pub const INBOX_SOURCE_CAP: usize = 64;
 /// one shared ceiling.
 pub const INBOX_TOTAL_CAP: usize = 256;
 
-/// Why a non-idempotent [`InboxMsg`] push was rejected. The idempotent
+/// Why a non-idempotent [`InboxMsg`] push was rejected.
+///
+/// The idempotent
 /// sources (`user`, `schedule`, `nudge`) never produce this — they coalesce
 /// instead of counting toward a cap. Every producer surfaces this to its
 /// own caller as a user-facing error; a push is never silently dropped.
@@ -543,7 +549,9 @@ impl Shared {
 /// notify) is observed by a parked agent.
 const PARK_POLL: Duration = Duration::from_millis(100);
 
-/// The cloneable **sender** side of a session's inbox.  Producers hold a
+/// The cloneable **sender** side of a session's inbox.
+///
+/// Producers hold a
 /// `Mailbox`, never the [`Inbox`]: a schedule re-arms through its own
 /// session's `Mailbox`, a finishing child posts its one result through its
 /// parent's `Mailbox` ([`Agent::outbox`](crate::agent::Agent)), a
@@ -937,7 +945,9 @@ pub struct Event {
 }
 
 /// Prefix of the `Kind::Error` message [`pump`] emits when the worker thread
-/// unwinds.  Shared so a sink can recognise a recovered panic without
+/// unwinds.
+///
+/// Shared so a sink can recognise a recovered panic without
 /// matching on free text (the headless result reports it as an error rather
 /// than a clean completion).
 pub const WORKER_PANIC_PREFIX: &str = "worker panicked: ";
@@ -1127,7 +1137,9 @@ pub enum Kind {
 /// One grouped hunk of a whole-file diff, carried by a
 /// [`crate::card::Mark::Diff`]: a flat unified list of [`Row`]s — context,
 /// deletions, and insertions interleaved exactly as `similar`'s grouped ops
-/// yield them.  `start` is the 1-indexed original line of the hunk's first
+/// yield them.
+///
+/// `start` is the 1-indexed original line of the hunk's first
 /// row; the sink walks the rows from there, advancing an old- and a
 /// new-side counter — a `Context` advances both, a `Del` advances the old
 /// counter (and keeps its pre-edit number), an `Add` advances the new
@@ -1140,7 +1152,9 @@ pub struct Hunk {
 
 /// One run of a diff row's text: a contiguous slice flagged `emph` when it is
 /// the part that actually changed against the row's paired line — the
-/// intra-line word diff `similar` computes.  A context row, and the unchanged
+/// intra-line word diff `similar` computes.
+///
+/// A context row, and the unchanged
 /// stretches that surround a change on a del/add row, carry `emph: false`.
 #[derive(Clone, Debug, Serialize)]
 pub struct Seg {
@@ -1160,7 +1174,9 @@ impl Seg {
 }
 
 /// One row of a [`Hunk`]'s unified line list: unchanged context, a removed
-/// line, or an inserted line.  Each carries its text as a run of [`Seg`]ments
+/// line, or an inserted line.
+///
+/// Each carries its text as a run of [`Seg`]ments
 /// so a del/add can mark the words that changed against its paired line; a
 /// context row is a single unemphasised segment.
 #[derive(Clone, Debug, Serialize)]
@@ -1241,7 +1257,9 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     hunks
 }
 
-/// A run-scoped usage accumulator.  Where a [`Transcript`] is **per-session**
+/// A run-scoped usage accumulator.
+///
+/// Where a [`Transcript`] is **per-session**
 /// — each session records its own trace — this meter is **per-run**: the root
 /// and every child, muted or live, share the single instance the
 /// [`FleetBus`] mints.  That shared lifetime is the whole point: an async
@@ -1458,6 +1476,7 @@ struct BusShared {
 
 /// The cloneable sender side of the bus's bounded, coalescing queue — the
 /// `mpsc::Sender<Event>` replacement threaded through [`Emitter`]/[`FleetBus`].
+///
 /// Public alongside [`Emitter::new`]/[`Emitter::with_mailbox`], which take
 /// one directly (the integration-test harness builds its own).
 pub struct BusSender(Arc<BusShared>);
@@ -1872,7 +1891,9 @@ pub(crate) fn drain_pass(
     }
 }
 
-/// One presentation surface.  [`Self::handle`] consumes a single event
+/// One presentation surface.
+///
+/// [`Self::handle`] consumes a single event
 /// synchronously; [`Self::drive`] drains the channel until the worker signals
 /// completion through `done`.  Completion is an explicit control-flow fact —
 /// the worker finished — *not* the channel disconnecting: a detached worker
@@ -1914,6 +1935,7 @@ pub trait Sink {
 }
 
 /// Run `work` on a scoped thread over `bus`'s channel, drive `sink`, join.
+///
 /// A worker panic is reported through the still-open [`Emitter`] as a
 /// final [`Kind::Error`]; the function returns `None` in that case.
 ///

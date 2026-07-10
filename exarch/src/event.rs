@@ -42,7 +42,9 @@ pub struct ToolResult {
     pub content: String,
 }
 
-/// A serialisable copy of [`crate::provider::Usage`].  We can't derive
+/// A serialisable copy of [`crate::provider::Usage`].
+///
+/// We can't derive
 /// `Serialize` on `Usage` itself without rippling the trait into the
 /// provider module's public surface, so the event log holds its own
 /// shape and converts in/out.
@@ -68,7 +70,9 @@ impl From<Usage> for UsageDelta {
 }
 
 /// Serialisable mirror of [`crate::provider::ProviderError`] for the
-/// event log.  `ProviderError` carries `&'static str` and `Duration`
+/// event log.
+///
+/// `ProviderError` carries `&'static str` and `Duration`
 /// fields that don't round-trip through serde cleanly; this struct
 /// flattens them to owned strings and second counts.  The on-screen
 /// renderer reads from this shape, so events.json fully reconstructs
@@ -158,7 +162,9 @@ impl From<&ProviderError> for ProviderErrorRecord {
     }
 }
 
-/// One protocol-level event.  The order of variants tracks the natural
+/// One protocol-level event.
+///
+/// The order of variants tracks the natural
 /// order in a session: lifecycle bookends wrap a sequence of (prompt,
 /// step, assistant, tool-results, …) repetitions plus the occasional
 /// meta-event (usage, cancellation, compaction).
@@ -290,7 +296,9 @@ pub enum QuiesceReason {
     Replied,
 }
 
-/// Per-session canonical log.  Holds the in-memory event vector, the
+/// Per-session canonical log.
+///
+/// Holds the in-memory event vector, the
 /// on-disk writer, the protocol state machine, and the static origin
 /// metadata (model, provider, sessions root) needed to (re)record
 /// `SessionStarted` on `clear` and to set up forked children — keyed

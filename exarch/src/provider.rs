@@ -35,7 +35,9 @@ use std::time::Duration;
 // passes `--max-tokens`.  Provider::max_tokens_override carries the
 // `Some` only when the user opted in.
 
-/// Best-effort capability lookup for `model`.  Consults the OR
+/// Best-effort capability lookup for `model`.
+///
+/// Consults the OR
 /// catalog regardless of provider — OR republishes upstream cards for
 /// every vendor it routes, so a native Anthropic / `OpenAI` launch hits
 /// the same context-window / tokenizer / canonical-slug data as the
@@ -165,7 +167,9 @@ impl ProviderKind {
 }
 
 /// An unusual provider declared in `config.ral`: a custom endpoint exarch
-/// has no built-in knowledge of. It carries the same four facts the rest of
+/// has no built-in knowledge of.
+///
+/// It carries the same four facts the rest of
 /// the code reads off a famous [`ProviderKind`] — label, key env var,
 /// endpoint, wire adapter — but as owned, runtime data rather than the
 /// `'static` table baked into the enum. Slice 3 of the provider-config ADR.
@@ -382,7 +386,9 @@ impl std::ops::AddAssign for Usage {
 
 /// Humanise a token count — the one rule every token readout shares: the
 /// usage line, the startup banner's context / limit fields, and the
-/// per-agent token tallies.  Under 10k prints in full (`0`, `9123`); from
+/// per-agent token tallies.
+///
+/// Under 10k prints in full (`0`, `9123`); from
 /// 10k to <1M shows one decimal with a bare `.0` dropped (`46.6k`, but
 /// `200k` not `200.0k`); 1M and over keeps one decimal (`1.0m`, `1.5m`).
 /// One source of truth so the plain [`Display`] and the TUI's styled
@@ -400,7 +406,9 @@ pub fn humanize_tokens(n: u64) -> String {
     }
 }
 
-/// The humanised pieces of a usage line.  One source of truth for the
+/// The humanised pieces of a usage line.
+///
+/// One source of truth for the
 /// usage rendering's *content* and layout decisions; `Display` joins the
 /// pieces as plain text and `tui::line::usage_text` styles them, so the
 /// two surfaces (X9) never disagree on what to show.  A cache field that
@@ -1025,7 +1033,9 @@ async fn retry_with_backoff<T>(
 
 /// The per-selection request tuning the `/model` overlay carries alongside the
 /// model: the reasoning effort, the sampling temperature, and the
-/// nucleus-sampling top-p.  Each is `None` for "auto" — the option is then
+/// nucleus-sampling top-p.
+///
+/// Each is `None` for "auto" — the option is then
 /// *not* set on the wire and genai applies the adapter's per-model default,
 /// exactly as before tuning existed.  The overlay edits it, [`crate::state`]
 /// persists it, and [`Engine::complete`] folds it into the [`ChatOptions`].
@@ -1199,7 +1209,9 @@ pub(crate) struct Transport {
 }
 
 /// One per process — the shared runtime and the per-credential transports
-/// warmed beneath all Providers.  Each [`Provider`] holds the
+/// warmed beneath all Providers.
+///
+/// Each [`Provider`] holds the
 /// [`Arc<Transport>`] it resolved at build time, so the map is touched only on
 /// the cold warm path, never per request.
 pub struct Engine {
@@ -2032,7 +2044,9 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: Ada
 }
 
 /// Scripted provider backend used by the `tests/` harness to drive
-/// [`crate::agent::Agent::apply`] end-to-end with no network.  A
+/// [`crate::agent::Agent::apply`] end-to-end with no network.
+///
+/// A
 /// [`Script`] is a queue of canned `complete` replies (each optionally
 /// streaming some text first) and a queue of `summarize` replies,
 /// consumed in order.  Running past the end of either queue panics — a

@@ -94,7 +94,9 @@ pub(crate) enum PinKind {
 }
 
 /// One mirrored pin: the card the user sees plus the key-derived class the
-/// nudge layer reads.  The bus and viewport still carry plain `Kind::Pin`;
+/// nudge layer reads.
+///
+/// The bus and viewport still carry plain `Kind::Pin`;
 /// this struct exists only inside the agent's session mirror.
 #[derive(Clone, Debug)]
 pub struct PinDigest {
@@ -166,7 +168,9 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 }
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
-/// decoder both delivery regimes share.  The live foreground sink
+/// decoder both delivery regimes share.
+///
+/// The live foreground sink
 /// (the transport event loop) calls it to emit now; the deferred sink's
 /// `deliver` calls the *same* function to mint the identical events at the turn
 /// boundary.  Four shapes arrive on the one `surface` channel:
@@ -315,7 +319,9 @@ impl DeferredSink for InboxDeferred {
 
 /// Build the [`Arc<dyn DeferredSink>`] a tool turn installs: an
 /// [`InboxDeferred`] over `emit`'s session inbox, stamping batches with `root`
-/// and guarding them with `registry`'s current generation.  Cloned into the
+/// and guarding them with `registry`'s current generation.
+///
+/// Cloned into the
 /// worker's turn state by core, so a nested `spawn` inherits it and flushes at
 /// its own completion.
 pub fn deferred_sink(
@@ -333,7 +339,9 @@ pub fn deferred_sink(
 }
 
 /// Evaluate `cmd` against `shell`, wrapped in `caps`, capturing
-/// stdout and stderr into buffers.  Returns the result as named pieces
+/// stdout and stderr into buffers.
+///
+/// Returns the result as named pieces
 /// so the caller can render it twice — once full for the terminal,
 /// once with per-section caps for the conversation history — without
 /// having to parse the rendered form back apart.
