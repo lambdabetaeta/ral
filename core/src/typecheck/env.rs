@@ -228,6 +228,8 @@ impl TyEnv {
         self.scopes.pop();
     }
 
+    /// # Panics
+    /// Panics if the scope stack is empty (more `pop`s than `push`es).
     pub fn bind(&mut self, name: String, scheme: Scheme) {
         self.scopes
             .last_mut()
@@ -236,6 +238,8 @@ impl TyEnv {
             .insert(name, scheme);
     }
 
+    /// # Panics
+    /// Panics if the scope stack is empty (more `pop`s than `push`es).
     pub fn bind_handler(&mut self, name: String, scheme: Scheme, removable_by_unalias: bool) {
         self.scopes.last_mut().unwrap().handlers.insert(
             name,

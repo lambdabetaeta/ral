@@ -449,6 +449,9 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
 /// seeded with an empty session — builtins are resolved dynamically during
 /// inference, and no prior bindings exist at bake time.  A type error is
 /// fatal: the build script panics with the formatted errors.
+///
+/// # Panics
+/// Panics if the prelude fails to type-check, reporting the errors.
 pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     let annotated = match typecheck(comp, SessionSchemes::default()) {
         Ok(a) => a,

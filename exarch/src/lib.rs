@@ -113,6 +113,10 @@ fn init_lib_test_binary() {
 /// loading the provider config, resolving the model selection, building the
 /// capability policy, setting up the scratch/log directories, or the chosen
 /// frontend fails.
+///
+/// # Panics
+/// Panics if the selected provider is absent from the credential store, an
+/// invariant the selection step upholds.
 pub fn run() -> Result<(), String> {
     let c = cli::Cli::parse();
     // A subcommand runs its action and exits before any session setup —

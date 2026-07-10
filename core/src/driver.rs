@@ -62,6 +62,9 @@ impl BakedPrelude {
     }
 
     /// The annotated prelude comp, decoded on first use.
+    ///
+    /// # Panics
+    /// Panics if the embedded prelude IR blob fails to deserialize.
     pub fn comp(&self) -> &Arc<Comp> {
         self.comp.get_or_init(|| {
             Arc::new(postcard::from_bytes(self.ir).expect("prelude IR deserialization failed"))
@@ -69,6 +72,9 @@ impl BakedPrelude {
     }
 
     /// The prelude's top-level schemes, decoded on first use.
+    ///
+    /// # Panics
+    /// Panics if the embedded prelude scheme blob fails to deserialize.
     pub fn schemes(&self) -> &[(String, Scheme)] {
         self.schemes.get_or_init(|| {
             postcard::from_bytes(self.scheme_bytes).expect("prelude schemes deserialization failed")
@@ -79,6 +85,9 @@ impl BakedPrelude {
     /// binaries that have no build-time blob.  Parse, elaborate, and
     /// [`bake_prelude`](crate::bake_prelude) `prelude.ral`, then carry the
     /// results in `OnceLock`s already filled (the blobs are unused).
+    ///
+    /// # Panics
+    /// Panics if the embedded `prelude.ral` fails to parse.
     pub fn bake_runtime() -> Self {
         let src = include_str!("prelude.ral");
         let ast = crate::parse(src).expect("prelude parse");
@@ -133,6 +142,10 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude) -> Shell {
 /// [`Pattern`](crate::syntax::ast::Pattern), or the scheme's type
 /// vocabulary silently invalidates a previously-emitted bake; the rerun
 /// lines force a re-bake when any of those files change.
+///
+/// # Panics
+/// Panics if `OUT_DIR` is unset, if serialising the prelude blobs fails, or
+/// if writing them into `OUT_DIR` fails.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:prelude-bake] build-script prelude bake: writes the postcard IR/scheme blobs to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."

@@ -26,6 +26,9 @@ pub fn probe_terminal() -> TerminalState {
 /// installs ral's handlers, then immediately layers exarch's cancel chain
 /// over them.  Callers should seed per-session variables, not repeat
 /// signal ceremony.
+///
+/// # Panics
+/// Panics if the embedded agent library fails to load.
 pub fn boot_shell() -> Shell {
     ral_core::process::clear();
     ral_core::process::install_handlers();

@@ -516,6 +516,10 @@ pub fn ensure_core_builtins_registered() {
 /// `&'static` slice (by pointer identity) is a no-op.  Name collisions
 /// with already-registered builtins panic — host crates must own
 /// disjoint surfaces.
+///
+/// # Panics
+/// Panics if a name in `entries` collides with an already-registered
+/// builtin, or if a name appears twice within `entries`.
 pub fn register_builtins(entries: &'static [BuiltinEntry]) {
     register_builtins_checked(entries).expect("builtin registration failed");
 }
@@ -542,6 +546,10 @@ pub fn register_builtins_checked(entries: &'static [BuiltinEntry]) -> Result<(),
 }
 
 /// Register captured builtins (ones whose bodies hold runtime state).
+///
+/// # Panics
+/// Panics if a name in `entries` collides with an already-registered
+/// builtin, or if a name appears twice within `entries`.
 pub fn register_captured_builtins(entries: Arc<[BuiltinEntry]>) {
     ensure_core_builtins_registered();
     let mut sets = REGISTERED_BUILTINS

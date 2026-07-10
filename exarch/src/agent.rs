@@ -270,6 +270,9 @@ impl ProviderHandle {
     }
 
     /// The provider in force for the next turn.
+    ///
+    /// # Panics
+    /// Panics if the provider-handle mutex is poisoned.
     pub fn current(&self) -> Arc<Provider> {
         self.0.lock().expect("provider handle poisoned").clone()
     }
@@ -277,6 +280,9 @@ impl ProviderHandle {
     /// Replace the active provider (a `/model` switch).  Takes effect on the
     /// drive loop's next turn; an in-flight turn finishes on the provider it
     /// started with, and any running peer keeps its own snapshot.
+    ///
+    /// # Panics
+    /// Panics if the provider-handle mutex is poisoned.
     pub fn swap(&self, provider: Arc<Provider>) {
         *self.0.lock().expect("provider handle poisoned") = provider;
     }
@@ -1126,6 +1132,10 @@ impl Agent {
     /// The provider is the agent's own [`ProviderHandle`], read once per turn,
     /// so a `/model` swap on this agent takes effect next turn; `control`
     /// handles agent-affecting slash commands ([`NoControl`] off the TUI).
+    ///
+    /// # Panics
+    /// Panics if pushing a reactive nudge onto the inbox is rejected, which
+    /// the idempotent nudge protocol guarantees cannot occur.
     pub fn drive(
         &mut self,
         control: &mut dyn Control,
@@ -1294,6 +1304,10 @@ impl Agent {
     /// mutation fails and is surfaced as `ProviderError::Other` (committing
     /// the prompt, recording a step or usage, rendering the request, or
     /// appending the reply).
+    ///
+    /// # Panics
+    /// Panics if the turn is truncated with no tool calls yet no cut-short
+    /// cause was recorded — an internal invariant of the round-trip loop.
     pub fn apply(
         &mut self,
         provider: &Arc<Provider>,

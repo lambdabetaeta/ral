@@ -639,6 +639,10 @@ impl AgentLog {
     /// needs.  Called whenever a turn ends without a natural assistant
     /// reply — a user cancellation or a surfaced error.  `reason`
     /// selects the synthetic stub text and the optional breadcrumb.
+    ///
+    /// # Panics
+    /// Panics if the synthesised tool results fail to match the pending ids,
+    /// which cannot occur since they are built directly from those ids.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
         let already_ready = self.is_ready();
         let (tool_stub, assistant_stub, stop_label) = match reason {

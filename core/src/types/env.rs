@@ -151,6 +151,10 @@ impl Env {
 
     /// The innermost scope, by reference.  Used by `use` to collect
     /// bindings introduced inside a module body.
+    ///
+    /// # Panics
+    /// Panics if the scope stack is empty, which cannot occur:
+    /// [`pop_scope`](Self::pop_scope) always preserves the prelude scope.
     pub fn top_scope(&self) -> &HashMap<String, Binding> {
         self.scopes.back().unwrap()
     }

@@ -2197,6 +2197,9 @@ pub mod scripted {
         }
 
         /// Append a `complete` reply.
+        ///
+        /// # Panics
+        /// Panics if the script mutex is poisoned.
         pub fn then(self, reply: Reply) -> Self {
             self.completes.lock().unwrap().push_back(reply);
             self

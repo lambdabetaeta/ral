@@ -585,6 +585,10 @@ impl Mailbox {
     /// Post a user-typed steering prompt — the TUI `Enter`-while-busy path.
     /// Infallible: `UserSteering` is idempotent (it merges rather than
     /// growing the queue) and never rejects.
+    ///
+    /// # Panics
+    /// Panics if the push is rejected, which `UserSteering`'s idempotence
+    /// rules out.
     pub fn push_user(&self, prompt: String) {
         self.push(InboxMsg::UserSteering(prompt))
             .expect("UserSteering is idempotent and never rejects");
@@ -652,11 +656,17 @@ impl Inbox {
 
     /// Post a user-typed steering prompt through the consumer handle.
     /// Infallible — see [`Mailbox::push_user`].
+    ///
+    /// # Panics
+    /// Panics if the push is rejected, which `UserSteering`'s idempotence
+    /// rules out.
     pub fn push_user(&self, prompt: String) {
         self.push(InboxMsg::UserSteering(prompt))
             .expect("UserSteering is idempotent and never rejects");
     }
 
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn is_empty(&self) -> bool {
         self.shared
             .queue
@@ -678,6 +688,9 @@ impl Inbox {
     /// variant, zeros included so the row set is stable.  Counts only,
     /// taken in one pass under the queue lock: nothing is drained,
     /// reordered, or woken — enumeration is not observation.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn source_depths(&self) -> Vec<(&'static str, u64)> {
         let q = self.shared.queue.lock().expect("inbox lock poisoned");
         let mut user = 0;
@@ -712,6 +725,9 @@ impl Inbox {
     /// Pending user-authored steering prompts, oldest first, for the TUI's
     /// queue strip.  Non-human deliveries and slash-command control turns stay
     /// invisible here: they are work for the drive loop, not queued user text.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn queued_user_messages(&self) -> Vec<String> {
         self.shared
             .queue
@@ -733,6 +749,9 @@ impl Inbox {
     /// not the user's draft and stays queued.
     ///
     /// Returns oldest-first, or `None` if no user prompts are queued.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn pop_back_user_all(&self) -> Option<Vec<String>> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         let mut prompts: Vec<String> = Vec::new();
@@ -760,6 +779,9 @@ impl Inbox {
     /// boundary ([`Self::next_or_idle`]).  This is also what holds the human's
     /// own ordering — a `/model` then a prompt swaps before the prompt runs —
     /// since steering queued behind the command is left with it.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn drain_tool(&self) -> Vec<Turn> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         let mut turns = Vec::new();
@@ -794,6 +816,9 @@ impl Inbox {
     /// Turn-boundary drain: the next deliverable, tagged with its source, or
     /// `None` if the queue is empty.  Never blocks — see [`Self::next_or_idle`]
     /// for the parking variant the drive loop uses.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn drain_turn(&self) -> Option<Turn> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         pop_turn(&mut q)
@@ -830,6 +855,9 @@ impl Inbox {
     /// message need only deliver first (deliver-then-retire, the module's
     /// [lock order](self)): a `Quiesce` verdict can then never win a race
     /// against a delivery it was supposed to wait for.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn next_or_idle(
         &self,
         park: impl Fn() -> ParkMode,
@@ -882,6 +910,9 @@ impl Inbox {
 
     /// Drop every pending message — `/clear` rebuilds the agent, so neither
     /// queued user prompts nor stale non-human deliveries carry across.
+    ///
+    /// # Panics
+    /// Panics if the inbox queue mutex is poisoned.
     pub fn clear(&self) {
         self.shared
             .queue
@@ -1280,11 +1311,17 @@ pub struct UsageMeter(Arc<Mutex<Usage>>);
 
 impl UsageMeter {
     /// Fold one usage delta into the run total.
+    ///
+    /// # Panics
+    /// Panics if the usage-meter mutex is poisoned.
     pub fn add(&self, u: Usage) {
         *self.0.lock().expect("usage meter poisoned") += u;
     }
 
     /// The run total so far.
+    ///
+    /// # Panics
+    /// Panics if the usage-meter mutex is poisoned.
     pub fn total(&self) -> Usage {
         *self.0.lock().expect("usage meter poisoned")
     }
@@ -1516,6 +1553,9 @@ impl BusSender {
     ///
     /// # Errors
     /// Returns `Err(SendError(ev))` when the receiver has been dropped.
+    ///
+    /// # Panics
+    /// Panics if the bus queue mutex is poisoned.
     pub fn send(&self, ev: Event) -> Result<(), SendError<Event>> {
         if !self.0.receiver_alive.load(Ordering::Acquire) {
             return Err(SendError(ev));
@@ -1542,6 +1582,9 @@ impl BusReceiver {
     /// # Errors
     /// Returns `Err(RecvError)` once the queue is empty and every sender has
     /// dropped.
+    ///
+    /// # Panics
+    /// Panics if the bus queue mutex is poisoned.
     pub fn recv(&self) -> Result<Event, std::sync::mpsc::RecvError> {
         let mut q = self.0.state.lock().expect("bus queue poisoned");
         loop {
@@ -1561,6 +1604,9 @@ impl BusReceiver {
     /// Returns `Err(TryRecvError::Empty)` when no event is queued but senders
     /// remain, or `Err(TryRecvError::Disconnected)` when the queue is empty
     /// and every sender has dropped.
+    ///
+    /// # Panics
+    /// Panics if the bus queue mutex is poisoned.
     pub fn try_recv(&self) -> Result<Event, TryRecvError> {
         let mut q = self.0.state.lock().expect("bus queue poisoned");
         match pop_one(&mut q) {
@@ -1576,6 +1622,9 @@ impl BusReceiver {
     /// Returns `Err(RecvTimeoutError::Timeout)` when `timeout` elapses before
     /// an event arrives, or `Err(RecvTimeoutError::Disconnected)` when the
     /// queue is empty and every sender has dropped.
+    ///
+    /// # Panics
+    /// Panics if the bus queue mutex is poisoned.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
         let deadline = Instant::now() + timeout;
         let mut q = self.0.state.lock().expect("bus queue poisoned");
@@ -1603,6 +1652,9 @@ impl BusReceiver {
     /// pending overflow markers included. The `/resources` `bus.depth`
     /// figure ([`crate::resources::frontend_rows`]): one pass over the lock,
     /// nothing drained or woken — enumeration is not observation.
+    ///
+    /// # Panics
+    /// Panics if the bus queue mutex is poisoned.
     pub fn depth(&self) -> usize {
         let q = self.0.state.lock().expect("bus queue poisoned");
         q.items.len() + q.markers.len()
@@ -1610,6 +1662,9 @@ impl BusReceiver {
 
     /// Resident bytes across every merged `Token`/`Thinking`/`Phase` entry —
     /// the `/resources` `bus.bytes` figure, a running total rather than a walk.
+    ///
+    /// # Panics
+    /// Panics if the bus queue mutex is poisoned.
     pub fn bytes(&self) -> usize {
         self.0.state.lock().expect("bus queue poisoned").bytes
     }

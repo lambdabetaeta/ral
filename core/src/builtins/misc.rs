@@ -7,6 +7,9 @@ use std::sync::OnceLock;
 
 /// Register prelude type hints from the baked schemes so that `builtin_help`
 /// can display them without needing access to the baked binary.
+///
+/// # Panics
+/// Panics if the prelude type hints have already been registered.
 pub fn register_prelude_type_hints(schemes: &[(String, crate::typecheck::Scheme)]) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -29,6 +32,9 @@ fn prelude_type_hint(name: &str) -> Option<String> {
 /// Register extra `name -> doc` entries from an embedding host so that
 /// `builtin_help` can list and look them up alongside the builtins and
 /// prelude.
+///
+/// # Panics
+/// Panics if the host library docs have already been registered.
 pub fn register_library_docs(entries: Vec<(String, String)>) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {

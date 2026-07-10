@@ -142,6 +142,9 @@ budget is too low to seat both"
 /// # Errors
 /// Returns `Err` if terminal setup fails, if drawing the banner fails, or if
 /// the UI render/input loop hits a fatal terminal error.
+///
+/// # Panics
+/// Panics if the OS refuses to spawn the agent worker thread.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut Agent,

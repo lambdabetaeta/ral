@@ -479,6 +479,10 @@ fn mint_dispatch_id() -> DispatchId {
 /// # Errors
 /// Returns `Err` if `req` is not a variant, if the `` `env-var `` class lacks
 /// a string payload, or if the reading class is unrecognised (naming it).
+///
+/// # Panics
+/// Panics if a worker handle's `state` or `last_observed` mutex is poisoned,
+/// reachable only through the `` `workers `` class.
 pub fn answer_probe(shell: &mut crate::types::Shell, req: FOValue) -> Result<FOValue, String> {
     let FOValue::Variant { label, payload } = &req else {
         return Err(format!("probe request must be a variant, got {req:?}"));
@@ -639,6 +643,8 @@ impl ControlSender {
         }
     }
 
+    /// # Panics
+    /// Panics if the wire-channel mutex is poisoned.
     pub fn send(&self, ctrl: Control) {
         #[cfg(unix)]
         if let Some(ch) = &self.wire {
@@ -683,6 +689,8 @@ impl EventReceiver {
         }
     }
 
+    /// # Panics
+    /// Panics if the stash or receiver mutex is poisoned.
     pub fn recv(&self) -> Option<Frame> {
         if let Some(frame) = self.stash.lock().unwrap().pop_front() {
             return Some(frame);

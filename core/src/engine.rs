@@ -180,6 +180,9 @@ fn resolve_installer<'a>(
 /// an unrecognised tag refuses the session as loudly as a protocol
 /// mismatch, since a wire engine speaking the wrong builtins is exactly
 /// the incoherence this rail exists to rule out. Never returns.
+///
+/// # Panics
+/// Panics if the inherited wire channel cannot be cloned for the writer.
 pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // SAFETY: fd 3 is the socket inherited from the front-end
     let stream = unsafe { UnixStream::from_raw_fd(3) };
