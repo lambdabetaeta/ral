@@ -11,6 +11,11 @@
 //! `getpwnam(3)` wrapper used for `~user` resolution.  The xdg
 //! sigil expander in `path::sigil` and the `cd` builtin both go
 //! through this function so the rule is one-and-the-same.
+//!
+//! Also home to the `$HOME` / `$USER` lookup helpers (`home`,
+//! `home_from_env`, `home_from_env_or_dot`, `user_name`,
+//! `user_name_from_env`), which pin which env var each resolution reads
+//! and what fallback it uses; `path.rs` re-exports them.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,10 +54,10 @@ impl TildePath {
 #[cfg(unix)]
 pub fn get_user_home(username: &str) -> String {
     use std::ffi::CString;
-    let Ok(c_name) = CString::new(username) else {
-        return format!("/home/{username}");
-    };
     let fallback = || format!("/home/{username}");
+    let Ok(c_name) = CString::new(username) else {
+        return fallback();
+    };
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::passwd = std::ptr::null_mut();
     // `_SC_GETPW_R_SIZE_MAX` is only a hint; grow on `ERANGE`.
