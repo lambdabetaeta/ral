@@ -162,7 +162,7 @@ impl Shell {
     /// the one caller, pushing the fact as a `` `notice `` surface class from
     /// *inside* the turn that produced it instead
     /// (`decisions/260706_enquiry-channel` §4.2).
-    pub(crate) fn take_worker_reap_notices(&mut self) -> Vec<ReapNotice> {
+    pub(crate) fn take_worker_reap_notices(&self) -> Vec<ReapNotice> {
         self.local.workers.take_reap_notices()
     }
 

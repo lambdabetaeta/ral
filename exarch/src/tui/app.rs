@@ -625,7 +625,7 @@ impl App {
             // dequeueing all of them so the user can revise the whole batch.
             KeyCode::Up if self.tabs.focused() == self.tabs.root() && k.modifiers.is_empty() => {
                 if self.prompt_state.row() == 0 {
-                    if !self.prompt_state.edit_queued_prompt(&mut self.inbox) {
+                    if !self.prompt_state.edit_queued_prompt(&self.inbox) {
                         self.prompt_state.history_prev();
                     }
                 } else {

@@ -114,8 +114,8 @@ impl FmtCtx {
                 }
             }
             CompTy::Return(spec, a) => {
-                self.absorb_mode(&spec.input);
-                self.absorb_mode(&spec.output);
+                self.absorb_mode(spec.input);
+                self.absorb_mode(spec.output);
                 self.absorb_ty(a);
             }
             CompTy::Fun(a, b) => {
@@ -141,12 +141,12 @@ impl FmtCtx {
         }
     }
 
-    pub(super) fn absorb_mode(&mut self, mode: &PipeMode) {
+    pub(super) fn absorb_mode(&mut self, mode: PipeMode) {
         if let PipeMode::Var(v) = mode
-            && !self.mode_names.contains_key(v)
+            && !self.mode_names.contains_key(&v)
         {
             let idx = self.mode_names.len();
-            self.mode_names.insert(*v, pick(MODE_LETTERS, idx));
+            self.mode_names.insert(v, pick(MODE_LETTERS, idx));
         }
     }
 }

@@ -142,10 +142,10 @@ pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
 
 /// Coerce `>` to streaming for stderr — atomic semantics make no sense for
 /// diagnostic output.  All other modes pass through unchanged.
-pub(crate) fn stderr_mode(mode: &RedirectMode) -> RedirectMode {
+pub(crate) fn stderr_mode(mode: RedirectMode) -> RedirectMode {
     match mode {
         RedirectMode::Write => RedirectMode::StreamWrite,
-        other => *other,
+        other => other,
     }
 }
 
@@ -245,7 +245,7 @@ pub(super) fn wire_stdout_file(
     let Some((path, mode)) = &plan.stdout_file else {
         return Ok((None, None));
     };
-    let (file, commit) = open_file(path, mode, shell)?;
+    let (file, commit) = open_file(path, *mode, shell)?;
     if commit.is_none() {
         shell.emit_io(io_event::write(
             path,
@@ -348,8 +348,8 @@ pub(super) fn wire_stderr(
             Ok(false)
         }
         Some(StderrRoute::File(path, mode)) => {
-            let effective_mode = stderr_mode(mode);
-            let (file, _) = open_file(path, &effective_mode, shell)?;
+            let effective_mode = stderr_mode(*mode);
+            let (file, _) = open_file(path, effective_mode, shell)?;
             command.stderr(crate::process::StdioSpec::from_file(file));
             // Stderr redirects are never atomic (`stderr_mode` coerces `>`
             // to streaming), so the write door completes the moment the

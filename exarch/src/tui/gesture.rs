@@ -170,7 +170,7 @@ impl GestureState {
 
     /// Scroll the focused pane by `delta` rows (negative = up).
     pub(super) fn scroll(
-        &mut self,
+        &self,
         viewports: &mut HashMap<AgentId, Viewport>,
         focused: AgentId,
         delta: isize,
@@ -191,7 +191,7 @@ impl GestureState {
     /// Scroll one content-height per page key, falling back to a sane
     /// step before the first frame is drawn.
     pub(super) fn scroll_page(
-        &mut self,
+        &self,
         viewports: &mut HashMap<AgentId, Viewport>,
         focused: AgentId,
         dir: isize,

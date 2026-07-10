@@ -31,6 +31,10 @@ use std::sync::Arc;
 mod float_bits {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "signature dictated by serde's `serialize_with`/`with` contract: `fn(&T, S)`"
+    )]
     pub(super) fn serialize<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_u64(value.to_bits())
     }

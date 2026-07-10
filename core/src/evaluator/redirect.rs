@@ -131,7 +131,7 @@ fn open_redirect_sink(
         mode,
         commit: None,
     });
-    let (file, commit) = command::open_file(path, &mode, shell)?;
+    let (file, commit) = command::open_file(path, mode, shell)?;
     intents.last_mut().expect("intent pushed above").commit = commit;
     Ok(Sink::File(file))
 }
@@ -156,7 +156,7 @@ fn install_sink_redirects(
                 stdout_changed = true;
             }
             (2, EvalRedirect::File(path)) => {
-                let mode = command::stderr_mode(mode);
+                let mode = command::stderr_mode(*mode);
                 stderr = open_redirect_sink(path, mode, shell, intents)?;
                 stderr_changed = true;
             }

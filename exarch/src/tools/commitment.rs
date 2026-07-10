@@ -446,12 +446,12 @@ fn writer_card(key: &str, value: &Value) -> Option<Card> {
 pub(super) fn commitment_settle(
     intent: CommitmentIntent,
     outcome: &AgentOutcome,
-    payload: &Option<Value>,
+    payload: Option<&Value>,
 ) -> Option<CommitmentSettle> {
     if !matches!(outcome, AgentOutcome::Complete) {
         return None;
     }
-    let payload = payload.as_ref()?;
+    let payload = payload?;
     match intent {
         CommitmentIntent::Write(key) => {
             let card = writer_card(&key, payload)?;
@@ -681,7 +681,7 @@ mod tests {
             commitment_settle(
                 CommitmentIntent::Verify(key.clone()),
                 &AgentOutcome::Complete,
-                &Some(pass.clone())
+                Some(&pass)
             ),
             Some(CommitmentSettle::Clear(k)) if k == key
         ));
@@ -689,7 +689,7 @@ mod tests {
             commitment_settle(
                 CommitmentIntent::Verify(key.clone()),
                 &AgentOutcome::Complete,
-                &Some(fail)
+                Some(&fail)
             )
             .is_none(),
             "a fail verdict tags nothing"
@@ -698,7 +698,7 @@ mod tests {
             commitment_settle(
                 CommitmentIntent::Verify(key),
                 &AgentOutcome::Failed("provider error".into()),
-                &Some(pass)
+                Some(&pass)
             )
             .is_none(),
             "a pass-shaped payload on a non-Complete outcome tags nothing"
@@ -722,7 +722,7 @@ mod tests {
         match commitment_settle(
             CommitmentIntent::Write(key.clone()),
             &AgentOutcome::Complete,
-            &Some(good),
+            Some(&good),
         ) {
             Some(CommitmentSettle::Open { key: k, card }) => {
                 assert_eq!(k, key);
@@ -734,7 +734,7 @@ mod tests {
             commitment_settle(
                 CommitmentIntent::Write(key.clone()),
                 &AgentOutcome::Complete,
-                &Some(empty)
+                Some(&empty)
             )
             .is_none(),
             "a card with no criteria tags nothing"
@@ -743,7 +743,7 @@ mod tests {
             commitment_settle(
                 CommitmentIntent::Write(key),
                 &AgentOutcome::Failed("provider error".into()),
-                &None
+                None
             )
             .is_none(),
             "no payload tags nothing"

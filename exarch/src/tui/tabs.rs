@@ -221,7 +221,7 @@ impl Tabs {
     }
 
     /// Cycle focus to the next tab (used by Tab key).
-    pub(super) fn focus_next(&mut self) {
+    pub(super) fn focus_next(&self) {
         let current = self.focused();
         let pos = self.tabs.iter().position(|&id| id == current).unwrap_or(0);
         let next = (pos + 1) % self.tabs.len();

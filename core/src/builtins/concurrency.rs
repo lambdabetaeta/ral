@@ -197,7 +197,7 @@ impl Drop for FlushGuard {
 /// is still filling as free.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
-    shell: &mut Shell,
+    shell: &Shell,
     io_mode: ChildIoMode,
     class: LeaseClass,
     cmd: &str,
@@ -471,7 +471,7 @@ fn lease_fire(chain: &LeaseChain) {
 // ── spawn ────────────────────────────────────────────────────────────────
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
-pub(crate) fn builtin_spawn(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn builtin_spawn(args: &[Value], shell: &Shell) -> Settled<Value> {
     check_arity(args, 1, "spawn")?;
     let (body, captured) = expect_thunk(&args[0], "spawn")?;
     spawn_buffered(body, captured, shell)
@@ -493,7 +493,7 @@ pub(crate) fn builtin_spawn(args: &[Value], shell: &mut Shell) -> Settled<Value>
 fn spawn_buffered(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
@@ -550,7 +550,7 @@ fn spawn_labelled(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
     label: std::string::String,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
@@ -697,7 +697,7 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
 /// them.  A detached worker's `surface` calls are buffered (never on the
 /// possibly-ended spawning turn's sink), so this is where they finally surface
 /// — on whichever turn observes the handle.
-fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, shell: &mut Shell) {
+fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, shell: &Shell) {
     {
         let mut joined = handle.joined.lock().unwrap();
         if *joined {
@@ -1097,7 +1097,7 @@ mod tests {
     /// worker's own scope, so a caller can assert cancellation at the
     /// scope level rather than through the conflated 130 status.
     fn spawn_polling_worker(
-        shell: &mut Shell,
+        shell: &Shell,
         cancel_via: impl FnOnce(&crate::process::CancelScope),
     ) -> (i32, crate::process::CancelScope) {
         let snap = Arc::new(shell.mobile().scope);
@@ -1128,9 +1128,9 @@ mod tests {
     /// actually unwound.
     #[test]
     fn worker_scope_cancel_stops_the_worker() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let (_idle_join, sibling) = shell.spawn_thread(Arc::new(shell.mobile().scope), |_| ());
-        let (observed, worker_scope) = spawn_polling_worker(&mut shell, |c| {
+        let (observed, worker_scope) = spawn_polling_worker(&shell, |c| {
             c.cancel(crate::process::CancelCause::Explicit);
         });
         assert!(
@@ -1150,9 +1150,9 @@ mod tests {
     /// worker's next poll.
     #[test]
     fn root_cancel_reaches_the_worker() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let root = shell.session.root.clone();
-        let (observed, worker_scope) = spawn_polling_worker(&mut shell, move |_| {
+        let (observed, worker_scope) = spawn_polling_worker(&shell, move |_| {
             root.cancel(crate::process::CancelCause::RootAbort);
         });
         assert!(
@@ -1273,7 +1273,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<abandoned>",
@@ -1316,11 +1316,11 @@ mod tests {
     /// sweep), and no notice of any cause is ever recorded.
     #[test]
     fn spawn_under_interactive_frame_arms_no_lease() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
@@ -1375,7 +1375,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
@@ -1408,7 +1408,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<babysat>",
@@ -1447,7 +1447,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<immortal>",
@@ -1486,7 +1486,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
@@ -1530,7 +1530,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<listed>",
@@ -1571,7 +1571,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let durable = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Durable,
             "<service>",
@@ -1582,7 +1582,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let sibling = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<sibling>",
@@ -1632,7 +1632,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Durable,
             "<service>",
@@ -1861,7 +1861,7 @@ mod tests {
             // competes for the `joined` latch.
             let _handle = spawn_child(
                 snap,
-                &mut shell,
+                &shell,
                 ChildIoMode::Buffered,
                 LeaseClass::Worker,
                 "<block>",
@@ -1913,7 +1913,7 @@ mod tests {
         // panic when observed.
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
@@ -1963,7 +1963,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
@@ -2015,7 +2015,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
@@ -2061,11 +2061,11 @@ mod tests {
     /// (`Arc::ptr_eq` on `result`) proves it, not a field-by-field copy.
     #[test]
     fn spawn_child_registers_one_entry_with_matching_handle() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test-cmd>",
@@ -2094,7 +2094,7 @@ mod tests {
     /// case above does.
     #[test]
     fn spawn_child_registers_with_no_deferred_lease_granted() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         assert!(
             shell.turn.deferred_lease.is_none(),
             "precondition: no lease granted"
@@ -2102,7 +2102,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<repl>",
@@ -2126,7 +2126,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let h1 = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<a>",
@@ -2140,7 +2140,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let h2 = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<b>",
@@ -2155,7 +2155,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let h3 = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<c>",
@@ -2182,7 +2182,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let h4 = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<d>",
@@ -2217,7 +2217,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let winner = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<winner>",
@@ -2231,7 +2231,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let loser1 = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<loser1>",
@@ -2245,7 +2245,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let loser2 = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<loser2>",
@@ -2290,13 +2290,13 @@ mod tests {
     /// parent and nested registrations are deliberately unordered.
     #[test]
     fn nested_spawn_registers_into_the_owning_shells_registry() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let (go_tx, go_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<usize>();
         let _outer = spawn_child(
             snap,
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<outer>",
@@ -2347,7 +2347,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
@@ -2391,7 +2391,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<claimed>",
@@ -2427,7 +2427,7 @@ mod tests {
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<live>",
@@ -2470,7 +2470,7 @@ mod tests {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             let handle = spawn_child(
                 Arc::new(shell.mobile().scope),
-                &mut shell,
+                &shell,
                 ChildIoMode::Buffered,
                 LeaseClass::Worker,
                 cmd,
@@ -2487,7 +2487,7 @@ mod tests {
 
         let refused = spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<three>",
@@ -2513,7 +2513,7 @@ mod tests {
         builtin_cancel(&[Value::Handle(handles[0].clone())], &mut shell).expect("cancel ok");
         spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<after>",
@@ -2543,7 +2543,7 @@ mod tests {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             spawn_child(
                 Arc::new(shell.mobile().scope),
-                &mut shell,
+                &shell,
                 ChildIoMode::Buffered,
                 class,
                 cmd,
@@ -2558,7 +2558,7 @@ mod tests {
 
         let refused = spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<three>",
@@ -2583,7 +2583,7 @@ mod tests {
         shell.turn.worker_cap = Some(1);
         let first = spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
@@ -2595,7 +2595,7 @@ mod tests {
 
         spawn_child(
             Arc::new(shell.mobile().scope),
-            &mut shell,
+            &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<next>",

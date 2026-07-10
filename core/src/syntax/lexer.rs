@@ -1355,7 +1355,7 @@ impl Lexer {
     /// Build a `Token::Redirect` and finish its span — one place to keep
     /// the field order and the span-finish call in sync.
     fn finish_redirect(
-        &mut self,
+        &self,
         fd: Option<u32>,
         kind: RedirectMode,
         target_fd: Option<u32>,

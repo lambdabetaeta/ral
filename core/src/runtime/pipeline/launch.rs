@@ -82,7 +82,7 @@ pub(super) fn wire_stage_stdout(
     cmd: &mut crate::process::Launch,
     stdout: ByteOut,
     group: &PipelineGroup,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<Option<Sink>> {
     match stdout {
         ByteOut::Downstream(writer) => {
@@ -318,7 +318,7 @@ impl PipelineBuild {
     /// gate frame.  Returns the running pipeline, with the
     /// `PipelineGroup` alongside so its anchor, foreground guard, and
     /// relay stay alive through collect.
-    fn finish(self, shell: &mut Shell) -> Result<(PipelineGroup, RunningPipeline), Break> {
+    fn finish(self, shell: &Shell) -> Result<(PipelineGroup, RunningPipeline), Break> {
         let Self { mut resources, .. } = self;
         // Hand the controlling tty to the pipeline pgid (interactive
         // only) *before* releasing the gate frames so the kernel's

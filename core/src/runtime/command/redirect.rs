@@ -301,7 +301,7 @@ fn open_atomic(
 )]
 pub(crate) fn open_file(
     path: &str,
-    mode: &RedirectMode,
+    mode: RedirectMode,
     shell: &mut Shell,
 ) -> Settled<(std::fs::File, Option<AtomicCommit>)> {
     let rp = shell.resolve(path);
@@ -351,7 +351,7 @@ pub(crate) fn open_file(
 /// exactly as a bare `>` would.
 pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     use std::io::Write as _;
-    let (mut file, commit) = open_file(path, &RedirectMode::Write, shell)?;
+    let (mut file, commit) = open_file(path, RedirectMode::Write, shell)?;
     file.write_all(bytes).map_err(|e| io_error(path, e))?;
     match commit {
         Some(commit) => commit
@@ -514,11 +514,11 @@ pub(crate) fn apply_redirects(
         let EvalRedirectV { fd, mode, target } = r;
         match target {
             EvalRedirect::File(path) => {
-                let effective_mode = if *fd == 2 { stderr_mode(mode) } else { *mode };
+                let effective_mode = if *fd == 2 { stderr_mode(*mode) } else { *mode };
                 // `?`-propagation is safe: any backups already pushed onto
                 // `guard.saved` will LIFO-restore via `RedirectGuard::Drop`
                 // when `guard` falls out of scope on the error return.
-                let (file, commit) = open_file(path, &effective_mode, shell)?;
+                let (file, commit) = open_file(path, effective_mode, shell)?;
                 if let Some(c) = commit {
                     guard.commits.push(c);
                 }
@@ -610,11 +610,11 @@ pub(crate) fn apply_redirects(
         let dst_slot = fd_to_std_handle(*fd)?;
         match target {
             EvalRedirect::File(path) => {
-                let effective_mode = if *fd == 2 { stderr_mode(mode) } else { *mode };
+                let effective_mode = if *fd == 2 { stderr_mode(*mode) } else { *mode };
                 // `?`-propagation is safe: any backups already pushed onto
                 // `guard.saved` will LIFO-restore via `RedirectGuard::Drop`
                 // when `guard` falls out of scope on the error return.
-                let (file, commit) = open_file(path, &effective_mode, shell)?;
+                let (file, commit) = open_file(path, effective_mode, shell)?;
                 if let Some(c) = commit {
                     guard.commits.push(c);
                 }

@@ -785,7 +785,7 @@ impl Agent {
     /// reject_protected_pin` refuses that key — so this is the one writer,
     /// the same shape as [`Self::set_commitment_pin`]/[`Self::
     /// unset_commitment_pin`] for `commitment:*`.
-    fn reconcile_service_pins(&mut self, emit: &Emitter) {
+    fn reconcile_service_pins(&self, emit: &Emitter) {
         let live: Vec<ProbedWorker> = self
             .probe_workers()
             .into_iter()
@@ -2007,7 +2007,7 @@ impl Agent {
     /// ([`Self::settle_commitment`]).  Refused if the key is already live: a
     /// commitment, once open, can only be closed by a verifier, never
     /// silently replaced.
-    fn set_commitment_pin(&mut self, key: &str, card: crate::card::Card) -> Result<(), String> {
+    fn set_commitment_pin(&self, key: &str, card: crate::card::Card) -> Result<(), String> {
         if !shell_eval::is_commitment_pin(key) {
             return Err(format!(
                 "`{key}` is not a protected commitment pin; expected `{}<id>`",
@@ -2039,7 +2039,7 @@ impl Agent {
     /// the caller's separate step ([`Self::settle_commitment`]).  The model
     /// cannot reach this path; ordinary `surface` unpins for the same prefix
     /// are rejected in `shell_eval`.
-    fn unset_commitment_pin(&mut self, key: &str) -> Result<bool, String> {
+    fn unset_commitment_pin(&self, key: &str) -> Result<bool, String> {
         if !shell_eval::is_commitment_pin(key) {
             return Err(format!(
                 "`{key}` is not a protected commitment pin; expected `{}<id>`",
@@ -2060,7 +2060,7 @@ impl Agent {
     /// reply.  This applies the tag on the parent's own thread, at drain, then
     /// forwards whatever [`Self::apply_commitment_settle`] (the pinning half)
     /// says actually changed to the viewport (the rendering half).
-    fn settle_commitment(&mut self, turn: &Turn, emit: &Emitter) {
+    fn settle_commitment(&self, turn: &Turn, emit: &Emitter) {
         let Turn::Agent(r) = turn else { return };
         if let Some(kind) = self.apply_commitment_settle(r.commitment_settle.as_ref()) {
             emit.emit(kind);
@@ -2074,7 +2074,7 @@ impl Agent {
     /// to test. An untagged settle (every ordinary `amnemon`/`mnemon`) and a
     /// clear of a key that was not actually live both report `None`.
     fn apply_commitment_settle(
-        &mut self,
+        &self,
         settle: Option<&shell_eval::CommitmentSettle>,
     ) -> Option<Kind> {
         match settle {
@@ -2104,7 +2104,7 @@ impl Agent {
     }
 
     #[cfg(test)]
-    pub(crate) fn insert_commitment_pin_for_test(&mut self, key: &str, card: crate::card::Card) {
+    pub(crate) fn insert_commitment_pin_for_test(&self, key: &str, card: crate::card::Card) {
         assert!(shell_eval::is_commitment_pin(key));
         self.pins.lock().expect("pin register poisoned").insert(
             key.to_string(),
@@ -2943,7 +2943,7 @@ mod tests {
     #[test]
     fn settle_commitment_clear_removes_the_pin() {
         let dir = tmp("settle-commitment-clear");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc";
         session.insert_commitment_pin_for_test(
             key,
@@ -2978,7 +2978,7 @@ mod tests {
     #[test]
     fn settle_commitment_open_sets_the_pin() {
         let dir = tmp("settle-commitment-open");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc";
         let card = crate::card::Card(vec![crate::card::Mark::Text {
             spans: vec![crate::card::Span {
@@ -3013,7 +3013,7 @@ mod tests {
     #[test]
     fn settle_commitment_no_tag_is_a_no_op() {
         let dir = tmp("settle-commitment-no-tag");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc";
         session.insert_commitment_pin_for_test(
             key,
@@ -3050,7 +3050,7 @@ mod tests {
     #[test]
     fn apply_commitment_settle_reports_only_a_real_change() {
         let dir = tmp("apply-commitment-settle");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc".to_string();
         let card = crate::card::Card(vec![crate::card::Mark::Text {
             spans: vec![crate::card::Span {

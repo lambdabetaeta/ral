@@ -194,7 +194,7 @@ impl Elaborator {
     /// Build an `Exec` computation at the current span.  All name-dispatched
     /// command heads (`bare`, `^name`, `./path`, `~/path`) funnel through here.
     fn exec(
-        &mut self,
+        &self,
         name: CommandName,
         args: Args,
         redirects: Vec<RedirectV>,
@@ -880,7 +880,7 @@ impl Elaborator {
     /// head computation (`App { args: [] }` is not a CBPV form), and a
     /// non-empty call is an [`CompKind::App`]; either way trailing
     /// redirects ride a [`ScopeOp::Redirect`] frame via [`Self::wrap_redirect`].
-    fn apply_head(&mut self, head_comp: Comp, arg_vals: Args, redirects: Vec<RedirectV>) -> Comp {
+    fn apply_head(&self, head_comp: Comp, arg_vals: Args, redirects: Vec<RedirectV>) -> Comp {
         let app = if arg_vals.is_empty() {
             head_comp
         } else {
@@ -903,7 +903,7 @@ impl Elaborator {
     /// at the surface level; every other case (CBPV `App`, nested
     /// `Scope`) routes through here so the redirect lives as an
     /// effect-frame scope rather than a transparent wrapper.
-    fn wrap_redirect(&mut self, body: Comp, redirects: Vec<RedirectV>) -> Comp {
+    fn wrap_redirect(&self, body: Comp, redirects: Vec<RedirectV>) -> Comp {
         if redirects.is_empty() {
             return body;
         }

@@ -155,8 +155,8 @@ fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
     let mut ctx = FmtCtx::for_value_types(&ty_refs);
     for d in diffs {
         if let Stdin { expected, actual } | Stdout { expected, actual } = d {
-            ctx.absorb_mode(expected);
-            ctx.absorb_mode(actual);
+            ctx.absorb_mode(*expected);
+            ctx.absorb_mode(*actual);
         }
     }
 

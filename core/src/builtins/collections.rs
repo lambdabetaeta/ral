@@ -190,7 +190,7 @@ pub(super) fn builtin_sort_by(args: &[Value], shell: &mut Shell) -> Settled<Valu
 }
 
 /// `range <start> <end>` -- generate a list of integers from start (inclusive) to end (exclusive).
-pub(super) fn builtin_range(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
     check_arity(args, 2, "range")?;
     let start = match &args[0] {
         Value::Int(n) => *n,
@@ -335,12 +335,12 @@ mod tests {
     /// longer than the chunk observes the cancel and aborts.
     #[test]
     fn long_range_polls_past_the_chunk() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         shell
             .turn
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &mut shell)
+        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &shell)
             .expect_err("a long range under a cancelled scope must abort");
         assert_eq!(status(err), 130);
     }
@@ -350,12 +350,12 @@ mod tests {
     /// guarantee that keeps the common case free.
     #[test]
     fn short_range_pays_no_poll() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         shell
             .turn
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
-        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &mut shell)
+        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &shell)
             .expect("a short range pays no poll and completes");
         assert_eq!(as_list(&v, "range").expect("list").len(), 10);
     }

@@ -167,7 +167,7 @@ fn step(
     result: Raw<Value>,
     callee: &mut Value,
     args: &mut Vec<Value>,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Option<Settled<Value>> {
     match result {
         Ok(v) if args.is_empty() => Some(Ok(v)),

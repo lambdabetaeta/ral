@@ -277,7 +277,7 @@ The final report should be concise and include:
 /// Fork the trunk's conversation into a new tab.  A branch converses (parks
 /// for the human), so it registers without a ceiling and pushes no result
 /// upward; `prompt` seeds a first turn, or `None` parks and waits.
-pub(crate) fn spawn_branch(session: &mut Agent, prompt: Option<&str>, emit: &Emitter) -> String {
+pub(crate) fn spawn_branch(session: &Agent, prompt: Option<&str>, emit: &Emitter) -> String {
     let title = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
     match session.branch() {
         Ok(child) => {
@@ -378,7 +378,7 @@ pub(super) struct AsyncSpawn {
 /// it to the protected pin register when the result drains
 /// ([`Agent::drive`](crate::agent::Agent::drive)).
 pub(super) fn spawn_async(
-    session: &mut Agent,
+    session: &Agent,
     id: String,
     mut child: Agent,
     spec: AsyncSpawn,
@@ -492,7 +492,7 @@ pub(super) fn spawn_async(
                 // on the worker thread, while the raw payload is still in hand —
                 // the parent only ever sees the tag, never the payload itself.
                 let commitment_settle = commitment
-                    .and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
+                    .and_then(|i| super::commitment::commitment_settle(i, &outcome, payload.as_ref()));
                 // Deliver, then retire.  The parent's park verdict reads child
                 // liveness (the registry) and delivery (its inbox) under two
                 // different locks, and pops its queue only after the verdict —

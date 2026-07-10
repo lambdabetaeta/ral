@@ -45,7 +45,7 @@ impl PromptState {
     /// with a blank line so each queued message stays distinct.  A non-empty
     /// live draft wins over queue editing: Up keeps its ordinary history
     /// behaviour rather than discarding text the user has started.
-    pub(super) fn edit_queued_prompt(&mut self, inbox: &mut Inbox) -> bool {
+    pub(super) fn edit_queued_prompt(&mut self, inbox: &Inbox) -> bool {
         if self.hist_pos.is_some() || !self.editor.is_empty() {
             return false;
         }

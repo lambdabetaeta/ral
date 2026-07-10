@@ -245,7 +245,7 @@ fn rows_of(body: &str) -> Vec<String> {
 /// they raise their own read card — one logical surface per read, matching the
 /// shape the redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
 /// exception: they read silently and speak only their `write` event.
-fn surface_read(shell: &mut Shell, path: &str) {
+fn surface_read(shell: &Shell, path: &str) {
     shell.surface(Value::map(vec![
         ("io".into(), Value::String("read".into())),
         ("path".into(), Value::String(path.to_string())),
@@ -600,7 +600,7 @@ const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
 /// falls back to a listing preview rather than an unwieldy diff — the same gate
 /// core's `old_snapshot_for_diff` applies to the redirect path.  `new_bytes` is
 /// capped to that prefix too, since past the cap it only ever seeds the listing.
-fn surface_write(shell: &mut Shell, path: &str, old: &str, new: &str) {
+fn surface_write(shell: &Shell, path: &str, old: &str, new: &str) {
     let fits = old.len() <= DIFF_SNAPSHOT_CAP && new.len() <= DIFF_SNAPSHOT_CAP;
     let new_prefix = new.as_bytes()[..new.len().min(DIFF_SNAPSHOT_CAP)].to_vec();
     let mut fields = vec![
