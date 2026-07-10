@@ -47,6 +47,10 @@ pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
 /// Registering the CLOEXEC clear as a `pre_exec` hook — rather than an
 /// `fcntl` on the parent's fd — confines the inherit window to this one
 /// child (see the module comment).
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "one of the platform `pass` backends behind `platform::pass`; the fallback variant genuinely returns `Err`, so the `Settled<()>` signature is fixed across the backend family."
+)]
 pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) -> Settled<()> {
     let fd = ch.as_raw_fd();
     cmd.env(env, fd.to_string());

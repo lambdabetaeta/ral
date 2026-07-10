@@ -961,6 +961,10 @@ fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
 /// tool-boundary drain ([`Inbox::drain_tool`]) and the turn-boundary drain
 /// ([`pop_turn`]).  Yields `None` only for a `Surface` an eliminator already
 /// delivered (its deliver-once latch is set): the caller drops it.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the `Option` is the drain protocol's suppression channel — a deliver-once `Surface` yields `None` so both drain sites (`drain_tool`, `pop_turn`) skip it rather than push an empty turn; flattening the return would erase that documented contract."
+)]
 fn to_turn(msg: InboxMsg) -> Option<Turn> {
     msg.on_drain();
     Some(match msg {

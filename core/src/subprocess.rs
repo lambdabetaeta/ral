@@ -104,21 +104,18 @@ pub(crate) struct WireModules {
 }
 
 impl WireModules {
-    pub(crate) fn from_modules(
-        modules: &crate::types::Modules,
-        _ctx: &mut InternCtx,
-    ) -> Result<Self, Error> {
-        Ok(Self {
+    pub(crate) fn from_modules(modules: &crate::types::Modules, _ctx: &mut InternCtx) -> Self {
+        Self {
             stack: modules.stack.clone(),
             depth: modules.depth,
-        })
+        }
     }
 
-    pub(crate) fn into_modules(self, _arcs: &ScopeArcs) -> Result<crate::types::Modules, Error> {
-        Ok(crate::types::Modules {
+    pub(crate) fn into_modules(self, _arcs: &ScopeArcs) -> crate::types::Modules {
+        crate::types::Modules {
             stack: self.stack,
             depth: self.depth,
-        })
+        }
     }
 }
 
@@ -300,7 +297,7 @@ impl WireContext {
             grants: h.grants.clone(),
             handlers,
             args: h.args.clone(),
-            modules: WireModules::from_modules(&h.modules, ctx)?,
+            modules: WireModules::from_modules(&h.modules, ctx),
             cwd: h.cwd.clone(),
         })
     }
@@ -318,7 +315,7 @@ impl WireContext {
             handlers: HandlerStack::from(handlers),
             hooks: std::collections::HashMap::default(),
             args: self.args,
-            modules: self.modules.into_modules(arcs)?,
+            modules: self.modules.into_modules(arcs),
             cwd: self.cwd,
         })
     }

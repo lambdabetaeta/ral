@@ -449,7 +449,7 @@ impl Lexer {
         Span::new(start.file, start.start, self.byte_pos())
     }
 
-    fn error(&self, span: Span, message: impl Into<String>) -> LexError {
+    fn error(span: Span, message: impl Into<String>) -> LexError {
         Self::typed_error(span, LexErrorKind::Other(message.into()))
     }
 
@@ -460,7 +460,6 @@ impl Lexer {
     /// Build an `UnterminatedString` error anchored at `span` (the
     /// opening delimiter), optionally carrying an inner-form failure.
     fn err_unterminated_string(
-        &self,
         span: Span,
         form: StringForm,
         inner: Option<Box<LexErrorKind>>,
@@ -481,13 +480,12 @@ impl Lexer {
     /// failures (an invalid escape, "expected identifier after `$(`")
     /// pass through unchanged so the user still sees the precise spot.
     fn rewrap_inner_into_string(
-        &self,
         outer_span: Span,
         form: StringForm,
         inner: LexError,
     ) -> LexError {
         if inner.kind.is_incomplete() {
-            self.err_unterminated_string(outer_span, form, Some(Box::new(inner.kind)))
+            Self::err_unterminated_string(outer_span, form, Some(Box::new(inner.kind)))
         } else {
             inner
         }
@@ -649,7 +647,7 @@ impl Lexer {
                     self.bump(); // consume '`'
                     let label = self.scan_ident();
                     if label.is_empty() {
-                        Err(self.error(
+                        Err(Self::error(
                             span,
                             "expected tag label after backtick; quote literal backticks",
                         ))
@@ -660,7 +658,7 @@ impl Lexer {
                 _ if is_bare_char(ch) => Ok(self.scan_bare_word(span)),
                 _ => {
                     self.bump();
-                    Err(self.error(span, format!("unexpected character: '{ch}'")))
+                    Err(Self::error(span, format!("unexpected character: '{ch}'")))
                 }
             };
         }
@@ -812,7 +810,7 @@ impl Lexer {
                     } else {
                         StringForm::BumpedSingle(level)
                     };
-                    return Err(self.err_unterminated_string(span, form, None));
+                    return Err(Self::err_unterminated_string(span, form, None));
                 }
                 Some('\'') => {
                     let mut hashes = 0usize;
@@ -866,7 +864,7 @@ impl Lexer {
             let cursor = self.byte_pos();
             match self.peek() {
                 None => {
-                    return Err(self.err_unterminated_string(span, form, None));
+                    return Err(Self::err_unterminated_string(span, form, None));
                 }
                 Some('"') => {
                     Self::flush_literal(&mut parts, &mut literal, &mut literal_start, cursor, file);
@@ -904,7 +902,7 @@ impl Lexer {
                             literal.push('$');
                         }
                         Err(inner) => {
-                            return Err(self.rewrap_inner_into_string(span, form, inner));
+                            return Err(Self::rewrap_inner_into_string(span, form, inner));
                         }
                     }
                 }
@@ -930,7 +928,7 @@ impl Lexer {
                                     ));
                                 }
                                 Err(inner) => {
-                                    return Err(self.rewrap_inner_into_string(span, form, inner));
+                                    return Err(Self::rewrap_inner_into_string(span, form, inner));
                                 }
                             }
                         }
@@ -949,7 +947,7 @@ impl Lexer {
                             self.bump();
                             let name = self.scan_ident();
                             if name.is_empty() {
-                                return Err(self.error(
+                                return Err(Self::error(
                                     deref_span,
                                     "expected identifier after `!$` in double-quoted string",
                                 ));
@@ -1048,16 +1046,16 @@ impl Lexer {
                 let h1 = self
                     .peek()
                     .and_then(|c| c.to_digit(16))
-                    .ok_or_else(|| self.error(span!(), "\\x escape needs two hex digits"))?;
+                    .ok_or_else(|| Self::error(span!(), "\\x escape needs two hex digits"))?;
                 self.bump();
                 let h2 = self
                     .peek()
                     .and_then(|c| c.to_digit(16))
-                    .ok_or_else(|| self.error(span!(), "\\x escape needs two hex digits"))?;
+                    .ok_or_else(|| Self::error(span!(), "\\x escape needs two hex digits"))?;
                 self.bump();
                 let n = (h1 << 4) | h2;
                 if n >= 0x80 {
-                    return Err(self.error(
+                    return Err(Self::error(
                         span!(),
                         "\\xNN must be \\x00..\\x7F (use Bytes for non-ASCII)",
                     ));
@@ -1071,7 +1069,7 @@ impl Lexer {
             Some('u') => {
                 self.bump();
                 if self.peek() != Some('{') {
-                    return Err(self.error(span!(), "\\u escape must be \\u{X..}"));
+                    return Err(Self::error(span!(), "\\u escape must be \\u{X..}"));
                 }
                 self.bump();
                 let mut digits = String::new();
@@ -1083,29 +1081,29 @@ impl Lexer {
                             self.bump();
                         }
                         _ => {
-                            return Err(self.error(span!(), "\\u{X..} expects 1–6 hex digits"));
+                            return Err(Self::error(span!(), "\\u{X..} expects 1–6 hex digits"));
                         }
                     }
                 }
                 if digits.is_empty() {
-                    return Err(self.error(span!(), "\\u{X..} expects 1–6 hex digits"));
+                    return Err(Self::error(span!(), "\\u{X..} expects 1–6 hex digits"));
                 }
                 self.bump(); // '}'
                 let cp = u32::from_str_radix(&digits, 16).unwrap();
                 let ch = char::from_u32(cp).ok_or_else(|| {
-                    self.error(span!(), format!("\\u{{{digits}}} is not a Unicode scalar"))
+                    Self::error(span!(), format!("\\u{{{digits}}} is not a Unicode scalar"))
                 })?;
                 literal.push(ch);
             }
             Some(ch) => {
                 self.bump();
-                return Err(self.error(
+                return Err(Self::error(
                     span!(),
                     format!("unknown escape `\\{ch}` in double-quoted string"),
                 ));
             }
             None => {
-                return Err(self.error(span!(), "unterminated double-quoted string after `\\`"));
+                return Err(Self::error(span!(), "unterminated double-quoted string after `\\`"));
             }
         }
         Ok(())
@@ -1183,10 +1181,10 @@ impl Lexer {
                     );
                 }
                 if name.is_empty() {
-                    return Err(self.error(span, "expected identifier after '$('"));
+                    return Err(Self::error(span, "expected identifier after '$('"));
                 }
                 if self.peek() != Some(')') {
-                    return Err(self.error(span, "expected ')' to close '$(...)' dereference"));
+                    return Err(Self::error(span, "expected ')' to close '$(...)' dereference"));
                 }
                 self.bump();
                 Ok(Some(StringPart::Variable(name)))
@@ -1246,7 +1244,7 @@ impl Lexer {
         // rather than overflowing the call stack.  Real programs sit
         // well below the cap.
         if self.delim_stack.len() >= crate::syntax::NESTING_DEPTH_LIMIT {
-            return Err(self.error(opener, crate::syntax::nesting_too_deep_message()));
+            return Err(Self::error(opener, crate::syntax::nesting_too_deep_message()));
         }
         // The caller already consumed the opener without going through
         // `open_delim`, so we mirror its delim_stack push here.  On a
@@ -1322,11 +1320,11 @@ impl Lexer {
 
         match self.peek() {
             Some('>') => {
-                let fd = Some(self.parse_fd(&fd_digits, span)?);
+                let fd = Some(Self::parse_fd(&fd_digits, span)?);
                 self.scan_redirect_gt(fd, span)
             }
             Some('<') => {
-                let fd = Some(self.parse_fd(&fd_digits, span)?);
+                let fd = Some(Self::parse_fd(&fd_digits, span)?);
                 self.scan_redirect_lt(fd, span)
             }
             // `scan_fd_redirect` is only entered after `is_fd_redirect_start`
@@ -1342,10 +1340,10 @@ impl Lexer {
     /// Overflow is a hard error — silently coercing `99999999999>` to
     /// fd 1 is exactly the bash-style sloppy inheritance we want to
     /// avoid.
-    fn parse_fd(&self, digits: &str, span: Span) -> Result<u32, LexError> {
+    fn parse_fd(digits: &str, span: Span) -> Result<u32, LexError> {
         debug_assert!(!digits.is_empty(), "scan_fd_redirect called without digits");
         digits.parse::<u32>().map_err(|_| {
-            self.error(
+            Self::error(
                 span,
                 format!("file descriptor '{digits}' does not fit in u32"),
             )
@@ -1390,9 +1388,9 @@ impl Lexer {
             self.bump();
             let target_digits = self.take_while(|ch| ch.is_ascii_digit());
             if target_digits.is_empty() {
-                return Err(self.error(span, "expected file descriptor after '>&'"));
+                return Err(Self::error(span, "expected file descriptor after '>&'"));
             }
-            let n = self.parse_fd(&target_digits, span)?;
+            let n = Self::parse_fd(&target_digits, span)?;
             return Ok(self.finish_redirect(fd, RedirectMode::Write, Some(n), span));
         }
         Ok(self.finish_redirect(fd, RedirectMode::Write, None, span))
@@ -1404,7 +1402,7 @@ impl Lexer {
             self.bump();
             if self.peek() == Some('<') {
                 self.bump();
-                return Err(self.error(
+                return Err(Self::error(
                     self.finish(span),
                     "`<<<` is bash's here-string operator — ral's `<<` already \
                      feeds a string to stdin, so drop one `<`",
@@ -1416,7 +1414,7 @@ impl Lexer {
             // heredoc delimiter from silently becoming stdin while the
             // intended body lines run as stray commands.
             if self.peek().is_some_and(|ch| !ch.is_whitespace()) {
-                return Err(self.error(
+                return Err(Self::error(
                     self.finish(span),
                     "ral has no heredocs: `<<` feeds a string to stdin and \
                      takes a space before its payload — `cmd << #' ... '#` \

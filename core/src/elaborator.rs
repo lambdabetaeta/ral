@@ -1143,6 +1143,10 @@ fn prelude_scope() -> HashSet<String> {
 ///
 /// If the `RAL_DUMP_IR` environment variable is set, the resulting IR is
 /// printed to stderr before being returned.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
+)]
 pub fn elaborate(ast: &[Stmt], bindings: HashSet<String>) -> Comp {
     let comp = Elaborator::new_with_bindings(bindings).stmts(ast);
     if std::env::var("RAL_DUMP_IR").is_ok() {

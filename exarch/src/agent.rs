@@ -884,7 +884,7 @@ impl Agent {
         if total > ceiling {
             if !self.disk_warn_latched {
                 self.disk_warn_latched = true;
-                self.note(
+                Agent::note(
                     format!(
                         "disk: session log + scratch is {} KiB, over the {} KiB warn ceiling \
                          — forensic records are never rotated or deleted automatically; \
@@ -1486,7 +1486,7 @@ impl Agent {
                     CutShort::Stalled(cause) => {
                         // A transient transport hiccup we recovered from, not
                         // a misconfiguration: an operational note, not an error.
-                        self.note(
+                        Agent::note(
                             format!(
                                 "[Stream stalled: {}]",
                                 cause.replace('\n', " | ")
@@ -1510,7 +1510,7 @@ impl Agent {
                 });
             }
             if truncated {
-                self.note(
+                Agent::note(
                     "[Truncated mid-tool-call; continuing]"
                         .into(),
                     emit,
@@ -1605,7 +1605,7 @@ impl Agent {
             // and the worker has no honest way to draw view-only chrome.
             return;
         };
-        self.note(format!("[Compacting history: {detail} → summary]"), emit);
+        Agent::note(format!("[Compacting history: {detail} → summary]"), emit);
         emit.emit(Kind::Phase("compacting".into()));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
@@ -1621,7 +1621,7 @@ impl Agent {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
-                self.note(
+                Agent::note(
                     format!("[Compacted: now {} KB]", self.log.history_bytes() / 1024),
                     emit,
                 );
@@ -1924,7 +1924,7 @@ impl Agent {
     /// step.  Recorded in `transcript.jsonl` at the emit seam and surfaced on
     /// the display dim; never written to the model-view `events.json`, since it
     /// is not a message the model saw.
-    pub(crate) fn note(&self, text: String, emit: &Emitter) {
+    pub(crate) fn note(text: String, emit: &Emitter) {
         emit.emit(Kind::SystemNote(text));
     }
 

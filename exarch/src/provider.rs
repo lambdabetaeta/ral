@@ -2230,6 +2230,11 @@ pub mod scripted {
         /// The scripted backend does not model the summariser; it returns
         /// a fixed summary so a byte-fallback compaction driven through it
         /// stays total rather than panicking.
+        #[allow(
+            clippy::unused_self,
+            clippy::unnecessary_wraps,
+            reason = "scripted backend arm of the `Backend` dispatch in `Provider::summarize`; its `&self` receiver and `Result` return mirror the live engine's method so both match arms share one shape."
+        )]
         pub(super) fn summarize(&self, _model: &str) -> Result<SummaryOut, ProviderError> {
             Ok(SummaryOut {
                 summary: "scripted summary".to_string(),

@@ -169,6 +169,10 @@ impl GestureState {
     }
 
     /// Scroll the focused pane by `delta` rows (negative = up).
+    #[allow(
+        clippy::unused_self,
+        reason = "one of a family of scroll gestures (`scroll` / `scroll_page`) invoked uniformly as `self.gesture.<method>(viewports, focused, delta)`; `scroll_page` reads `self.frame` and delegates to `self.scroll`, so dropping the receiver here would split the pair's call shape."
+    )]
     pub(super) fn scroll(
         &self,
         viewports: &mut HashMap<AgentId, Viewport>,

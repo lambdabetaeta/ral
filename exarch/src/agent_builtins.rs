@@ -1037,6 +1037,10 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
 
 /// `skill-list` — list all available skills (fresh scan, filtered by
 /// the live grant). Returns one `name: description` per line.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body."
+)]
 fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let cwd = shell.cwd();
     let config_dir = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);

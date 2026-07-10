@@ -22,6 +22,10 @@ use crate::types::{
 /// parent we synthesise a single command node here so a direct-spawn
 /// stage appears in the tree on equal footing with helper-routed
 /// stages.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "sibling of `StageHandle::observe` in the collect match; both arms must yield the same `Settled<StageObservation>` so the fold can `unwrap_or_else` uniformly."
+)]
 fn observe_external_stage(
     running: command::RunningChild,
     is_last: bool,

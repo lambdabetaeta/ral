@@ -2,7 +2,6 @@
 //! event loop.
 
 use std::fmt::Write;
-use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +24,7 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 type EndpointRx =
     std::sync::mpsc::Receiver<(String, Result<Vec<crate::models::ProviderEndpoint>, String>)>;
 
-pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
+pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     let store = ctx.store;
     let available = store.available();
     // Each plan-backed provider's flavour, for the picker's labels: a ChatGPT
@@ -106,7 +105,6 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
     if let Some((id, model, tuning, route)) = outcome {
         apply_model_switch(tui, ctx, &id, &model, &tuning, route.as_ref());
     }
-    Ok(())
 }
 
 /// Poll keys and background-fetch results until the picker resolves.  Returns

@@ -311,7 +311,7 @@ pub(super) fn route_submit(
             "/copy" => cmd_copy(&mut tui.app),
             "/export" => cmd_export(&mut tui.app, arg, info),
             "/model" => {
-                pick_model(tui, ctx)?;
+                pick_model(tui, ctx);
             }
             // The viewport blanks immediately, and the in-flight model response
             // is cancelled first — otherwise streamed tokens sitting in the bus

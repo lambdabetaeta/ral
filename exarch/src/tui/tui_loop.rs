@@ -101,14 +101,14 @@ budget is too low to seat both"
                 );
             } else {
                 let receipt = crate::tools::spawn_discussion(session, topic, emit);
-                session.note(format!("discussion started: {receipt}"), emit);
+                Agent::note(format!("discussion started: {receipt}"), emit);
             }
             return ControlFlow::Continue;
         }
         if head == "/branch" {
             let prompt = (!rest.is_empty()).then_some(rest);
             let receipt = crate::tools::spawn_branch(session, prompt, emit);
-            session.note(format!("branch started: {receipt}"), emit);
+            Agent::note(format!("branch started: {receipt}"), emit);
             return ControlFlow::Continue;
         }
         match trimmed {
