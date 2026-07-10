@@ -544,6 +544,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         };
         let history = rt.hooks.history.clone();
         let keymap = rt.hooks.state.keymap.clone();
+        drop(rt);
         (old_buf, handlers, hook_env, history, keymap)
     }; // lock released
 

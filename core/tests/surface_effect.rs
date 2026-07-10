@@ -95,7 +95,7 @@ fn surface_forwards_the_event_to_the_sink() {
     );
     assert_eq!(out.expect("surface should succeed"), Value::Unit);
 
-    let events = log.lock().unwrap();
+    let events = log.lock().unwrap().clone();
     assert_eq!(events.len(), 1, "exactly one event surfaced");
     let FOValue::Variant { label, payload } = &events[0] else {
         panic!("expected a variant, got {:?}", events[0]);
@@ -131,7 +131,7 @@ emit "ship it""#,
     );
     out.expect("surface from a thunk should succeed");
 
-    let events = log.lock().unwrap();
+    let events = log.lock().unwrap().clone();
     assert_eq!(events.len(), 1, "the thunk's event reached the sink");
     let FOValue::Variant { label, .. } = &events[0] else {
         panic!("expected a variant");

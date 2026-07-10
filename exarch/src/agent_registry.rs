@@ -262,6 +262,7 @@ impl AgentRegistry {
                 .ok_or(MessageError::UnknownRecipient(to))?
                 .mailbox
                 .clone();
+            drop(g);
             (mailbox, from_title)
         };
         mailbox
@@ -346,6 +347,7 @@ impl AgentRegistry {
                 })
             })
             .collect();
+        drop(g);
         v.sort_by_key(|a| a.id);
         v
     }
@@ -515,14 +517,11 @@ mod tests {
             provider(),
         );
         let g = reg.lock();
-        assert!(
-            g.entries[&1]._ceiling.is_none(),
-            "ceiling = false arms no reaper deadline"
-        );
-        assert!(
-            g.entries[&2]._ceiling.is_some(),
-            "ceiling = true arms a reaper deadline"
-        );
+        let one_has_no_ceiling = g.entries[&1]._ceiling.is_none();
+        let two_has_ceiling = g.entries[&2]._ceiling.is_some();
+        drop(g);
+        assert!(one_has_no_ceiling, "ceiling = false arms no reaper deadline");
+        assert!(two_has_ceiling, "ceiling = true arms a reaper deadline");
     }
 
     #[test]

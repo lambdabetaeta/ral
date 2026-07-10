@@ -462,8 +462,11 @@ mod tests {
         );
         let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
         let rt = runtime.lock().unwrap();
-        assert_eq!(rt.plugins.len(), 1);
-        assert_eq!(rt.plugins[0].name, "from-rc");
+        let plugin_count = rt.plugins.len();
+        let first_name = rt.plugins[0].name.clone();
+        drop(rt);
+        assert_eq!(plugin_count, 1);
+        assert_eq!(first_name, "from-rc");
     }
 
     /// Omitting `options:` loads with an empty map; the plugin's own
@@ -488,8 +491,11 @@ mod tests {
         );
         let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
         let rt = runtime.lock().unwrap();
-        assert_eq!(rt.plugins.len(), 1);
-        assert_eq!(rt.plugins[0].name, "fallback");
+        let plugin_count = rt.plugins.len();
+        let first_name = rt.plugins[0].name.clone();
+        drop(rt);
+        assert_eq!(plugin_count, 1);
+        assert_eq!(first_name, "fallback");
     }
 
     /// Malformed rc plugin entries (non-map, missing `plugin:`) emit a

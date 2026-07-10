@@ -119,6 +119,7 @@ pub(crate) fn load_plugin(
     let mut rt = lock(runtime);
     rt.plugins.push(plugin);
     rt.keybindings_dirty = true;
+    drop(rt);
     Ok(())
 }
 

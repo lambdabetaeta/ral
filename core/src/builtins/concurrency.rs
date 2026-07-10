@@ -659,8 +659,13 @@ fn ensure_live(handle: &HandleInner, shell: &mut Shell) -> Settled<()> {
 /// settles the handle with the same panic error `await`'s blocking path
 /// reports, so `poll` and `race` observe a finished (failed) block rather
 /// than spinning on a `None` they would read as still-running.
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the result guard must span the cached re-check, try_recv, and cache write; releasing early lets a second awaiter observe a bare Disconnected"
+)]
 fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle> {
-    if let Some(completed) = handle.cached.lock().unwrap().clone() {
+    let cached = handle.cached.lock().unwrap().clone();
+    if let Some(completed) = cached {
         set_status_from_outcome(&completed.outcome, shell);
         return Some(completed);
     }
@@ -670,7 +675,8 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
     // awaiter's cached outcome or blocks until it exists -- it can never
     // see a bare `Disconnected` left behind by someone else's `recv`.
     let mut rx_guard = handle.result.lock().unwrap();
-    if let Some(completed) = handle.cached.lock().unwrap().clone() {
+    let cached = handle.cached.lock().unwrap().clone();
+    if let Some(completed) = cached {
         set_status_from_outcome(&completed.outcome, shell);
         return Some(completed);
     }
@@ -736,7 +742,8 @@ fn wait_first_settled<'a>(
             // sweep renews every named handle's idle lease, so a worker
             // being waited on is never idle-reaped mid-wait.
             *handle.last_observed.lock().unwrap() = std::time::Instant::now();
-            match *handle.state.lock().unwrap() {
+            let state = *handle.state.lock().unwrap();
+            match state {
                 HandleState::Cancelled => continue,
                 HandleState::Running => saw_running = true,
                 HandleState::Completed => {}
@@ -1985,7 +1992,7 @@ mod tests {
         }
         shell.turn.surface = Some(Arc::new(Rec(log.clone())));
         await_handle(&handle, &mut shell).expect("await ok");
-        let replayed = log.lock().unwrap();
+        let replayed = log.lock().unwrap().clone();
         assert_eq!(
             replayed.as_slice(),
             &[FOValue::Variant {

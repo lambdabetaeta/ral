@@ -542,6 +542,7 @@ pub fn register_builtins_checked(entries: &'static [BuiltinEntry]) -> Result<(),
     }
     check_builtin_collisions(entries, &sets)?;
     sets.push(BuiltinSet::Static(entries));
+    drop(sets);
     Ok(())
 }
 
@@ -651,6 +652,7 @@ pub fn builtin_names() -> Vec<&'static str> {
             names.push(*s);
         }
     }
+    drop(sets);
     names
 }
 

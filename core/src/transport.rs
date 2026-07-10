@@ -708,7 +708,8 @@ impl EventReceiver {
     /// # Panics
     /// Panics if the stash or receiver mutex is poisoned.
     pub fn recv(&self) -> Option<Frame> {
-        if let Some(frame) = self.stash.lock().unwrap().pop_front() {
+        let stashed = self.stash.lock().unwrap().pop_front();
+        if let Some(frame) = stashed {
             return Some(frame);
         }
         self.rx.lock().unwrap().recv().ok()
@@ -1129,7 +1130,8 @@ impl WireTransport {
     /// `Report` will ever arrive on this connection, so the host's `recv`
     /// must be told the transport is dead rather than blocking forever.
     fn write(&self, frame: &Frame) {
-        if let Err(e) = self.write_tx.lock().unwrap().write_frame(frame) {
+        let outcome = self.write_tx.lock().unwrap().write_frame(frame);
+        if let Err(e) = outcome {
             self.death.store(true, Ordering::SeqCst);
             eprintln!("wire: engine process died ({e})");
         }

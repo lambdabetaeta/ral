@@ -514,7 +514,7 @@ mod tests {
             ..capture_req("$[1 + 1]")
         });
 
-        let events = captured.lock().unwrap();
+        let events = captured.lock().unwrap().clone();
         let saw_reap_notice = events.iter().any(|ev| {
             let crate::serial::FOValue::Variant { label, payload } = ev else {
                 return false;
@@ -760,7 +760,7 @@ mod tests {
             matches!(&shell.turn.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
             "Inherit must restore the session's stdout sink after the turn"
         );
-        let written = marker.lock().unwrap();
+        let written = marker.lock().unwrap().clone();
         assert!(
             !written.is_empty(),
             "the turn's stdout must land in the inherited sink"

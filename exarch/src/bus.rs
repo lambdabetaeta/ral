@@ -711,6 +711,7 @@ impl Inbox {
                 InboxMsg::Surface { .. } => surface += 1,
             }
         }
+        drop(q);
         vec![
             ("user", user),
             ("schedule", schedule),
@@ -763,6 +764,7 @@ impl Inbox {
             }
         }
         *q = kept;
+        drop(q);
         (!prompts.is_empty()).then_some(prompts)
     }
 
@@ -810,6 +812,7 @@ impl Inbox {
                 }
             }
         }
+        drop(q);
         turns
     }
 

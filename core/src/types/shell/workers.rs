@@ -309,6 +309,7 @@ impl WorkerRegistry {
             }
         }
         inner.reserved += 1;
+        drop(inner);
         Ok(Reservation {
             registry: self.clone(),
             armed: true,
@@ -408,6 +409,7 @@ impl WorkerRegistry {
                 _ => i += 1,
             }
         }
+        drop(inner);
     }
 
     /// Drain every accumulated [`ReapNotice`], leaving the ledger empty.

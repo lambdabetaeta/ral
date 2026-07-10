@@ -197,14 +197,14 @@ impl Session {
         // SIGTERM/SIGHUP (`Terminate`) or a Ctrl-\ (`RootAbort`) every
         // future turn would fail with the same cause; exit with its
         // code instead of dealing the user an unusable prompt.
-        if let Some(cause) = self
+        let cancel_cause = self
             .transport
             .shell_mut()
             .shell
             .cancel_handle()
             .as_scope()
-            .cause()
-        {
+            .cause();
+        if let Some(cause) = cancel_cause {
             #[allow(
                 clippy::cast_sign_loss,
                 reason = "clamped to 0..=255, a byte exit status"

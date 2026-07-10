@@ -2030,6 +2030,7 @@ impl Agent {
                 card,
             },
         );
+        drop(m);
         Ok(())
     }
 
@@ -3525,10 +3526,13 @@ mod tests {
 
         session.reconcile_service_pins(&emit);
         {
-            let pins = session.pins.lock().unwrap();
-            let pin = pins
+            let pin = session
+                .pins
+                .lock()
+                .unwrap()
                 .get(shell_eval::SERVICES_PIN_KEY)
-                .expect("the services pin must be born");
+                .expect("the services pin must be born")
+                .clone();
             assert_eq!(pin.kind, shell_eval::PinKind::Service);
             let line = crate::card::summary_line(&pin.card);
             assert!(
@@ -4322,7 +4326,8 @@ mod tests {
         );
 
         // End the blocked worker so the test does not leak a live thread.
-        for entry in session.transport.shell_mut().shell.workers() {
+        let workers = session.transport.shell_mut().shell.workers();
+        for entry in workers {
             entry
                 .handle
                 .cancel

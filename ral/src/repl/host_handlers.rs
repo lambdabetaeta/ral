@@ -196,6 +196,7 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             if jt.resume_in_background(id).is_none() {
                 diagnostic::cmd_error("bg", NOT_A_PGID_JOB);
             }
+            drop(jt);
             Ok(Value::Unit)
         })),
     }
@@ -222,6 +223,7 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                 }
                 None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
             }
+            drop(jt);
             Ok(Value::Unit)
         })),
     }

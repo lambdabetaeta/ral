@@ -870,6 +870,7 @@ fn index_for(base: &Path) -> Result<&'static Index, String> {
     }
     let idx: &'static Index = Box::leak(Box::new(build_index(&canonical)?));
     guard.insert(canonical, idx);
+    drop(guard);
     Ok(idx)
 }
 
@@ -917,6 +918,10 @@ fn path_hash(p: &Path) -> u64 {
 }
 
 /// Run one search against `idx` and return matching paths.
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the picker and query-tracker read guards must both span fuzzy_search and the result projection, which reads paths back through the picker"
+)]
 fn search_paths(idx: &Index, query: &str, limit: usize) -> Result<Vec<String>, String> {
     let parser = QueryParser::default();
     let parsed = parser.parse(query);

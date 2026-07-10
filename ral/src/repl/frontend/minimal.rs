@@ -43,7 +43,8 @@ impl Frontend for MinimalFrontend {
         // Read first line.
         write_prompt(prompt.styled().as_bytes());
         let mut line = String::new();
-        let input = match stdin.lock().read_line(&mut line) {
+        let first_read = stdin.lock().read_line(&mut line);
+        let input = match first_read {
             Ok(0) => return Read::Eof,
             Ok(_) => line.trim_end_matches(['\n', '\r']).to_string(),
             Err(e) => {
@@ -59,7 +60,8 @@ impl Frontend for MinimalFrontend {
         let input = super::join_continuation(input, || {
             write_prompt(b"> ");
             let mut cont = String::new();
-            match stdin.lock().read_line(&mut cont) {
+            let cont_read = stdin.lock().read_line(&mut cont);
+            match cont_read {
                 Ok(0) | Err(_) => super::Continuation::Discard,
                 Ok(_) if cont.trim().starts_with('\0') => super::Continuation::Discard,
                 Ok(_) if cont.as_bytes().first().copied() == Some(0x03) => {

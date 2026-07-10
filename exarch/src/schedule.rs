@@ -428,6 +428,7 @@ impl ScheduleRegistry {
                 deadline,
             },
         );
+        drop(g);
         Ok(id)
     }
 
@@ -458,6 +459,7 @@ impl ScheduleRegistry {
                 fires: e.fires,
             })
             .collect();
+        drop(g);
         v.sort_by_key(|s| s.id);
         v
     }
