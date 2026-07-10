@@ -1036,7 +1036,11 @@ impl Agent {
             label: label.into(),
             payload: None,
         }) {
-            Ok(FOValue::Int { value }) => value as u64,
+            Ok(FOValue::Int { value }) => {
+                #[allow(clippy::cast_sign_loss, reason="probe binding-count is a non-negative cardinality")]
+                let count = value as u64;
+                count
+            }
             other => unreachable!("`{label} probe must answer an Int, got {other:?}"),
         };
         rows.push(ProbeRow::new(
@@ -1413,9 +1417,11 @@ impl Agent {
             if let Some(reasoning) = reasoning.as_deref()
                 && !reasoning.trim().is_empty()
             {
+                #[allow(clippy::cast_possible_truncation, reason="answer char count cannot approach u32::MAX")]
+                let answer_chars = last_text.chars().count() as u32;
                 emit.emit(Kind::Reasoning {
                     text: reasoning.to_string(),
-                    answer_chars: last_text.chars().count() as u32,
+                    answer_chars,
                 });
             }
             emit.emit(Kind::Boundary);
@@ -1791,7 +1797,11 @@ impl Agent {
                         .map(|(_, v)| v.clone())
                 };
                 let id = match field("id") {
-                    Some(FOValue::Int { value }) => value as u64,
+                    Some(FOValue::Int { value }) => {
+                        #[allow(clippy::cast_sign_loss, reason="probe workers.id is a non-negative WorkerId")]
+                        let id = value as u64;
+                        id
+                    }
                     other => unreachable!("`workers row `id must be an Int, got {other:?}"),
                 };
                 let cmd = match field("cmd") {
@@ -1813,17 +1823,29 @@ impl Agent {
                     other => unreachable!("`workers row `running must be a Bool, got {other:?}"),
                 };
                 let up_secs = match field("up-secs") {
-                    Some(FOValue::Int { value }) => value as u64,
+                    Some(FOValue::Int { value }) => {
+                        #[allow(clippy::cast_sign_loss, reason="probe up-secs is a non-negative duration")]
+                        let up_secs = value as u64;
+                        up_secs
+                    }
                     other => unreachable!("`workers row `up-secs must be an Int, got {other:?}"),
                 };
                 let idle_secs = match field("idle-secs") {
-                    Some(FOValue::Int { value }) => value as u64,
+                    Some(FOValue::Int { value }) => {
+                        #[allow(clippy::cast_sign_loss, reason="probe idle-secs is a non-negative duration")]
+                        let idle_secs = value as u64;
+                        idle_secs
+                    }
                     other => unreachable!("`workers row `idle-secs must be an Int, got {other:?}"),
                 };
                 let settled_epoch = match field("settled-epoch") {
                     Some(FOValue::Variant { label, payload }) if label == "some" => {
                         match payload.as_deref() {
-                            Some(FOValue::Int { value }) => Some(*value as u64),
+                            Some(FOValue::Int { value }) => {
+                                #[allow(clippy::cast_sign_loss, reason="probe settled-epoch is a non-negative unix epoch")]
+                                let epoch = *value as u64;
+                                Some(epoch)
+                            }
                             other => unreachable!(
                                 "`workers row `settled-epoch's `some must carry an Int, got {other:?}"
                             ),

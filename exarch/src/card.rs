@@ -197,11 +197,13 @@ impl Card {
 /// magnitude, shared by [`Card::magnitude`] and the renderer's size-bar.
 /// Context rows are unchanged, so they do not count.
 pub fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
-    hunks
+    #[allow(clippy::cast_possible_truncation, reason="changed-line count cannot approach u32::MAX")]
+    let n = hunks
         .iter()
         .flat_map(|h| h.rows.iter())
         .filter(|r| matches!(r, Row::Del(_) | Row::Add(_)))
-        .count() as u32
+        .count() as u32;
+    n
 }
 
 // ── I/O events: structural shapes core emits onto the `surface` sink ─────────
@@ -790,10 +792,14 @@ pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
                 _ => return None,
             },
         },
-        "large-binding" => Notice::LargeBinding {
-            name: str_field(m, "name")?,
-            bytes: int_field(m, "bytes")?.max(0) as u64,
-        },
+        "large-binding" => {
+            #[allow(clippy::cast_sign_loss, reason="max(0) floors to a non-negative byte size")]
+            let bytes = int_field(m, "bytes")?.max(0) as u64;
+            Notice::LargeBinding {
+                name: str_field(m, "name")?,
+                bytes,
+            }
+        }
         _ => return None,
     })
 }
@@ -1199,7 +1205,7 @@ fn decode_raw_bytes(m: &ral_core::types::Map) -> Vec<u8> {
         Some(RalValue::List(items)) => items
             .iter()
             .filter_map(|v| match v {
-                RalValue::Int(n) => Some(*n as u8),
+                RalValue::Int(n) => u8::try_from(*n).ok(),
                 _ => None,
             })
             .collect(),
@@ -1234,7 +1240,11 @@ fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
 /// An integer-typed field clamped into `u32` (negatives floor to 0).
 fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     match m.get(field) {
-        Some(RalValue::Int(n)) => Some((*n).clamp(0, i64::from(u32::MAX)) as u32),
+        Some(RalValue::Int(n)) => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason="value pre-clamped to [0, u32::MAX]")]
+            let clamped = (*n).clamp(0, i64::from(u32::MAX)) as u32;
+            Some(clamped)
+        }
         _ => None,
     }
 }

@@ -273,7 +273,9 @@ impl Trigger {
                 let now = Zoned::now();
                 let next = schedule.next_after(&now)?;
                 let secs = next.timestamp().duration_since(now.timestamp()).as_secs();
-                Some(Duration::from_secs(secs.max(0) as u64))
+                #[allow(clippy::cast_sign_loss, reason="max(0) floors the delay to a non-negative seconds count")]
+                let secs = secs.max(0) as u64;
+                Some(Duration::from_secs(secs))
             }
         }
     }

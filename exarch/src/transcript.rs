@@ -135,13 +135,15 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             elapsed,
         } => {
             let (text, error) = outcome.breadcrumb(text);
+            #[allow(clippy::cast_possible_truncation, reason="elapsed-ms fits u64 for any real run")]
+            let elapsed_ms = elapsed.as_millis() as u64;
             (
                 "subagent_done",
                 json!({
                     "title": title,
                     "text": text,
                     "error": error,
-                    "elapsed_ms": elapsed.as_millis() as u64,
+                    "elapsed_ms": elapsed_ms,
                 }),
             )
         }
@@ -213,7 +215,9 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
     let map = obj
         .as_object_mut()
         .expect("event_record arms are JSON objects");
-    map.insert("t_ms".into(), json!(t_ms as u64));
+    #[allow(clippy::cast_possible_truncation, reason="elapsed-ms fits u64 for any real run")]
+    let t_ms_u64 = t_ms as u64;
+    map.insert("t_ms".into(), json!(t_ms_u64));
     map.insert("id".into(), json!(id));
     map.insert("kind".into(), json!(name));
     Some(obj)

@@ -170,6 +170,8 @@ fn field_value_text(v: &FieldVal) -> String {
 fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duration) -> String {
     use serde_json::json;
     let u = &h.usage;
+    #[allow(clippy::cast_possible_truncation, reason="elapsed-ms fits u64 for any real run")]
+    let duration_ms = elapsed.as_millis() as u64;
     let mut obj = json!({
         "type": "result",
         "is_error": r.is_err() || h.panicked,
@@ -190,7 +192,7 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
             }
         }),
         "num_turns": h.turns,
-        "duration_ms": elapsed.as_millis() as u64,
+        "duration_ms": duration_ms,
         "total_cost_usd": u.dollars,
         "usage": {
             "input_tokens": u.input,

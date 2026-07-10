@@ -1257,6 +1257,7 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     let mut hunks = Vec::new();
     for group in diff.grouped_ops(2) {
         let first = group.first().expect("grouped_ops yields non-empty groups");
+        #[allow(clippy::cast_possible_truncation, reason="diff line index cannot approach u32::MAX")]
         let start = first.old_range().start as u32 + 1;
         let mut rows = Vec::new();
         for op in &group {

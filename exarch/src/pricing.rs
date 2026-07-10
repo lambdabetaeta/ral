@@ -58,10 +58,12 @@ impl ModelPricing {
         } else {
             self.input
         };
-        uncached_input as f64 * self.input
+        #[allow(clippy::cast_precision_loss, reason="token counts are bounded far below 2^52; f64 represents them exactly")]
+        let cost = uncached_input as f64 * self.input
             + cache_creation as f64 * cw
             + cache_read as f64 * cr
-            + output as f64 * self.output
+            + output as f64 * self.output;
+        cost
     }
 }
 

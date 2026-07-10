@@ -397,9 +397,13 @@ pub fn humanize_tokens(n: u64) -> String {
     // Tier on the rounded display, not the raw count: a value within ~50
     // tokens of 1M rounds to `1.0m`, never `1000k`.
     if n >= 999_950 {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
+        #[allow(clippy::cast_precision_loss, reason="display rounding of a token count; magnitude far below 2^52")]
+        let m = n as f64 / 1_000_000.0;
+        format!("{m:.1}m")
     } else if n >= 10_000 {
-        let k = format!("{:.1}", n as f64 / 1_000.0);
+        #[allow(clippy::cast_precision_loss, reason="display rounding of a token count; magnitude far below 2^52")]
+        let thousands = n as f64 / 1_000.0;
+        let k = format!("{thousands:.1}");
         format!("{}k", k.strip_suffix(".0").unwrap_or(&k))
     } else {
         n.to_string()
@@ -2008,8 +2012,8 @@ fn prime_pricing(runtime: &tokio::runtime::Runtime) {
 /// Extract our [`Usage`] from genai's raw usage record, applying the
 /// model's price card for `adapter`.  Used by both [`Provider::complete`] and
 fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: AdapterKind) -> Usage {
-    let input = raw.prompt_tokens.unwrap_or(0) as u64;
-    let output = raw.completion_tokens.unwrap_or(0) as u64;
+    let input = u64::try_from(raw.prompt_tokens.unwrap_or(0)).unwrap_or(0);
+    let output = u64::try_from(raw.completion_tokens.unwrap_or(0)).unwrap_or(0);
     // Preserve the `None` vs `Some(0)` distinction: OpenAI-family
     // adapters leave `cache_creation_tokens` unset because the upstream
     // API does not report writes, and the renderer needs that signal so
@@ -2018,12 +2022,12 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: Ada
         .prompt_tokens_details
         .as_ref()
         .and_then(|d| d.cache_creation_tokens)
-        .map(|n| n as u64);
+        .map(|n| u64::try_from(n).unwrap_or(0));
     let cache_read = raw
         .prompt_tokens_details
         .as_ref()
         .and_then(|d| d.cached_tokens)
-        .map(|n| n as u64);
+        .map(|n| u64::try_from(n).unwrap_or(0));
     let dollars = if metered {
         crate::pricing::lookup_for(model, adapter)
             .map_or(0.0, |p| {

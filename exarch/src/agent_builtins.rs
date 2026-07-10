@@ -255,7 +255,11 @@ fn surface_read(shell: &mut Shell, path: &str) {
 /// Parse a 1-or-greater bound argument for `view-text`.
 fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
     match arg.as_int() {
-        Some(n) if n >= 1 => Ok(n as usize),
+        Some(n) if n >= 1 => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason="guarded n >= 1; exarch is 64-bit so usize == u64")]
+            let bound = n as usize;
+            Ok(bound)
+        }
         _ => Err(sig(format!(
             "view-text: {which} must be an Int >= 1 (range is half-open: end > start), got {}",
             arg.type_name()
@@ -284,8 +288,10 @@ fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut result_rows = Vec::new();
     if lo < hi {
         for i in lo..hi {
+            #[allow(clippy::cast_possible_wrap, reason="line index bounded by file length; no i64 wrap")]
+            let line = i as i64 + 1;
             result_rows.push(Value::map(vec![
-                ("line".into(), Value::Int(i as i64 + 1)),
+                ("line".into(), Value::Int(line)),
                 ("hash".into(), Value::String(hashes[i].clone())),
                 ("text".into(), Value::String(rows[i].clone())),
             ]));
@@ -398,9 +404,11 @@ fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let results = search_tree(shell, &pattern)?
         .into_iter()
         .map(|hit| {
+            #[allow(clippy::cast_possible_wrap, reason="line number bounded by file length; no i64 wrap")]
+            let line = hit.line as i64;
             Value::map(vec![
                 ("file".into(), Value::String(hit.file)),
-                ("line".into(), Value::Int(hit.line as i64)),
+                ("line".into(), Value::Int(line)),
                 ("text".into(), Value::String(hit.text)),
             ])
         })
@@ -680,7 +688,11 @@ fn builtin_edit_replace(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "explore-dir")?;
     let depth: usize = match &args[0] {
-        Value::Int(n) if *n >= 0 => *n as usize,
+        Value::Int(n) if *n >= 0 => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason="guarded n >= 0; exarch is 64-bit so usize == u64")]
+            let depth = *n as usize;
+            depth
+        }
         Value::Int(n) => {
             return Err(sig(format!(
                 "explore-dir: depth must be non-negative, got {n}"
@@ -1036,9 +1048,11 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
             let _ = write!(out, "{}: {}", s.name, s.description);
         }
     }
+    #[allow(clippy::cast_possible_wrap, reason="skill-list line count bounded; no i64 wrap")]
+    let count = out.lines().count() as i64;
     shell.surface(Value::map(vec![
         ("io".into(), Value::String("skill-list".into())),
-        ("count".into(), Value::Int(out.lines().count() as i64)),
+        ("count".into(), Value::Int(count)),
     ]));
     Settled::Ok(Value::String(out))
 }
@@ -1073,7 +1087,11 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
 fn builtin_service_handle(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "service-handle")?;
     let id = match args[0].as_int() {
-        Some(n) if n >= 0 => ral_core::types::WorkerId(n as u64),
+        Some(n) if n >= 0 => {
+            #[allow(clippy::cast_sign_loss, reason="guarded n >= 0")]
+            let id = n as u64;
+            ral_core::types::WorkerId(id)
+        }
         _ => {
             return Err(sig(format!(
                 "service-handle: expected a non-negative Int id, got {}",
@@ -1367,7 +1385,9 @@ mod tests {
         let entry = shell.workers().pop().expect("the service registered");
         assert_eq!(entry.class, ral_core::types::LeaseClass::Durable);
 
-        let handle = match builtin_service_handle(&[Value::Int(entry.id.0 as i64)], &mut shell) {
+        #[allow(clippy::cast_possible_wrap, reason="test WorkerId is small; no i64 wrap")]
+        let id = entry.id.0 as i64;
+        let handle = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
             Ok(Value::Handle(h)) => h,
             other => panic!("service-handle must return a Handle, got {other:?}"),
         };
@@ -1413,7 +1433,9 @@ mod tests {
             "settled but unclaimed, the entry still lingers"
         );
 
-        let handle = match builtin_service_handle(&[Value::Int(entry.id.0 as i64)], &mut shell) {
+        #[allow(clippy::cast_possible_wrap, reason="test WorkerId is small; no i64 wrap")]
+        let id = entry.id.0 as i64;
+        let handle = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
             Ok(Value::Handle(h)) => h,
             other => panic!("a settled-but-retained service must still resolve, got {other:?}"),
         };
@@ -1457,7 +1479,9 @@ mod tests {
         let entry = shell.workers().pop().expect("the spawn registered");
         assert_eq!(entry.class, ral_core::types::LeaseClass::Worker);
 
-        let err = match builtin_service_handle(&[Value::Int(entry.id.0 as i64)], &mut shell) {
+        #[allow(clippy::cast_possible_wrap, reason="test WorkerId is small; no i64 wrap")]
+        let id = entry.id.0 as i64;
+        let err = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
             Err(Break::Error(e)) => e,
             other => panic!("an ephemeral worker's id must be refused, got {other:?}"),
         };
