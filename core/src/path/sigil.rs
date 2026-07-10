@@ -1,6 +1,6 @@
 //! Expansion of path-prefix sigils for grant paths.
 //!
-//! Four sigils are recognised at the head of a path string:
+//! Five sigils are recognised at the head of a path string:
 //!
 //!   * `~` / `~/...` / `~user[/...]` — to a home directory, the
 //!     usual shell tilde rule.
@@ -15,11 +15,14 @@
 //!   * `tempdir:[/sub]` — to `std::env::temp_dir()`, the platform's
 //!     scratch directory (`$TMPDIR` on macOS, `/tmp` on Linux).
 //!     Distinct from a literal `"/tmp"` because macOS rarely uses it.
+//!   * `gitdir:[/sub]` — to the real git directory of the freeze cwd,
+//!     via [`crate::path::discover_git_dir`] (resolving a worktree
+//!     `.git` pointer); falls back to the cwd when it is not a repo.
 //!
 //! Anything else passes through unchanged.  `~` and `xdg:` work
 //! both at runtime (stage 1 of [`crate::path::Resolver`]) and at
-//! policy freeze; `cwd:` and `tempdir:` are policy-only and only
-//! the freeze pass expands them.  Policy authors thus write
+//! policy freeze; `cwd:`, `tempdir:`, and `gitdir:` are policy-only
+//! and only the freeze pass expands them.  Policy authors thus write
 //! portable paths in `.exarch.toml` and `grant { fs: ... }`
 //! blocks without naming the host's home directory, XDG layout,
 //! or working directory directly.
@@ -37,10 +40,9 @@ pub fn looks_like_xdg(s: &str) -> bool {
     s.starts_with("xdg:")
 }
 
-/// True when `s` is shaped like a path or path-prefix sigil
+/// True when `s` is shaped like a path or path-prefix sigil.
 ///
-/// — it
-/// either contains a path separator or starts with one of the four
+/// It either contains a path separator or starts with one of the five
 /// sigil tokens recognised by [`freeze_one`] (`~`, `xdg:`, `cwd:`,
 /// `tempdir:`, `gitdir:`).
 ///
@@ -210,7 +212,10 @@ fn require_home(ctx: &FreezeCtx<'_>) -> Result<(), String> {
 /// so the result joins as a relative component.  Used for `cwd:`
 /// and `tempdir:` — sigils whose only structure is an optional
 /// suffix (no env var, no kind enum).
-#[allow(clippy::option_option, reason = "tri-state: no-match / match-no-suffix / match-with-suffix")]
+#[allow(
+    clippy::option_option,
+    reason = "tri-state: no-match / match-no-suffix / match-with-suffix"
+)]
 fn parse_literal_sigil<'a>(input: &'a str, name: &str) -> Option<Option<&'a str>> {
     let body = input.strip_prefix(name)?.strip_prefix(':')?;
     Some(if body.is_empty() {
@@ -296,8 +301,11 @@ mod tests {
     }
 
     fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, String> {
-        freeze_path_list(paths.iter().map(std::string::ToString::to_string).collect(), ctx)
-            .map(|v| v.iter().map(|p| p.as_str().to_string()).collect())
+        freeze_path_list(
+            paths.iter().map(std::string::ToString::to_string).collect(),
+            ctx,
+        )
+        .map(|v| v.iter().map(|p| p.as_str().to_string()).collect())
     }
 
     // Unix-only: `cwd:/src` joins via `PathBuf`, producing
