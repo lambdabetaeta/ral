@@ -18,12 +18,8 @@ pub fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Discover the real git directory for `cwd`, handling worktrees where
-/// `.git` is a file pointing elsewhere.
-///
-/// Calls [`find_git_entry`] to
-/// locate the first `.git`; if it is a directory, returns it; if it is a
-/// file, parses the `gitdir:` pointer and resolves it.
+/// Discover the real git directory for `cwd`, resolving the `gitdir:`
+/// pointer when `.git` is a worktree file rather than a directory.
 ///
 /// Returns `None` when `cwd` is not inside a git repository.
 #[allow(
@@ -53,9 +49,5 @@ pub fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
     };
 
     // Normalize through the same fold-dots kernel the grant side uses.
-    Some(
-        crate::path::NormalizedPrefix::from_surface(&resolved)
-            .as_path()
-            .to_path_buf(),
-    )
+    Some(crate::path::lex::fold_dots(&resolved))
 }
