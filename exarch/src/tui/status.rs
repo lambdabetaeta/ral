@@ -77,6 +77,12 @@ pub(super) fn rule_line(
     if let Some(cap) = context_window
         && cap > 0
     {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "float division of counts, then rounded and min-clamped; cast saturates regardless"
+        )]
         let pct = ((last_input as f64 / cap as f64) * 100.0).round() as u64;
         let pct = pct.min(999);
         let bar = ctx_ramp(pct, CTX_BAR_W);
@@ -123,9 +129,20 @@ pub(super) const CTX_BAR_W: usize = 10;
 /// bar and the marginal rail share one value scale.
 pub(super) fn ctx_ramp(pct: u64, bar_w: usize) -> Vec<Span<'static>> {
     let pct = pct.min(100) as usize;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "pct already clamped to 0..=100, result additionally clamped to bar_w"
+    )]
     let filled = ((pct as f64 / 100.0) * bar_w as f64).round() as usize;
     let filled = filled.min(bar_w);
-    let step = rail::value_step(Some(pct as u32));
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "pct already clamped to 0..=100"
+    )]
+    let pct_u32 = pct as u32;
+    let step = rail::value_step(Some(pct_u32));
     let fill_col = rail::lighten(CYAN, step);
     let mut spans = Vec::with_capacity(bar_w);
     spans.push(Span::styled("ctx ", Style::default().fg(SLATE)));
@@ -168,6 +185,12 @@ pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     let secs = elapsed.as_secs();
     // log2 fill, scaled so a minute-long wait reaches the right edge:
     // 0s → 0 cells, 3s → ~3, 16s → ~7, ~60s → full.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "log2 of a small positive count, then min-clamped"
+    )]
     let filled = ((((secs + 1) as f64).log2() * 1.7).round() as usize).min(WAIT_BAR_W);
     let fill_col = rail::lighten(PURPLE, wait_step(secs));
     let mut spans = Vec::with_capacity(WAIT_BAR_W + 1);

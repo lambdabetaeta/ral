@@ -40,7 +40,7 @@ use std::{
 
 /// Rows a wheel notch moves the view; paging keys move a frame-height at
 /// a time, derived per-keystroke from the last drawn content height.
-const SCROLL_STEP: usize = 3;
+const SCROLL_STEP: isize = 3;
 
 // ---------------------------------------------------------------------------
 // App struct
@@ -284,7 +284,11 @@ impl App {
                 parent,
                 branch,
             } => {
-                let agent_slot = AgentSlot((self.tabs.len() as u8) % AGENT_HUES.len() as u8);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
+                )]
+                let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
                 self.tabs
                     .born(id, &log_dir, title, parent, branch, agent_slot);
             }
@@ -665,12 +669,12 @@ impl App {
             MouseEventKind::ScrollUp => {
                 let f = self.tabs.focused();
                 self.gesture
-                    .scroll(self.tabs.viewports_mut(), f, -(SCROLL_STEP as isize));
+                    .scroll(self.tabs.viewports_mut(), f, -SCROLL_STEP);
             }
             MouseEventKind::ScrollDown => {
                 let f = self.tabs.focused();
                 self.gesture
-                    .scroll(self.tabs.viewports_mut(), f, SCROLL_STEP as isize);
+                    .scroll(self.tabs.viewports_mut(), f, SCROLL_STEP);
             }
             MouseEventKind::Down(MouseButton::Left)
                 if !me.modifiers.contains(KeyModifiers::SHIFT) =>

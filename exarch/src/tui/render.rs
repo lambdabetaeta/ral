@@ -87,6 +87,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // so it no longer claims the prompt region.
     let text_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
     let prompt_h = app.prompt_state.height_hint(text_w, area.height);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "live-agent tab count; a handful of subprocesses, never near u16::MAX"
+    )]
     let tab_h = if app.tabs.len() > 1 {
         app.tabs.len() as u16
     } else {
@@ -103,6 +107,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
         queued_prompt_rows(&queued, w, (area.height / 3).max(1) as usize)
     };
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "queued rows capped at (area.height/3).max(1) when built — viewport-bounded"
+    )]
     let queued_h = queued_lines.len() as u16;
     // The register's vertical budget is decided here, before the layout:
     // shown as the right-hand column when the focused session has pins and
@@ -302,6 +310,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             && ts.elapsed() < COPY_TOAST_TTL
         {
             let msg = format!("[{n} characters copied]");
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "fixed short toast string, then clamped to footer width"
+            )]
             let w = (msg.len() as u16).min(footer_row.width);
             let r = Rect {
                 x: footer_row.x + footer_row.width.saturating_sub(w),

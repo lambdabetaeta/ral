@@ -177,9 +177,13 @@ impl GestureState {
     ) {
         if let Some(vp) = viewports.get_mut(&focused) {
             if delta < 0 {
-                vp.scroll_up((-delta) as usize);
+                #[allow(clippy::cast_sign_loss, reason = "sign guarded by the enclosing branch")]
+                let up = (-delta) as usize;
+                vp.scroll_up(up);
             } else {
-                vp.scroll_down(delta as usize);
+                #[allow(clippy::cast_sign_loss, reason = "sign guarded by the enclosing branch")]
+                let down = delta as usize;
+                vp.scroll_down(down);
             }
         }
     }
@@ -192,9 +196,14 @@ impl GestureState {
         focused: AgentId,
         dir: isize,
     ) {
-        let page = self
-            .frame
-            .map_or(10, |f| f.text.height.saturating_sub(1).max(1) as isize);
+        let page = self.frame.map_or(10, |f| {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "terminal height (u16) fits isize on this target"
+            )]
+            let rows = f.text.height.saturating_sub(1).max(1) as isize;
+            rows
+        });
         self.scroll(viewports, focused, dir * page);
     }
     pub(super) fn clear_selection(&mut self) {

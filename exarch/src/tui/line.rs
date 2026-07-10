@@ -173,7 +173,14 @@ const SIZE_BAR_W: usize = 8;
 /// two, a ~500-line event fills the bar.  Tracks the rail's value-step,
 /// which also buckets `log2` of the line count.
 fn size_cells(magnitude: u32) -> usize {
-    (((magnitude + 1) as f32).log2().round() as usize).min(SIZE_BAR_W)
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "log2 of a small positive count, then min-clamped"
+    )]
+    let cells = (((magnitude + 1) as f32).log2().round() as usize).min(SIZE_BAR_W);
+    cells
 }
 
 /// The header size-bar span: [`SIZE_BAR_W`] cells, `█` for the filled
@@ -206,6 +213,12 @@ const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'
 /// resolution than the rail's four [`super::rail::value_step`] buckets while
 /// tracking the same scale.
 pub(super) fn spark_glyph(magnitude: Option<u32>) -> char {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "log2 of a small positive count, then min-clamped"
+    )]
     let step =
         (((magnitude.unwrap_or(0) + 1) as f32).log2().round() as usize).min(SPARK_GLYPHS.len() - 1);
     SPARK_GLYPHS[step]
@@ -227,6 +240,10 @@ const GRAIN_W: usize = 4;
 /// balance to show and renders blank.
 pub(super) fn grain_run(add: u32, del: u32) -> Span<'static> {
     let total = add + del;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "changed-line counts far below f32 precision limit"
+    )]
     let cell = if total == 0 {
         ' '
     } else {
@@ -239,7 +256,14 @@ pub(super) fn grain_run(add: u32, del: u32) -> Span<'static> {
 /// bucketed into quartiles so the run reads pre-attentively: `≥0.75 → ⣿`,
 /// `≥0.50 → ⣶`, `≥0.25 → ⣤`, else `⣀`.
 fn grain_cell(ratio: f32) -> char {
-    match (ratio * GRAIN_W as f32) as usize {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "ratio in [0,1] times a small constant GRAIN_W"
+    )]
+    let bucket = (ratio * GRAIN_W as f32) as usize;
+    match bucket {
         3.. => '⣿',
         2 => '⣶',
         1 => '⣤',
@@ -256,6 +280,10 @@ fn grain_cell(ratio: f32) -> char {
 /// data colour.
 pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
     let total = think + say;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "changed-line counts far below f32 precision limit"
+    )]
     let cell = if total == 0 {
         ' '
     } else {
@@ -269,7 +297,15 @@ pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
 /// reasoning's own magnitude — "how dearly bought" and "how much thinking".
 /// The reasoning prose itself stays folded until the block is dialed.
 pub(super) fn thinking_header(reasoning: &str, say_chars: u32) -> Vec<Line<'static>> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+    )]
     let think_chars = reasoning.chars().count() as u32;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+    )]
     let think_lines = reasoning.lines().count() as u32;
     vec![
         Line::default(),
@@ -570,6 +606,7 @@ fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
 
 /// Count the rows across every hunk that satisfy `pred` — the addition /
 /// deletion tallies the header's grain run reads.
+#[allow(clippy::cast_possible_truncation, reason = "diff row count")]
 fn count_rows(hunks: &[Hunk], pred: impl Fn(&Row) -> bool) -> u32 {
     hunks
         .iter()
@@ -813,6 +850,10 @@ const REGISTER_CARD_MARGIN: usize = 2;
 /// The hue is the register's only departure from a surfaced card — identity
 /// that the transcript reads from the matrix, a side column must carry itself.
 pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'static>> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "small compile-time constant fits u16"
+    )]
     let draw_w = width.saturating_sub(REGISTER_CARD_MARGIN as u16);
     render_framed(
         card,
@@ -1008,6 +1049,10 @@ fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
 /// branch of [`measure_value_spans`]; subsumes the old `meter`.
 fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     const W: u32 = 10;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "value already clamped to W via min"
+    )]
     let filled = if total == 0 {
         0
     } else {
@@ -1439,6 +1484,11 @@ fn human_secs(s: u64) -> String {
 /// The retry-after wait carried by a parsed `body`, if any: the first of
 /// the recognised second-count keys whose value reads as a number.  Used
 /// only when the response header didn't already supply the wait.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float->int cast saturates: a negative or absurd retry-seconds pins to 0 / u64::MAX, both acceptable for a wait readout"
+)]
 fn wait_from_body(body: &Value) -> Option<u64> {
     let obj = provider::error_object(body)?;
     ["resets_in_seconds", "retry_after_seconds", "retry_after"]

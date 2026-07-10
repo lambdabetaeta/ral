@@ -11,6 +11,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// `start_cell` and `end_cell` are absolute cell columns within the text
 /// area (0 = left edge).  The rail glyph occupies the first [`RAIL_W`]
 /// columns; columns landing inside the rail clamp to the start of content.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "small compile-time constant fits u16"
+)]
 pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> String {
     let text = plain(line);
     if text.is_empty() {
@@ -23,6 +27,10 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
     let mut byte_lo = text.len();
     let mut byte_hi = text.len();
     for (i, ch) in text.char_indices() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "char display width is 0..=2"
+        )]
         let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
         if cell >= lo && byte_lo == text.len() {
             byte_lo = i;
@@ -39,6 +47,10 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
 /// Apply [`Modifier::REVERSED`] to a cell-column range within a [`Line`],
 /// splitting any span that straddles the boundary so the highlight stays
 /// granular.  The rail glyph (first [`RAIL_W`] columns) is excluded.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "small compile-time constant fits u16"
+)]
 pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cell: u16) {
     let skip = usize::from(
         line.spans
@@ -58,6 +70,10 @@ pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cel
     }
     for s in line.spans.iter().skip(skip) {
         let content = s.content.as_ref();
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "cell width of a span on a rendered line fits u16"
+        )]
         let w = UnicodeWidthStr::width(content) as u16;
         let span_end = cell + w;
         if span_end <= lo || cell >= hi {
@@ -72,6 +88,10 @@ pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cel
             let mut buf = String::new();
             let mut in_sel = cell >= lo;
             for ch in content.chars() {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "char display width is 0..=2"
+                )]
                 let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
                 let ch_end = char_cell + ch_w;
                 let ch_in_sel = char_cell < hi && ch_end > lo;

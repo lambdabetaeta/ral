@@ -245,6 +245,11 @@ const NUCLEUS: Color = Color::Rgb(140, 196, 150);
 
 /// Linear RGB interpolation between two colours at `t ∈ [0, 1]`.
 fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "t in [0,1] keeps mix in [0,255]; cast saturates regardless"
+    )]
     let mix = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
     Color::Rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
@@ -252,6 +257,11 @@ fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
 /// Snap `t` to `places` decimal places — keeps repeated `±step` additions from
 /// drifting into float noise like `0.30000000000000004`.
 fn snap(t: f64, places: usize) -> f64 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "places is a small decimal-place count"
+    )]
     let scale = 10f64.powi(places as i32);
     (t * scale).round() / scale
 }
@@ -762,6 +772,10 @@ impl Picker {
     /// height that fits the search line, status line, bordered model list, the
     /// three tuning rows, one note per failed provider, and the bezel.
     fn desired_size(&self, frame: Rect) -> (u16, u16) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "count of failed providers; bounded by the tiny catalog"
+        )]
         let failed = self.failures().len() as u16;
         // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
         //          + list(VISIBLE+border) + effort(1) + temp(1) + top-p(1)
@@ -1081,9 +1095,14 @@ impl Picker {
             return Self::unsupported_row("effort");
         }
         let focused = self.focus == Focus::Effort;
+        #[allow(clippy::cast_precision_loss, reason = "const slice length")]
         let last = LADDER.len().saturating_sub(1).max(1) as f64;
         let mut spans = vec![self.field_label("effort", Focus::Effort)];
         for (i, rung) in LADDER.iter().enumerate() {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "enumerate index over a small const-length slice"
+            )]
             let value = lerp(EFFORT_DIM, EFFORT_BRIGHT, i as f64 / last);
             let mut style = Style::default().fg(value);
             if !focused {
@@ -1122,6 +1141,12 @@ impl Picker {
         let focused = self.focus == field;
         let mut spans = vec![self.field_label(label, field)];
 
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "t/max in [0,1], TRACK_W is a small const"
+        )]
         let filled = value.map_or(0, |t| ((t / max) * TRACK_W as f64).round() as usize);
         for i in 0..TRACK_W {
             let on = value.is_some() && i < filled;
@@ -1153,14 +1178,20 @@ impl Picker {
         if !supported {
             return Self::unsupported_row("temp");
         }
+        #[allow(clippy::cast_precision_loss, reason = "const track width")]
         let last = (TRACK_W - 1).max(1) as f64;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "enumerate index over a small const-length range"
+        )]
+        let hue = |i: usize| lerp(COLD, WARM, i as f64 / last);
         self.track_line(
             "temp",
             Focus::Temperature,
             self.temperature,
             TEMP_MAX,
             TEMP_PLACES,
-            |i| lerp(COLD, WARM, i as f64 / last),
+            hue,
         )
     }
 

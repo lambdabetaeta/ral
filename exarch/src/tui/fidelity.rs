@@ -44,12 +44,19 @@ pub(super) struct Fidelity {
 /// signal, the renderer leaves the prose untouched.
 pub(super) fn context_floor(last_input: u64, context_window: Option<u64>) -> u8 {
     match context_window {
-        Some(cap) if cap > 0 => match last_input as f64 / cap as f64 {
-            r if r < 0.50 => 0,
-            r if r < 0.75 => 1,
-            r if r < 0.90 => 2,
-            _ => 3,
-        },
+        Some(cap) if cap > 0 => {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "token counts far below f64 precision limit (2^52)"
+            )]
+            let r = last_input as f64 / cap as f64;
+            match r {
+                r if r < 0.50 => 0,
+                r if r < 0.75 => 1,
+                r if r < 0.90 => 2,
+                _ => 3,
+            }
+        }
         _ => 0,
     }
 }
@@ -78,7 +85,12 @@ fn jaccard(a: &str, b: &str) -> f32 {
     if union == 0 {
         0.0
     } else {
-        inter as f32 / union as f32
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "shingle-set sizes bounded by cap, far below f32 precision limit"
+        )]
+        let ratio = inter as f32 / union as f32;
+        ratio
     }
 }
 

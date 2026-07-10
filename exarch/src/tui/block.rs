@@ -398,6 +398,10 @@ impl Block {
     /// markdown block or a subagent result), `None` elsewhere.  The rail's
     /// value-step and the header size-bar both read this, so prose volume
     /// lightens the rail the way line counts do for a diff.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "transcript-block line count; u32 headroom far exceeds any in-memory transcript"
+    )]
     pub(super) fn magnitude(&self) -> Option<u32> {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
@@ -791,6 +795,10 @@ impl Block {
                 error,
                 elapsed,
             } => {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "transcript-block line count; u32 headroom far exceeds any in-memory transcript"
+                )]
                 let size = text.lines().count() as u32;
                 let mut ls = line::subagent_header(title, size, error.as_deref(), *elapsed);
                 // L1 is the header alone; L2/L3 extend it with the rendered

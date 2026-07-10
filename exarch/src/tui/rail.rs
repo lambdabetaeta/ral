@@ -120,6 +120,11 @@ pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
         return from;
     };
     let t = t.clamp(0.0, 1.0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "explicitly clamped to 0..=255 before cast"
+    )]
     let lerp = |a: u8, b: u8| -> u8 {
         (f32::from(a) + (f32::from(b) - f32::from(a)) * t)
             .round()
@@ -147,6 +152,11 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
     let Color::Rgb(r, g, b) = c else {
         return c;
     };
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Rec.601 luma weights sum to 1.0 over byte-range inputs, result stays in 0..=255"
+    )]
     let luma = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round() as u8;
     mix(c, Color::Rgb(luma, luma, luma), t)
 }

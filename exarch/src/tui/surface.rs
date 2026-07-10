@@ -155,12 +155,24 @@ impl SurfaceBuffer {
             // per-kind group yields one card (or none), reconstructed from the
             // same `observation_group_card` span idioms.
             use crate::card::observation_group_card;
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "buffered-observation count for the run census"
+            )]
             for card in observation_group_card(&buf.reads, &[], &[]) {
                 vp.push_observation_card(card, ObservationKind::Read, buf.reads.len() as u32);
             }
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "buffered-observation count for the run census"
+            )]
             for card in observation_group_card(&[], &buf.execs, &[]) {
                 vp.push_observation_card(card, ObservationKind::Exec, buf.execs.len() as u32);
             }
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "buffered-observation count for the run census"
+            )]
             for card in observation_group_card(&[], &[], &buf.greps) {
                 vp.push_observation_card(card, ObservationKind::Grep, buf.greps.len() as u32);
             }

@@ -216,6 +216,7 @@ fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     for call in calls {
         tally.merge(call.tally);
     }
+    #[allow(clippy::cast_possible_truncation, reason = "coalesced-run call count")]
     let text = census_line(calls.len() as u32, tally);
     let mut ls = vec![Line::default()];
     push_wrapped(

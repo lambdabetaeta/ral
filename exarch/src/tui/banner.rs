@@ -87,7 +87,12 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
         },
     ));
 
-    let sz = format!("{:.1} kB", s.system_size as f64 / 1024.0);
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "byte count of system prompt; display only"
+    )]
+    let system_size = s.system_size as f64;
+    let sz = format!("{:.1} kB", system_size / 1024.0);
     let mut sys_val = vec![meta_plain(sz), meta_span(Role::Muted, " · ")];
     if s.system_files.is_empty() {
         sys_val.push(meta_span(Role::Muted, "default"));
@@ -170,11 +175,16 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         (0..AGENT_HUES.len())
             .map(|slot| {
                 let label = if slot == 0 { "root" } else { "subagent" };
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "slot indexes AGENT_HUES (len 6), fits u8"
+                )]
+                let agent_slot = slot as u8;
                 (
                     label,
                     vec![rail::span(
                         RailKind::ToolCall(false),
-                        AgentSlot(slot as u8),
+                        AgentSlot(agent_slot),
                         None,
                     )],
                 )

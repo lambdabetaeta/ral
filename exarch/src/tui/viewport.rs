@@ -537,6 +537,10 @@ impl Viewport {
     /// bar, so landing on a plain call (which has none) is a no-op that still halts.
     /// Marks the flatten stale so the collapsed header re-renders.
     pub(super) fn set_result_size(&mut self, text: &str) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "content count; u32 headroom far exceeds any in-memory transcript"
+        )]
         let n = text.lines().count() as u32;
         if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.is_call())
             && block.is_tool_call()
@@ -675,6 +679,10 @@ impl Viewport {
     }
 
     fn current_answer_chars(&self) -> u32 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "committed markdown char count; feeds deliberation ratio, u32 headroom"
+        )]
         let committed = self
             .blocks
             .iter()
@@ -683,7 +691,12 @@ impl Viewport {
             .fold(0u32, |n, text| {
                 n.saturating_add(text.chars().count() as u32)
             });
-        committed.saturating_add(self.open.chars().count() as u32)
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "committed markdown char count; feeds deliberation ratio, u32 headroom"
+        )]
+        let open_chars = self.open.chars().count() as u32;
+        committed.saturating_add(open_chars)
     }
 
     fn upsert_thinking(&mut self, text: String, answer_chars: u32) {
@@ -922,7 +935,15 @@ impl Viewport {
         if self.thinking.trim().is_empty() {
             return vec![];
         }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+        )]
         let think_chars = self.thinking.chars().count() as u32;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+        )]
         let think_lines = self.thinking.lines().count() as u32;
         let answer_chars = self.current_answer_chars();
         vec![
@@ -971,6 +992,10 @@ impl Viewport {
         if self.open.trim().is_empty() {
             return None;
         }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "content count; u32 headroom far exceeds any in-memory transcript"
+        )]
         let magnitude = self.open.lines().count() as u32;
         Some(Line::from(vec![
             rail::span(RailKind::Markdown, self.agent, Some(magnitude)),
@@ -991,6 +1016,10 @@ impl Viewport {
         let mut think = self.thinking_seat();
         // Seat the rail on the thinking rows, matching committed-block rendering.
         if !think.is_empty() {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+            )]
             let think_lines = self.thinking.lines().count() as u32;
             if let Some(idx) = think.iter().position(|l| !is_blank(l)) {
                 think[idx].spans.insert(
@@ -1022,6 +1051,10 @@ impl Viewport {
         // top, `100%` once `offset` reaches `max_off` (the tail).  `None` when
         // the whole buffer fits, so the rule line shows no readout.  `offset`
         // is clamped to `max_off` so it stays within the valid scroll range.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "scroll percentage already clamped to 0..=100"
+        )]
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
         let mut lines = Vec::new();
