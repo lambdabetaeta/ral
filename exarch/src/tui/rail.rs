@@ -125,6 +125,7 @@ pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
         clippy::cast_sign_loss,
         reason = "explicitly clamped to 0..=255 before cast"
     )]
+    #[allow(clippy::suboptimal_flops, reason="u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula")]
     let lerp = |a: u8, b: u8| -> u8 {
         (f32::from(a) + (f32::from(b) - f32::from(a)) * t)
             .round()
@@ -157,6 +158,7 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
         clippy::cast_sign_loss,
         reason = "Rec.601 luma weights sum to 1.0 over byte-range inputs, result stays in 0..=255"
     )]
+    #[allow(clippy::suboptimal_flops, reason="u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula")]
     let luma = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round() as u8;
     mix(c, Color::Rgb(luma, luma, luma), t)
 }
@@ -181,6 +183,7 @@ pub(super) fn span(kind: RailKind, agent: AgentSlot, magnitude: Option<u32>) -> 
 mod tests {
     use super::*;
 
+    #[allow(clippy::suboptimal_flops, reason="u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula")]
     fn luma(c: Color) -> f32 {
         let Color::Rgb(r, g, b) = c else {
             unreachable!("test colours are RGB")

@@ -36,11 +36,14 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     // construction here (a residual is drawn from `free_ty`'s output, which only
     // reports unbound canonical roots); the assertion makes the contract
     // explicit and guards a future change that derives residuals otherwise.
-    debug_assert!(
-        residuals_are_live_roots(u, &residuals),
-        "a generalisation residual is not an unbound canonical root — the cache \
-         would go stale under a later unite/bind"
-    );
+    #[allow(clippy::debug_assert_with_mut_call, reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless")]
+    {
+        debug_assert!(
+            residuals_are_live_roots(u, &residuals),
+            "a generalisation residual is not an unbound canonical root — the cache \
+             would go stale under a later unite/bind"
+        );
+    }
     let cached_fv = Some(residuals);
 
     // Snapshot any cyclic var bindings reachable from `applied`.  The

@@ -935,6 +935,7 @@ fn syn_to_ratatui(s: SynStyle) -> Style {
 mod tests {
     use super::*;
 
+    #[allow(clippy::suboptimal_flops, reason="u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula")]
     fn luma(c: Color) -> f32 {
         let Color::Rgb(r, g, b) = c else {
             unreachable!("test colours are RGB")

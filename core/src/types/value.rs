@@ -187,6 +187,7 @@ impl Value {
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Self::Int(n) => Some(*n),
+            #[allow(clippy::float_cmp, reason = "integral test: exact by construction, comparing f to its own floor")]
             Self::Float(f)
                 if *f == f.floor()
                     && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(f) =>

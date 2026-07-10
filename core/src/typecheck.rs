@@ -170,10 +170,13 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                 .flatten()
                 .map(|ty| {
                     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &ty);
-                    debug_assert!(
-                        self::generalize::scheme_is_closed(&mut ctx.unifier, &scheme),
-                        "top-level Bind scheme must leave no variable free"
-                    );
+                    #[allow(clippy::debug_assert_with_mut_call, reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless")]
+                    {
+                        debug_assert!(
+                            self::generalize::scheme_is_closed(&mut ctx.unifier, &scheme),
+                            "top-level Bind scheme must leave no variable free"
+                        );
+                    }
                     Box::new(scheme)
                 });
             // A node inference never visited keeps the elaborator's
@@ -504,10 +507,13 @@ pub fn alias_arm_scheme(
     inferencer.pin_arm_to_head(head, &cty)?;
     let thunk_ty = Ty::Thunk(Box::new(cty));
     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);
-    debug_assert!(
-        self::generalize::scheme_is_closed(&mut ctx.unifier, &scheme),
-        "alias-arm scheme must leave no variable free"
-    );
+    #[allow(clippy::debug_assert_with_mut_call, reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless")]
+    {
+        debug_assert!(
+            self::generalize::scheme_is_closed(&mut ctx.unifier, &scheme),
+            "alias-arm scheme must leave no variable free"
+        );
+    }
     Ok(scheme)
 }
 
@@ -536,9 +542,12 @@ pub fn binding_value_scheme(
     let cty = inferencer.infer_binding_value(param, body);
     let thunk_ty = Ty::Thunk(Box::new(cty));
     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);
-    debug_assert!(
-        self::generalize::scheme_is_closed(&mut ctx.unifier, &scheme),
-        "binding-value scheme must leave no variable free"
-    );
+    #[allow(clippy::debug_assert_with_mut_call, reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless")]
+    {
+        debug_assert!(
+            self::generalize::scheme_is_closed(&mut ctx.unifier, &scheme),
+            "binding-value scheme must leave no variable free"
+        );
+    }
     scheme
 }

@@ -20,6 +20,7 @@ use crate::types::Shell;
 struct CaptureScope<'a> {
     shell: &'a mut Shell,
     saved_stdout: Option<Sink>,
+    #[allow(clippy::option_option, reason = "save-slot for an `Option<Sink>` field restored on Drop; outer/inner are distinct states")]
     saved_capture_outer: Option<Option<Sink>>,
 }
 

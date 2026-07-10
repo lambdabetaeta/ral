@@ -250,6 +250,7 @@ fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
         clippy::cast_sign_loss,
         reason = "t in [0,1] keeps mix in [0,255]; cast saturates regardless"
     )]
+    #[allow(clippy::suboptimal_flops, reason="u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula")]
     let mix = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
     Color::Rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }

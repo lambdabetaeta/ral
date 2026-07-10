@@ -210,6 +210,7 @@ fn require_home(ctx: &FreezeCtx<'_>) -> Result<(), String> {
 /// so the result joins as a relative component.  Used for `cwd:`
 /// and `tempdir:` — sigils whose only structure is an optional
 /// suffix (no env var, no kind enum).
+#[allow(clippy::option_option, reason = "tri-state: no-match / match-no-suffix / match-with-suffix")]
 fn parse_literal_sigil<'a>(input: &'a str, name: &str) -> Option<Option<&'a str>> {
     let body = input.strip_prefix(name)?.strip_prefix(':')?;
     Some(if body.is_empty() {

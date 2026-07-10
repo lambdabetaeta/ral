@@ -130,16 +130,19 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::Unit, Value::Unit) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
+        #[allow(clippy::float_cmp, reason = "shell `==` is defined as bit-exact IEEE equality; epsilon would break reflexivity")]
         (Value::Float(x), Value::Float(y)) => x == y,
         #[allow(
             clippy::cast_precision_loss,
             reason = "mixed Int/Float equality is defined by promoting the Int to f64; precision loss beyond 2^53 is intrinsic to cross-tower comparison"
         )]
+        #[allow(clippy::float_cmp, reason = "shell `==` is defined as bit-exact IEEE equality; epsilon would break reflexivity")]
         (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
         #[allow(
             clippy::cast_precision_loss,
             reason = "mixed Int/Float equality is defined by promoting the Int to f64; precision loss beyond 2^53 is intrinsic to cross-tower comparison"
         )]
+        #[allow(clippy::float_cmp, reason = "shell `==` is defined as bit-exact IEEE equality; epsilon would break reflexivity")]
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
