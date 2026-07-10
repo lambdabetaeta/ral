@@ -267,7 +267,7 @@ impl Cli {
 /// Long flags that take a separate value token carry that value past the flag.
 /// Which flags those are is read from clap's own model ([`value_taking_longs`])
 /// rather than hand-listed, so it cannot drift from the `Cli` definition.
-pub(crate) fn inject_arg_terminator(raw: Vec<String>) -> Vec<String> {
+pub(crate) fn inject_arg_terminator(raw: &[String]) -> Vec<String> {
     let value_longs = value_taking_longs();
     let mut out = Vec::with_capacity(raw.len() + 1);
     let mut i = 0;
@@ -366,7 +366,7 @@ mod tests {
     /// terminator injection, then clap, then distil to a [`Mode`].
     fn mode_of(args: &[&str]) -> Mode {
         let raw: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
-        Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(raw)))
+        Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(&raw)))
             .into_mode()
     }
 
@@ -425,7 +425,8 @@ mod tests {
     }
 
     fn inject(args: &[&str]) -> Vec<String> {
-        inject_arg_terminator(args.iter().map(std::string::ToString::to_string).collect())
+        let raw: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
+        inject_arg_terminator(&raw)
     }
 
     #[test]

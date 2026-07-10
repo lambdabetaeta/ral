@@ -134,7 +134,7 @@ impl Shell {
     /// under a `deny_paths` entry or outside every read prefix.
     pub fn check_fs_read(&mut self, path: &crate::path::ResolvedPath) -> Settled<()> {
         self.audit_call(|ctx, audit, site| {
-            crate::capability::check_fs_op(ctx, path, FsOp::Read, audit, site)
+            crate::capability::check_fs_op(ctx, path, &FsOp::Read, audit, site)
         })
     }
 
@@ -145,7 +145,7 @@ impl Shell {
     /// under a `deny_paths` entry or outside every write prefix.
     pub fn check_fs_write(&mut self, path: &crate::path::ResolvedPath) -> Settled<()> {
         self.audit_call(|ctx, audit, site| {
-            crate::capability::check_fs_op(ctx, path, FsOp::Write, audit, site)
+            crate::capability::check_fs_op(ctx, path, &FsOp::Write, audit, site)
         })
     }
 

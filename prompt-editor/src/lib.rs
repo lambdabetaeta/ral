@@ -5,6 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 
+#[derive(Clone, Copy)]
 pub enum EditMode {
     Emacs,
     Vi,

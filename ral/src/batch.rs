@@ -91,7 +91,7 @@ pub(crate) fn apply_session_capabilities(
 /// as JSON on stderr.
 pub(crate) fn run_batch(
     name: &str,
-    source: String,
+    source: &str,
     script_args: Vec<String>,
     opts: BatchOpts,
 ) -> ExitCode {
@@ -134,12 +134,12 @@ pub(crate) fn run_batch(
             )
         };
 
-    let ast = match parse(&source) {
+    let ast = match parse(source) {
         Ok(ast) => ast,
         Err(e) => {
             eprint!(
                 "{}",
-                diagnostic::format_parse_error_ariadne(name, &source, &e)
+                diagnostic::format_parse_error_ariadne(name, source, &e)
             );
             return ExitCode::from(2);
         }
@@ -158,7 +158,7 @@ pub(crate) fn run_batch(
         if let Err(errors) = run_check(&comp) {
             eprint!(
                 "{}",
-                diagnostic::format_type_errors_ariadne(name, &source, &errors)
+                diagnostic::format_type_errors_ariadne(name, source, &errors)
             );
             return ExitCode::from(1u8);
         }
@@ -176,7 +176,7 @@ pub(crate) fn run_batch(
     if let Some(n) = recursion_limit {
         shell.set_recursion_limit(n);
     }
-    shell.install_root_context(name.to_string(), source.as_str());
+    shell.install_root_context(name.to_string(), source);
     shell.set_args(script_args);
 
     if let Err(code) = apply_session_capabilities(&mut shell, &capabilities) {
@@ -202,7 +202,7 @@ pub(crate) fn run_batch(
         Err(errs) => {
             eprint!(
                 "{}",
-                diagnostic::format_type_errors_ariadne(name, &source, &errs)
+                diagnostic::format_type_errors_ariadne(name, source, &errs)
             );
             return ExitCode::from(1u8);
         }
@@ -216,7 +216,7 @@ pub(crate) fn run_batch(
     };
     let result = match shell.run_turn(TurnRequest {
         turn: Turn {
-            program: Program::Source(source.clone()),
+            program: Program::Source(source.to_string()),
             script_name: name.to_string(),
             caps: ral_core::types::Capabilities::root(),
             turn_limit: None,

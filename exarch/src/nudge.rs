@@ -129,7 +129,7 @@ impl Registry {
     pub fn react(
         &mut self,
         attempt: &Result<TurnOutcome, ProviderError>,
-        ctx: NudgeCtx,
+        ctx: &NudgeCtx,
         emit: &Emitter,
         log: &mut AgentLog,
     ) -> Option<String> {
@@ -346,7 +346,7 @@ mod tests {
         assert!(
             reg.react(
                 &attempt,
-                NudgeCtx {
+                &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: None,
@@ -382,7 +382,7 @@ mod tests {
             waiting_on_children: false,
         };
         assert!(
-            reg.react(&attempt(), ctx(), &emit(), &mut log).is_none(),
+            reg.react(&attempt(), &ctx(), &emit(), &mut log).is_none(),
             "transient provider failures are surfaced directly"
         );
         assert_eq!(reg.used, 0);
@@ -410,7 +410,7 @@ mod tests {
         };
         for _ in 0..=BUDGET {
             assert!(
-                reg.react(&attempt(), ctx(), &emit(), &mut log).is_none(),
+                reg.react(&attempt(), &ctx(), &emit(), &mut log).is_none(),
                 "provider failure should stop, not nudge"
             );
         }
@@ -424,7 +424,7 @@ mod tests {
         let mut log = fresh_log("empty");
         match reg.react(
             &Ok(TurnOutcome::Empty),
-            NudgeCtx {
+            &NudgeCtx {
                 must_reply: false,
                 is_headless_root: false,
                 pinned: None,
@@ -448,7 +448,7 @@ mod tests {
             assert!(
                 reg.react(
                     &Ok(TurnOutcome::Empty),
-                    NudgeCtx {
+                    &NudgeCtx {
                         must_reply: false,
                         is_headless_root: false,
                         pinned: None,
@@ -463,7 +463,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Empty),
-                NudgeCtx {
+                &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: None,
@@ -484,7 +484,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Complete("done".into())),
-                NudgeCtx {
+                &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: None,
@@ -516,7 +516,7 @@ mod tests {
         for _ in 0..BUDGET {
             match reg.react(
                 &Ok(TurnOutcome::Complete("prose, no reply".into())),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             ) {
@@ -536,7 +536,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Complete("still no reply".into())),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             )
@@ -554,7 +554,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Complete("answer to the user".into())),
-                NudgeCtx {
+                &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: None,
@@ -583,7 +583,7 @@ mod tests {
         let msg = reg
             .react(
                 &Ok(TurnOutcome::Replied(serde_json::json!("done"))),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             )
@@ -608,7 +608,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Replied(serde_json::json!("first"))),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             )
@@ -618,7 +618,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Replied(serde_json::json!("second, verified"))),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             )
@@ -638,7 +638,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Replied(serde_json::json!("findings"))),
-                NudgeCtx {
+                &NudgeCtx {
                     must_reply: true,
                     is_headless_root: false,
                     pinned: None,
@@ -673,7 +673,7 @@ mod tests {
             let msg = reg
                 .react(
                     &Ok(TurnOutcome::Complete("done".into())),
-                    ctx(),
+                    &ctx(),
                     &emit(),
                     &mut log,
                 )
@@ -693,7 +693,7 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Complete("waiting on verifier".into())),
-                NudgeCtx {
+                &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: Some("commitment:abc: criteria 0/1".into()),
@@ -726,7 +726,7 @@ mod tests {
         let msg = reg
             .react(
                 &Ok(TurnOutcome::Complete("prose, no reply".into())),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             )
@@ -755,7 +755,7 @@ mod tests {
             waiting_on_children: false,
         };
         // Spend a unit of budget.
-        let _ = reg.react(&Ok(TurnOutcome::Empty), ctx(), &emit(), &mut log);
+        let _ = reg.react(&Ok(TurnOutcome::Empty), &ctx(), &emit(), &mut log);
         assert!(reg.used >= 1);
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
@@ -780,7 +780,7 @@ mod tests {
             reg.reset();
             if let Some(msg) = reg.react(
                 &Ok(TurnOutcome::Complete("x".into())),
-                ctx(),
+                &ctx(),
                 &emit(),
                 &mut log,
             ) {

@@ -67,12 +67,12 @@ use stdio::{announce_command_title, inherit_tty, wire_stderr, wire_stdin, wire_s
 /// via [`super::pipeline::run_pipeline`], so this function and that path
 /// share one resolution and one stdio rendering of every call.
 pub(crate) fn run(
-    id: CommandIdentity,
+    id: &CommandIdentity,
     args: &[Value],
     redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let rc = vet(&id, args, shell)?;
+    let rc = vet(id, args, shell)?;
     let cmd_name = rc.shown.clone();
 
     // A bundled uutils image keeps an inline placement only for the
@@ -112,7 +112,7 @@ pub(crate) fn run(
             .io
             .stdout
             .child_stdout(inherit_tty)
-            .map_err(pipe_err)?;
+            .map_err(|e| pipe_err(&e))?;
         command.stdout(p.stdio);
         p.pump
     } else {
@@ -129,7 +129,7 @@ pub(crate) fn run(
     // that no fallible work remains between `spawn` and
     // `RunningChild::assemble` — the `?` here cannot leak a child.
     let stderr_pump = if stderr_piped {
-        Some(shell.turn.io.stderr.try_clone().map_err(pipe_err)?)
+        Some(shell.turn.io.stderr.try_clone().map_err(|e| pipe_err(&e))?)
     } else {
         None
     };
@@ -154,12 +154,12 @@ pub(crate) fn run(
             // exactly the status the resulting failure yields (NotFound→127,
             // PermissionDenied→126, else 127), so read it off the very Break
             // we are about to propagate.  Outcome is "bad" (nonzero status).
-            let failure = spawn_error(&cmd_name, e);
+            let failure = spawn_error(&cmd_name, &e);
             let status = match &failure {
                 Break::Error(err) => err.exit_code(),
                 Break::Escape(_) => 127,
             };
-            shell.emit_io(io_event::exec(&cmd_name, &rc.args, status));
+            shell.emit_io(&io_event::exec(&cmd_name, &rc.args, status));
             return Err(failure.into());
         }
     };
@@ -233,7 +233,7 @@ pub(crate) fn run(
             let preview = commit.temp_preview();
             match commit.commit() {
                 Ok(()) => {
-                    shell.emit_io(io_event::write(
+                    shell.emit_io(&io_event::write(
                         path,
                         *mode,
                         io_event::WriteOutcome::Committed,
@@ -243,7 +243,7 @@ pub(crate) fn run(
                     Ok(())
                 }
                 Err(e) => {
-                    shell.emit_io(io_event::write(
+                    shell.emit_io(&io_event::write(
                         path,
                         *mode,
                         io_event::WriteOutcome::Failed,
@@ -256,7 +256,7 @@ pub(crate) fn run(
         } else {
             // The command did not succeed: the write door did not
             // complete. `commit` drops here, discarding the staged temp.
-            shell.emit_io(io_event::write(
+            shell.emit_io(&io_event::write(
                 path,
                 *mode,
                 io_event::WriteOutcome::Aborted,
@@ -280,7 +280,7 @@ pub(crate) fn run(
     // bundled fast path returned long before the spawn above, so this door
     // covers only the Host and spawned `BundledTool` images.  `code` is the
     // user-visible exit status; outcome is "ok" iff it is zero.
-    shell.emit_io(io_event::exec(&cmd_name, &rc.args, code));
+    shell.emit_io(&io_event::exec(&cmd_name, &rc.args, code));
     commit_result?;
     // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
     // pipeline helper subprocess) forgives SIGPIPE — the reader ended the

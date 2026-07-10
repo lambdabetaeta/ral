@@ -131,7 +131,7 @@ impl FsOp {
 pub(crate) fn check_fs_op(
     ctx: &Context,
     path: &crate::path::ResolvedPath,
-    op: FsOp,
+    op: &FsOp,
     audit: &mut Audit,
     site: CallSite,
 ) -> Settled<()> {

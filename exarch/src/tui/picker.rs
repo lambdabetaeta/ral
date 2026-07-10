@@ -383,7 +383,7 @@ impl Picker {
     pub fn new(
         providers: Vec<ProviderId>,
         subscription: BTreeMap<ProviderId, Subscription>,
-        initial: Tuning,
+        initial: &Tuning,
         caps: fn(&str) -> crate::pricing::ModelCaps,
     ) -> Self {
         let models = providers
@@ -1264,7 +1264,7 @@ mod tests {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
             BTreeMap::new(),
-            Tuning::default(),
+            &Tuning::default(),
             caps_unknown,
         );
         p.set_models(
@@ -1295,7 +1295,7 @@ mod tests {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Openrouter)],
             BTreeMap::new(),
-            Tuning::default(),
+            &Tuning::default(),
             caps_unknown,
         );
         p.set_models(
@@ -1341,7 +1341,7 @@ mod tests {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Openai)],
             BTreeMap::from([(fam(ProviderKind::Openai), Subscription::ChatGpt)]),
-            Tuning::default(),
+            &Tuning::default(),
             caps_unknown,
         );
         p.set_models(
@@ -1378,7 +1378,7 @@ mod tests {
         let mut p = Picker::new(
             vec![fam(ProviderKind::OpencodeGo)],
             BTreeMap::from([(fam(ProviderKind::OpencodeGo), Subscription::FlatRate)]),
-            Tuning::default(),
+            &Tuning::default(),
             caps_unknown,
         );
         p.set_models(
@@ -1453,7 +1453,7 @@ mod tests {
         let mut p = Picker::new(
             vec![llama.clone()],
             BTreeMap::new(),
-            Tuning::default(),
+            &Tuning::default(),
             caps_unknown,
         );
         p.set_models(&llama, ModelsState::Loaded(vec!["llama-3".into()]));
@@ -1610,7 +1610,7 @@ mod tests {
         let p = Picker::new(
             vec![fam(ProviderKind::Anthropic)],
             BTreeMap::new(),
-            Tuning {
+            &Tuning {
                 effort: Some(ReasoningEffort::Medium),
                 temperature: Some(0.5),
                 top_p: Some(0.9),
@@ -1643,7 +1643,7 @@ mod tests {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Anthropic)],
             BTreeMap::new(),
-            Tuning::default(),
+            &Tuning::default(),
             caps_split,
         );
         p.set_models(

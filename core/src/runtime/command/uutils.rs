@@ -126,7 +126,7 @@ pub(crate) fn run_uutils_in_process(
     // next builtin's process-cwd read.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:uutils-cwd-save] Defensive process-cwd snapshot around a third-party uutils tool that might internally chdir; restored below. Process-cwd bookkeeping, not the model's data I/O — the bundled exec surfaces via emit_io(exec) further down."
+        reason = "[io-door:silent:uutils-cwd-save] Defensive process-cwd snapshot around a third-party uutils tool that might internally chdir; restored below. Process-cwd bookkeeping, not the model's data I/O — the bundled exec surfaces via emit_io(&exec) further down."
     )]
     let saved_cwd = std::env::current_dir().ok();
 
@@ -159,7 +159,7 @@ pub(crate) fn run_uutils_in_process(
         // so this completion door fires exactly once, like the normal
         // branch below.
         drop(exit_code_guard);
-        shell.emit_io(super::io_event::exec(tool, arg_strs, 1));
+        shell.emit_io(&super::io_event::exec(tool, arg_strs, 1));
         return Err(Break::Error(
             Error::new(format!("bundled tool '{tool}' panicked"), 1)
                 .at_loc(shell.turn.loc.source_loc(0)),
@@ -173,7 +173,7 @@ pub(crate) fn run_uutils_in_process(
     // Door 3 — EXEC (inline bundled completion): the sole inline-uutils
     // door.  The caller (`command::run`) returns before its spawn path for
     // this image, so no external exec event double-fires for this call.
-    shell.emit_io(super::io_event::exec(tool, arg_strs, exit_code));
+    shell.emit_io(&super::io_event::exec(tool, arg_strs, exit_code));
     shell.mobile.control.last_status = exit_code;
     if exit_code == 0 {
         Ok(Value::Unit)

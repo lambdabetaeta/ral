@@ -174,7 +174,7 @@ pub(crate) fn force_pipe_value(value: Value, shell: &mut Shell) -> Settled<Value
         // The forced producer's value crosses the value edge into the
         // next stage — a non-trivial continuation, so [`Tail::No`].
         Value::Block { body, captured } => {
-            crate::evaluator::eval_block(&body, captured, Tail::No, shell)
+            crate::evaluator::eval_block(&body, &captured, Tail::No, shell)
         }
         other => Ok(other),
     }

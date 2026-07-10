@@ -1264,7 +1264,7 @@ impl Agent {
                 is_headless_root: self.parent.is_none() && !self.interactive,
             };
             let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
-            let nudge_msg = self.nudges.react(&outcome, ctx, emit, &mut self.log);
+            let nudge_msg = self.nudges.react(&outcome, &ctx, emit, &mut self.log);
             if let Some(msg) = &nudge_msg {
                 self.inbox
                     .push(InboxMsg::Nudge(msg.clone()))
@@ -1956,7 +1956,7 @@ impl Agent {
             cmd,
             timeout_secs,
             emit,
-            Some(self.pins.clone()),
+            Some(&self.pins),
         ) {
             shell_eval::Outcome::Ran(r) => render(&r),
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
@@ -3388,7 +3388,7 @@ mod tests {
                 crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
                 "ping".into(),
                 None,
-                agent.inbox.mailbox(),
+                &agent.inbox.mailbox(),
             )
             .expect("a one-hour `after` trigger must arm");
         assert_eq!(schedules.list().len(), 1, "the schedule is armed");

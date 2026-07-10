@@ -470,8 +470,8 @@ impl Shell {
     /// cross the rail; core has no host vocabulary to report that in (an
     /// exarch `Kind::SystemNote` would leak host concepts into core), so the
     /// drop is a `dbg_trace`, not a silent no-op.
-    pub fn surface(&self, ev: Value) {
-        match crate::serial::FOValue::try_from(&ev) {
+    pub fn surface(&self, ev: &Value) {
+        match crate::serial::FOValue::try_from(ev) {
             Ok(fo) => {
                 if let Some(sink) = self.turn.surface.as_ref() {
                     sink.emit(&fo);
@@ -506,7 +506,7 @@ impl Shell {
     /// with no surface installed it is inert.  The event is a plain
     /// [`Value::Map`] whose shape (`{io: …, …}`) the host decodes — core
     /// names no card type.
-    pub(crate) fn emit_io(&self, ev: Value) {
+    pub(crate) fn emit_io(&self, ev: &Value) {
         self.surface(ev);
     }
 

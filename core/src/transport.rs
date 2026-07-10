@@ -483,8 +483,8 @@ fn mint_dispatch_id() -> DispatchId {
 /// # Panics
 /// Panics if a worker handle's `state` or `last_observed` mutex is poisoned,
 /// reachable only through the `` `workers `` class.
-pub fn answer_probe(shell: &mut crate::types::Shell, req: FOValue) -> Result<FOValue, String> {
-    let FOValue::Variant { label, payload } = &req else {
+pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FOValue, String> {
+    let FOValue::Variant { label, payload } = req else {
         return Err(format!("probe request must be a variant, got {req:?}"));
     };
     match label.as_str() {
@@ -968,10 +968,14 @@ impl Transport for IdentityTransport {
             .send(Frame::Event(id, Event::Report(report)));
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Transport::probe signature is fixed by the trait; the sibling impl consumes `reading` into a Frame"
+    )]
     fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
         self.check_not_reentrant();
         let mut engine = self.engine.lock();
-        answer_probe(&mut engine.shell, reading)
+        answer_probe(&mut engine.shell, &reading)
     }
 
     fn control(&self) -> &ControlSender {

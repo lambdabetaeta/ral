@@ -363,7 +363,7 @@ pub fn run(
     // each still records its own trace, the behaviour we want everywhere.
     let fleet = Fleet::new(
         session.agents.clone(),
-        FleetBus::per_turn(session.inbox()),
+        FleetBus::per_turn(&session.inbox()),
         session.focus_handle(),
         session.interactive(),
         engine,

@@ -176,7 +176,7 @@ pub(super) fn cmd_help(app: &mut App) {
         .collect();
     let width = names.iter().map(String::len).max().unwrap_or(0);
     for (n, c) in names.iter().zip(SLASH_COMMANDS) {
-        app.push_note(id, format!("{n:<width$}   {}", c.help));
+        app.push_note(id, &format!("{n:<width$}   {}", c.help));
     }
 }
 
@@ -196,12 +196,12 @@ pub(super) fn cmd_copy(app: &mut App) {
     let id = app.tabs.root();
     let reply = app.latest_reply();
     if reply.is_empty() {
-        app.push_error(id, "no reply to copy yet".into());
+        app.push_error(id, "no reply to copy yet");
         return;
     }
     let payload = tail_bytes(&reply, YANK_CAP);
     if let Err(e) = osc52_copy(payload) {
-        app.push_error(id, format!("clipboard write failed: {e}"));
+        app.push_error(id, &format!("clipboard write failed: {e}"));
         return;
     }
     let note = if payload.len() < reply.len() {
@@ -212,7 +212,7 @@ pub(super) fn cmd_copy(app: &mut App) {
             reply.lines().count()
         )
     };
-    app.push_note(id, note);
+    app.push_note(id, &note);
 }
 
 /// Write the focused tab's user view — its rendered `user.log` — to `arg`, a
@@ -223,24 +223,24 @@ pub(super) fn cmd_copy(app: &mut App) {
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.root();
     if arg.is_empty() {
-        app.push_error(id, "usage: /export <path>".into());
+        app.push_error(id, "usage: /export <path>");
         return;
     }
     let dest = resolve_export_path(arg, info.cwd);
     if dest.exists() {
-        app.push_error(id, format!("refusing to overwrite {}", dest.display()));
+        app.push_error(id, &format!("refusing to overwrite {}", dest.display()));
         return;
     }
     let src = match app.flush_focused_log() {
         Ok(p) => p,
         Err(e) => {
-            app.push_error(id, format!("could not flush transcript: {e}"));
+            app.push_error(id, &format!("could not flush transcript: {e}"));
             return;
         }
     };
     match viewport::export_log(&src, &dest) {
-        Ok(_) => app.push_note(id, format!("[exported user view to {}]", dest.display())),
-        Err(e) => app.push_error(id, format!("could not write {}: {e}", dest.display())),
+        Ok(_) => app.push_note(id, &format!("[exported user view to {}]", dest.display())),
+        Err(e) => app.push_error(id, &format!("could not write {}: {e}", dest.display())),
     }
 }
 
@@ -252,7 +252,7 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
     if let Err(reject) = mailbox.push(InboxMsg::Command(cmd)) {
         tui.app
-            .push_error(tui.app.tabs.root(), format!("command dropped: {reject}"));
+            .push_error(tui.app.tabs.root(), &format!("command dropped: {reject}"));
     }
 }
 
@@ -293,17 +293,17 @@ pub(super) fn route_submit(
         Some((cmd, _)) if cmd.name == "/close" => {
             if focused == root {
                 tui.app
-                    .push_error(root, "nothing to close here; /quit ends the session".into());
+                    .push_error(root, "nothing to close here; /quit ends the session");
             } else if !tui.app.tabs.is_branch(focused) {
                 tui.app
-                    .push_error(focused, "/close closes a branch, not this tab".into());
+                    .push_error(focused, "/close closes a branch, not this tab");
             } else {
                 ctx.agents.remove_subtree(focused);
             }
         }
         Some((cmd, _)) if focused != root => {
             tui.app
-                .push_error(focused, format!("{} is not available on this tab", cmd.name));
+                .push_error(focused, &format!("{} is not available on this tab", cmd.name));
         }
         Some((cmd, arg)) => match cmd.name {
             "/help" => cmd_help(&mut tui.app),
@@ -347,7 +347,7 @@ pub(super) fn route_submit(
             }
             "/discuss" => {
                 if arg.is_empty() {
-                    tui.app.push_error(focused, "usage: /discuss <prompt>".into());
+                    tui.app.push_error(focused, "usage: /discuss <prompt>");
                     return Ok(());
                 }
                 push_command(tui, mailbox, text.clone());
@@ -360,7 +360,7 @@ pub(super) fn route_submit(
         None if unrecognized.is_some() => {
             let head = unrecognized.expect("checked Some above");
             tui.app
-                .push_error(focused, format!("unknown command: {head} (see /help)"));
+                .push_error(focused, &format!("unknown command: {head} (see /help)"));
         }
         // A plain prompt steers the focused tab: the trunk's session inbox, or
         // the focused sub-agent's mailbox.  An agent that died between focus and

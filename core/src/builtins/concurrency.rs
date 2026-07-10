@@ -79,12 +79,12 @@ impl EventSink for DeferredSurface {
 /// worker's `outcome` — `` `ok ``, `` `err `` (the [`break_record`]), or
 /// `` `panic `` (the message).  Core names the event; exarch names its
 /// appearance.  It carries no return value — the model `await`s for that.
-fn done_event(cmd: &str, outcome: Value) -> FOValue {
+fn done_event(cmd: &str, outcome: &Value) -> FOValue {
     // `outcome` is always one of the three statically-built variants below
     // (`` `ok `` over `Unit`, `` `err `` over `break_record`'s all-scalar
     // map, `` `panic `` over a `String`) — never the block's actual return
     // value, so it is provably first-order.
-    let outcome = FOValue::try_from(&outcome)
+    let outcome = FOValue::try_from(outcome)
         .expect("spawn outcome tag is statically first-order");
     FOValue::Variant {
         label: "done".into(),
@@ -113,7 +113,7 @@ impl DeferredSurface {
     /// `await`/`race`.  The batch is a fresh clone so it is independent of
     /// whatever an eliminator later drains from the same buffer
     /// (`complete_handle`'s `mem::take`).
-    fn flush(&self, joined: &Arc<Mutex<bool>>, cmd: &str, outcome: Value) {
+    fn flush(&self, joined: &Arc<Mutex<bool>>, cmd: &str, outcome: &Value) {
         let Some(deferred) = self.deferred.as_ref() else {
             return;
         };
@@ -148,7 +148,7 @@ impl FlushGuard {
     /// Disarm and flush with `outcome` on a non-panicking exit.  Taking the
     /// clone here, before the clean path sends the result, keeps the boundary's
     /// copy independent of the eliminators' later `mem::take`.
-    fn settle(mut self, outcome: Value) {
+    fn settle(mut self, outcome: &Value) {
         self.armed = false;
         self.surface.flush(&self.joined, &self.cmd, outcome);
     }
@@ -161,7 +161,7 @@ impl Drop for FlushGuard {
                 label: "panic".into(),
                 payload: Some(Box::new(Value::String("spawned thread panicked".into()))),
             };
-            self.surface.flush(&self.joined, &self.cmd, panic);
+            self.surface.flush(&self.joined, &self.cmd, &panic);
         }
     }
 }
@@ -335,7 +335,7 @@ where
                 payload: Some(Box::new(break_record(e))),
             },
         };
-        guard.settle(outcome);
+        guard.settle(&outcome);
         let _ = tx.send(result);
         // The worker's own settle mark, strictly *after* the send so
         // `Completed` always implies an observable outcome in the channel

@@ -254,7 +254,7 @@ impl Shell {
                 ReapCause::Backstop => "backstop",
                 ReapCause::Retention => "retention",
             };
-            self.surface(Value::Variant {
+            self.surface(&Value::Variant {
                 label: "notice".into(),
                 payload: Some(Box::new(Value::map(vec![
                     (
@@ -270,7 +270,7 @@ impl Shell {
             });
         }
         for notice in self.take_large_binding_notices() {
-            self.surface(Value::Variant {
+            self.surface(&Value::Variant {
                 label: "notice".into(),
                 payload: Some(Box::new(Value::map(vec![
                     (
@@ -410,6 +410,10 @@ impl Shell {
 
     /// End an explicit terminal loan, restoring the access recorded when it
     /// began. Pair with [`Self::begin_terminal_loan`].
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "TerminalLoan is a single-use RAII token; taking it by value surrenders it so a loan cannot be ended twice"
+    )]
     pub fn end_terminal_loan(&mut self, loan: TerminalLoan) {
         self.turn.terminal_access = loan.0;
     }

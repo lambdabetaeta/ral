@@ -168,7 +168,7 @@ impl Frontend for RustylineFrontend {
             flush_pending_messages(&self.runtime);
             return Read::Line(raw);
         };
-        match dispatch_keybinding(pk, &raw, shell, &self.runtime, self.edit_mode.into()) {
+        match dispatch_keybinding(&pk, &raw, shell, &self.runtime, self.edit_mode.into()) {
             KeybindingOutcome::Accept(line) => {
                 flush_pending_messages(&self.runtime);
                 Read::Line(line)

@@ -255,7 +255,7 @@ fn run_external(
     let stdin_guard = command::install_stdin_redirect(redirects, shell)?;
     let shown = id.shown.clone();
     let result = audit::frame_call(&shown, args, shell, move |shell| {
-        command::run(id, args, redirects, shell)
+        command::run(&id, args, redirects, shell)
     });
     stdin_guard.restore(shell);
     result

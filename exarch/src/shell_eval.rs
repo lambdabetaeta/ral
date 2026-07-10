@@ -354,7 +354,7 @@ pub fn run_shell(
     cmd: &str,
     timeout_secs: u64,
     emit: &Emitter,
-    pins: Option<PinDigests>,
+    pins: Option<&PinDigests>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -395,7 +395,7 @@ pub fn run_shell(
                 if reject_protected_pin(&kind, emit) {
                     return;
                 }
-                if let Some(pins) = &pins
+                if let Some(pins) = pins
                     && let Ok(mut m) = pins.lock()
                 {
                     match &kind {

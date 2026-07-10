@@ -99,7 +99,7 @@ pub(crate) fn spawn(
 /// Uses `compat::not_found_hint` for `NotFound` so the error message mentions
 /// PATH issues and platform conventions.  Exit status 127 matches the POSIX
 /// convention for "command not found".
-pub(crate) fn spawn_error(name: &str, e: std::io::Error) -> Break {
+pub(crate) fn spawn_error(name: &str, e: &std::io::Error) -> Break {
     use crate::process::{CommandFailure, SpawnFailure};
 
     let failure = match e.kind() {
@@ -118,7 +118,7 @@ pub(crate) fn spawn_error(name: &str, e: std::io::Error) -> Break {
 }
 
 /// Wrap an I/O error from pipe creation/cloning into a [`Break`].
-pub(super) fn pipe_err(e: std::io::Error) -> Break {
+pub(super) fn pipe_err(e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("pipe: {e}"), 1))
 }
 
@@ -127,7 +127,7 @@ pub(super) fn pipe_err(e: std::io::Error) -> Break {
 /// and any other kind as the underlying error.  `ctx` is the path the
 /// operation touched, used as the message prefix.  The error carries exit
 /// code 1.
-pub(super) fn io_error(ctx: &str, e: std::io::Error) -> Break {
+pub(super) fn io_error(ctx: &str, e: &std::io::Error) -> Break {
     let msg = match e.kind() {
         std::io::ErrorKind::NotFound => format!("{ctx}: no such file or directory"),
         std::io::ErrorKind::PermissionDenied => format!("{ctx}: permission denied"),

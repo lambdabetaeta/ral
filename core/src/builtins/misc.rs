@@ -615,7 +615,7 @@ pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
 /// with no sink (e.g. a bare REPL) this is the identity and returns Unit.
 pub(super) fn builtin_surface(args: &[Value], shell: &Shell) -> Settled<Value> {
     if let Some(event) = args.first() {
-        shell.surface(event.clone());
+        shell.surface(event);
     }
     Ok(Value::Unit)
 }

@@ -76,7 +76,7 @@ fn main() -> ExitCode {
         return ExitCode::from(code);
     }
 
-    let mode = parse_mode(stripped);
+    let mode = parse_mode(&stripped);
 
     // Refuse to run setuid: the shell inherits the caller's environment and
     // must not run with elevated privileges the user did not request.
@@ -98,7 +98,7 @@ fn main() -> ExitCode {
     run_mode(mode)
 }
 
-fn parse_mode(args: Vec<String>) -> Mode {
+fn parse_mode(args: &[String]) -> Mode {
     Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(args)))
         .into_mode()
 }
@@ -116,7 +116,7 @@ fn run_mode(mode: Mode) -> ExitCode {
             code,
             script_args,
             batch,
-        } => run_batch("-c", code, script_args, batch),
+        } => run_batch("-c", &code, script_args, batch),
     }
 }
 
@@ -139,7 +139,7 @@ fn run_stdin_script(opts: InteractiveOpts) -> ExitCode {
     let source = ral_core::source::normalize_source_text(source);
     run_batch(
         "<stdin>",
-        source,
+        &source,
         Vec::new(),
         BatchOpts {
             run: opts.run,
@@ -161,5 +161,5 @@ fn run_script(path: &str, script_args: Vec<String>, batch: BatchOpts) -> ExitCod
         }
     };
     let source = ral_core::source::normalize_source_text(source);
-    run_batch(path, source, script_args, batch)
+    run_batch(path, &source, script_args, batch)
 }

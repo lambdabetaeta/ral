@@ -136,6 +136,7 @@ pub fn resources_card(rows: &[ProbeRow]) -> Card {
 /// The probed agent's viewport window, figures beside the caps that bound
 /// them — one accumulator, one struct, so a figure can never drift apart
 /// from the cap it is measured against.
+#[derive(Clone, Copy)]
 pub struct ViewportFigures {
     /// Scrollback blocks currently retained in heap.
     pub blocks: u64,
@@ -156,6 +157,7 @@ pub struct ViewportFigures {
 /// The tab count is a distinct row
 /// (`fleet.agents`) even when its figure coincides with `live`, because
 /// the registry, not the tab bar, is the authority on agents.
+#[derive(Clone, Copy)]
 pub struct ViewFigures {
     /// Views whose agent still runs — one per live agent, unbounded.
     pub live: u64,
@@ -174,6 +176,7 @@ pub struct ViewFigures {
 /// aggregate, so cramming it into `cap` would read as a false ceiling on a
 /// count or a sum it does not bound — the cap is named in `bus.bytes`'s
 /// note instead, honest cap-less rows over a silently mismatched pair.
+#[derive(Clone, Copy)]
 pub struct BusFigures {
     /// Queue entries — a merged run and a reserved kind each count as one.
     pub depth: u64,

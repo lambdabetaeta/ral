@@ -43,6 +43,7 @@ use unicode_width::UnicodeWidthStr;
 /// [`super::block::Block`] — the projection reads these without copying the
 /// script.  The viewport pairs them with the call's rendered effect rows to
 /// build a [`Call`].
+#[derive(Clone, Copy)]
 pub(super) struct CallParts<'a> {
     pub(super) intent: &'a str,
     pub(super) tool: &'a str,
@@ -186,7 +187,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let lead_w = UnicodeWidthStr::width(head.content.as_ref()) + GAP;
     let mut ls = vec![Line::default()];
     ls.extend(pinned_intent(
-        vec![head, Span::raw(INTENT_INDENT)],
+        &[head, Span::raw(INTENT_INDENT)],
         lead_w,
         // The viewport prepends the rail to this row alone, so continuations
         // bake in its width and the bars target `bar_col - RAIL_W` to land at
@@ -194,7 +195,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         RAIL_W + lead_w,
         &tip.intent,
         tip.context,
-        sparkline(calls),
+        &sparkline(calls),
         calls.len().min(MAX_SPARKLINE),
         bar_col(width).saturating_sub(RAIL_W),
     ));
@@ -281,12 +282,12 @@ fn full_list(calls: &[Call], source: bool, width: usize) -> Vec<Line<'static>> {
 /// line owns it), so the indent and bar column need no [`RAIL_W`] offset.
 fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
     pinned_intent(
-        vec![Span::raw(INTENT_INDENT)],
+        &[Span::raw(INTENT_INDENT)],
         GAP,
         GAP,
         &call.intent,
         call.context,
-        bar(call.magnitude),
+        &bar(call.magnitude),
         1,
         bar_col(width),
     )
@@ -304,12 +305,12 @@ fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
 /// encodes; only the intent ink drains its saturation).
 #[allow(clippy::too_many_arguments)]
 fn pinned_intent(
-    lead: Vec<Span<'static>>,
+    lead: &[Span<'static>],
     lead_w: usize,
     cont_indent: usize,
     intent: &str,
     context: u8,
-    bars: Span<'static>,
+    bars: &Span<'static>,
     bars_w: usize,
     bar_last: usize,
 ) -> Vec<Line<'static>> {
@@ -325,7 +326,7 @@ fn pinned_intent(
             let pad = bars_left
                 .saturating_sub(lead_w + UnicodeWidthStr::width(chunk.as_str()))
                 .max(GAP);
-            let mut spans = lead.clone();
+            let mut spans = lead.to_vec();
             spans.push(Span::styled(chunk, ink));
             spans.push(Span::raw(" ".repeat(pad)));
             spans.push(bars.clone());

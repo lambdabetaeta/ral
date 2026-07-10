@@ -20,6 +20,7 @@ use std::process::Command;
 /// What [`sandboxed_command`] should run under the OS sandbox.  A host
 /// program is its resolved path/bare name; a bundled tool is run as a
 /// child placement of ral itself (`ral --ral-bundled-tool <tool> …`).
+#[derive(Clone, Copy)]
 pub(crate) enum LaunchTarget<'a> {
     Host { program: &'a str },
     BundledTool { tool: &'a str },

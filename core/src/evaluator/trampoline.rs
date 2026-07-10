@@ -133,7 +133,6 @@ fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Se
             Value::Block { body, captured } => {
                 let block_tail = if args.is_empty() { Tail::Yes } else { Tail::No };
                 let body = body.clone();
-                let captured = captured.clone();
                 let result =
                     super::eval_block(&body, captured, block_tail, shell).map_err(Control::from);
                 if let Some(done) = step(result, &mut callee, &mut args, shell) {

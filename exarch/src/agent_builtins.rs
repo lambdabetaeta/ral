@@ -246,7 +246,7 @@ fn rows_of(body: &str) -> Vec<String> {
 /// shape the redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
 /// exception: they read silently and speak only their `write` event.
 fn surface_read(shell: &Shell, path: &str) {
-    shell.surface(Value::map(vec![
+    shell.surface(&Value::map(vec![
         ("io".into(), Value::String("read".into())),
         ("path".into(), Value::String(path.to_string())),
     ]));
@@ -395,7 +395,7 @@ fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let pattern = args[0].to_string();
 
     // One logical search, one surface — the scope is the cwd the walk roots at.
-    shell.surface(Value::map(vec![
+    shell.surface(&Value::map(vec![
         ("io".into(), Value::String("grep".into())),
         ("scope".into(), Value::String(".".into())),
         ("pattern".into(), Value::String(pattern.clone())),
@@ -613,7 +613,7 @@ fn surface_write(shell: &Shell, path: &str, old: &str, new: &str) {
     if fits {
         fields.push(("old_bytes".into(), Value::Bytes(old.as_bytes().to_vec())));
     }
-    shell.surface(Value::map(fields));
+    shell.surface(&Value::map(fields));
 }
 
 /// Read a file as a UTF-8 string for the witness layer, gating the read through
@@ -1013,7 +1013,7 @@ fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             };
             // Surface only once the body is in hand, so the card never claims
             // a load that did not happen.
-            shell.surface(Value::map(vec![
+            shell.surface(&Value::map(vec![
                 ("io".into(), Value::String("skill".into())),
                 ("name".into(), Value::String(name)),
                 (
@@ -1055,7 +1055,7 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     }
     #[allow(clippy::cast_possible_wrap, reason="skill-list line count bounded; no i64 wrap")]
     let count = out.lines().count() as i64;
-    shell.surface(Value::map(vec![
+    shell.surface(&Value::map(vec![
         ("io".into(), Value::String("skill-list".into())),
         ("count".into(), Value::Int(count)),
     ]));

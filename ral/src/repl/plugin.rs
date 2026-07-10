@@ -231,6 +231,7 @@ pub(super) struct PendingKeybinding {
 /// fault; `source` is the plugin file's text, installed as that root context
 /// so a fault inside the handler resolves to the right line of the plugin
 /// file and renders with a source arrow, exactly as a command fault does.
+#[derive(Clone, Copy)]
 pub(super) struct HookFor<'a> {
     pub(super) name: &'a str,
 }

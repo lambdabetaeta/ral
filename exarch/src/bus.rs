@@ -1851,14 +1851,14 @@ pub struct FleetBus {
 impl FleetBus {
     /// A session-lived bus over `inbox` (the TUI root's inbox).  Emitters
     /// minted from it are session-lived, so detached async children stream.
-    pub fn session(inbox: Inbox) -> Self {
+    pub fn session(inbox: &Inbox) -> Self {
         Self::build(inbox.mailbox(), true)
     }
 
     /// A per-turn bus over `inbox` (headless / tests).  Emitters are not
     /// session-lived, so async children stay muted on the display (they still
     /// record their own trace).
-    pub fn per_turn(inbox: Inbox) -> Self {
+    pub fn per_turn(inbox: &Inbox) -> Self {
         Self::build(inbox.mailbox(), false)
     }
 
@@ -2436,7 +2436,7 @@ mod tests {
         let mut sink = CountSink(0);
         // A session-lived bus, as the TUI uses it: its sender outlives the
         // turn, so a detached worker's clone never disconnects the channel.
-        let bus = FleetBus::session(Inbox::new());
+        let bus = FleetBus::session(&Inbox::new());
         // Outlives `pump`: holds an `Emitter` clone whose `Sender` keeps the
         // channel from ever disconnecting, exactly as a detached worker would.
         let holder: Mutex<Option<Emitter>> = Mutex::new(None);
@@ -2711,7 +2711,7 @@ mod tests {
             ..Usage::default()
         };
 
-        let bus = FleetBus::per_turn(Inbox::new());
+        let bus = FleetBus::per_turn(&Inbox::new());
         let root = bus.emitter(0, Transcript::none());
         // The muted child: a fresh dead channel, but the root run's meter.
         let child = root.muted_child(1, Transcript::none());

@@ -8,6 +8,7 @@ use std::time::Duration;
 /// The rule line's right-side status readout: model name, the ctx%
 /// value-ramp inputs (`last_input` against `context_window`), and the
 /// running token `usage` figures.
+#[derive(Clone, Copy)]
 pub(super) struct StatusReadout<'a> {
     pub(super) usage: &'a Usage,
     pub(super) last_input: u64,

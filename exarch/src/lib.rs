@@ -291,7 +291,7 @@ pub fn run() -> Result<(), String> {
     } else {
         tui::run(
             &mut session,
-            provider,
+            &provider,
             &info,
             &store,
             &mut catalog,

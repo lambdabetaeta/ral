@@ -165,7 +165,7 @@ pub(crate) struct DecodedResponse {
 ///
 /// Shared by both serial-boundary crossings: the remote-eval response
 /// edge here, and the pipeline value edge in `runtime/pipeline/helper`.
-pub(crate) fn transfer_error(err: Error) -> Error {
+pub(crate) fn transfer_error(err: &Error) -> Error {
     let hint = err.hint.clone().unwrap_or_else(|| {
         "encode the value first, or avoid transferring live handles across a process boundary"
             .to_string()
@@ -381,7 +381,7 @@ pub(crate) fn run_child_eval(
                 match SerialValue::from_runtime(&value, &mut ctx) {
                     Ok(serial) => Some(serial),
                     Err(e) => {
-                        let outcome = break_to_outcome(Break::Error(transfer_error(e)));
+                        let outcome = break_to_outcome(Break::Error(transfer_error(&e)));
                         return finish(ctx, outcome, last_status, audit_nodes, None);
                     }
                 }
@@ -722,7 +722,7 @@ mod tests {
         });
         let mut ctx = InternCtx::new();
         let err =
-            transfer_error(SerialValue::from_runtime(&handle, &mut ctx).expect_err("must fail"));
+            transfer_error(&SerialValue::from_runtime(&handle, &mut ctx).expect_err("must fail"));
         assert!(err.message.contains("cannot cross the process boundary"));
         assert!(err.message.contains("value"));
     }

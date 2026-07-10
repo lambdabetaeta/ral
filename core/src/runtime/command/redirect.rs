@@ -247,7 +247,7 @@ fn open_atomic(
         .prefix(".")
         .suffix(".ral-write.tmp")
         .tempfile_in(parent)
-        .map_err(|e| io_error(path, e))?;
+        .map_err(|e| io_error(path, &e))?;
     // tempfile defaults to 0600 for security; redirects expect umask-style
     // permissions.  Preserve the existing target's mode if it exists; for a
     // new file, mirror what a plain `open(2)` create would produce —
@@ -274,14 +274,14 @@ fn open_atomic(
         let mut perms = tmp
             .as_file()
             .metadata()
-            .map_err(|e| io_error(path, e))?
+            .map_err(|e| io_error(path, &e))?
             .permissions();
         perms.set_mode(mode);
         tmp.as_file()
             .set_permissions(perms)
-            .map_err(|e| io_error(path, e))?;
+            .map_err(|e| io_error(path, &e))?;
     }
-    let file = tmp.as_file().try_clone().map_err(|e| io_error(path, e))?;
+    let file = tmp.as_file().try_clone().map_err(|e| io_error(path, &e))?;
     Ok((file, AtomicCommit { tmp, target }))
 }
 
@@ -315,13 +315,13 @@ pub(crate) fn open_file(
             .append(true)
             .open(rp.as_path())
             .map(|f| (f, None))
-            .map_err(|e| io_error(path, e)),
+            .map_err(|e| io_error(path, &e)),
         RedirectMode::StreamWrite => std::fs::File::create(rp.as_path())
             .map(|f| (f, None))
-            .map_err(|e| io_error(path, e)),
+            .map_err(|e| io_error(path, &e)),
         RedirectMode::Read => std::fs::File::open(rp.as_path())
             .map(|f| (f, None))
-            .map_err(|e| io_error(path, e)),
+            .map_err(|e| io_error(path, &e)),
         // A here-string carries its payload in the redirect itself; it is
         // routed by `install_stdin_redirect` and never opens a file.
         RedirectMode::HereString => {
@@ -334,7 +334,7 @@ pub(crate) fn open_file(
             } else {
                 std::fs::File::create(rp.as_path())
                     .map(|f| (f, None))
-                    .map_err(|e| io_error(path, e))
+                    .map_err(|e| io_error(path, &e))
             }
         }
     }
@@ -352,7 +352,7 @@ pub(crate) fn open_file(
 pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     use std::io::Write as _;
     let (mut file, commit) = open_file(path, RedirectMode::Write, shell)?;
-    file.write_all(bytes).map_err(|e| io_error(path, e))?;
+    file.write_all(bytes).map_err(|e| io_error(path, &e))?;
     match commit {
         Some(commit) => commit
             .commit()
@@ -728,12 +728,12 @@ pub(crate) fn install_stdin_redirect(
         RedirectMode::Read => {
             let rp = shell.resolve(word);
             shell.check_fs_read(&rp)?;
-            let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(word, e))?;
+            let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(word, &e))?;
             // Door 1 — READ: announce the open eagerly so the read event
             // precedes the body/exec it feeds (e.g. the read card before
             // exec in `cat < a`).  Read has no outcome: a failed open
             // returns above before this point.
-            shell.emit_io(io_event::read(word));
+            shell.emit_io(&io_event::read(word));
             crate::io::Source::File(f)
         }
         RedirectMode::HereString => {

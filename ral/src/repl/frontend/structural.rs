@@ -467,7 +467,7 @@ impl StructuralFrontend {
             // here, the edited buffer reappearing on the next read).
             Composed::Keybinding(pk) => {
                 let buf = prompt.text();
-                match dispatch_keybinding(pk, &buf, shell, &self.runtime, keymap) {
+                match dispatch_keybinding(&pk, &buf, shell, &self.runtime, keymap) {
                     KeybindingOutcome::Accept(line) => Read::Line(line),
                     KeybindingOutcome::Edit(text, cursor) => {
                         Read::Edit(EditBuffer { text, cursor })

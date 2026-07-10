@@ -145,7 +145,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
             summary: label.clone(),
         });
         let mailbox = session.mailbox();
-        let content = match session.schedules.schedule(trigger, prompt, label, mailbox) {
+        let content = match session.schedules.schedule(trigger, prompt, label, &mailbox) {
             Ok(sid) => format!("scheduled (id {sid})"),
             Err(e) => format!("could not schedule: {e}"),
         };

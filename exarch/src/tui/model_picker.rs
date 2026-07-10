@@ -56,7 +56,7 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
         .provider(tui.app.tabs.focused())
         .map(|p| p.current().tuning().clone())
         .unwrap_or_default();
-    let mut picker = Picker::new(available, subscription, initial_tuning, provider::caps_for);
+    let mut picker = Picker::new(available, subscription, &initial_tuning, provider::caps_for);
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
     // network. A ChatGPT plan login has no catalog endpoint, so its curated plan
@@ -104,7 +104,7 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
     let outcome = drive_picker(tui, store, ctx.catalog, rx.as_ref());
     tui.app.picker = None;
     if let Some((id, model, tuning, route)) = outcome {
-        apply_model_switch(tui, ctx, &id, &model, &tuning, route);
+        apply_model_switch(tui, ctx, &id, &model, &tuning, route.as_ref());
     }
     Ok(())
 }
@@ -211,7 +211,7 @@ fn drive_picker(
                     Ok(id) => return Some((id, query, tuning, route)),
                     Err(e) => {
                         let root = tui.app.tabs.root();
-                        tui.app.push_error(root, e);
+                        tui.app.push_error(root, &e);
                     }
                 }
             }
@@ -237,7 +237,7 @@ fn apply_model_switch(
     provider_id: &provider::ProviderId,
     model: &str,
     tuning: &provider::Tuning,
-    route: Option<String>,
+    route: Option<&String>,
 ) {
     let store = ctx.store;
     let info = ctx.info;
@@ -246,7 +246,7 @@ fn apply_model_switch(
     let Some(cred) = store.get(provider_id).cloned() else {
         tui.app.push_error(
             id,
-            format!("{} has no resolved credential", provider_id.label()),
+            &format!("{} has no resolved credential", provider_id.label()),
         );
         return;
     };
@@ -255,7 +255,7 @@ fn apply_model_switch(
     let focused = tui.app.tabs.focused();
     let Some(provider) = ctx.agents.provider(focused) else {
         tui.app
-            .push_error(id, "the focused agent is no longer live".to_string());
+            .push_error(id, "the focused agent is no longer live");
         return;
     };
     // Capture the current provider's max_tokens_override before we swap,
@@ -269,7 +269,7 @@ fn apply_model_switch(
         &cred,
         current_override,
         tuning.clone(),
-        route.clone(),
+        route.cloned(),
     ));
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
@@ -279,14 +279,14 @@ fn apply_model_switch(
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(
         &state_dir,
-        &state::State::new(provider_id, model, tuning, route.as_deref()),
+        &state::State::new(provider_id, model, tuning, route.map(String::as_str)),
     ) {
         tui.app
-            .push_error(id, format!("could not persist selection: {e}"));
+            .push_error(id, &format!("could not persist selection: {e}"));
     }
     emit.emit(Kind::SystemNote(format!(
         "[Switched to {label} {model}{}]",
-        tuning_suffix(tuning, route.as_deref())
+        tuning_suffix(tuning, route.map(String::as_str))
     )));
 }
 

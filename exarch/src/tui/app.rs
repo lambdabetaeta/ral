@@ -553,15 +553,15 @@ impl App {
     /// legend row, a clipboard or export ack) that names nothing about the run,
     /// so it is *drawn, not recorded*: it never becomes an event, the way the
     /// rendered `Kind::SystemNote` does at the emit seam.
-    pub(super) fn push_note(&mut self, id: AgentId, text: String) {
-        self.push_chrome(id, RailShape::Plain, line::note(&text));
+    pub(super) fn push_note(&mut self, id: AgentId, text: &str) {
+        self.push_chrome(id, RailShape::Plain, line::note(text));
     }
 
     /// Draw an error line straight to the viewport — the UI-thread twin of
     /// [`Agent::note_error`], for the view commands that surface their own
     /// failures.  Drawn, not recorded.
-    pub(super) fn push_error(&mut self, id: AgentId, message: String) {
-        self.push_chrome(id, RailShape::Error, line::error(&message));
+    pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
+        self.push_chrome(id, RailShape::Error, line::error(message));
     }
     pub fn key(&mut self, k: KeyEvent, can_edit: bool) {
         if k.kind != KeyEventKind::Press {

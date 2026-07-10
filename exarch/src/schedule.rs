@@ -407,7 +407,7 @@ impl ScheduleRegistry {
         trigger: Trigger,
         prompt: String,
         label: Option<String>,
-        mailbox: Mailbox,
+        mailbox: &Mailbox,
     ) -> Result<ScheduleId, String> {
         let delay = trigger
             .next_delay()
@@ -416,7 +416,7 @@ impl ScheduleRegistry {
         let id = g.next_id;
         g.next_id += 1;
         let label = label.unwrap_or_else(|| format!("sched-{id}"));
-        let deadline = self.arm_deadline(id, &mailbox, delay);
+        let deadline = self.arm_deadline(id, mailbox, delay);
         g.entries.insert(
             id,
             Entry {
@@ -654,7 +654,7 @@ mod tests {
                 },
                 "run tests".into(),
                 Some("nightly".into()),
-                inbox.mailbox(),
+                &inbox.mailbox(),
             )
             .unwrap();
         let live = reg.list();
@@ -674,7 +674,7 @@ mod tests {
             Trigger::After(Duration::from_millis(40)),
             "ping".into(),
             None,
-            inbox.mailbox(),
+            &inbox.mailbox(),
         )
         .unwrap();
         let mut fired = None;
@@ -710,7 +710,7 @@ mod tests {
             },
             "x".into(),
             None,
-            inbox.mailbox(),
+            &inbox.mailbox(),
         )
         .unwrap();
         assert_eq!(reg.list().len(), 1);

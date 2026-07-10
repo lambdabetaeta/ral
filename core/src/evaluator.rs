@@ -137,11 +137,11 @@ pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Val
 /// [`apply`] on a `Value::Thunk`.
 pub(crate) fn eval_block(
     body: &Arc<Comp>,
-    captured: Arc<Env>,
+    captured: &Arc<Env>,
     tail: Tail,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    shell.with_thunk_body(ThunkBody::Block, &captured, |shell, mobile| {
+    shell.with_thunk_body(ThunkBody::Block, captured, |shell, mobile| {
         crate::runtime::transport::dispatch(body, mobile, tail, shell)
     })
 }
@@ -171,7 +171,7 @@ mod tests {
         let body = Arc::new(crate::compile(source).expect("compile"));
         let mut shell = Shell::default();
         let captured = shell.snapshot();
-        let _ = eval_block(&body, captured, Tail::No, &mut shell);
+        let _ = eval_block(&body, &captured, Tail::No, &mut shell);
         assert!(
             shell.mobile.scope.get("leak_block").is_none(),
             "block boundary must discard `let` bindings"

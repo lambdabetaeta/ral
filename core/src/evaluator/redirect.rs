@@ -209,7 +209,7 @@ fn install_sink_redirects(
 /// where no body runs and any already-opened atomic temp is discarded.
 fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
     for intent in intents {
-        shell.emit_io(io_event::write(
+        shell.emit_io(&io_event::write(
             &intent.path,
             intent.mode,
             WriteOutcome::Failed,
@@ -301,7 +301,7 @@ impl<'a> RedirectFrame<'a> {
                 outcome = WriteOutcome::Committed;
                 new_bytes = None;
             }
-            self.shell.emit_io(io_event::write(
+            self.shell.emit_io(&io_event::write(
                 &intent.path,
                 intent.mode,
                 outcome,

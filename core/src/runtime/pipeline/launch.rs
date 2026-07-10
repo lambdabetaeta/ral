@@ -167,6 +167,10 @@ struct SpawnedStage {
 /// or a helper stage (a bundled tool or a ral computation).  The route
 /// is consumed whole — its edge ends move into the spawned child's
 /// stdio and protocol channels.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "LaunchCx bundles unique `&mut` borrows; by-value transfers them so callees get mutable access — a shared `&LaunchCx` cannot yield `&mut`"
+)]
 fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
     spec: &StageSpec,
@@ -394,7 +398,7 @@ fn launch_external_stage_direct(
         },
         shell,
         park_on_stop,
-        |e| command::spawn_error(&rc.shown, e),
+        |e| command::spawn_error(&rc.shown, &e),
     )
 }
 

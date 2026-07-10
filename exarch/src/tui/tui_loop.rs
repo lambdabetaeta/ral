@@ -148,7 +148,7 @@ budget is too low to seat both"
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut Agent,
-    provider: Arc<Provider>,
+    provider: &Arc<Provider>,
     info: &banner::SessionInfo<'_>,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
@@ -169,7 +169,7 @@ pub fn run(
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
     let status_provider = oauth::provider_label(provider.subscription(), provider.id().label());
-    tui.app.update_live_model(&provider, &status_provider);
+    tui.app.update_live_model(provider, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
     // registry and focus handle.  Input, the queued-user strip, async-agent
@@ -179,7 +179,7 @@ pub fn run(
     tui.app.tabs.bind_focus(session.focus_handle());
     let fleet = Fleet::new(
         session.agents.clone(),
-        FleetBus::session(session.inbox()),
+        FleetBus::session(&session.inbox()),
         session.focus_handle(),
         session.interactive(),
         engine,
@@ -188,7 +188,7 @@ pub fn run(
         session.seed(s);
     }
     tui.app
-        .banner(tui.guard.term(), info, &provider)
+        .banner(tui.guard.term(), info, provider)
         .map_err(|e| e.to_string())?;
 
     // The worker thread runs the trunk via `Agent::drive`, parking on an empty

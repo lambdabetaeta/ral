@@ -86,7 +86,7 @@ pub(crate) struct StageValue {
 /// Pack one value boundary for transport between helpers or back to the parent.
 pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
     let mut ctx = InternCtx::new();
-    let value = SerialValue::from_runtime(value, &mut ctx).map_err(transfer_error)?;
+    let value = SerialValue::from_runtime(value, &mut ctx).map_err(|e| transfer_error(&e))?;
     Ok(StageValue {
         scope_table: ctx.scope_table,
         value,
@@ -296,9 +296,17 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
 // Helper-side error reporters.  Each consumes a `String` error and
 // emits a `cmd_error`, so call sites can `Result::map_err(report_*)?`
 // inside an IIFE that propagates `Err(())` to a single `unwrap_or(1)`.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "point-free `map_err` target: takes the error String flowing off the fallible edge"
+)]
 fn report_helper_env_err(err: String) {
     crate::diagnostic::cmd_error("ral", &err);
 }
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "point-free `map_err` target: takes the error String flowing off the fallible edge"
+)]
 fn report_helper_setup_err(err: String) {
     crate::diagnostic::cmd_error("ral", &format!("pipeline helper: {err}"));
 }

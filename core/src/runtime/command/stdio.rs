@@ -247,7 +247,7 @@ pub(super) fn wire_stdout_file(
     };
     let (file, commit) = open_file(path, *mode, shell)?;
     if commit.is_none() {
-        shell.emit_io(io_event::write(
+        shell.emit_io(&io_event::write(
             path,
             *mode,
             WriteOutcome::Committed,
@@ -258,7 +258,7 @@ pub(super) fn wire_stdout_file(
     #[cfg(windows)]
     let stderr_dup = if matches!(plan.stderr_route, Some(StderrRoute::Stdout)) {
         Some(crate::process::StdioSpec::from_file(
-            file.try_clone().map_err(pipe_err)?,
+            file.try_clone().map_err(|e| pipe_err(&e))?,
         ))
     } else {
         None
@@ -324,12 +324,12 @@ pub(super) fn wire_stderr(
                     let owned = std::io::stdout()
                         .as_handle()
                         .try_clone_to_owned()
-                        .map_err(pipe_err)?;
+                        .map_err(|e| pipe_err(&e))?;
                     crate::process::StdioSpec::from_owned_handle(owned)
                 } else {
                     match &shell.turn.io.stdout {
                         crate::io::Sink::Pipe(w) => crate::process::StdioSpec::from_pipe_writer(
-                            w.try_clone().map_err(pipe_err)?,
+                            w.try_clone().map_err(|e| pipe_err(&e))?,
                         ),
                         // Buffer / Tee / LineFramed sinks pump child.stdout via an
                         // anonymous pipe allocated by `Stdio::piped()`; we cannot
@@ -355,7 +355,7 @@ pub(super) fn wire_stderr(
             // to streaming), so the write door completes the moment the
             // open succeeds — same reasoning as the non-atomic stdout case
             // in `wire_stdout_file`.
-            shell.emit_io(io_event::write(
+            shell.emit_io(&io_event::write(
                 path,
                 effective_mode,
                 WriteOutcome::Committed,

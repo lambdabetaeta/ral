@@ -337,7 +337,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                         .write_frame(&Frame::Event(id, Event::Report(report)));
                 }
                 WorkItem::Probe(id, reading) => {
-                    let report = match answer_probe(&mut shell, reading) {
+                    let report = match answer_probe(&mut shell, &reading) {
                         Ok(v) => Report::Ran {
                             result: Ok(v),
                             status: 0,

@@ -43,7 +43,7 @@ fn end_of(s: &str) -> usize {
 /// inspects the resulting context to decide whether to accept or re-edit
 /// the line.
 pub(super) fn dispatch_keybinding(
-    pk: PendingKeybinding,
+    pk: &PendingKeybinding,
     current: &str,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,

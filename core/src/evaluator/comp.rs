@@ -250,7 +250,7 @@ pub(crate) fn step_force(val: &Val, shell: &mut Shell) -> Raw<Value> {
     let result = match v {
         // `!{ … }` eliminates a thunk to its value, which the caller
         // threads onward — a non-trivial continuation, so `Tail::No`.
-        Value::Block { body, captured } => super::eval_block(&body, captured, Tail::No, shell)?,
+        Value::Block { body, captured } => super::eval_block(&body, &captured, Tail::No, shell)?,
         lam @ Value::Lambda { .. } => lam,
         other => {
             return Err(shell
