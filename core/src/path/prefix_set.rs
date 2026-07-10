@@ -1,9 +1,6 @@
-//! A set of path prefixes that carries each path in both forms:
-//!
-//! the
-//! *surface* form the author wrote (sigil- and `~`-expanded, `.`/`..`
-//! normalised, symlinks intact) and the *resolved* form (symlinks
-//! followed).
+//! A set of path prefixes that carries each path in both the *surface*
+//! form the author wrote (sigil- and `~`-expanded, `.`/`..` normalised,
+//! symlinks intact) and the *resolved* form (symlinks followed).
 //!
 //! Containment and intersection are judged on the resolved
 //! form, so two spellings of one directory (`/tmp` and `/private/tmp`)
@@ -21,7 +18,7 @@
 //! resolved form — not the surface string — is what stops a symlinked
 //! deeper prefix from surviving as authority outside a shallower ceiling.
 
-use super::lex::meet_prefix_sets_by;
+use super::lex::path_within_str;
 use super::resolved::NormalizedPrefix;
 use super::resolver::Resolver;
 use crate::types::Meet;
@@ -67,9 +64,10 @@ impl PrefixSet {
     /// strings) is absolute and `.`/`..`-collapsed with every sigil
     /// expanded — exactly the work [`resolve`](Self::resolve) needs a
     /// [`Resolver`] for — so only [`canonicalise_lenient`](super::canon)
-    /// remains.  The resolver-free door the `Capabilities` composition
-    /// meets use, which hold no `Resolver`: it lets them judge prefix
-    /// overlap on the same resolved form the gate and the projection do.
+    /// remains.  This is the resolver-free door used by the
+    /// `Capabilities` composition meets, which hold no `Resolver`; it
+    /// lets them judge prefix overlap on the same resolved form the gate
+    /// and the projection do.
     pub fn from_frozen(prefixes: &[NormalizedPrefix]) -> Self {
         let mut set: Vec<Prefix> = prefixes
             .iter()
@@ -104,6 +102,22 @@ impl PrefixSet {
             .map(NormalizedPrefix::from_surface)
             .collect()
     }
+}
+
+/// Intersect two prefix lists, keeping every element covered by some
+/// element of the other list — i.e. the deeper prefix of each
+/// overlapping pair survives.  `key` projects each item to the path
+/// string overlap is judged on; [`Meet`] always keys on the
+/// symlink-resolved form, so a confinement meet can never fall back to
+/// lexical (surface-string) overlap.  The result is unsorted and may
+/// contain duplicates; the caller applies its own dedup/ordering.
+fn meet_prefix_sets_by<T: Clone>(a: &[T], b: &[T], key: impl Fn(&T) -> &str) -> Vec<T> {
+    let covered = |x: &T, others: &[T]| others.iter().any(|o| path_within_str(key(x), key(o)));
+    a.iter()
+        .filter(|x| covered(x, b))
+        .cloned()
+        .chain(b.iter().filter(|y| covered(y, a)).cloned())
+        .collect()
 }
 
 /// Intersection: a prefix survives iff some prefix on each side covers

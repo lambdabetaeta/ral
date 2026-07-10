@@ -119,27 +119,6 @@ pub fn path_within_str(path: &str, prefix: &str) -> bool {
     path_within(Path::new(path), Path::new(prefix))
 }
 
-/// Intersect two prefix sets, keeping every element covered by some
-/// element of the other set — i.e. the deeper prefix of each
-/// overlapping pair survives.  `key` projects each item to the path
-/// string overlap is judged on.  Module-private to `path`: the sole
-/// caller is [`PrefixSet`](super::PrefixSet)'s `Meet`, which always keys
-/// on the symlink-resolved form — so a confinement meet can never fall
-/// back to lexical (surface-string) overlap.  The result is unsorted and
-/// may contain duplicates; the caller applies its own dedup/ordering.
-pub(in crate::path) fn meet_prefix_sets_by<T: Clone>(
-    a: &[T],
-    b: &[T],
-    key: impl Fn(&T) -> &str,
-) -> Vec<T> {
-    let covered = |x: &T, others: &[T]| others.iter().any(|o| path_within_str(key(x), key(o)));
-    a.iter()
-        .filter(|x| covered(x, b))
-        .cloned()
-        .chain(b.iter().filter(|y| covered(y, a)).cloned())
-        .collect()
-}
-
 /// Resolve `path` relative to the directory containing `script`.
 ///
 /// If `path` is absolute it is returned unchanged.  If `script` is
