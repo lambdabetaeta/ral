@@ -6,7 +6,7 @@
 
 use super::comp::eval_comp;
 use super::pattern::assign_pattern;
-use crate::ir::{CompKind, IrPattern};
+use crate::ir::IrPattern;
 use crate::types::{Env, Value, Shell, Raw, ThunkBody, Settled, Break, Error, Tail, Control, TailCall};
 
 /// One lambda call frame: evaluate the body *in place* on the caller's
@@ -17,9 +17,9 @@ use crate::types::{Env, Value, Shell, Raw, ThunkBody, Settled, Break, Error, Tai
 /// evaluator layer, not on `Shell`), then `body` runs. As a
 /// [`ThunkBody::Lambda`] the frame enters with a fresh `$?` and folds
 /// `{last_status, cwd}` back. The single call site supplies one `body`
-/// closure that branches internally on `if let CompKind::Lam`: a curried
-/// inner `Lam` is closed into a fresh `Value::Lambda`, otherwise the body
-/// is evaluated via [`eval_comp`].
+/// closure that closes a curried inner `Lam` into a fresh
+/// `Value::Lambda` via [`close_lam`](super::val::close_lam), otherwise
+/// evaluates the body via [`eval_comp`].
 ///
 /// `is_last` is the lambda body's tail position — true when this is the
 /// final argument of the call, so the body's final computation sits
@@ -99,23 +99,15 @@ fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Se
                 // provides.
                 let body_tail = if is_last { Tail::Yes } else { Tail::No };
                 // Curried lambdas (`λx.λy.M`) are flattened by the
-                // elaborator, so `body` itself can be `Lam` — close
-                // it directly into a fresh `Value::Lambda` instead
-                // of routing through `eval_comp(Lam)`, which is
-                // unreachable.
+                // elaborator, so `body` itself can be `Lam`. Closing the
+                // inner `Lam` directly avoids `eval_comp`'s `Lam` arm,
+                // which would wrongly raise the "bare lambda in
+                // computation position" error for a legitimate curried
+                // application.
                 let result = apply_lambda_frame(&captured, &param, &arg, shell, |child| {
-                    if let CompKind::Lam {
-                        param: inner_param,
-                        body: inner_body,
-                    } = &body.item
-                    {
-                        Ok(Value::Lambda {
-                            param: inner_param.clone(),
-                            body: inner_body.clone(),
-                            captured: child.snapshot(),
-                        })
-                    } else {
-                        eval_comp(&body, child, body_tail)
+                    match super::val::close_lam(&body, child) {
+                        Some(lam) => Ok(lam),
+                        None => eval_comp(&body, child, body_tail),
                     }
                 });
                 if let Some(done) = step(result, &mut callee, &mut args, shell) {

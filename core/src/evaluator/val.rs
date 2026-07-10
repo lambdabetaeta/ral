@@ -5,9 +5,16 @@
 //! the dispatch entry; collection literals (`eval_list`, `eval_map`)
 //! and string-piece rendering (`interpolate_piece`) live alongside
 //! because they are pure value transformations.
+//!
+//! A [`Val::Thunk`] is the IR producer of a function/handler value:
+//! [`close_lam`] projects it to [`Value::Lambda`] when its body is a
+//! `Lam` computation (a function literal `{ |x| ... }`) and to
+//! [`Value::Block`] otherwise (a nullary block literal `{ ... }`), so
+//! every downstream consumer observes the body shape without
+//! re-introspecting the IR.
 
 use crate::diagnostic;
-use crate::ir::{Val, ValListElem, ValMapEntry};
+use crate::ir::{Comp, Val, ValListElem, ValMapEntry};
 use crate::path::tilde::expand_tilde_path;
 use crate::types::{Error, List, Shell, Value};
 
@@ -33,12 +40,10 @@ pub(crate) fn interpolate_piece(v: &Value, shell: &Shell) -> Result<String, Erro
 
 /// Evaluates a value term of the CBPV IR.
 ///
-/// Values are side-effect-free: literals, variables, thunk closures,
-/// list and map constructors, and tilde-expansion.  [`Val::Variable`]
-/// runs value-name lookup: env → pseudo-vars (`$env`, `$args`,
-/// `$script`, `$nproc`) → explicit builtin value form.  A name that
-/// misses all three is reported as an undefined variable — value
-/// position has no handler or external command arm.
+/// [`Val::Variable`] runs value-name lookup: env → pseudo-vars
+/// (`$env`, `$args`, `$script`, `$nproc`) → explicit builtin value
+/// form. A name that misses all three is reported as an undefined
+/// variable — value position has no handler or external command arm.
 pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
     match val {
         Val::Unit => Ok(Value::Unit),
@@ -53,30 +58,10 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
                 1,
             )
         }),
-        // `Val::Thunk(comp)` is the IR producer of a callable value.
-        // Project to `Value::Lambda` when the body is a `Lam`
-        // computation (a function literal `{ |x| ... }`), and to
-        // `Value::Block` otherwise (a nullary block literal
-        // `{ ... }`). The split lets every downstream consumer —
-        // `apply`, `step_force`, typecheck — observe the body shape
-        // without re-introspecting the IR. Curried lambdas carry
-        // their inner `Lam`-chain in the body field; the elaborator
-        // flattens nested lambdas, so `body` is either the lambda's
-        // tail or a nested `Lam`.
-        Val::Thunk(body) => match &body.item {
-            crate::ir::CompKind::Lam {
-                param,
-                body: lam_body,
-            } => Ok(Value::Lambda {
-                param: param.clone(),
-                body: lam_body.clone(),
-                captured: shell.snapshot(),
-            }),
-            _ => Ok(Value::Block {
-                body: body.clone(),
-                captured: shell.snapshot(),
-            }),
-        },
+        Val::Thunk(body) => Ok(close_lam(body, shell).unwrap_or_else(|| Value::Block {
+            body: body.clone(),
+            captured: shell.snapshot(),
+        })),
         Val::List(elems) => eval_list(elems, shell),
         Val::Map(entries) => eval_map(entries, shell),
         Val::Variant { label, payload } => {
@@ -94,6 +79,22 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
             path.suffix.as_deref(),
             &shell.mobile.context.home(),
         ))),
+    }
+}
+
+/// Closes a `CompKind::Lam` computation into a [`Value::Lambda`],
+/// capturing the current environment. Returns `None` when `comp` is not
+/// a lambda literal. Curried lambdas carry their inner `Lam`-chain in
+/// the body field, which the elaborator has already flattened.
+pub(crate) fn close_lam(comp: &Comp, shell: &Shell) -> Option<Value> {
+    if let crate::ir::CompKind::Lam { param, body } = &comp.item {
+        Some(Value::Lambda {
+            param: param.clone(),
+            body: body.clone(),
+            captured: shell.snapshot(),
+        })
+    } else {
+        None
     }
 }
 
@@ -164,14 +165,14 @@ fn eval_map(entries: &[ValMapEntry], shell: &mut Shell) -> Result<Value, Error> 
             let key = match &key_value {
                 Value::String(s) => s.clone(),
                 _ => {
-                    return Err(Error::new(
+                    return Err(shell.err_hint(
                         format!(
                             "map key must be a String, got {} '{key_value}'",
                             key_value.type_name()
                         ),
+                        "use str to convert",
                         1,
-                    )
-                    .with_hint("use str to convert"));
+                    ));
                 }
             };
             if !seen.insert(key.clone()) {
