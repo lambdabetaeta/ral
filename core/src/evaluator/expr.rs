@@ -3,7 +3,7 @@
 //! [`eval_not`] and [`eval_binary`] evaluate the primitive operator nodes
 //! (arithmetic, comparison, boolean negation) produced by the elaborator's
 //! expression desugaring.
-//! [`index_value`] implements `Comp::Index` — subscripting into lists by
+//! [`index_value`] implements `CompKind::Index` — subscripting into lists by
 //! integer position and into maps by string key.
 
 use super::val::eval_val;
@@ -102,9 +102,9 @@ pub(crate) fn eval_binary(op: BinaryOp, lhs: &Val, rhs: &Val, shell: &mut Shell)
 }
 
 /// Ensure `val` is `Int` or `Float`; error otherwise.
-fn require_numeric(val: &Value, shell: &Shell) -> Result<Value, Error> {
+fn require_numeric(val: &Value, shell: &Shell) -> Result<(), Error> {
     match val {
-        Value::Int(_) | Value::Float(_) => Ok(val.clone()),
+        Value::Int(_) | Value::Float(_) => Ok(()),
         _ => Err(shell.err_hint(
             format!(
                 "expected Int or Float in arithmetic, got {} '{}'",
@@ -139,11 +139,9 @@ fn binop(l: &Value, op: BinaryOp, r: &Value, shell: &Shell) -> Settled<Value> {
     }
 }
 
-/// Ordering on the four [`CompareOp`] variants, routed through the same
-/// `value_ordering` that backs `lt`/`gt` and `sort-list` so the
-/// expression operators and the builtins cannot disagree.  Int·Int
-/// compares as `i64` (no f64 precision loss above 2^53); mixed Int/Float
-/// lifts to f64; String·String is lexicographic.
+/// Ordering on the four [`CompareOp`] variants via
+/// [`value_ordering`](crate::builtins::util::value_ordering), which owns
+/// the comparison taxonomy.
 fn compare(l: &Value, op: CompareOp, r: &Value) -> Settled<Value> {
     let want: fn(std::cmp::Ordering) -> bool = match op {
         CompareOp::Lt => std::cmp::Ordering::is_lt,
@@ -161,9 +159,9 @@ fn compare(l: &Value, op: CompareOp, r: &Value) -> Settled<Value> {
 fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value, Error> {
     let div_zero = || shell.err("division by zero", 1);
     let mod_zero = || shell.err("modulo by zero", 1);
-    let lv = require_numeric(l, shell)?;
-    let rv = require_numeric(r, shell)?;
-    if let (Value::Int(a), Value::Int(b)) = (&lv, &rv) {
+    require_numeric(l, shell)?;
+    require_numeric(r, shell)?;
+    if let (Value::Int(a), Value::Int(b)) = (l, r) {
         let overflow =
             || shell.err(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
         Ok(match op {
@@ -176,8 +174,8 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value,
             ArithOp::Mod => a.checked_rem(*b).map(Value::Int).ok_or_else(overflow)?,
         })
     } else {
-        let a = lv.as_float().unwrap();
-        let b = rv.as_float().unwrap();
+        let a = l.as_float().unwrap();
+        let b = r.as_float().unwrap();
         Ok(match op {
             ArithOp::Add => Value::Float(a + b),
             ArithOp::Sub => Value::Float(a - b),
