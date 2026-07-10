@@ -171,11 +171,21 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
     fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "PRNG output reduced mod len; any truncation still yields a valid in-range index"
+        )]
         let i = (self.next() as usize) % xs.len();
         xs[i]
     }
     fn range(&mut self, lo: usize, hi: usize) -> usize {
-        lo + (self.next() as usize) % (hi - lo)
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "PRNG output reduced mod len; any truncation still yields a valid in-range index"
+        )]
+        {
+            lo + (self.next() as usize) % (hi - lo)
+        }
     }
 }
 

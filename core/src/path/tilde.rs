@@ -57,6 +57,11 @@ pub fn get_user_home(username: &str) -> String {
     let mut result: *mut libc::passwd = std::ptr::null_mut();
     // `_SC_GETPW_R_SIZE_MAX` is only a hint; grow on `ERANGE`.
     let hint = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "guarded hint > 0; a positive getpw buffer-size hint fits usize"
+    )]
     let mut len = if hint > 0 { hint as usize } else { 1024 };
     loop {
         let mut buf = vec![0u8; len];

@@ -262,6 +262,10 @@ impl<T: Clone> Store<T> {
         let needed = (i as usize) + 1;
         if needed > self.slots.len() {
             self.slots.resize_with(needed, || Slot::Free);
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "needed = i+1 for a u32 var-id i; var-ids never approach 2^32"
+            )]
             if needed as u32 > self.next {
                 self.next = needed as u32;
             }

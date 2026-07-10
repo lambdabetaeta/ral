@@ -281,7 +281,15 @@ impl Shell {
                         },
                     ),
                     ("name".into(), Value::String(notice.name)),
-                    ("bytes".into(), Value::Int(notice.bytes as i64)),
+                    ("bytes".into(), Value::Int({
+                        #[allow(
+                            clippy::cast_possible_wrap,
+                            reason = "u64 in-memory byte count is far below i64::MAX"
+                        )]
+                        {
+                            notice.bytes as i64
+                        }
+                    })),
                 ]))),
             });
         }

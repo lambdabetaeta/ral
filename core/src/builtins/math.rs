@@ -43,6 +43,10 @@ fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
     let x = finite_float(name, &args[0])?;
     let r = op(x);
     if (-I64_BOUND..I64_BOUND).contains(&r) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "r is integral and range-checked into [-2^63, 2^63) on line 45; the cast is exact"
+        )]
         Ok(Value::Int(r as i64))
     } else {
         Err(sig(format!("{name}: {x} is outside the integer range")))
@@ -67,6 +71,10 @@ pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
             "0 rounds to a whole number, 2 to hundredths",
         ));
     }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "places is range-checked to 0..=308 on lines 64-68"
+    )]
     let factor = 10f64.powi(places as i32);
     let r = (x * factor).round() / factor;
     if r.is_finite() {

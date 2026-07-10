@@ -14,8 +14,8 @@ const NO_GREP: &str = "regex operations require the grep feature — rebuild wit
 /// rather than silently coercing junk to zero.
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
     match v {
-        Value::Int(n) if *n >= 0 => Ok(*n as usize),
-        Value::Int(n) => Err(sig(format!("{ctx}: index must be non-negative, got {n}"))),
+        Value::Int(n) => usize::try_from(*n)
+            .map_err(|_| sig(format!("{ctx}: index must be non-negative, got {n}"))),
         Value::String(s) => s
             .parse::<usize>()
             .map_err(|_| sig(format!("{ctx}: '{s}' is not a non-negative integer"))),
@@ -42,6 +42,10 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
             )));
         }
     };
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "n is an in-memory char/byte/element count; a live collection cannot exceed i64::MAX"
+    )]
     Ok(Value::Int(n as i64))
 }
 
@@ -309,6 +313,10 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
             if *f >= 9_223_372_036_854_775_808.0 || *f < -9_223_372_036_854_775_808.0 {
                 Err(sig(format!("int: {f} is outside the integer range")))
             } else {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "guarded by the |f| < 2^63 check on lines 309-310; the cast is exact"
+                )]
                 Ok(Value::Int(*f as i64))
             }
         }
@@ -332,6 +340,10 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
     check_arity(args, 1, "float")?;
     let val = &args[0];
     match val {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "Int→Float coercion; loss of low bits beyond 2^53 is the intrinsic, documented semantics of `float`"
+        )]
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Float(f) => Ok(Value::Float(*f)),
         Value::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {

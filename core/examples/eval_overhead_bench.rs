@@ -54,6 +54,10 @@ fn main() {
         let _ = time_thunk_bracket(&mut shell, &captured, 1_000);
 
         let dt = time_thunk_bracket(&mut shell, &captured, ITERS);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "benchmark timing print; f64 precision is ample for ns/iter reporting"
+        )]
         let ns_per = dt.as_nanos() as f64 / f64::from(ITERS);
         println!("{n:>9}  {dt:>14.3?}  {ns_per:>12.1}");
     }

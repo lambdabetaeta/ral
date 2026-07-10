@@ -83,13 +83,15 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     let mut out = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         match item {
-            Value::Int(n) if *n >= 0 && *n <= 255 => out.push(*n as u8),
-            Value::Int(n) => {
-                return Err(sig_hint(
-                    format!("{ctx}: byte at index {idx} out of range: {n}"),
-                    "bytes must be Int values in range 0..255",
-                ));
-            }
+            Value::Int(n) => match u8::try_from(*n) {
+                Ok(b) => out.push(b),
+                Err(_) => {
+                    return Err(sig_hint(
+                        format!("{ctx}: byte at index {idx} out of range: {n}"),
+                        "bytes must be Int values in range 0..255",
+                    ));
+                }
+            },
             _ => {
                 return Err(sig_hint(
                     format!(
@@ -129,7 +131,15 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "mixed Int/Float equality is defined by promoting the Int to f64; precision loss beyond 2^53 is intrinsic to cross-tower comparison"
+        )]
         (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "mixed Int/Float equality is defined by promoting the Int to f64; precision loss beyond 2^53 is intrinsic to cross-tower comparison"
+        )]
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Bytes(x), Value::Bytes(y)) => x == y,

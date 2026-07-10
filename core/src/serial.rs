@@ -175,6 +175,10 @@ impl InternCtx {
             return Err(Error::new("cyclic scope reference cannot be serialised", 1));
         }
         self.in_progress.insert(ptr);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "serialised scope id; the table holds a handful of scopes, far below 2^32"
+        )]
         let id = self.scope_table.len() as u32;
         self.ptr_to_id.insert(ptr, id);
         self.scope_table.push(Vec::new()); // placeholder

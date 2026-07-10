@@ -614,10 +614,18 @@ impl Shell {
                 "" | "-c" | "<prelude>" => None,
                 s => Some(Value::String(s.to_string())),
             },
-            "nproc" => Some(Value::Int(
-                std::thread::available_parallelism()
-                    .map_or(1, |n| n.get() as i64),
-            )),
+            "nproc" => Some(Value::Int(std::thread::available_parallelism().map_or(
+                1,
+                |n| {
+                    #[allow(
+                        clippy::cast_possible_wrap,
+                        reason = "CPU count from available_parallelism is tiny"
+                    )]
+                    {
+                        n.get() as i64
+                    }
+                },
+            ))),
             "CWD" => {
                 let p = self.cwd();
                 let s = p.to_string_lossy().to_string();

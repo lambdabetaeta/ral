@@ -30,7 +30,15 @@ fn classify(ft: fs::FileType) -> &'static str {
 fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
     t.ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs() as i64)
+        .map_or(0, |d| {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "u64 seconds-since-epoch cannot reach i64::MAX (~292e9 years)"
+            )]
+            {
+                d.as_secs() as i64
+            }
+        })
 }
 
 #[allow(
@@ -164,7 +172,15 @@ fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
     let v = Value::map(vec![
         ("name".into(), Value::String(name.clone())),
         ("type".into(), Value::String(classify(file_type).into())),
-        ("size".into(), Value::Int(meta.len() as i64)),
+        ("size".into(), Value::Int({
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
+            )]
+            {
+                meta.len() as i64
+            }
+        })),
         (
             "mtime".into(),
             Value::Int(secs_since_epoch(meta.modified())),
@@ -202,7 +218,15 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     Ok(Value::map(vec![
         ("name".into(), Value::String(name)),
         ("type".into(), Value::String(classify(ft).into())),
-        ("size".into(), Value::Int(meta.len() as i64)),
+        ("size".into(), Value::Int({
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
+            )]
+            {
+                meta.len() as i64
+            }
+        })),
         (
             "mtime".into(),
             Value::Int(secs_since_epoch(meta.modified())),

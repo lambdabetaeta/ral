@@ -51,6 +51,10 @@ impl Source {
         starts.push(0);
         for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
+                )]
                 starts.push((i + 1) as u32);
             }
         }
@@ -82,6 +86,10 @@ impl Source {
     /// column.
     pub fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
         let safe = floor_char_boundary(&self.text, byte_offset);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
+        )]
         let target = safe as u32;
         // Largest i such that line_starts[i] <= target.  partition_point
         // returns the first i where the predicate is false; subtract one.
@@ -116,6 +124,10 @@ impl SourceDb {
     /// Register `source`, returning the [`FileId`] that resolves to it.
     pub fn register(&mut self, source: Source) -> FileId {
         let sources = Arc::make_mut(&mut self.sources);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
+        )]
         let id = FileId(sources.len() as u32);
         sources.push(source);
         id
@@ -142,6 +154,10 @@ impl SourceDb {
     /// — sound exactly when nothing else registers a source into this
     /// registry between the peek and that later registration.
     pub fn next_id(&self) -> FileId {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
+        )]
         FileId(self.sources.len() as u32)
     }
 }

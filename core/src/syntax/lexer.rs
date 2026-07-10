@@ -411,9 +411,14 @@ struct OpenDelim {
 
 impl Lexer {
     fn new(source: &str, file: FileId) -> Self {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "byte length of a source in the u32 span system (< 4 GiB)"
+        )]
+        let source_len = source.len() as u32;
         Self {
             chars: source.char_indices().collect(),
-            source_len: source.len() as u32,
+            source_len,
             pos: 0,
             file,
             delim_stack: Vec::new(),
@@ -422,9 +427,15 @@ impl Lexer {
 
     /// Current byte offset (one past the last-consumed char).
     fn byte_pos(&self) -> u32 {
-        self.chars
-            .get(self.pos)
-            .map_or(self.source_len, |(b, _)| *b as u32)
+        self.chars.get(self.pos).map_or(self.source_len, |(b, _)| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "byte length of a source in the u32 span system (< 4 GiB)"
+            )]
+            {
+                *b as u32
+            }
+        })
     }
 
     /// Zero-width span at the current cursor; the byte range is extended
@@ -1051,6 +1062,10 @@ impl Lexer {
                         "\\xNN must be \\x00..\\x7F (use Bytes for non-ASCII)",
                     ));
                 }
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "n is guarded < 0x80 on line 1048; fits u8"
+                )]
                 literal.push(n as u8 as char);
             }
             Some('u') => {
@@ -1506,7 +1521,13 @@ mod tests {
         let src = "echo a # tail";
         let (tok, span) = lex(src).unwrap().pop().unwrap();
         assert_eq!(tok, Token::Eof);
-        assert_eq!(span.start, src.len() as u32);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "test literal length; trivially fits u32"
+        )]
+        {
+            assert_eq!(span.start, src.len() as u32);
+        }
     }
 
     /// After a newline or `;` separator, a hash-bumped single-quoted

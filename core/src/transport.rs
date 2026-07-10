@@ -488,15 +488,24 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: FOValue) -> Result<FOV
         return Err(format!("probe request must be a variant, got {req:?}"));
     };
     match label.as_str() {
-        "worker-count" => Ok(FOValue::Int {
-            value: shell.worker_count() as i64,
-        }),
-        "binding-count" => Ok(FOValue::Int {
-            value: shell.binding_count() as i64,
-        }),
-        "leased-binding-count" => Ok(FOValue::Int {
-            value: shell.leased_binding_count() as i64,
-        }),
+        "worker-count" => {
+            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+            Ok(FOValue::Int {
+                value: shell.worker_count() as i64,
+            })
+        }
+        "binding-count" => {
+            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+            Ok(FOValue::Int {
+                value: shell.binding_count() as i64,
+            })
+        }
+        "leased-binding-count" => {
+            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+            Ok(FOValue::Int {
+                value: shell.leased_binding_count() as i64,
+            })
+        }
         "env-var" => {
             let name = match payload.as_deref() {
                 Some(FOValue::String { value }) => value.as_str(),
@@ -516,11 +525,18 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: FOValue) -> Result<FOV
         "cwd" => Ok(FOValue::String {
             value: shell.cwd().display().to_string(),
         }),
-        "grant-depth" => Ok(FOValue::Int {
-            value: shell.grant_depth() as i64,
-        }),
+        "grant-depth" => {
+            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+            Ok(FOValue::Int {
+                value: shell.grant_depth() as i64,
+            })
+        }
         "workers" => {
             use crate::types::{HandleState, LeaseClass};
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "worker counts, sequential WorkerId(u64) ids, and u64 uptime/idle/settled-epoch quantities are all far below i64::MAX in any live process"
+            )]
             let items = shell
                 .workers()
                 .into_iter()

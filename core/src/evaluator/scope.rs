@@ -53,6 +53,10 @@ pub(crate) fn error_record(
     line: usize,
     col: usize,
 ) -> Value {
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "line/col are source positions bounded by source size, far below i64::MAX"
+    )]
     Value::map(vec![
         ("cmd".into(), Value::String(cmd.to_string())),
         ("status".into(), Value::Int(i64::from(status))),

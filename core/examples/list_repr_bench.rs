@@ -97,7 +97,13 @@ where
 }
 
 fn make_ints(n: usize) -> Vec<V> {
-    (0..n).map(|i| V::Int(i as i64)).collect()
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "loop index in 0..n benchmark data; far below i64::MAX"
+    )]
+    {
+        (0..n).map(|i| V::Int(i as i64)).collect()
+    }
 }
 
 // E. Tight-inner-loop fold over &[V]:  per-element work is a single i64 add,

@@ -335,10 +335,16 @@ impl Audit {
 
 /// Microseconds since the Unix epoch.
 pub fn epoch_us() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "microseconds-since-epoch stays below i64::MAX until year 294276"
+    )]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as i64
+    }
 }
 
 /// The two kinds of execution-tree node.
@@ -458,6 +464,10 @@ impl ExecNode {
     pub fn to_value(&self) -> Value {
         let args_list: Vec<Value> = self.args.iter().map(|a| Value::String(a.clone())).collect();
         let children_list: Vec<Value> = self.children.iter().map(Self::to_value).collect();
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "line/col are source positions bounded by source size, far below i64::MAX"
+        )]
         let mut pairs = vec![
             ("kind".into(), Value::String(self.kind.to_string())),
             ("cmd".into(), Value::String(self.cmd.clone())),

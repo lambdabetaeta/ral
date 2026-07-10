@@ -187,7 +187,16 @@ impl Value {
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Self::Int(n) => Some(*n),
-            Self::Float(f) if *f == f.floor() => Some(*f as i64),
+            Self::Float(f)
+                if *f == f.floor()
+                    && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(f) =>
+            {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "guard restricts f to integral values in [-2^63, 2^63); the cast is exact"
+                )]
+                Some(*f as i64)
+            }
             _ => None,
         }
     }
@@ -198,6 +207,10 @@ impl Value {
     /// parsed.  Use the `float` builtin for explicit conversion.
     pub fn as_float(&self) -> Option<f64> {
         match self {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "Int→Float coercion; loss beyond 2^53 is intrinsic to representing i64 in an f64 mantissa"
+            )]
             Self::Int(n) => Some(*n as f64),
             Self::Float(f) => Some(*f),
             _ => None,
