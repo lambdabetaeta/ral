@@ -54,16 +54,11 @@ use super::{Mobile, Shell};
 use crate::types::{ControlState, Env};
 use std::sync::Arc;
 
-/// Which same-thread thunk body [`Shell::with_thunk_body`] is eliminating,
-/// and the asymmetry that distinguishes the two forms.
+/// Which same-thread thunk body [`Shell::with_thunk_body`] is eliminating.
 ///
-/// Both run on the caller's live [`Shell`]: the turn, session, and local
-/// state are shared by identity, so the body sees the same audit trail,
-/// byte sinks, builtin table, cancel root, and terminal lease the caller
-/// holds — nothing is copied or re-attached.  Only the [`Mobile`] is
-/// swapped for a clone whose scope is the closure's captured environment
-/// plus a fresh frame.  The kind fixes the two places the forms differ: the
-/// entry `last_status` and the fold-back set.
+/// The kind fixes the two places a forced block and an applied lambda
+/// differ — the entry `last_status` and the fold-back set — spelled out in
+/// the per-variant docs below.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ThunkBody {
     /// `!{ … }` — force a block (or apply one as a function).  Enters with
@@ -181,12 +176,9 @@ impl Shell {
     /// [`dispatch`](crate::runtime::transport::dispatch) for a block) and
     /// returns the post-body mobile alongside its result; this routine then
     /// folds the [`ThunkBody`]-specific set back onto the caller's mobile.
-    ///
-    /// The store — `turn`, `session`, `local` — is shared by identity, so
-    /// there is no second [`SessionState`](super::SessionState) to drift
-    /// from the first and no session-global datum (the terminal lease among
-    /// them) can be silently severed.  This is the single in-place routine
-    /// block and lambda elimination meet at.
+    /// The store — `turn`, `session`, `local` — is shared by identity (see
+    /// the module doc); this is the single in-place routine block and lambda
+    /// elimination meet at.
     ///
     /// `local.repl.pending_chpwd` is bracketed for a [`ThunkBody::Block`] —
     /// a block has no business persisting a REPL notification the parent
@@ -256,9 +248,10 @@ impl Shell {
     /// REPL aside (prompt, hook shell): clone context state from
     /// `parent` without touching its IO / audit / REPL editor
     /// context.  The child is an independent sibling; no flow-back is
-    /// needed.  The source cursor and the builtin table — no longer
-    /// part of `context` — are copied alongside so the aside resolves
-    /// names and renders positions exactly as the parent would.
+    /// needed.  The source cursor (`turn.loc`) and the builtin table
+    /// (`session.builtins`) are copied alongside the context clone so the
+    /// aside resolves names and renders positions exactly as the parent
+    /// would.
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();

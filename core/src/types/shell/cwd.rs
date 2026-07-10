@@ -22,9 +22,9 @@ use std::path::PathBuf;
 /// what `Shell::cwd()` returns when no `within [dir: …]` override is
 /// active.
 ///
-/// `previous` is the directory `cd` last moved away from. The `OLDPWD`
-/// companion; surfaced to child processes via `apply_env` and to ral code
-/// via the `cd -` shorthand.
+/// `previous` is the directory `cd` last moved away from. It is surfaced
+/// to child processes as `OLDPWD` (via `apply_env`), so a child that
+/// itself runs `cd -` reads it; ral has no `cd -` of its own.
 ///
 /// `current = None` means "uninitialised"; readers fall back through
 /// [`process_cwd`]. Front ends call `Shell::seed_default_env_vars` at
@@ -64,33 +64,16 @@ impl Shell {
         process_cwd().unwrap_or_else(fallback)
     }
 
-    /// Change the shell's logical working directory.  Mutates the
-    /// shell-owned [`Cwd`](crate::types::Cwd) pair on `context.cwd`;
-    /// does not touch the process cwd, which would race other ral
-    /// threads.  Child processes inherit the new cwd via
-    /// [`crate::runtime::command::process::apply_env`]'s
-    /// `Command::current_dir(shell.cwd())`, which threads the same
-    /// value uniformly regardless of `within [dir: …]`.
+    /// Change the shell's logical working directory, recording the prior
+    /// effective cwd as `previous` (the `OLDPWD` source).  `old` reads
+    /// through [`Self::cwd`], so a `within [dir: …]` override in force at
+    /// the call counts as "where we were."
     ///
-    /// `OLDPWD` / `PWD` similarly live on shell state, not process
-    /// env: `apply_env` writes them on each spawn from
-    /// `context.cwd.previous` and [`Self::cwd`].  Inside ral code,
-    /// reads go through `cwd` — `$env[PWD]` is filtered out of `$env`
-    /// at the source.
-    ///
-    /// `OLDPWD` is the *effective* cwd captured the instant before this
-    /// `cd`: `old` reads through [`Self::cwd`], so a `within [dir: …]`
-    /// override in force at the call counts as "where we were."  That is
-    /// bash's `OLDPWD = $PWD-before-cd` contract, and `cd -` returns to
-    /// exactly that directory.
-    ///
-    /// Tilde expansion is delegated to
-    /// [`expand_tilde_path`]; an empty `target` is treated as `~`.
-    /// Relative targets resolve against the current logical cwd
-    /// (matching bash's default `cd -L`: symlinks are preserved; only
-    /// `.` / `..` components are normalised).  Returns
-    /// `(old_path, new_path)` so the caller can fire the `chpwd`
-    /// hook.
+    /// Tilde expansion is delegated to [`expand_tilde_path`]; an empty
+    /// `target` is treated as `~`.  Relative targets resolve against the
+    /// current logical cwd (matching bash's default `cd -L`: symlinks are
+    /// preserved; only `.` / `..` components are normalised).  Returns
+    /// `(old_path, new_path)` so the caller can fire the `chpwd` hook.
     ///
     /// # Errors
     /// Returns `Err` if the resolved target cannot be stat'd (e.g. it does

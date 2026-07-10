@@ -2,12 +2,11 @@
 //!
 //! [`Shell::new`] builds an empty interpreter state — root grant frame,
 //! defaulted env, no audit trail.  [`Shell::seed_default_env_vars`] is
-//! the front-end startup hook that adopts the host process env
-//! (`HOME`, `USER`, `PATH`, `SHELL`, `TERM`, `LANG`, `LOGNAME`,
-//! multiplexer / terminal passthroughs) into the dynamic context,
-//! increments `SHLVL`, and snapshots the
-//! process cwd into the shell-owned [`Cwd`](crate::types::Cwd) pair so
-//! later reads consult shell state instead of resyscalling.
+//! the front-end startup hook that adopts the host process env into the
+//! dynamic context, increments `SHLVL`, and snapshots the process cwd
+//! into the shell-owned [`Cwd`](crate::types::Cwd) pair so later reads
+//! consult shell state instead of resyscalling.  That function's doc
+//! lists the seeded variables.
 
 use super::{Context, LocalState, Mobile, SessionState, Shell, TurnState};
 use crate::types::{ControlState, Env, GrantStack, LocationCursor};
@@ -74,10 +73,11 @@ impl Shell {
 
     /// Adopt the host process env at startup.
     ///
-    /// Seeds the well-known variables (`HOME`, `USER`, `PATH`,
-    /// `SHELL`, `TERM`, `LANG`, `LOGNAME`, `SHLVL`, multiplexer and
-    /// terminal passthroughs) into `context.env_overrides`, filling in
-    /// sensible defaults for anything unset.  These are read from ral
+    /// Seeds the well-known variables (`HOME`, `USER`, `PATH`, `SHELL`,
+    /// `TERM`, `LANG`, `LOGNAME`, `SHLVL`, the `OS_NAME` / `OS_ARCH` /
+    /// `OS_FAMILY` machine facts, and the multiplexer and terminal
+    /// passthroughs) into `context.env_overrides`, filling in sensible
+    /// defaults for anything unset.  These are read from ral
     /// code as `$env[KEY]`; the environment is dynamic state, not a
     /// lexical binding.  Called once at startup by every front end —
     /// interactive `ral`, `exarch`, batch scripts — so the language
