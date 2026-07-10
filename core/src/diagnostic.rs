@@ -8,183 +8,14 @@
 //! Color output is gated by [`ansi::use_color`].
 
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
-use crate::source::{FileId, Span as ByteSpan};
+use crate::source::{
+    FileId, Source, SourceDb, Span as ByteSpan, byte_to_line_col, line_col_to_byte,
+};
 use crate::syntax::lexer::{LexErrorKind, StringForm};
 use crate::syntax::parser::ParseError;
+use crate::text::byte_to_char;
 use crate::typecheck::TypeError;
 use std::fmt::Write;
-use std::sync::Arc;
-
-use crate::text::floor_char_boundary;
-
-/// Source text bundled with a precomputed line-start index.
-///
-/// Binary search
-/// over the index resolves a `(byte_offset → line, col)` lookup in
-/// O(log lines), independent of file size; `eval_comp` recomputes `Location`
-/// from a span on every node it visits, so the per-lookup cost is on a hot
-/// path.
-///
-/// Built once when the source is loaded; `Arc<[u32]>` makes Location
-/// clones (which happen every closure call) refcount-bumps rather
-/// than copies.
-#[derive(Clone, Debug)]
-pub struct Source {
-    /// Display name of the source — a script path, `<stdin>`, or a loaded
-    /// module's virtual path.  Carried so a runtime error rendered from a
-    /// [`SourceDb`] names the file the caret points into.
-    name: Arc<str>,
-    text: Arc<str>,
-    /// Sorted byte offsets where each line starts.  `line_starts[0] == 0`;
-    /// thereafter, `line_starts[i]` is the byte index immediately after the
-    /// `i`-th newline.  Length is therefore one greater than the newline
-    /// count in `text`.
-    line_starts: Arc<[u32]>,
-}
-
-impl Source {
-    /// Wrap `text` under display `name`, building the line-start index in
-    /// one pass.
-    pub fn new(name: Arc<str>, text: Arc<str>) -> Self {
-        let mut starts: Vec<u32> =
-            Vec::with_capacity(text.bytes().filter(|&b| b == b'\n').count() + 1);
-        starts.push(0);
-        for (i, b) in text.bytes().enumerate() {
-            if b == b'\n' {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
-                )]
-                starts.push((i + 1) as u32);
-            }
-        }
-        Self {
-            name,
-            text,
-            line_starts: starts.into(),
-        }
-    }
-
-    /// Convenience: wrap `text` under `name` by allocating and indexing.
-    pub fn from_text(name: &str, text: &str) -> Self {
-        Self::new(Arc::from(name), Arc::from(text))
-    }
-
-    /// Borrow the source's display name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Borrow the underlying source text.
-    pub fn as_str(&self) -> &str {
-        &self.text
-    }
-
-    /// Convert a byte offset into a 1-indexed (line, col) pair using the
-    /// precomputed index.  O(log lines) for the line lookup, plus one
-    /// `chars().count()` over the (typically short) current line for the
-    /// column.
-    pub fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
-        let safe = floor_char_boundary(&self.text, byte_offset);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
-        )]
-        let target = safe as u32;
-        // Largest i such that line_starts[i] <= target.  partition_point
-        // returns the first i where the predicate is false; subtract one.
-        let line_idx = self
-            .line_starts
-            .partition_point(|&start| start <= target)
-            .saturating_sub(1);
-        let line_start = self.line_starts[line_idx] as usize;
-        let line = line_idx + 1;
-        let col = self.text[line_start..safe].chars().count() + 1;
-        (line, col)
-    }
-}
-
-/// Registry of every source text the current turn has loaded, keyed by
-/// [`FileId`].
-///
-/// A [`SourceLoc`] carries the `FileId` of the source whose
-/// `line`/`col` index it holds, and the runtime renderer resolves that id
-/// here so a `source`d module's error draws its caret into the module's own
-/// bytes rather than the top-level script's.
-///
-/// `Arc`-shared so the per-closure `Location` clone is a refcount bump.
-/// Within a turn the top-level source and each module it loads each register
-/// once; [`reset`](Self::reset) at the next turn boundary reclaims them.
-#[derive(Clone, Debug, Default)]
-pub struct SourceDb {
-    sources: Arc<Vec<Source>>,
-}
-
-impl SourceDb {
-    /// Register `source`, returning the [`FileId`] that resolves to it.
-    pub fn register(&mut self, source: Source) -> FileId {
-        let sources = Arc::make_mut(&mut self.sources);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
-        )]
-        let id = FileId(sources.len() as u32);
-        sources.push(source);
-        id
-    }
-
-    /// Drop every registered source, returning the registry to empty so the
-    /// next [`register`](Self::register) hands out [`FileId`] with index `0` again.
-    /// Called at each top-level turn boundary so a long interactive session
-    /// reclaims the prior turn's sources instead of growing without bound.
-    pub fn reset(&mut self) {
-        Arc::make_mut(&mut self.sources).clear();
-    }
-
-    /// Resolve `id` to its registered [`Source`], or `None` when the id is
-    /// the placeholder [`FileId::DUMMY`] or names a source this registry
-    /// does not hold.
-    pub fn get(&self, id: FileId) -> Option<&Source> {
-        self.sources.get(id.0 as usize)
-    }
-
-    /// Peek the [`FileId`] the next [`register`](Self::register) call will
-    /// mint, without registering anything. Lets a caller stamp the id onto
-    /// a program's spans *before* the source it names is itself registered
-    /// — sound exactly when nothing else registers a source into this
-    /// registry between the peek and that later registration.
-    pub fn next_id(&self) -> FileId {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
-        )]
-        FileId(self.sources.len() as u32)
-    }
-}
-
-/// Convert a byte offset within `source` into a 1-indexed (line, col) pair.
-///
-/// Linear-scan version retained for one-off callers that do not have a
-/// cached `Source` to hand; hot paths should build a [`Source`] once and
-/// call [`Source::byte_to_line_col`] instead.
-pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
-    let safe = floor_char_boundary(source, byte_offset);
-    let prefix = &source[..safe];
-    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let last_nl = prefix.rfind('\n');
-    let line_start = last_nl.map_or(0, |i| i + 1);
-    let col = source[line_start..safe].chars().count() + 1;
-    (line, col)
-}
-
-/// Convert a byte offset to a character offset.  Ariadne uses character
-/// offsets, so every byte offset must pass through this before being handed
-/// to the rendering layer.
-pub fn byte_to_char(source: &str, byte_offset: usize) -> usize {
-    source[..floor_char_boundary(source, byte_offset)]
-        .chars()
-        .count()
-}
 
 // Re-export the color-gating functions so diagnostics and their gate share
 // one import.
@@ -211,25 +42,87 @@ pub struct SourceLoc {
     pub len: usize,
 }
 
-// ── Format functions (ariadne) ────────────────────────────────────────────
-
-/// Locate the byte offset in `source` corresponding to 1-indexed
-/// (line, col).  `col` counts characters within the line, so the in-line
-/// advance steps over `col - 1` characters to land on a char boundary.
-fn line_col_to_byte(source: &str, line: usize, col: usize) -> usize {
-    let mut byte_offset = 0usize;
-    for (i, ln) in source.split_inclusive('\n').enumerate() {
-        if i + 1 == line {
-            let in_line = ln
-                .char_indices()
-                .nth(col.saturating_sub(1))
-                .map_or(ln.len(), |(b, _)| b);
-            return byte_offset + in_line;
-        }
-        byte_offset += ln.len();
-    }
-    byte_offset
+/// A source position: script name + (line, col).  Used both for "where we
+/// are now" and (via `Location::call_site`) "where we were called from".
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CallSite {
+    pub script: String,
+    pub line: usize,
+    pub col: usize,
 }
+
+/// Turn-local source cursor for diagnostics.
+///
+/// Holds where execution is,
+/// where it was called from (saved before entering prelude wrappers so
+/// `audit`/`try` name the user's line, not the prelude's), and the cached
+/// source text of the current script for structured spans.
+///
+/// The durable registry it resolves against — the
+/// [`SourceDb`](crate::source::SourceDb) keyed by [`FileId`] — is session
+/// state, not part of this cursor: the cursor is installed by the current turn
+/// and discarded on teardown, while the registry survives so a turn's runtime
+/// error still renders after the turn returns.
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LocationCursor {
+    pub script: String,
+    pub line: usize,
+    pub col: usize,
+    /// Cached source text plus a precomputed line-start index for fast
+    /// span → (line, col) lookup.  Not serde-transmissible (holds Arcs)
+    /// and the sandbox child doesn't need it for diagnostics.
+    #[serde(skip)]
+    pub source: Option<Source>,
+    /// Identity of the active source — the [`FileId`] registered in the
+    /// session registry for the text in `source`.  Stamped onto every
+    /// [`SourceLoc`] this cursor builds so the renderer resolves the right
+    /// source at render time.  [`FileId::DUMMY`] before any script context is
+    /// installed.
+    pub current: FileId,
+    pub call_site: CallSite,
+}
+
+impl LocationCursor {
+    /// Snapshot the user-visible call site (preserved across prelude
+    /// wrappers) as a [`CallSite`].  Used wherever capability checks
+    /// and command audit nodes need a value-typed source position —
+    /// passing the snapshot by value lets the caller hold `&mut
+    /// audit` alongside without a borrow conflict against the
+    /// cursor itself.
+    pub fn audit_site(&self) -> CallSite {
+        self.call_site.clone()
+    }
+
+    /// Record the current position (`script`, `line`, `col`) as the
+    /// user-visible call site.  Invoked at the start of dispatch so
+    /// audit nodes and error frames produced by the body name the
+    /// user's line rather than wherever the body's evaluation has
+    /// since drifted.
+    pub fn record_call_site_here(&mut self) {
+        self.call_site = CallSite {
+            script: self.script.clone(),
+            line: self.line,
+            col: self.col,
+        };
+    }
+
+    /// Build a [`SourceLoc`] anchored at the current position with the given
+    /// highlight length.  Used by error-construction sites that want to
+    /// point the diagnostic at the command/tool name on the current line.
+    /// The location carries `current` — the identity of the active source —
+    /// so the renderer resolves the right text even when the error crosses a
+    /// module boundary before it is rendered.
+    pub fn source_loc(&self, len: usize) -> SourceLoc {
+        SourceLoc {
+            source: self.current,
+            line: self.line,
+            col: self.col,
+            len,
+        }
+    }
+}
+
+// ── Format functions (ariadne) ────────────────────────────────────────────
 
 /// The `(error-colour, hint-colour, reset)` triple — empty strings when
 /// color is disabled so the same `format!` works either way.
@@ -242,7 +135,9 @@ fn error_palette() -> (&'static str, &'static str, &'static str) {
 }
 
 /// Render a bare "code: message" line when there's no source span to point at.
-/// Used by the type-error path when the error lacks a span.
+/// The shared messageless fallback for both the type-error path (error
+/// lacks a span) and the runtime-error path (no location, or its source is
+/// unresolved in the registry).
 fn render_messageless(code: Option<&str>, message: &str, hint: Option<&str>) -> String {
     let mut out = String::new();
     let (head, cyan, reset) = error_palette();
@@ -495,69 +390,6 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
     }
 }
 
-/// Short phrase placed next to the primary label, describing the immediate
-/// nature of the mismatch.
-///
-/// The kind's full message goes on the Report;
-/// the label is the bite-size pointer that fits next to the underline.
-///
-/// The label is symmetric in `expected`/`actual` — see the note on
-/// `TypeErrorKind::render_message` for why.  Variables get the same
-/// Greek letters as the surrounding message (shared `FmtCtx`) so a
-/// reader who sees `α` in the message can find `α` in the label.
-pub fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String {
-    use crate::typecheck::{FmtCtx, TypeErrorKind as K, fmt_ty_ctx};
-    match kind {
-        K::RecursiveRow => "the type loops back into itself here".into(),
-        K::TypeTooDeep => "the type nests too deeply here".into(),
-        K::TyMismatch { expected, actual } => {
-            // Match the orientation of the full message
-            // ("couldn't match type X with type Y") so the underline
-            // label and the headline read in the same direction.
-            let ctx = FmtCtx::for_value_types(&[expected, actual]);
-            format!(
-                "{} doesn't match {}",
-                fmt_ty_ctx(expected, &ctx),
-                fmt_ty_ctx(actual, &ctx)
-            )
-        }
-        K::CompTyMismatch { .. } => "types disagree here".into(),
-        K::CommandNotCallable { ty, .. } => {
-            let ctx = FmtCtx::for_value_types(&[ty]);
-            format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
-        }
-        K::ModeMismatch { .. } => "pipeline channels disagree here".into(),
-        K::RowExtraField { label } => format!("no field '{label}' in this record"),
-        K::RowMissingField { label } => format!("this record needs field '{label}'"),
-        K::CaseNotExhaustive { missing, extra } => match (missing.as_slice(), extra.as_slice()) {
-            ([only], []) => format!("no handler for {only}"),
-            (some, []) => format!("no handler for {}", some.join(", ")),
-            ([], [only]) => format!("handler for {only} that the value never produces"),
-            ([], some) => format!(
-                "handlers for {} that the value never produces",
-                some.join(", ")
-            ),
-            _ => "case alternatives don't match the value".into(),
-        },
-        K::CaseLabelTypeMismatch { label, .. } => {
-            format!("the handler at {label} is the wrong shape")
-        }
-        K::CaseOnNonVariant { .. }
-        | K::ControlOperatorAsValue { .. }
-        | K::HandlerNotFirstClass { .. }
-        | K::BuiltinNotFirstClass { .. }
-        | K::CannotRedefineBuiltin { .. }
-        | K::HandlerShadowedByBinding { .. }
-        | K::BuiltinArity { .. }
-        | K::FailStatusZero
-        | K::MalformedAlias { .. }
-        | K::MalformedUnalias { .. }
-        | K::IndexIntoThunk
-        | K::FieldOnNonRecord { .. }
-        | K::DynamicIndexOnScalar { .. } => "here".into(),
-    }
-}
-
 /// Render a type error via the ariadne crate — structured labels, error
 /// code, and optional help.  Falls back to a messageless render when the
 /// error carries no span (nothing to point at).
@@ -576,7 +408,7 @@ pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> S
         &message,
         LabelRange {
             range,
-            label: label_message_for_kind(&err.kind),
+            label: err.kind.render_label(),
         },
         None,
         hint.as_deref(),

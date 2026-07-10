@@ -59,9 +59,14 @@ struct Elaborator {
     /// Counter for generating fresh variable names (`_g1`, `_g2`, …) when
     /// hoisting effectful sub-expressions into `Comp::Bind` nodes.
     counter: usize,
+    /// Prelude exports, always in scope beneath every lexical frame.  Shared
+    /// (never mutated after construction), so each elaboration refcount-bumps
+    /// the cached set rather than cloning every prelude name.
+    prelude: Arc<HashSet<String>>,
     /// Stack of lexical scopes.  Each scope is a set of bound names.  The
-    /// outermost scope holds the prelude exports; inner scopes are pushed for
-    /// lambda bodies, blocks, and `let` groups.
+    /// base frame holds the caller's bindings; inner scopes are pushed for
+    /// lambda bodies, blocks, and `let` groups.  The prelude sits beneath
+    /// them all in `prelude`.
     lexical_scopes: Vec<HashSet<String>>,
     /// The most recently seen source span — attached to every emitted `Comp`.
     /// Narrowed scopewise by [`Self::with_span`]; every traversal that knows
@@ -90,7 +95,8 @@ impl Elaborator {
     fn new_with_bindings(bindings: HashSet<String>) -> Self {
         Self {
             counter: 0,
-            lexical_scopes: vec![prelude_scope(), bindings],
+            prelude: prelude_scope(),
+            lexical_scopes: vec![bindings],
             current_span: None,
         }
     }
@@ -101,11 +107,8 @@ impl Elaborator {
         format!("_g{}", self.counter)
     }
 
-    /// Mutable handle to the innermost lexical scope.  `lexical_scopes`
-    /// is initialised with the prelude and the caller's bindings frame
-    /// (see `new_with_bindings`) and only grows from there via
-    /// [`with_bound_names`] / [`with_new_scope`], so this is total —
-    /// no caller observes an empty scope stack.
+    /// Mutable handle to the innermost lexical scope.  Total: the stack is
+    /// initialised non-empty and never popped past its base frame.
     fn current_scope_mut(&mut self) -> &mut HashSet<String> {
         self.lexical_scopes
             .last_mut()
@@ -136,15 +139,9 @@ impl Elaborator {
                     .map(|entry| {
                         let pattern = self.elab_pattern(&entry.pattern);
                         let default = entry.default.as_ref().map(|d| {
-                            // Defaults are statement-shaped: elaborate via
-                            // `stmts` so a bare command head, a value, or a
-                            // chain all work identically.  The result is a
-                            // single `Comp` that produces the default value
-                            // when run.  Wrap the surface `Ast` in a
-                            // synthetic `Stmt` carrying the elaborator's
-                            // current span — defaults have no source span
-                            // of their own; the enclosing pattern's span
-                            // is the natural fallback.
+                            // Defaults are statement-shaped, so elaborate via
+                            // `stmts`; they carry no span of their own, so
+                            // they inherit the enclosing pattern's.
                             let stmt = [Spanned::with_span(self.current_span, d.clone())];
                             Arc::new(self.stmts(&stmt))
                         });
@@ -183,12 +180,14 @@ impl Elaborator {
         self.with_bound_names(std::iter::empty::<String>(), f)
     }
 
-    /// True if `name` is bound in any enclosing scope (searched innermost first).
+    /// True if `name` is bound in any enclosing scope (searched innermost
+    /// first) or is a prelude export.
     fn is_bound(&self, name: &str) -> bool {
         self.lexical_scopes
             .iter()
             .rev()
             .any(|scope| scope.contains(name))
+            || self.prelude.contains(name)
     }
 
     /// Build an `Exec` computation at the current span.  All name-dispatched
@@ -240,7 +239,7 @@ impl Elaborator {
         }
     }
 
-    /// Elaborate a single statement group (produced by the [`group`] pre-pass).
+    /// Elaborate a single statement group (produced by the [`group_stmts`] pre-pass).
     ///
     /// For a single statement, stamps its span onto `current_span` (so
     /// the emitted IR — and any unification failures it provokes —
@@ -1123,14 +1122,18 @@ fn desugar_zero_arg_exit(name: &str, args: Args) -> Args {
 }
 
 /// Return the set of names exported by the prelude (cached after first call).
-fn prelude_scope() -> HashSet<String> {
-    static PRELUDE: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+/// The `Arc` is shared across elaborations, so each caller refcount-bumps the
+/// cached set rather than re-cloning every prelude name.
+fn prelude_scope() -> Arc<HashSet<String>> {
+    static PRELUDE: std::sync::OnceLock<Arc<HashSet<String>>> = std::sync::OnceLock::new();
     PRELUDE
         .get_or_init(|| {
-            prelude_manifest::PRELUDE_EXPORTS
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect()
+            Arc::new(
+                prelude_manifest::PRELUDE_EXPORTS
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+            )
         })
         .clone()
 }

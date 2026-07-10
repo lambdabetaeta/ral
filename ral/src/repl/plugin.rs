@@ -37,8 +37,9 @@ use self::manifest::LoadedPlugin;
 use super::errfmt::{format_plugin_disabled, plugin_error, plugin_warning};
 use super::frontend::EditBuffer;
 use super::plugin_editor::{
-    EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs, byte_to_char,
+    EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs,
 };
+use ral_core::text::byte_to_char;
 use rustyline::config::EditMode;
 use rustyline::history::{DefaultHistory, History};
 use rustyline::{

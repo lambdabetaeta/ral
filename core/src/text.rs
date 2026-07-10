@@ -29,6 +29,15 @@ pub fn ceil_char_boundary(s: &str, offset: usize) -> usize {
     i
 }
 
+/// Convert a byte offset to a character offset.  Ariadne uses character
+/// offsets, so every byte offset must pass through this before being handed
+/// to the rendering layer.
+pub fn byte_to_char(source: &str, byte_offset: usize) -> usize {
+    source[..floor_char_boundary(source, byte_offset)]
+        .chars()
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -674,13 +674,13 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
             Some(err) => Spine::TypeError {
                 span: err.pos.map(|sp| {
                     (
-                        ral_core::diagnostic::byte_to_char(src, sp.start as usize),
-                        ral_core::diagnostic::byte_to_char(src, sp.end as usize),
+                        ral_core::text::byte_to_char(src, sp.start as usize),
+                        ral_core::text::byte_to_char(src, sp.end as usize),
                     )
                 }),
                 code: err.kind.code().to_string(),
                 headline: err.kind.render_message(),
-                label: ral_core::diagnostic::label_message_for_kind(&err.kind),
+                label: err.kind.render_label(),
                 hint: err.hint(),
             },
             None => Spine::Empty,

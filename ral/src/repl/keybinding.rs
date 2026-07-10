@@ -16,7 +16,8 @@ use super::plugin::{
     FramedHook, HookFor, HookFraming, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook,
     defer_plugin_message, keymap_name, lock,
 };
-use super::plugin_editor::{EditorState, PluginContext, PluginInputs, PluginOutputs, byte_to_char};
+use super::plugin_editor::{EditorState, PluginContext, PluginInputs, PluginOutputs};
+use ral_core::text::byte_to_char;
 
 /// Outcome of running a plugin keybinding handler.
 ///

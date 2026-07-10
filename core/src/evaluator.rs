@@ -1,40 +1,20 @@
 //! CBPV evaluator for `ral`.
 //!
-//! Two verbs reach outside the crate; [`apply`] is crate-private.
+//! The turn/block evaluation verbs and the tail-absorption seam they share;
+//! per-verb contract detail lives on each function's own doc.
 //!
-//! - [`eval_top_level`] (`pub(crate)`) — the turn-evaluation verb a
-//!   tool call, a REPL turn, or a script line settles through.  Hosts do
-//!   not call it directly; they enter through the framed
-//!   [`Shell::run_turn`](crate::Shell::run_turn) door, which drives it.
-//!   The post-run [`crate::types::Mobile`] is *installed* on the parent shell on
-//!   every outcome (Ok / Error / Exit); a top-level turn is a resume
-//!   point, so every persistable state change must survive.
-//! - [`evaluate`] — bare tail-absorbed run with no mobile contract.
-//!   For callers already inside an active session: module loading,
-//!   prelude bootstrap, capability profiles, REPL plugin / config
-//!   loading.
-//!
-//! [`apply`] (`pub(crate)`) reduces a thunk applied to arguments,
-//! absorbing tail signals through the trampoline.  Blocks reach their
-//! contract through it: the trampoline pattern-matches `Value::Thunk`
-//! and delegates to the internal [`eval_block`].  It is reached from
-//! outside the evaluator only through the host turn door
-//! ([`crate::Shell::run_turn`]) and the in-frame builtin wrapper
-//! [`crate::builtins::apply`], so a host cannot start an unframed
-//! reduction; the in-crate callers ([`crate::runtime`]) already hold a
-//! turn frame.
-//!
-//! [`eval_block`] (`pub(crate)`) is the block contract: scope-isolated
-//! body, mobile discarded on exit, local scratch reset, audit fragment
-//! merged into the parent trail.  Invoked by the trampoline's
-//! `Value::Thunk` arm, by [`comp::step_force`](crate::evaluator::comp::step_force), and by the pipeline's
-//! stream-iteration tail dispatch.  `spawn` / `watch` workers bypass
-//! it — the worker thread's lifecycle satisfies block discipline on
-//! its own.
-//!
-//! Where the body actually runs (in-process vs OS-sandboxed child over
-//! IPC) is orthogonal to the contract and is delegated to
-//! [`crate::runtime::transport::dispatch`].
+//! - [`eval_top_level`] (`pub(crate)`) — runs a top-level turn, installing
+//!   the post-run [`Mobile`](crate::types::Mobile) on the parent shell on
+//!   every outcome.
+//! - [`evaluate`] — a bare tail-absorbed run with no mobile contract, for
+//!   callers already inside an active session (module loading, prelude
+//!   bootstrap, capability profiles, REPL plugin / config loading).
+//! - [`eval_block`] (`pub(crate)`) — the block contract: scope-isolated
+//!   body, mobile discarded on exit.  External callers reach it through
+//!   [`apply`], the crate-private thunk-application verb.
+//! - [`absorb_tail`] is the seam every absorption point funnels through to
+//!   land an escaping [`TailCall`] and turn a `Raw<Value>` into a
+//!   `Settled<Value>`.
 
 pub mod audit;
 pub(crate) mod call;
@@ -120,7 +100,7 @@ pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Val
 /// shared trail) cross the boundary.
 ///
 /// `captured` is the closure's lexical environment — the snapshot a
-/// `Value::Thunk` carries.  [`Shell::with_thunk_body`] runs the body in
+/// `Value::Block` carries.  [`Shell::with_thunk_body`] runs the body in
 /// place: it swaps in a mobile rescoped to `captured` plus a fresh frame
 /// for the body's own `let` bindings, brackets the parent's
 /// `repl.pending_chpwd`, and — as a [`ThunkBody::Block`] — folds only
@@ -134,7 +114,7 @@ pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Val
 /// grant only chooses whether that absorption trampolines.
 ///
 /// `pub(crate)`: external callers reach the block contract through
-/// [`apply`] on a `Value::Thunk`.
+/// [`apply`] on a `Value::Block`.
 pub(crate) fn eval_block(
     body: &Arc<Comp>,
     captured: &Arc<Env>,

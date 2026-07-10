@@ -1,4 +1,4 @@
-//! Audit collector, execution tree, and source positions.
+//! Audit collector and execution tree.
 //!
 //! This module owns every shape used by audit: the per-shell collector
 //! [`Audit`], the storage [`AuditTrail`], the transport [`AuditFragment`],
@@ -14,94 +14,12 @@
 //! scope is what decides where they land in the tree.
 
 use super::value::Value;
-use crate::diagnostic::Source;
-use crate::source::FileId;
+use crate::diagnostic::CallSite;
 use serde::{Deserialize, Serialize};
 
 /// Cap applied to per-node `stderr` when bytes are being captured
 /// (`CapturePolicy::Bytes`).  See SPEC §10.3.
 pub const STDERR_CAP_BYTES: usize = 64 * 1024;
-
-/// A source position: script name + (line, col).  Used both for "where we
-/// are now" and (via `Location::call_site`) "where we were called from".
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-pub struct CallSite {
-    pub script: String,
-    pub line: usize,
-    pub col: usize,
-}
-
-/// Turn-local source cursor for diagnostics.
-///
-/// Holds where execution is,
-/// where it was called from (saved before entering prelude wrappers so
-/// `audit`/`try` name the user's line, not the prelude's), and the cached
-/// source text of the current script for structured spans.
-///
-/// The durable registry it resolves against — the
-/// [`SourceDb`](crate::diagnostic::SourceDb) keyed by [`FileId`] — is session
-/// state, not part of this cursor: the cursor is installed by the current turn
-/// and discarded on teardown, while the registry survives so a turn's runtime
-/// error still renders after the turn returns.
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-pub struct LocationCursor {
-    pub script: String,
-    pub line: usize,
-    pub col: usize,
-    /// Cached source text plus a precomputed line-start index for fast
-    /// span → (line, col) lookup.  Not serde-transmissible (holds Arcs)
-    /// and the sandbox child doesn't need it for diagnostics.
-    #[serde(skip)]
-    pub source: Option<Source>,
-    /// Identity of the active source — the [`FileId`] registered in the
-    /// session registry for the text in `source`.  Stamped onto every
-    /// [`crate::diagnostic::SourceLoc`] this cursor builds so the renderer resolves the right
-    /// source at render time.  [`FileId::DUMMY`] before any script context is
-    /// installed.
-    pub current: FileId,
-    pub call_site: CallSite,
-}
-
-impl LocationCursor {
-    /// Snapshot the user-visible call site (preserved across prelude
-    /// wrappers) as a [`CallSite`].  Used wherever capability checks
-    /// and command audit nodes need a value-typed source position —
-    /// passing the snapshot by value lets the caller hold `&mut
-    /// audit` alongside without a borrow conflict against the
-    /// cursor itself.
-    pub fn audit_site(&self) -> CallSite {
-        self.call_site.clone()
-    }
-
-    /// Record the current position (`script`, `line`, `col`) as the
-    /// user-visible call site.  Invoked at the start of dispatch so
-    /// audit nodes and error frames produced by the body name the
-    /// user's line rather than wherever the body's evaluation has
-    /// since drifted.
-    pub fn record_call_site_here(&mut self) {
-        self.call_site = CallSite {
-            script: self.script.clone(),
-            line: self.line,
-            col: self.col,
-        };
-    }
-
-    /// Build a [`SourceLoc`](crate::diagnostic::SourceLoc) anchored at
-    /// the current position with the given highlight length.  Used by
-    /// error-construction sites that want to point the diagnostic at
-    /// the command/tool name on the current line.  The location carries
-    /// `current` — the identity of the active source — so the renderer
-    /// resolves the right text even when the error crosses a module
-    /// boundary before it is rendered.
-    pub fn source_loc(&self, len: usize) -> crate::diagnostic::SourceLoc {
-        crate::diagnostic::SourceLoc {
-            source: self.current,
-            line: self.line,
-            col: self.col,
-            len,
-        }
-    }
-}
 
 /// Raw bytes carried by one audit node.  `stdout` and `stderr` are the
 /// per-command captures produced under `CapturePolicy::Bytes`, or the

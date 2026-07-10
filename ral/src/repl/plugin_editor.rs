@@ -21,8 +21,8 @@
 //! [`PluginOutputs::pushed_buffer`] — is a **character** offset into the
 //! buffer text, not a byte offset.  rustyline's own API uses byte offsets;
 //! the REPL frontend converts at the boundary so plugin code never has to
-//! think about UTF-8.  Use [`char_to_byte`] and [`byte_to_char`] for the
-//! conversion.
+//! think about UTF-8.  Use [`char_to_byte`] and
+//! [`ral_core::text::byte_to_char`] for the conversion.
 
 use ral_core::Value;
 
@@ -98,15 +98,6 @@ pub fn char_to_byte(text: &str, cursor: usize) -> usize {
         .map_or(text.len(), |(i, _)| i)
 }
 
-/// Convert a byte offset in `text` into the character offset of the same
-/// position.  Offsets past the end are clamped to the character count; an
-/// offset that lands inside a multi-byte sequence rounds down to the
-/// start of that character.
-pub fn byte_to_char(text: &str, byte: usize) -> usize {
-    let boundary = ral_core::text::floor_char_boundary(text, byte);
-    text[..boundary].chars().count()
-}
-
 /// Execution context for `_editor` and `_plugin` builtins.
 ///
 /// Read-only information the runtime supplies before a plugin handler runs.
@@ -160,6 +151,7 @@ pub struct PluginContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ral_core::text::byte_to_char;
 
     #[test]
     fn char_byte_round_trip_ascii() {
@@ -182,22 +174,6 @@ mod tests {
     fn char_to_byte_past_end_clamps() {
         let s = "héllo";
         assert_eq!(char_to_byte(s, 9999), s.len());
-    }
-
-    #[test]
-    fn byte_to_char_past_end_clamps() {
-        let s = "héllo";
-        assert_eq!(byte_to_char(s, 9999), s.chars().count());
-    }
-
-    #[test]
-    fn byte_to_char_inside_multibyte_rounds_down() {
-        // `é` is two bytes; byte offset 2 lies between its bytes.
-        let s = "hé";
-        assert_eq!(byte_to_char(s, 0), 0);
-        assert_eq!(byte_to_char(s, 1), 1); // start of `é`
-        assert_eq!(byte_to_char(s, 2), 1); // inside `é` → rounds down
-        assert_eq!(byte_to_char(s, 3), 2); // past `é`
     }
 
     #[test]

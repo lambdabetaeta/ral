@@ -1451,10 +1451,7 @@ fn merge_into(tail: &mut QueueEntry, incoming: Kind, bytes: &mut usize) {
             if acc.len() > MERGE_TEXT_CAP {
                 // Drop from the front, rounded forward to the next char
                 // boundary so the retained tail stays valid UTF-8.
-                let mut cut = acc.len() - MERGE_TEXT_CAP;
-                while !acc.is_char_boundary(cut) {
-                    cut += 1;
-                }
+                let cut = ral_core::text::ceil_char_boundary(acc, acc.len() - MERGE_TEXT_CAP);
                 acc.drain(..cut);
                 tail.elided += cut as u64;
                 *bytes -= cut;

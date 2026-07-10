@@ -14,7 +14,7 @@ use super::TerminalAccess;
 use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
 use super::repl::ReplScratch;
 use super::workers::ReapCause;
-use crate::diagnostic::SourceDb;
+use crate::source::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};

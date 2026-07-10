@@ -1,13 +1,19 @@
-//! Source positions.
+//! Source positions and loaded source text.
 //!
 //! A [`Span`] is a half-open byte range `[start, end)` tagged with a
 //! [`FileId`] — the opaque per-file handle carried on every span.
 //! "No narrower position available" is `Option<Span>` = `None`, used
 //! uniformly across AST, IR, and typechecker; there is no sentinel span.
-//! Line/column recovery is deferred to render time: `diagnostic.rs` receives
-//! the source text directly and asks `ariadne` to locate the line.
+//!
+//! [`Source`] bundles a loaded text with a precomputed line-start index for
+//! O(log lines) `byte → (line, col)` recovery, and [`SourceDb`] is the
+//! per-turn registry that resolves a [`FileId`] back to its [`Source`] at
+//! render time.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::text::floor_char_boundary;
 
 /// A half-open byte range `[start, end)` within a single source file.
 ///
@@ -53,23 +59,13 @@ impl Span {
         }
     }
 
-    /// Number of bytes covered by the span.
-    pub fn len(self) -> u32 {
-        self.end - self.start
-    }
-
-    /// True when the span is zero-width (a cursor position).
-    pub fn is_empty(self) -> bool {
-        self.end == self.start
-    }
-
     /// Convert to a `usize` range suitable for slicing source text.
     pub fn range(self) -> std::ops::Range<usize> {
         self.start as usize..self.end as usize
     }
 }
 
-/// Opaque handle into a [`SourceDb`](crate::diagnostic::SourceDb).
+/// Opaque handle into a [`SourceDb`].
 ///
 /// Each
 /// registered source text gets a unique `FileId`; spans and runtime
@@ -100,8 +96,8 @@ impl Default for FileId {
 /// (`If.cond`, `Case.scrutinee`/`table`, per-arg and per-key positions,
 /// `Force` operand, interpolation segments, …) is a [`Spanned<_>`]
 /// wrapper rather than an ad-hoc `*_span` parallel field on the parent,
-/// so one helper (`Inferencer::with_span` in the typechecker) can
-/// drive narrowing uniformly downstream.
+/// so one helper (the crate-local [`WithSpan`] trait shared by the
+/// elaborator and typechecker) can drive narrowing uniformly downstream.
 ///
 /// "No narrower position available" is `span: None`; the same encoding
 /// used by [`Comp::span`](crate::ir::Comp) in the IR — there is no
@@ -184,4 +180,185 @@ pub(crate) trait WithSpan {
         *self.span_slot() = saved;
         out
     }
+}
+
+// ── Loaded source text ───────────────────────────────────────────────
+
+/// Source text bundled with a precomputed line-start index.
+///
+/// Binary search
+/// over the index resolves a `(byte_offset → line, col)` lookup in
+/// O(log lines), independent of file size; `eval_comp` recomputes `Location`
+/// from a span on every node it visits, so the per-lookup cost is on a hot
+/// path.
+///
+/// Built once when the source is loaded; `Arc<[u32]>` makes Location
+/// clones (which happen every closure call) refcount-bumps rather
+/// than copies.
+#[derive(Clone, Debug)]
+pub struct Source {
+    /// Display name of the source — a script path, `<stdin>`, or a loaded
+    /// module's virtual path.  Carried so a runtime error rendered from a
+    /// [`SourceDb`] names the file the caret points into.
+    name: Arc<str>,
+    text: Arc<str>,
+    /// Sorted byte offsets where each line starts.  `line_starts[0] == 0`;
+    /// thereafter, `line_starts[i]` is the byte index immediately after the
+    /// `i`-th newline.  Length is therefore one greater than the newline
+    /// count in `text`.
+    line_starts: Arc<[u32]>,
+}
+
+impl Source {
+    /// Wrap `text` under display `name`, building the line-start index in
+    /// one pass.
+    pub fn new(name: Arc<str>, text: Arc<str>) -> Self {
+        let mut starts: Vec<u32> =
+            Vec::with_capacity(text.bytes().filter(|&b| b == b'\n').count() + 1);
+        starts.push(0);
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
+                )]
+                starts.push((i + 1) as u32);
+            }
+        }
+        Self {
+            name,
+            text,
+            line_starts: starts.into(),
+        }
+    }
+
+    /// Convenience: wrap `text` under `name` by allocating and indexing.
+    pub fn from_text(name: &str, text: &str) -> Self {
+        Self::new(Arc::from(name), Arc::from(text))
+    }
+
+    /// Borrow the source's display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Borrow the underlying source text.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// Convert a byte offset into a 1-indexed (line, col) pair using the
+    /// precomputed index.  O(log lines) for the line lookup, plus one
+    /// `chars().count()` over the (typically short) current line for the
+    /// column.
+    pub fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
+        let safe = floor_char_boundary(&self.text, byte_offset);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
+        )]
+        let target = safe as u32;
+        // Largest i such that line_starts[i] <= target.  partition_point
+        // returns the first i where the predicate is false; subtract one.
+        let line_idx = self
+            .line_starts
+            .partition_point(|&start| start <= target)
+            .saturating_sub(1);
+        let line_start = self.line_starts[line_idx] as usize;
+        let line = line_idx + 1;
+        let col = self.text[line_start..safe].chars().count() + 1;
+        (line, col)
+    }
+}
+
+/// Registry of every source text the current turn has loaded, keyed by
+/// [`FileId`].
+///
+/// A [`SourceLoc`](crate::diagnostic::SourceLoc) carries the `FileId` of the
+/// source whose `line`/`col` index it holds, and the runtime renderer
+/// resolves that id here so a `source`d module's error draws its caret into
+/// the module's own bytes rather than the top-level script's.
+///
+/// `Arc`-shared so the per-closure `Location` clone is a refcount bump.
+/// Within a turn the top-level source and each module it loads each register
+/// once; [`reset`](Self::reset) at the next turn boundary reclaims them.
+#[derive(Clone, Debug, Default)]
+pub struct SourceDb {
+    sources: Arc<Vec<Source>>,
+}
+
+impl SourceDb {
+    /// Register `source`, returning the [`FileId`] that resolves to it.
+    pub fn register(&mut self, source: Source) -> FileId {
+        let sources = Arc::make_mut(&mut self.sources);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
+        )]
+        let id = FileId(sources.len() as u32);
+        sources.push(source);
+        id
+    }
+
+    /// Drop every registered source, returning the registry to empty so the
+    /// next [`register`](Self::register) hands out [`FileId`] with index `0` again.
+    /// Called at each top-level turn boundary so a long interactive session
+    /// reclaims the prior turn's sources instead of growing without bound.
+    pub fn reset(&mut self) {
+        Arc::make_mut(&mut self.sources).clear();
+    }
+
+    /// Resolve `id` to its registered [`Source`], or `None` when the id is
+    /// the placeholder [`FileId::DUMMY`] or names a source this registry
+    /// does not hold.
+    pub fn get(&self, id: FileId) -> Option<&Source> {
+        self.sources.get(id.0 as usize)
+    }
+
+    /// Peek the [`FileId`] the next [`register`](Self::register) call will
+    /// mint, without registering anything. Lets a caller stamp the id onto
+    /// a program's spans *before* the source it names is itself registered
+    /// — sound exactly when nothing else registers a source into this
+    /// registry between the peek and that later registration.
+    pub fn next_id(&self) -> FileId {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
+        )]
+        FileId(self.sources.len() as u32)
+    }
+}
+
+/// Convert a byte offset within `source` into a 1-indexed (line, col) pair.
+///
+/// Linear-scan version retained for the one-off caller that recovers a
+/// position from source text without a cached [`Source`] to hand; hot paths
+/// should build a [`Source`] once and call [`Source::byte_to_line_col`]
+/// instead.
+pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+    let safe = floor_char_boundary(source, byte_offset);
+    let prefix = &source[..safe];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let last_nl = prefix.rfind('\n');
+    let line_start = last_nl.map_or(0, |i| i + 1);
+    let col = source[line_start..safe].chars().count() + 1;
+    (line, col)
+}
+
+/// Locate the byte offset in `source` corresponding to 1-indexed
+/// (line, col).  `col` counts characters within the line, so the in-line
+/// advance steps over `col - 1` characters to land on a char boundary.
+pub(crate) fn line_col_to_byte(source: &str, line: usize, col: usize) -> usize {
+    let mut byte_offset = 0usize;
+    for (i, ln) in source.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            let in_line = ln
+                .char_indices()
+                .nth(col.saturating_sub(1))
+                .map_or(ln.len(), |(b, _)| b);
+            return byte_offset + in_line;
+        }
+        byte_offset += ln.len();
+    }
+    byte_offset
 }

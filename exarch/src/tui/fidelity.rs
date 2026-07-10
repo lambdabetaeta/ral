@@ -111,9 +111,5 @@ fn cap(s: &str) -> &str {
     if s.len() <= CAP {
         return s;
     }
-    let mut end = CAP;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..ral_core::text::floor_char_boundary(s, CAP)]
 }

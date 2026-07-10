@@ -65,12 +65,15 @@ pub use shell::modules::Modules;
 // Logical shell cwd (current + OLDPWD companion).  See types/shell/cwd.rs.
 pub use shell::cwd::Cwd;
 
-// Audit collector, execution tree, source positions.  See types/audit.rs.
+// Audit collector and execution tree.  See types/audit.rs.
 mod audit;
 pub use audit::{
-    Audit, AuditFragment, AuditIo, AuditTime, AuditTrail, CallSite, CapturePolicy, ExecNode,
-    ExecNodeKind, LocationCursor, STDERR_CAP_BYTES, epoch_us,
+    Audit, AuditFragment, AuditIo, AuditTime, AuditTrail, CapturePolicy, ExecNode, ExecNodeKind,
+    STDERR_CAP_BYTES, epoch_us,
 };
+
+// Turn-local source cursor and its call-site snapshot.  See diagnostic.rs.
+pub use crate::diagnostic::{CallSite, LocationCursor};
 
 // Shell state, Context.  See types/shell.rs.
 mod shell;

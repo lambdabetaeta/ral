@@ -128,6 +128,71 @@ impl TypeErrorKind {
             }
         }
     }
+
+    /// Short phrase placed next to the primary label of a rendered
+    /// diagnostic, describing the immediate nature of the mismatch.
+    ///
+    /// The kind's full message (from [`render_message`](Self::render_message))
+    /// goes on the report headline; the label is the bite-size pointer that
+    /// fits next to the underline.
+    ///
+    /// The label is symmetric in `expected`/`actual` — see the note on
+    /// [`render_message`](Self::render_message) for why.  Variables get the
+    /// same Greek letters as the surrounding message (shared [`FmtCtx`]) so a
+    /// reader who sees `α` in the message can find `α` in the label.
+    pub fn render_label(&self) -> String {
+        match self {
+            Self::RecursiveRow => "the type loops back into itself here".into(),
+            Self::TypeTooDeep => "the type nests too deeply here".into(),
+            Self::TyMismatch { expected, actual } => {
+                // Match the orientation of the full message
+                // ("couldn't match type X with type Y") so the underline
+                // label and the headline read in the same direction.
+                let ctx = FmtCtx::for_value_types(&[expected, actual]);
+                format!(
+                    "{} doesn't match {}",
+                    fmt_ty_ctx(expected, &ctx),
+                    fmt_ty_ctx(actual, &ctx)
+                )
+            }
+            Self::CompTyMismatch { .. } => "types disagree here".into(),
+            Self::CommandNotCallable { ty, .. } => {
+                let ctx = FmtCtx::for_value_types(&[ty]);
+                format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
+            }
+            Self::ModeMismatch { .. } => "pipeline channels disagree here".into(),
+            Self::RowExtraField { label } => format!("no field '{label}' in this record"),
+            Self::RowMissingField { label } => format!("this record needs field '{label}'"),
+            Self::CaseNotExhaustive { missing, extra } => {
+                match (missing.as_slice(), extra.as_slice()) {
+                    ([only], []) => format!("no handler for {only}"),
+                    (some, []) => format!("no handler for {}", some.join(", ")),
+                    ([], [only]) => format!("handler for {only} that the value never produces"),
+                    ([], some) => format!(
+                        "handlers for {} that the value never produces",
+                        some.join(", ")
+                    ),
+                    _ => "case alternatives don't match the value".into(),
+                }
+            }
+            Self::CaseLabelTypeMismatch { label, .. } => {
+                format!("the handler at {label} is the wrong shape")
+            }
+            Self::CaseOnNonVariant { .. }
+            | Self::ControlOperatorAsValue { .. }
+            | Self::HandlerNotFirstClass { .. }
+            | Self::BuiltinNotFirstClass { .. }
+            | Self::CannotRedefineBuiltin { .. }
+            | Self::HandlerShadowedByBinding { .. }
+            | Self::BuiltinArity { .. }
+            | Self::FailStatusZero
+            | Self::MalformedAlias { .. }
+            | Self::MalformedUnalias { .. }
+            | Self::IndexIntoThunk
+            | Self::FieldOnNonRecord { .. }
+            | Self::DynamicIndexOnScalar { .. } => "here".into(),
+        }
+    }
 }
 
 /// Format a `CompTyMismatch` in user-friendly prose, suppressing the

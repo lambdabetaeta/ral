@@ -23,9 +23,8 @@
 
 use std::path::Path;
 
-use crate::diagnostic::Source;
 use crate::ir::Comp;
-use crate::source::FileId;
+use crate::source::{FileId, Source};
 use crate::types::{Shell, Settled, Value, sig, Break};
 
 use super::util::arg0_str;
