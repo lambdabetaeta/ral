@@ -122,9 +122,10 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
 /// Every path string by which a kernel sandbox MAC hook might
 /// present the same VFS object as `p`.
 ///
-/// Always includes `p`
-/// itself; on macOS also includes the lenient canonical form
-/// and any firmlink-toggled variant.  Sorted, deduped.
+/// Always includes `p` itself; on macOS also includes the lenient
+/// canonical form and any firmlink-toggled variant.  Unsorted and
+/// possibly repeating — the sole caller [`match_variants_list`] owns
+/// ordering and uniqueness.
 ///
 /// The motivation is empirical: a Seatbelt rule written
 /// `(subpath "/private/var/select")` does not match an `lstat` of
@@ -133,12 +134,10 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
 /// behave the inverse way.  Granting both forms removes the
 /// guessing without enlarging the trust surface — both names
 /// already point to the same inode.
-pub fn match_variants(p: &Path) -> Vec<PathBuf> {
+pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
     let mut out = vec![p.to_path_buf(), canonicalise_lenient(p)];
     let toggles: Vec<PathBuf> = out.iter().filter_map(|q| firmlink_toggle(q)).collect();
     out.extend(toggles);
-    out.sort();
-    out.dedup();
     out
 }
 
@@ -253,8 +252,12 @@ mod tests {
     #[test]
     fn match_variants_passes_unrelated_paths_through() {
         // Path that doesn't touch any firmlink root and has no
-        // resolvable symlinks: only the input is returned.
+        // resolvable symlinks: every variant is the input itself (the
+        // lenient canonical form of a non-existent path is the input).
         let v = match_variants(Path::new("/Users/nobody/projects/foo"));
-        assert_eq!(v, vec![PathBuf::from("/Users/nobody/projects/foo")]);
+        assert!(
+            v.iter()
+                .all(|p| p == Path::new("/Users/nobody/projects/foo"))
+        );
     }
 }
