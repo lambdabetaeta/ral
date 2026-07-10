@@ -247,8 +247,8 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             ..
         } => Some(
             "a command head must be a function or a thunk; \
-             a value here is data, not a callable — pass it \
-             as an argument or wrap a callable instead"
+             a value here is data, not something you can invoke — pass it \
+             as an argument, or wrap it in a function instead"
                 .to_string(),
         ),
         TypeErrorKind::ControlOperatorAsValue { name } => Some(format!(

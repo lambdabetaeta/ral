@@ -524,7 +524,7 @@ pub fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String 
         K::CompTyMismatch { .. } => "types disagree here".into(),
         K::CommandNotCallable { ty, .. } => {
             let ctx = FmtCtx::for_value_types(&[ty]);
-            format!("{} is not callable", fmt_ty_ctx(ty, &ctx))
+            format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
         }
         K::ModeMismatch { .. } => "pipeline channels disagree here".into(),
         K::RowExtraField { label } => format!("no field '{label}' in this record"),

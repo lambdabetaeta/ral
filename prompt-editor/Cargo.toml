@@ -3,6 +3,9 @@ name = "prompt-editor"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"

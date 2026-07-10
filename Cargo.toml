@@ -22,6 +22,29 @@ complexity = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 correctness = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Deliberate opt-outs from pedantic/nursery (priority 0 overrides the groups).
+# Each is advisory-by-design ceremony, not a defect signal, in this codebase:
+#   must_use_candidate / return_self_not_must_use — #[must_use] earns its meaning
+#     by being selective; annotating every pure accessor is noise.
+#   missing_const_for_fn — `const` is an API commitment with no payoff on internal
+#     code never evaluated in a const context.
+#   redundant_pub_crate — an explicit `pub(crate)` documents reach more clearly.
+#   option_if_let_else — the `map_or_else` rewrite frequently reads worse.
+#   items_after_statements — a local `fn`/`const` beside its use is a locality idiom.
+#   too_many_lines — splitting for a line count alone harms readable dispatch/draw code.
+#   similar_names / many_single_char_names — intentional domain pairs and math locals.
+# The vendored crate (vendor/ripgrep-core) does not inherit these lints.
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+missing_const_for_fn = "allow"
+redundant_pub_crate = "allow"
+option_if_let_else = "allow"
+items_after_statements = "allow"
+too_many_lines = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
 disallowed_methods = "deny"
 
 [profile.release]
