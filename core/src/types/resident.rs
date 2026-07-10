@@ -6,52 +6,19 @@
 //!
 //! The signature is the unification; the chapters keep their own
 //! representations, locks, and homes
-//! (`decisions/260615_no-core-repr-leak-into-exarch`) — the worker
-//! registry beside core's handles, the job table in the REPL binary, the
-//! agent registry and schedules in exarch. Fusing them into one registry
-//! struct is exactly what this trait refuses to do: [`Resident`] asks each
-//! chapter to *answer* through its own representation, never to restructure
-//! itself to match a shared one. Capabilities in particular are
+//! (`decisions/260615_no-core-repr-leak-into-exarch`). [`Resident`] asks
+//! each chapter to *answer* through its own representation, never to
+//! restructure itself to match a shared one. Capabilities in particular are
 //! deliberately not unified: [`Resident::capability_kind`] names the KIND
 //! (`"handle"`, `"pgid"`, `"agent-id"`, `"schedule-id"`, `"name"`), never a
 //! value, so the honest variance between a `Value::Handle` and a pgid stays
 //! typed and distinct.
 //!
-//! Extracted in parcel 9 from the first two folds that needed it — the
-//! REPL's `jobs` listing and its exit-time survivor warning
-//! (`ral/src/repl/host_handlers.rs`) — shaped by exactly what they consume:
-//! a bracketed designator and a state word. A fold wraps [`designator`](Resident::designator)
-//! in `[...]` uniformly rather than each chapter deciding its own
-//! bracketing; population-specific detail a fold also needs (a worker's
-//! `cmd`, a job's `pgid`) stays exactly that — read directly off the
-//! concrete type, never lifted into the signature, per the ADR's line that
-//! the unification is the interface, never a flattening of the structs.
-//! [`lease_row`](Resident::lease_row) and [`capability_kind`](Resident::capability_kind)
-//! round out the shape the ADR licenses for `/resources` and future folds,
-//! even though no fold built so far reads them.
-//!
-//! ## Implemented, and refused
-//!
-//! Core implements it for [`WorkerEntry`](super::WorkerEntry) (`shell/workers.rs`);
-//! the REPL implements it for its own `Job` (`ral/src/jobs.rs`) — the two
-//! chapters whose folds motivated the extraction. exarch's three chapters
-//! (agent registry entries, schedules, the binding ledger) all refuse: each
-//! only ever hands out a bare snapshot type for listing (`AgentInfo`,
-//! `ScheduleInfo`; the binding ledger does not even have one), built by
-//! cloning fields out from under a lock that is dropped before the snapshot
-//! reaches the caller. [`Resident::cancel`] takes `&self` alone, by design —
-//! a fold cancels *through* the resident, never by also passing back a
-//! registry and an id — but none of those three snapshots carries a live
-//! handle to its own registry, and adding one would either grow the
-//! snapshot into something that holds a lock across a listing (breaking the
-//! "enumeration is not observation" rule every listing here obeys) or
-//! duplicate the registry's own cancel/unschedule plumbing onto a type that
-//! was never meant to outlive the call that built it. That is the
-//! structural cost `decisions/260705_session-ledger`'s "the ledger is an
-//! interface, not a struct" explicitly licenses refusing rather than
-//! forcing: `agent_cancel`, `schedules`' own cancel, and the binding
-//! prune sweep remain each chapter's own verb, not a detour through this
-//! trait.
+//! Core implements it for [`WorkerEntry`](super::WorkerEntry); the REPL
+//! implements it for its own `Job`. exarch's chapters refuse: they hand out
+//! bare snapshot types for listing rather than a live handle to their own
+//! registry, and `decisions/260705_session-ledger` licenses that refusal —
+//! the ledger is an interface, not a struct.
 
 /// One resident's signature, projected from whatever representation its
 /// own chapter keeps.
@@ -67,8 +34,9 @@ pub trait Resident {
     fn designator(&self) -> String;
 
     /// The chapter this resident belongs to: `"worker"`, `"job"`,
-    /// `"agent"`, `"schedule"`, `"binding"` — the population a listing
-    /// fold groups by, distinct from the capability that reaches it.
+    /// `"agent"`, `"schedule"`, `"binding"`, distinct from the capability
+    /// that reaches it. Part of the shape the ADR licenses; no fold groups
+    /// by it yet.
     fn population(&self) -> &'static str;
 
     /// The kind of typed value that reaches and controls this resident —
