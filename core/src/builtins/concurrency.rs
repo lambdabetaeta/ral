@@ -471,6 +471,16 @@ fn lease_fire(chain: &LeaseChain) {
 
 // ── spawn ────────────────────────────────────────────────────────────────
 
+/// The worker body handed to [`spawn_child`]: the sole computation of a
+/// fresh thread, under the trivial continuation the thread's join provides.
+/// `spawn_child` absorbs any terminal tail call on that thread, so the body
+/// runs at [`Tail::Yes`].
+fn worker_body(
+    body: Arc<crate::ir::Comp>,
+) -> impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static {
+    move |child_env| with_scope(child_env, |s| eval_comp(&body, s, Tail::Yes))
+}
+
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
 pub(crate) fn builtin_spawn(args: &[Value], shell: &Shell) -> Settled<Value> {
     check_arity(args, 1, "spawn")?;
@@ -502,10 +512,7 @@ fn spawn_buffered(
         ChildIoMode::Buffered,
         LeaseClass::Worker,
         "<block>",
-        // The worker body is the sole computation of a fresh thread,
-        // under the trivial continuation the thread's join provides;
-        // `spawn_child` absorbs any terminal tail call on that thread.
-        move |child_env| with_scope(child_env, |s| eval_comp(&body, s, Tail::Yes)),
+        worker_body(body),
     )?))
 }
 
@@ -559,10 +566,7 @@ fn spawn_labelled(
         ChildIoMode::Watch { label },
         LeaseClass::Worker,
         "<watch>",
-        // The worker body is the sole computation of a fresh thread,
-        // under the trivial continuation the thread's join provides;
-        // `spawn_child` absorbs any terminal tail call on that thread.
-        move |child_env| with_scope(child_env, |s| eval_comp(&body, s, Tail::Yes)),
+        worker_body(body),
     )?))
 }
 
@@ -607,10 +611,7 @@ pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Valu
         ChildIoMode::Buffered,
         LeaseClass::Durable,
         &desc,
-        // The worker body is the sole computation of a fresh thread,
-        // under the trivial continuation the thread's join provides;
-        // `spawn_child` absorbs any terminal tail call on that thread.
-        move |child_env| with_scope(child_env, |s| eval_comp(&body, s, Tail::Yes)),
+        worker_body(body),
     )?))
 }
 
