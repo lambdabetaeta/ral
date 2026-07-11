@@ -159,10 +159,8 @@ impl Drop for SlotGuard {
 #[cfg(test)]
 pub(crate) fn is_set() -> bool {
     let p = CURRENT.load(Ordering::Acquire);
-    // SAFETY: a non-null slot points into the allocation `publish`
-    // deliberately leaked, so the pointee is live for the rest of the
-    // process — the guard's null-on-drop only bounds when the slot fires,
-    // not the pointee's lifetime.
+    // SAFETY: a non-null slot points into the allocation `publish` leaks, so
+    // the pointee is live for the rest of the process (see `publish`).
     !p.is_null() && unsafe { (*p).load(Ordering::Relaxed) } != 0
 }
 
@@ -173,10 +171,8 @@ pub(crate) fn is_set() -> bool {
 fn raise() {
     let p = CURRENT.load(Ordering::Acquire);
     if !p.is_null() {
-        // SAFETY: a non-null slot points into the allocation `publish`
-        // deliberately leaked, so the pointee is live for the rest of the
-        // process — the guard's null-on-drop only bounds when the slot fires,
-        // not the pointee's lifetime.
+        // SAFETY: a non-null slot points into the allocation `publish` leaks,
+        // so the pointee is live for the rest of the process (see `publish`).
         unsafe { (*p).store(CancelCause::Interrupt as u8, Ordering::Relaxed) };
     }
 }
@@ -195,14 +191,6 @@ pub fn raise_interrupt() {
 /// cooperative foreground unwind and relays to external pipeline groups but
 /// never `_exit`s; SIGTERM/SIGHUP forward into the escalating
 /// [`term_handler`], the right ladder for a deliberate termination request.
-#[cfg(unix)]
-/// Phase 2 Task 7 (signal relocation): When using `WireTransport`,
-/// the front-end owns signal handlers and translates SIGINT/SIGTSTP/
-/// SIGWINCH into `Control` frames sent through the `ControlSender`.
-/// The `RAL_SIGINT_HANDLER`/`RAL_TERM_HANDLER` cross-process chaining
-/// below is for the `IdentityTransport` path only — `WireTransport`
-/// must not install these; the engine receives cancellation through
-/// the wire, not a shared flag.
 #[cfg(unix)]
 pub fn install() {
     RAL_SIGINT_HANDLER.store(
