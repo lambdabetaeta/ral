@@ -98,6 +98,8 @@ pub struct TerminalState {
     /// process entry.  False when stdin is not a tty.  See the type doc.
     pub startup_foreground: bool,
     /// `true` when stdout is a tty *and* TERM/platform checks say ANSI works.
+    /// `RAL_INTERACTIVE_MODE=full` forces it on regardless (see
+    /// [`ansi_supported`]), matching the `ansi_supported` contract.
     pub supports_ansi: bool,
     /// `true` when TERM/platform checks say stderr's terminal accepts ANSI.
     /// The stderr analogue of `supports_ansi`, snapshotted the same way at

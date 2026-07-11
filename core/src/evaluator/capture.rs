@@ -31,7 +31,6 @@ impl<'a> CaptureScope<'a> {
             &mut shell.turn.io.capture_outer,
             saved_stdout.try_clone().ok(),
         );
-        shell.turn.io.capture_depth += 1;
         Self {
             shell,
             saved_stdout: Some(saved_stdout),
@@ -42,7 +41,6 @@ impl<'a> CaptureScope<'a> {
 
 impl Drop for CaptureScope<'_> {
     fn drop(&mut self) {
-        self.shell.turn.io.capture_depth -= 1;
         if let Some(prev) = self.saved_capture_outer.take() {
             self.shell.turn.io.capture_outer = prev;
         }

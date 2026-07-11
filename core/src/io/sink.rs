@@ -6,9 +6,10 @@
 //! through.  [`ChildStdioPlan`] is its companion for child processes: the
 //! `Stdio` to hand `Command::stdout`/`stderr` plus an optional pump sink the
 //! caller drains after spawn.  The buffer primitives ([`new_buffer`],
-//! [`tee_with_buffer`], [`take_buffer`], [`peek_buffer`],
-//! [`strip_trailing_newline`]) are the sole owners of the
-//! `Arc<Mutex<Vec<u8>>>` idiom for captured bytes.
+//! [`tee_with_buffer`], [`take_buffer`], [`peek_buffer`]) are the sole
+//! owners of the `Arc<Mutex<Vec<u8>>>` idiom for captured bytes.  The two
+//! strip helpers ([`strip_trailing_newline`], [`str_strip_one_terminator`])
+//! are plain byte/string trimmers over that captured output.
 
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex};
 /// to disk so high-volume spawn / command-substitution captures push the user
 /// toward an explicit redirect (`cmd > log`).  Enforced in `Write::write_all`
 /// so both direct shell writes and pump-thread appends observe it.
-pub const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
+const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
 

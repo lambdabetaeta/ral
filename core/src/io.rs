@@ -8,8 +8,7 @@
 //! `crate::io::TerminalState`, etc.
 //!
 //! This file holds [`Io`] — the per-Shell IO bundle (stdin / stdout /
-//! stderr / interactive / terminal / `launch_role` / `capture_outer` /
-//! `capture_depth`) — and
+//! stderr / interactive / terminal / `launch_role` / `capture_outer`) — and
 //! [`LaunchRole`], the process-group role that distinguishes the top-level
 //! orchestrator from a pipeline-local child. Terminal-foreground authority is
 //! no longer carried here — that is the session's
@@ -20,7 +19,7 @@ mod sink;
 mod source;
 mod terminal;
 
-pub use sink::{ByteBuffer, ChildStdioPlan, ExternalWrite, SINK_BUFFER_CAP, Sink};
+pub use sink::{ByteBuffer, ChildStdioPlan, ExternalWrite, Sink};
 pub(crate) use sink::{
     new_buffer, peek_buffer, str_strip_one_terminator, strip_trailing_newline, take_buffer,
     tee_with_buffer,
@@ -86,13 +85,6 @@ pub struct Io {
     /// side-effects remain visible rather than being silently discarded.
     /// `None` when not inside a capture context.
     pub capture_outer: Option<Sink>,
-    /// Depth of nested `with_capture` scopes.  `> 0` means the current
-    /// stdout is a capture buffer (or tee chain leading to one), so
-    /// pipeline planning must avoid foregrounding: a captured pipeline
-    /// must not steal the controlling terminal away from the parent.
-    /// `capture_outer` alone is not enough — a `try_clone` of the outer
-    /// sink can fail and leave it `None` even inside a capture.
-    pub capture_depth: usize,
 }
 
 impl Io {
@@ -117,7 +109,6 @@ impl Io {
                 .as_ref()
                 .map(Sink::try_clone)
                 .transpose()?,
-            capture_depth: self.capture_depth,
         })
     }
 
@@ -135,7 +126,6 @@ impl Io {
             .capture_outer
             .as_ref()
             .and_then(|s| s.try_clone().ok());
-        self.capture_depth = parent.capture_depth;
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
         self.launch_role = parent.launch_role;
@@ -162,7 +152,6 @@ impl Default for Io {
             terminal: TerminalState::default(),
             launch_role: LaunchRole::default(),
             capture_outer: None,
-            capture_depth: 0,
         }
     }
 }

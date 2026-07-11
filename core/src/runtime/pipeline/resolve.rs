@@ -314,8 +314,7 @@ fn resolve_terminal_plan(shell: &Shell) -> TerminalPlan {
     // selection, but the body (e.g. `fzf`) draws on `/dev/tty` and *must* own
     // the foreground pgid or its first `tcsetattr` raises SIGTTOU; the host
     // suspended its own surface and raised the turn to `ExplicitLoan` for
-    // exactly this window.  This replaces both the old `capture_depth` gate
-    // and its `tui_active` exception with a single final-sink/loan rule.
+    // exactly this window.  Foregrounding is this single final-sink/loan rule.
     let loan = matches!(shell.turn.terminal_access, TerminalAccess::ExplicitLoan);
     let terminal_bound = matches!(
         shell.turn.io.stdout,
