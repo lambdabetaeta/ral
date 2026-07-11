@@ -5,12 +5,16 @@
 //! messages, escape sequences, or the internal buffer stack — each
 //! backend owns those concerns itself.
 //!
-//! Two implementations live in submodules:
+//! Three implementations live in submodules:
 //! - [`minimal::MinimalFrontend`] — canonical-stdin fallback for dumb
 //!   terminals and `RAL_INTERACTIVE_MODE=minimal`.  No raw mode, no
 //!   plugin features.
 //! - [`rustyline::RustylineFrontend`] — full editor with completion,
 //!   plugin keybindings, ghost text, highlights, and rustyline history.
+//! - `structural::StructuralFrontend` — the ratatui projection surface
+//!   ([`Surface::Structural`], `structural` builds only): a line editor
+//!   drawn in an inline viewport that projects the live shell's typed
+//!   spine, worksheet bindings, and handles matrix around the prompt.
 
 mod minimal;
 mod rustyline;
