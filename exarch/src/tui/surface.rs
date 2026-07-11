@@ -21,8 +21,8 @@ struct PatchBuf {
 /// user does not care about interleave order); flushed as one block per
 /// non-empty bucket.  The exec/grep buckets keep the typed [`IoEvent`] rather
 /// than pre-rendered spans so flush-time rendering can reuse the exact
-/// `io_card` span idioms via [`crate::card::observation_group_card`].  Writes are not
-/// buffered — a write is a barrier landed standalone as its own card.
+/// `io_card` span idioms via [`crate::card`]'s per-kind group helpers.  Writes
+/// are not buffered — a write is a barrier landed standalone as its own card.
 struct ObservationBuf {
     id: AgentId,
     /// Read paths, first-seen order, deduped.
@@ -139,41 +139,26 @@ impl SurfaceBuffer {
 
     /// Commit any pending [`ObservationBuf`] as one block *per non-empty kind*, in a
     /// fixed Read → Exec → Grep order, reusing the exact `io_card` span idioms
-    /// via [`crate::card::observation_group_card`].  No-op when the buffer is empty.
-    /// Called at every commit boundary that isn't another io surface in the
-    /// same session, through the shared [`SurfaceBuffer::flush_surfaces`].
+    /// via [`crate::card`]'s per-kind group helpers.  No-op when the buffer is
+    /// empty.  Called at every commit boundary that isn't another io surface in
+    /// the same session, through the shared [`SurfaceBuffer::flush_surfaces`].
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "buffered-observation count for the run census"
+    )]
     fn flush_observations(&mut self, viewports: &mut HashMap<AgentId, Viewport>) {
         let Some(buf) = self.observation_buf.take() else {
             return;
         };
         if let Some(vp) = viewports.get_mut(&buf.id) {
-            // One block per non-empty kind, in the fixed Read → Exec → Grep
-            // order, each carrying its `ObservationKind` and the count it folds — the
-            // run's census tally.  Reads / greps / execs are *observations* the
-            // coalescing projection folds under their call; writes never buffer
-            // (a write is a barrier landed standalone as its own card).  Each
-            // per-kind group yields one card (or none), reconstructed from the
-            // same `observation_group_card` span idioms.
-            use crate::card::observation_group_card;
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "buffered-observation count for the run census"
-            )]
-            for card in observation_group_card(&buf.reads, &[], &[]) {
+            use crate::card::{execs_card, greps_card, reads_card};
+            if let Some(card) = reads_card(&buf.reads) {
                 vp.push_observation_card(card, ObservationKind::Read, buf.reads.len() as u32);
             }
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "buffered-observation count for the run census"
-            )]
-            for card in observation_group_card(&[], &buf.execs, &[]) {
+            if let Some(card) = execs_card(&buf.execs) {
                 vp.push_observation_card(card, ObservationKind::Exec, buf.execs.len() as u32);
             }
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "buffered-observation count for the run census"
-            )]
-            for card in observation_group_card(&[], &[], &buf.greps) {
+            if let Some(card) = greps_card(&buf.greps) {
                 vp.push_observation_card(card, ObservationKind::Grep, buf.greps.len() as u32);
             }
         }

@@ -575,7 +575,7 @@ pub fn io_card(event: &IoEvent) -> Card {
 /// The command of an exec, *without* its `$ ` prefix or `→ status` tail —
 /// the program as a [`Role::Path`] span and each arg as plain ink (a missing
 /// command degrades to plain ink).  Shared by [`io_card`] (which frames it
-/// with the prompt and status) and [`observation_group_card`] (which comma-joins
+/// with the prompt and status) and [`execs_card`] (which comma-joins
 /// several, dropping the per-event status — see its docs).
 ///
 /// The surfaced `argv` is post-shell — word-split, quotes already consumed —
@@ -620,7 +620,7 @@ fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
 }
 
 /// A read row: the muted verb `read`, then the path as the subject.  Reused
-/// verbatim per entry in [`observation_group_card`]'s comma-joined read run, so a lone
+/// verbatim per entry in [`reads_card`]'s comma-joined read run, so a lone
 /// read and a grouped one share one shape.
 fn read_spans(path: &str) -> Vec<Span> {
     vec![span(Role::Muted, "read "), span(Role::Path, path)]
@@ -685,59 +685,66 @@ fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark
     }]
 }
 
-/// Compose a run of buffered observation surfaces — even interleaved, grouped
-/// by the TUI into per-kind buckets — into one [`Card`] *per non-empty kind*,
-/// in a fixed Read → Exec → Grep order.
+// ── Observation groups: a run of buffered surfaces of one kind → one card ────
+//
+// Each helper composes a run of buffered observation surfaces of one kind
+// (Read / Exec / Grep) into a single [`Card`], `None` when the run is empty.
+// The card is one [`Mark::Text`] reusing the exact `io_card` span vocabulary,
+// so hues match; a lone surface (a run of one) renders identically to its
+// `io_card`, modulo the deliberate exec departure. Writes never reach here: a
+// write is a barrier rendered standalone as its own card.
+
+/// The Read group: `read p1, read p2, …` — each entry the verb + path,
+/// comma-joined.
+pub fn reads_card(reads: &[String]) -> Option<Card> {
+    if reads.is_empty() {
+        return None;
+    }
+    let mut spans = Vec::new();
+    join_spans(&mut spans, reads, |spans, path| {
+        spans.extend(read_spans(path));
+    });
+    Some(Card(vec![Mark::Text { spans }]))
+}
+
+/// The Exec group: `$ cmd1, cmd2, …` — one prompt, the commands comma-joined.
 ///
-/// Each card is a single [`Mark::Text`]
-/// reusing the exact `io_card` span vocabulary, so hues match; a lone surface
-/// (a group of one) renders identically to its `io_card`, modulo the deliberate
-/// exec departure below — no special case.  Writes never reach here: a write is
-/// a barrier rendered standalone as its own card (header + content preview).
-///
-/// The exec group **drops the `→ status` tail** that single `io_card` exec
-/// rows carry: a comma-joined run of commands reads as the *set of commands
-/// run* (`$ wc -l, grep -rn, git status`), and a per-command status would be
-/// per-event noise on that line.  The status is not lost — it rides the bus
-/// in each `Kind::Io`'s structured event and reaches the transcript via
+/// **Drops the `→ status` tail** that single `io_card` exec rows carry: a
+/// comma-joined run of commands reads as the *set of commands run* (`$ wc -l,
+/// grep -rn, git status`), and a per-command status would be per-event noise
+/// on that line.  The status is not lost — it rides the bus in each
+/// `Kind::Io`'s structured event and reaches the transcript via
 /// `transcript::event_record`; only this grouped *presentation* omits it.
-pub fn observation_group_card(reads: &[String], execs: &[IoEvent], greps: &[IoEvent]) -> Vec<Card> {
-    let mut cards = Vec::new();
-    // Read: `read p1, read p2, …` — each entry the verb + path, comma-joined.
-    if !reads.is_empty() {
-        let mut spans = Vec::new();
-        join_spans(&mut spans, reads, |spans, path| {
-            spans.extend(read_spans(path));
-        });
-        cards.push(Card(vec![Mark::Text { spans }]));
+pub fn execs_card(execs: &[IoEvent]) -> Option<Card> {
+    if execs.is_empty() {
+        return None;
     }
-    // Exec: `$ cmd1, cmd2, …` — one prompt, the commands comma-joined, each
-    // dropping its status tail (see the doc comment above).
-    if !execs.is_empty() {
-        let mut spans = vec![span_plain("$ ")];
-        join_spans(&mut spans, execs, |spans, e| {
-            if let IoEvent::Exec { argv, .. } = e {
-                spans.extend(exec_cmd_spans(argv));
-            }
-        });
-        cards.push(Card(vec![Mark::Text { spans }]));
+    let mut spans = vec![span_plain("$ ")];
+    join_spans(&mut spans, execs, |spans, e| {
+        if let IoEvent::Exec { argv, .. } = e {
+            spans.extend(exec_cmd_spans(argv));
+        }
+    });
+    Some(Card(vec![Mark::Text { spans }]))
+}
+
+/// The Grep group: `grep p1 in s1, p2 in s2, …` — one verb, the
+/// `pattern in scope` entries comma-joined.
+pub fn greps_card(greps: &[IoEvent]) -> Option<Card> {
+    if greps.is_empty() {
+        return None;
     }
-    // Grep: `grep p1 in s1, p2 in s2, …` — one verb, the `pattern in scope`
-    // entries comma-joined.
-    if !greps.is_empty() {
-        let mut spans = vec![span(Role::Muted, "grep ")];
-        join_spans(&mut spans, greps, |spans, e| {
-            if let IoEvent::Grep { scope, pattern } = e {
-                spans.extend(grep_spans(scope, pattern));
-            }
-        });
-        cards.push(Card(vec![Mark::Text { spans }]));
-    }
-    cards
+    let mut spans = vec![span(Role::Muted, "grep ")];
+    join_spans(&mut spans, greps, |spans, e| {
+        if let IoEvent::Grep { scope, pattern } = e {
+            spans.extend(grep_spans(scope, pattern));
+        }
+    });
+    Some(Card(vec![Mark::Text { spans }]))
 }
 
 /// Append each of `items` to `spans` via `each`, separating entries with a
-/// plain `", "` — the comma-join shared by every [`observation_group_card`] bucket.
+/// plain `", "` — the comma-join shared by every observation group.
 fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span>, &T)) {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
