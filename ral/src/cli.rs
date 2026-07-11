@@ -52,8 +52,9 @@ pub(crate) struct InteractiveOpts {
     pub no_rc: bool,
     /// `-i` forces interactive mode even when stdin is not a tty.
     pub force_interactive: bool,
-    /// `-s` reads stdin as a batch script even when a script positional is
-    /// present or stdin is a tty. Takes precedence over `force_interactive`.
+    /// `-s` reads stdin as a batch script even when stdin is a tty. Consulted
+    /// only in the interactive case: a script positional, if present, is run
+    /// instead. Takes precedence over `-i` (`force_interactive`).
     pub force_stdin: bool,
     /// `--surface` selects the interactive frontend. `None` leaves the choice
     /// to the rc `surface:` key, falling back to the default surface.
@@ -150,7 +151,7 @@ pub(crate) struct Cli {
     #[arg(short = 'i')]
     force_interactive: bool,
 
-    /// Read stdin as a script even when a positional argument or terminal is present
+    /// Read stdin as a script even when stdin is a terminal (a script positional takes precedence)
     #[arg(short = 's')]
     force_stdin: bool,
 
