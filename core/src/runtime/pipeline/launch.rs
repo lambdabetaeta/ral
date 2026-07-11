@@ -111,6 +111,36 @@ pub(super) fn wire_stage_stdout(
     }
 }
 
+/// Wire a stage's stdin, stdout, and stderr, moving the route's byte
+/// edge ends into the child's stdio.  Stdin routes via [`route_stdin`]
+/// (upstream reader or the enclosing boundary); stdout fans out through
+/// [`wire_stage_stdout`] (downstream writer, parent sink with an optional
+/// pump, or `/dev/null` for a value-out stage); stderr always goes
+/// through the standard [`Sink::child_stderr`] plan.  Shared by the
+/// direct-spawn external path and the ral-helper path so their wiring
+/// cannot drift.
+pub(super) fn wire_stage_stdio(
+    cmd: &mut crate::process::Launch,
+    stdin: ByteIn,
+    stdout: ByteOut,
+    group: &PipelineGroup,
+    shell: &mut Shell,
+) -> Settled<command::ExternalPlumbing> {
+    cmd.stdin(route_stdin(stdin, group, shell).into_stdio());
+    let stdout_pump = wire_stage_stdout(cmd, stdout, group, shell)?;
+    let stderr_plan = shell
+        .turn
+        .io
+        .stderr
+        .child_stderr()
+        .map_err(super::protocol::pipe_error)?;
+    cmd.stderr(stderr_plan.stdio);
+    Ok(command::ExternalPlumbing {
+        stdout_pump,
+        stderr_pump: stderr_plan.pump,
+    })
+}
+
 /// Spawn `cmd` into `group`, apply post-spawn child limits if any
 /// capability layer is active, and assemble a [`command::RunningChild`]
 /// with the parent-side pumps attached.  One funnel for both external
@@ -361,41 +391,15 @@ fn launch_external_stage_direct(
     let rc = command::vet(&ext.id, &ext.args, shell)?;
     let mut cmd = command::build_command(&rc, shell)?;
 
-    cmd.stdin(route_stdin(route.stdin, group, shell).into_stdio());
-
-    // Stdout: pipe to downstream > pump to parent > null.
-    // Redirect-file branches are unreachable here — the caller
-    // gates on `ext.redirects.is_empty()`.
-    let stdout_pump = wire_stage_stdout(&mut cmd, route.stdout, group, shell)?;
-
-    let stderr_piped = !matches!(shell.turn.io.stderr, Sink::Stderr);
-    cmd.stderr(if stderr_piped {
-        crate::process::StdioSpec::piped()
-    } else {
-        crate::process::StdioSpec::inherit()
-    });
-
-    let stderr_pump = if stderr_piped {
-        Some(
-            shell
-                .turn
-                .io
-                .stderr
-                .try_clone()
-                .map_err(super::protocol::pipe_error)?,
-        )
-    } else {
-        None
-    };
+    // Redirect-file branches are unreachable in `wire_stage_stdout` here —
+    // the caller gates on `ext.redirects.is_empty()`.
+    let plumbing = wire_stage_stdio(&mut cmd, route.stdin, route.stdout, group, shell)?;
 
     spawn_into_group(
         group,
         &mut cmd,
         rc.shown.clone(),
-        command::ExternalPlumbing {
-            stdout_pump,
-            stderr_pump,
-        },
+        plumbing,
         shell,
         park_on_stop,
         |e| command::spawn_error(&rc.shown, &e),

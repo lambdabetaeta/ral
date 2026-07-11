@@ -18,10 +18,10 @@
 use super::super::command;
 use super::collect::StageObservation;
 use super::group::PipelineGroup;
-use super::launch::{route_stdin, spawn_into_group, wire_stage_stdout};
+use super::launch::{spawn_into_group, wire_stage_stdio};
 use super::protocol::{DeferredFrame, FrameReader, HelperProtocol, pipe_error};
 use super::resolve::StageSpec;
-use super::route::{ByteIn, ByteOut, StageRoute};
+use super::route::StageRoute;
 use crate::child_eval::{ChildEvalRequest, ChildEvalResponse, DecodedResponse, decode_response};
 use crate::types::{AuditFragment, Break, Error, Settled, Shell};
 
@@ -134,31 +134,6 @@ impl HelperStageHandle {
     }
 }
 
-/// Wire stdin / stdout / stderr for a ral helper stage, moving the
-/// route's edge ends into the child's stdio.  Stdout fans out three
-/// ways: [`ByteOut::Downstream`] → the byte edge's writer;
-/// [`ByteOut::Parent`] → the parent's stdout sink (with a pump if the
-/// final byte sink is non-fd); [`ByteOut::Null`] → `/dev/null` for
-/// value-out stages whose interior output edge is a value channel and
-/// which therefore never emit bytes.  Stderr always goes through the
-/// standard child-stderr plan.
-fn wire_ral_stdio(
-    cmd: &mut crate::process::Launch,
-    stdin: ByteIn,
-    stdout: ByteOut,
-    shell: &mut Shell,
-    group: &PipelineGroup,
-) -> Settled<command::ExternalPlumbing> {
-    cmd.stdin(route_stdin(stdin, group, shell).into_stdio());
-    let stdout_pump = wire_stage_stdout(cmd, stdout, group, shell)?;
-    let stderr_plan = shell.turn.io.stderr.child_stderr().map_err(pipe_error)?;
-    cmd.stderr(stderr_plan.stdio);
-    Ok(command::ExternalPlumbing {
-        stdout_pump,
-        stderr_pump: stderr_plan.pump,
-    })
-}
-
 pub(super) fn launch_helper_stage(
     job: ChildEvalRequest,
     spec: &StageSpec,
@@ -175,7 +150,7 @@ pub(super) fn launch_helper_stage(
         ..
     } = route;
     let (mut cmd, proto) = HelperProtocol::build_command(value_in, value_out)?;
-    let plumbing = wire_ral_stdio(&mut cmd, stdin, stdout, shell, group)?;
+    let plumbing = wire_stage_stdio(&mut cmd, stdin, stdout, group, shell)?;
     let running = spawn_into_group(
         group,
         &mut cmd,
