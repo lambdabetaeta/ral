@@ -426,20 +426,18 @@ impl Shell {
     /// dispatches a [`Program::Hook`] turn at a lifecycle moment (prompt
     /// render, startup, plugin hook, keybinding).
     ///
-    /// Registration checks:
-    /// 1. `value` is a `Block` or `Lambda`.
-    /// 2. Its arity matches `sig` (0 for `Prompt`, 1 otherwise).
-    /// 3. `Hook::validate` — a no-op seam for future mobility
-    ///    checks.
-    ///
-    /// On success the hook is inserted into `context.hooks`,
-    /// keyed by `name`.  On failure a [`RegisterError`] is returned;
-    /// callers render it as a diagnostic at `origin`.
+    /// A re-registration of an already-registered `name` short-circuits
+    /// before any scheme inference.  Otherwise the hook is built with the
+    /// same scheme-inference path an ordinary session `let` uses, and
+    /// [`Hook::validate`] is the single check that `value` is a `Block` or
+    /// `Lambda` of the arity `sig` expects.  On success the hook is
+    /// inserted into `context.hooks`, keyed by `name`; on failure the
+    /// caller renders the [`RegisterError`] as a diagnostic at `origin`.
     ///
     /// # Errors
-    /// Returns `Err` if `value` is not a `Block` or `Lambda`, if its arity
-    /// does not match `sig`, if a hook named `name` is already registered, or
-    /// if [`Hook::validate`] rejects it.
+    /// Returns [`RegisterError::AlreadyRegistered`] if a hook named `name`
+    /// already exists, or whatever [`Hook::validate`] raises if `value` is
+    /// not a `Block`/`Lambda` or its arity does not match `sig`.
     pub fn register_hook(
         &mut self,
         name: HookName,
@@ -448,37 +446,18 @@ impl Shell {
         policy: DefaultPolicy,
         origin: Span,
     ) -> Result<(), RegisterError> {
-        // 1. Must be Block or Lambda.
-        let arity = match &value {
-            Value::Block { .. } => 0,
-            Value::Lambda { .. } => value.lambda_arity().unwrap_or(1),
-            _ => {
-                return Err(RegisterError::NotCallable {
-                    name,
-                    origin,
-                    actual: value.type_name().to_string(),
-                });
-            }
-        };
-
-        // 2. Arity must match the signature.
-        let expected = sig.expected_arity();
-        if arity != expected {
-            return Err(RegisterError::ArityMismatch {
-                name,
-                origin,
-                expected,
-                actual: arity,
-                sig_label: sig.label().to_string(),
-            });
+        // Re-registration short-circuits before any scheme inference.
+        if self.mobile.context.hooks.contains_key(&name) {
+            return Err(RegisterError::AlreadyRegistered { name, origin });
         }
 
-        // 3. Build the Binding with the same scheme inference an
-        //    ordinary session `let` uses.
+        // Build the Binding with the same scheme inference an ordinary
+        // session `let` uses. A non-thunk value gets no scheme; the
+        // `validate` below is the one gate that rejects it.
         let arm = match &value {
             Value::Lambda { param, body, .. } => Some((Some(param), body)),
             Value::Block { body, .. } => Some((None, body)),
-            _ => unreachable!("already checked above"),
+            _ => None,
         };
         let scheme = arm.map(|(param, body)| {
             crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
@@ -486,12 +465,6 @@ impl Shell {
         use crate::types::Binding;
         let binding = Binding { value, scheme };
 
-        // 4. Check for duplicate registration.
-        if self.mobile.context.hooks.contains_key(&name) {
-            return Err(RegisterError::AlreadyRegistered { name, origin });
-        }
-
-        // 5. Validate arity and callability.
         let hook = Hook {
             binding,
             sig,

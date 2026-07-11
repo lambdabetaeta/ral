@@ -179,9 +179,10 @@ pub struct Hook {
     pub origin: Span,
 }
 impl Hook {
-    /// Validate arity: the handler's parameter count must match
-    /// the signature's expected arity (0 for Prompt, 1 for Hook/
-    /// Lifecycle/PluginFactory).
+    /// The single registration gate: the bound value must be a `Block` or
+    /// a `Lambda`, and its parameter count must match the signature's
+    /// expected arity (0 for `Prompt`, 1 for `Hook`/`Lifecycle`/
+    /// `PluginFactory`).
     ///
     /// # Errors
     /// Returns [`RegisterError::NotCallable`] if the bound value is neither
