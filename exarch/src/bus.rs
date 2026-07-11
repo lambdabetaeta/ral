@@ -800,7 +800,7 @@ impl Inbox {
                 // turn-boundary drain does, so it lands as one human turn.
                 let mut text = String::new();
                 while let Some(InboxMsg::UserSteering(s)) = q.front() {
-                    if s.trim_start().starts_with('/') {
+                    if is_slash(s) {
                         break;
                     }
                     let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
@@ -814,9 +814,7 @@ impl Inbox {
                 turns.push(Turn::Human(text));
             } else {
                 let msg = q.pop_front().expect("front present and tool-boundary");
-                if let Some(turn) = to_turn(msg) {
-                    turns.push(turn);
-                }
+                turns.push(to_turn(msg));
             }
         }
         drop(q);
@@ -936,45 +934,32 @@ impl Inbox {
 /// source.  A leading run of *user* steering coalesces into one [`Turn::Human`]
 /// (preserving the whole-queue join, so a lone `/clear` still reaches the
 /// command path); every other source is delivered on its own so the drive loop
-/// can render each in its honest medium.  A `Surface` whose deliver-once latch
-/// is already set is dropped and the scan continues (a suppressed batch never
-/// short-circuits a later deliverable).
+/// can render each in its honest medium.
 fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
-    loop {
-        if let InboxMsg::UserSteering(_) = q.front()? {
-            let mut text = String::new();
-            while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
-                let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
-                    unreachable!("front just checked to be user steering")
-                };
-                if !text.is_empty() {
-                    text.push_str("\n\n");
-                }
-                text.push_str(&s);
+    if let InboxMsg::UserSteering(_) = q.front()? {
+        let mut text = String::new();
+        while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
+            let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
+                unreachable!("front just checked to be user steering")
+            };
+            if !text.is_empty() {
+                text.push_str("\n\n");
             }
-            return Some(Turn::Human(text));
+            text.push_str(&s);
         }
-        let msg = q.pop_front().expect("front checked present");
-        // A suppressed `Surface` yields nothing; the loop tries the next
-        // message rather than return an empty turn.
-        if let Some(turn) = to_turn(msg) {
-            return Some(turn);
-        }
+        return Some(Turn::Human(text));
     }
+    let msg = q.pop_front().expect("front checked present");
+    Some(to_turn(msg))
 }
 
 /// Convert one non-user-steering message into the [`Turn`] it delivers,
 /// running its drain side effect ([`InboxMsg::on_drain`]).  Shared by the
 /// tool-boundary drain ([`Inbox::drain_tool`]) and the turn-boundary drain
-/// ([`pop_turn`]).  Yields `None` only for a `Surface` an eliminator already
-/// delivered (its deliver-once latch is set): the caller drops it.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "the `Option` is the drain protocol's suppression channel — a deliver-once `Surface` yields `None` so both drain sites (`drain_tool`, `pop_turn`) skip it rather than push an empty turn; flattening the return would erase that documented contract."
-)]
-fn to_turn(msg: InboxMsg) -> Option<Turn> {
+/// ([`pop_turn`]).
+fn to_turn(msg: InboxMsg) -> Turn {
     msg.on_drain();
-    Some(match msg {
+    match msg {
         InboxMsg::ScheduledWakeup {
             label,
             trigger,
@@ -989,7 +974,7 @@ fn to_turn(msg: InboxMsg) -> Option<Turn> {
         InboxMsg::UserSteering(_) => {
             unreachable!("user steering coalesced by the caller")
         }
-    })
+    }
 }
 
 pub struct Event {
@@ -1042,13 +1027,11 @@ pub enum Kind {
         tuning: Tuning,
     },
     /// A transient label for the worker's current synchronous phase —
-    /// "awaiting model", "compacting".  Emitted before a long op so
-    /// the frontend can paint a progress label alongside the spinner —
-    /// can name what the worker is doing during an otherwise silent gap:
-    /// the user sees what the worker is doing during a silent gap,
-    /// bare dot, and the user can see Esc was not swallowed), and the
-    /// headless `events.json` keeps it for post-mortem.  Superseded by
-    /// the next event of any kind.
+    /// "awaiting model", "compacting".  Emitted before a long op so the
+    /// frontend can name what the worker is doing during an otherwise silent
+    /// gap (a progress label alongside the spinner); the headless
+    /// `events.json` keeps it for post-mortem.  Superseded by the next event
+    /// of any kind.
     Phase(String),
     ToolCall {
         tool: &'static str,
