@@ -7,7 +7,6 @@
 //! the consumer ([`super::App::handle`]) calls into here to turn them
 //! into `Line`s.
 
-use super::block::wrap_line;
 use super::highlight::highlight_ral;
 use super::palette::{
     CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_GLYPHS, RAIL_W, READ_W, RED, RED_HOT,
@@ -24,7 +23,7 @@ use ratatui::{
 use serde_json::Value;
 use std::borrow::Cow;
 use std::time::Duration;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// True when every span in `l` is empty or whitespace-only — i.e. the
 /// line carries no glyphs and reads as a vertical separator rather
@@ -866,7 +865,7 @@ fn span_run_width(spans: &[Span<'static>]) -> usize {
 
 /// Render a `text` mark — a run of optionally-roled spans into one or more
 /// `Line`s, breaking on embedded newlines so a multi-line span stays
-/// faithful.  Width-folding happens later in `block::wrap_line`, which
+/// faithful.  Width-folding happens later in [`wrap_line`], which
 /// preserves each span's style.
 fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1454,6 +1453,173 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
 }
 
+/// Fold one logical line into visual rows no wider than `width`,
+/// word-aware and preserving each span's style.  The line builders already
+/// lay content out within [`READ_W`], so on a terminal at least that wide
+/// this hands the line straight back; it only folds on a narrower one.
+///
+/// Continuations re-indent to the line's leading indentation — an optional
+/// [`RAIL_GLYPHS`] rail glyph (prepended by [`super::block::Block::render_with`])
+/// plus any leading whitespace the builders inset content with — so a wrapped
+/// prompt echo, code row, or io effect folds under its own indent rather than
+/// sliding back to column zero.  A line with no leading indent wraps flush at
+/// `0`.  The greedy placement breaks between words, dropping the inter-word
+/// gap at the break; a single word wider than the body column is hard-broken
+/// char-by-char.
+pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 || line.width() <= width {
+        return vec![line.clone()];
+    }
+    // The hang column is the line's leading indentation: an optional rail
+    // glyph (the first span, when it is one the rail prepends) followed by any
+    // whitespace-only spans the builders inset with.  Carrying the indent into
+    // the head — rather than leaving it in the body — is what keeps it on a
+    // wrapped row 0: the body's leading whitespace would otherwise be dropped
+    // as a row-leading gap.  The head spans ride row 0 verbatim (so the copy
+    // contract still strips a leading rail glyph), and continuations re-indent
+    // to their summed width.
+    let spans = line.spans.as_slice();
+    let rail = usize::from(
+        spans
+            .first()
+            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
+    );
+    let mut head_len = rail;
+    while spans
+        .get(head_len)
+        .is_some_and(|s| !s.content.is_empty() && s.content.chars().all(|c| c == ' '))
+    {
+        head_len += 1;
+    }
+    let head = &spans[..head_len];
+    let body = &spans[head_len..];
+    let indent: usize = head
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    // Row 0 opens carrying the head spans verbatim (the rail glyph and indent,
+    // occupying columns `0..indent`); continuation rows are seeded with the
+    // indent.
+    let mut row: Vec<Span<'static>> = head.to_vec();
+    let mut col = indent;
+    // Whether a word has landed on the current row's body.  A pending gap
+    // before the first body word of a row is leading whitespace and is
+    // dropped; once a word lands the row may break and gaps become
+    // inter-word separators.
+    let mut started = false;
+    // The whitespace pending between the last word and the next: carried as
+    // style-runs so a styled gap survives, or dropped at a break / row start.
+    let mut gap: Vec<(String, Style)> = Vec::new();
+    let mut gap_w = 0;
+
+    for (word, ww) in words(body) {
+        // A whitespace run is held as the pending gap, never placed eagerly.
+        if word.iter().all(|(s, _)| s.chars().all(char::is_whitespace)) {
+            gap = word;
+            gap_w = ww;
+            continue;
+        }
+        // Break before a word that overflows once this row carries one; the
+        // pending gap is dropped at the break.
+        if started && col + gap_w + ww > width {
+            rows.push(Line::from(std::mem::take(&mut row)));
+            row = seed(indent);
+            col = indent;
+            started = false;
+            gap.clear();
+            gap_w = 0;
+        }
+        // Place the pending gap only between words on a started row; drop it
+        // when it would lead the row.
+        if started {
+            for (s, style) in std::mem::take(&mut gap) {
+                row.push(Span::styled(s, style));
+            }
+            col += gap_w;
+        } else {
+            gap.clear();
+        }
+        gap_w = 0;
+        // Place the word, hard-breaking it char-by-char when it alone is
+        // wider than the body column.
+        for (s, style) in word {
+            for ch in s.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if started && col + cw > width {
+                    rows.push(Line::from(std::mem::take(&mut row)));
+                    row = seed(indent);
+                    col = indent;
+                }
+                push_char(&mut row, ch, style);
+                col += cw;
+                started = true;
+            }
+        }
+    }
+    if started || rows.is_empty() {
+        rows.push(Line::from(row));
+    }
+    rows
+}
+
+/// A fresh continuation row seeded with `indent` spaces, or empty when the
+/// line wraps flush — the body column every wrapped row re-indents to.
+fn seed(indent: usize) -> Vec<Span<'static>> {
+    if indent == 0 {
+        Vec::new()
+    } else {
+        vec![Span::raw(" ".repeat(indent))]
+    }
+}
+
+/// Append `ch` to `row`, extending the trailing span when it shares `ch`'s
+/// style so a word does not fragment into one span per character.
+fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
+    match row.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push(ch),
+        _ => row.push(Span::styled(ch.to_string(), style)),
+    }
+}
+
+/// Tokenise a span stream into maximal whitespace / non-whitespace runs,
+/// paired with each run's display width.  A run carries its style-fragments
+/// so a word that crosses a span seam (a style change mid-word) keeps each
+/// fragment's [`Style`].  Mirrors `md`'s word/space split, but span-aware.
+fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
+    let mut out: Vec<(Vec<(String, Style)>, usize)> = Vec::new();
+    let mut run: Vec<(String, Style)> = Vec::new();
+    let mut run_w = 0;
+    // Whether the run accumulated so far is whitespace — `None` until the
+    // first char fixes its kind.
+    let mut ws: Option<bool> = None;
+    let mut flush = |run: &mut Vec<(String, Style)>, run_w: &mut usize, ws: &mut Option<bool>| {
+        if !run.is_empty() {
+            out.push((std::mem::take(run), std::mem::replace(run_w, 0)));
+        }
+        *ws = None;
+    };
+    for span in spans {
+        for ch in span.content.chars() {
+            let is_ws = ch.is_whitespace();
+            if ws.is_some_and(|prev| prev != is_ws) {
+                flush(&mut run, &mut run_w, &mut ws);
+            }
+            ws = Some(is_ws);
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            match run.last_mut() {
+                Some((s, st)) if *st == span.style => s.push(ch),
+                _ => run.push((ch.to_string(), span.style)),
+            }
+            run_w += cw;
+        }
+    }
+    flush(&mut run, &mut run_w, &mut ws);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1538,6 +1704,64 @@ mod tests {
                 "overflows width 30: {}",
                 span_run_width(&l.spans)
             );
+        }
+    }
+
+    fn indent_of(s: &str) -> usize {
+        s.len() - s.trim_start().len()
+    }
+
+    /// A wrapped, indented, rail-less line (a source or io-effect row) keeps
+    /// its indent on row 0 and hangs every continuation under it — the leading
+    /// whitespace is the hang column, not a row-leading gap to drop.
+    #[test]
+    fn wrap_hangs_indented_line_under_its_indent() {
+        let line = Line::from(vec![
+            Span::raw("    "),
+            Span::raw("let paper_candidates = filter re-match candidates over the files"),
+        ]);
+        let rows = wrap_line(&line, 24);
+        assert!(rows.len() > 1, "expected a fold at width 24");
+        for row in &rows {
+            assert_eq!(
+                indent_of(&text(row)),
+                4,
+                "row lost its indent: {:?}",
+                text(row)
+            );
+        }
+    }
+
+    /// A rail-led line still hangs continuations two columns under the glyph,
+    /// and the colour-styled glyph rides row 0 as its own span — what the copy
+    /// contract ([`plain`]) keys off to strip the chrome.
+    #[test]
+    fn wrap_hangs_rail_led_line_under_the_glyph() {
+        let rail = Span::styled("▸ ", Style::default().fg(ratatui::style::Color::Cyan));
+        let line = Line::from(vec![
+            rail,
+            Span::raw("alpha beta gamma delta epsilon zeta eta theta iota"),
+        ]);
+        let rows = wrap_line(&line, 20);
+        assert!(rows.len() > 1);
+        assert!(RAIL_GLYPHS.contains(&rows[0].spans[0].content.as_ref()));
+        for row in &rows[1..] {
+            let t = text(row);
+            assert_eq!(indent_of(&t), 2);
+            assert!(!t.starts_with('▸'));
+        }
+    }
+
+    /// A flush, unindented line wraps back to column zero — no spurious indent.
+    #[test]
+    fn wrap_keeps_flush_line_flush() {
+        let line = Line::from(Span::raw(
+            "one two three four five six seven eight nine ten",
+        ));
+        let rows = wrap_line(&line, 16);
+        assert!(rows.len() > 1);
+        for row in &rows {
+            assert_eq!(indent_of(&text(row)), 0);
         }
     }
 }

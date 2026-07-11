@@ -121,6 +121,6 @@ pub(super) const RAIL_W: usize = 2;
 /// The full rail shape vocabulary: one glyph + space per block kind.
 /// [`super::line::plain`] drops a leading span whose content matches one of
 /// these so copied text carries the content, not the chrome glyph;
-/// [`super::block::wrap_line`] reuses the set to detect a rail-led row and
+/// [`super::line::wrap_line`] reuses the set to detect a rail-led row and
 /// indent its continuations.
 pub(super) const RAIL_GLYPHS: [&str; 9] = ["▎ ", "▸ ", "▽ ", "· ", "∴ ", "↘ ", "━ ", "╳ ", RAIL];

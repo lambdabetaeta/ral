@@ -30,9 +30,9 @@
 
 use std::fmt::Write;
 
-use super::block::{Reveal, wrap_line};
+use super::block::Reveal;
 use super::highlight::highlight_ral;
-use super::line::{self, push_wrapped, wash};
+use super::line::{self, push_wrapped, wash, wrap_line};
 use super::palette::{CODE_BG, RAIL_W, SLATE};
 use super::md;
 use crate::card::ObservationKind;
