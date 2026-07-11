@@ -74,7 +74,7 @@
 //! ```
 
 use crate::source::Span;
-use crate::syntax::ast::{Ast, Pattern, Stmt};
+use crate::syntax::ast::{Ast, Stmt};
 use std::collections::{HashMap, HashSet};
 
 /// A statement group produced by the pre-pass.
@@ -104,13 +104,12 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     let mut defs: HashMap<&str, Vec<usize>> = HashMap::new();
 
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
-        if let Ast::Let { pattern, value } = &stmt.item
-            && let Pattern::Name(name) = &pattern.item
+        if let Some((name, value)) = stmt.item.as_name_let()
             && value.item.is_thunk_form()
         {
             let di = def_list.len();
-            def_list.push((stmt_idx, name.as_str(), value.item.as_ref(), value.span));
-            defs.entry(name.as_str()).or_default().push(di);
+            def_list.push((stmt_idx, name, value.item.as_ref(), value.span));
+            defs.entry(name).or_default().push(di);
         }
     }
 
@@ -408,6 +407,7 @@ fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax::ast::Pattern;
     use crate::syntax::parser::parse;
     use std::fmt::Write;
 

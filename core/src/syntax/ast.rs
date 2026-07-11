@@ -671,6 +671,23 @@ impl Ast {
     pub fn is_thunk_form(&self) -> bool {
         matches!(self, Self::Lambda { .. } | Self::Block(_))
     }
+
+    /// The bound name and (spanned) right-hand side of a top-level
+    /// `let name = rhs` whose pattern is a bare [`Pattern::Name`].  `None`
+    /// for any other statement — including a destructuring `let [a, b] = …`,
+    /// which binds no single name and so is neither a `LetRec` knot member
+    /// nor a single worksheet node.  The value keeps its [`Spanned`] wrapper
+    /// so callers that need the RHS span (`group.rs`) and those that need
+    /// only the RHS AST (the worksheet) share this one shape.
+    pub fn as_name_let(&self) -> Option<(&str, &Spanned<Box<Self>>)> {
+        match self {
+            Self::Let { pattern, value } => match &pattern.item {
+                Pattern::Name(name) => Some((name.as_str(), value)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl ScopeAst {
