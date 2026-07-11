@@ -43,7 +43,7 @@ pub(super) fn query_cursor_col() -> Option<usize> {
 
         tcsetattr(0, TCSANOW, &raw const orig);
 
-        if len < 6 || buf[0] != b'\x1b' || buf[1] != b'[' {
+        if len < 6 || buf[0] != b'\x1b' || buf[1] != b'[' || buf[len - 1] != b'R' {
             return None;
         }
         let inner = &buf[2..len - 1]; // ESC[ … R

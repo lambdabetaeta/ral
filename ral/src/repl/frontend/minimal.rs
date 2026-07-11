@@ -40,7 +40,11 @@ impl Frontend for MinimalFrontend {
             let _ = out.flush();
         };
 
-        // Read first line.
+        // Read first line.  A fresh prompt has no partial buffer to abandon,
+        // so this read carries no abort-byte detection: a bare Ctrl-D on an
+        // empty line arrives as `Ok(0)` (EOF), and a control byte at the start
+        // of a piped line is fed through as ordinary input for the session to
+        // reject — only the continuation read below abandons a partial buffer.
         write_prompt(prompt.styled().as_bytes());
         let mut line = String::new();
         let first_read = stdin.lock().read_line(&mut line);
@@ -53,19 +57,21 @@ impl Frontend for MinimalFrontend {
             }
         };
 
-        // Continuation: while the input ends with a continuation token
-        // (|, ?, =, if, elsif, else, ,) prompt for and fold in the next
-        // line.  An EOF / read error, an end-of-transmission `\0`, or a
-        // Ctrl-C byte abandons the partial buffer.
+        // Continuation: while `parser::needs_continuation` (driven by
+        // `join_continuation`) reports the buffer incomplete — an unclosed
+        // lexeme or an Incompleteness class awaiting more input — prompt for
+        // and fold in the next line.  An EOF / read error, or a leading
+        // end-of-transmission (NUL) or Ctrl-C byte, abandons the partial
+        // buffer; both abort bytes are read off the raw first byte.
         let input = super::join_continuation(input, || {
             write_prompt(b"> ");
             let mut cont = String::new();
             let cont_read = stdin.lock().read_line(&mut cont);
+            let first_byte = cont.as_bytes().first().copied();
             match cont_read {
                 Ok(0) | Err(_) => super::Continuation::Discard,
-                Ok(_) if cont.trim().starts_with('\0') => super::Continuation::Discard,
-                Ok(_) if cont.as_bytes().first().copied() == Some(0x03) => {
-                    // Ctrl-C byte.
+                Ok(_) if first_byte == Some(0x00) => super::Continuation::Discard,
+                Ok(_) if first_byte == Some(0x03) => {
                     ral_core::process::clear();
                     super::Continuation::Discard
                 }
