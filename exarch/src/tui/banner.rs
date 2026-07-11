@@ -34,7 +34,7 @@ pub struct SessionInfo<'a> {
 /// names something: a path carries the Path identity, a `dangerous` base
 /// alarms; names and quantities stay plain ink.
 pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
-    let caps = provider::caps_for(p.model());
+    let caps = crate::pricing::caps_or_default(p.model());
     let mut rows: Vec<Field> = vec![
         meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
         meta_field("provider", vec![meta_span(Role::Strong, p.id().label())]),

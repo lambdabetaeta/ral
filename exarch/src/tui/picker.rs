@@ -60,7 +60,7 @@
 
 use super::line::{BANNER_GOLD, CYAN, OVERLAY_BG, SLATE};
 use crate::models::ProviderEndpoint;
-use crate::oauth::Subscription;
+use crate::provider::Subscription;
 use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -369,7 +369,7 @@ pub struct Picker {
     /// Capability lookup for the *highlighted* model: the tuning rows gate
     /// themselves on its `supported_parameters` so effort/temperature gray out
     /// (and stop being sent) on a model that doesn't admit them. Injected
-    /// (production passes [`crate::provider::caps_for`]) so the picker stays a
+    /// (production passes [`crate::pricing::caps_or_default`]) so the picker stays a
     /// pure component the tests can drive with a stub.
     caps: fn(&str) -> crate::pricing::ModelCaps,
 }
@@ -422,7 +422,7 @@ impl Picker {
             .get(id)
             .copied()
             .unwrap_or(Subscription::Metered);
-        crate::oauth::provider_label(subscription, id.label())
+        crate::provider::provider_label(subscription, id.label())
     }
 
     /// The providers whose lists are not yet known — the REPL spawns a

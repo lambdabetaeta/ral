@@ -26,7 +26,6 @@ use crate::{
     credential::CredentialStore,
     fleet::Fleet,
     models::{LiveSource, ModelCatalog},
-    oauth,
     provider::{self, Provider},
 };
 
@@ -158,7 +157,7 @@ pub fn run(
     vi: bool,
     engine: Arc<provider::Engine>,
 ) -> Result<(), String> {
-    let caps = provider::caps_for(provider.model());
+    let caps = crate::pricing::caps_or_default(provider.model());
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
         session.id,
@@ -168,7 +167,7 @@ pub fn run(
         vi,
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider = oauth::provider_label(provider.subscription(), provider.id().label());
+    let status_provider = provider::provider_label(provider.subscription(), provider.id().label());
     tui.app.update_live_model(provider, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
@@ -482,7 +481,7 @@ fn ui_loop(
             // must follow focus.
             if let Some(ph) = ctx.agents.provider(now_focus) {
                 let p = ph.current();
-                let status_provider = oauth::provider_label(p.subscription(), p.id().label());
+                let status_provider = provider::provider_label(p.subscription(), p.id().label());
                 tui.app.update_live_model(&p, &status_provider);
             }
         }

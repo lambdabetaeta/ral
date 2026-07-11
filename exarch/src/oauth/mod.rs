@@ -39,33 +39,6 @@ pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/re
 /// API-key path lists live via genai instead.
 pub(crate) const PLAN_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 
-/// How a provider's plan reads, for both metering and labelling. A turn
-/// under either subscription flavour is unmetered; the flavour only changes
-/// the decoration [`provider_label`] applies.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Subscription {
-    /// A metered API key — turns are billed per token.
-    Metered,
-    /// A `ChatGPT` plan login authorised over OAuth.
-    ChatGpt,
-    /// A flat-rate plan declared by the provider's [`crate::provider::ProviderId`]
-    /// (opencode Go's $10/mo gateway).
-    FlatRate,
-}
-
-/// A provider's status/picker label: the subscription-decorated form when it
-/// is on a plan, else the bare provider name. The single place the "decorate
-/// when subscription" decision is made — and the only place the per-flavour
-/// suffix is spelled — so the status bar, the `/model` switch, and the picker
-/// rows cannot drift.
-pub(crate) fn provider_label(subscription: Subscription, base: &str) -> String {
-    match subscription {
-        Subscription::Metered => base.to_string(),
-        Subscription::ChatGpt => format!("{base} (ChatGPT subscription)"),
-        Subscription::FlatRate => format!("{base} (subscription)"),
-    }
-}
-
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
@@ -193,7 +166,7 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
 
 /// Every signed-in account's label, comma-joined — for the disambiguating
 /// messages `logout`/`accounts` print.
-pub fn labels(accounts: &[OAuthToken]) -> String {
+fn labels(accounts: &[OAuthToken]) -> String {
     accounts
         .iter()
         .map(OAuthToken::label)
@@ -318,15 +291,7 @@ pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> 
         .send()
         .await
         .map_err(|e| format!("token refresh request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token refresh failed ({status}): {body}"));
-    }
-    let resp: RefreshResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("could not parse token refresh response: {e}"))?;
+    let resp: RefreshResponse = json_or_error(resp, "token refresh").await?;
 
     let access_token = resp
         .access_token
@@ -388,6 +353,25 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("could not build HTTP client: {e}"))
 }
 
+/// Turn a token-endpoint response into a decoded `T`: a non-2xx status
+/// becomes an `Err` carrying the status and the body text, a success decodes
+/// the JSON body. `action` names the request for both messages
+/// (`"{action} failed (…)"` / `"could not parse {action} response"`). Shared
+/// by every login flow and by [`refresh`].
+pub(super) async fn json_or_error<T: DeserializeOwned>(
+    resp: reqwest::Response,
+    action: &str,
+) -> Result<T, String> {
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("{action} failed ({status}): {body}"));
+    }
+    resp.json()
+        .await
+        .map_err(|e| format!("could not parse {action} response: {e}"))
+}
+
 /// Exchange an authorization code for tokens at the token endpoint.
 pub(super) async fn exchange_code(
     client: &reqwest::Client,
@@ -408,14 +392,7 @@ pub(super) async fn exchange_code(
         .send()
         .await
         .map_err(|e| format!("token exchange request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token exchange failed ({status}): {body}"));
-    }
-    resp.json()
-        .await
-        .map_err(|e| format!("could not parse token exchange response: {e}"))
+    json_or_error(resp, "token exchange").await
 }
 
 /// A PKCE verifier/challenge pair. The verifier is 64 random bytes encoded
@@ -636,23 +613,4 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The single source of truth for the subscription decoration: a metered
-    /// provider keeps its bare name, a `ChatGPT` login carries the `OpenAI` plan
-    /// suffix, and a flat-rate plan the generic one — so the status bar, the
-    /// `/model` switch, and the picker cannot drift across flavours.
-    #[test]
-    fn provider_label_decorates_per_flavour() {
-        assert_eq!(
-            provider_label(Subscription::Metered, "deepseek"),
-            "deepseek"
-        );
-        assert_eq!(
-            provider_label(Subscription::ChatGpt, "openai"),
-            "openai (ChatGPT subscription)"
-        );
-        assert_eq!(
-            provider_label(Subscription::FlatRate, "opencode-go"),
-            "opencode-go (subscription)"
-        );
-    }
 }

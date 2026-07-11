@@ -34,13 +34,10 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     let subscription = available
         .iter()
         .filter_map(|id| {
-            let kind = if store
-                .get(id)
-                .is_some_and(super::super::credential::Credential::is_subscription)
-            {
-                crate::oauth::Subscription::ChatGpt
+            let kind = if store.is_subscription(id) {
+                crate::provider::Subscription::ChatGpt
             } else if id.flat_rate() {
-                crate::oauth::Subscription::FlatRate
+                crate::provider::Subscription::FlatRate
             } else {
                 return None;
             };
@@ -55,7 +52,12 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         .provider(tui.app.tabs.focused())
         .map(|p| p.current().tuning().clone())
         .unwrap_or_default();
-    let mut picker = Picker::new(available, subscription, &initial_tuning, provider::caps_for);
+    let mut picker = Picker::new(
+        available,
+        subscription,
+        &initial_tuning,
+        crate::pricing::caps_or_default,
+    );
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
     // network. A ChatGPT plan login has no catalog endpoint, so its curated plan
@@ -67,10 +69,7 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         .loading_providers()
         .into_iter()
         .filter(|id| {
-            if store
-                .get(id)
-                .is_some_and(super::super::credential::Credential::is_subscription)
-            {
+            if store.is_subscription(id) {
                 let models = crate::oauth::PLAN_MODELS
                     .iter()
                     .map(std::string::ToString::to_string)
@@ -270,7 +269,7 @@ fn apply_model_switch(
         route.cloned(),
     ));
     let label = provider_id.label();
-    let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
+    let status_provider = crate::provider::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
     tui.app
         .update_live_model(&provider.current(), &status_provider);

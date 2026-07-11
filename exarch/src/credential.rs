@@ -7,12 +7,9 @@
 //! credential — or was present but malformed — is then scrubbed from the
 //! process environment. The scrub keeps a child a tool call spawns from
 //! inheriting a live key and, because the variable is gone, forecloses
-//! re-reading it later, which is why resolution is eager.
-//!
-//! This generalises the single-key read-and-scrub that lived inline in
-//! `run`: it now sweeps every [`ProviderKind`] rather than the one a
-//! `--provider` flag named, with provider knowledge still sourced once
-//! from [`ProviderKind::info`].
+//! re-reading it later, which is why resolution is eager. The sweep covers
+//! every [`ProviderKind`], with provider knowledge sourced once from
+//! [`ProviderKind::info`].
 //!
 //! Custom providers declared in `config.ral` ([`crate::config`]) flow through
 //! the same sweep: each is keyed by its [`ProviderId`] and its declared key
@@ -49,12 +46,9 @@ pub enum Credential {
 }
 
 impl Credential {
-    /// Whether this credential is a `ChatGPT` plan login rather than an API
-    /// key. This is the OAuth-vs-key distinction the store answers — narrower
-    /// than "is a flat subscription", since a flat rate can also be a
-    /// `ProviderId` property (opencode Go) with an ordinary API key. It marks
-    /// exactly the credential that carries no listable catalog (the Codex
-    /// backend), which is why the picker keys its plan-model seeding on it.
+    /// Whether this credential is a `ChatGPT` plan login (OAuth) rather than
+    /// an API key — narrower than "is a flat subscription", since a flat rate
+    /// can also be a `ProviderId` property (opencode Go) on an ordinary key.
     pub fn is_subscription(&self) -> bool {
         matches!(self, Self::OAuth(_))
     }
@@ -118,14 +112,16 @@ impl CredentialStore {
             let Some(var) = id.key_env() else {
                 continue;
             };
-            // Scrub any var that is *present*, valid or not — a malformed
-            // key is still a live secret in the child env.
-            #[allow(clippy::disallowed_methods)]
-            if std::env::var(var).is_ok() {
-                scrub.push(var.to_string());
-            }
-            if let EnvKey::Valid(key) = read_env_key(var) {
-                ready.insert(id.clone(), Credential::ApiKey(key));
+            // Read the var once. A present var — valid or malformed — is
+            // scrubbed so a child a tool call spawns cannot inherit a live
+            // secret; only a valid key becomes an available credential.
+            match read_env_key(var) {
+                EnvKey::Absent => {}
+                EnvKey::Malformed => scrub.push(var.to_string()),
+                EnvKey::Valid(key) => {
+                    scrub.push(var.to_string());
+                    ready.insert(id.clone(), Credential::ApiKey(key));
+                }
             }
         }
 
@@ -161,8 +157,14 @@ impl CredentialStore {
         self.ready.contains_key(id)
     }
 
-    /// The available providers, in declaration order (famous first, then
-    /// custom).
+    /// Whether `id`'s bound credential is a `ChatGPT` plan login (OAuth)
+    /// rather than an API key. `false` for an absent or metered provider.
+    pub fn is_subscription(&self, id: &ProviderId) -> bool {
+        self.get(id).is_some_and(Credential::is_subscription)
+    }
+
+    /// The available providers, in declaration order: famous first, then the
+    /// signed-in `ChatGPT` accounts (by label), then the custom providers.
     pub fn available(&self) -> Vec<ProviderId> {
         self.all
             .iter()
@@ -172,27 +174,29 @@ impl CredentialStore {
     }
 }
 
-/// The state of a provider's key environment variable.
+/// The state of a provider's key environment variable, from a single read.
 enum EnvKey {
+    /// The variable is unset — nothing to bind and nothing to scrub.
+    Absent,
+    /// Present but unusable: empty / whitespace-only, or carrying a control
+    /// character (a stray newline pasted into the value) — it would fail at
+    /// the provider, so it binds no credential, but it is still a live secret
+    /// in the environment and must be scrubbed.
+    Malformed,
     /// A usable key (trimmed, non-empty, no control characters).
     Valid(String),
-    /// The variable is unset, or set but empty / whitespace-only / carrying
-    /// a control character (a stray newline pasted into the value) — it
-    /// would fail at the provider, so it is not a usable key.
-    Unusable,
 }
 
-/// Classify an environment variable as a credential key. The validity rule
-/// matches the inline single-key check `run` used before auto-discovery: a
-/// control character (a pasted newline) means the value cannot be a key.
+/// Classify a provider's key environment variable in a single read. A control
+/// character (a pasted newline) means the value cannot be a key.
 fn read_env_key(var: &str) -> EnvKey {
     #[allow(clippy::disallowed_methods)]
     let Ok(raw) = std::env::var(var) else {
-        return EnvKey::Unusable;
+        return EnvKey::Absent;
     };
     let key = raw.trim().to_string();
     if key.is_empty() || key.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        EnvKey::Unusable
+        EnvKey::Malformed
     } else {
         EnvKey::Valid(key)
     }
