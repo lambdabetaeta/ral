@@ -144,10 +144,6 @@ fn run_value_fold(stages: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Va
     for (i, stage) in stages.iter().enumerate() {
         let stage_tail = if i == last { tail } else { Tail::No };
         let value = crate::evaluator::call::invoke(stage, acc.take(), stage_tail, shell)?;
-        // `x | f = f !{x}`: a non-final stage's value crosses a value
-        // edge, so it is forced once before the next stage consumes it.
-        // The final stage's value is the pipeline's own result, returned
-        // as evaluated.
         let value = if i < last {
             force_pipe_value(value, shell)?
         } else {
