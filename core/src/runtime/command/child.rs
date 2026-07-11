@@ -208,28 +208,40 @@ impl RunningChild {
         let _ = child.kill();
     }
 
+    /// Poll for the leader to reap within `deadline`, handling a stop the
+    /// same way `wait` does.  `Some(outcome)` if it exited (or the wait
+    /// errored) inside the window, `None` on timeout.
+    #[cfg(unix)]
+    fn grace_poll(
+        &self,
+        child: &mut crate::process::ChildHandle,
+        deadline: std::time::Instant,
+    ) -> Option<crate::process::WaitOutcome> {
+        while std::time::Instant::now() < deadline {
+            match child.try_wait_handling_stop(self.pgid, self.park_on_stop) {
+                Ok(Some(o)) => return Some(o),
+                Err(_) => break,
+                Ok(None) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
     /// Cancel-path teardown: terminate the process group by the cancel
-    /// cause, give a well-behaved tree a short grace to exit on the
-    /// signal it expects, then SIGKILL whatever is left.  Used when the
-    /// cancel scope fires mid-wait (exarch's tool timeout, a Ctrl-C).
-    /// An interrupt is delivered SIGINT-first to preserve job-control
-    /// semantics; an explicit cancel, a deadline, or a termination
-    /// request is delivered SIGTERM-first; a root abort gets an
-    /// immediate group SIGKILL with no foreground grace.  Killing the *group* (not just the leader
-    /// pid) takes out forked grandchildren too, closing the stdout pipe
-    /// so the pump drain can complete instead of blocking until they
-    /// exit on their own.
+    /// cause, give the tree a short grace to exit on the signal it expects,
+    /// then SIGKILL whatever is left.  Used when the cancel scope fires
+    /// mid-wait (exarch's tool timeout, a Ctrl-C).  An interrupt goes
+    /// SIGINT-first, an explicit cancel / deadline / termination request
+    /// SIGTERM-first, and a root abort straight to SIGKILL with no grace.
+    /// Signalling the *group* (not just the leader pid) takes out forked
+    /// grandchildren too, closing the stdout pipe so the pump drain can
+    /// complete.
     ///
-    /// Returns `Some(outcome)` when the leader was reaped inside the
-    /// grace peek (the caller must not `wait` again), `None` otherwise
-    /// (the caller's follow-up blocking `wait_handling_stop` reaps the
-    /// now-dying leader).  Outside the root-abort path the method ends
-    /// with a group SIGKILL so a grandchild that ignored the chosen
-    /// signal — and would otherwise keep the leader's pipe open past the
-    /// leader's own exit — cannot survive the teardown.  The grace poll
-    /// plus the unconditional group SIGKILL together guarantee that
-    /// teardown bounds the whole tree.  Falls back to a direct child
-    /// kill when no group is tracked.
+    /// Returns `Some(outcome)` when the leader was reaped inside the grace
+    /// peek (the caller must not `wait` again), `None` otherwise (the
+    /// caller's follow-up blocking `wait_handling_stop` reaps it).  Falls
+    /// back to a direct child kill when no group is tracked.
     fn terminate_group(
         &self,
         child: &mut crate::process::ChildHandle,
@@ -254,18 +266,7 @@ impl RunningChild {
                 #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
                 unsafe { libc::kill(child.id() as libc::pid_t, signal) };
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-                let mut reaped = None;
-                while std::time::Instant::now() < deadline {
-                    match child.try_wait_handling_stop(None, self.park_on_stop) {
-                        Ok(Some(o)) => {
-                            reaped = Some(o);
-                            break;
-                        }
-                        Err(_) => break,
-                        Ok(None) => {}
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+                let reaped = self.grace_poll(child, deadline);
                 if reaped.is_none() {
                     let _ = child.kill();
                 }
@@ -285,18 +286,7 @@ impl RunningChild {
             // budget — but long enough for a test runner to print its
             // summary and exit.
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            let mut reaped = None;
-            while std::time::Instant::now() < deadline {
-                match child.try_wait_handling_stop(self.pgid, self.park_on_stop) {
-                    Ok(Some(o)) => {
-                        reaped = Some(o);
-                        break;
-                    }
-                    Err(_) => break,
-                    Ok(None) => {}
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            let reaped = self.grace_poll(child, deadline);
             // SIGKILL the whole group unconditionally: harmless on a tree
             // that already exited cleanly, decisive against a grandchild
             // that trapped the chosen signal and is still holding the
@@ -547,8 +537,7 @@ impl RunningChild {
         let _ = self.pump.take();
         let _ = self.stderr_pump.take();
         // Don't release the group: `abandon` is invoked when a sibling
-        // stage parked the pipeline pgid (Unix) or for the
-        // pipeline-borrowed case on Windows.  The owner's Drop is what
+        // stage parked the pipeline pgid.  The owner's Drop is what
         // releases.
     }
 }
