@@ -6,7 +6,7 @@
 //! `absolute_in` path helper that `for_invocation` uses to make
 //! user-supplied relative paths absolute against the session cwd.
 
-use ral_core::types::{Break, Capabilities, Shell};
+use ral_core::types::{Break, Capabilities, Escape, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
@@ -20,7 +20,8 @@ use ral_core::path;
 /// The script's sigils are resolved against `ctx` at load, so the
 /// orchestrator composes (`meet` / `join`) already-resolved policies.  An
 /// `xdg:` path escaping `$HOME` is rejected here, at the profile that names
-/// it, before composition can discard it.
+/// it, before composition can discard it; that rejection surfaces as a
+/// [`Break::Error`], not an [`Break::Escape`].
 pub(super) fn load_capabilities_ral(
     shell: &mut Shell,
     path: &Path,
@@ -33,9 +34,16 @@ pub(super) fn load_capabilities_ral(
             path.display()
         ));
     }
-    ral_core::capability::load_capabilities_from_path(shell, path, ctx).map_err(|e| match e {
-        Break::Error(err) => format!("exarch: {flag} {}: {}", path.display(), err.message),
-        other @ Break::Escape(_) => format!("exarch: {flag} {}: {other:?}", path.display()),
+    ral_core::capability::load_capabilities_from_path(shell, path, ctx).map_err(|e| {
+        let detail = match e {
+            Break::Error(err) => err.message,
+            Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
+            #[cfg(unix)]
+            Break::Escape(Escape::Stopped { signal, cmd, .. }) => {
+                format!("{cmd}: stopped by signal {}", signal.display())
+            }
+        };
+        format!("exarch: {flag} {}: {detail}", path.display())
     })
 }
 

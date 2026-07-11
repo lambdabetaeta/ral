@@ -1,7 +1,7 @@
 //! Command-line surface.
 //!
-//! Parses argv via clap and resolves `-p/-f` into the optional initial
-//! prompt.  The system-prompt assembly lives in `prompt::assemble`.
+//! Parses argv via clap and resolves `--prompt/--file` into the optional
+//! initial prompt.  The system-prompt assembly lives in `prompt::assemble`.
 
 use crate::headless::OutputFormat;
 use clap::{Parser, Subcommand};
@@ -82,9 +82,9 @@ pub struct Cli {
     /// Per-request visible-output ceiling (`max_tokens` in the API
     /// call).  Unset = use the per-model default, shown as the
     /// `max-tokens` row in the startup banner once a model is
-    /// selected.  The old hard 4k constant truncated Opus turns
-    /// mid-stream and reported them as silent stops; raise this when
-    /// emitting large files or running deep reasoning.
+    /// selected.  Raise this when emitting large files or running deep
+    /// reasoning; the per-model default sets a comfortable ceiling
+    /// otherwise.
     #[arg(long = "max-tokens", value_name = "N")]
     pub max_tokens: Option<u32>,
     /// Reasoning effort: `none`, `low`, `medium`, `high`, `xhigh`, or
@@ -180,7 +180,7 @@ pub enum Command {
     Accounts,
 }
 
-/// Resolve `-p/-f` into an optional initial prompt.
+/// Resolve `--prompt/--file` into an optional initial prompt.
 ///
 /// A blank seed (empty
 /// or whitespace-only) collapses to `None` here, so the frontends do not
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn chat_conflicts_with_headless_and_system() {
         // Chat withholds `reply`, so a headless trunk could never return.
-        Cli::try_parse_from(["exarch", "--chat", "--headless", "-p", "hi"])
+        Cli::try_parse_from(["exarch", "--chat", "--headless", "--prompt", "hi"])
             .expect_err("chat is interactive-only");
         // Chat obliterates the persona `--system` would set.
         Cli::try_parse_from(["exarch", "--chat", "--system", "persona.md"])
