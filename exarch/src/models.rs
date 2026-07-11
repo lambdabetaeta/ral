@@ -9,8 +9,9 @@
 //! blocks a selection.
 //!
 //! All network I/O sits behind the [`ModelSource`] trait so `cargo test`
-//! drives the cache, the TTL, and the resolution logic against an
-//! in-memory fake and never touches the network.
+//! drives the resolution logic and the in-memory memo against a fake and
+//! never touches the network. The tests run `in_memory` (no `cache_path`),
+//! so the disk cache and the TTL-staleness path are not exercised by them.
 
 use crate::credential::{Credential, CredentialStore};
 use crate::provider::{ProviderId, ProviderKind};
@@ -422,9 +423,7 @@ pub fn resolve_model_provider<S: ModelSource>(
     catalog: &mut ModelCatalog<S>,
 ) -> Result<ProviderId, String> {
     if available.is_empty() {
-        return Err(
-            "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into(),
-        );
+        return Err(no_provider_error());
     }
     for id in available {
         if let Some(models) = catalog.list(id)
@@ -450,12 +449,23 @@ pub fn resolve_model_provider<S: ModelSource>(
     Err(format!(
         "model '{name}' is not listed by any available provider ({}); \
          pass a model that one of them serves",
-        available
-            .iter()
-            .map(ProviderId::label)
-            .collect::<Vec<_>>()
-            .join(", ")
+        available_labels(available)
     ))
+}
+
+/// The error when the credential store resolved no provider at all — the
+/// user has set no key, so no name can be served.
+fn no_provider_error() -> String {
+    "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into()
+}
+
+/// The available providers' labels, comma-joined for an error message.
+fn available_labels(available: &[ProviderId]) -> String {
+    available
+        .iter()
+        .map(ProviderId::label)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Resolve an explicit `--provider` label to the matching available provider,
@@ -477,17 +487,11 @@ pub fn resolve_pinned_provider(
         return Ok(id.clone());
     }
     if available.is_empty() {
-        return Err(
-            "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into(),
-        );
+        return Err(no_provider_error());
     }
     Err(format!(
         "provider '{name}' is not available ({}); set its API key or name one that is",
-        available
-            .iter()
-            .map(ProviderId::label)
-            .collect::<Vec<_>>()
-            .join(", ")
+        available_labels(available)
     ))
 }
 
