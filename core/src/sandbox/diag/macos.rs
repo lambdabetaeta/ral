@@ -44,7 +44,7 @@ pub(super) fn is_denial_line(line: &str) -> bool {
 /// `... (Sandbox) Sandbox: cargo(12345) deny(1) file-read-data /…`
 /// → `Some(12345)`.  Returns `None` on any deviation from that shape.
 pub(super) fn extract_pid(line: &str) -> Option<u32> {
-    let after_tag = line.rsplit_once("Sandbox: ")?.1;
+    let after_tag = line.split_once("Sandbox: ")?.1;
     let (_, after_open) = after_tag.split_once('(')?;
     let (digits, _) = after_open.split_once(')')?;
     digits.parse().ok()
@@ -59,17 +59,12 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
 ///
 /// A `path` is returned only for filesystem operations (`file-*`),
 /// whose operand Seatbelt logs fully resolved — exactly the path the
-/// user must grant.  Non-filesystem denials carry a service or
-/// endpoint name in the same position, not a grantable path:
-/// `ipc-posix-shm-*` names a POSIX shared-memory region (e.g.
-/// `apple.shm.notification_center`, touched benignly at process
-/// startup), `mach-lookup` a Mach service, `network-*` an address.
-/// These yield `Some((op, None))`, so the hint can still reproduce
-/// their kernel line for transparency but never offers the operand as
-/// a path to add to an fs grant.  Returns `None` on any deviation from
+/// user must grant.  For `ipc-*`, `mach-*`, and `network-*` operations
+/// the operand is a service or endpoint name, not a grantable path, so
+/// those yield `Some((op, None))`.  Returns `None` on any deviation from
 /// the `comm(pid) deny(n) <op> …` shape.
 pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
-    let after_tag = line.rsplit_once("Sandbox: ")?.1;
+    let after_tag = line.split_once("Sandbox: ")?.1;
     // Skip the `comm(pid)` token, then the `deny(n)` token, landing on
     // the operation.  `splitn` keeps the operand tail (with its spaces)
     // intact as the final piece.

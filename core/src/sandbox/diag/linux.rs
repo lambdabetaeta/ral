@@ -5,8 +5,8 @@
 //! the offending thread with SIGSYS and emits a `type=1326` audit
 //! record carrying pid, comm, exe, arch, syscall, and ip.  We read
 //! these via `journalctl -k --since <window>` (systemd-based distros),
-//! with plain `dmesg` as a fallback for unreadable journals or
-//! non-systemd hosts.
+//! with `dmesg --since <window>` as a fallback for unreadable journals
+//! or non-systemd hosts, bounded to the same wall window.
 //!
 //! bwrap's mount-namespace restrictions, by contrast, surface as
 //! ENOENT on the affected syscall with no kernel-side deny event;
@@ -41,6 +41,7 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
             return Some(String::from_utf8_lossy(&out.stdout).into_owned());
         }
     let dmesg = std::process::Command::new("dmesg")
+        .args(["--since", since.as_str()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -77,4 +78,30 @@ pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
         return None;
     }
     Some((syscall, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINE: &str = "audit: type=1326 audit(1719400000.123:789): auid=1000 ppid=54321 \
+                        pid=12345 comm=\"rustc\" arch=c00000b7 syscall=101 ip=0x0 code=0x0";
+
+    #[test]
+    fn is_denial_line_matches_only_type_1326() {
+        assert!(is_denial_line(LINE));
+        assert!(!is_denial_line("audit: type=1300 audit(...): syscall=101"));
+    }
+
+    #[test]
+    fn extract_pid_picks_pid_not_ppid() {
+        assert_eq!(extract_pid(LINE), Some(12345));
+        assert_eq!(extract_pid("no pid token here"), None);
+    }
+
+    #[test]
+    fn parse_denial_returns_syscall_and_no_path() {
+        assert_eq!(parse_denial(LINE), Some(("101", None)));
+        assert_eq!(parse_denial("type=1326 with no syscall token"), None);
+    }
 }

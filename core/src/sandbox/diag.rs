@@ -19,8 +19,8 @@
 //! and Linux) get a stub `platform` module that reports no denials.
 //! macOS logs the fully-resolved path of the denied access, so the
 //! path the user must grant is exactly the path in the line; Linux's
-//! `type=1326` audit record carries no path, so the hint there degrades
-//! to "a sandboxed syscall was denied" with no path or symlink note.
+//! `type=1326` audit record carries no path, so the hint there names the
+//! blocked syscall operation with no path or symlink note.
 
 use crate::types::{Error, Shell};
 use std::collections::{HashMap, HashSet};
@@ -121,28 +121,33 @@ fn build_hint(denials: &[&str]) -> String {
     let path = denials
         .iter()
         .find_map(|l| platform::parse_denial(l).and_then(|(_, p)| p));
-    match path {
-        Some(path) => {
-            let _ = write!(
-                out,
-                "\n\nthe path `{path}` is outside the active grant's fs.read, so the access was \
-                 denied. To allow it, add this path (or a parent directory) to the grant's read \
-                 set: the `grant [ fs: [read: ['{path}']] ] {{ … }}` block in ral, or \
-                 `--extend-base` for exarch."
-            );
-            out.push_str(
-                "\n\nNote: the sandbox matches fully-resolved paths. If this path was reached \
-                 through a symlink inside a granted directory (e.g. ~/.config), granting the \
-                 link's directory will not help — grant the resolved path shown above.",
-            );
-        }
-        None => {
-            out.push_str(
-                "\n\nA sandboxed syscall was denied (the kernel record carries no path here). The \
-                 access lies outside the active grant; widen the grant's fs read set — the \
-                 `grant [ fs: [read: […]] ] { … }` block in ral, or `--extend-base` for exarch.",
-            );
-        }
+    if let Some(path) = path {
+        let _ = write!(
+            out,
+            "\n\nthe path `{path}` is outside the active grant's fs.read, so the access was \
+             denied. To allow it, add this path (or a parent directory) to the grant's read \
+             set: the `grant [ fs: [read: ['{path}']] ] {{ … }}` block in ral, or \
+             `--extend-base` for exarch."
+        );
+        out.push_str(
+            "\n\nNote: the sandbox matches fully-resolved paths. If this path was reached \
+             through a symlink inside a granted directory (e.g. ~/.config), granting the \
+             link's directory will not help — grant the resolved path shown above.",
+        );
+    } else {
+        let op = denials
+            .iter()
+            .find_map(|l| platform::parse_denial(l).map(|(op, _)| op));
+        let what = op.map_or_else(
+            || "A sandboxed operation was denied".to_string(),
+            |op| format!("The sandboxed operation `{op}` was denied"),
+        );
+        let _ = write!(
+            out,
+            "\n\n{what} (the kernel record carries no path here). The access lies outside the \
+             active grant; widen the grant's fs read set — the `grant [ fs: [read: […]] ] \
+             {{ … }}` block in ral, or `--extend-base` for exarch."
+        );
     }
     out
 }
