@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// Compute the effective `Capabilities` for a session.
 ///
 /// `base_name` selects the ceiling — one of `dangerous`,
-/// `reasonable`, `read-only`, `minimal`, or `confined` — see
+/// `reasonable`, `edit-only`, `read-only`, `minimal`, or `confined` — see
 /// [`base::resolve_base`] for the per-profile shape.
 /// `extend_base`, if `Some`, is loaded and joined
 /// into the ceiling.  Each entry in `restrict_files` is loaded
@@ -102,7 +102,7 @@ pub fn for_invocation(
 /// spawn can *reduce* a child's reach but never escalate it past the
 /// parent's: naming a base looser than the parent simply changes nothing
 /// (e.g. a network-off parent stays offline even under `minimal`).
-/// `base_name` is one of the five bake-ins; an unknown name returns the
+/// `base_name` is one of the six bake-ins; an unknown name returns the
 /// same diagnostic [`for_invocation`] gives.
 ///
 /// # Errors

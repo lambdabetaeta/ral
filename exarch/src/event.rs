@@ -315,12 +315,9 @@ pub struct AgentLog {
     /// truncated by `/compact` and by `/clear`.
     events: Vec<SessionEvent>,
     state: State,
-    /// Active compaction, if any: the summary standing in for the
-    /// physically-dropped prefix (`apply_compaction` truncates `events`
-    /// itself, so there is no cut index to keep here — see [`Compaction`]).
+    /// Active compaction, if any — see [`Compaction`] for the invariant.
     /// In-memory only (logs are per-run); the on-disk `Compacted` event is
-    /// the archival breadcrumb.  The model view is the summary followed by
-    /// `events` in full.
+    /// the archival breadcrumb.
     compaction: Option<Compaction>,
     /// Model identifier this log records.  Stored so `clear` can
     /// re-emit `SessionStarted` with the same value, and `fork`
@@ -336,11 +333,14 @@ pub struct AgentLog {
 }
 
 /// The live state of an applied compaction: the summary standing in for
-/// the dropped prefix.  `AgentLog::apply_compaction` physically drops the
-/// summarised prefix from `events` (`decisions/260705_leases-and-budgets`,
-/// "Compaction physically drops the model prefix in memory"), so `events`
-/// *is* the kept verbatim suffix from that point on — no cut index to carry
-/// here.  The model view is the summary followed by `events` in full.
+/// the dropped prefix.
+///
+/// The compaction invariant, authoritative here: `AgentLog::apply_compaction`
+/// physically drops the summarised prefix from `events`
+/// (`decisions/260705_leases-and-budgets`, "Compaction physically drops the
+/// model prefix in memory"), so `events` *is* the kept verbatim suffix from
+/// that point on — there is no cut index to carry. The model view is this
+/// summary followed by `events` in full ([`AgentLog::project`]).
 struct Compaction {
     summary: String,
 }
@@ -494,16 +494,7 @@ impl AgentLog {
             events = &events[..events.len() - 1];
         }
 
-        let mut msgs = Vec::new();
-        if let Some(c) = &self.compaction {
-            // `events` already holds only the kept suffix — the summarised
-            // prefix was physically dropped from the Vec at compaction time.
-            msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
-        }
-        for e in events {
-            msgs.extend(e.clone().into_chat_messages());
-        }
-        msgs
+        self.project(events)
     }
 
     /// Import parent context messages without appending a prompt.
@@ -694,10 +685,9 @@ impl AgentLog {
     /// Indices in `events` of top-level user prompts — the turn boundaries a
     /// compaction may cut at.  Replays the ready/in-turn state so a mid-turn
     /// steering prompt (not a clean boundary) is skipped, and a cut never
-    /// splits an assistant message from its tool results.  `events` already
-    /// starts at the live view (a prior compaction physically dropped its
-    /// summarised prefix), so there is no separate "visible from" index to
-    /// skip past — the whole vector is candidates.
+    /// splits an assistant message from its tool results.  `events` is
+    /// already the live view (see [`Compaction`]), so the whole vector is
+    /// candidates — no separate "visible from" index to skip past.
     fn turn_start_indices(&self) -> Vec<usize> {
         let mut ready = true;
         let mut starts = Vec::new();
@@ -755,16 +745,9 @@ impl AgentLog {
             return None;
         }
 
-        let mut prefix_messages = Vec::new();
-        if let Some(c) = &self.compaction {
-            prefix_messages.push(ChatMessage::user(summary_prompt(&c.summary)));
-        }
-        for e in &self.events[..cut] {
-            prefix_messages.extend(e.clone().into_chat_messages());
-        }
         Some(CompactionPlan {
             suffix_start: cut,
-            prefix_messages,
+            prefix_messages: self.project(&self.events[..cut]),
         })
     }
 
@@ -927,20 +910,26 @@ impl AgentLog {
         self.record(ev).map_err(|e| e.to_string())
     }
 
-    /// The `Vec<ChatMessage>` shape genai wants.  When a compaction is
-    /// active, the view is the summary (as a user message) followed by
-    /// `events` in full — the summarised prefix was physically dropped from
-    /// the Vec at compaction time, so there is no separate cut to slice at
-    /// here.  Lifecycle / step / usage events drop out in projection.
-    fn model_messages(&self) -> Vec<ChatMessage> {
+    /// Project an event slice into the `Vec<ChatMessage>` shape genai
+    /// wants: the active compaction summary (as a user message) when one is
+    /// live, followed by the slice's events.  Lifecycle / step / usage
+    /// events drop out in [`SessionEvent::into_chat_messages`].  The single
+    /// place the summary-prompt-plus-projection shape is spelled.
+    fn project(&self, events: &[SessionEvent]) -> Vec<ChatMessage> {
         let mut msgs = Vec::new();
         if let Some(c) = &self.compaction {
             msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
         }
-        for e in &self.events {
+        for e in events {
             msgs.extend(e.clone().into_chat_messages());
         }
         msgs
+    }
+
+    /// The full model view: [`project`](Self::project) over every live
+    /// event.
+    fn model_messages(&self) -> Vec<ChatMessage> {
+        self.project(&self.events)
     }
 }
 

@@ -88,8 +88,9 @@ impl Transcript {
 
 /// Project one bus event into its `transcript.jsonl` record, or `None` for the
 /// variants the operational trace deliberately omits: the rendering-only
-/// [`Kind::Card`] / [`Kind::Phase`], the assistant [`Kind::Token`] stream
-/// (prose belongs to the model view), and the interactive-only chrome
+/// [`Kind::Card`] / [`Kind::Phase`], the assistant [`Kind::Token`],
+/// [`Kind::Thinking`], and [`Kind::Reasoning`] streams (prose and deliberation
+/// belong to the model view), and the interactive-only chrome
 /// ([`Kind::Boundary`], [`Kind::UserPromptEcho`], the pin register). The
 /// exhaustive match means a new [`Kind`] won't silently fall out of the trace.
 pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde_json::Value> {
@@ -147,14 +148,12 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
                 }),
             )
         }
-        // The raw structural effect a card erases — kept so a post-mortem reads
-        // the read/write/exec/grep shape. The card composed from it is a
-        // rendering and lives in the TUI's `user.log`, never here.
+        // Io, Done, Notice, and Resources each carry a raw fact beside the
+        // `card` the TUI renders from it (bus.rs documents each pairing); the
+        // trace keeps the fact — structural read/write/exec/grep shape, worker
+        // settlement, ready-boundary housekeeping, `/resources` rows — never
+        // the rendering, which lives only in the TUI's `user.log`.
         Kind::Io { event, .. } => ("io", json!({ "event": event })),
-        // A detached worker's raw settlement fact — a clean return, a raised
-        // error, or a panic — kept beside the rendered `card` on the
-        // `Kind::Io` pattern, so `transcript.jsonl` records how the worker
-        // settled, not just its one-line ink.
         Kind::Done { outcome, .. } => {
             use crate::card::DoneOutcome;
             match outcome {
@@ -168,11 +167,6 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
                 }
             }
         }
-        // Core's own ready-boundary housekeeping fact — which worker was
-        // reaped and why, which bindings a prune pass fell, or which
-        // install crossed the large-binding threshold — kept beside the
-        // rendered `card` the same way `Kind::Io` keeps its structural
-        // `event` beside its rendering.
         Kind::Notice { notice, .. } => {
             use crate::card::Notice;
             match notice {
@@ -193,11 +187,8 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
                 }
             }
         }
-        // The `/resources` fold's raw rows — the agent's accumulator
-        // figures at the instant the operator asked — kept beside the
-        // rendered `card` on the same raw-fact/rendering pattern.  The
-        // frontend's own rows are appended at render time and stay
-        // presentation, so they are deliberately absent here.
+        // The frontend's own rows are appended at render time and stay
+        // presentation, so they are deliberately absent from these raw rows.
         Kind::Resources { rows, .. } => ("resources", json!({ "rows": rows })),
         // Rendering- and presentation-only: a composed card, a progress phase,
         // the assistant token stream, the interactive-only live lines, and the

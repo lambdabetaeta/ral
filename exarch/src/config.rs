@@ -1,6 +1,6 @@
 //! Operator-set exarch configuration: the unusual-provider file
-//! (`$XDG_CONFIG_HOME/exarch/config.ral`) and a handful of standalone
-//! environment-variable knobs the binary reads once at startup.
+//! (`$XDG_CONFIG_HOME/exarch/config.ral`) and a single standalone
+//! environment-variable knob the binary reads once at startup.
 //!
 //! ## Unusual providers
 //!
@@ -47,18 +47,25 @@ use ral_core::types::{Break, Capabilities, Value};
 /// The config file name under `$XDG_CONFIG_HOME/exarch/`.
 const CONFIG_FILE: &str = "config.ral";
 
-/// The operator-set disk-warn ceiling, in bytes, or `None` if unset or
-/// unparseable.
+/// The operator-set disk-warn ceiling, in bytes, or `None` if unset.
 ///
 /// Absent means [`crate::agent::Agent::check_disk_warn`] never
 /// walks the log/scratch dirs at all, no cost paid ever
 /// (`decisions/260705_leases-and-budgets`, "Disk: report and warn only").
 /// Read once at startup, like every other launch setting; there is
 /// deliberately no live-reload.
-pub fn disk_warn_bytes() -> Option<u64> {
-    std::env::var("EXARCH_DISK_WARN_BYTES")
-        .ok()
-        .and_then(|s| s.parse().ok())
+///
+/// # Errors
+/// A present but unparseable value is a hard error, not a silent
+/// disable — a mistyped ceiling is an operator mistake to surface, the
+/// same fail-loud discipline the provider [`load`] follows.
+pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
+    match std::env::var("EXARCH_DISK_WARN_BYTES") {
+        Ok(s) => s.parse().map(Some).map_err(|e| {
+            format!("EXARCH_DISK_WARN_BYTES: '{s}' is not a byte count: {e}")
+        }),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Load the custom providers declared in `$XDG_CONFIG_HOME/exarch/config.ral`.

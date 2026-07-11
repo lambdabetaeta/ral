@@ -1,4 +1,5 @@
-//! Sandbox dispatch, shell construction, scratch directory.
+//! Session boot: shell construction, environment and scratch seeding, the
+//! run-log and XDG directory layout, plus the shared time/slug helpers.
 //!
 //! One-shot bootstrap pieces that live for the lifetime of the process
 //! (or, for [`Scratch`], for the lifetime of one root session).
@@ -12,8 +13,9 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-/// Probe the terminal in the same mode `boot_shell` and `Agent::fork`
-/// both want — honours `RAL_INTERACTIVE_MODE` if set.
+/// Probe the terminal in the same mode `boot_shell` and every agent's
+/// transport endpoint (`Agent::assemble`) both want — honours
+/// `RAL_INTERACTIVE_MODE` if set.
 pub fn probe_terminal() -> TerminalState {
     let (_mode, terminal, _warn) = TerminalState::probe_from_env();
     terminal

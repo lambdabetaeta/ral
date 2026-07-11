@@ -91,15 +91,27 @@ pub fn dispatch_pre_main() -> Option<u8> {
     install_child_hooks_and_serve_helpers().or_else(ral_core::sandbox::serve_sandbox_early_init)
 }
 
-/// Pre-`main` trampoline for the library's own unit-test binary; see
+/// Emit the pre-`main` re-exec `#[ctor]` shared by the binary and tests.
+///
+/// It serves helper / sandbox re-execs from a constructor and exits the
+/// child before libtest sees flags it would reject. Invoked once per binary
+/// (gate with `#[cfg(test)]` where the ctor is only wanted under test). See
 /// [`dispatch_pre_main`].
-#[cfg(test)]
-#[ctor::ctor(unsafe)]
-fn init_lib_test_binary() {
-    if let Some(code) = dispatch_pre_main() {
-        std::process::exit(i32::from(code));
-    }
+#[macro_export]
+macro_rules! pre_main_ctor {
+    () => {
+        #[ctor::ctor(unsafe)]
+        fn init_pre_main() {
+            if let Some(code) = $crate::dispatch_pre_main() {
+                ::std::process::exit(i32::from(code));
+            }
+        }
+    };
 }
+
+// The library's own unit-test binary; see [`dispatch_pre_main`].
+#[cfg(test)]
+pre_main_ctor!();
 
 /// The binary's entry point, lifted into the library so integration
 /// tests can link the whole crate.
@@ -146,9 +158,9 @@ pub fn run() -> Result<(), String> {
             }
         };
     }
-    // Belt-and-suspenders to the clap `requires` above: `--output-format`
-    // only affects the headless frontend, so a `json` request without
-    // `--headless` is a mistake, not a silent no-op.
+    // Belt-and-suspenders to the `requires = "headless"` on `--output-format`
+    // in cli.rs: `--output-format` only affects the headless frontend, so a
+    // `json` request without `--headless` is a mistake, not a silent no-op.
     if c.output_format == headless::OutputFormat::Json && !c.headless {
         return Err("--output-format is only meaningful with --headless".into());
     }
@@ -158,7 +170,7 @@ pub fn run() -> Result<(), String> {
     // XDG config home, evaluated under a no-authority grant. Absent → none.
     let custom = config::load()?;
     // The operator's disk-warn ceiling, if set — threaded to the trunk below.
-    let disk_warn_bytes = config::disk_warn_bytes();
+    let disk_warn_bytes = config::disk_warn_bytes()?;
 
     // Auto-discover providers and resolve their keys into the in-memory
     // store, scrubbing every key var from the environment. The custom
@@ -177,7 +189,6 @@ pub fn run() -> Result<(), String> {
         );
     }
 
-    #[allow(clippy::disallowed_methods)]
     let cwd = std::env::current_dir()
         .map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
     let state_dir = bootstrap::project_dir(&cwd);
@@ -244,7 +255,7 @@ pub fn run() -> Result<(), String> {
     // One shared runtime for the whole fleet; per-credential transports warm
     // lazily as providers are built and borrow it.
     let engine = Engine::new();
-    let provider = std::sync::Arc::new(Provider::build(
+    let provider = Arc::new(Provider::build(
         engine.clone(),
         &id,
         model.clone(),
@@ -265,7 +276,7 @@ pub fn run() -> Result<(), String> {
         // headless trunk terminates once its seeded work is idle.
         !c.headless,
         c.chat,
-        std::sync::Arc::clone(&provider),
+        Arc::clone(&provider),
         disk_warn_bytes,
     )
     .map_err(|e| format!("session init: {e}"))?;

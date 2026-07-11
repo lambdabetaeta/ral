@@ -23,8 +23,9 @@ use gray_matter::engine::YAML;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// A discovered skill — enough metadata for the prompt and enough path
-/// info for on-demand body loading.
+/// A discovered skill's prompt metadata: the `name` and `description` the
+/// Skills section lists.  It holds no path — on-demand body loading is
+/// driven by the `(name, dir)` pairs [`discover_all`] returns.
 #[derive(Clone, Debug)]
 pub struct Skill {
     pub name: String,

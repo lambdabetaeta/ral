@@ -382,7 +382,7 @@ impl Agent {
         transport.attach(
             ral_core::transport::TerminalEndpoint {
                 lease: None,
-                state: ral_core::io::TerminalState::probe_from_env().1,
+                state: crate::bootstrap::probe_terminal(),
             },
             cwd,
             std::path::PathBuf::from(&home),

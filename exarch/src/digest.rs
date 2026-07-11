@@ -10,8 +10,14 @@
 //! receives on later turns and what the transcript records — the user
 //! never sees more of a result than the model does.
 //!
-//! Non-`ral` tools call [`clip`] directly on their own output (fff,
-//! agent replies, opaque parse-error blobs) with their own caps.
+//! A couple of non-`ral` producers call [`clip`] directly on their own
+//! output — agent replies and opaque parse-error blobs — each at its own
+//! cap.
+//!
+//! The section caps here bound one tool result; the model's whole history
+//! is bounded separately by the compaction budget ([`compaction_due`] /
+//! [`COMPACT_THRESHOLD`]), which summarises older turns once context
+//! pressure crosses the reserve.
 
 use crate::shell_eval;
 use std::fmt::Write;
@@ -26,9 +32,6 @@ const VALUE_CAP: usize = 20_000;
 const STDOUT_CAP: usize = 10_000;
 const STDERR_CAP: usize = 10_000;
 
-/// Cap for one `fff` tool result.
-pub const FFF_CAP: usize = 2000;
-
 /// Cap for an `Outcome::Static` blob (parse / type errors etc.) — a
 /// diagnostic the model reads in full and cannot query, so it gets the
 /// same room as stderr.
@@ -38,10 +41,9 @@ pub const OPAQUE_CAP: usize = 3000;
 /// deliberately-constructed report, not a scraped tail, so it keeps by far
 /// the most room.
 ///
-/// An observed good explorer brief already ran to 5787 bytes
-/// against the former 6000 cap; the cap is now wide enough that a thorough
-/// report fits whole, with middle-elision (the [`clip`] backstop) reserved
-/// for the genuinely oversized reply rather than the common case.
+/// Wide enough that a thorough report fits whole, with middle-elision (the
+/// [`clip`] backstop) reserved for the genuinely oversized reply rather than
+/// the common case.
 pub const AGENT_REPLY_CAP: usize = 16_000;
 
 /// Fallback compaction trigger, in serialised model-view bytes, for

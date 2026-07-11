@@ -22,9 +22,8 @@ const STATE_FILE: &str = "state.json";
 
 /// The persisted runtime state: the model selection plus its tuning.
 ///
-/// The
-/// tuning fields are `#[serde(default)]` so a state file written by an older
-/// binary (model only) still loads — its tuning reads as "auto" — and a
+/// The tuning fields are `#[serde(default)]` so a state file written by an
+/// older binary (model only) still loads — its tuning reads as "auto" — and a
 /// hand-edited or future file with unknown keys is tolerated by [`load`].
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct State {
@@ -108,9 +107,9 @@ fn path_in(dir: &Path) -> PathBuf {
 /// Load the selection from `dir/state.json`, or `None` when the file is
 /// absent or unreadable as state.
 ///
-/// A malformed file is treated as absent
-/// (the default selection applies) rather than failing startup — the
-/// selection is recoverable state, not load-bearing config.
+/// A malformed file is treated as absent (the default selection applies)
+/// rather than failing startup — the selection is recoverable state, not
+/// load-bearing config.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:state-read] reads the persisted picker selection; recoverable session state, not turn-time data I/O"
@@ -122,10 +121,9 @@ pub fn load(dir: &Path) -> Option<State> {
 
 /// Persist `state` to `dir/state.json`, creating `dir` if needed.
 ///
-/// Returns a
-/// message on failure so the picker can note it without aborting the
-/// switch — the switch already took effect in memory; only its persistence
-/// failed.
+/// Returns a message on failure so the picker can note it without aborting
+/// the switch — the switch already took effect in memory; only its
+/// persistence failed.
 ///
 /// # Errors
 /// Returns `Err` if creating `dir`, serialising the state, or writing

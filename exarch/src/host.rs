@@ -12,7 +12,7 @@
 //! std target constants can provide.
 
 /// Multi-line markdown list — `os`, `now`, `cwd`, `user`, `home`,
-/// `exarch logs`, and (when cwd is inside a repo) `git`.  Stable for
+/// `git` (when cwd is inside a repo), then `exarch logs`.  Stable for
 /// the process lifetime, so safe inside the cached system prefix.
 pub fn snapshot(exarch_state: &std::path::Path) -> String {
     use std::fmt::Write;

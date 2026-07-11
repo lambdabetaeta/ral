@@ -27,15 +27,10 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
 }
 
-/// Mirror the binary's pre-`main` re-exec dispatch — helper re-exec
-/// dispatch, then the OS-sandbox stage — before libtest sees the flags
-/// either would reject; see [`exarch::dispatch_pre_main`].
-#[ctor::ctor(unsafe)]
-fn init_test_binary() {
-    if let Some(code) = exarch::dispatch_pre_main() {
-        std::process::exit(i32::from(code));
-    }
-}
+// Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,
+// then the OS-sandbox stage — before libtest sees the flags either would
+// reject; see [`exarch::dispatch_pre_main`].
+exarch::pre_main_ctor!();
 
 /// A unique scratch directory per test so concurrent runs don't share
 /// session logs.

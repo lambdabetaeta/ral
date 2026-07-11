@@ -22,47 +22,33 @@ use std::path::{Path, PathBuf};
 /// provider — chat does not branch on the adapter.
 pub const CHAT_SYSTEM: &str = ".";
 
-/// Build the full system prompt, in order:
+/// Build the full system prompt as an ordered list of `(heading, body)`
+/// sections that [`render`] walks uniformly.  The order, and what each
+/// section carries:
 ///
-/// 1. **persona** (unheaded) — the baked `data/system.md`, or the `--system
-///    FILE...` files when given.  `--system` replaces *only* the persona; every
-///    other section stands, so an operator can retune the voice without losing
-///    the tool reference.
-/// 2. **Ral** (`data/ral.md`) — the language and tool reference.
-/// 3. **Editing** — the file-editing scheme, selected by `edit`: the
-///    line-hash `view-text`/`view-text-around`/`edit-hash` reference
-///    (`data/edit-hash.md`) for [`EditScheme::Hash`], or the
-///    read/`string-replace`/write idiom (`data/edit-replace.md`) for
-///    [`EditScheme::Replace`] (the CLI's `--edit replace`). Only the prompt
-///    text switches — both builtins stay registered either way, so
-///    `explain edit-hash` still works under `--edit replace`, just unadvertised.
-/// 4. **Builtins** — every builtin and prelude function's **name** only (see
-///    [`builtin_index`]), a progressive-disclosure index right after the `Ral`
-///    prose that points `help` at it: the agent reads the whole surface at a
-///    glance and `explain <name>`s any one for its signature and docs on demand,
-///    since the full help strings proved far too long to bake in.
-/// 5. **Tasks** (`data/tasks.md`) — the task-management kit API reference:
-///    `empty-tasks`, `add-task`, `remove-task`, `transition`, `status-counts`,
-///    and the rendering/persistence surface.  Bindings are always live
-///    (sourced at boot alongside the agent library); call `explain <name>` for
-///    any one's full signature.
-/// 6. **Script style** (`data/script-style.md`) — the scripting guide.
-/// 7. **Host** — the environment snapshot ([`host::snapshot`]) followed by the
-///    live `Grant`: where the agent stands on disk and when "now" is, then the
-///    authority it holds, read together as the facts of its situation.
-/// 8. **Workspace** (optional) — present whenever any `AGENTS.md` is discovered
-///    (see [`discover_agents`]): the operator's own `<config>/AGENTS.md` then
-///    every repo `AGENTS.md` from the git root down to the cwd, the deepest
-///    last so its recency wins.  Project instructions, not authority — it
-///    cannot widen the grant.
-/// 9. **Agent** (optional) — when `headless`, the closing return-channel
-///    contract (`data/agent.md`): the agent returns its result by calling
-///    `reply` exactly once, the contract a headless root and every sub-agent
-///    share.  Appended last, where its recency carries.
-/// 10. **Skills** (optional) — present whenever any skill is discovered and
-///     readable under the grant: `name: description` per skill, plus a
-///     note telling the agent to call `skill <name>` to load and
-///     `skill-list` to refresh mid-session.
+/// 1. **persona** (unheaded) — baked `data/system.md`, or the `--system
+///    FILE...` files when given.  `--system` replaces *only* the persona;
+///    every other section stands.
+/// 2. **Ral** — the language and tool reference (`data/ral.md`).
+/// 3. **Editing** — the file-editing scheme `edit` selects: line-hash
+///    (`data/edit-hash.md`) or string-replace (`data/edit-replace.md`).
+///    Only the prompt text switches; both builtins stay registered.
+/// 4. **Builtins** — every builtin/prelude function's name only, a
+///    progressive-disclosure index (see [`builtin_index`]).
+/// 5. **Tasks** — the task-management kit API (`data/tasks.md`).
+/// 6. **Script style** — the scripting guide (`data/script-style.md`).
+/// 7. **Host** — the environment snapshot ([`host::snapshot`]) and the live
+///    grant, one under the other.
+/// 8. **Workspace** (optional) — the discovered `AGENTS.md` chain (see
+///    [`discover_agents`]): operator config first, then repo root down to
+///    cwd, deepest last.  Instructions, not authority.
+/// 9. **Skills** (optional) — `name: description` per discovered readable
+///    skill, with a note to call `skill <name>` to load and `skill-list` to
+///    refresh mid-session.
+/// 10. **Agent** / **Surfacing** — the closing section, chosen by `headless`:
+///     a headless run gets the `reply` return-channel contract
+///     (`data/agent.md`); an interactive run gets the surfacing guidance
+///     (`data/surface.md`).  Last, where its recency carries.
 ///
 /// # Errors
 /// Returns `Err` if reading a `--system` file or a discovered workspace
@@ -126,9 +112,9 @@ pub fn assemble(
 /// only its callers do, so the filter lives here and covers all three sources.
 ///
 /// This is a *progressive-disclosure* index, not a reference: the agent reads
-/// the whole surface at a glance, then `help <name>`s any one for its signature
-/// and docs on demand — baking every help string into the prompt proved far too
-/// long.  The set is fixed at build time and does not vary per agent, so it is
+/// the whole surface at a glance, then `explain <name>`s any one for its
+/// signature and docs on demand — baking every help string into the prompt
+/// proved far too long.  The set is fixed at build time and does not vary per agent, so it is
 /// assembled from the static tables, never a live shell.  The host builtin
 /// sets ([`HOST_BUILTIN_SETS`](crate::agent_builtins::HOST_BUILTIN_SETS) —
 /// exarch's own surface and core's host-installed `service`) are chained in
