@@ -3,7 +3,7 @@
 //! When a plugin-registered key fires during readline, rustyline stores a
 //! [`PendingKeybinding`] and immediately accepts the line.  The REPL loop
 //! then calls [`dispatch_keybinding`] to run the handler outside the
-//! readline borrow, with a fresh [`PluginContext`] reflecting the current
+//! readline borrow, with a fresh [`PluginContext`](super::plugin_editor::PluginContext) reflecting the current
 //! editor state.  The handler may mutate the buffer, accept the line, or
 //! push a new buffer onto the stack.
 
@@ -38,7 +38,7 @@ fn end_of(s: &str) -> usize {
 /// Execute a pending keybinding handler with the current editor state.
 ///
 /// Looks up the handler from the plugin runtime, builds a
-/// [`PluginContext`], invokes the hook through [`call_plugin_hook`], and
+/// [`PluginContext`](super::plugin_editor::PluginContext), invokes the hook through [`call_plugin_hook`], and
 /// inspects the resulting context to decide whether to accept or re-edit
 /// the line.
 pub(super) fn dispatch_keybinding(

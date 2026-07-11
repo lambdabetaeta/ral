@@ -34,9 +34,9 @@ the caller's turn or a fresh one:
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The `FramedHook`
   carries the per-hook policy: the terminal authority (`Leased` for keybinding
   dispatch, so an `_ed-tui` body can foreground a captured pipeline; `Denied`
-  elsewhere), a `kind` label, the capability ceiling (`Capabilities::root()` —
-  plugins run with host authority), and an optional foreground budget arming the
-  turn's wall.
+  elsewhere), a `kind` label, and an optional foreground budget arming the
+  turn's wall. Plugins run with the host authority (`Capabilities::root()`) the
+  framed turn already carries.
 
 ## Source-mapped faults and the buffer-change breaker
 
@@ -88,9 +88,10 @@ convert at the rustyline boundary so plugin code never handles UTF-8.
 
 `plugin.rs::PluginRuntime` is the `Arc<Mutex<…>>` threaded between the loop,
 rustyline's `Hinter`/`Highlighter` callbacks, the structural surface's per-tick
-loop, and keybinding dispatch. It is partitioned into `PluginSnapshot`,
-`EditorHooks`, `Keybindings`, and `DeferredDiagnostics` so each call site reaches
-only its slice. The load-bearing rule: editor callbacks may hold the mutex, the
+loop, and keybinding dispatch. It holds the canonical plugin list and the
+`keybindings_dirty` flag directly and partitions the rest into `EditorHooks`,
+`Keybindings`, and `DeferredDiagnostics` so each call site reaches only its
+slice. The load-bearing rule: editor callbacks may hold the mutex, the
 evaluator must not — every hook releases the lock before running ral code so
 re-entrant `_ed-*` calls can re-acquire it.
 
@@ -110,7 +111,9 @@ structural surface matches it against crossterm's.
   `RAL_PATH`, typechecks and evaluates it under a `ScriptContextGuard`,
   instantiates a parameterised plugin block through the value turn door,
   installs alias bindings, and records it (retaining the file source on the
-  `LoadedPlugin`). Unloading reverses the env installation.
+  `LoadedPlugin`). Hooks and aliases are committed only after every validation
+  passes, so a rejected load rolls back cleanly; unloading is the exact inverse,
+  removing the plugin's hooks and keybindings and undoing the env installation.
 - `keybinding.rs` — when a plugin-registered key fires, rustyline stashes a
   `PendingKeybinding` and accepts the line; `dispatch_keybinding` then runs the
   handler outside the readline borrow under `HookFraming::Framed` with `Leased`

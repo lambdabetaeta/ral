@@ -1,8 +1,8 @@
 //! REPL-specific error formatting.
 //!
-//! Plugin diagnostics and the compact REPL parse-error path live here.
-//! The full ariadne-rendered errors come from `ral_core::diagnostic`;
-//! these helpers handle the shorter, REPL-styled cases.
+//! Plugin diagnostics live here.  The full ariadne-rendered errors come
+//! from `ral_core::diagnostic`; these helpers handle the shorter,
+//! REPL-styled cases.
 
 use ral_core::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use ral_core::types::Error;
@@ -35,7 +35,7 @@ pub(super) fn format_plugin_error(plugin_name: &str, context: &str, err: &Error)
 ///
 /// Use only from contexts where no readline-driven escape sequence is about
 /// to clobber the line (e.g. lifecycle hooks at startup).  Inside the
-/// readline loop, defer via [`super::plugin::defer_plugin_error`] instead.
+/// readline loop, defer via [`super::plugin::defer_plugin_message`] instead.
 pub(super) fn plugin_error(plugin_name: &str, context: &str, err: &Error) {
     eprintln!("{}", format_plugin_error(plugin_name, context, err));
 }
@@ -57,29 +57,4 @@ pub(super) fn plugin_warning(plugin_name: &str, msg: &str) {
     let c = ansi::use_color();
     let (yellow, reset) = (ansi::when(c, BOLD_YELLOW), ansi::when(c, RESET));
     eprintln!("{yellow}plugin{reset} '{plugin_name}': warning: {msg}");
-}
-
-#[allow(dead_code, reason = "used only in tests")]
-pub(super) fn format_repl_parse_error(message: &str) -> String {
-    let c = ansi::use_color();
-    format!(
-        "{}error{}: {message} (exit status 2)\n",
-        ansi::when(c, BOLD_RED),
-        ansi::when(c, RESET),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_repl_parse_error;
-
-    #[test]
-    fn repl_compact_parse_error_for_single_value() {
-        let rendered = format_repl_parse_error(
-            "value cannot appear in command position; use 'return <value>'",
-        );
-        assert!(rendered.contains("value cannot appear in command position"));
-        assert!(rendered.contains("(exit status 2)"));
-        assert!(!rendered.contains("-->"));
-    }
 }

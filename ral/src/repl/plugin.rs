@@ -3,17 +3,18 @@
 //!
 //! The `Arc<Mutex<PluginRuntime>>` lives across rustyline's `Hinter` and
 //! `Highlighter` (which require `Send + Sync`) and the REPL's own
-//! keybinding dispatch.  The runtime is partitioned into four named
-//! substructs so each call site reaches for only the slice it owns:
+//! keybinding dispatch.  It holds the canonical plugin list (`plugins`)
+//! and the `keybindings_dirty` reconciliation flag directly, and
+//! partitions the rest into three named substructs so each call site
+//! reaches for only the slice it owns:
 //!
-//! - [`PluginSnapshot`] — the plugin list and the generation it was
-//!   synced from.  Read by every hook path; mutated by [`sync_plugins`].
 //! - [`EditorHooks`] — hook env, prev-buffer change-detection state,
 //!   the most recent hook outputs (ghost text, highlights), the
 //!   editor state exposed to plugins via `_ed-*`, and the history
 //!   snapshot.  Touched by Hinter/Highlighter callbacks.
 //! - [`Keybindings`] — pending keybinding flagged by rustyline's event
-//!   handler and the buffer stack populated by `_ed-push`.
+//!   handler, the buffer stack populated by `_ed-push`, and the key
+//!   sequences currently bound with rustyline.
 //! - [`DeferredDiagnostics`] — plugin error/warning messages buffered
 //!   during readline for later flushing past line-erase escapes.
 //!
@@ -238,11 +239,8 @@ pub(super) struct PendingKeybinding {
 
 // ── Transactional hook helper ───────────────────────────────────────────
 
-/// Per-call view of a plugin's metadata threaded through the hook
-/// helper.  `name` labels the hook turn's root context and the source-mapped
-/// fault; `source` is the plugin file's text, installed as that root context
-/// so a fault inside the handler resolves to the right line of the plugin
-/// file and renders with a source arrow, exactly as a command fault does.
+/// Per-call view of the plugin owning a hook: `name` labels the hook turn's
+/// root context and the source-mapped fault.
 #[derive(Clone, Copy)]
 pub(super) struct HookFor<'a> {
     pub(super) name: &'a str,
@@ -939,7 +937,7 @@ impl PluginRuntime {
     /// binding_idx, chord)` triple, for a frontend that matches incoming
     /// keys itself rather than registering handlers with rustyline (the
     /// structural surface).  The `(plugin_name, binding_idx)` pair is the
-    /// same identity [`resolve_keybinding`] resolves, so a matched chord
+    /// same identity [`resolve_keybinding`](Self::resolve_keybinding) resolves, so a matched chord
     /// dispatches through the shared [`super::keybinding::dispatch_keybinding`].
     /// An unparseable notation is skipped silently — rustyline's
     /// [`sync_plugins`] already warns on it, and this runs every keypress.

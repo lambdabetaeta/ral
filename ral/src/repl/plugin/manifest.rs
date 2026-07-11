@@ -49,9 +49,6 @@ impl LoadedPlugin {
     /// `(name, thunk)` pairs the caller installs into env.
     pub(super) fn parse(val: &Value) -> Result<(Self, Vec<(String, Value)>), Error> {
         let map = as_map_ref(val);
-        // `capabilities:` is not enforced — plugins run with host authority.
-        // Reject it explicitly: silently accepting a security-shaped field
-        // would let an author believe the plugin is confined when it is not.
         if map.is_some_and(|m| m.get("capabilities").is_some()) {
             return Err(load_err(
                 "manifest 'capabilities:' is not enforced — plugins run with host \
@@ -165,9 +162,8 @@ fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
 mod tests {
     use super::*;
 
-    /// A `capabilities:` key is rejected with a clear error rather than
-    /// accepted and ignored: it is never enforced, so silently dropping it
-    /// would let an author believe the plugin is confined when it is not.
+    /// A `capabilities:` key is rejected with an error that names the key and
+    /// points at `grant` (the authority rationale lives on the struct doc).
     #[test]
     fn capabilities_key_is_rejected() {
         let manifest = Value::map(vec![
@@ -183,7 +179,8 @@ mod tests {
         );
     }
 
-    /// A manifest without the dead field parses as before.
+    /// A manifest with no `capabilities:` key parses into a clean plugin
+    /// record carrying its name and no aliases.
     #[test]
     fn manifest_without_capabilities_parses() {
         let manifest = Value::map(vec![("name".into(), Value::String("p".into()))]);
