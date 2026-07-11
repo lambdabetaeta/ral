@@ -10,7 +10,8 @@ use ral_core::types::{Break, Capabilities, HookName};
 #[cfg(test)]
 use ral_core::{DefaultPolicy, HookSig};
 use ral_core::{
-    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, diagnostic,
+    Captured, RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value,
+    diagnostic,
 };
 use std::sync::{Arc, Mutex};
 
@@ -50,30 +51,14 @@ impl PromptText {
     }
 }
 
-/// Evaluate a prompt block, extracting its display text.  A block's return
-/// value produces the prompt; when it returns unit, its captured stdout is
-/// used.  Any other value is its display form, so a plain string prompt is
-/// the string itself.
-#[cfg(test)]
-pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
-    let Value::Block { .. } = prompt else {
-        return prompt.to_string();
-    };
-
-    // Register as a temporary hook, run it, extract text.
-    let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
-    let _ = shell.register_hook(
-        HookName::session("__eval_prompt_test__"),
-        prompt.clone(),
-        HookSig::Prompt,
-        DefaultPolicy::denied_capture(),
-        origin,
-    );
-
-    let req = TurnRequest {
+/// Build the capture-into-string turn for the `Session/<name>` prompt hook.
+/// The prompt body runs with denied terminal access and its stdout captured,
+/// so a block that prints its prompt is read back from the capture.
+fn prompt_turn(name: &str) -> TurnRequest<'static> {
+    TurnRequest {
         turn: Turn {
             program: Program::Hook {
-                name: HookName::session("__eval_prompt_test__"),
+                name: HookName::session(name),
                 args: vec![],
             },
             script_name: "<prompt>".to_string(),
@@ -89,17 +74,14 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         deferred: None,
         desk: None,
         lifecycle: Box::new(()),
-    };
+    }
+}
 
-    let (result, captured) = shell.with_preserved_status(|shell| match shell.run_turn(req) {
-        TurnReport::Ran {
-            result, captured, ..
-        } => (result, captured),
-        TurnReport::Static { .. } => {
-            unreachable!("a thunk prompt body never compiles source")
-        }
-    });
-
+/// Extract the prompt display text from a prompt turn's outcome.  A returned
+/// value is the prompt; a returned unit falls back to captured stdout (with a
+/// trailing newline trimmed); an error prints a diagnostic and degrades to
+/// [`DEFAULT_PROMPT`].
+fn prompt_text_from(result: Result<Value, Break>, captured: Option<Captured>) -> String {
     match result {
         Ok(Value::Unit) => {
             if let Some(cap) = captured {
@@ -120,6 +102,38 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         }
         Err(Break::Escape(_)) => DEFAULT_PROMPT.to_string(),
     }
+}
+
+/// Evaluate a prompt block, extracting its display text.  A block's return
+/// value produces the prompt; when it returns unit, its captured stdout is
+/// used.  Any other value is its display form, so a plain string prompt is
+/// the string itself.  Registers the value as a temporary hook and runs it
+/// through the same [`prompt_turn`] / [`prompt_text_from`] path as [`render`].
+#[cfg(test)]
+pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
+    let Value::Block { .. } = prompt else {
+        return prompt.to_string();
+    };
+
+    let _ = shell.register_hook(
+        HookName::session("__eval_prompt_test__"),
+        prompt.clone(),
+        HookSig::Prompt,
+        DefaultPolicy::denied_capture(),
+        ral_core::source::Span::synthetic(),
+    );
+
+    let (result, captured) =
+        shell.with_preserved_status(|shell| match shell.run_turn(prompt_turn("__eval_prompt_test__")) {
+            TurnReport::Ran {
+                result, captured, ..
+            } => (result, captured),
+            TurnReport::Static { .. } => {
+                unreachable!("a thunk prompt body never compiles source")
+            }
+        });
+
+    prompt_text_from(result, captured)
 }
 
 /// Write the terminal title escape (`ral: <cwd>`) to stdout.
@@ -150,50 +164,10 @@ pub(super) fn write_terminal_title(shell: &Shell) {
 /// The prompt hook is registered at session boot and may be
 /// overwritten by the rc `prompt:` key.
 pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> PromptText {
-    let req = TurnRequest {
-        turn: Turn {
-            program: Program::Hook {
-                name: HookName::session("prompt"),
-                args: vec![],
-            },
-            script_name: "<prompt>".to_string(),
-            caps: Capabilities::root(),
-            turn_limit: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Inherit,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        lifecycle: Box::new(()),
-    };
-
-    let base = match shell.run_turn(req) {
+    let base = match shell.run_turn(prompt_turn("prompt")) {
         TurnReport::Ran {
             result, captured, ..
-        } => match result {
-            Ok(Value::Unit) => {
-                if let Some(cap) = captured {
-                    let text = String::from_utf8_lossy(&cap.stdout).into_owned();
-                    if let Some(stripped) = text.strip_suffix('\n') {
-                        stripped.to_string()
-                    } else {
-                        text
-                    }
-                } else {
-                    DEFAULT_PROMPT.to_string()
-                }
-            }
-            Ok(other) => other.to_string(),
-            Err(Break::Error(e)) => {
-                diagnostic::cmd_error("ral", &format!("prompt error: {}", e.message));
-                DEFAULT_PROMPT.to_string()
-            }
-            Err(Break::Escape(_)) => DEFAULT_PROMPT.to_string(),
-        },
+        } => prompt_text_from(result, captured),
         TurnReport::Static { .. } => DEFAULT_PROMPT.to_string(),
     };
 

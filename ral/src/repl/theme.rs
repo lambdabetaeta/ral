@@ -14,7 +14,8 @@
 //! file can replace it once during startup without imposing locking on
 //! the read path beyond a snapshot clone.
 
-use ral_core::ansi::YELLOW;
+use ral_core::Map;
+use ral_core::ansi::{YELLOW, named_color};
 use std::sync::{LazyLock, RwLock};
 
 /// Styling applied to ral-computed values printed at the REPL prompt.
@@ -32,6 +33,24 @@ impl Default for OutputTheme {
             value_prefix: "=> ".into(),
             value_color: Some(YELLOW.into()),
         }
+    }
+}
+
+impl OutputTheme {
+    /// Build a theme from an RC `theme:` map, starting from the default and
+    /// overriding the `value_prefix` / `value_color` keys it carries.  A
+    /// `value_color` names an ANSI colour (see [`named_color`]); unknown keys
+    /// are ignored.
+    pub(crate) fn from_map(pairs: &Map) -> Self {
+        let mut theme = Self::default();
+        for (k, v) in pairs {
+            match k.as_str() {
+                "value_prefix" => theme.value_prefix = v.to_string(),
+                "value_color" => theme.value_color = named_color(&v.to_string()),
+                _ => {}
+            }
+        }
+        theme
     }
 }
 

@@ -11,7 +11,6 @@ use ral_core::{Map, Shell, Value};
 
 use super::frontend::Surface;
 use super::theme::{OutputTheme, set_output_theme};
-use ral_core::ansi::named_color;
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -216,15 +215,7 @@ pub(crate) fn apply_rc_config(config: Value, ctx: &mut RcCtx<'_>) -> Option<Valu
             "startup" => startup = Some(val),
             "theme" => {
                 if let Value::Map(pairs) = val {
-                    let mut theme = OutputTheme::default();
-                    for (k, v) in pairs {
-                        match k.as_str() {
-                            "value_prefix" => theme.value_prefix = v.to_string(),
-                            "value_color" => theme.value_color = named_color(&v.to_string()),
-                            _ => {}
-                        }
-                    }
-                    set_output_theme(theme);
+                    set_output_theme(OutputTheme::from_map(&pairs));
                 }
             }
             _ => {}
