@@ -48,10 +48,6 @@ pub fn load_capabilities_from_str(
 
 /// Read `path` from disk and forward to [`load_capabilities_from_str`].
 ///
-/// A missing file is reported as `file not found`; any other IO failure is
-/// wrapped with the file path so the user sees which profile could not be
-/// opened.
-///
 /// # Errors
 /// Returns `Err` if the file cannot be read (`file not found`, or any other
 /// IO failure wrapped with the path), or for any failure of
@@ -82,10 +78,10 @@ pub fn load_capabilities_from_path(
     load_capabilities_from_str(shell, &source, &abs, ctx)
 }
 
-/// Load each profile in `paths`, freezing each against the session's
-/// `$HOME` and working directory,
+/// Load, `meet`-compose, and install a session-wide capability ceiling.
 ///
-/// compose them left-to-right by `meet`
+/// Load each profile in `paths`, freezing each against the session's
+/// `$HOME` and working directory, compose them left-to-right by `meet`
 /// (each successive file narrows authority), and push the result onto
 /// `shell` as a permanent session-wide ceiling.  No-op when `paths` is
 /// empty.
@@ -96,12 +92,8 @@ pub fn load_capabilities_from_path(
 /// upward through `meet`, so any profile declaring `audit: true` makes the
 /// whole session audit.
 ///
-/// A profile that fails to load surfaces as `Break::Error` with a neutral
-/// mechanism message (`file not found`, or the per-profile decode/freeze
-/// error); a caller prepends its own provenance — the `--capabilities`
-/// flag, a config key — as appropriate.  An escape raised while a profile
-/// evaluates (`exit`, a stopped child) propagates unchanged, exactly as it
-/// would from a `source`d file.
+/// A load failure carries a neutral mechanism message; a caller prepends
+/// its own provenance (the `--capabilities` flag, a config key).
 ///
 /// # Errors
 /// Returns `Err` at the first profile that fails to load — a missing file,

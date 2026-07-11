@@ -9,7 +9,7 @@
 //! shape-specific hint.
 
 use crate::types::{
-    Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, FsPolicy, Settled, ShellPolicy,
+    Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, FsPolicy, List, Settled, ShellPolicy,
     Value, as_map, as_map_ref, sig,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,11 +29,11 @@ fn decode_fs(
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Settled<FsPolicy> {
-    let entries = as_map(value, err_prefix)?;
+    let entries = as_map_ref(value, err_prefix)?;
     let mut fp = FsPolicy::default();
     for (sub, paths) in entries {
-        let raw: Vec<String> = match paths {
-            Value::List(items) => items.iter().map(std::string::ToString::to_string).collect(),
+        let items = match paths {
+            Value::List(items) => items,
             other => {
                 return Err(sig(format!(
                     "{err_prefix}: '{sub}' must be a list of paths, got {} (use [\"/path\"])",
@@ -41,6 +41,7 @@ fn decode_fs(
                 )));
             }
         };
+        let raw = string_list(items, &format!("'{sub}' entries"), err_prefix)?;
         let frozen = freeze_prefix_list(raw, ctx, err_prefix)?;
         match sub.as_str() {
             "read" => fp.read_prefixes = frozen,
@@ -56,21 +57,43 @@ fn decode_fs(
     Ok(fp)
 }
 
-/// Freeze each raw fs entry, requiring the result absolute.  Pairs the
-/// raw entry with its frozen form so a rejected relative prefix names
-/// the spelling the author wrote.
+/// Collect a `Value::List` into owned strings, rejecting any non-String
+/// element with a shape-specific hint.  Shared by the fs path lists and
+/// the exec subcommand lists, both of which are string-only.
+fn string_list(items: &List, what: &str, err_prefix: &str) -> Settled<Vec<String>> {
+    items
+        .iter()
+        .map(|item| match item {
+            Value::String(s) => Ok(s.clone()),
+            other => Err(sig(format!(
+                "{err_prefix}: {what} must be strings — expected a string, got {}",
+                other.type_name()
+            ))),
+        })
+        .collect()
+}
+
+/// Freeze one sigil-or-path entry and require the result absolute,
+/// naming the spelling the author wrote on rejection.  Shared by the fs
+/// prefix lists and the exec map keys.
+fn freeze_absolute(
+    entry: &str,
+    ctx: &crate::path::sigil::FreezeCtx<'_>,
+    err_prefix: &str,
+) -> Result<crate::path::NormalizedPrefix, String> {
+    let frozen = crate::path::sigil::freeze_one(entry, ctx)?;
+    require_absolute(&frozen, entry, err_prefix)?;
+    Ok(frozen)
+}
+
+/// Freeze each raw fs entry, requiring the result absolute.
 fn freeze_prefix_list(
     raw: Vec<String>,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
 ) -> Settled<Vec<crate::path::NormalizedPrefix>> {
-    use crate::path::sigil::freeze_one;
     raw.into_iter()
-        .map(|entry| {
-            let frozen = freeze_one(&entry, ctx).map_err(sig)?;
-            require_absolute(&frozen, &entry, err_prefix).map_err(sig)?;
-            Ok(frozen)
-        })
+        .map(|entry| freeze_absolute(&entry, ctx, err_prefix).map_err(sig))
         .collect()
 }
 
@@ -130,10 +153,7 @@ fn decode_shell(value: &Value, err_prefix: &str) -> Settled<ShellPolicy> {
 ///
 /// Every dimension stays `None` ("no opinion → inherits caller") unless
 /// the map names it.  A grant or capability-file map attenuates only
-/// along the dimensions named and leaves the rest alone.  Critically
-/// this keeps `grant [exec: [foo: []]] body` from triggering OS-level
-/// fs/net sandboxing (no fs/net dimension is restricted, so no child
-/// sandbox is needed).
+/// along the dimensions named and leaves the rest alone.
 ///
 /// The freeze pass resolves `~` / `xdg:` / `cwd:` / `tempdir:` sigils and
 /// rejects an `xdg:` value that escapes `ctx.home` (defence in depth — an
@@ -145,9 +165,9 @@ pub(crate) fn decode_capability_map(
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Settled<Capabilities> {
-    let entries = as_map(value, err_prefix)?;
+    let entries = as_map_ref(value, err_prefix)?;
     let mut caps = Capabilities::default();
-    for (k, v) in &entries {
+    for (k, v) in entries {
         match k.as_str() {
             "exec" => caps.exec = Some(decode_exec_grant(v, &format!("{err_prefix} exec"))?),
             "fs" => caps.fs = Some(decode_fs(v, &format!("{err_prefix} fs"), ctx)?),
@@ -202,11 +222,9 @@ fn freeze_exec_map(
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
 ) -> Result<ExecMap, String> {
-    use crate::path::sigil::{freeze_one, looks_like_path_or_sigil};
+    use crate::path::sigil::looks_like_path_or_sigil;
     let freeze_key = |key: &str| -> Result<String, String> {
-        let frozen = freeze_one(key, ctx)?;
-        require_absolute(&frozen, key, err_prefix)?;
-        Ok(frozen.into_string())
+        Ok(freeze_absolute(key, ctx, err_prefix)?.into_string())
     };
 
     let mut literals = BTreeMap::new();
@@ -330,7 +348,9 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
             }
             Value::List(items) => {
                 let subs: BTreeSet<String> =
-                    items.iter().map(std::string::ToString::to_string).collect();
+                    string_list(&items, &format!("subcommands for '{cmd}'"), err_prefix)?
+                        .into_iter()
+                        .collect();
                 if subs.is_empty() {
                     ExecPolicy::Allow
                 } else {
