@@ -145,8 +145,7 @@ fn bar_col(width: usize) -> usize {
 /// calls, the figure the data-encoding rail's value-step reads.  `None`
 /// when no call carried a result (the rail then renders at the base hue).
 pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
-    let mags: Vec<u32> = calls.iter().filter_map(|c| c.magnitude).collect();
-    (!mags.is_empty()).then(|| mags.iter().sum())
+    calls.iter().filter_map(|c| c.magnitude).reduce(|a, b| a + b)
 }
 
 /// Render a coalesced ral block's rail-less body at `level`.  The caller

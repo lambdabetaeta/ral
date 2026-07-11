@@ -15,10 +15,9 @@
 //! input — the highlighter only *colours* spans, it never adds or drops a
 //! character.
 //!
-//! v1 colours each string/expr/deref as a single class; it does not recurse
-//! into double-quoted interpolations or `$[…]` / `$name[k]` sub-streams to
-//! re-colour their interior.  A later refinement could walk those nested
-//! token streams (the lexer already carries them on the token).
+//! Nested interpolation streams — a double-quoted string's `$…` splices and
+//! `$[…]` / `$name[k]` derefs — are coloured as their single enclosing
+//! class, not recursed into.
 
 use super::palette::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
 use ral_core::syntax::is_keyword;

@@ -844,12 +844,12 @@ impl Block {
             },
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
-            // A block that renders no row at all — an invisible plain call
     }
-    /// The rail shape this block wears.  Chrome lifts its [`RailShape`]
-    /// the variant.  Plain chrome is ambient frame text and carries no
-    /// rail.  A tool call's disclosure triangle tracks the level: `▽` once
-    /// it reveals context (L2+), `▸` while reduced.
+    /// The rail shape this block wears, or `None` for a block that seats no
+    /// rail.  Chrome maps its coarse [`RailShape`] into the matching
+    /// [`RailKind`] (a `Plain` shape becomes the `▪` note).  A tool call's
+    /// disclosure triangle tracks the level: `▽` once it reveals context
+    /// (L2+), `▸` while reduced.
     fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
         match &self.kind {
             BlockKind::DiallableTool { tool, .. } if *tool != "agents" => {
@@ -907,10 +907,6 @@ fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// Shrink the leading whitespace of `line` by `n` cells, trimming the
-/// first whitespace-only span(s) in place.  Used to reclaim the columns
-/// the rail occupies on a markdown block's opening row so its prose stays
-/// flush with the body inset.
 /// The width of a line's leading run of all-space spans — the indent the
 /// rail's gutter is carved from or hung under. Counted span-wise to match
 /// [`shrink_leading_ws`], which only trims leading spans the builders emit
@@ -930,6 +926,10 @@ fn leading_ws(line: &Line<'static>) -> usize {
     w
 }
 
+/// Shrink the leading whitespace of `line` by `n` cells, trimming the
+/// first whitespace-only span(s) in place.  Used to reclaim the columns
+/// the rail occupies on a markdown block's opening row so its prose stays
+/// flush with the body inset.
 fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
     let mut remaining = n;
     for span in &mut line.spans {

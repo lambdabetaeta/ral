@@ -86,9 +86,9 @@ pub(super) struct Viewport {
     blocks: Vec<Block>,
     /// Rendered-row estimate per entry of [`Self::blocks`], same order and
     /// length — each block's `log_lines` count, captured where it is already
-    /// computed ([`Self::log_block`], [`Self::rewrite_log`]). The running sum
-    /// is the [`VIEWPORT_MAX_ROWS`] eviction trigger; cheap because it is
-    /// never recomputed from scratch on the hot push path.
+    /// computed ([`Self::log_block`], [`Self::rewrite_log`]). Their sum is the
+    /// [`VIEWPORT_MAX_ROWS`] eviction trigger, refolded per push — cheap
+    /// because the per-block counts are never re-walked, only summed.
     block_rows: Vec<usize>,
     /// Set once this view has been evicted into a tombstone
     /// ([`Self::evict_to_tombstone`]); `blocks`/`block_rows` are empty from
@@ -555,21 +555,27 @@ impl Viewport {
     /// this turn (no prompt separates it from the end), append to it so all
     /// deliberation in one turn coalesces into one `∴` block.  Otherwise
     /// insert a new thinking block before the trailing markdown run.
-    /// `answer_chars` is the current turn's answer mass, the deliberation
+    /// `answer_chars` is the current turn's answer mass — the deliberation
+    /// grain's say-side, so the committed `∴` block's think/say ratio
+    /// reflects how dearly the answer was bought.
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
-        let preserve_scrollback = !self.sticky
-            && self.flat.virtual_think_len > 0
-            && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len;
+        let preserve_scrollback = self.looking_at_pushed_thinking();
         self.thinking.clear();
         self.upsert_thinking(text, answer_chars);
         if preserve_scrollback {
-            // The live header is about to become a real collapsed block. If
-            // the viewport was looking at the scrollback it had pushed down,
-            // do not immediately tail-follow and yank those rows back up; let
-            // the next render clamp only if the buffer truly no longer has
-            // enough rows to hold this offset.
             self.sticky = false;
         }
+    }
+
+    /// Whether the view is parked on scrollback the live thinking seat had
+    /// pushed down.  When it is, turning that seat into a real collapsed block
+    /// must not re-arm tail-follow and yank those rows back up under the
+    /// reader; the next render clamps only if the buffer truly can no longer
+    /// hold the offset.
+    fn looking_at_pushed_thinking(&self) -> bool {
+        !self.sticky
+            && self.flat.virtual_think_len > 0
+            && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len
     }
 
     /// Append a live reasoning chunk from the model's thinking phase.
@@ -591,9 +597,7 @@ impl Viewport {
     /// End a streaming step: commit whatever remains in `open`.
     pub(super) fn close_boundary(&mut self, context_floor: u8) {
         if !self.thinking.trim().is_empty() {
-            let preserve_scrollback = !self.sticky
-                && self.flat.virtual_think_len > 0
-                && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len;
+            let preserve_scrollback = self.looking_at_pushed_thinking();
             let text = std::mem::take(&mut self.thinking);
             let answer_chars = self.current_answer_chars();
             self.upsert_thinking(text, answer_chars);
@@ -667,9 +671,6 @@ impl Viewport {
         while self.blocks.len() > VIEWPORT_MAX_BLOCKS
             || self.block_rows.iter().sum::<usize>() > VIEWPORT_MAX_ROWS
         {
-            if self.blocks.is_empty() {
-                break;
-            }
             self.blocks.remove(0);
             self.block_rows.remove(0);
             evicted = true;
@@ -1005,9 +1006,9 @@ impl Viewport {
     }
 
     /// The visible slice at `width` × `height`, after re-flattening if
-    /// stale and resolving the scroll position: head-anchored to the trailing
-    /// segment while sticky ([`Self::tail_anchored_offset`]), clamped
-    /// otherwise — and re-armed to sticky once it reaches the bottom.
+    /// stale and resolving the scroll position: while `sticky`, `offset` is
+    /// pinned to the tail (`max_off`); otherwise the stored `offset` is
+    /// clamped to `max_off` and `sticky` re-arms once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
         // The provisional thinking seat (when the model is reasoning) renders
@@ -1269,7 +1270,13 @@ mod tests {
     use super::*;
 
     fn viewport() -> Viewport {
-        let path = std::env::temp_dir().join("exarch-streaming-seat-test.log");
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "exarch-viewport-test-{}-{}.log",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed),
+        ));
         Viewport::new(path, AgentSlot(0))
     }
 
@@ -1493,11 +1500,10 @@ mod tests {
 
     /// Scrolling down while sticky must not over-scroll past `max_off`.
     /// Before the fix, `scroll_down` left `sticky` set, so
-    /// [`Self::tail_anchored_offset`]—whose `.max(self.offset)` floor is meant
-    /// to keep the view from receding as content grows—instead let the offset
-    /// creep up to the tail segment head row, blanking the lower rows.
-    /// Clearing `sticky` on every user scroll routes through the non-sticky
-    /// clamp in [`Self::render_window`], which bounds `offset` to `max_off`.
+    /// [`Self::render_window`] kept pinning `offset` to the tail instead of
+    /// honouring the user's position, blanking the lower rows.  Clearing
+    /// `sticky` on every user scroll routes through the non-sticky clamp,
+    /// which bounds `offset` to `max_off`.
     #[test]
     fn scroll_down_while_sticky_clamps_to_max_off() {
         let mut vp = viewport();

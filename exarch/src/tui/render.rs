@@ -61,8 +61,7 @@ pub(super) struct FrameGeom {
 pub(super) fn contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
-/// Paint the full frame: content area, queued-user strip, tab bar / matrix,
-/// prompt editor, status line, and footer.
+/// Paint one frame into `term`.
 pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let (cols, rows) = size().unwrap_or((READ_W, 24));
     let area = Rect::new(0, 0, cols, rows);
@@ -259,21 +258,13 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         // only; a subagent tab shows a watch-only hint in the prompt slot,
         // and the textarea keeps its draft for when the user tabs home.
         if let Some(line) = prompt_hint {
-            let block = ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(Style::default().fg(SLATE).add_modifier(Modifier::DIM))
-                .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
+            let block = prompt_block(Style::default().fg(SLATE).add_modifier(Modifier::DIM));
             f.render_widget(Paragraph::new(line).block(block), prompt_row);
         } else {
             // The prompt's rounded border is exarch chrome, not the
             // editor's: the facade renders bare text, so the box is
             // drawn here and the editor fills its padded interior.
-            let block = ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(Style::default().fg(PINK))
-                .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
+            let block = prompt_block(Style::default().fg(PINK));
             let inner = block.inner(prompt_row);
             f.render_widget(block, prompt_row);
             app.prompt_state.render(f, inner);
@@ -408,6 +399,17 @@ fn prompt_hint(
             .fg(SLATE)
             .add_modifier(Modifier::DIM | Modifier::ITALIC),
     )))
+}
+
+/// The prompt editor's rounded chrome in `border` ink — exarch's frame
+/// around the (bare-text) editor, built once so the hint and editor paths
+/// share one box.
+fn prompt_block(border: Style) -> ratatui::widgets::Block<'static> {
+    ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(border)
+        .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
 }
 
 fn footer_hint() -> Line<'static> {
