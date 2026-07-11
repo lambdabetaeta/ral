@@ -47,12 +47,8 @@ pub(super) struct PipelineGroup {
     terminal: TerminalPlan,
     leader: Option<Pgid>,
     foreground: Option<crate::process::ForegroundGuard>,
-    /// SIGINT-forwarding relay slot, claimed on the *first* `spawn` —
-    /// i.e. once a real child has joined the pgid.  Forwarding SIGINT
-    /// to `-pgid` before any real child is in would leave only the
-    /// anchor to receive it, and the anchor's death would in turn
-    /// strand later children whose `setpgid` would no longer find an
-    /// existing group.  Dropped with the group.
+    /// SIGINT-forwarding relay slot; see the SIGINT/relay invariant note
+    /// at the top of this file.  Dropped with the group.
     relay: Option<crate::process::PipelineRelay>,
     #[cfg(unix)]
     anchor: Option<AnchorProcess>,
@@ -158,6 +154,13 @@ impl Drop for PipelineGroup {
     }
 }
 
+/// The child's OS pid as a `pid_t`.
+#[cfg(unix)]
+#[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
+fn child_pid(child: &crate::process::ChildHandle) -> libc::pid_t {
+    child.id() as libc::pid_t
+}
+
 #[cfg(unix)]
 struct AnchorProcess {
     child: Option<crate::process::ChildHandle>,
@@ -202,9 +205,7 @@ impl AnchorProcess {
     }
 
     fn pgid(&self) -> Pgid {
-        #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-        let pid = self.child.as_ref().expect("anchor child").id() as libc::pid_t;
-        Pgid(pid)
+        Pgid(child_pid(self.child.as_ref().expect("anchor child")))
     }
 
     /// Close the release pipe and reap the anchor.  When the pipeline
@@ -220,8 +221,7 @@ impl AnchorProcess {
     fn finish(mut self) {
         let _ = self.release.take();
         if let Some(mut child) = self.child.take() {
-            #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-            let pid = child.id() as libc::pid_t;
+            let pid = child_pid(&child);
             unsafe {
                 libc::kill(pid, libc::SIGCONT);
             }
