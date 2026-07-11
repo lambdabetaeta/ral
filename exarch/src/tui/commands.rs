@@ -111,10 +111,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
 /// matches only when typed alone — trailing text means the user meant a
 /// prompt, so it declines and the line proceeds to the model.
 pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &str)> {
-    let (head, rest) = match trimmed.split_once(char::is_whitespace) {
-        Some((h, r)) => (h, r.trim()),
-        None => (trimmed, ""),
-    };
+    let (head, rest) = split_head(trimmed);
     let cmd = SLASH_COMMANDS
         .iter()
         .find(|c| c.name == head || c.aliases.contains(&head))?;
@@ -130,6 +127,16 @@ pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &s
 /// command).
 pub(super) fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
+}
+
+/// Split `trimmed` into its first whitespace-delimited token and the trimmed
+/// remainder — the head/rest shape both [`lookup_command`] and the worker's
+/// `ReplControl::command` parse a command line into.
+pub(super) fn split_head(trimmed: &str) -> (&str, &str) {
+    match trimmed.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim()),
+        None => (trimmed, ""),
+    }
 }
 
 /// The head token of `trimmed`, when it names no [`SLASH_COMMANDS`] entry at
@@ -327,15 +334,9 @@ pub(super) fn route_submit(
             "/clear" => {
                 crate::cancel::raise_interrupt();
                 ctx.agents.cancel(root);
-                // Read the focused agent's provider for the banner redraw.
-                // If the focused agent has settled (no provider), fall back to
-                // the root's provider.  If neither is available, use a
-                // throwaway scripted provider.
-                let provider_guard = ctx
-                    .agents
-                    .provider(focused)
-                    .map(|ph| ph.current())
-                    .or_else(|| ctx.agents.provider(root).map(|ph| ph.current()));
+                // Read the root's provider for the banner redraw, falling back
+                // to a throwaway scripted provider if the trunk has settled.
+                let provider_guard = ctx.agents.provider(root).map(|ph| ph.current());
                 if let Some(guard) = provider_guard {
                     tui.app.clear(info, &guard, tui.guard.term())?;
                 } else {
