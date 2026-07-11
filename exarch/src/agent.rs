@@ -818,29 +818,22 @@ impl Agent {
 
     /// Prune this shell's idle top-level bindings — the binding-lease
     /// ledger's one boundary drain site
-    /// (`decisions/260629_agent-binding-reaping`). The worker-reap and
-    /// large-binding notices no longer poll through here: core's own
-    /// engine now pushes both as `` `notice `` surface classes at the
-    /// ready boundary of the turn that produced them
-    /// (`decisions/260706_enquiry-channel` §4.2), decoded by
-    /// `shell_eval::decode_surface` into `Kind::Notice` at the ordinary
-    /// emit seam — this call site retired along with the polled
-    /// `Shell::take_worker_reap_notices`/`take_large_binding_notices`
-    /// accessors, now crate-private to core.
+    /// (`decisions/260629_agent-binding-reaping`). Worker-reap and
+    /// large-binding notices reach the sink the ordinary way: core's engine
+    /// pushes both as `` `notice `` surface classes at a turn's ready
+    /// boundary (`decisions/260706_enquiry-channel` §4.2), decoded by
+    /// `shell_eval::decode_surface` into `Kind::Notice` at the emit seam.
     ///
-    /// The prune half stays host-called and host-composed: unlike the
-    /// other two, `prune_idle_bindings` hands back the post-prune
+    /// The prune half stays host-called and host-composed because
+    /// `prune_idle_bindings` hands back the post-prune
     /// [`MobileSnapshot`](ral_core::types::MobileSnapshot) this agent's
     /// panic-recovery baseline needs, and a snapshot cannot ride the
     /// turn/surface/Report seam (`decisions/260706_enquiry-channel` §5
-    /// keeps durability off the wire) — so it cannot be folded into core's
-    /// automatic per-turn push the way the other two were. This is the one
-    /// acknowledged residue of the pushed-notice migration: the notice is
-    /// still built here, from the polled return, one compact `Kind::Notice`
-    /// naming what fell, adopting the verb's own post-prune snapshot as the
-    /// durable checkpoint in the same statement — the pairing the verb's
-    /// signature enforces, so a later panic rollback can never resurrect a
-    /// pruned name.
+    /// keeps durability off the wire). So the notice is built here, from the
+    /// polled return, as one compact `Kind::Notice` naming what fell, adopting
+    /// the verb's own post-prune snapshot as the durable checkpoint in the
+    /// same statement — the pairing the verb's signature enforces, so a later
+    /// panic rollback can never resurrect a pruned name.
     fn reap_bindings(&mut self, emit: &Emitter) {
         let Some((notices, checkpoint)) = self.transport.shell_mut().shell.prune_idle_bindings()
         else {

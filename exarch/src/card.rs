@@ -859,10 +859,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 /// Like
 /// [`DoneOutcome`], the raw record [`value_to_notice`] decodes once and
 /// [`notice_card`] composes the matching one-line card — core emits the
-/// fact, exarch renders it; the three variants used to be three separately
-/// *polled* accessors (`take_worker_reap_notices`, `prune_idle_bindings`'s
-/// notice half, `take_large_binding_notices`) that a host drained and
-/// composed into cards itself.
+/// fact, exarch renders it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Notice {
     /// A worker's registry entry was removed by policy — the lease chain's
@@ -1084,8 +1081,7 @@ pub fn summary_line(card: &Card) -> String {
 /// payload is a *list* of mark variants, each carrying a record payload.
 /// A bare known mark surfaced unwrapped (`` `diff […] ``) is lifted into a
 /// one-mark card for the model's convenience.  Anything else returns
-/// `None` and is dropped, exactly as the old `value_to_kind` dropped an
-/// unrecognised variant.
+/// `None` and is dropped.
 ///
 /// Decoding never fails *within* a recognised card: an unknown mark label
 /// or role degrades to plain `text` rather than dropping the whole card,
@@ -1382,15 +1378,9 @@ fn int_field(m: &ral_core::types::Map, field: &str) -> Option<i64> {
 }
 
 /// A list-of-strings field; non-string elements render as their display so a
-/// partially-formed `argv` stays faithful, and a missing or non-list field is
-/// empty.
+/// partially-formed field (an `argv`, a row list) stays faithful, and a
+/// missing or non-list field is empty.
 fn strings_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
-    lines_field(m, field)
-}
-
-/// A list-of-strings field; non-string elements render as their display so
-/// the row stays faithful, and a missing or non-list field is empty.
-fn lines_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
     match m.get(field) {
         Some(RalValue::List(items)) => items
             .iter()
