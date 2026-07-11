@@ -81,10 +81,10 @@ impl ModelPricing {
 ///   `per_request_limits`, `canonical_slug`/`name`/`description`,
 ///   `created` — none are wired to a current code path; add when a
 ///   concrete consumer exists.
-// `tokenizer`, `supported_parameters` and `supports_tools` are
-// scraped from the catalog but have no consumer yet — they exist so
-// future code (a client-side token estimator; a pre-flight check
-// before sending `tools`) doesn't need a second pass over the schema.
+// `tokenizer` is scraped from the catalog but has no consumer yet — it
+// exists so a future client-side token estimator doesn't need a second
+// pass over the schema.  `supported_parameters` is read by
+// [`ModelCaps::supports`].
 #[allow(dead_code)]
 #[derive(Clone, Default, Debug)]
 pub struct ModelCaps {
@@ -125,8 +125,8 @@ impl ModelCaps {
 }
 
 /// Pricing + caps share the same `/api/v1/models` payload, so a single
-/// `OnceCell` holds both keyed maps and the public `lookup`/`caps`
-/// helpers read out of it.  Two separate cells would duplicate the
+/// `OnceCell` holds both keyed maps and the `lookup`/`caps` helpers read
+/// out of it.  Two separate cells would duplicate the
 /// HTTP call (and tear if only one were populated).
 static CATALOG: OnceCell<Snapshot> = OnceCell::const_new();
 
@@ -152,7 +152,7 @@ pub async fn ensure_loaded() {
 /// itself, but `DeepSeek`'s generic aliases are listed as $0 in OR
 /// (`OpenRouter`'s own free-tier promotion) while the native `DeepSeek`
 /// API charges.  [`lookup_for`] routes to the correct source.
-pub fn lookup(model: &str) -> Option<ModelPricing> {
+pub(crate) fn lookup(model: &str) -> Option<ModelPricing> {
     CATALOG.get()?.prices.get(model).copied()
 }
 
@@ -264,6 +264,18 @@ pub fn caps(model: &str) -> Option<ModelCaps> {
     CATALOG.get()?.caps.get(model).cloned()
 }
 
+/// Capability snapshot for `model`, defaulting the record on a catalog miss.
+///
+/// The miss is an unlisted native-provider model, or a lookup before the
+/// catalog loads.  The `OpenRouter` catalog backs every provider — OR
+/// republishes upstream cards, so a native Anthropic / `OpenAI` launch hits
+/// the same context-window / tokenizer / canonical-slug data as its
+/// OR-fronted equivalent.  A missing entry defaults every field so the banner
+/// renders `—` for what it cannot resolve.
+pub fn caps_or_default(model: &str) -> ModelCaps {
+    caps(model).unwrap_or_default()
+}
+
 /// The total context window in tokens for `model`, when the `OpenRouter`
 /// catalog has been fetched and lists it.
 ///
@@ -370,9 +382,10 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
 /// and `claude-opus-4-8`.  The dash form inherits the same source-suffix
 /// uniqueness guard, is generated only when the bare suffix actually
 /// carries a `.`, never overwrites a literal catalog key, and is dropped
-/// when two distinct dotted suffixes would collapse onto one dash key —
-/// each guard for the same reason the bare alias has it: an alias that
-/// could bind to the wrong rate is worse than a miss.
+/// on any collision — whether two distinct dotted suffixes normalize onto
+/// one dash key, or the dash key coincides with another entry's plain bare
+/// suffix — each guard for the same reason the bare alias has it: an alias
+/// that could bind to the wrong rate is worse than a miss.
 fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     let mut suffix_count: HashMap<&str, usize> = HashMap::new();
     for key in map.keys() {
@@ -382,13 +395,20 @@ fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     }
     let unique_suffix = |suffix: &str| suffix_count.get(suffix).copied() == Some(1);
 
+    // The collision guard for the dash alias.  A dash alias may only land
+    // when no other alias would also claim its key, so it counts both
+    // sources of alias keys: the plain bare suffix lands under the suffix
+    // verbatim, and a dotted suffix additionally under its dash-normalized
+    // form.  A dash key that ties either is dropped.
     let mut dash_count: HashMap<String, usize> = HashMap::new();
     for key in map.keys() {
         if let Some((_, suffix)) = key.split_once('/')
             && unique_suffix(suffix)
-            && suffix.contains('.')
         {
-            *dash_count.entry(suffix.replace('.', "-")).or_default() += 1;
+            *dash_count.entry(suffix.to_string()).or_default() += 1;
+            if suffix.contains('.') {
+                *dash_count.entry(suffix.replace('.', "-")).or_default() += 1;
+            }
         }
     }
 
@@ -693,6 +713,30 @@ mod tests {
         assert_eq!(m.get("claude-opus-4-8"), Some(&10));
         // The dotted bare alias is still safe to add.
         assert_eq!(m.get("claude-opus-4.8"), Some(&20));
+    }
+
+    /// A dash-normalized alias must not collide with another vendor's
+    /// plain unique bare suffix: `anthropic/claude-opus-4.8` normalizes to
+    /// `claude-opus-4-8`, which is also `vendor/claude-opus-4-8`'s own bare
+    /// suffix.  The plain bare suffix binds deterministically to its own
+    /// entry and the dash alias is dropped, so the rate is never the
+    /// HashMap-iteration-order coin-flip an unseeded guard produced.
+    #[test]
+    fn dash_alias_yields_to_plain_bare_suffix_collision() {
+        let mut m: HashMap<String, u32> = HashMap::new();
+        m.insert("anthropic/claude-opus-4.8".into(), 7);
+        m.insert("vendor/claude-opus-4-8".into(), 42);
+        add_bare_aliases(&mut m);
+        assert_eq!(
+            m.get("claude-opus-4-8"),
+            Some(&42),
+            "the plain bare suffix wins its own key"
+        );
+        assert_eq!(
+            m.get("claude-opus-4.8"),
+            Some(&7),
+            "the dotted bare alias still resolves to the dotted entry"
+        );
     }
 
     /// Two distinct dotted suffixes can normalize to the same dash key
