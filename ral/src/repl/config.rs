@@ -10,7 +10,8 @@ use ral_core::types::{DefaultPolicy, HookName, HookSig};
 use ral_core::{Map, Shell, Value};
 
 use super::frontend::Surface;
-use super::theme::{OutputTheme, named_color, set_output_theme};
+use super::theme::{OutputTheme, set_output_theme};
+use ral_core::ansi::named_color;
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -128,7 +129,7 @@ pub(crate) fn apply_rc_config(config: Value, ctx: &mut RcCtx<'_>) -> Option<Valu
                 }
             }
             "prompt" => {
-                let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
+                let origin = ral_core::source::Span::synthetic();
                 if let Err(e) = ctx.shell.register_hook(
                     HookName::session("prompt"),
                     val,

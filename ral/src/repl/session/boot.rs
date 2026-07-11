@@ -189,7 +189,7 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
         )),
         captured: Arc::new(ral_core::types::Env::default()),
     };
-    let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
+    let origin = ral_core::source::Span::synthetic();
     let _ = shell.register_hook(
         hook_name,
         block,
@@ -340,7 +340,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         }
     };
     if let Some(block) = super::super::config::apply_rc_config(config, ctx) {
-        let origin = Span::new(ral_core::source::FileId(0), 0, 0);
+        let origin = Span::synthetic();
         if let Err(e) = ctx.shell.register_hook(
             HookName::session("startup"),
             block,

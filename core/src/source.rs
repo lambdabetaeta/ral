@@ -49,6 +49,17 @@ impl Span {
         }
     }
 
+    /// The origin span for source a host synthesises rather than reads from a
+    /// file: `FileId(0)` at offset `0..0`.  Used to stamp hook registrations
+    /// and other boot-time bindings that have no user-authored byte range.
+    pub fn synthetic() -> Self {
+        Self {
+            start: 0,
+            end: 0,
+            file: FileId(0),
+        }
+    }
+
     /// Smallest span covering both `self` and `other`. Files must match.
     pub fn join(self, other: Self) -> Self {
         debug_assert!(self.file == other.file, "join across files");

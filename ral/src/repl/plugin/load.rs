@@ -89,7 +89,7 @@ pub(crate) fn load_plugin(
 /// a failed load).  Every handler fires as a `Program::Hook` through
 /// `Shell::run_turn`.
 fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(), Error> {
-    let origin = Span::new(ral_core::source::FileId(0), 0, 0);
+    let origin = Span::synthetic();
     for (hook_event, handler) in &plugin.hooks {
         let sig = match hook_event.as_str() {
             "buffer-change" | "keybinding" => HookSig::Hook {
@@ -246,7 +246,7 @@ fn instantiate(
     match val {
         val @ (Value::Lambda { .. } | Value::Block { .. }) => {
             let factory_name = HookName::plugin(name.to_string(), "factory");
-            let origin = Span::new(ral_core::source::FileId(0), 0, 0);
+            let origin = Span::synthetic();
             if let Err(e) = shell.register_hook(
                 factory_name.clone(),
                 val,

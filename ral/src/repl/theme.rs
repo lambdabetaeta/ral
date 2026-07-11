@@ -14,7 +14,7 @@
 //! file can replace it once during startup without imposing locking on
 //! the read path beyond a snapshot clone.
 
-use ral_core::ansi::{BLACK, BLUE, CYAN, GREEN, MAGENTA, RED, WHITE, YELLOW};
+use ral_core::ansi::YELLOW;
 use std::sync::{LazyLock, RwLock};
 
 /// Styling applied to ral-computed values printed at the REPL prompt.
@@ -48,23 +48,4 @@ pub(crate) fn set_output_theme(theme: OutputTheme) {
 /// Return a snapshot of the current output theme.
 pub(crate) fn output_theme() -> OutputTheme {
     OUTPUT_THEME.read().map(|g| g.clone()).unwrap_or_default()
-}
-
-/// Map a standard color name to its ANSI SGR escape string.
-///
-/// Accepts `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
-/// `white`, and `none`/`off` (which returns `None` to suppress color).
-/// Unrecognised names also return `None`.
-pub(crate) fn named_color(name: &str) -> Option<String> {
-    match name.to_ascii_lowercase().as_str() {
-        "black" => Some(BLACK.into()),
-        "red" => Some(RED.into()),
-        "green" => Some(GREEN.into()),
-        "yellow" => Some(YELLOW.into()),
-        "blue" => Some(BLUE.into()),
-        "magenta" => Some(MAGENTA.into()),
-        "cyan" => Some(CYAN.into()),
-        "white" => Some(WHITE.into()),
-        _ => None,
-    }
 }
