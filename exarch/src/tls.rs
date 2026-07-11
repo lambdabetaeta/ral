@@ -1,12 +1,18 @@
-//! Outbound HTTPS trust policy.
+//! Outbound HTTPS: trust policy and transport liveness.
 //!
-//! Every client exarch builds for an outbound request validates the peer
-//! against the bundled Mozilla webpki root store rather than the operating
-//! system's trust store. This keeps exarch self-contained: it runs unchanged
-//! on container images that ship no `ca-certificates` bundle — where reqwest's
-//! default `rustls-platform-verifier` path loads zero roots and aborts the
-//! client build — and it sidesteps platform-verifier quirks such as macOS
-//! rejecting an otherwise-valid certificate with `OSStatus -26276`.
+//! Two concerns for the clients exarch builds. First, trust: every client
+//! validates the peer against the bundled Mozilla webpki root store rather
+//! than the operating system's trust store ([`config`]). This keeps exarch
+//! self-contained: it runs unchanged on container images that ship no
+//! `ca-certificates` bundle — where reqwest's default
+//! `rustls-platform-verifier` path loads zero roots and aborts the client
+//! build — and it sidesteps platform-verifier quirks such as macOS rejecting
+//! an otherwise-valid certificate with `OSStatus -26276`.
+//!
+//! Second, liveness: the transport [`client`] arms a per-read idle timeout
+//! ([`STREAM_IDLE_TIMEOUT`]) and keep-alive probes so a silent or black-holed
+//! connection becomes a retryable transport error rather than a forever-hung
+//! stream.
 
 use std::time::Duration;
 
@@ -60,13 +66,9 @@ const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
 
 /// A `reqwest::Client` bound to [`config`], for the genai transport and model
 /// listing — which would otherwise let genai build a client against the system
-/// trust store. No *total* request timeout, so a long, legitimately slow
-/// completion stays alive; the only liveness bound is [`STREAM_IDLE_TIMEOUT`]
-/// as a per-read timeout, which resets on every byte and so detects a stalled
-/// socket at the byte/SSE level rather than at the decoded-event level.
-/// Keep-alive probes (h2 PING + TCP keepalive) additionally detect a dead
-/// connection *between* requests, so a retry never reuses a pooled socket
-/// that has already gone dark.
+/// trust store. It sets no *total* request timeout (a legitimately slow
+/// completion stays alive) and layers on the liveness bounds documented at
+/// [`STREAM_IDLE_TIMEOUT`], [`H2_KEEP_ALIVE_INTERVAL`], and [`TCP_KEEP_ALIVE`].
 pub(crate) fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(config())
