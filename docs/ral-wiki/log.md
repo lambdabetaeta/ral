@@ -1513,8 +1513,8 @@ expressed. Net −249 production lines.
   `render_messageless`. Static T0012 / type-error rendering byte-for-byte unchanged.
 - *Smell-review fixes, same commit.* The `infer.rs` tail-stage comment loses a
   tombstone parenthetical naming deleted code; the uutils synthetic wire literal
-  becomes a named `Wire::EXTERNAL` constant (`core/src/mode.rs`, beside `Wire::EMPTY`,
-  mirroring `PipeSpec::ext`); `InferCtx` gains a sentence on its address-keyed maps'
+  grounds to `∅ → bytes` (`core/src/mode.rs`, mirroring `PipeSpec::ext`);
+  `InferCtx` gains a sentence on its address-keyed maps'
   single-tree validity (`env.rs`); the duplicated `ValListElem` match in
   `annotate_val`/`annotate_args` extracts to one `annotate_list_elem`.
 - *Tests.* `ral/tests/no_typecheck.rs` → `type_errors_block.rs` (renamed, not

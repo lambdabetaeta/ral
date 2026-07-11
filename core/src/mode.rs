@@ -111,15 +111,6 @@ impl Wire {
         output: ByteMode::Empty,
     };
 
-    /// The ground wire of a lone external stage: its open input edge,
-    /// pinned by no neighbour, grounds to `∅`, and its output is bytes —
-    /// an external command's bytes-out signature with its input variable
-    /// grounded to the value edge.
-    pub const EXTERNAL: Self = Self {
-        input: ByteMode::Empty,
-        output: ByteMode::Bytes,
-    };
-
     /// Lift the ground wire back into a [`PipeSpec`] over the lattice, so a
     /// consumer that already reads `PipeSpec` modes (pipeline staging's
     /// boundary and kind decisions) reads the checker's verdict unchanged.

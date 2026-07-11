@@ -265,9 +265,9 @@ evaluator unchecked:
 Sandbox child bodies were already sub-nodes of annotated parents; the baked
 prelude is annotated at build time. The synthetic single-stage uutils pipeline
 (`dispatch_uutils_via_pipeline`, `core/src/evaluator/command/uutils.rs`) is an
-external head with no upstream, so it *synthesizes* its own `Wire::EXTERNAL`
-(`core/src/mode.rs`, next to `Wire::EMPTY`) at construction — a lone stage's open
-external input grounds to `∅`, its output is bytes, mirroring `PipeSpec::ext`. This
+external head with no upstream, so it *synthesizes* its own ground wire at
+construction — a lone stage's open external input grounds to `∅`, its output is
+bytes, mirroring `PipeSpec::ext`. This
 was verified wire-for-wire by the dual-run asserts while the old engine still
 existed, then the scaffolding went.
 

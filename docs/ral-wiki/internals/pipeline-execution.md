@@ -91,7 +91,7 @@ handler's counter, which the launch loop's per-stage `signal::check` reads to ab
 
 **A helper-evaluated stage can itself launch a pipeline, so `HelperProtocol::wire`
 clears absent value-channel env vars.** Bundled-tool dispatch goes through
-`run_pipeline` (a single anchorless stage, `Wire::EXTERNAL`), so a `HelperEval`
+`run_pipeline` (a single anchorless stage whose wire grounds to `∅ → bytes`), so a `HelperEval`
 child may spawn its own nested helper. An absent value-channel fd left merely unset
 would ride the inherited environment into that nested helper, which would then parse
 a fd number already closed in its address space; `wire` (`pipeline/protocol/common.rs`)
