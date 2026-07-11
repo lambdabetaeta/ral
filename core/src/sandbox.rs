@@ -433,21 +433,3 @@ mod tests {
         assert_eq!(args, vec!["-c", "echo hi"]);
     }
 }
-
-#[cfg(all(test, unix))]
-mod ipc_tests {
-    use crate::serial::{InternCtx, SerialValue, build_arcs};
-    use crate::types::Value;
-
-    #[test]
-    fn ipc_value_roundtrips_simple_values() {
-        let value = Value::map(vec![
-            ("a".into(), Value::Int(1)),
-            ("b".into(), Value::String("x".into())),
-        ]);
-        let mut ctx = InternCtx::new();
-        let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
-        let arcs = build_arcs(&ctx.scope_table).expect("build arcs");
-        assert_eq!(ipc.into_runtime(&arcs).expect("from serial"), value);
-    }
-}

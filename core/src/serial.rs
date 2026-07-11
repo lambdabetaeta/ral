@@ -155,7 +155,6 @@ pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 pub struct InternCtx {
     pub scope_table: ScopeTable,
     pub ptr_to_id: HashMap<usize, u32>,
-    pub in_progress: HashSet<usize>,
 }
 
 impl InternCtx {
@@ -163,7 +162,6 @@ impl InternCtx {
         Self {
             scope_table: Vec::new(),
             ptr_to_id: HashMap::new(),
-            in_progress: HashSet::new(),
         }
     }
 
@@ -175,10 +173,6 @@ impl InternCtx {
         if let Some(&id) = self.ptr_to_id.get(&ptr) {
             return Ok(id);
         }
-        if self.in_progress.contains(&ptr) {
-            return Err(Error::new("cyclic scope reference cannot be serialised", 1));
-        }
-        self.in_progress.insert(ptr);
         #[allow(
             clippy::cast_possible_truncation,
             reason = "serialised scope id; the table holds a handful of scopes, far below 2^32"
@@ -209,7 +203,6 @@ impl InternCtx {
             ));
         }
         self.scope_table[id as usize] = entries;
-        self.in_progress.remove(&ptr);
         Ok(id)
     }
 }
@@ -250,12 +243,7 @@ fn value_carries_handle(value: &Value) -> bool {
     }
 }
 
-/// Reconstruct one `Arc<HashMap>` per scope from a scope table.
-///
-/// Walks the dependency graph (scope X depends on every id reachable
-/// through closures captured in its entries) and builds a scope only
-/// once all of its dependencies have been built.  A cycle in the graph
-/// is reported rather than silently producing a dangling reference.
+/// One reconstructed `Arc<HashMap>` per scope table row (`None` until built).
 pub type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 
 /// Topologically reconstruct one `Arc<HashMap>` per scope from a scope table,
@@ -543,37 +531,6 @@ impl From<FOValue> for Value {
     }
 }
 
-impl FOValue {
-    /// Embed a first-order value into any richer extension slot.  Total —
-    /// `Ext` is unreachable for `X = NoExt`, discharged via `match x {}`.
-    /// Inherent rather than a `From` impl to avoid the reflexive-impl
-    /// collision (E0119) with `impl<X> From<FOValue<X>> for FOValue<X>`.
-    pub fn embed<X>(self) -> FOValue<X> {
-        match self {
-            Self::Unit => FOValue::Unit,
-            Self::Bool { value } => FOValue::Bool { value },
-            Self::Int { value } => FOValue::Int { value },
-            Self::Float { value } => FOValue::Float { value },
-            Self::String { value } => FOValue::String { value },
-            Self::Bytes { value } => FOValue::Bytes { value },
-            Self::List { items } => FOValue::List {
-                items: items.into_iter().map(Self::embed).collect(),
-            },
-            Self::Map { entries } => FOValue::Map {
-                entries: entries
-                    .into_iter()
-                    .map(|(k, v)| (k, v.embed()))
-                    .collect(),
-            },
-            Self::Variant { label, payload } => FOValue::Variant {
-                label,
-                payload: payload.map(|p| Box::new(p.embed())),
-            },
-            Self::Ext(x) => match x {},
-        }
-    }
-}
-
 impl SerialEnvSnapshot {
     /// Intern every scope of `env` into `ctx`, recording their table ids.
     ///
@@ -778,5 +735,17 @@ mod tests {
                 "float {value} must round-trip bit-for-bit",
             );
         }
+    }
+
+    #[test]
+    fn ipc_value_roundtrips_simple_values() {
+        let value = Value::map(vec![
+            ("a".into(), Value::Int(1)),
+            ("b".into(), Value::String("x".into())),
+        ]);
+        let mut ctx = InternCtx::new();
+        let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
+        let arcs = build_arcs(&ctx.scope_table).expect("build arcs");
+        assert_eq!(ipc.into_runtime(&arcs).expect("from serial"), value);
     }
 }
