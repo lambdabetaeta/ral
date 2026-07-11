@@ -16,9 +16,27 @@ use crate::bus::{AgentOutcome, Emitter, Kind};
 use crate::card::{Card, Field, FieldVal, Mark, Span};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::shell_eval::{COMMITMENT_PIN_PREFIX, CommitmentSettle};
+use crate::shell_eval::COMMITMENT_PIN_PREFIX;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
+
+/// What a settled `commit`/`verify_commitment` child should do to the
+/// protected pin register.
+///
+/// Decided by the worker thread that drove it while
+/// it still holds the child's raw structured reply
+/// ([`spawn_async`](super::agent::spawn_async)).  Carried on
+/// [`AgentResult`](crate::bus::AgentResult) and applied only on the parent's
+/// own thread, at drain (`Agent::settle_commitment`) — the worker thread
+/// never holds `&mut Agent` on the parent.
+#[derive(Clone, Debug)]
+pub enum CommitmentSettle {
+    /// A writer formalized a commitment: open this key with this card.
+    /// Refused at drain if the key is somehow already live.
+    Open { key: String, card: Card },
+    /// A verifier passed: clear this key.
+    Clear(String),
+}
 
 pub(super) struct CommitTool;
 

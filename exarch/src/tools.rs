@@ -139,6 +139,7 @@ pub(crate) fn tools_for(returns: bool, schedules: bool, can_spawn: bool) -> Vec<
 
 pub(crate) use agent::spawn_branch;
 pub(crate) use agent::spawn_discussion;
+pub(crate) use commitment::CommitmentSettle;
 
 /// The placeholder a malformed call passes for `display` when the JSON did
 /// not even parse into args — a cross-tool sentinel.  The frontend reads it

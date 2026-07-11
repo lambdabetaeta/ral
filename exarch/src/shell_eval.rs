@@ -119,27 +119,6 @@ impl PinDigest {
     }
 }
 
-/// What a settled `commit`/`verify_commitment` child should do to the
-/// protected pin register.
-///
-/// Decided by the worker thread that drove it while
-/// it still holds the child's raw structured reply
-/// ([`spawn_async`](crate::tools::agent::spawn_async)).  Carried on
-/// [`AgentResult`](crate::bus::AgentResult) and applied only on the parent's
-/// own thread, at drain (`Agent::settle_commitment`) — the worker thread
-/// never holds `&mut Agent` on the parent.
-#[derive(Clone, Debug)]
-pub enum CommitmentSettle {
-    /// A writer formalized a commitment: open this key with this card.
-    /// Refused at drain if the key is somehow already live.
-    Open {
-        key: String,
-        card: crate::card::Card,
-    },
-    /// A verifier passed: clear this key.
-    Clear(String),
-}
-
 /// A shared, session-owned register of current pinned-state digests.
 ///
 /// Written

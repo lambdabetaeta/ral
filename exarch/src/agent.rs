@@ -36,6 +36,7 @@ use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
 };
 use crate::shell_eval;
+use crate::tools::CommitmentSettle;
 use crate::transcript::Transcript;
 use ral_core::Shell;
 use ral_core::serial::FOValue;
@@ -2069,17 +2070,17 @@ impl Agent {
     /// clear of a key that was not actually live both report `None`.
     fn apply_commitment_settle(
         &self,
-        settle: Option<&shell_eval::CommitmentSettle>,
+        settle: Option<&CommitmentSettle>,
     ) -> Option<Kind> {
         match settle {
-            Some(shell_eval::CommitmentSettle::Open { key, card }) => {
+            Some(CommitmentSettle::Open { key, card }) => {
                 self.set_commitment_pin(key, card.clone()).ok()?;
                 Some(Kind::Pin {
                     key: key.clone(),
                     card: card.clone(),
                 })
             }
-            Some(shell_eval::CommitmentSettle::Clear(key)) => {
+            Some(CommitmentSettle::Clear(key)) => {
                 self.unset_commitment_pin(key)
                     .ok()
                     .filter(|&cleared| cleared)?;
@@ -2958,7 +2959,7 @@ mod tests {
             log_dir: dir,
             elapsed: std::time::Duration::from_secs(0),
             generation: 0,
-            commitment_settle: Some(shell_eval::CommitmentSettle::Clear(key.to_string())),
+            commitment_settle: Some(CommitmentSettle::Clear(key.to_string())),
         });
         session.settle_commitment(&turn, &emit);
         assert!(
@@ -2990,7 +2991,7 @@ mod tests {
             log_dir: dir,
             elapsed: std::time::Duration::from_secs(0),
             generation: 0,
-            commitment_settle: Some(shell_eval::CommitmentSettle::Open {
+            commitment_settle: Some(CommitmentSettle::Open {
                 key: key.to_string(),
                 card,
             }),
@@ -3053,7 +3054,7 @@ mod tests {
             }],
         }]);
 
-        match session.apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Open {
+        match session.apply_commitment_settle(Some(&CommitmentSettle::Open {
             key: key.clone(),
             card,
         })) {
@@ -3068,7 +3069,7 @@ mod tests {
 
         assert!(
             session
-                .apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Clear(
+                .apply_commitment_settle(Some(&CommitmentSettle::Clear(
                     "commitment:never-opened".into()
                 )))
                 .is_none(),
@@ -3076,7 +3077,7 @@ mod tests {
         );
 
         match session
-            .apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Clear(key.clone())))
+            .apply_commitment_settle(Some(&CommitmentSettle::Clear(key.clone())))
         {
             Some(Kind::Unpin { key: k }) => assert_eq!(k, key),
             Some(_) => panic!("expected an Unpin event for a live clear, got some other Kind"),

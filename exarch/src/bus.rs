@@ -176,7 +176,7 @@ pub struct AgentResult {
     /// pin register when this result drains.  The worker thread computes
     /// this — not the parent — since only it still holds the raw reply
     /// payload the decision needs.
-    pub commitment_settle: Option<crate::shell_eval::CommitmentSettle>,
+    pub commitment_settle: Option<crate::tools::CommitmentSettle>,
 }
 
 impl AgentResult {
