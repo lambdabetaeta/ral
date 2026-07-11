@@ -131,11 +131,11 @@ impl Shell {
 
     /// Install `value` as a lexical scope binding for `name` (the rc
     /// `bindings:` path).  Where [`Self::install_alias`] pushes a handler
-    /// frame, this writes a scope entry: for a callable the closed
+    /// frame, this writes a scope entry: for a function value the closed
     /// session scheme is inferred under the value/function-application
     /// convention and stored alongside the value, so the next turn's
-    /// check sees its type and the binding is callable by function
-    /// application at the prompt.  A non-callable carries no scheme.
+    /// check sees its type and the binding is applyable by function
+    /// application at the prompt.  A non-function value carries no scheme.
     pub fn bind_value(&mut self, name: String, value: Value) {
         let arm = match &value {
             Value::Lambda { param, body, .. } => Some((Some(param), body)),
@@ -152,11 +152,11 @@ impl Shell {
 
     /// Bind `name` → `value` as a plain scope variable, inferring no
     /// scheme.  The scheme-less sibling of [`Self::bind_value`]: where
-    /// `bind_value` types a definition so it is callable by function
+    /// `bind_value` types a definition so it is applyable by function
     /// application at the prompt, this installs data (an env mirror like
     /// `USER` / `CWD`, the `RAL_PROMPT` thunk read by the renderer, a host
-    /// seed var) that is *resolved* but never reinterpreted as a typed
-    /// prompt-callable.  Keeping the two verbs distinct preserves the
+    /// seed var) that is *resolved* but never reinterpreted as a value
+    /// applyable at the prompt.  Keeping the two verbs distinct preserves the
     /// boundary an rc draws between its `bindings:` (typed) and its
     /// `env:` / `prompt:` (untyped) keys.
     pub fn set_var(&mut self, name: String, value: Value) {

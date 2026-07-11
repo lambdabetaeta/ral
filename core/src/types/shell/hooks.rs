@@ -185,7 +185,7 @@ impl Hook {
     /// `PluginFactory`).
     ///
     /// # Errors
-    /// Returns [`RegisterError::NotCallable`] if the bound value is neither
+    /// Returns [`RegisterError::NotFunction`] if the bound value is neither
     /// a `Block` nor a `Lambda`, or [`RegisterError::ArityMismatch`] if its
     /// parameter count differs from the signature's expected arity.
     pub fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
@@ -194,7 +194,7 @@ impl Hook {
             Value::Block { .. } => 0,
             Value::Lambda { .. } => self.binding.value.lambda_arity().unwrap_or(0),
             other => {
-                return Err(RegisterError::NotCallable {
+                return Err(RegisterError::NotFunction {
                     name: name.clone(),
                     origin: self.origin,
                     actual: format!("{other}"),
@@ -218,7 +218,7 @@ impl Hook {
 #[derive(Debug, Clone)]
 pub enum RegisterError {
     /// The value is not a Block or Lambda.
-    NotCallable {
+    NotFunction {
         name: HookName,
         origin: Span,
         actual: String,
@@ -238,7 +238,7 @@ pub enum RegisterError {
 impl fmt::Display for RegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotCallable { name, actual, .. } => {
+            Self::NotFunction { name, actual, .. } => {
                 write!(
                     f,
                     "cannot register '{name}' as a hook: \

@@ -153,7 +153,7 @@ pub enum TypeErrorKind {
     /// surface terms instead of as a `Cmd a vs a → b` mismatch.  The flag
     /// records that the head/args IR shape suggests a single
     /// double-quoted string split by an unescaped inner quote.
-    CommandNotCallable {
+    CommandNotFunction {
         ty: Ty,
         split_string_suspect: bool,
     },
@@ -246,7 +246,7 @@ impl TypeErrorKind {
             Self::RecursiveRow => "T0002",
             Self::TypeTooDeep => "T0003",
             Self::TyMismatch { .. } => "T0010",
-            Self::CompTyMismatch { .. } | Self::CommandNotCallable { .. } => {
+            Self::CompTyMismatch { .. } | Self::CommandNotFunction { .. } => {
                 "T0011"
             }
             Self::ModeMismatch { .. } => "T0012",

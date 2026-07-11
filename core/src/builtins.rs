@@ -3,7 +3,7 @@
 //! Builtins are commands implemented in Rust that run inside the shell
 //! process.  Each builtin is registered in a single
 //! `builtin_registry!` entry that names the builtin, its computation-
-//! type hint, its fixed arity (if first-class-callable), its one-line
+//! type hint, its fixed arity (if a first-class function), its one-line
 //! doc, and its runtime body — so adding a new builtin can update only
 //! one place and the six facets cannot drift apart.  The macro emits a
 //! [`CORE_BUILTINS`] static (a `&[BuiltinEntry]`) consumed by each shell's
@@ -72,7 +72,7 @@ const fn arity_agrees(declared: Option<usize>, structural: Option<usize>) -> boo
 ///
 /// Every entry binds six facets at once: the user-visible names, the
 /// computation-type hint consumed by the inference engine, a fixed arity
-/// (if the builtin is first-class-callable and not variadic), the doc
+/// (if the builtin is a first-class function and not variadic), the doc
 /// string the `help` builtin prints, the type-checker rule, and a
 /// `call` block that produces the runtime result.  The macro emits a
 /// single [`BuiltinEntry`] per name into the [`CORE_BUILTINS`] static
@@ -86,7 +86,7 @@ const fn arity_agrees(declared: Option<usize>, structural: Option<usize>) -> boo
 /// (the static is const-evaluated, and a mismatch is a const-panic build
 /// error) — the two cannot drift apart.
 ///
-/// Entries with `arity: _` are not first-class-callable (variadic or
+/// Entries with `arity: _` are not first-class functions (variadic or
 /// command-only); `$name` is available only if the type signature has an
 /// explicit value form.
 ///
@@ -658,7 +658,7 @@ pub fn builtin_names() -> Vec<&'static str> {
 }
 
 /// Synthesise a first-class thunk for a [`BuiltinEntry`] so a
-/// `$name` reference resolves to a callable value.
+/// `$name` reference resolves to a function value.
 ///
 /// The thunk
 /// wraps an n-ary lambda around a name-dispatched

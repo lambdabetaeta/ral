@@ -579,7 +579,7 @@ impl Parser {
     }
 
     /// Parse a fixed-arity control operator described by `kw`: the
-    /// bare-head keyword, followed by exactly `kw.arity` callable-
+    /// bare-head keyword, followed by exactly `kw.arity` function-
     /// atom operands and an optional run of trailing I/O redirects.
     /// `kw.build` destructures the arity-validated operand vector
     /// into the matching [`ScopeAst`]; the result is wrapped in

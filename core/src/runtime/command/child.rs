@@ -47,7 +47,7 @@ pub(crate) enum GroupOwner {
 /// ```
 ///
 /// `wait` consumes `RunningChild` and yields a `WaitedChild` that
-/// carries the `WaitOutcome`.  `drain` is only callable on `WaitedChild`,
+/// carries the `WaitOutcome`.  `drain` can only be invoked on `WaitedChild`,
 /// so the bug class "join pumps before wait" (which would let drainers
 /// block on a still-open pipe) is unwritable: there's no
 /// `RunningChild::drain`.

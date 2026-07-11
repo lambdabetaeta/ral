@@ -571,7 +571,7 @@ pub fn termios_snapshot() -> Option<libc::termios> {
 ///
 /// `try_acquire` performs `tcsetpgrp(STDIN_FILENO, target)`, snapshots the
 /// current termios, and remembers the previous foreground pgid; `drop`
-/// restores both.  It is *uncallable* without a [`TerminalLease`] borrow:
+/// restores both.  It cannot be invoked without a [`TerminalLease`] borrow:
 /// holding `&TerminalLease` is the proof that ral owns the controlling
 /// terminal's foreground, replacing the old internal `startup_foreground`
 /// re-check.  Returns `None` only when the pgid handoff itself fails (target

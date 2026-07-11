@@ -50,7 +50,7 @@ impl TypeErrorKind {
             Self::RowMissingField { label } => {
                 format!("this record is missing a field named '{label}'")
             }
-            Self::CommandNotCallable { ty, .. } => {
+            Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
                     "value of type {} cannot be used as a command head",
@@ -156,7 +156,7 @@ impl TypeErrorKind {
                 )
             }
             Self::CompTyMismatch { .. } => "types disagree here".into(),
-            Self::CommandNotCallable { ty, .. } => {
+            Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
             }
@@ -297,7 +297,7 @@ fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
 /// build fails here, rather than silently rendering no hint.
 pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     let from_kind = match kind {
-        TypeErrorKind::CommandNotCallable {
+        TypeErrorKind::CommandNotFunction {
             split_string_suspect: true,
             ..
         } => Some(
@@ -307,7 +307,7 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              \\\" inside the string, or drop the inner quoting"
                 .to_string(),
         ),
-        TypeErrorKind::CommandNotCallable {
+        TypeErrorKind::CommandNotFunction {
             split_string_suspect: false,
             ..
         } => Some(

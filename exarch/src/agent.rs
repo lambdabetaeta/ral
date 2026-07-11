@@ -120,7 +120,7 @@ pub struct Agent {
     /// This agent's view into the tool registry — the single source of truth
     /// read by `provider.complete` (advertisement) and [`Self::stage`]
     /// (dispatch).  Membership is the gate: a tool absent here is neither
-    /// advertised nor callable.  Every agent spawns; the views differ only by
+    /// advertised nor invocable.  Every agent spawns; the views differ only by
     /// `reply` (withheld from the conversing trunk) and the self-wakeup family
     /// (the `--allow-schedule` grant).  See [`crate::tools::tools_for`].
     tools: Vec<&'static dyn crate::tools::Tool>,

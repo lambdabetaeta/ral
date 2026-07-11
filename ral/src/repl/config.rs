@@ -145,7 +145,7 @@ pub(crate) fn apply_rc_config(
                 }
             }
             "aliases" => {
-                // A callable installs as an argv-handler alias; any other
+                // A function installs as an argv-handler alias; any other
                 // value falls through to a plain scope binding so the key
                 // still lands somewhere usable.
                 for (name, value) in into_map(val) {
@@ -167,8 +167,8 @@ pub(crate) fn apply_rc_config(
             }
             "bindings" => {
                 // Every value installs as a lexical scope binding,
-                // callables included; a callable is typed by the checker
-                // so it is callable by function application at the prompt.
+                // functions included; a function is typed by the checker
+                // so it is applyable by function application at the prompt.
                 for (name, value) in into_map(val) {
                     ctx.shell.bind_value(name, value);
                 }
@@ -616,8 +616,8 @@ mod tests {
         assert_eq!(shell.scope_lookup("n"), Some(&Value::Int(42)));
     }
 
-    /// Under `aliases:` a callable installs as an alias handler frame; a
-    /// non-callable falls through to a plain scope binding.
+    /// Under `aliases:` a function installs as an alias handler frame; a
+    /// non-function value falls through to a plain scope binding.
     #[test]
     fn rc_aliases_route_by_value_shape() {
         let plain = Value::Bool(true);
@@ -639,14 +639,14 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// A callable under `bindings:` is a lexical binding, not an alias: it
+    /// A function under `bindings:` is a lexical binding, not an alias: it
     /// lands in scope and carries a session scheme, so a heterogeneous
     /// call `ws 'x' { ... }` (a String and a Block — two independently
     /// typed parameters) typechecks at the prompt.  As an argv alias the
     /// same call would force the argv element type to be both String and
     /// Block, a [T0010] mismatch.
     #[test]
-    fn rc_bindings_callable_typechecks_heterogeneous_call() {
+    fn rc_bindings_function_typechecks_heterogeneous_call() {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
         let (shell, _, _) = apply_rc_inner(src, true);
         // Lexical binding, not an alias handler frame.
@@ -655,18 +655,18 @@ mod tests {
         let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
         assert!(
             errs.is_empty(),
-            "heterogeneous call to a `bindings:` callable should typecheck: {errs:?}"
+            "heterogeneous call to a `bindings:` function should typecheck: {errs:?}"
         );
     }
 
-    /// A callable under `aliases:` installs as an argv-handler alias (a
+    /// A function under `aliases:` installs as an argv-handler alias (a
     /// handler frame, not a scope binding).  An alias is a unary lambda
     /// whose single parameter binds the argv list, so the heterogeneous
     /// call `ws 'x' { echo lol }` forces the homogeneous argv element type
     /// to be both String and Block — a [T0010] mismatch, confirming the
     /// by-key split actually changes behaviour.
     #[test]
-    fn rc_aliases_callable_is_argv_alias() {
+    fn rc_aliases_function_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
         let (shell, _, _) = apply_rc_inner(src, true);
         // Alias handler frame, not a scope binding.

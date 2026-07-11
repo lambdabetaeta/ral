@@ -872,7 +872,7 @@ impl Elaborator {
         self.hoist(comp, binds)
     }
 
-    /// Apply a callable `head_comp` to `arg_vals` and wrap any trailing
+    /// Apply a function `head_comp` to `arg_vals` and wrap any trailing
     /// `redirects`.  Shared by the two value-application heads — a bound
     /// bare name (`f x`) and an explicit value head (`$f x`, `{…} x`) —
     /// which build the identical CBPV shape: a zero-arg "call" is just the

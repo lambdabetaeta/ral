@@ -486,13 +486,13 @@ impl Inferencer<'_> {
     }
 
     /// If `head_ty` resolves to a `Return(_, ty)` where `ty` is concretely
-    /// non-callable — i.e. not a `Thunk` and not a free type variable that
+    /// not a function — i.e. not a `Thunk` and not a free type variable that
     /// could later become one — return that `ty`.  Otherwise return `None`.
     ///
     /// Used by `CompKind::App` to detect `'foo' bar baz` and friends and
     /// raise a surface-level diagnostic before the general unifier
     /// mismatch fires.
-    fn command_non_callable_ty(&mut self, head_ty: &CompTy) -> Option<Ty> {
+    fn command_non_function_ty(&mut self, head_ty: &CompTy) -> Option<Ty> {
         match self.ctx.unifier.resolve_comp_ty(head_ty) {
             CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                 Ty::Thunk(_) | Ty::Var(_) => None,
@@ -1826,10 +1826,10 @@ impl Inferencer<'_> {
                 // arg; a spread-only call still wants the cascading check.
                 let positional = crate::ir::args::positional(args).unwrap_or_default();
                 if !positional.is_empty()
-                    && let Some(ty) = self.command_non_callable_ty(&head_ty)
+                    && let Some(ty) = self.command_non_function_ty(&head_ty)
                 {
                     let split_string_suspect = looks_like_nested_quote_mistake(head, &positional);
-                    self.ctx.diagnose(TypeErrorKind::CommandNotCallable {
+                    self.ctx.diagnose(TypeErrorKind::CommandNotFunction {
                         ty,
                         split_string_suspect,
                     });

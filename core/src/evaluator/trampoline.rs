@@ -131,7 +131,7 @@ fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Se
                     return done;
                 }
             }
-            // Non-callable: done if no args, error otherwise.
+            // Not a function: done if no args, error otherwise.
             _ if args.is_empty() => return Ok(callee),
             _ => {
                 let hint = if matches!(callee, Value::Unit) {

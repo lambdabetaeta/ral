@@ -123,7 +123,7 @@ fn registry() -> &'static [Box<dyn Tool>] {
 /// the self-wakeup family; `can_spawn` admits `amnemon`/`mnemon`.  The
 /// result is the agent's single source of truth: it is both advertised to the
 /// provider and searched on dispatch, so a tool absent here is invisible and
-/// uncallable, with no separate predicate.
+/// uninvocable, with no separate predicate.
 pub(crate) fn tools_for(returns: bool, schedules: bool, can_spawn: bool) -> Vec<&'static dyn Tool> {
     registry()
         .iter()
