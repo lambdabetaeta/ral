@@ -207,6 +207,14 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     }
 }
 
+/// Decode one surfaced value and apply the protected-pin guard: the [`Kind`]
+/// to emit, or `None` when the value decodes to nothing or is a rejected
+/// protected-pin write.  Shared by the live and deferred-batch surface sinks.
+fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
+    let kind = decode_surface(val)?;
+    (!reject_protected_pin(&kind, emit)).then_some(kind)
+}
+
 fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
     let key = match kind {
         Kind::Pin { key, .. } | Kind::Unpin { key }
@@ -369,11 +377,7 @@ pub fn run_shell(
         transport,
         turn,
         |val| {
-            let live_val = RalValue::from(val);
-            if let Some(kind) = decode_surface(&live_val) {
-                if reject_protected_pin(&kind, emit) {
-                    return;
-                }
+            if let Some(kind) = accepted_surface(&RalValue::from(val), emit) {
                 if let Some(pins) = pins
                     && let Ok(mut m) = pins.lock()
                 {
@@ -392,11 +396,7 @@ pub fn run_shell(
         },
         |batch| {
             for val in batch {
-                let live_val = RalValue::from(val);
-                if let Some(kind) = decode_surface(&live_val) {
-                    if reject_protected_pin(&kind, emit) {
-                        continue;
-                    }
+                if let Some(kind) = accepted_surface(&RalValue::from(val), emit) {
                     emit.emit(kind);
                 }
             }
@@ -416,12 +416,7 @@ pub fn run_shell(
         return Outcome::Static("internal error: dispatch completed without a Report".into());
     };
 
-    ral_core::dbg_trace!(
-        "shell",
-        "eval in {:?} (timed_out={})",
-        tool_start.elapsed(),
-        false
-    );
+    ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
 
     match report {
         Report::Static { diagnostics } => {
