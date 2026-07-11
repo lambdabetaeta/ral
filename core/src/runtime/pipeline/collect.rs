@@ -232,15 +232,19 @@ impl PipelineCollector {
     }
 
     /// Note that a stage has parked the pipeline as a stopped job.  The
-    /// group-wide SIGSTOP runs on the *first* stop only — it is
-    /// idempotent in principle, but skipping it after the first stop
-    /// keeps the unsafe call out of every later observation.
+    /// group-wide SIGSTOP fires only when this stop will actually be the
+    /// surfaced control: not once the pipeline is already parked (the
+    /// first stop wins, keeping the unsafe call out of every later
+    /// observation), and not when an earlier control escape already holds
+    /// the break — that control wins in `finish`, so parking here would
+    /// stop a pipeline that is really exiting.
     #[cfg(unix)]
     fn note_stop(&mut self, signal: Escape) {
-        if self.stopped_pgid.is_some() {
-            return;
-        }
-        if let Escape::Stopped { pgid, .. } = &signal {
+        let already_controlled = matches!(self.break_, Some(PipelineBreak::Control(_)));
+        if self.stopped_pgid.is_none()
+            && !already_controlled
+            && let Escape::Stopped { pgid, .. } = &signal
+        {
             self.stopped_pgid = Some(*pgid);
             // Park any still-running siblings so the whole pgid is in a
             // consistent stopped state before we hand it to the REPL.
@@ -394,6 +398,23 @@ mod tests {
         c.note_stop(stopped_escape(FAKE_PGID + 1));
         // First Stopped wins; later calls do not overwrite the recorded pgid.
         assert_eq!(c.stopped_pgid, Some(Pgid(FAKE_PGID)));
+    }
+
+    #[test]
+    fn note_stop_skips_park_when_control_already_held() {
+        // An earlier control escape (e.g. Exit) already holds the break, so
+        // a later Stopped must not park the group: that control wins in
+        // `finish`, and parking would stop a pipeline that is really
+        // exiting.  stopped_pgid stays None, so collect's abandon branch
+        // never fires.
+        let mut c = PipelineCollector::new();
+        c.note_control(Escape::Exit(3));
+        c.note_stop(stopped_escape(FAKE_PGID));
+        assert!(c.stopped_pgid.is_none());
+        assert!(matches!(
+            c.break_,
+            Some(PipelineBreak::Control(Escape::Exit(3)))
+        ));
     }
 
     #[test]
