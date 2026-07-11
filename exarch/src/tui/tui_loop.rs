@@ -467,7 +467,7 @@ fn ui_loop(
                 mb.wake();
             }
             // Update the live model chrome to reflect the newly focused
-            // agent'\''s provider — the banner, status bar, and ctx% gauge
+            // agent's provider — the banner, status bar, and ctx% gauge
             // must follow focus.
             if let Some(ph) = ctx.agents.provider(now_focus) {
                 let p = ph.current();
