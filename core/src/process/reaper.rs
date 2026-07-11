@@ -13,11 +13,10 @@
 //! rather than spawning their own timer; the daemon sleeps until the
 //! earliest deadline, cancels it, and re-evaluates.
 //!
-//! The daemon fires one [`Action`] per entry.  Originally that action was
-//! always "cancel a scope" — the death-clock and the foreground wall.  It
-//! is now `Cancel(scope) | Run(callback)`: a deadline that cancels a
-//! [`CancelScope`], or one that runs an opaque host closure.  A scheduled
-//! wakeup is the second shape — the host (exarch) hands the reaper a
+//! The daemon fires one [`Action`] per entry, in one of two shapes:
+//! `Cancel(scope)` cancels a [`CancelScope`] — the death-clock and the
+//! foreground wall — and `Run(callback)` runs an opaque host closure.  A
+//! scheduled wakeup is the second shape — the host (exarch) hands the reaper a
 //! `Run` closure that posts a prompt and wakes its idle loop, while the
 //! reaper stays ignorant of prompts, cron, and sessions.  Recurrence is
 //! *not* a reaper concept: entries remain one-shot, and a recurring
@@ -190,10 +189,8 @@ fn arm(action: Action, after: Duration) -> Deadline {
 pub struct Deadline {
     armed: Arc<AtomicBool>,
     /// Set by [`Self::keep`]: `Drop` leaves `armed` alone instead of
-    /// disarming it.  "Keep it armed" is a state this handle carries,
-    /// not a leaked `Arc` strong count — `keep` used to `mem::forget`
-    /// `self`, which permanently held one strong reference per kept
-    /// deadline for no reason a reader could see in the type.
+    /// disarming it.  "Keep it armed" is a state this handle carries, so
+    /// `Drop` still runs its ordinary course.
     keep: bool,
 }
 
