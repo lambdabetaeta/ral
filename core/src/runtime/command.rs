@@ -30,7 +30,7 @@
 //! the same `build_command` / `spawn` primitives directly through
 //! [`super::pipeline::run_pipeline`].
 
-use crate::types::{Break, Control, Error, Raw, Shell, Value};
+use crate::types::{Break, Error, Raw, Shell, Value};
 
 mod child;
 mod foreground;
@@ -46,18 +46,18 @@ pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
-    AtomicCommit, RedirectGuard, StdinRedirectGuard, apply_redirects, atomic_write, commit_atomics,
-    install_stdin_redirect, open_file, restore_redirects,
+    AtomicCommit, EvalRedirect, EvalRedirectV, RedirectGuard, StdinRedirectGuard, apply_redirects,
+    atomic_write, commit_atomics, install_stdin_redirect, open_file, restore_redirects, stderr_mode,
 };
 use stdio::classify_redirects;
-pub(crate) use stdio::{EvalRedirect, EvalRedirectV, StdinRoute, TtyInputPermit, stderr_mode};
+pub(crate) use stdio::{StdinRoute, TtyInputPermit};
 use vet::ExecImage;
 pub(crate) use vet::vet;
 
 use child::WaitedChild;
 use foreground::ForegroundDecision;
 use process::{pipe_err, spawn};
-use stdio::{announce_command_title, inherit_tty, wire_stderr, wire_stdin, wire_stdout_file};
+use stdio::{inherit_tty, wire_stderr, wire_stdin, wire_stdout_file};
 
 /// Executes a standalone external call: vet the identity, route
 /// bundled uutils invocations through the in-process or
@@ -93,7 +93,8 @@ pub(crate) fn run(
         && redirects.is_empty()
         && uutils::can_run_uutils_in_process(shell)
     {
-        return uutils::run_uutils_in_process(tool, &rc.args, shell).map_err(Control::from);
+        return uutils::run_uutils_in_process(tool, &rc.args, shell)
+            .map_err(crate::types::Control::from);
     }
 
     let mut command = build_command(&rc, shell)?;
@@ -304,6 +305,15 @@ pub(crate) fn run(
             let err = crate::sandbox::augment_failure(err, shell, &pids, started);
             Err(Break::Error(err).into())
         }
+    }
+}
+
+/// Announce the running command via the terminal title (OSC 0).
+fn announce_command_title(cmd: &str, shell: &Shell) {
+    if shell.turn.io.interactive && shell.turn.io.terminal.ui_title_ok() {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(crate::ansi::osc_set_title(cmd).as_bytes());
+        let _ = std::io::stdout().flush();
     }
 }
 

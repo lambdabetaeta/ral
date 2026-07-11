@@ -1,8 +1,7 @@
 //! Turn a [`SpawnPlan`] into a `std::process::Command`, spawn it via
-//! the canonical pgid + sandbox funnel, and translate spawn / wait /
-//! exit-status errors into [`Break`]s.  No stdio routing here — that
-//! lives in [`super::stdio`] and [`super::redirect`] and is layered on
-//! top before spawn.
+//! the canonical pgid + sandbox funnel, and translate spawn errors into
+//! [`Break`]s.  No stdio routing here — that lives in [`super::stdio`]
+//! and [`super::redirect`] and is layered on top before spawn.
 
 use crate::types::{Break, Error, Settled, Shell};
 
@@ -19,11 +18,15 @@ use super::vet::{ExecImage, SpawnPlan};
 /// self-exec helper, so building it is fallible (the self-path lookup
 /// can fail); the resulting child inherits cwd/env/PWD through
 /// `apply_env` exactly like a host external.
+///
+/// Invoked by [`super::run`] and by the pipeline stage builder
+/// (`launch_external_stage`); it is never spawned here.
 pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::process::Launch> {
-    // Per-command OS confinement: when a projection is active, confine the
-    // child per-command under the effective projection.  The grant body
-    // itself evaluates locally; this launcher is the sole OS-sandbox locus.
-    if let Some(projection) = shell.sandbox_projection() {
+    let mut cmd = if let Some(projection) = shell.sandbox_projection() {
+        // Per-command OS confinement: when a projection is active, confine
+        // the child per-command under the effective projection.  The grant
+        // body itself evaluates locally; this launcher is the sole OS-sandbox
+        // locus.
         crate::sandbox::projection_enforceable(&projection).map_err(|reason| {
             Break::Error(Error::new(
                 format!("sandbox confinement unavailable: {reason}"),
@@ -35,50 +38,42 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::p
             ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
         };
         let cmd = crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?;
-        let mut cmd = crate::process::Launch::from_command(cmd);
-        apply_env(&mut cmd, shell);
-        #[cfg(unix)]
-        if shell.has_active_capabilities() {
-            cmd.apply_unix_resource_limits();
-        }
-        return Ok(cmd);
-    }
-
-    let mut cmd = match &plan.image {
-        ExecImage::Host(path) => {
-            let mut cmd = crate::process::Launch::new(path);
-            cmd.args(&plan.args);
-            #[cfg(unix)]
-            if shell.has_active_capabilities() {
-                cmd.apply_unix_resource_limits();
+        crate::process::Launch::from_command(cmd)
+    } else {
+        match &plan.image {
+            ExecImage::Host(path) => {
+                let mut cmd = crate::process::Launch::new(path);
+                cmd.args(&plan.args);
+                cmd
             }
-            cmd
-        }
-        ExecImage::BundledTool { tool } => {
-            use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
-            let mut cmd = self_reexec(BUNDLED_TOOL_FLAG)
-                .map_err(|e| Break::Error(Error::new(format!("bundled tool '{tool}': {e}"), 1)))?;
-            cmd.arg(tool);
-            cmd.args(&plan.args);
-            #[cfg(unix)]
-            if shell.has_active_capabilities() {
-                cmd.apply_unix_resource_limits();
+            ExecImage::BundledTool { tool } => {
+                use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
+                let mut cmd = self_reexec(BUNDLED_TOOL_FLAG).map_err(|e| {
+                    Break::Error(Error::new(format!("bundled tool '{tool}': {e}"), 1))
+                })?;
+                cmd.arg(tool);
+                cmd.args(&plan.args);
+                cmd
             }
-            cmd
         }
     };
     apply_env(&mut cmd, shell);
+    #[cfg(unix)]
+    if shell.has_active_capabilities() {
+        cmd.apply_unix_resource_limits();
+    }
     Ok(cmd)
 }
 
-/// Spawn an external child the canonical way: install the canonical
-/// `pre_exec` (apply pgid, reset child signals) via
+/// Spawn a standalone external child the canonical way: install the
+/// canonical `pre_exec` (apply pgid, reset child signals) via
 /// `signal::spawn_with_pgid`, mirror `setpgid` in the parent, then
 /// apply sandbox child limits if any capability grant is active.
 ///
-/// One funnel for both standalone exec ([`super::run`]) and pipeline
-/// stages (`launch_external_stage` via `PipelineGroup::spawn`) so the
-/// post-spawn boilerplate cannot drift.
+/// The standalone-exec funnel only ([`super::run`]).  Pipeline stages
+/// take a parallel post-spawn path — `PipelineGroup::spawn` followed by
+/// `apply_child_limits_in_pipeline` — because they must join the group's
+/// pgid rather than lead their own.
 ///
 /// Returns the child plus its leader pgid: `Some` when `pgid` is
 /// `NewLeader`, `NewSession`, or `Join`, `None` for `Inherit`.
@@ -120,20 +115,6 @@ pub(crate) fn spawn_error(name: &str, e: &std::io::Error) -> Break {
 /// Wrap an I/O error from pipe creation/cloning into a [`Break`].
 pub(super) fn pipe_err(e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("pipe: {e}"), 1))
-}
-
-/// Map a `std::io::Error` from a path operation into a [`Break`],
-/// rendering `NotFound` / `PermissionDenied` as their canonical messages
-/// and any other kind as the underlying error.  `ctx` is the path the
-/// operation touched, used as the message prefix.  The error carries exit
-/// code 1.
-pub(super) fn io_error(ctx: &str, e: &std::io::Error) -> Break {
-    let msg = match e.kind() {
-        std::io::ErrorKind::NotFound => format!("{ctx}: no such file or directory"),
-        std::io::ErrorKind::PermissionDenied => format!("{ctx}: permission denied"),
-        _ => format!("{ctx}: {e}"),
-    };
-    Break::Error(Error::new(msg, 1))
 }
 
 /// Propagate `context.env_overrides`, the shell's effective cwd, and

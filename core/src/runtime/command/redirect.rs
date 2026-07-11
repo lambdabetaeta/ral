@@ -8,10 +8,49 @@ use crate::syntax::ast::RedirectMode;
 use crate::types::{Break, Error, Settled, Shell};
 
 use super::io_event;
-use super::process::io_error;
-use super::stdio::{EvalRedirect, EvalRedirectV};
-#[cfg(any(unix, windows))]
-use super::stdio::stderr_mode;
+
+/// A redirect whose target has been evaluated to a concrete file
+/// path or fd.  The evaluator walks the AST's `ValRedirectTarget`
+/// and hands one of these to [`super::run`] and to [`apply_redirects`]
+/// (for builtins).
+#[derive(Clone, Debug)]
+pub(crate) enum EvalRedirect {
+    File(String),
+    Fd(u32),
+}
+
+/// One evaluated redirect: the runtime counterpart of the IR's
+/// [`crate::ir::RedirectV`], with `target` already resolved to a
+/// concrete file path or fd.
+#[derive(Clone, Debug)]
+pub(crate) struct EvalRedirectV {
+    pub(crate) fd: u32,
+    pub(crate) mode: RedirectMode,
+    pub(crate) target: EvalRedirect,
+}
+
+/// Coerce `>` to streaming for stderr — atomic semantics make no sense for
+/// diagnostic output.  All other modes pass through unchanged.
+pub(crate) fn stderr_mode(mode: RedirectMode) -> RedirectMode {
+    match mode {
+        RedirectMode::Write => RedirectMode::StreamWrite,
+        other => other,
+    }
+}
+
+/// Map a `std::io::Error` from a path operation into a [`Break`],
+/// rendering `NotFound` / `PermissionDenied` as their canonical messages
+/// and any other kind as the underlying error.  `ctx` is the path the
+/// operation touched, used as the message prefix.  The error carries exit
+/// code 1.
+fn io_error(ctx: &str, e: &std::io::Error) -> Break {
+    let msg = match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{ctx}: no such file or directory"),
+        std::io::ErrorKind::PermissionDenied => format!("{ctx}: permission denied"),
+        _ => format!("{ctx}: {e}"),
+    };
+    Break::Error(Error::new(msg, 1))
+}
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};

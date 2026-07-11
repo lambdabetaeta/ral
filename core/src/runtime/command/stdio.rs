@@ -10,27 +10,7 @@ use crate::types::{Shell, Settled, Break, Error};
 use super::process::pipe_err;
 use super::io_event;
 use super::io_event::WriteOutcome;
-use super::redirect::{AtomicCommit, open_file};
-
-/// A redirect whose target has been evaluated to a concrete file
-/// path or fd.  The evaluator walks the AST's `ValRedirectTarget`
-/// and hands one of these to [`super::run`] and to
-/// [`super::redirect::apply_redirects`] (for builtins).
-#[derive(Clone, Debug)]
-pub(crate) enum EvalRedirect {
-    File(String),
-    Fd(u32),
-}
-
-/// One evaluated redirect: the runtime counterpart of the IR's
-/// [`crate::ir::RedirectV`], with `target` already resolved to a
-/// concrete file path or fd.
-#[derive(Clone, Debug)]
-pub(crate) struct EvalRedirectV {
-    pub(crate) fd: u32,
-    pub(crate) mode: RedirectMode,
-    pub(crate) target: EvalRedirect,
-}
+use super::redirect::{AtomicCommit, EvalRedirect, EvalRedirectV, open_file, stderr_mode};
 
 /// Capability witness that fd 0 of the parent process is safe to inherit
 /// into a spawned child's stdin in the current context.
@@ -138,15 +118,6 @@ pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
             shell.turn.io.stdout,
             crate::io::Sink::Terminal | crate::io::Sink::External(_)
         )
-}
-
-/// Coerce `>` to streaming for stderr — atomic semantics make no sense for
-/// diagnostic output.  All other modes pass through unchanged.
-pub(crate) fn stderr_mode(mode: RedirectMode) -> RedirectMode {
-    match mode {
-        RedirectMode::Write => RedirectMode::StreamWrite,
-        other => other,
-    }
 }
 
 /// Classify the call-site redirects into a stdout/stderr routing plan for
@@ -372,15 +343,6 @@ pub(super) fn wire_stderr(
             Ok(true)
         }
         None => Ok(false),
-    }
-}
-
-/// Announce the running command via the terminal title (OSC 0).
-pub(super) fn announce_command_title(cmd: &str, shell: &Shell) {
-    if shell.turn.io.interactive && shell.turn.io.terminal.ui_title_ok() {
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(crate::ansi::osc_set_title(cmd).as_bytes());
-        let _ = std::io::stdout().flush();
     }
 }
 
