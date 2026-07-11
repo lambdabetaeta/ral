@@ -17,8 +17,8 @@ use crate::evaluator::redirect::with_redirects;
 // ── Resolution ─────────────────────────────────────────────────────────
 
 /// The verdict of command-name resolution: one arm per place a name
-/// can live.  The dispatcher, value-position name lookup, pipeline
-/// staging, and `help` introspection all consume this single judgement.
+/// can live.  Consumed by the dispatcher ([`run_call`]) and by pipeline
+/// staging ([`crate::runtime::pipeline::resolve`]).
 pub(crate) enum Resolution {
     /// The lexical environment binds this name.
     Env(Value),
@@ -91,9 +91,8 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
 /// (`decisions/260629_agent-binding-reaping`) for the resolved name — a
 /// dispatch-time touch, not a lookup-time one: command dispatch is already
 /// heavyweight (grant resolution, audit), so this costs nothing on the
-/// pure-lookup path `Env::get` stays on. This is the defensive seam for a
-/// name a runtime mechanism installed (e.g. `source`) that the elaborator
-/// could not see and so compiled as a bare `Exec` rather than `App`.
+/// pure-lookup path `Env::get` stays on. See [`run_call`] for why an
+/// `Env` arm reaches dispatch at all.
 pub(crate) fn classify_command(head: &CommandWord, shell: &mut Shell) -> Settled<Resolution> {
     let r = resolve_command_word(head, shell);
     if let Resolution::Env(_) = &r
@@ -220,11 +219,11 @@ impl Drop for MaskedHandler<'_> {
 /// inside reaches the next outer match.
 fn run_handler(entry: &HandlerEntry, depth: usize, args: &[Value], shell: &mut Shell) -> Raw<Value> {
     let thunk = entry.thunk.clone();
-    let name = entry.name.clone();
     let call_args = match entry.arity {
-        HandlerArity::CatchAll => {
-            vec![Value::String(name.into_owned()), Value::list(args.to_vec())]
-        }
+        HandlerArity::CatchAll => vec![
+            Value::String(entry.name.clone().into_owned()),
+            Value::list(args.to_vec()),
+        ],
         HandlerArity::Unary => vec![Value::list(args.to_vec())],
     };
     let masked = MaskedHandler::strip(shell, depth);

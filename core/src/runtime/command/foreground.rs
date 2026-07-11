@@ -20,9 +20,11 @@ use crate::types::Shell;
 pub(super) struct ForegroundDecision {
     want_fg: bool,
     /// True when this caller owns the foreground decision (top-level
-    /// orchestrator, not a pipeline stage) *and* the shell is
-    /// non-interactive — the regime where leading an own group is safe
-    /// and useful for cancel tree-kill.
+    /// orchestrator, not a pipeline stage — a pipeline stage must instead
+    /// join the pipeline's pgid) *and* the shell is non-interactive: the
+    /// regime where leading an own group is safe and useful for cancel
+    /// tree-kill, with no interactive session whose terminal-foreground
+    /// group the child must stay consistent with.
     own_group_when_background: bool,
     /// True when a stop signal should *park* the child as a resumable job
     /// rather than kill-and-reap it.  Only an interactive REPL has a job
@@ -60,11 +62,7 @@ impl ForegroundDecision {
             );
         Self {
             want_fg,
-            // Lead an own group in the background only when this caller
-            // owns the foreground decision (a pipeline stage does not —
-            // it must join the pipeline's pgid) and there is no
-            // interactive session whose terminal-foreground group the
-            // child must stay consistent with.
+            // Lead an own group in the background — see the field doc.
             own_group_when_background: shell.turn.io.launch_role.is_top_level()
                 && !shell.turn.io.interactive,
             // Park only a foreground child of an interactive REPL — see

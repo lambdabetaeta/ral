@@ -96,9 +96,10 @@ fn check_existence(id: &CommandIdentity, ctx: &Context) -> Settled<()> {
 }
 
 /// Stringify `args`, refusing any shape the syscall boundary cannot
-/// accept.  Takes `&CommandIdentity` rather than `&str` so the borrow
-/// checker enforces the diagnostic ordering: shape rejection cannot
-/// fire ahead of [`check_existence`].
+/// accept.  Takes `&CommandIdentity` rather than `&str` because
+/// [`reject_exec_arg`] needs `id.shown` for its hints.  Diagnostic
+/// ordering — existence before shape — is a property of [`vet`]'s call
+/// sequence, not of this signature.
 fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled<Vec<String>> {
     for arg in args {
         if let Some(sig) = reject_exec_arg(id, arg, shell) {
