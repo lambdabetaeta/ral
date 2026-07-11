@@ -12,8 +12,7 @@ use std::time::Instant;
 
 use ratatui::text::Line;
 
-use crate::bus::AgentId;
-use crate::fleet::NO_FOCUS;
+use crate::bus::{AgentId, NO_FOCUS};
 
 use super::block::AgentSlot;
 use super::viewport::Viewport;

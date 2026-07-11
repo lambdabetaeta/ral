@@ -355,17 +355,15 @@ pub fn run(
     // The root's trace handle, attached to the emitter `pump` drives it
     // through; bound before `session` is borrowed into the worker closure.
     let root_transcript = session.transcript();
-    // The fleet for this one-shot run: the trunk's shared registry, focus
-    // handle, and human-attachment, plus a per-turn bus over the trunk's *own*
-    // inbox (so the drive worker's emitter and any in-turn producer share one
-    // queue).  Headless has no idle loop and no tabs, so the channel closes when
+    // The fleet for this one-shot run: the trunk's shared registry and
+    // transport engine, plus a per-turn bus over the trunk's *own* inbox (so
+    // the drive worker's emitter and any in-turn producer share one queue).
+    // Headless has no idle loop and no tabs, so the channel closes when
     // the worker finishes and async children stay muted *on the display* — but
     // each still records its own trace, the behaviour we want everywhere.
     let fleet = Fleet::new(
         session.agents.clone(),
         FleetBus::per_turn(&session.inbox()),
-        session.focus_handle(),
-        session.interactive(),
         engine,
     );
     // Seed the launch prompt into that same inbox; the headless trunk is a

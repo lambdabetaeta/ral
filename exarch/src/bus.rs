@@ -46,6 +46,13 @@ use std::time::{Duration, Instant};
 /// content hash.
 pub type AgentId = u64;
 
+/// The focus sentinel: no agent is attached.
+///
+/// Off the TUI the focus handle holds this for the whole run (there is no
+/// `TAB`); in the TUI it means the frontend resolves focus to the trunk.
+/// Distinct from any real [`AgentId`].
+pub const NO_FOCUS: AgentId = AgentId::MAX;
+
 /// When a message in the inbox may be drained into the model's context.
 ///
 /// The boundary is a *per-message* property, not a global rule.  Everything

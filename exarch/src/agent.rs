@@ -22,7 +22,7 @@
 use crate::agent_builtins;
 use crate::bootstrap::Scratch;
 use crate::bus::{
-    AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, ParkMode, Turn,
+    AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, NO_FOCUS, ParkMode, Turn,
     WORKER_PANIC_PREFIX,
 };
 use crate::cancel;
@@ -31,7 +31,6 @@ use crate::digest::{
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
 };
 use crate::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
-use crate::fleet::NO_FOCUS;
 use crate::nudge;
 use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
@@ -511,11 +510,6 @@ impl Agent {
     /// fork — the TUI binds its `App` to this and mutates it on `TAB`.
     pub(crate) fn focus_handle(&self) -> Arc<AtomicU64> {
         self.focus.clone()
-    }
-
-    /// Whether a human is attached to the fleet.
-    pub(crate) fn interactive(&self) -> bool {
-        self.interactive
     }
 
     /// This agent's own provider handle — read by the spawn site to register it

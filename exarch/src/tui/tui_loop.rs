@@ -172,7 +172,7 @@ pub fn run(
     tui.app.update_live_model(provider, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
-    // registry and focus handle.  Input, the queued-user strip, async-agent
+    // registry and transport engine.  Input, the queued-user strip, async-agent
     // results, and the worker's drive loop all read and write this one inbox;
     // `TAB` and the focused agent's park predicate share one focus handle.
     tui.app.bind_inbox(session.inbox());
@@ -180,8 +180,6 @@ pub fn run(
     let fleet = Fleet::new(
         session.agents.clone(),
         FleetBus::session(&session.inbox()),
-        session.focus_handle(),
-        session.interactive(),
         engine,
     );
     if let Some(s) = seed {
@@ -226,7 +224,7 @@ pub fn run(
         catalog,
         info,
         emit: &ui_emit,
-        engine: fleet.engine(),
+        engine: &fleet.engine,
     };
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = std::thread::Builder::new()
