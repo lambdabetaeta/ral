@@ -13,6 +13,16 @@
 //! underlying host *machine* (OS, architecture, cwd, git state,
 //! wall-clock) lives in [`crate::host`].
 //!
+//! Beyond the embedding, this module holds the host's synchronous
+//! turn-entry seam. [`Shell::run_turn`] runs one whole
+//! [`Turn`](crate::transport::Turn) — source text or a registered hook —
+//! to a flat [`TurnReport`], and [`Shell::register_hook`] populates the
+//! session-lived hook table those [`Program::Hook`](crate::transport::Program)
+//! turns dispatch against.  The types a host describes turn policy with
+//! ([`TurnIo`], [`TurnStdin`], [`RequestedTerminalAccess`],
+//! [`TurnRequest`]) live here; the turn's spine — compile, build, and
+//! run-framed — is orchestrated in [`crate::turn`].
+//!
 //! The prelude is baked ahead of time: the host's build script calls
 //! [`bake_prelude_to_out_dir`], which parses, elaborates, and
 //! [`bake_prelude`](crate::bake_prelude)s `prelude.ral` into two postcard
