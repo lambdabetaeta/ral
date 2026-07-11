@@ -4,6 +4,31 @@
 //! observe runtime state (process group, controlling terminal) without
 //! shipping an extra helper binary.  The flags are not user-facing and
 //! are not advertised in `--help`.
+//!
+//! [`run_pre_main_reexec_stages`] is the pre-`main` body every test binary
+//! (the lib unit tests and the `core/tests/*.rs` integration binaries)
+//! runs from its `#[ctor]`.
+
+/// Run the pre-`main` re-exec dispatch shared by ral's test binaries.
+///
+/// A test that spawns a pipeline stage or a per-command sandbox re-execs
+/// `current_exe()` — which under `cargo test` is the test binary itself —
+/// with a hidden tail flag.  Two stages are dispatched here, chained by
+/// `.or_else` so a non-re-exec invocation falls through:
+///
+///   1. `try_run_pipeline_stage_helper` — `--ral-pipeline-stage-helper`
+///      and friends serve one pipeline / capture stage.
+///   2. `serve_sandbox_early_init` — `--sandbox-projection` enters the OS
+///      sandbox, then runs the confined `--ral-sandbox-exec` host binary
+///      or `--ral-bundled-tool` tool.
+///
+/// Returns `Some(code)` when this process was such a re-exec and must exit
+/// immediately; `None` for a normal test run, which then reaches libtest.
+pub fn run_pre_main_reexec_stages() -> Option<u8> {
+    #[cfg(unix)]
+    crate::builtins::uutils::init_signal_dispositions();
+    crate::try_run_pipeline_stage_helper().or_else(crate::sandbox::serve_sandbox_early_init)
+}
 
 /// Hidden multicall sentinel: emit the helper's own pgid and exit.
 #[cfg(unix)]

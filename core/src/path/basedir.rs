@@ -125,26 +125,9 @@ fn absolute_env_var(key: &str) -> Option<PathBuf> {
 // itself is platform-agnostic, but `/h/.config` vs `\h\.config`
 // makes the literal comparisons Unix-specific.
 #[cfg(all(test, unix))]
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-
-    /// Mutate one `XDG_*_HOME` var around `f`, restoring it after.
-    /// Holds the shared [`crate::test_env::env_guard`] so concurrent
-    /// env-mutating tests under `RUST_TEST_THREADS > 1` stay serial.
-    fn with_var(key: &str, val: Option<&str>, f: impl FnOnce()) {
-        let _guard = crate::test_env::env_guard();
-        let prev = std::env::var_os(key);
-        match val {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        f();
-        match prev {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-    }
+    use crate::test_env::with_var;
 
     #[test]
     fn unset_var_falls_back_to_home_default() {

@@ -2,15 +2,12 @@
 //! `Comp` and the schemes baked from it.  Both are memoised so the
 //! prelude is parsed and elaborated exactly once per test binary.
 //!
-//! Also installs a pre-main constructor that mimics the ral binary's
-//! response to the `--ral-pipeline-stage-helper` sentinel (dispatched
-//! at line 22 below).  Pipelines and capture-active standalone
-//! invocations of bundled coreutils tools re-exec `current_exe()` with
-//! that flag and run one stage via the pipeline helper protocol —
-//! in a unit test, `current_exe()` is the test binary itself, so
-//! without the constructor the re-exec would land in the test
-//! framework instead of the helper, and bundled `test`/`wc`/`stat`
-//! would never run.
+//! Also installs a pre-main constructor that serves the shared re-exec
+//! stages (see [`ral_core::test_helper::run_pre_main_reexec_stages`]):
+//! pipelines and capture-active standalone invocations of bundled
+//! coreutils tools re-exec `current_exe()` — the test binary itself — so
+//! without the constructor the re-exec would land in the test framework
+//! instead of the helper, and bundled `test`/`wc`/`stat` would never run.
 
 #![allow(dead_code)] // not every test file uses every helper
 
@@ -20,26 +17,7 @@ use std::sync::{Arc, OnceLock};
 
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
-    #[cfg(unix)]
-    ral_core::builtins::uutils::init_signal_dispositions();
-    // Two stages get dispatched ahead of the Rust test harness, chained
-    // by `.or_else` (the helper stage returns `None` on a non-helper
-    // invocation, falling through to the sandbox stage):
-    //
-    //   1. `--ral-pipeline-stage-helper` and friends — the pipeline
-    //      re-execs `current_exe()` (which is *this* test binary) to
-    //      serve one stage; without the trampoline that re-exec would
-    //      land in the test framework instead of the helper.
-    //   2. `--sandbox-projection ...` — a per-command sandbox launch
-    //      re-execs the same way to install the OS sandbox.
-    //      `serve_sandbox_early_init` consumes the flag, pins
-    //      `SANDBOX_SELF`, enters the sandbox, then runs the confined
-    //      target (a `--ral-sandbox-exec` host binary or a
-    //      `--ral-bundled-tool` tool).  Letting libtest see those flags
-    //      would crash with "unknown argument".
-    if let Some(code) = ral_core::try_run_pipeline_stage_helper()
-        .or_else(ral_core::sandbox::serve_sandbox_early_init)
-    {
+    if let Some(code) = ral_core::test_helper::run_pre_main_reexec_stages() {
         std::process::exit(i32::from(code));
     }
 }

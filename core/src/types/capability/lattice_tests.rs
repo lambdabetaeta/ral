@@ -1,9 +1,9 @@
 //! Lattice-algebra tests for the capability types.
 //!
 //! Lives as a sibling of `capability.rs` (via `mod lattice_tests;` there)
-//! because several tests exercise crate-private helpers (`ExecMap`'s
-//! `Meet`/`Join`, `meet_literal_exec`) that an integration test in
-//! `core/tests/` cannot see.
+//! because several tests exercise crate-private surfaces — the
+//! `pub(crate)` `decode_capability_map` and the crate-private `FreezeCtx`
+//! scaffolding — that an integration test in `core/tests/` cannot see.
 
 #![allow(
     clippy::disallowed_methods,
@@ -38,33 +38,22 @@ fn break_msg(b: Break) -> String {
     }
 }
 
-use crate::test_env::env_guard;
+use crate::test_env::{with_var, with_vars_cleared};
 
 /// Run `f` with every `XDG_*_HOME` override removed, restoring them
 /// after, so `xdg:` sigils resolve to the home-joined defaults and the
 /// escape guard sees paths under the synthetic test home.
 fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
-    let _guard = env_guard();
-    const VARS: [&str; 5] = [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-        "XDG_BIN_HOME",
-    ];
-    let saved: Vec<(&str, Option<std::ffi::OsString>)> =
-        VARS.iter().map(|v| (*v, std::env::var_os(v))).collect();
-    for v in VARS {
-        unsafe { std::env::remove_var(v) };
-    }
-    let out = f();
-    for (v, val) in saved {
-        match val {
-            Some(x) => unsafe { std::env::set_var(v, x) },
-            None => unsafe { std::env::remove_var(v) },
-        }
-    }
-    out
+    with_vars_cleared(
+        &[
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_BIN_HOME",
+        ],
+        f,
+    )
 }
 
 // ── Capabilities lattice properties ───────────────────────────────
@@ -676,15 +665,10 @@ fn decode_rewrites_sigils_to_concrete_paths() {
 #[cfg(unix)]
 #[test]
 fn decode_rejects_xdg_var_outside_home() {
-    let _guard = env_guard();
     let v = map(vec![("fs", map(vec![("read", strs(&["xdg:data"]))]))]);
-    let prev = std::env::var_os("XDG_DATA_HOME");
-    unsafe { std::env::set_var("XDG_DATA_HOME", "/etc") };
-    let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
-    match prev {
-        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
-        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
-    }
+    let err = with_var("XDG_DATA_HOME", Some("/etc"), || {
+        decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err()
+    });
     let err = break_msg(err);
     assert!(
         err.contains("XDG_DATA_HOME"),
