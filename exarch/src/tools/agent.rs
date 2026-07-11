@@ -339,17 +339,6 @@ fn dispatch_spawn(
     )
 }
 
-/// Which commitment-register operation, if any, a settled spawn's structured
-/// reply should be checked against — computed by
-/// [`commitment::commitment_settle`](super::commitment::commitment_settle) on
-/// the worker thread while it still holds the raw payload.
-pub(super) enum CommitmentIntent {
-    /// A `commit` writer: on a matching, well-formed card, open this key.
-    Write(String),
-    /// A `verify_commitment` verifier: on a matching pass, clear this key.
-    Verify(String),
-}
-
 /// The tool-specific half of an async spawn: everything that varies between
 /// `amnemon`/`mnemon` and `commit`/`verify_commitment`, as opposed to the
 /// fork-detach-register mechanics every one of them shares ([`spawn_async`]).
@@ -361,7 +350,7 @@ pub(super) struct AsyncSpawn {
     pub prompt: Option<String>,
     /// Set only for a `commit`/`verify_commitment` spawn. `None` for every
     /// ordinary spawn, which can never tag a result for the pin register.
-    pub commitment: Option<CommitmentIntent>,
+    pub commitment: Option<super::commitment::CommitmentIntent>,
 }
 
 /// Fork-then-detach: hand an already-forked, already-capped `child` to a
@@ -600,6 +589,11 @@ as marked turns."
     }
 }
 
+/// An agent's display label: its title when known, else its numeric id.
+fn label(title: Option<&str>, id: u64) -> String {
+    title.map_or_else(|| id.to_string(), str::to_string)
+}
+
 /// `message` — send a marked model-visible note to another live agent.
 pub(super) struct MessageTool;
 
@@ -666,23 +660,17 @@ answer; use `reply` for a returning agent's final result."
                 emit,
             );
         };
-        let recipient_title = session.agents.title_for(recipient_id);
+        let who = label(session.agents.title_for(recipient_id).as_deref(), recipient_id);
         emit.emit(Kind::ToolCall {
             tool: "message",
             cmd: message.to_string(),
-            summary: Some(match &recipient_title {
-                Some(t) => format!("Messaged agent {t}."),
-                None => format!("Messaged agent {recipient_id}."),
-            }),
+            summary: Some(format!("Messaged agent {who}.")),
         });
         let content = match session
             .agents
             .message(session.id, recipient_id, message.to_string())
         {
-            Ok(()) => match &recipient_title {
-                Some(t) => format!("sent message to agent {recipient_id} ({t})"),
-                None => format!("sent message to agent {recipient_id}"),
-            },
+            Ok(()) => format!("sent message to agent {who}"),
             Err(MessageError::UnknownRecipient(n)) => {
                 format!("no live agent with id {n}; did it finish already?")
             }
@@ -745,20 +733,14 @@ A no-op if no live agent has that id."
                 emit,
             );
         };
-        let agent_title = session.agents.title_for(agent_id);
+        let who = label(session.agents.title_for(agent_id).as_deref(), agent_id);
         emit.emit(Kind::ToolCall {
             tool: "agent_cancel",
             cmd: format!("cancelling agent {agent_id}"),
-            summary: Some(match &agent_title {
-                Some(t) => format!("Agent {t} cancelled."),
-                None => format!("Agent {agent_id} cancelled."),
-            }),
+            summary: Some(format!("Agent {who} cancelled.")),
         });
         let content = if session.agents.cancel(agent_id) {
-            match &agent_title {
-                Some(t) => format!("cancelling agent {agent_id} ({t})"),
-                None => format!("cancelling agent {agent_id}"),
-            }
+            format!("cancelling agent {who}")
         } else {
             format!("no live agent with id {agent_id}")
         };
