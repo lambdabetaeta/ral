@@ -105,13 +105,8 @@ pub(super) fn create_default_rc() -> Option<String> {
 // ── RC config application ────────────────────────────────────────────────
 
 /// Apply the RC config map to `ctx`. Returns the `startup` block, if any,
-/// so the caller can execute it in the right context.  `rc_text` is
-/// reserved for future source-text capture (e.g. for `which`).
-pub(crate) fn apply_rc_config(
-    config: Value,
-    ctx: &mut RcCtx<'_>,
-    _rc_text: Option<&str>,
-) -> Option<Value> {
+/// so the caller can execute it in the right context.
+pub(crate) fn apply_rc_config(config: Value, ctx: &mut RcCtx<'_>) -> Option<Value> {
     let Value::Map(pairs) = config else {
         return None;
     };
@@ -352,12 +347,8 @@ mod tests {
     /// Evaluate `rc_src`, apply it through `apply_rc_config`, and return
     /// the resulting environment.  Registers the baked prelude so plugin
     /// files can use `get`, `has`, etc. — the same environment they see at
-    /// real startup.  When `pass_source` is set, the rc text is forwarded
-    /// to `apply_rc_config` so alias source extraction is exercised.
-    fn apply_rc_inner(
-        rc_src: &str,
-        pass_source: bool,
-    ) -> (Shell, Surface, Arc<Mutex<PluginRuntime>>) {
+    /// real startup.
+    fn apply_rc_inner(rc_src: &str) -> (Shell, Surface, Arc<Mutex<PluginRuntime>>) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
@@ -379,17 +370,16 @@ mod tests {
                 surface: &mut surface,
                 runtime: &runtime,
             },
-            if pass_source { Some(rc_src) } else { None },
         );
         (shell, surface, runtime)
     }
 
     fn apply_rc(rc_src: &str) -> Shell {
-        apply_rc_inner(rc_src, false).0
+        apply_rc_inner(rc_src).0
     }
 
     fn apply_rc_with_runtime(rc_src: &str) -> (Shell, Arc<Mutex<PluginRuntime>>) {
-        let (shell, _, runtime) = apply_rc_inner(rc_src, false);
+        let (shell, _, runtime) = apply_rc_inner(rc_src);
         (shell, runtime)
     }
 
@@ -515,7 +505,7 @@ mod tests {
     #[test]
     fn aliases_install_as_handler_frames() {
         let src = "return [\n    aliases: [\n        greet: { |args| echo hello ...$args },\n        ll: { |args| ls -lh ...$args },\n    ],\n]\n";
-        let (shell, _, _) = apply_rc_inner(src, true);
+        let (shell, _, _) = apply_rc_inner(src);
         assert!(shell.has_alias("greet"));
         assert!(shell.has_alias("ll"));
         // Aliases live in the handler stack, not in scope.
@@ -559,7 +549,6 @@ mod tests {
                 surface: &mut surface,
                 runtime: &runtime,
             },
-            None,
         );
         shell
     }
@@ -567,7 +556,7 @@ mod tests {
     /// Apply an rc map and return the resolved [`Surface`] (the default
     /// when the rc does not set one).
     fn apply_rc_surface(rc_src: &str) -> Surface {
-        apply_rc_inner(rc_src, false).1
+        apply_rc_inner(rc_src).1
     }
 
     /// rc `surface:` selects the frontend, case-insensitively.
@@ -648,7 +637,7 @@ mod tests {
     #[test]
     fn rc_bindings_function_typechecks_heterogeneous_call() {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
-        let (shell, _, _) = apply_rc_inner(src, true);
+        let (shell, _, _) = apply_rc_inner(src);
         // Lexical binding, not an alias handler frame.
         assert!(shell.scope_lookup("ws").is_some());
         assert!(!shell.has_alias("ws"));
@@ -668,7 +657,7 @@ mod tests {
     #[test]
     fn rc_aliases_function_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
-        let (shell, _, _) = apply_rc_inner(src, true);
+        let (shell, _, _) = apply_rc_inner(src);
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));
         assert!(shell.scope_lookup("ws").is_none());

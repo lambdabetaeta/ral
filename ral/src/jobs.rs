@@ -451,41 +451,6 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
     }
 }
 
-/// Set default signal dispositions for the interactive shell.
-///
-/// Unix: SIGINT routes to the relay handler (no-op when no relay slot
-/// is active, forwards to external pipeline groups when one is); SIGQUIT
-/// (Ctrl-\) cancels the durable root — the reap-everything gesture,
-/// reaching the foreground turn and every detached worker; SIGTSTP
-/// and SIGTTOU are ignored so the shell handles Ctrl+Z via waitpid and
-/// can manipulate the terminal without being stopped.
-///
-/// Windows: a no-op.  The console-control handler (Ctrl-C / Ctrl-Break
-/// fan-out) is installed by `ral_core::process::install_handlers`,
-/// called from `repl::setup_signals`; there is no signal-disposition
-/// analogue to install here.
-#[cfg(unix)]
-pub fn setup_signals() {
-    unsafe {
-        // Install relay rather than SIG_IGN.  When no relay slots are active
-        // it is a no-op, which is the right behaviour between commands.
-        libc::signal(
-            libc::SIGINT,
-            ral_core::process::relay_handler() as *const () as libc::sighandler_t,
-        );
-        // Ctrl-\ cancels the durable root — the reap-everything gesture,
-        // reaching the foreground turn and every detached worker.
-        libc::signal(
-            libc::SIGQUIT,
-            ral_core::process::quit_handler() as *const () as libc::sighandler_t,
-        );
-        // Ignore SIGTSTP in the shell — we handle it via waitpid.
-        libc::signal(libc::SIGTSTP, libc::SIG_IGN);
-        // Ignore SIGTTOU so we can manipulate the terminal.
-        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

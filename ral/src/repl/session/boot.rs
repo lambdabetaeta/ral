@@ -1,15 +1,17 @@
 //! One-shot bootstrap for an interactive [`Session`](super::Session).
 //!
-//! Each function here is called exactly once at REPL startup and does
-//! one process-level setup task: signal handlers, terminal claim, panic
+//! The setup entrypoints here each run once at REPL startup, doing one
+//! process-level setup task: signal handlers, terminal claim, panic
 //! hook, terminal capability probe, profile/rc sourcing, frontend
-//! construction.  Splitting them out of `session.rs` keeps the state
-//! machine itself focused on the run/turn/eval loop.
+//! construction.  (The rc-sourcing helpers are the exception: login
+//! profiles and the user rc are each sourced through `source_config_file`,
+//! so it runs up to three times.)  Splitting them out of `session.rs`
+//! keeps the state machine itself focused on the run/turn/eval loop.
 
 use ral_core::source::Span;
 use ral_core::transport::Program;
 use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig};
-use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
+use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -18,18 +20,15 @@ use super::super::config::{RcCtx, create_default_rc, find_ralrc};
 use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
 use super::super::plugin::{PluginRuntime, framed_turn_request};
-#[cfg(unix)]
-use crate::jobs;
 
 /// Install signal handlers and job-control signal masks for interactive use.
 ///
-/// Unix disposition summary:
+/// Unix disposition table:
 /// - SIGINT  → relay handler (no-op when idle; forwards to external pipeline groups)
+/// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
+///   foreground turn and every detached worker — instead of core-dumping)
 /// - SIGTERM/SIGHUP → term handler (cancels the durable root with `Terminate`;
 ///   the third delivery force-exits via the escalation ladder)
-/// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
-///   foreground turn and every detached worker — instead of core-dumping;
-///   installed by `jobs::setup_signals`, a no-op between turns)
 /// - SIGTSTP → `SIG_IGN`  (shell handles Ctrl+Z via waitpid, not self-stop)
 /// - SIGTTOU → `SIG_IGN`  (shell writes terminal settings without being stopped)
 /// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
@@ -52,11 +51,27 @@ pub(super) fn setup_signals() {
                 "ral: could not claim terminal: {msg}; job control may misbehave"
             ));
         }
-        jobs::setup_signals(); // SIGINT relay, SIGQUIT root-abort, SIGTSTP/SIGTTOU ignore
         unsafe {
+            // SIGINT relay rather than SIG_IGN: a no-op when no relay slot is
+            // active (the right behaviour between commands), forwarding to
+            // external pipeline groups when one is.
+            libc::signal(
+                libc::SIGINT,
+                ral_core::process::relay_handler() as *const () as libc::sighandler_t,
+            );
+            // Ctrl-\ cancels the durable root — the reap-everything gesture.
+            libc::signal(
+                libc::SIGQUIT,
+                ral_core::process::quit_handler() as *const () as libc::sighandler_t,
+            );
             let term = ral_core::process::term_handler() as *const () as libc::sighandler_t;
             libc::signal(libc::SIGTERM, term);
             libc::signal(libc::SIGHUP, term);
+            // Ignore SIGTSTP (Ctrl+Z handled via waitpid) and SIGTTOU/SIGTTIN
+            // so the shell manipulates the terminal and reads stdin without
+            // being stopped when backgrounded.
+            libc::signal(libc::SIGTSTP, libc::SIG_IGN);
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
             libc::signal(libc::SIGTTIN, libc::SIG_IGN);
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
@@ -162,9 +177,18 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
     if shell.has_hook(&hook_name) {
         return;
     }
-    let src = format!("{{ return \"{}\" }}", super::super::prompt::DEFAULT_PROMPT);
-    let comp = Arc::new(ral_core::compile(&src).expect("default prompt thunk compiles"));
-    let block = evaluate(&comp, shell).expect("default prompt thunk evaluates");
+    // Build the return-the-constant thunk directly rather than interpolating
+    // `DEFAULT_PROMPT` into ral source and compiling it: the prompt value is
+    // then decoupled from what the constant's bytes happen to be, so no
+    // boot-time `.expect` can panic on its contents.
+    let block = ral_core::types::Value::Block {
+        body: Arc::new(ral_core::source::Spanned::synthetic(
+            ral_core::ir::CompKind::Return(ral_core::ir::Val::String(
+                super::super::prompt::DEFAULT_PROMPT.into(),
+            )),
+        )),
+        captured: Arc::new(ral_core::types::Env::default()),
+    };
     let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
     let _ = shell.register_hook(
         hook_name,
@@ -340,7 +364,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
             ));
         }
     };
-    if let Some(block) = super::super::config::apply_rc_config(config, ctx, Some(&src)) {
+    if let Some(block) = super::super::config::apply_rc_config(config, ctx) {
         let origin = Span::new(ral_core::source::FileId(0), 0, 0);
         if let Err(e) = ctx.shell.register_hook(
             HookName::session("startup"),
