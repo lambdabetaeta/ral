@@ -215,7 +215,6 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
                 HookFraming::Framed(FramedHook {
                     terminal: RequestedTerminalAccess::Denied,
                     kind: "prompt",
-                    caps: Capabilities::root(),
                     budget: None,
                 }),
             );

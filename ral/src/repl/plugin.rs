@@ -340,6 +340,7 @@ const BUFFER_CHANGE_FAULT_LIMIT: u32 = 3;
 ///   - [`HookFraming::InFrame`] — lifecycle hooks (`pre-exec`, `post-exec`,
 ///     `chpwd`) fire from inside the command's own turn frame. A second frame
 ///     would nest, so the handler is applied in place.
+#[derive(Clone, Copy)]
 pub(super) enum HookFraming {
     /// Establish a fresh turn frame before applying the handler. Inherits the
     /// session streams and runs no lifecycle hooks; the [`FramedHook`] carries
@@ -354,23 +355,21 @@ pub(super) enum HookFraming {
 /// `terminal` is the terminal authority the hook turn may hand to a child
 /// (keybinding dispatch leases it; the others deny it). `kind` labels the hook
 /// for the turn's root context and fault attribution (`"keybinding"`,
-/// `"buffer-change"`, `"prompt"`). `caps` is the capability ceiling the handler
-/// runs under — `Capabilities::root()` is full host authority (the default, so
-/// nothing regresses); a narrower set attenuates the handler. `budget` arms the
-/// turn's foreground wall: `Some(d)` cancels a handler that overruns `d`
-/// (the buffer-change keystroke budget), `None` leaves it uncapped.
+/// `"buffer-change"`, `"prompt"`). `budget` arms the turn's foreground wall:
+/// `Some(d)` cancels a handler that overruns `d` (the buffer-change keystroke
+/// budget), `None` leaves it uncapped.
+#[derive(Clone, Copy)]
 pub(super) struct FramedHook {
     pub(super) terminal: RequestedTerminalAccess,
     pub(super) kind: &'static str,
-    pub(super) caps: Capabilities,
     pub(super) budget: Option<Duration>,
 }
 
 /// The single primitive for running a plugin hook.  In order:
 ///   1. take any pre-existing `shell.repl().plugin_context` aside
 ///   2. install `ctx_in` (when `Some`) so `_ed-*` builtins resolve correctly
-///   3. apply the handler to `args`, framed per `framing` (no capability
-///      attenuation; plugins run with host authority)
+///   3. apply the handler to `args`, framed per `framing` (plugins run with
+///      the host authority the framed turn already carries)
 ///   4. take the context back out (now carrying outputs and any `state_cell` mutation)
 ///   5. restore the pre-existing context
 ///
@@ -412,7 +411,6 @@ pub(super) fn call_plugin_hook(
         HookFraming::Framed(FramedHook {
             terminal,
             kind,
-            caps,
             budget,
         }) => {
             // Label the root context `kind:plugin` (e.g. `keybinding:fzf`).
@@ -432,7 +430,6 @@ pub(super) fn call_plugin_hook(
                             args: fo_args,
                         },
                     );
-                    req.turn.caps = caps;
                     req.turn.turn_limit = budget;
                     shell.run_turn(req)
                 }
@@ -586,22 +583,15 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
             .plugins
             .get(idx)
             .and_then(|p| p.state_cell.clone());
-        let state_loaded = state_cell.is_some();
 
-        let ctx_in = PluginContext {
-            editor_state: EditorState {
-                text: line.to_string(),
-                cursor: pos,
-                keymap: keymap.clone(),
-            },
-            inputs: PluginInputs {
-                history_entries: history.clone(),
-                in_readline: true,
-            },
-            outputs: PluginOutputs::default(),
+        let ctx_in = PluginRuntime::build_plugin_context(
+            line.to_string(),
+            pos,
+            keymap.clone(),
+            history.clone(),
+            true,
             state_cell,
-            state_default_used: state_loaded,
-        };
+        );
 
         let hr = call_plugin_hook(
             &mut hook_env,
@@ -616,7 +606,6 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
             HookFraming::Framed(FramedHook {
                 terminal: RequestedTerminalAccess::Denied,
                 kind: "buffer-change",
-                caps: Capabilities::root(),
                 budget: Some(BUFFER_CHANGE_BUDGET),
             }),
         );
@@ -652,13 +641,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         }
 
         if let Some(ctx_out) = hr.ctx {
-            // Save state cell back to the runtime.
-            {
-                let mut rt = lock(runtime);
-                if let Some(p) = rt.plugins.get_mut(idx) {
-                    p.state_cell.clone_from(&ctx_out.state_cell);
-                }
-            }
+            lock(runtime).write_back_state_cell(idx, ctx_out.state_cell.as_ref());
             if let Some(g) = ctx_out.outputs.ghost_text {
                 ghost = Some(g);
             }
@@ -896,20 +879,60 @@ impl PluginRuntime {
         self.hooks.env = None;
     }
 
-    /// Resolve a pending keybinding to its plugin index and handler value.
+    /// Resolve a pending keybinding to its plugin index and bound key.
     ///
     /// Lookup is by the plugin's name, the only identity stable across
     /// `unload_plugin`'s `Vec::remove`; `binding_idx` then indexes that
     /// one plugin's immutable keybinding list.  Returns `None` when the
     /// named plugin is no longer loaded — the unbind-and-ignore case.
+    /// Dispatch fires the handler through the hook table by name, so the
+    /// resolution yields only the index and the key notation, never the
+    /// handler value itself.
     pub(super) fn resolve_keybinding(
         &self,
         plugin: &str,
         binding_idx: usize,
-    ) -> Option<(usize, String, Value)> {
+    ) -> Option<(usize, String)> {
         let idx = self.plugins.iter().position(|p| p.name == plugin)?;
-        let (key_str, handler) = self.plugins[idx].keybindings.get(binding_idx)?;
-        Some((idx, key_str.clone(), handler.clone()))
+        let (key_str, _handler) = self.plugins[idx].keybindings.get(binding_idx)?;
+        Some((idx, key_str.clone()))
+    }
+
+    /// Build the per-hook [`PluginContext`] both the buffer-change and
+    /// keybinding paths install around a handler call: the editor state, the
+    /// history snapshot and readline flag, and the plugin's persistent state
+    /// cell.  `state_default_used` tracks whether a cell was already present.
+    pub(super) fn build_plugin_context(
+        text: String,
+        cursor: usize,
+        keymap: String,
+        history: Vec<String>,
+        in_readline: bool,
+        state_cell: Option<Value>,
+    ) -> PluginContext {
+        let state_default_used = state_cell.is_some();
+        PluginContext {
+            editor_state: EditorState {
+                text,
+                cursor,
+                keymap,
+            },
+            inputs: PluginInputs {
+                history_entries: history,
+                in_readline,
+            },
+            outputs: PluginOutputs::default(),
+            state_cell,
+            state_default_used,
+        }
+    }
+
+    /// Save a handler's (possibly mutated) state cell back into the plugin
+    /// record at `idx`.  A no-op if the plugin was unloaded mid-dispatch.
+    pub(super) fn write_back_state_cell(&mut self, idx: usize, state_cell: Option<&Value>) {
+        if let Some(p) = self.plugins.get_mut(idx) {
+            p.state_cell = state_cell.cloned();
+        }
     }
 
     /// Every plugin keybinding as a frontend-neutral `(plugin_name,

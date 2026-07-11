@@ -7,7 +7,6 @@
 //! editor state.  The handler may mutate the buffer, accept the line, or
 //! push a new buffer onto the stack.
 
-use ral_core::types::Capabilities;
 use ral_core::{HookName, RequestedTerminalAccess, Shell, Value};
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +15,6 @@ use super::plugin::{
     FramedHook, HookFor, HookFraming, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook,
     defer_plugin_message, keymap_name, lock,
 };
-use super::plugin_editor::{EditorState, PluginContext, PluginInputs, PluginOutputs};
 use ral_core::text::byte_to_char;
 
 /// Outcome of running a plugin keybinding handler.
@@ -58,17 +56,9 @@ pub(super) fn dispatch_keybinding(
     let resolved = {
         let rt = lock(runtime);
         rt.resolve_keybinding(&pk.plugin, pk.binding_idx)
-            .map(|(idx, key_str, handler)| {
-                (
-                    idx,
-                    key_str,
-                    rt.plugins[idx].state_cell.clone(),
-                    rt.plugins[idx].source.clone(),
-                    handler,
-                )
-            })
+            .map(|(idx, key_str)| (idx, key_str, rt.plugins[idx].state_cell.clone()))
     };
-    let Some((idx, key_str, state_cell, _source, _handler)) = resolved else {
+    let Some((idx, key_str, state_cell)) = resolved else {
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
 
@@ -78,24 +68,20 @@ pub(super) fn dispatch_keybinding(
     // plugin surface (which speaks chars throughout).
     let cursor_chars = byte_to_char(current, pk.cursor_byte);
 
+    // Snapshot history once, reused for the context and the args map.
+    let history = lock(runtime).hooks.history.clone();
+
     // Load the plugin's persistent cell into the context and save any
     // mutation back afterwards, mirroring `run_buffer_change_hooks`; a
     // keybinding handler's `_ed-state` must survive between keypresses.
-    let state_loaded = state_cell.is_some();
-    let ctx_in = PluginContext {
-        editor_state: EditorState {
-            text: current.to_string(),
-            cursor: cursor_chars,
-            keymap: keymap_name(keymap).into(),
-        },
-        inputs: PluginInputs {
-            history_entries: lock(runtime).hooks.history.clone(),
-            in_readline: false,
-        },
-        outputs: PluginOutputs::default(),
-        state_cell: state_cell.clone(),
-        state_default_used: state_loaded,
-    };
+    let ctx_in = PluginRuntime::build_plugin_context(
+        current.to_string(),
+        cursor_chars,
+        keymap_name(keymap).into(),
+        history.clone(),
+        false,
+        state_cell.clone(),
+    );
 
     #[allow(
         clippy::cast_possible_wrap,
@@ -111,15 +97,7 @@ pub(super) fn dispatch_keybinding(
             ("cursor".into(), Value::Int(cursor)),
             (
                 "history".into(),
-                Value::List(
-                    lock(runtime)
-                        .hooks
-                        .history
-                        .iter()
-                        .cloned()
-                        .map(Value::String)
-                        .collect(),
-                ),
+                Value::List(history.into_iter().map(Value::String).collect()),
             ),
             (
                 "keymap".into(),
@@ -131,7 +109,6 @@ pub(super) fn dispatch_keybinding(
         HookFraming::Framed(FramedHook {
             terminal: RequestedTerminalAccess::Leased,
             kind: "keybinding",
-            caps: Capabilities::root(),
             budget: None,
         }),
     );
@@ -147,12 +124,7 @@ pub(super) fn dispatch_keybinding(
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
 
-    {
-        let mut rt = lock(runtime);
-        if let Some(p) = rt.plugins.get_mut(idx) {
-            p.state_cell.clone_from(&ctx.state_cell);
-        }
-    }
+    lock(runtime).write_back_state_cell(idx, ctx.state_cell.as_ref());
 
     if let Some((text, cursor)) = ctx.outputs.pushed_buffer {
         lock(runtime)
@@ -175,9 +147,8 @@ mod tests {
     use ral_core::Value;
     use std::collections::HashMap;
 
-    /// A plugin record carrying one keybinding whose handler is the given
-    /// marker value, so resolution can be checked by identity of the
-    /// handler it returns.
+    /// A plugin record carrying one keybinding under `key`, so resolution
+    /// can be checked by the `(idx, key)` it yields.
     fn plugin(name: &str, key: &str, handler: Value) -> LoadedPlugin {
         LoadedPlugin {
             name: name.to_string(),
@@ -200,21 +171,15 @@ mod tests {
         rt.plugins.push(plugin("a", "ctrl-t", Value::Int(1)));
         rt.plugins.push(plugin("b", "ctrl-r", Value::Int(2)));
 
-        // Before unload, "a"'s binding resolves to slot 0 with handler 1.
-        assert_eq!(
-            rt.resolve_keybinding("a", 0),
-            Some((0, "ctrl-t".into(), Value::Int(1)))
-        );
+        // Before unload, "a"'s binding resolves to slot 0.
+        assert_eq!(rt.resolve_keybinding("a", 0), Some((0, "ctrl-t".into())));
 
         // `unload_plugin` removes "a"; "b" shifts down to slot 0 — the
         // exact compaction that the old index-keyed dispatch mishandled.
         rt.plugins.remove(0);
 
         // The stale "a" binding now misses; it must NOT pick up "b"'s
-        assert_eq!(
-            rt.resolve_keybinding("b", 0),
-            Some((0, "ctrl-r".into(), Value::Int(2)))
-        );
+        assert_eq!(rt.resolve_keybinding("b", 0), Some((0, "ctrl-r".into())));
         assert_eq!(rt.resolve_keybinding("a", 0), None);
     }
 
