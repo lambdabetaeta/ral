@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::repl::completion::Candidate;
-use crate::repl::plugin_editor::char_to_byte;
+use ral_core::text::char_to_byte;
 
 use super::{MENU_MAX_ROWS, NAME_HUE, SLATE};
 

@@ -17,7 +17,7 @@ use super::super::plugin::{
     HookEnvGuard, PluginRuntime, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
     snapshot_history, sync_plugins,
 };
-use super::super::plugin_editor::char_to_byte;
+use ral_core::text::char_to_byte;
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, Read};
 

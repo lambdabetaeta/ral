@@ -58,7 +58,8 @@ use crate::repl::plugin::{
     HookEnvGuard, KeyChord, KeyName, Keymap, PendingKeybinding, PluginRuntime,
     flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env, run_buffer_change_hooks,
 };
-use crate::repl::plugin_editor::{HighlightSpan, char_to_byte};
+use crate::repl::plugin_editor::HighlightSpan;
+use ral_core::text::char_to_byte;
 use crate::repl::worksheet::Worksheet;
 
 mod menu;

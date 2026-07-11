@@ -38,9 +38,50 @@ pub fn byte_to_char(source: &str, byte_offset: usize) -> usize {
         .count()
 }
 
+/// Convert a character offset to a byte offset — the inverse of
+/// [`byte_to_char`].
+///
+/// A `cursor` value at or past the character count returns `text.len()`, so
+/// the result is always a valid slice boundary.
+pub fn char_to_byte(text: &str, cursor: usize) -> usize {
+    text.char_indices()
+        .nth(cursor)
+        .map_or(text.len(), |(i, _)| i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn char_byte_round_trip_ascii() {
+        let s = "hello";
+        for n in 0..=s.chars().count() {
+            assert_eq!(byte_to_char(s, char_to_byte(s, n)), n);
+        }
+    }
+
+    #[test]
+    fn char_byte_round_trip_unicode() {
+        let s = "héllo🦀world";
+        let nchars = s.chars().count();
+        for n in 0..=nchars {
+            assert_eq!(byte_to_char(s, char_to_byte(s, n)), n);
+        }
+    }
+
+    #[test]
+    fn char_to_byte_past_end_clamps() {
+        let s = "héllo";
+        assert_eq!(char_to_byte(s, 9999), s.len());
+    }
+
+    #[test]
+    fn char_to_byte_at_text_len() {
+        let s = "héllo";
+        let nchars = s.chars().count();
+        assert_eq!(char_to_byte(s, nchars), s.len());
+    }
 
     #[test]
     fn floor_snaps_back_into_a_codepoint() {

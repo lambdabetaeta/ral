@@ -26,8 +26,8 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
 use super::complete::style_ansi;
-use super::plugin_editor::{HighlightSpan, PluginContext, Span, char_to_byte};
-use ral_core::text::byte_to_char;
+use super::plugin_editor::{HighlightSpan, PluginContext, Span};
+use ral_core::text::{byte_to_char, char_to_byte};
 
 fn ctx(shell: &Shell) -> Settled<&PluginContext> {
     shell

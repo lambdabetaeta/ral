@@ -21,7 +21,7 @@
 //! [`PluginOutputs::pushed_buffer`] — is a **character** offset into the
 //! buffer text, not a byte offset.  rustyline's own API uses byte offsets;
 //! the REPL frontend converts at the boundary so plugin code never has to
-//! think about UTF-8.  Use [`char_to_byte`] and
+//! think about UTF-8.  Use [`ral_core::text::char_to_byte`] and
 //! [`ral_core::text::byte_to_char`] for the conversion.
 
 use ral_core::Value;
@@ -89,15 +89,6 @@ pub struct HighlightSpan {
     pub style: std::string::String,
 }
 
-/// Convert a character offset into the byte offset of the same position
-/// in `text`.  A `cursor` value at or past the character count returns
-/// `text.len()`, so the result is always a valid slice boundary.
-pub fn char_to_byte(text: &str, cursor: usize) -> usize {
-    text.char_indices()
-        .nth(cursor)
-        .map_or(text.len(), |(i, _)| i)
-}
-
 /// Execution context for `_editor` and `_plugin` builtins.
 ///
 /// Read-only information the runtime supplies before a plugin handler runs.
@@ -146,40 +137,4 @@ pub struct PluginContext {
     /// Per-plugin scratch cell exposed via `_ed-state`.
     pub state_cell: Option<Value>,
     pub state_default_used: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ral_core::text::byte_to_char;
-
-    #[test]
-    fn char_byte_round_trip_ascii() {
-        let s = "hello";
-        for n in 0..=s.chars().count() {
-            assert_eq!(byte_to_char(s, char_to_byte(s, n)), n);
-        }
-    }
-
-    #[test]
-    fn char_byte_round_trip_unicode() {
-        let s = "héllo🦀world";
-        let nchars = s.chars().count();
-        for n in 0..=nchars {
-            assert_eq!(byte_to_char(s, char_to_byte(s, n)), n);
-        }
-    }
-
-    #[test]
-    fn char_to_byte_past_end_clamps() {
-        let s = "héllo";
-        assert_eq!(char_to_byte(s, 9999), s.len());
-    }
-
-    #[test]
-    fn char_to_byte_at_text_len() {
-        let s = "héllo";
-        let nchars = s.chars().count();
-        assert_eq!(char_to_byte(s, nchars), s.len());
-    }
 }
