@@ -13,11 +13,8 @@ mod jobs;
 mod platform;
 mod repl;
 
-pub(crate) use batch::apply_session_capabilities;
 use batch::run_batch;
-pub(crate) use cli::InteractiveOpts;
-use cli::{BatchOpts, Cli, Mode, inject_arg_terminator};
-pub(crate) use platform::{load_exit_hints, probe_terminal};
+use cli::{BatchOpts, Cli, InteractiveOpts, Mode, inject_arg_terminator};
 
 /// The prelude baked into this binary at build time by `build.rs`.
 pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();

@@ -68,13 +68,13 @@ impl Session {
     /// failure or an escape raised while a capabilities profile evaluates.
     /// Profile/rc errors and escapes are reported and tolerated — a broken
     /// rc must not strand the user, so `source_config_inner` swallows them.
-    pub(super) fn boot(is_login: bool, opts: &crate::InteractiveOpts) -> Result<Self, ExitCode> {
+    pub(super) fn boot(is_login: bool, opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
         boot::setup_signals();
-        let (interactive_mode, terminal) = crate::probe_terminal(true);
+        let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         ral_core::dbg_trace!("repl", "before register");
         let mut shell = ral_core::driver::boot_shell(terminal, &crate::PRELUDE);
         ral_core::dbg_trace!("repl", "after register");
-        shell.set_exit_hints(crate::load_exit_hints());
+        shell.set_exit_hints(crate::platform::load_exit_hints());
         boot::setup_panic_hook();
 
         // Login shell: set umask and source system/user profiles.
@@ -112,7 +112,7 @@ impl Session {
         }
         // `--capabilities` applies after rc files: rc is operator-trusted
         // session bootstrap, the user-supplied ceiling narrows from there.
-        crate::apply_session_capabilities(&mut shell, &opts.run.capabilities)?;
+        crate::platform::apply_session_capabilities(&mut shell, &opts.run.capabilities)?;
 
         // Install the default prompt only when rc files did not
         // register one already (e.g. via the `prompt` key in ralrc).

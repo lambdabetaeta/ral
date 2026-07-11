@@ -69,7 +69,7 @@ pub(crate) fn register_host_surface() {
 /// Boots a [`Session`] (signals, terminal, builtins, profiles, capabilities,
 /// frontend) and drives its loop to completion.  Returns the exit code
 /// to hand back to the OS.
-pub(crate) fn run_interactive(is_login: bool, opts: &super::InteractiveOpts) -> ExitCode {
+pub(crate) fn run_interactive(is_login: bool, opts: &crate::cli::InteractiveOpts) -> ExitCode {
     match Session::boot(is_login, opts) {
         Ok(session) => session.run(),
         Err(code) => code,

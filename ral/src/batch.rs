@@ -3,14 +3,15 @@
 use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Escape, Settled};
 use ral_core::{
-    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, diagnostic,
+    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, diagnostic,
     elaborator::elaborate, syntax::parser::parse,
 };
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::PRELUDE;
 use crate::cli::{BatchOpts, RunOpts};
-use crate::{PRELUDE, load_exit_hints, probe_terminal};
+use crate::platform::{apply_session_capabilities, load_exit_hints, probe_terminal};
 
 /// Serialise the execution tree root to JSON and emit it on stderr.
 fn emit_audit_tree(
@@ -56,37 +57,6 @@ fn emit_audit_tree(
         serde_json::to_string(&json_val).unwrap_or_default()
     };
     eprintln!("{json_str}");
-}
-
-/// Apply the `--capabilities` profiles as a session-wide ceiling, mapping the
-/// outcome to a process exit.
-///
-/// The composition mechanism (load, `meet`-fold, freeze, push) lives in
-/// [`ral_core::capability::apply_session_profiles`]. A load failure is
-/// attributed to the flag that supplied the profiles and yields exit 2; an
-/// escape raised while a profile evaluates (`exit`, a stopped child) propagates
-/// to the same process exit it would from any other script.
-pub(crate) fn apply_session_capabilities(
-    shell: &mut Shell,
-    paths: &[std::path::PathBuf],
-) -> Result<(), ExitCode> {
-    match ral_core::capability::apply_session_profiles(shell, paths) {
-        Ok(()) => Ok(()),
-        Err(Break::Error(e)) => {
-            diagnostic::cmd_error("ral", &format!("--capabilities: {}", e.message));
-            Err(ExitCode::from(2))
-        }
-        Err(Break::Escape(Escape::Exit(code))) => {
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "clamped to 0..=255, a byte exit status"
-            )]
-            let byte = code.clamp(0, 255) as u8;
-            Err(ExitCode::from(byte))
-        }
-        #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { .. })) => Err(ExitCode::from(1)),
-    }
 }
 
 /// Execute `source` non-interactively (script or `-c` mode).
