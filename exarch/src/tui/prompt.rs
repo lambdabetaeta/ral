@@ -30,7 +30,7 @@ impl PromptState {
         }
     }
 
-    pub fn submit(&mut self) -> Option<String> {
+    pub(super) fn submit(&mut self) -> Option<String> {
         let prompt = self.editor.text();
         if prompt.is_empty() {
             return None;
@@ -57,7 +57,7 @@ impl PromptState {
         true
     }
 
-    pub fn paste(&mut self, s: &str) {
+    pub(super) fn paste(&mut self, s: &str) {
         self.cx_pending = false;
         self.editor.insert_str(s);
     }
@@ -97,8 +97,8 @@ impl PromptState {
         self.editor_request = true;
     }
 
-    /// The prompt'\''s current contents, lines newline-joined.
-    pub fn prompt_text(&self) -> String {
+    /// The prompt's current contents, lines newline-joined.
+    pub(super) fn prompt_text(&self) -> String {
         self.editor.text()
     }
 
@@ -118,7 +118,7 @@ impl PromptState {
         self.editor.set_base_style(style);
     }
 
-    /// Replace the prompt'\''s contents, leaving the cursor at the end.
+    /// Replace the prompt's contents, leaving the cursor at the end.
     pub(super) fn set_prompt(&mut self, s: &str) {
         self.editor.clear();
         self.editor.insert_str(s);

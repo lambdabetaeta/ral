@@ -15,6 +15,7 @@ use crossterm::{
 };
 
 use ratatui::{
+    crossterm::event::MouseEvent,
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -56,6 +57,17 @@ pub(super) struct FrameGeom {
     pub(super) text: Rect,
     /// First visible buffer row, mapping screen rows to buffer rows.
     pub(super) offset: usize,
+}
+impl FrameGeom {
+    /// Map a mouse event's screen cell to buffer `(row, col)` — the scrolled
+    /// buffer row and the cell column within the text area (0 = left edge) —
+    /// or `None` when the event lands outside the content area.
+    pub(super) fn buffer_coords(&self, me: MouseEvent) -> Option<(usize, u16)> {
+        contains(self.text, me.column, me.row).then(|| {
+            let row = self.offset + (me.row - self.text.y) as usize;
+            (row, me.column - self.text.x)
+        })
+    }
 }
 /// Whether the cell `(col, row)` lies inside `rect`.
 pub(super) fn contains(rect: Rect, col: u16, row: u16) -> bool {

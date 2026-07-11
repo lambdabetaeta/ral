@@ -1,17 +1,17 @@
 //! Full-screen TUI frontend.
 //!
-//! One [`Sink`] implementation, plus the REPL loop the user types into.
-//! The TUI owns raw-mode, bracketed-paste, the alternate screen, and
-//! mouse capture through [`TerminalGuard`]; the agent core in
-//! [`crate::bus`] and [`crate::agent`] sees only an
-//! [`crate::bus::Emitter`] / [`Event`] channel.
+//! One [`crate::bus::Sink`] implementation, plus the REPL loop the user
+//! types into.  The TUI owns raw-mode, bracketed-paste, the alternate
+//! screen, and mouse capture through [`terminal::TerminalGuard`]; the agent
+//! core in [`crate::bus`] and [`crate::agent`] sees only a
+//! [`crate::bus::Emitter`] channel.
 //!
 //! The app owns its scrollback rather than delegating it to the host
 //! terminal: each session is a buffer of collapsible [`block`]s and the
 //! whole frame is redrawn every tick.  A tool call shows its summary and
 //! opens to the full ral script on a click; the wheel scrolls, click-drag
-//! selects and copies, and Shift-drag falls through to the terminal'\''s own
-//! selection.  Assistant text accumulates into the active [`Viewport`]'\''s
+//! selects and copies, and Shift-drag falls through to the terminal's own
+//! selection.  Assistant text accumulates into the active [`viewport::Viewport`]'s
 //! paragraph buffer and commits one fence-safe paragraph at a time — no
 //! live preview row.
 mod app;

@@ -6,7 +6,6 @@
 //! parameter — `GestureState` is a pure data+policy bundle.
 
 use super::render::FrameGeom;
-use super::render::contains;
 use super::terminal::osc52_copy;
 use super::viewport::Viewport;
 use crate::bus::AgentId;
@@ -79,15 +78,10 @@ impl GestureState {
         viewports: &HashMap<AgentId, Viewport>,
         focused: AgentId,
     ) -> Option<usize> {
-        let frame = self.frame?;
-        if !contains(frame.text, me.column, me.row) {
-            return None;
-        }
-        let row = frame.offset + (me.row - frame.text.y) as usize;
+        let (row, col) = self.frame?.buffer_coords(me)?;
         let vp = viewports.get(&focused)?;
         let idx = vp.block_at(row)?;
-        let col = (me.column - frame.text.x) as usize;
-        (vp.block_dialable(idx) && col < vp.row_width(row)?).then_some(idx)
+        (vp.block_dialable(idx) && (col as usize) < vp.row_width(row)?).then_some(idx)
     }
 
     /// The dialable block the pointer currently rests over, if any.
@@ -100,29 +94,21 @@ impl GestureState {
         self.hover = idx;
     }
 
-    /// Begin a left-button gesture: drop any prior selection, anchor at
-    /// the pressed row and column, and remember the block under it.
-    pub(super) fn press(
-        &mut self,
-        me: MouseEvent,
-        viewports: &HashMap<AgentId, Viewport>,
-        focused: AgentId,
-    ) {
+    /// Begin a left-button gesture: drop any prior selection, anchor at the
+    /// pressed row and column, and remember the block under it.  The cycle
+    /// target is the current hover block, computed for this same event by
+    /// [`super::App::mouse`] before dispatch, so a click in the dead margin
+    /// (no hover block) clears selection rather than cycling.
+    pub(super) fn press(&mut self, me: MouseEvent) {
         self.selection = None;
         self.press = None;
-        let Some(frame) = self.frame else { return };
-        if !contains(frame.text, me.column, me.row) {
+        let Some((row, col)) = self.frame.and_then(|f| f.buffer_coords(me)) else {
             return;
-        }
-        let row = frame.offset + (me.row - frame.text.y) as usize;
-        let col = me.column.saturating_sub(frame.text.x);
-        // The cycle target hugs the text exactly as the hover and wheel do,
-        // so a click in the dead margin clears selection rather than cycling.
-        let block = self.hover_block(me, viewports, focused);
+        };
         self.press = Some(Press {
             row,
             col,
-            block,
+            block: self.hover,
             dragged: false,
         });
     }
@@ -147,7 +133,7 @@ impl GestureState {
 
     /// Finish a left-button gesture: a drag copies its selection, a bare
     /// click over a dialable block cycles it (L1↔L3); a bare click over
-    /// inert content stays selection (a no-op clear).
+    /// inert content leaves the (already-cleared) selection empty.
     pub(super) fn release(&mut self, viewports: &mut HashMap<AgentId, Viewport>, focused: AgentId) {
         let Some(press) = self.press.take() else {
             return;

@@ -231,29 +231,17 @@ const SHADOW_DEPTH: u16 = 2;
 const SHADOW_FG: Color = Color::Rgb(14, 16, 22);
 
 /// The temperature gradient endpoints (cold blue → warm red) and the effort
-/// value-ramp endpoints (dim → bright cyan), as raw RGB for interpolation.
-const COLD: (u8, u8, u8) = (96, 160, 235);
-const WARM: (u8, u8, u8) = (228, 116, 96);
-const EFFORT_DIM: (u8, u8, u8) = (74, 86, 110);
-const EFFORT_BRIGHT: (u8, u8, u8) = (150, 205, 220);
+/// value-ramp endpoints (dim → bright cyan), interpolated by [`super::rail::mix`].
+const COLD: Color = Color::Rgb(96, 160, 235);
+const WARM: Color = Color::Rgb(228, 116, 96);
+const EFFORT_DIM: Color = Color::Rgb(74, 86, 110);
+const EFFORT_BRIGHT: Color = Color::Rgb(150, 205, 220);
 
 /// The top-p track's single hue — top-p is nucleus *mass*, not a temperature,
 /// so it carries no gradient; one constant colour across the track, the fill
 /// (size) alone encoding the value. A muted green, kept distinct from the
 /// effort ramp's cyan and the temperature track's blue→red.
 const NUCLEUS: Color = Color::Rgb(140, 196, 150);
-
-/// Linear RGB interpolation between two colours at `t ∈ [0, 1]`.
-fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "t in [0,1] keeps mix in [0,255]; cast saturates regardless"
-    )]
-    #[allow(clippy::suboptimal_flops, reason="u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula")]
-    let mix = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
-    Color::Rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
-}
 
 /// Snap `t` to `places` decimal places — keeps repeated `±step` additions from
 /// drifting into float noise like `0.30000000000000004`.
@@ -457,7 +445,7 @@ impl Picker {
         if self.focus != Focus::Provider {
             return None;
         }
-        let model = self.highlighted_or_model()?;
+        let model = self.highlighted_or_model(&self.rows())?;
         (!self.endpoints.contains_key(&model)).then_some(model)
     }
 
@@ -469,20 +457,21 @@ impl Picker {
     }
 
     /// The model on the highlighted row, if it is a listed model (the manual
-    /// row and a still-empty list have no model to gate against).
-    fn highlighted_model(&self) -> Option<String> {
-        match self.rows().into_iter().nth(self.selected) {
-            Some(Row::Model(_, model)) => Some(model),
+    /// row and a still-empty list have no model to gate against). Reads the
+    /// row slice the caller already computed for this frame or key.
+    fn highlighted_model(&self, rows: &[Row]) -> Option<String> {
+        match rows.get(self.selected) {
+            Some(Row::Model(_, model)) => Some(model.clone()),
             _ => None,
         }
     }
 
     /// The highlighted model iff it is served through `OpenRouter` — the only
     /// provider that routes, so the only one the provider control applies to.
-    fn highlighted_or_model(&self) -> Option<String> {
-        match self.rows().into_iter().nth(self.selected) {
+    fn highlighted_or_model(&self, rows: &[Row]) -> Option<String> {
+        match rows.get(self.selected) {
             Some(Row::Model(id, model)) if id.famous() == Some(ProviderKind::Openrouter) => {
-                Some(model)
+                Some(model.clone())
             }
             _ => None,
         }
@@ -491,8 +480,8 @@ impl Picker {
     /// The routing slugs the highlighted `OpenRouter` model's loaded endpoints
     /// offer, in listed order — the options the provider control cycles after
     /// `auto`. Empty while loading/failed/unfetched or for a non-OpenRouter row.
-    fn endpoint_slugs(&self) -> Vec<String> {
-        let Some(model) = self.highlighted_or_model() else {
+    fn endpoint_slugs(&self, rows: &[Row]) -> Vec<String> {
+        let Some(model) = self.highlighted_or_model(rows) else {
             return Vec::new();
         };
         match self.endpoints.get(&model) {
@@ -506,9 +495,9 @@ impl Picker {
     /// The route slug in force *for the highlighted model* — `Some` only when a
     /// route was chosen and that same model is still highlighted, so the choice
     /// can never leak onto a different model. `None` is "auto".
-    fn active_route(&self) -> Option<&str> {
+    fn active_route(&self, rows: &[Row]) -> Option<&str> {
         let route = self.route.as_ref()?;
-        (self.highlighted_or_model().as_deref() == Some(route.model.as_str()))
+        (self.highlighted_or_model(rows).as_deref() == Some(route.model.as_str()))
             .then_some(route.slug.as_str())
     }
 
@@ -517,8 +506,8 @@ impl Picker {
     /// row, or a still-loading list — read as supported, so the controls are
     /// only ever grayed when the catalog *positively* says the parameter is
     /// absent.
-    fn supports(&self, param: &str) -> bool {
-        match self.highlighted_model() {
+    fn supports(&self, rows: &[Row], param: &str) -> bool {
+        match self.highlighted_model(rows) {
             Some(model) => (self.caps)(&model).supports(param),
             None => true,
         }
@@ -529,17 +518,17 @@ impl Picker {
     /// its catalog `supported_parameters`) is masked to `None` so it is neither
     /// sent nor persisted, while the picker keeps the user's setting for the
     /// next model that does admit it.
-    fn tuning(&self) -> Tuning {
+    fn tuning(&self, rows: &[Row]) -> Tuning {
         Tuning {
             effort: self
-                .supports("reasoning")
+                .supports(rows, "reasoning")
                 .then(|| LADDER[self.effort_idx].effort.clone())
                 .flatten(),
             temperature: self
-                .supports("temperature")
+                .supports(rows, "temperature")
                 .then_some(self.temperature)
                 .flatten(),
-            top_p: self.supports("top_p").then_some(self.top_p).flatten(),
+            top_p: self.supports(rows, "top_p").then_some(self.top_p).flatten(),
         }
     }
 
@@ -550,9 +539,18 @@ impl Picker {
         use ratatui::crossterm::event::KeyCode;
         match code {
             KeyCode::Esc => return PickAction::Cancelled,
-            KeyCode::Enter => return self.apply(),
-            KeyCode::Tab => self.focus = self.cycle(true),
-            KeyCode::BackTab => self.focus = self.cycle(false),
+            KeyCode::Enter => {
+                let rows = self.rows();
+                return self.apply(&rows);
+            }
+            KeyCode::Tab => {
+                let rows = self.rows();
+                self.focus = self.cycle(&rows, true);
+            }
+            KeyCode::BackTab => {
+                let rows = self.rows();
+                self.focus = self.cycle(&rows, false);
+            }
             // Typing always means "filter models", whatever field had focus.
             // The chosen route self-gates on the highlighted model (see
             // [`Self::active_route`]), so a query that moves the highlight off
@@ -567,8 +565,14 @@ impl Picker {
                 self.query.pop();
                 self.selected = 0;
             }
-            KeyCode::Up | KeyCode::Left => self.move_in_focus(false),
-            KeyCode::Down | KeyCode::Right => self.move_in_focus(true),
+            KeyCode::Up | KeyCode::Left => {
+                let rows = self.rows();
+                self.move_in_focus(&rows, false);
+            }
+            KeyCode::Down | KeyCode::Right => {
+                let rows = self.rows();
+                self.move_in_focus(&rows, true);
+            }
             _ => {}
         }
         PickAction::None
@@ -576,11 +580,15 @@ impl Picker {
 
     /// Resolve the highlighted row into a selection carrying the live tuning and
     /// the route in force for that model.
-    fn apply(&self) -> PickAction {
-        let route = self.active_route().map(str::to_string);
-        match self.rows().into_iter().nth(self.selected) {
-            Some(Row::Model(id, model)) => PickAction::Selected(id, model, self.tuning(), route),
-            Some(Row::Manual(query)) => PickAction::Manual(query, self.tuning(), route),
+    fn apply(&self, rows: &[Row]) -> PickAction {
+        let route = self.active_route(rows).map(str::to_string);
+        match rows.get(self.selected) {
+            Some(Row::Model(id, model)) => {
+                PickAction::Selected(id.clone(), model.clone(), self.tuning(rows), route)
+            }
+            Some(Row::Manual(query)) => {
+                PickAction::Manual(query.clone(), self.tuning(rows), route)
+            }
             None => PickAction::None,
         }
     }
@@ -589,8 +597,8 @@ impl Picker {
     /// (`Search → Provider → Effort → Temperature → TopP → …`). The provider
     /// control joins the cycle only when an `OpenRouter` model is highlighted —
     /// the only model the route applies to; for any other model it is skipped.
-    fn cycle(&self, forward: bool) -> Focus {
-        let has_provider = self.highlighted_or_model().is_some();
+    fn cycle(&self, rows: &[Row], forward: bool) -> Focus {
+        let has_provider = self.highlighted_or_model(rows).is_some();
         let order: &[Focus] = if has_provider {
             &[
                 Focus::Search,
@@ -619,11 +627,11 @@ impl Picker {
     /// Move the focused control: in Search the model selection, in Effort the
     /// rung, in Temperature the value. `up` is the increasing direction (down
     /// the list, up the ladder, warmer).
-    fn move_in_focus(&mut self, up: bool) {
+    fn move_in_focus(&mut self, rows: &[Row], up: bool) {
         match self.focus {
             Focus::Search => {
                 if up {
-                    let n = self.rows().len();
+                    let n = rows.len();
                     if n > 0 {
                         self.selected = (self.selected + 1).min(n - 1);
                     }
@@ -636,16 +644,16 @@ impl Picker {
                 // `auto → slug₀ → slug₁ → …`, clamping at the ends. This is a
                 // routing choice for *that* model, so it deliberately leaves the
                 // selection untouched — the highlighted model never moves.
-                let Some(model) = self.highlighted_or_model() else {
+                let Some(model) = self.highlighted_or_model(rows) else {
                     return;
                 };
-                let slugs = self.endpoint_slugs();
+                let slugs = self.endpoint_slugs(rows);
                 if slugs.is_empty() {
                     return; // loading / failed / none — nothing to cycle yet
                 }
                 // Index 0 is "auto"; index i+1 is slugs[i].
                 let pos = self
-                    .active_route()
+                    .active_route(rows)
                     .and_then(|s| slugs.iter().position(|x| x == s))
                     .map_or(0, |i| i + 1);
                 let next = if up {
@@ -659,7 +667,7 @@ impl Picker {
                 });
             }
             Focus::Effort => {
-                if !self.supports("reasoning") {
+                if !self.supports(rows, "reasoning") {
                     return;
                 }
                 self.effort_idx = if up {
@@ -669,14 +677,14 @@ impl Picker {
                 };
             }
             Focus::Temperature => {
-                if !self.supports("temperature") {
+                if !self.supports(rows, "temperature") {
                     return;
                 }
                 self.temperature =
                     step_knob(self.temperature, up, TEMP_STEP, TEMP_MAX, TEMP_PLACES);
             }
             Focus::TopP => {
-                if !self.supports("top_p") {
+                if !self.supports(rows, "top_p") {
                     return;
                 }
                 self.top_p = step_knob(self.top_p, up, TOP_P_STEP, TOP_P_MAX, TOP_P_PLACES);
@@ -771,7 +779,8 @@ impl Picker {
 
     /// The overlay's outer size: the fixed width (clamped to the frame) and a
     /// height that fits the search line, status line, bordered model list, the
-    /// three tuning rows, one note per failed provider, and the bezel.
+    /// always-reserved serving-provider row, the three tuning rows, one note
+    /// per failed provider, and the bezel.
     fn desired_size(&self, frame: Rect) -> (u16, u16) {
         #[allow(
             clippy::cast_possible_truncation,
@@ -789,12 +798,15 @@ impl Picker {
 
     /// Draw the floating overlay over the centre of `frame`: a double-line
     /// bezel (the "above the session" affordance) holding the search box, the
-    /// fuzzy model list, the effort ramp, the temperature and top-p tracks, and
-    /// the function-key footer on the bottom border.
+    /// fuzzy model list, the always-reserved serving-provider row, the effort
+    /// ramp, the temperature and top-p tracks, and the function-key footer on
+    /// the bottom border. The filtered row slice is computed once here and
+    /// threaded through the row-reading helpers.
     pub fn render(&self, f: &mut Frame, frame: Rect) {
         let (w, h) = self.desired_size(frame);
         let area = centered(w, h, frame);
         let plane = Style::default().bg(OVERLAY_BG);
+        let rows = self.rows();
 
         // Cast the drop shadow first (down-right of the box), then blank the
         // cells beneath the box itself and paint the bezel over them.
@@ -840,29 +852,29 @@ impl Picker {
         let mut ci = 0; // chunk index
         f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[ci]);
         ci += 1;
-        f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[ci]);
+        f.render_widget(Paragraph::new(self.status_line(&rows)).style(plane), chunks[ci]);
         ci += 1;
-        self.render_list(f, chunks[ci], plane);
+        self.render_list(f, &rows, chunks[ci], plane);
         ci += 1;
         // Always render the provider row (inert "OpenRouter routing only" for a
         // non-OpenRouter model), so the overlay's height stays stable.
         f.render_widget(
-            Paragraph::new(self.provider_line(chunks[ci].width)).style(plane),
+            Paragraph::new(self.provider_line(&rows, chunks[ci].width)).style(plane),
             chunks[ci],
         );
         ci += 1;
         f.render_widget(
-            Paragraph::new(self.effort_line(self.supports("reasoning"))).style(plane),
+            Paragraph::new(self.effort_line(self.supports(&rows, "reasoning"))).style(plane),
             chunks[ci],
         );
         ci += 1;
         f.render_widget(
-            Paragraph::new(self.temp_line(self.supports("temperature"))).style(plane),
+            Paragraph::new(self.temp_line(self.supports(&rows, "temperature"))).style(plane),
             chunks[ci],
         );
         ci += 1;
         f.render_widget(
-            Paragraph::new(self.top_p_line(self.supports("top_p"))).style(plane),
+            Paragraph::new(self.top_p_line(self.supports(&rows, "top_p"))).style(plane),
             chunks[ci],
         );
         ci += 1;
@@ -898,8 +910,8 @@ impl Picker {
         ])
     }
 
-    fn status_line(&self) -> Line<'static> {
-        let n = self.rows().len();
+    fn status_line(&self, rows: &[Row]) -> Line<'static> {
+        let n = rows.len();
         let text = if self.is_loading() {
             "loading…".to_string()
         } else {
@@ -914,7 +926,7 @@ impl Picker {
     /// The model list inside its own rounded panel (a panel-within-the-bezel,
     /// Norton-Commander style). The selected row is reversed; the panel border
     /// brightens when the search field has focus.
-    fn render_list(&self, f: &mut Frame, area: Rect, plane: Style) {
+    fn render_list(&self, f: &mut Frame, rows: &[Row], area: Rect, plane: Style) {
         let focused = self.focus == Focus::Search;
         let border = if focused {
             Style::default().fg(CYAN)
@@ -929,7 +941,6 @@ impl Picker {
         let list_area = block.inner(area);
         f.render_widget(block, area);
 
-        let rows = self.rows();
         let window = list_area.height as usize;
         // Scroll so the selected row stays visible.
         let start = self.selected.saturating_sub(window.saturating_sub(1));
@@ -977,7 +988,7 @@ impl Picker {
     /// * loaded → an `auto` tag plus one hue-coded tag per serving provider,
     ///   each annotated with its context window and quantization (nominal data
     ///   earns hue, the magnitudes printed as values), the active one reversed.
-    fn provider_line(&self, width: u16) -> Line<'static> {
+    fn provider_line(&self, rows: &[Row], width: u16) -> Line<'static> {
         let focused = self.focus == Focus::Provider;
         let label = self.field_label("provider", Focus::Provider);
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
@@ -997,7 +1008,7 @@ impl Picker {
             }
         };
 
-        let Some(model) = self.highlighted_or_model() else {
+        let Some(model) = self.highlighted_or_model(rows) else {
             return Line::from(vec![
                 label,
                 Span::styled(
@@ -1038,7 +1049,7 @@ impl Picker {
         ];
         // Index 0 is `auto`; index i+1 is `endpoints[i]`.
         let active = self
-            .active_route()
+            .active_route(rows)
             .and_then(|slug| endpoints.iter().position(|e| e.slug == slug))
             .map_or(0, |i| i + 1);
 
@@ -1097,14 +1108,14 @@ impl Picker {
         }
         let focused = self.focus == Focus::Effort;
         #[allow(clippy::cast_precision_loss, reason = "const slice length")]
-        let last = LADDER.len().saturating_sub(1).max(1) as f64;
+        let last = LADDER.len().saturating_sub(1).max(1) as f32;
         let mut spans = vec![self.field_label("effort", Focus::Effort)];
         for (i, rung) in LADDER.iter().enumerate() {
             #[allow(
                 clippy::cast_precision_loss,
                 reason = "enumerate index over a small const-length slice"
             )]
-            let value = lerp(EFFORT_DIM, EFFORT_BRIGHT, i as f64 / last);
+            let value = super::rail::mix(EFFORT_DIM, EFFORT_BRIGHT, i as f32 / last);
             let mut style = Style::default().fg(value);
             if !focused {
                 style = style.add_modifier(Modifier::DIM);
@@ -1180,12 +1191,12 @@ impl Picker {
             return Self::unsupported_row("temp");
         }
         #[allow(clippy::cast_precision_loss, reason = "const track width")]
-        let last = (TRACK_W - 1).max(1) as f64;
+        let last = (TRACK_W - 1).max(1) as f32;
         #[allow(
             clippy::cast_precision_loss,
             reason = "enumerate index over a small const-length range"
         )]
-        let hue = |i: usize| lerp(COLD, WARM, i as f64 / last);
+        let hue = |i: usize| super::rail::mix(COLD, WARM, i as f32 / last);
         self.track_line(
             "temp",
             Focus::Temperature,
@@ -1659,7 +1670,7 @@ mod tests {
         p.key(KeyCode::Tab); // Temperature
         p.key(KeyCode::Right); // auto → 0.0
         p.key(KeyCode::Right); // 0.0 → 0.1
-        let live = p.tuning();
+        let live = p.tuning(&p.rows());
         assert_eq!(live.effort.as_ref().map(ReasoningEffort::variant_name), Some("high"));
         assert_eq!(live.temperature, Some(0.1));
 
@@ -1667,7 +1678,7 @@ mod tests {
         p.key(KeyCode::Tab); // TopP
         p.key(KeyCode::Tab); // Search
         p.key(KeyCode::Down); // → chat-only
-        let masked = p.tuning();
+        let masked = p.tuning(&p.rows());
         assert!(masked.effort.is_none(), "reasoning masked for chat-only");
         assert_eq!(masked.temperature, Some(0.1));
 
@@ -1682,7 +1693,7 @@ mod tests {
         p.key(KeyCode::Tab); // Search
         p.key(KeyCode::Up); // → reasoner
         assert_eq!(
-            p.tuning().effort.as_ref().map(ReasoningEffort::variant_name),
+            p.tuning(&p.rows()).effort.as_ref().map(ReasoningEffort::variant_name),
             Some("high")
         );
     }
@@ -1696,7 +1707,7 @@ mod tests {
         let mut p = openrouter_picker();
         p.key(KeyCode::Down); // highlight deepseek/deepseek-chat
         let model = "deepseek/deepseek-chat";
-        assert_eq!(p.highlighted_model().as_deref(), Some(model));
+        assert_eq!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
         p.set_endpoints(
             model,
             EndpointsState::Loaded(vec![
@@ -1709,21 +1720,21 @@ mod tests {
         assert_eq!(p.focus, Focus::Provider);
 
         p.key(KeyCode::Right);
-        assert_eq!(p.active_route(), Some("deepinfra"));
+        assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
         assert_eq!(
-            p.highlighted_model().as_deref(),
+            p.highlighted_model(&p.rows()).as_deref(),
             Some(model),
             "the highlighted model never moves when picking a provider"
         );
         p.key(KeyCode::Right);
-        assert_eq!(p.active_route(), Some("novita"));
+        assert_eq!(p.active_route(&p.rows()), Some("novita"));
         // Right at the end clamps — it does not wrap back to auto.
         p.key(KeyCode::Right);
-        assert_eq!(p.active_route(), Some("novita"));
+        assert_eq!(p.active_route(&p.rows()), Some("novita"));
         p.key(KeyCode::Left);
-        assert_eq!(p.active_route(), Some("deepinfra"));
+        assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
         p.key(KeyCode::Left);
-        assert_eq!(p.active_route(), None);
+        assert_eq!(p.active_route(&p.rows()), None);
 
         // The chosen route rides Enter alongside the highlighted model.
         p.key(KeyCode::Right); // auto → deepinfra
@@ -1750,7 +1761,7 @@ mod tests {
         );
         p.key(KeyCode::Tab); // Provider
         p.key(KeyCode::Right); // choose deepinfra
-        assert_eq!(p.active_route(), Some("deepinfra"));
+        assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
 
         // Return to the search field and move the highlight to another model.
         for _ in 0..4 {
@@ -1758,17 +1769,17 @@ mod tests {
         }
         assert_eq!(p.focus, Focus::Search);
         p.key(KeyCode::Down); // deepseek/deepseek-r1
-        assert_ne!(p.highlighted_model().as_deref(), Some(model));
+        assert_ne!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
         assert_eq!(
-            p.active_route(),
+            p.active_route(&p.rows()),
             None,
             "the route does not ride another model"
         );
 
         // Back on its own model, the choice is active again.
         p.key(KeyCode::Up);
-        assert_eq!(p.highlighted_model().as_deref(), Some(model));
-        assert_eq!(p.active_route(), Some("deepinfra"));
+        assert_eq!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
+        assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
     }
 
     /// A non-OpenRouter model has no routing, so `Tab` skips the provider
@@ -1776,7 +1787,7 @@ mod tests {
     #[test]
     fn provider_control_skipped_for_non_openrouter_model() {
         let mut p = loaded_picker();
-        assert!(p.highlighted_model().is_some());
+        assert!(p.highlighted_model(&p.rows()).is_some());
         p.key(KeyCode::Tab);
         assert_eq!(p.focus, Focus::Effort);
         assert!(p.focused_or_model_needing_endpoints().is_none());

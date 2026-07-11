@@ -59,11 +59,6 @@ impl Tui {
     }
 }
 
-/// One row of the slash-command registry: the canonical token, any aliases,
-/// the argument it consumes (if any), and a one-line description for `/help`.
-/// The table is metadata only — names, help, and the argument shape; dispatch
-/// is a direct match by name in [`route_submit`], split by where the work must
-/// run (the UI thread or the session's drive loop).
 /// The agent-affecting slash command hook the worker's [`Agent::drive`]
 /// calls at the turn boundary, where the drive thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was
@@ -81,9 +76,7 @@ pub struct ReplControl<'a> {
 impl Control for ReplControl<'_> {
     fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
         let trimmed = raw.trim();
-        let (head, rest) = trimmed
-            .split_once(char::is_whitespace)
-            .map_or((trimmed, ""), |(h, r)| (h, r.trim()));
+        let (head, rest) = commands::split_head(trimmed);
         if head == "/discuss" {
             let topic = rest;
             if topic.is_empty() {
@@ -330,6 +323,11 @@ fn ui_loop(
             .mailbox(focused)
             .is_none_or(|mb| mb.waiting_for_input())
     };
+    // A tab is steerable when it is the trunk (slash commands and prompts) or
+    // a live peer with a registered inbox; recomputed each frame and on every
+    // key, since a focused agent can settle between one and the next.
+    let is_steerable =
+        |ctx: &CommandCtx<'_>, root, focused| focused == root || ctx.agents.mailbox(focused).is_some();
     let mut waiting_for_input = focused_waiting(ctx, tui.app.tabs.focused());
     loop {
         // Focus as of the start of this iteration; compared at the end so a
@@ -358,9 +356,7 @@ fn ui_loop(
                 // reports `Stop` again; its verdict is not needed.
                 drain_pass(rx, done, None, |ev| tui.app.handle(ev, rx));
                 tui.app.busy_off();
-                let focused = tui.app.tabs.focused();
-                let steerable =
-                    focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
+                let steerable = is_steerable(ctx, tui.app.tabs.root(), tui.app.tabs.focused());
                 tui.app.tabs.set_steerable(steerable);
                 draw(&mut tui.app, tui.guard.term())?;
                 return Ok(());
@@ -383,9 +379,7 @@ fn ui_loop(
             let ticked = tui.app.tabs.tick();
             let animating = tui.app.animating(frame);
             if dirty || ticked || animating {
-                let focused = tui.app.tabs.focused();
-                let steerable =
-                    focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
+                let steerable = is_steerable(ctx, tui.app.tabs.root(), tui.app.tabs.focused());
                 tui.app.tabs.set_steerable(steerable);
                 draw(&mut tui.app, tui.guard.term())?;
                 dirty = false;
@@ -409,12 +403,8 @@ fn ui_loop(
             match ct_read()? {
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
                     dirty = true;
-                    // A tab is steerable when it is root (slash commands and
-                    // prompts) or a live peer with a registered inbox; on a
-                    // steerable tab Enter submits and text entry is allowed.
                     let focused = tui.app.tabs.focused();
-                    let steerable =
-                        focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
+                    let steerable = is_steerable(ctx, tui.app.tabs.root(), focused);
                     tui.app.tabs.set_steerable(steerable);
                     match key_action(KeyMode::Running, &k, steerable) {
                         // Esc / Ctrl-C interrupt the *focused* tab's current
@@ -488,12 +478,7 @@ fn ui_loop(
     }
 }
 
-/// Open the `/model` picker over the available providers, fetch their model
-/// lists (cache-first, then background), and drive the modal loop until the
-/// user selects a model or dismisses it. On a selection the provider is rebuilt
-/// over the same transcript, the [`ProviderHandle`] is swapped (taking effect on
-/// the worker's next turn), the saved selection is updated, and the status bar
-/// follows.
+/// Whether `k` is `c` pressed with the Control modifier.
 pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
     k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
 }

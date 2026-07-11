@@ -101,7 +101,7 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
 /// buffer at rest. The thresholds roughly track `log2` of line count.
 pub(super) fn value_step(magnitude: Option<u32>) -> u8 {
     match magnitude {
-        None | Some(0) => 0,
+        None => 0,
         Some(n) if n <= 4 => 0,
         Some(n) if n <= 20 => 1,
         Some(n) if n <= 80 => 2,

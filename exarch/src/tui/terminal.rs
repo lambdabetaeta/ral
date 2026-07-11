@@ -113,7 +113,9 @@ pub(super) fn editor_command() -> (String, Vec<String>) {
         })
         .unwrap_or_else(|| "vi".to_string());
     let mut parts = spec.split_whitespace().map(str::to_string);
-    let program = parts.next().unwrap_or_else(|| "vi".to_string());
+    let program = parts
+        .next()
+        .expect("spec is non-empty and non-whitespace, so it has a first token");
     (program, parts.collect())
 }
 

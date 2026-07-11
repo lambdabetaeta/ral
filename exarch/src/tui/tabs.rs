@@ -67,8 +67,7 @@ pub(super) struct Tabs {
 
     /// Whether the currently focused tab is steerable — root always is, a live
     /// sub-agent with a registered mailbox is, and a dead/lingering one is not.
-    /// Set by the UI loop on every keypress; also updated on focus-fallback so
-    /// the prompt hint flips at once rather than waiting for the next keystroke.
+    /// Recomputed and set by the UI loop each frame and on every keypress.
     focused_steerable: bool,
 }
 
@@ -146,7 +145,6 @@ impl Tabs {
             if self.focus.load(Ordering::Relaxed) == id {
                 let fallback = self.parent_focus(id);
                 self.focus.store(fallback, Ordering::Relaxed);
-                self.focused_steerable = fallback == self.root;
             }
             self.parents.remove(&id);
             self.branches.remove(&id);

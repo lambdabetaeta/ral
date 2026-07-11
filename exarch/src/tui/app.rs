@@ -144,9 +144,7 @@ impl App {
         fidelity::context_floor(self.last_input, self.context_window)
     }
 
-    /// Set the live `provider model` label shown in the status bar. Set
-    /// once at startup and again on every `/model` switch.
-    /// Set the live model from the focused agent'\''s provider.  Updates the
+    /// Set the live model from the focused agent's provider.  Updates the
     /// status bar label and the context window — the denominator of the ctx%
     /// gauge — so both follow `/model` and `TAB`.  Call at startup, after
     /// every focus change, and after a model switch.
@@ -450,8 +448,7 @@ impl App {
             // here, at the render seam, because only this thread may read
             // the tabs/viewport structures; the agent's transcript keeps
             // the agent rows, and these stay presentation.
-            Kind::Resources { card, .. } => {
-                let mut card = card;
+            Kind::Resources { mut card, .. } => {
                 let (blocks, rows, bytes) = self
                     .tabs
                     .viewport(id)
@@ -665,8 +662,8 @@ impl App {
             // Anywhere over a dialable block, the wheel dials its disclosure
             // level (up reveals, down reduces) and consumes the event; once
             // the level clamps — or over inert chrome — it scrolls instead.
-            MouseEventKind::ScrollUp if self.wheel_dial(me, 1) => {}
-            MouseEventKind::ScrollDown if self.wheel_dial(me, -1) => {}
+            MouseEventKind::ScrollUp if self.wheel_dial(1) => {}
+            MouseEventKind::ScrollDown if self.wheel_dial(-1) => {}
             MouseEventKind::ScrollUp => {
                 let f = self.tabs.focused();
                 self.gesture
@@ -680,8 +677,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Left)
                 if !me.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                let f = self.tabs.focused();
-                self.gesture.press(me, self.tabs.viewports(), f);
+                self.gesture.press(me);
             }
             MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me),
             MouseEventKind::Up(MouseButton::Left) => {
@@ -700,11 +696,10 @@ impl App {
     /// non-dialable block, or over a block already clamped at the requested
     /// end returns `false` and falls through to a viewport scroll — so a
     /// tall run never traps the wheel.
-    fn wheel_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
-        let Some(idx) = self
-            .gesture
-            .hover_block(me, self.tabs.viewports(), self.tabs.focused())
-        else {
+    fn wheel_dial(&mut self, delta: i8) -> bool {
+        // `App::mouse` already set the hover block for this event, so reuse
+        // it rather than re-mapping the pointer per wheel notch.
+        let Some(idx) = self.gesture.hover() else {
             return false;
         };
         let id = self.tabs.focused();

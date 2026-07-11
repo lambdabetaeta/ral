@@ -34,12 +34,9 @@ pub(super) const MD_INDENT: u16 = 4;
 const BASE_FG: Color = Color::Rgb(208, 213, 224);
 
 /// The flat background wash an echoed paragraph wears: a faint neutral
-/// block behind every span, deepening one step per echo level. It is a
-/// *background* treatment, categorically apart from the foreground
-/// saturation drain context pressure applies, so the two epistemic
-/// signals never collide on one axis — distress drains the ink, echo
-/// shades the field behind it. Static (no row-wise oscillation), so it
-/// reads as a flagged passage, never as a render glitch.
+/// block behind every span, deepening one step per echo level. Static (no
+/// row-wise oscillation), so it reads as a flagged passage, never a render
+/// glitch. ([`modulate`] explains the foreground/background axis split.)
 const ECHO_WASH: Color = Color::Rgb(46, 40, 54);
 
 // ── public entry points ──────────────────────────────────────────────────
@@ -89,25 +86,14 @@ pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'sta
 }
 
 /// Degrade finished lines so the medium tracks the model's reliability
-/// (Move 7, coherent degradation).  Both treatments walk the already-built
-/// spans — fixed-colour code, headings, and tables are *not* exempt, so the
-/// whole block reads as one fidelity rather than a mix of degraded prose
-/// and confident code.  The two epistemic signals ride two disjoint colour
-/// axes, neither of which is the value (lightness) channel that carries
-/// magnitude on the rail and the bars — so a degraded answer can never be
-/// misread as a small one, nor a small one as degraded:
-///
-/// - **context pressure → foreground drain.** Every foreground desaturates
-///   toward its own luma-grey (~45% / ~70% / ~90% at levels 1–3) at held
-///   luminance, so the prose loses its hue — "drained of confidence" — yet
-///   stays as legible as the sound answer beside it.  No `DIM`: that is the
-///   app's idiom for minor chrome ([`super::line::note`]), and a suspect
-///   answer is important, not ignorable.
-/// - **echo similarity → background wash.** A flat [`ECHO_WASH`] field sits
-///   behind every span, deepening one step per echo level, so an echoed
-///   paragraph reads as flagged.  It is static and on the background axis,
-///   apart from the drain's foreground axis, so the two signals stay
-///   separable and neither reads as motion.
+/// (Move 7, coherent degradation): context pressure drains every foreground's
+/// saturation ([`drain`], no `DIM` — that idiom is for ignorable chrome), and
+/// echo similarity lays a flat [`ECHO_WASH`] behind every span.  Both walk the
+/// already-built spans — code, headings, and tables included — so the whole
+/// block reads as one fidelity.  The two signals ride disjoint colour axes
+/// (foreground vs background), and neither is the value/lightness channel that
+/// carries magnitude on the rail and bars, so a degraded answer can never be
+/// misread as a small one.
 fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
     if f.context == 0 && f.echo == 0 {
         return;
@@ -175,6 +161,34 @@ fn gfm() -> Options {
 /// trailing blank as a separator for the next commit.
 fn ends_with_blank_line(s: &str) -> bool {
     s.ends_with("\n\n") || s == "\n"
+}
+
+/// Drop trailing blank lines from a built line buffer.
+fn trim_trailing_blanks(lines: &mut Vec<Line<'static>>) {
+    while lines.last().is_some_and(is_blank) {
+        lines.pop();
+    }
+}
+
+/// Break an over-wide `word` into pieces each at most `budget` columns wide,
+/// splitting between characters.  `emit` is called with every piece *before*
+/// the last one (each ends a wrapped line) and its display width; the final
+/// piece and its width are returned for the caller to place inline (it never
+/// ends a line on its own).  The last piece may be empty only for an empty
+/// input word.
+fn char_break(word: &str, budget: usize, mut emit: impl FnMut(String, usize)) -> (String, usize) {
+    let mut buf = String::new();
+    let mut bw = 0;
+    for ch in word.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if bw + cw > budget && !buf.is_empty() {
+            emit(std::mem::take(&mut buf), bw);
+            bw = 0;
+        }
+        buf.push(ch);
+        bw += cw;
+    }
+    (buf, bw)
 }
 
 // ── composer ─────────────────────────────────────────────────────────────
@@ -473,23 +487,15 @@ impl Composer {
             return;
         }
         // Word exceeds the budget on its own; break by char.
-        let mut buf = String::new();
-        let mut bw = 0;
-        for ch in word.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if bw + cw > budget && !buf.is_empty() {
-                self.cur
-                    .push(Span::styled(std::mem::take(&mut buf), self.style));
-                self.cur_w += bw;
-                self.flush_line();
-                bw = 0;
-            }
-            buf.push(ch);
-            bw += cw;
-        }
-        if !buf.is_empty() {
-            self.cur.push(Span::styled(buf, self.style));
-            self.cur_w += bw;
+        let style = self.style;
+        let (last, lw) = char_break(word, budget, |chunk, cw| {
+            self.cur.push(Span::styled(chunk, style));
+            self.cur_w += cw;
+            self.flush_line();
+        });
+        if !last.is_empty() {
+            self.cur.push(Span::styled(last, style));
+            self.cur_w += lw;
         }
         self.mid_word = true;
     }
@@ -603,9 +609,7 @@ impl Composer {
     /// the line buffer.
     fn finish(mut self, trailing_blank: bool) -> Vec<Line<'static>> {
         self.flush_line();
-        while self.out.last().is_some_and(is_blank) {
-            self.out.pop();
-        }
+        trim_trailing_blanks(&mut self.out);
         if trailing_blank && !self.out.is_empty() {
             self.out.push(Line::default());
         }
@@ -849,22 +853,14 @@ fn wrap_spans(spans: &[Span<'static>], w: usize) -> Vec<Vec<Span<'static>>> {
                 continue;
             }
             // Word exceeds the budget on its own; break it by character.
-            let mut buf = String::new();
-            let mut bw = 0;
-            for ch in word.chars() {
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if bw + cw > w && !buf.is_empty() {
-                    cur.push(Span::styled(std::mem::take(&mut buf), s.style));
-                    lines.push(std::mem::take(&mut cur));
-                    cur_w = 0;
-                    bw = 0;
-                }
-                buf.push(ch);
-                bw += cw;
-            }
-            if !buf.is_empty() {
-                cur.push(Span::styled(buf, s.style));
-                cur_w = bw;
+            let (last, lw) = char_break(word, w, |chunk, _cw| {
+                cur.push(Span::styled(chunk, s.style));
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            });
+            if !last.is_empty() {
+                cur.push(Span::styled(last, s.style));
+                cur_w = lw;
             }
         }
     }
@@ -909,9 +905,7 @@ fn highlight_block(body: &str, lang: Option<&str>) -> Vec<Line<'static>> {
             .collect();
         out.push(Line::from(spans));
     }
-    while out.last().is_some_and(is_blank) {
-        out.pop();
-    }
+    trim_trailing_blanks(&mut out);
     out
 }
 
