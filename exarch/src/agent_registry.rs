@@ -11,8 +11,10 @@
 //!     started after context compaction (`agents`) and stop stragglers
 //!     (`agent_cancel`);
 //!   * the **subtree cascade**: [`AgentRegistry::cancel`] cancels an agent
-//!     *and every descendant*, the single primitive behind `agent_cancel`,
-//!     the per-agent ceiling, and `/clear`.  Each
+//!     *and every descendant*, behind `agent_cancel` and the per-agent
+//!     ceiling; `/clear` and `/close` reap a subtree through `clear_subtree`
+//!     and `remove_subtree`, and `cancel_entry` is the per-entry primitive all
+//!     of them share.  Each
 //!     node is cancelled across both layers — the cooperative [`Token`] its
 //!     drive loop polls, and its own session's durable root, so an
 //!     in-flight `ral` eval unwinds at ral's poll points instead of
@@ -178,7 +180,7 @@ impl AgentRegistry {
     /// gone.
     pub fn cancel_descendants(&self, root: AgentId) {
         let mut g = self.lock();
-        remove_descendants(&mut g, root);
+        cancel_and_remove(&mut g, root, false);
     }
 
     /// Register an agent under its `parent` (`None` for the trunk).  `ceiling`
@@ -303,9 +305,11 @@ impl AgentRegistry {
     }
 
     /// Cancel an agent **and its whole subtree** by id; `true` if the agent
-    /// existed.  The single cascade primitive: `agent_cancel`, the ceiling,
-    /// and `/clear` all route here.  Each cancelled worker observes its token,
-    /// settles `Cancelled`, and removes its own entry through [`Self::settle`].
+    /// existed.  `agent_cancel` and the per-agent ceiling route here; `/clear`
+    /// and `/close` reap through [`Self::clear_subtree`]/[`Self::remove_subtree`]
+    /// instead.  All of them share [`cancel_entry`] as the per-entry primitive.
+    /// Each cancelled worker observes its token, settles `Cancelled`, and
+    /// removes its own entry through [`Self::settle`].
     pub fn cancel(&self, id: AgentId) -> bool {
         let g = self.lock();
         let existed = g.entries.contains_key(&id);
@@ -323,10 +327,7 @@ impl AgentRegistry {
     pub fn interrupt(&self, id: AgentId) {
         let g = self.lock();
         if let Some(e) = g.entries.get(&id) {
-            e.cancel.cancel(CancelCause::Interrupt);
-            if let Some(root) = &e.eval_root {
-                root.cancel(CancelCause::Interrupt);
-            }
+            cancel_entry(e, CancelCause::Interrupt);
         }
     }
 
@@ -352,7 +353,7 @@ impl AgentRegistry {
         v
     }
 
-    /// Look up one agent'\''s title by id, if it is live.
+    /// Look up one agent's title by id, if it is live.
     pub fn title_for(&self, id: AgentId) -> Option<String> {
         let g = self.lock();
         g.entries.get(&id).map(|e| e.title.clone())
@@ -364,25 +365,17 @@ impl AgentRegistry {
     /// not torn down).
     pub fn clear_subtree(&self, root: AgentId) {
         let mut g = self.lock();
-        remove_descendants(&mut g, root);
+        cancel_and_remove(&mut g, root, false);
         g.generation += 1;
     }
 
     /// Close `root` and its whole subtree: cancel each entry's in-flight turn and
     /// eval, then drop the entries.  The inclusive twin of the `/clear` reap
-    /// (`remove_descendants` leaves the root); no generation bump — a branch
-    /// pushes no result, so there is nothing to fence.  `/close` routes here.
+    /// (which leaves the root live); no generation bump — a branch pushes no
+    /// result, so there is nothing to fence.  `/close` routes here.
     pub fn remove_subtree(&self, root: AgentId) {
         let mut g = self.lock();
-        let subtree = descendants(&g.entries, root, true);
-        for d in &subtree {
-            if let Some(e) = g.entries.get(d) {
-                cancel_entry(e, CancelCause::Explicit);
-            }
-        }
-        for d in subtree {
-            g.entries.remove(&d);
-        }
+        cancel_and_remove(&mut g, root, true);
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -426,14 +419,19 @@ fn descendants(
     out
 }
 
-fn remove_descendants(g: &mut Inner, root: AgentId) {
-    let desc = descendants(&g.entries, root, false);
-    for d in &desc {
+/// Cancel and drop a subtree.  `inclusive` reaps `root` itself (the `/close`
+/// twin, [`AgentRegistry::remove_subtree`]); `false` leaves `root` live and
+/// reaps only its proper descendants (the `/clear` reap and a settling
+/// `reply`).  Each reaped entry is cancelled across both layers before removal
+/// so an in-flight eval unwinds instead of grinding on as an orphan.
+fn cancel_and_remove(g: &mut Inner, root: AgentId, inclusive: bool) {
+    let victims = descendants(&g.entries, root, inclusive);
+    for d in &victims {
         if let Some(e) = g.entries.get(d) {
             cancel_entry(e, CancelCause::Explicit);
         }
     }
-    for d in desc {
+    for d in victims {
         g.entries.remove(&d);
     }
 }
@@ -540,7 +538,7 @@ mod tests {
     }
 
     /// `/clear` and a settling `reply` reap descendants through
-    /// `remove_descendants`: each reaped worker is cancelled across both
+    /// `cancel_and_remove`: each reaped worker is cancelled across both
     /// layers, so an in-flight eval unwinds instead of grinding on as an
     /// orphan whose result nobody will collect.
     #[test]
@@ -570,7 +568,7 @@ mod tests {
 
     /// `/close` routes to `remove_subtree`, the inclusive twin of the `/clear`
     /// reap: it cancels and drops the whole subtree *including* its root — a
-    /// branch and any agents it spawned — where `remove_descendants` would have
+    /// branch and any agents it spawned — where the `/clear` reap would have
     /// left the root live.  The trunk above the closed subtree is untouched.
     #[test]
     fn remove_subtree_cancels_and_removes_the_root_too() {
