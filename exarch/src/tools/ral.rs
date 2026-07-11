@@ -14,8 +14,8 @@ use std::sync::{Arc, OnceLock};
 
 pub(super) struct RalTool;
 
-/// Parsed ral-tool input.  Public to the tool so the parser stays
-/// trivially testable without going through `dispatch`.
+/// Parsed ral-tool input, split from `dispatch` so the parser stays
+/// trivially testable in isolation.
 #[cfg_attr(test, derive(Debug))]
 struct RalArgs {
     cmd: String,

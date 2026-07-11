@@ -41,7 +41,7 @@ timezone, e.g. `0 9 * * 1-5` for weekdays at 09:00) for a recurring \
 calendar occurrence, or `after` (e.g. `30m`, `2h`) for a one-shot relative \
 delay.  The payload is a natural-language instruction you will act on when \
 woken, not code.  List live ones with `schedules`; remove one with \
-`unschedule`.  Requires scheduling authority (off by default)."
+`unschedule`.  Requires scheduling authority."
     }
 
     fn schema(&self) -> &'static Value {

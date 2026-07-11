@@ -37,9 +37,13 @@ const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
 type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)>;
 
 /// The rule set the binary ships with.
-///
-/// [`Agent::apply`]: crate::agent::Agent::apply
 const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
+
+/// Wrap a synthetic reminder body in the shared bracket, so the model can
+/// distinguish a system reminder from genuine user input.
+fn wrap_reminder(body: &str) -> String {
+    format!("{EXARCH_REMINDER_OPEN}{body}{EXARCH_REMINDER_CLOSE}")
+}
 
 /// Per-attempt expectations that depend on the agent rather than the
 /// attempt outcome: whether this agent returns through `reply`
@@ -143,9 +147,7 @@ impl Registry {
             if ctx.is_headless_root && !self.reply_verified {
                 self.reply_verified = true;
                 record_nudge(emit, log, self.used, "reply verification".into());
-                return Some(format!(
-                    "{EXARCH_REMINDER_OPEN}{VERIFY_REPLY_MESSAGE}{EXARCH_REMINDER_CLOSE}"
-                ));
+                return Some(wrap_reminder(VERIFY_REPLY_MESSAGE));
             }
             return None;
         }
@@ -214,10 +216,7 @@ impl Registry {
                 surface_provider_error(attempt, emit, log);
                 return None;
             }
-            return Some(format!(
-                "{EXARCH_REMINDER_OPEN}{}{EXARCH_REMINDER_CLOSE}",
-                parts.join(" ")
-            ));
+            return Some(wrap_reminder(&parts.join(" ")));
         };
         if self.used >= BUDGET {
             let msg = format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})");
@@ -228,9 +227,7 @@ impl Registry {
         }
         self.used += 1;
         record_nudge(emit, log, self.used, cause);
-        Some(format!(
-            "{EXARCH_REMINDER_OPEN}{message}{EXARCH_REMINDER_CLOSE}"
-        ))
+        Some(wrap_reminder(message))
     }
 }
 
@@ -258,7 +255,7 @@ fn surface_provider_error(
 
 /// The headless root's one-shot reply-verification nudge
 /// ([`NudgeCtx::is_headless_root`]) — see [`Registry::react`].
-const VERIFY_REPLY_MESSAGE: &str = "Recall the original prompt, and ensure that you
+const VERIFY_REPLY_MESSAGE: &str = "Recall the original prompt, and ensure that you \
     have correctly responded to it, completing any tasks. Then call `reply` again.";
 
 // ── Rules ────────────────────────────────────────────────────────────
