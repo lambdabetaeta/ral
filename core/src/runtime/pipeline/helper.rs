@@ -10,6 +10,13 @@
 //!
 //! `--ral-pipeline-anchor` owns the pipeline pgid for the whole launch
 //! so a fast-exiting first stage cannot strand later stages.
+//!
+//! `--ral-bundled-tool <tool> <args...>` runs a bundled coreutils /
+//! diffutils / ripgrep tool in this process and exits with its status.
+//! Unlike the stage helper it exchanges no [`ChildEvalRequest`] /
+//! [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse) frame: its
+//! inherited env/cwd/stdio/process-group/sandbox are the execution
+//! context (see `decisions/260616_bundled-tools-as-exec-images`).
 
 use crate::child_eval::{ChildEvalRequest, break_response, run_child_eval, transfer_error};
 use crate::serial::{InternCtx, ScopeTable, SerialValue, build_arcs};
@@ -51,30 +58,6 @@ pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 /// context, so it just runs `uutils_invoke` and exits with the tool
 /// status.  See `decisions/260616_bundled-tools-as-exec-images`.
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
-
-/// Optional start-gate descriptor for a bundled-tool child.
-///
-/// No live launcher wires this today: direct bundled tools are admitted
-/// only on the same no-helper path as host externals, so they run
-/// immediately.  If a future direct bundled-tool gate is needed, the
-/// child side already has the same shape as the anchor gate: read this
-/// descriptor to EOF, then enter the tool.
-#[cfg(all(
-    unix,
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-pub(crate) const BUNDLED_TOOL_GATE_FD_ENV: &str = "RAL_BUNDLED_TOOL_GATE_FD";
-#[cfg(all(
-    windows,
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-pub(crate) const BUNDLED_TOOL_GATE_HANDLE_ENV: &str = "RAL_BUNDLED_TOOL_GATE_HANDLE";
-
-/// A multicall sentinel that no live caller emits.  Recognising it here
-/// turns a stale invocation — an old script, or a re-exec from a
-/// mismatched binary — into a clear diagnostic and a non-zero exit
-/// rather than an opaque clap usage error.
-pub(crate) const RETIRED_EXEC_FLAG: &str = "--ral-pipeline-exec-helper";
 
 /// One typed value crossing a process-staged pipeline boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,10 +451,6 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     let mut args = std::env::args_os();
     let _argv0 = args.next();
     let mode = args.next()?.to_string_lossy().into_owned();
-    if mode == RETIRED_EXEC_FLAG {
-        eprintln!("ral: pipeline exec helper is no longer used");
-        return Some(1);
-    }
     #[cfg(unix)]
     {
         crate::sandbox::register_self_for_helpers();
@@ -507,58 +486,6 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     }
 }
 
-/// Block until an optional bundled-tool start gate reaches EOF.
-///
-/// No current launcher sets the env var, so bundled-tool children run
-/// immediately.  The reader remains the child half of the dormant gate
-/// protocol: if a parent later passes one inheritable descriptor, closing
-/// the parent end releases the tool.
-#[cfg(all(
-    unix,
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-fn block_on_bundled_tool_gate() {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::net::UnixStream;
-    match read_env_optional(BUNDLED_TOOL_GATE_FD_ENV, "an fd", |s| s.parse::<i32>().ok()) {
-        Ok(Some(fd)) => {
-            let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
-            let _ = std::io::copy(&mut stream, &mut std::io::sink());
-        }
-        Ok(None) => {}
-        Err(err) => report_helper_env_err(err),
-    }
-}
-
-#[cfg(all(
-    windows,
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-fn block_on_bundled_tool_gate() {
-    use std::os::windows::io::FromRawHandle;
-    match read_env_optional(BUNDLED_TOOL_GATE_HANDLE_ENV, "a handle", |s| {
-        s.parse::<usize>()
-            .ok()
-            .map(|v| v as std::os::windows::io::RawHandle)
-    }) {
-        Ok(Some(handle)) => {
-            let mut reader = unsafe { os_pipe::PipeReader::from_raw_handle(handle) };
-            let _ = std::io::copy(&mut reader, &mut std::io::sink());
-        }
-        Ok(None) => {}
-        Err(err) => report_helper_env_err(err),
-    }
-}
-
-/// There is no inheritable-descriptor gate transport off Unix/Windows;
-/// the bundled tools only link on those platforms anyway (see
-/// `run_uutils_in_process`), so the gate is a no-op here.
-#[cfg(all(
-    not(any(unix, windows)),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-fn block_on_bundled_tool_gate() {}
-
 /// Hidden bundled-tool dispatch from the binary entrypoint
 /// (`ral --ral-bundled-tool <tool> <args...>`).
 ///
@@ -589,8 +516,6 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
         return Some(127);
     }
 
-    block_on_bundled_tool_gate();
-
     let exit_code = uutils::invoke_bundled(tool, tool_args);
     #[allow(clippy::cast_sign_loss, reason = "clamp(0, 255) bounds the value to the u8 range before the cast")]
     Some(exit_code.clamp(0, 255) as u8)
@@ -602,7 +527,7 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
 /// Without any bundled tool linked in there is nothing
 /// `--ral-bundled-tool` could dispatch, so it is unreachable; recognise
 /// the sentinel anyway to turn it into a clear diagnostic rather than an
-/// opaque clap usage error, mirroring [`RETIRED_EXEC_FLAG`].
+/// opaque clap usage error.
 #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     let flag = args.first()?;
