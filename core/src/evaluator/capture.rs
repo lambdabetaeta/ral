@@ -123,7 +123,7 @@ impl Drop for AuditCaptureScope<'_> {
 /// consequence, not the predicate.
 ///
 /// Installed once around each *command* dispatch (see
-/// [`crate::runtime::transport::dispatch`]) for builtins and standalone externals.  Pipeline
+/// [`crate::evaluator::eval_block`]) for builtins and standalone externals.  Pipeline
 /// stages don't pass through this path — they capture per-stage via
 /// [`crate::io::tee_with_buffer`] at stage launch, because their stdout
 /// is `Sink::Pipe(writer)` to the next stage and never touches

@@ -75,6 +75,15 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 }
 
 // ── Boundary verbs ───────────────────────────────────────────────────────
+//
+// Both verbs evaluate the body **in process**: a `grant` is a dynamic
+// effect scope, not a process boundary, so nested grants compose by
+// intersection over authority in the evaluator's dynamic context.  OS
+// confinement is a separate, per-child locus — the launcher in
+// `build_command` (crate::runtime::command::process) enters the OS sandbox
+// for an admitted external or bundled-as-image child under an active
+// projection, so a `grant [net:false] { <pure ral> }` fails closed only
+// when a child is actually spawned, not at body entry.
 
 /// Run `comp` as a top-level turn.  Installs the post-run [`Mobile`]
 /// on `shell` for every outcome — Ok, Error, Exit — so a `let`
@@ -84,11 +93,13 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 /// The turn's program is its sole computation, evaluated under a
 /// trivial continuation ([`Tail::Yes`]): its value is handed straight
 /// back to the [`Shell::run_turn`](crate::Shell::run_turn) door that
-/// drove it, which relays it to the host.  `dispatch` absorbs any
-/// terminal tail call inside the swapped-in mobile.
+/// drove it, which relays it to the host.  The turn's mobile is swapped
+/// in for the run, so any terminal tail call is absorbed under it.
 pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
     let mobile = shell.mobile();
-    let (post, outcome) = crate::runtime::transport::dispatch(comp, mobile, Tail::Yes, shell);
+    let (post, outcome) = shell.run_with_mobile(mobile, |shell| {
+        absorb_tail(comp::eval_comp(comp, shell, Tail::Yes), shell)
+    });
     shell.install_mobile(post);
     outcome
 }
@@ -109,9 +120,10 @@ pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Val
 /// `tail` forwards the block's own tail position to its body: a block
 /// applied in tail position (the trampoline's final argument) grants
 /// [`Tail::Yes`] so the body's final call trampolines; a forced block
-/// or a pipeline value-edge force passes [`Tail::No`].  `dispatch`
-/// absorbs any terminal tail call inside the swapped-in mobile, so the
-/// grant only chooses whether that absorption trampolines.
+/// or a pipeline value-edge force passes [`Tail::No`].  The body's
+/// mobile is swapped in for the run, absorbing any terminal tail call
+/// under it, so the grant only chooses whether that absorption
+/// trampolines.
 ///
 /// `pub(crate)`: external callers reach the block contract through
 /// [`apply`] on a `Value::Block`.
@@ -122,7 +134,9 @@ pub(crate) fn eval_block(
     shell: &mut Shell,
 ) -> Settled<Value> {
     shell.with_thunk_body(ThunkBody::Block, captured, |shell, mobile| {
-        crate::runtime::transport::dispatch(body, mobile, tail, shell)
+        shell.run_with_mobile(mobile, |shell| {
+            absorb_tail(comp::eval_comp(body, shell, tail), shell)
+        })
     })
 }
 

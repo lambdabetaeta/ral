@@ -13,10 +13,12 @@
 //!   runtime at the single call [`pipeline::run_pipeline`], from
 //!   [`comp::eval_pipeline`](crate::evaluator::comp).  The command-call
 //!   primitives ([`command_call::run_call`], the [`command`] redirect
-//!   guards and identity types) and the transport router
-//!   ([`transport::dispatch`], which the boundary verbs call to choose
-//!   local vs OS-confined evaluation) are the other entry points the
-//!   machine reaches for, all crate-internal.
+//!   guards and identity types) are the other entry points the machine
+//!   reaches for, all crate-internal.  The boundary verbs
+//!   ([`eval_top_level`](crate::evaluator::eval_top_level) /
+//!   [`eval_block`](crate::evaluator::eval_block)) always evaluate their
+//!   body in process; OS confinement is decided per-child in
+//!   [`build_command`](crate::runtime::command::process).
 //! - **Up** (runtime → evaluator): the runtime re-enters evaluation only
 //!   through [`call::invoke`](crate::evaluator::call::invoke),
 //!   [`eval_block`](crate::evaluator::eval_block), and
@@ -31,4 +33,3 @@
 pub(crate) mod command;
 pub(crate) mod command_call;
 pub(crate) mod pipeline;
-pub(crate) mod transport;

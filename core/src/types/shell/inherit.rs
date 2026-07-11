@@ -172,8 +172,7 @@ impl Shell {
     /// to `captured` plus a fresh frame so the body's own `let` bindings
     /// live above the captured closure scope, and hands it to `f` together
     /// with `&mut self`.  `f` installs the mobile for the body's duration
-    /// (via [`Self::run_with_mobile`] for a lambda, or
-    /// [`dispatch`](crate::runtime::transport::dispatch) for a block) and
+    /// (via [`Self::run_with_mobile`], for both a lambda and a block) and
     /// returns the post-body mobile alongside its result; this routine then
     /// folds the [`ThunkBody`]-specific set back onto the caller's mobile.
     /// The store — `turn`, `session`, `local` — is shared by identity (see
