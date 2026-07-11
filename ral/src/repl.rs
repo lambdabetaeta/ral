@@ -41,6 +41,7 @@ mod cursor;
 mod errfmt;
 mod exec;
 mod frontend;
+mod highlight_style;
 mod host_handlers;
 mod keybinding;
 mod prompt;

@@ -4,7 +4,7 @@
 //! [`RalHelper`] implements rustyline's `Completer`, `Hinter`, and
 //! `Highlighter`.  Completion itself is the frontend-neutral
 //! [`super::completion`] engine; this type only holds the per-prompt
-//! [`Sources`](super::completion::Sources) snapshot and adapts the engine's
+//! [`Sources`] snapshot and adapts the engine's
 //! [`Candidate`](super::completion::Candidate)s to rustyline `Pair`s.
 //! Highlighting and ghost text come from plugin buffer-change hooks recorded
 //! in [`super::plugin::PluginRuntime`].
@@ -20,8 +20,8 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use super::completion::{self, Sources};
+use super::highlight_style::apply_highlights;
 use super::plugin::{PluginRuntime, lock, run_buffer_change_hooks};
-use super::plugin_editor::HighlightSpan;
 
 // ── RalHelper ────────────────────────────────────────────────────────────
 
@@ -131,150 +131,3 @@ impl Highlighter for RalHelper {
 
 impl Validator for RalHelper {}
 impl Helper for RalHelper {}
-
-// ── Syntax highlighting ──────────────────────────────────────────────────
-
-pub(super) fn apply_highlights(line: &str, spans: &[HighlightSpan]) -> String {
-    if spans.is_empty() {
-        return line.to_string();
-    }
-
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
-    let len = chars.len();
-    let mut styles: Vec<Option<&str>> = vec![None; len];
-    for span in spans {
-        for slot in &mut styles[span.span.clamp_to(len).range()] {
-            *slot = Some(span.style.as_str());
-        }
-    }
-
-    let mut out = String::with_capacity(line.len() * 2);
-    let mut cur: Option<&str> = None;
-    for (i, &(_, ch)) in chars.iter().enumerate() {
-        let new = styles[i];
-        if new != cur {
-            if cur.is_some() {
-                out.push_str(ansi::RESET);
-            }
-            if let Some(s) = new {
-                out.push_str(style_ansi(s).unwrap_or(""));
-            }
-            cur = new;
-        }
-        out.push(ch);
-    }
-    if cur.is_some() {
-        out.push_str(ansi::RESET);
-    }
-    out
-}
-
-/// Map a highlight style name to its ANSI escape, or `None` if the name is not
-/// a known style.  The single source of truth for the legal style vocabulary —
-/// `_ed-highlight` derives its validation from this.
-#[allow(clippy::match_same_arms)]
-pub(super) fn style_ansi(style: &str) -> Option<&'static str> {
-    Some(match style {
-        "command" => ansi::BOLD_GREEN,
-        "builtin" => ansi::BOLD_CYAN,
-        "prelude" => ansi::BOLD_BLUE,
-        "argument" => "",
-        "option" => ansi::CYAN,
-        "path-exists" => ansi::UNDERLINE,
-        "path-missing" => ansi::UNDERLINE_RED,
-        "string" => ansi::YELLOW,
-        "number" => ansi::MAGENTA,
-        "comment" => ansi::DIM,
-        "error" => ansi::BOLD_RED,
-        "match" => ansi::BOLD,
-        "bracket-1" => ansi::CYAN,
-        "bracket-2" => ansi::MAGENTA,
-        "bracket-3" => ansi::YELLOW,
-        _ => return None,
-    })
-}
-
-/// Map a highlight style name to a ratatui [`Style`](ratatui::style::Style),
-/// or `None` for an unknown name — the structural surface's analogue of
-/// [`style_ansi`], which paints into a terminal cell rather than emitting an
-/// ANSI escape.  Kept adjacent and arm-for-arm with `style_ansi` so the two
-/// stay in lockstep: a style added to the vocabulary must be given both an
-/// escape and a cell style.
-#[cfg(feature = "structural")]
-#[allow(clippy::match_same_arms)]
-pub(super) fn style_ratatui(style: &str) -> Option<ratatui::style::Style> {
-    use ratatui::style::{Color, Modifier, Style};
-    let s = Style::default();
-    Some(match style {
-        "command" => s.fg(Color::Green).add_modifier(Modifier::BOLD),
-        "builtin" => s.fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        "prelude" => s.fg(Color::Blue).add_modifier(Modifier::BOLD),
-        "argument" => s,
-        "option" => s.fg(Color::Cyan),
-        "path-exists" => s.add_modifier(Modifier::UNDERLINED),
-        "path-missing" => s.fg(Color::Red).add_modifier(Modifier::UNDERLINED),
-        "string" => s.fg(Color::Yellow),
-        "number" => s.fg(Color::Magenta),
-        "comment" => s.add_modifier(Modifier::DIM),
-        "error" => s.fg(Color::Red).add_modifier(Modifier::BOLD),
-        "match" => s.add_modifier(Modifier::BOLD),
-        "bracket-1" => s.fg(Color::Cyan),
-        "bracket-2" => s.fg(Color::Magenta),
-        "bracket-3" => s.fg(Color::Yellow),
-        _ => return None,
-    })
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::repl::plugin_editor::Span;
-
-    // ── apply_highlights span safety ─────────────────────────────────────
-    //
-    // `Span::clamped` orders its endpoints, so an inverted `(start, end)`
-    // submitted by a plugin folds to the same range as the ordered pair and
-    // can never produce a backwards slice in `apply_highlights`.
-
-    #[test]
-    fn apply_highlights_inverted_span_folds_to_ordered() {
-        let line = "hello world";
-        let bound = line.chars().count();
-        let inverted = HighlightSpan {
-            span: Span::clamped(5, 2, bound),
-            style: "command".into(),
-        };
-        let ordered = HighlightSpan {
-            span: Span::clamped(2, 5, bound),
-            style: "command".into(),
-        };
-        assert_eq!(
-            apply_highlights(line, &[inverted]),
-            apply_highlights(line, &[ordered]),
-        );
-    }
-
-    #[test]
-    fn apply_highlights_out_of_range_span_clamps() {
-        let line = "hi";
-        let span = HighlightSpan {
-            span: Span::clamped(0, 999, line.chars().count()),
-            style: "command".into(),
-        };
-        // Must not panic: the range is clamped to the slice length.
-        let _ = apply_highlights(line, &[span]);
-    }
-
-    #[test]
-    fn apply_highlights_span_reclamps_to_shorter_line() {
-        // A span minted against a longer buffer must not panic when the line
-        // rendered at the slice site has since shrunk.
-        let span = HighlightSpan {
-            span: Span::clamped(0, 10, 10),
-            style: "command".into(),
-        };
-        let _ = apply_highlights("hi", &[span]);
-    }
-}

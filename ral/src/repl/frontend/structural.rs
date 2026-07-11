@@ -51,7 +51,7 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
-use crate::repl::complete::style_ratatui;
+use crate::repl::highlight_style::style_ratatui;
 use crate::repl::completion::{self, Sources};
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use crate::repl::plugin::{

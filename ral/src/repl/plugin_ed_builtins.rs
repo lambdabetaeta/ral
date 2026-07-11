@@ -25,7 +25,7 @@ use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, as_map, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
-use super::complete::style_ansi;
+use super::highlight_style::style_ansi;
 use super::plugin_editor::{HighlightSpan, PluginContext, Span};
 use ral_core::text::{byte_to_char, char_to_byte};
 
@@ -54,6 +54,14 @@ fn require_interactive(name: &str, shell: &Shell) -> Settled<()> {
         )));
     }
     Ok(())
+}
+
+/// Split `text` at a character-offset `cursor` into the substrings left and
+/// right of it.
+fn split_at_cursor(text: &str, cursor: usize) -> (String, String) {
+    let left: String = text.chars().take(cursor).collect();
+    let right: String = text.chars().skip(cursor).collect();
+    (left, right)
 }
 
 // ─── State read ──────────────────────────────────────────────────────────────
@@ -117,13 +125,8 @@ pub fn builtin_ed_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-lbuffer", shell)?;
     shell.check_editor_read("lbuffer")?;
     let pc = ctx(shell)?;
-    Ok(Value::String(
-        pc.editor_state
-            .text
-            .chars()
-            .take(pc.editor_state.cursor)
-            .collect(),
-    ))
+    let (left, _) = split_at_cursor(&pc.editor_state.text, pc.editor_state.cursor);
+    Ok(Value::String(left))
 }
 
 // ─── State write ─────────────────────────────────────────────────────────────
@@ -169,8 +172,7 @@ pub fn builtin_ed_set_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Valu
     shell.check_editor_write("set-lbuffer")?;
     let l = args[0].to_string();
     let pc = ctx_mut(shell)?;
-    let cursor = pc.editor_state.cursor;
-    let right: String = pc.editor_state.text.chars().skip(cursor).collect();
+    let (_, right) = split_at_cursor(&pc.editor_state.text, pc.editor_state.cursor);
     let new_cursor = l.chars().count();
     pc.editor_state.text = format!("{l}{right}");
     pc.editor_state.cursor = new_cursor;
@@ -185,8 +187,7 @@ pub fn builtin_ed_insert(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let s = args[0].to_string();
     let pc = ctx_mut(shell)?;
     let cursor = pc.editor_state.cursor;
-    let left: String = pc.editor_state.text.chars().take(cursor).collect();
-    let right: String = pc.editor_state.text.chars().skip(cursor).collect();
+    let (left, right) = split_at_cursor(&pc.editor_state.text, cursor);
     let s_chars = s.chars().count();
     pc.editor_state.text = format!("{left}{s}{right}");
     pc.editor_state.cursor = cursor + s_chars;
@@ -230,8 +231,8 @@ pub fn builtin_ed_accept(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// non-Unit value it wins; otherwise the captured bytes are decoded
 /// (trailing newline stripped).
 ///
-/// The re-entrancy guard and the pipeline foreground signal are now the
-/// turn's explicit terminal loan.  `begin_terminal_loan` raises the turn
+/// The re-entrancy guard and the pipeline foreground signal are the turn's
+/// explicit terminal loan.  `begin_terminal_loan` raises the turn
 /// to `ExplicitLoan` — which the pipeline foreground rule honors, keeping
 /// `_ed-tui`'s body in the foreground process group despite the captured
 /// stdout pipe — and the matching `end_terminal_loan` restores it;
@@ -352,6 +353,12 @@ fn is_word_token(tok: &Token) -> bool {
 /// from the token (already unescaped, hash-bumping and all); every other
 /// kind is read back out of `text` via the token's own byte span, stripping
 /// the surrounding quotes for double-quoted strings.
+///
+/// Escapes are asymmetric between the two quote styles: a single-quoted body
+/// is the token's unescaped value, but a double-quoted body is returned raw
+/// from the source span — its `\n`, `\"`, `$…` escapes verbatim, not
+/// interpreted.  Plugins tokenizing the buffer see double-quoted text exactly
+/// as typed; unescaping it is theirs to do if they need the runtime value.
 fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
     if let Token::SingleQuoted(s) = tok {
         return s.clone();
