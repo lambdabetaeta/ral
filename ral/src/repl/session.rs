@@ -165,18 +165,11 @@ impl Session {
     /// they cover a panic-unwind exit as well as this orderly one.
     pub(super) fn run(mut self) -> ExitCode {
         ral_core::dbg_trace!("repl", "entering REPL loop");
-        let cwd = self.transport.shell_mut().shell.cwd();
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        self.transport.attach(
-            ral_core::transport::TerminalEndpoint {
-                lease: None,
-                state: ral_core::io::TerminalState::probe_from_env().1,
-            },
-            cwd,
-            std::path::PathBuf::from(&home),
-            None, // rc_path
-            crate::ENGINE_INSTALLER_TAG.to_string(),
-        );
+        // No `attach` here: under `IdentityTransport` the shell is already
+        // booted and dressed by `boot`, and its `attach` discards everything
+        // but the terminal lease (hardcoded `None`).  Computing cwd/HOME/a
+        // re-probed terminal only to throw them away is dead work — wire it
+        // when `WireTransport` is actually constructed.
         while matches!(self.turn(), Flow::Continue) {}
         ExitCode::from(self.exit_code)
     }

@@ -141,10 +141,8 @@ pub(crate) fn run_batch(
     }
 
     let mut shell = ral_core::driver::boot_shell(terminal, &PRELUDE);
-    // `watch` is core-implemented but host-installed: a batch script's stdout
-    // is the real terminal or pipe, a durable sink a detached watcher can
-    // outlive the turn writing to. Registered process-wide for typecheck by
-    // `register_host_surface()`; installed here so it also runs.
+    // `watch` is host-installed (why: WATCH_BUILTIN's doc in core); the batch
+    // path installs it so a script's `watch` runs, not just typechecks.
     shell.install_builtins(ral_core::builtins::WATCH_BUILTIN);
     shell.set_exit_hints(load_exit_hints());
     tick!("builtins");

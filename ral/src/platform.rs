@@ -25,10 +25,8 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
     (mode, terminal)
 }
 
-/// Home directory: `$HOME` on Unix, `%USERPROFILE%` on Windows.
-/// Falls back to `.` so REPL completion never panics on a path
-/// join.  Routes through [`ral_core::path::home_from_env_or_dot`]
-/// so the resolution rule lives in one place.
+/// Home directory, deferring the resolution rule to
+/// [`ral_core::path::home_from_env_or_dot`].
 pub(crate) fn home_dir() -> String {
     ral_core::path::home_from_env_or_dot()
 }
