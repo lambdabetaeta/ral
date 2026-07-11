@@ -7,6 +7,11 @@ use std::io::BufRead;
 use std::io::Write;
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
+
+/// The loopback callback wait is bounded so an abandoned sign-in cannot hang
+/// the CLI forever; it mirrors the device flow's authorization-code expiry.
+const MAX_WAIT: Duration = Duration::from_mins(15);
 
 /// Drive the browser flow to completion and return the issued tokens.
 pub(super) async fn run(client: &reqwest::Client) -> Result<super::RawTokens, String> {
@@ -139,9 +144,7 @@ fn launch_browser(_url: &str) -> Result<(), String> {
 /// Accept one connection, parse the authorization code from the callback
 /// request, reply with a small confirmation page, and return the code.
 fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|e| format!("could not accept callback connection: {e}"))?;
+    let mut stream = accept_within(listener, MAX_WAIT)?;
     let request_line = read_request_line(&mut stream)?;
 
     let path_and_query = request_line
@@ -175,6 +178,37 @@ fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<Strin
 
     write_page(&mut stream, "Signed in to exarch. You can close this tab.");
     Ok(code)
+}
+
+/// Accept one connection, giving up after `timeout` so an abandoned sign-in
+/// cannot block the CLI forever. Polls the listener in nonblocking mode
+/// rather than parking the spawn-blocking thread on `accept` with no way to
+/// time out, then hands back a blocking stream for the read/write below.
+fn accept_within(listener: &TcpListener, timeout: Duration) -> Result<TcpStream, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("could not configure callback listener: {e}"))?;
+    let start = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|e| format!("could not configure callback connection: {e}"))?;
+                return Ok(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= timeout {
+                    return Err(format!(
+                        "browser sign-in timed out after {} minutes",
+                        timeout.as_secs() / 60
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("could not accept callback connection: {e}")),
+        }
+    }
 }
 
 /// Read the first request line — the only line that carries the callback's
