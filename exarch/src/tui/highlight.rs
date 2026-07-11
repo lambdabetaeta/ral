@@ -20,7 +20,7 @@
 //! re-colour their interior.  A later refinement could walk those nested
 //! token streams (the lexer already carries them on the token).
 
-use super::line::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
+use super::palette::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
 use ral_core::syntax::is_keyword;
 use ral_core::syntax::lexer::{Token, lex};
 use ratatui::{

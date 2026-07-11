@@ -13,7 +13,7 @@
 //! every block shares the tab's agent, so the whole rail glows that agent's
 //! hue — constant here by design, and read on a tab-switch as "whose
 //! transcript is this". The human's prompt fence is the exception, wearing a
-//! neutral [`super::line::PROMPT_INK`] so it never reads as an agent.
+//! neutral [`super::palette::PROMPT_INK`] so it never reads as an agent.
 //!
 //! The rail is the keystone of the "transcript as graphic" re-encoding
 //! ([[decisions/260618_tui-transcript-as-graphic]]): the variables live
@@ -22,7 +22,7 @@
 //! composes on the same substrate.
 
 use super::block::AgentSlot;
-use super::line::{AGENT_HUES, PROMPT_INK};
+use super::palette::{AGENT_HUES, PROMPT_INK};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 

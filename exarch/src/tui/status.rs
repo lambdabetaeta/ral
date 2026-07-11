@@ -1,4 +1,5 @@
-use super::line::{CYAN, PURPLE, SLATE, usage_text};
+use super::line::usage_text;
+use super::palette::{CYAN, PURPLE, SLATE};
 use super::rail;
 use crate::provider::Usage;
 use ratatui::style::Style;

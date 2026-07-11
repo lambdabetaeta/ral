@@ -15,7 +15,8 @@
 
 use super::fidelity::Fidelity;
 use super::group;
-use super::line::{self, RAIL_GLYPHS, RAIL_W, READ_W, is_blank};
+use super::line::{self, is_blank};
+use super::palette::{QUEUED_PROMPT_BG, RAIL_GLYPHS, RAIL_W, READ_W, SLATE};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
@@ -25,7 +26,7 @@ use ratatui::text::{Line, Span};
 use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
-/// Index into the agent rail palette (`line::AGENT_HUES`). Root is `0`;
+/// Index into the agent rail palette ([`super::palette::AGENT_HUES`]). Root is `0`;
 /// each subagent takes the next slot at birth, wrapping modulo the
 /// palette length. Carried by value on every [`Block`] so the rail
 /// renders agent identity without a lookup on `App`.
@@ -46,7 +47,7 @@ pub(super) enum RailShape {
     /// stall) is an annotation, not a navigable block, so it earns a subtle glyph.
     #[default]
     Plain,
-    /// The human's submitted prompt — marked by its [`super::line::PROMPT_INK`]
+    /// The human's submitted prompt — marked by its [`super::palette::PROMPT_INK`]
     /// body tint and the `❖` rail fence, with a full-width rule above its first
     /// row (painted by the flatten).  No background band — background is the
     /// machine's.
@@ -189,7 +190,7 @@ pub(super) fn queued_prompt_rows(
             &rows[first..],
             width,
             true,
-            Some(line::QUEUED_PROMPT_BG),
+            Some(QUEUED_PROMPT_BG),
         );
     }
 
@@ -200,10 +201,10 @@ pub(super) fn queued_prompt_rows(
             Line::from(Span::styled(
                 format!("⋯ ({hidden} more)"),
                 Style::default()
-                    .fg(line::SLATE)
+                    .fg(SLATE)
                     .add_modifier(Modifier::ITALIC),
             )),
-            line::QUEUED_PROMPT_BG,
+            QUEUED_PROMPT_BG,
             Some(width as usize),
         ));
     }

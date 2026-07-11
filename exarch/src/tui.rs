@@ -26,6 +26,7 @@ mod line;
 mod matrix;
 mod md;
 mod model_picker;
+mod palette;
 mod picker;
 mod prompt;
 mod rail;

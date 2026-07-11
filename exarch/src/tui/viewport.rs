@@ -17,7 +17,8 @@
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{READ_W, deliberation_grain, is_blank, plain, size_bar};
+use super::line::{deliberation_grain, is_blank, plain, size_bar};
+use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::{AgentId, Hunk};

@@ -18,7 +18,8 @@ use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::fidelity::Fidelity;
-use super::line::{CYAN, LIME, READ_W, SLATE, is_blank};
+use super::line::is_blank;
+use super::palette::{CYAN, LIME, READ_W, SLATE};
 use super::rail::{desaturate, mix};
 
 /// Left inset for assistant markdown lines, marking the model's voice

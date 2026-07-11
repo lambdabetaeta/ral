@@ -11,7 +11,8 @@ use crate::provider::{self, Provider};
 
 use super::block::AgentSlot;
 use super::fidelity::Fidelity;
-use super::line::{self, AGENT_HUES, READ_W, SLATE};
+use super::line;
+use super::palette::{AGENT_HUES, CODE_BG, READ_W, SLATE};
 use super::md;
 use super::rail::{self, RailKind};
 use super::status::{CTX_BAR_W, ctx_ramp, wait_bar};
@@ -220,7 +221,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
             "code",
             swatch(
                 "scripts and shell output — a recessed panel",
-                Some(line::CODE_BG),
+                Some(CODE_BG),
             ),
         ),
         (
@@ -327,7 +328,7 @@ mod tests {
     use crate::card::{FieldVal, Mark, Role};
     use crate::provider::scripted::Script;
     use crate::provider::{Provider, ProviderKind};
-    use crate::tui::{line, rail};
+    use crate::tui::{line, palette, rail};
     use std::path::{Path, PathBuf};
 
     /// A representative session: a fetched-catalog model (distinct slug,
@@ -510,7 +511,7 @@ mod tests {
         for l in legend_panel() {
             if let Some(first) = l.spans.first() {
                 assert!(
-                    !line::RAIL_GLYPHS.contains(&first.content.as_ref()),
+                    !palette::RAIL_GLYPHS.contains(&first.content.as_ref()),
                     "a legend row leads with a rail glyph: {:?}",
                     line::plain(&l)
                 );

@@ -1,6 +1,7 @@
 //! Drag-selection helpers: column-aware text extraction and
 //! character-range highlighting.
-use super::line::{RAIL_GLYPHS, RAIL_W, plain};
+use super::line::plain;
+use super::palette::{RAIL_GLYPHS, RAIL_W};
 use ratatui::{
     style::Modifier,
     text::{Line, Span},

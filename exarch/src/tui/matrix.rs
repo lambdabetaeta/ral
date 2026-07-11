@@ -1,4 +1,5 @@
-use super::line::{self, AGENT_HUES, SLATE};
+use super::line;
+use super::palette::{AGENT_HUES, SLATE};
 use super::rail;
 use super::render::tab_bar;
 use super::viewport::Viewport;
