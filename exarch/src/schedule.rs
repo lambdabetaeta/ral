@@ -214,9 +214,12 @@ fn parse_field(spec: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u64
             return Err(format!("cron range `{range}` is descending in `{spec}`"));
         }
         let mut v = lo;
-        while v <= hi {
+        loop {
             mask |= 1 << v;
-            v += step;
+            match v.checked_add(step) {
+                Some(next) if next <= hi => v = next,
+                _ => break,
+            }
         }
     }
     Ok(mask)
@@ -511,11 +514,9 @@ impl ScheduleRegistry {
             if let Some(delay) = entry.trigger.next_delay() {
                 entry.deadline = self.arm_deadline(id, mailbox, delay);
             } else {
-                let _ = entry;
                 g.entries.remove(&id);
             }
         } else {
-            let _ = entry;
             g.entries.remove(&id);
         }
         drop(g);
@@ -573,6 +574,17 @@ mod tests {
         assert!(CronSchedule::parse("* * * 13 *").is_err());
         assert!(CronSchedule::parse("*/0 * * * *").is_err());
         assert!(CronSchedule::parse("5-1 * * * *").is_err());
+    }
+
+    #[test]
+    fn oversized_step_does_not_overflow() {
+        // A step wider than the field range must not overflow the u8
+        // increment: `N/step` sets only N, then the walk stops.
+        let s = sched("59/200 * * * *");
+        assert!(bit(s.minute, 59) && !bit(s.minute, 0));
+        // A `*/step` with an oversized step sets only the low bound.
+        let s = sched("*/200 * * * *");
+        assert!(bit(s.minute, 0) && !bit(s.minute, 59));
     }
 
     #[test]
