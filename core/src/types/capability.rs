@@ -498,25 +498,6 @@ impl Capabilities {
     pub fn root() -> Self {
         Self::default()
     }
-
-    /// True when these capabilities, applied as a session frame over the
-    /// ambient root, engage the OS sandbox — i.e. they impose fs or net
-    /// restrictions an external process must be confined to.  Mirrors the
-    /// grant stack [`crate::types::Shell::new`] installs (root, then this
-    /// frame), so a host can decide whether to stand up sandbox
-    /// machinery without constructing a whole `Shell` to probe the
-    /// projection.
-    pub fn engages_sandbox(&self) -> bool {
-        let context = crate::types::Context {
-            grants: {
-                let mut grants = GrantStack::root();
-                grants.push(self.clone());
-                grants
-            },
-            ..crate::types::Context::default()
-        };
-        crate::capability::sandbox_projection(&context).is_some()
-    }
 }
 
 impl Capabilities {

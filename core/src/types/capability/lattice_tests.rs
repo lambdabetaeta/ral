@@ -764,7 +764,7 @@ fn decode_accepts_cwd_relative_fs_path() {
 /// engage the OS sandbox — the projection is empty.
 #[test]
 fn root_does_not_engage_sandbox() {
-    assert!(!Capabilities::root().engages_sandbox());
+    assert!(!crate::capability::engages_sandbox(&Capabilities::root()));
 }
 
 /// A net-deny frame is a real restriction an external process must be
@@ -775,7 +775,7 @@ fn net_deny_engages_sandbox() {
         net: Some(false),
         ..Default::default()
     };
-    assert!(caps.engages_sandbox());
+    assert!(crate::capability::engages_sandbox(&caps));
 }
 
 /// A bool-typed `editor` sub-key must hold a genuine `Bool`.  A non-Bool

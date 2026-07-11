@@ -12,7 +12,8 @@
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, PrefixSet};
 use crate::types::{
-    Context, ExecDir, ExecPolicy, ExecProjection, FsPolicy, FsProjection, Meet, SandboxProjection,
+    Capabilities, Context, ExecDir, ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack,
+    Meet, SandboxProjection,
 };
 use std::collections::BTreeSet;
 
@@ -80,41 +81,42 @@ pub(crate) fn sandbox_projection(ctx: &Context) -> Option<SandboxProjection> {
     })
 }
 
-/// Reduce the exec component of the stack.
+/// True when `caps` engage the OS sandbox over the ambient root.
 ///
-/// `Unrestricted` means no layer attenuated exec; the OS profile
-/// leaves `process-exec` open and the in-ral gate is the only check.
-/// `Restricted` carries four sets:
+/// I.e. they impose fs or net restrictions an external process must be
+/// confined to.  Mirrors the grant stack [`crate::types::Shell::new`]
+/// installs (root, then this frame), so a host can decide whether to
+/// stand up sandbox machinery without constructing a whole `Shell` to
+/// probe the projection.
+pub fn engages_sandbox(caps: &Capabilities) -> bool {
+    let mut grants = GrantStack::root();
+    grants.push(caps.clone());
+    let context = Context {
+        grants,
+        ..Context::default()
+    };
+    sandbox_projection(&context).is_some()
+}
+
+/// Reduce the exec component of the stack into an [`ExecProjection`].
 ///
-///   * `allow_paths` — the literal exec keys named anywhere in the
-///     stack, resolved to absolute paths and kept where the full-stack
-///     live verdict admits them (see [`admitted_literal_paths`]).  The
-///     OS profile renders them as `(literal …)`.
-///   * `allow_dirs` — subpath keys carrying `Allow`, intersected by
-///     prefix across opining layers.  Rendered as `(subpath …)`.
-///   * `deny_paths` — absolute exec keys carrying `Deny`, unioned across
-///     layers (a `Deny` is sticky).  Rendered as `(deny process-exec
-///     (literal …))` after the broad allow so SBPL's last-match-wins
-///     carves them out of a covering `allow_dirs` region.
-///   * `deny_dirs` — subpath keys carrying `Deny`, *unioned* across
-///     layers (denies are sticky).  Rendered as `(deny process-exec
-///     (subpath …))` after the broad allow so SBPL's last-match-wins
-///     gives them precedence.
-///   * `deny_basenames` — bare-name exec keys carrying `Deny`, unioned
-///     across layers.  A bare name vetoes a command wherever it lands,
-///     so it renders as a final-path-component match, not a single
-///     resolved path: this keeps the deny sound when the name lives
-///     somewhere other than PATH resolves it, and closes the
-///     interpreter-bypass route (`sh -c git`) by which a denied name
-///     could otherwise slip in through an admitted dir.
+/// `Unrestricted` means no layer attenuated exec; the OS profile leaves
+/// `process-exec` open and the in-ral gate is the only check.
+/// `Restricted` carries five sets, computed as follows (their OS
+/// rendering is documented on [`ExecProjection`]):
 ///
-/// `allow_paths` draws its candidates from the raw union of every
-/// layer's literal keys and resolves each to a path before deciding: a
-/// literal and a covering allow-dir interact only once the name is
-/// resolved (`git` under a sibling layer's `/usr/bin/`), so the allow
-/// decision defers to [`evaluate_exec`] (see [`admitted_literal_paths`])
-/// over the resolved identity rather than intersecting names and dirs as
-/// separate maps.
+///   * `allow_dirs` — subpath keys carrying `Allow`, met by prefix
+///     across opining layers.
+///   * `deny_dirs`, `deny_paths`, `deny_basenames` — subpath, absolute,
+///     and bare-name keys carrying `Deny`, each unioned across layers (a
+///     `Deny` is sticky).  A bare name vetoes a command wherever it
+///     lands, closing the interpreter-bypass route (`sh -c git`).
+///   * `allow_paths` — literal exec keys resolved to absolute paths and
+///     kept where the full-stack live verdict admits them.  A literal
+///     and a covering allow-dir meet only once the name is resolved, so
+///     the decision defers to [`evaluate_exec`] over the resolved
+///     identity (see [`admitted_literal_paths`]) rather than
+///     intersecting names and dirs as separate maps.
 fn reduce_exec(ctx: &Context) -> ExecProjection {
     let resolver = ctx.resolver();
     let mut subpath_allow: Option<PrefixSet> = None;
