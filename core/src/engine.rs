@@ -320,7 +320,8 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                     // `Report` frame would ever be written, and the
                     // front-end's `recv` would block forever.
                     let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        shell.run_turn(req).into_report()
+                        let turn_report = shell.run_turn(req);
+                        turn_report.into_report(shell.sources())
                     }))
                     .unwrap_or_else(|_| Report::Static {
                         diagnostics: crate::transport::Diagnostics::Host(

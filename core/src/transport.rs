@@ -269,6 +269,8 @@ pub enum Diagnostics {
 /// [`Break`](crate::types::Break).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Break {
+    /// A caught runtime error, already rendered to its full diagnostic string
+    /// (see [`TurnReport::into_report`]) — the host prints it verbatim.
     Error(String),
     Exit(i32),
     #[cfg(unix)]
@@ -279,21 +281,31 @@ pub enum Break {
     },
 }
 
-impl From<crate::types::Break> for Break {
-    fn from(break_: crate::types::Break) -> Self {
-        use crate::types::{Break as EngineBreak, Escape};
-        match break_ {
-            EngineBreak::Error(e) => Self::Error(e.message),
-            EngineBreak::Escape(esc) => match esc {
-                Escape::Exit(code) => Self::Exit(code.clamp(0, 255)),
-                #[cfg(unix)]
-                Escape::Stopped { pgid, signal, .. } => Self::Stopped {
-                    pgid: pgid.0,
-                    signal: signal.number(),
-                    signal_name: signal.name().unwrap_or("?").to_string(),
-                },
+/// Project an engine [`Break`](crate::types::Break) onto the transport
+/// [`Break`], rendering a caught runtime error against `sources` into its
+/// full diagnostic string. `single_command` selects the compact one-liner
+/// over the source-span caret, exactly as the batch host chooses.
+fn render_break(
+    break_: crate::types::Break,
+    sources: &crate::source::SourceDb,
+    single_command: bool,
+) -> Break {
+    use crate::types::{Break as EngineBreak, Escape};
+    match break_ {
+        EngineBreak::Error(e) => Break::Error(crate::diagnostic::format_runtime_error_auto(
+            sources,
+            &e,
+            single_command,
+        )),
+        EngineBreak::Escape(esc) => match esc {
+            Escape::Exit(code) => Break::Exit(code.clamp(0, 255)),
+            #[cfg(unix)]
+            Escape::Stopped { pgid, signal, .. } => Break::Stopped {
+                pgid: pgid.0,
+                signal: signal.number(),
+                signal_name: signal.name().unwrap_or("?").to_string(),
             },
-        }
+        },
     }
 }
 
@@ -301,10 +313,16 @@ impl crate::driver::TurnReport {
     /// Project into the protocol [`Report`]: the live `Value` becomes a
     /// first-order [`FOValue`] (a non-transportable result — e.g. a live
     /// `Handle` — is reported as an error rather than dropped silently),
-    /// and rich diagnostics render to strings.  The one lossy step between
-    /// the engine and the seam.
-    pub fn into_report(self) -> Report {
-        
+    /// and rich diagnostics render to strings against `sources`.  The one
+    /// lossy step between the engine and the seam.
+    ///
+    /// A caught runtime error is rendered here — at the seam, while the
+    /// engine's [`SourceDb`](crate::source::SourceDb) is still in hand — into
+    /// the same full diagnostic string the batch host produces
+    /// ([`format_runtime_error_auto`](crate::diagnostic::format_runtime_error_auto)):
+    /// `error:` prefix, exit status, hint, and source-span caret.  The host
+    /// then only has to print it.
+    pub fn into_report(self, sources: &crate::source::SourceDb) -> Report {
         use crate::turn::StaticDiagnostics;
         match self {
             Self::Static { diagnostics } => Report::Static {
@@ -330,7 +348,7 @@ impl crate::driver::TurnReport {
                             "turn result is not transportable across the host seam".into(),
                         )),
                     },
-                    Err(break_) => Err(break_.into()),
+                    Err(break_) => Err(render_break(break_, sources, single_command)),
                 },
                 // Clamp here, at the single point a raw code becomes a
                 // transport code, so `status` and `Break::Exit` (clamped
@@ -958,7 +976,8 @@ impl Transport for IdentityTransport {
             desk: engine.desk.clone(),
             lifecycle: Box::new(()),
         };
-        let report = engine.shell.run_turn(req).into_report();
+        let turn_report = engine.shell.run_turn(req);
+        let report = turn_report.into_report(engine.shell.sources());
 
         engine
             .current_dispatch
@@ -1574,5 +1593,38 @@ mod probe_tests {
             .probe(FOValue::Unit)
             .expect_err("a non-variant probe request must not answer Ok");
         assert!(err.contains("variant"));
+    }
+}
+
+// ── Runtime-error seam tests ──────────────────────────────────────────
+//
+// A caught runtime error is rendered to its full diagnostic string at the
+// seam, so every front-end (REPL included) regains batch-host parity —
+// `error:` prefix, exit status, hint — and prints the string verbatim.
+#[cfg(test)]
+mod runtime_error_seam_tests {
+    use super::*;
+    use crate::source::SourceDb;
+    use crate::types::{Break as EngineBreak, Error};
+
+    #[test]
+    fn runtime_error_projects_to_a_full_diagnostic_string() {
+        let db = SourceDb::default();
+        let err = Error::new("boom", 3).with_hint("try harder");
+        // `single_command` selects the compact one-liner, no source span.
+        let Break::Error(rendered) = render_break(EngineBreak::Error(err), &db, true) else {
+            panic!("an engine runtime error must project to a transport Break::Error");
+        };
+        assert!(rendered.contains("error"), "error prefix missing: {rendered:?}");
+        assert!(rendered.contains("boom"), "message missing: {rendered:?}");
+        assert!(
+            rendered.contains("exit status 3"),
+            "exit status missing: {rendered:?}"
+        );
+        assert!(rendered.contains("try harder"), "hint missing: {rendered:?}");
+        assert!(
+            rendered.ends_with('\n'),
+            "the seam must supply the trailing newline the host prints verbatim: {rendered:?}"
+        );
     }
 }
