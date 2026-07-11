@@ -115,7 +115,7 @@ pub fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(r: &mut R) -> io::Resul
     let Some(body) = read_body(r)? else {
         return Ok(None);
     };
-    decode_body(&body, |b| serde_json::from_slice(b)).map(Some)
+    decode_body(&body).map(Some)
 }
 
 /// Read one length-prefixed frame body off `r`, retrying a signal-cut
@@ -153,13 +153,10 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(body))
 }
 
-/// Run `decode` over a frame body, turning a deserialise failure into an
-/// `io::Error` after dumping the raw bytes for post-mortem.
-fn decode_body<T>(
-    body: &[u8],
-    decode: impl FnOnce(&[u8]) -> serde_json::Result<T>,
-) -> io::Result<T> {
-    match decode(body) {
+/// Deserialise a frame body, turning a failure into an `io::Error` after
+/// dumping the raw bytes for post-mortem.
+fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
+    match serde_json::from_slice(body) {
         Ok(value) => Ok(value),
         Err(e) => {
             let path = std::env::temp_dir().join(format!(

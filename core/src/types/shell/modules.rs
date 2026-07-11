@@ -6,14 +6,12 @@
 //! state lives in `ral::repl::plugin::PluginRuntime` — outside core, since
 //! hooks and keybindings only fire inside the rustyline-driven REPL.
 
-/// Module-loader state for `use` and `source`: the active-load stack (for
-/// cycle detection) and the current recursion depth.
+/// Module-loader state for `use` and `source`.
 ///
-/// Both are push/pop
-/// balanced within a single load, so neither flows back from a child
-/// computation to its parent.
-#[derive(Clone, Default, Debug)]
+/// Both fields are push/pop balanced within a single load, so neither
+/// flows back from a child computation to its parent.
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Modules {
-    pub stack: Vec<std::string::String>,
+    pub stack: Vec<String>,
     pub depth: usize,
 }

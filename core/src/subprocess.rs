@@ -20,15 +20,17 @@
 //! and session state (durable root, source registry, exit hints, builtin
 //! table) are host-local — the child constructs its own.  In particular the
 //! builtin table is never wired: its entries hold host fn pointers, so the
-//! receiver supplies its own from its booted session.  Audit policy is
-//! carried on the eval-request envelope, not here, because it is an
-//! instruction to the child rather than a property of the shell state.
+//! receiver supplies its own from its booted session.  Hooks are likewise
+//! host-local — they fire only inside the REPL — so a child reconstructs an
+//! empty hook map.  Audit policy is carried on the eval-request envelope, not
+//! here, because it is an instruction to the child rather than a property of
+//! the shell state.
 
 use crate::serial::{InternCtx, ScopeArcs, SerialEnvSnapshot, SerialValue};
 use crate::typecheck;
 use crate::types::{
-    Context, ControlState, Error, ExecNode, ExecNodeKind, GrantStack, HandlerEntry, HandlerFrame,
-    HandlerStack, Mobile, Shell,
+    Context, ControlState, Error, GrantStack, HandlerEntry, HandlerFrame, HandlerStack, Mobile,
+    Shell,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,29 +98,6 @@ impl WireHandlerFrame {
     }
 }
 
-/// Wire mirror of `types::Modules`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct WireModules {
-    pub stack: Vec<String>,
-    pub depth: usize,
-}
-
-impl WireModules {
-    pub(crate) fn from_modules(modules: &crate::types::Modules, _ctx: &mut InternCtx) -> Self {
-        Self {
-            stack: modules.stack.clone(),
-            depth: modules.depth,
-        }
-    }
-
-    pub(crate) fn into_modules(self, _arcs: &ScopeArcs) -> crate::types::Modules {
-        crate::types::Modules {
-            stack: self.stack,
-            depth: self.depth,
-        }
-    }
-}
-
 /// Wire mirror of [`ControlState`].
 ///
 /// Every counter the parent observes across an IPC round trip is here:
@@ -138,7 +117,7 @@ pub(crate) struct WireControl {
 }
 
 impl WireControl {
-    fn from_control(c: &ControlState) -> Self {
+    fn from_runtime(c: &ControlState) -> Self {
         Self {
             last_status: c.last_status,
             call_depth: c.call_depth,
@@ -146,79 +125,12 @@ impl WireControl {
         }
     }
 
-    fn into_control(self) -> ControlState {
+    fn into_runtime(self) -> ControlState {
         ControlState {
             last_status: self.last_status,
             call_depth: self.call_depth,
             recursion_limit: self.recursion_limit,
         }
-    }
-}
-
-/// Wire mirror of `ExecNode`, using `SerialValue` for the value field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WireExecNode {
-    pub kind: ExecNodeKind,
-    pub cmd: String,
-    pub args: Vec<String>,
-    pub status: i32,
-    pub script: String,
-    pub line: usize,
-    pub col: usize,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub value: SerialValue,
-    pub children: Vec<Self>,
-    pub start: i64,
-    pub end: i64,
-    pub principal: String,
-}
-
-impl WireExecNode {
-    pub(crate) fn from_runtime(node: ExecNode, ctx: &mut InternCtx) -> Result<Self, Error> {
-        let mut children = Vec::with_capacity(node.children.len());
-        for child in node.children {
-            children.push(Self::from_runtime(child, ctx)?);
-        }
-        Ok(Self {
-            kind: node.kind,
-            cmd: node.cmd,
-            args: node.args,
-            status: node.status,
-            script: node.script,
-            line: node.line,
-            col: node.col,
-            stdout: node.stdout,
-            stderr: node.stderr,
-            value: SerialValue::from_runtime(&node.value, ctx)?,
-            children,
-            start: node.start,
-            end: node.end,
-            principal: node.principal,
-        })
-    }
-
-    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<ExecNode, Error> {
-        let mut children = Vec::with_capacity(self.children.len());
-        for child in self.children {
-            children.push(child.into_runtime(arcs)?);
-        }
-        Ok(ExecNode {
-            kind: self.kind,
-            cmd: self.cmd,
-            args: self.args,
-            status: self.status,
-            script: self.script,
-            line: self.line,
-            col: self.col,
-            stdout: self.stdout,
-            stderr: self.stderr,
-            value: self.value.into_runtime(arcs)?,
-            children,
-            start: self.start,
-            end: self.end,
-            principal: self.principal,
-        })
     }
 }
 
@@ -229,7 +141,7 @@ impl WireExecNode {
 /// (IO, audit, REPL, exit hints, cancel) is host-local and the
 /// receiver constructs its own.
 ///
-/// Pair with [`Self::from_mobile`] / [`Self::into_mobile`] to cross the
+/// Pair with [`Self::from_runtime`] / [`Self::into_runtime`] to cross the
 /// wire; the inverses are total (modulo handle-bearing values, which
 /// the serial layer drops with a clean error).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,9 +161,11 @@ pub(crate) struct WireMobile {
 /// `serial::InternCtx`, so `handlers` is reified into a
 /// `Vec<WireHandlerFrame>` here and rehydrated on the receiving side.
 /// All other fields ride their runtime types directly: `grants` is
-/// `#[serde(transparent)]` over `Vec<Capabilities>`, `modules` and
-/// `cwd` are local `Serialize`-implementing wrappers, and the bare
-/// fields (`env_overrides`, dir, args) are serde-friendly already.
+/// `#[serde(transparent)]` over `Vec<Capabilities>`, `modules` and `cwd`
+/// are `Serialize` themselves, and the bare fields (`env_overrides`, dir,
+/// args) are serde-friendly already.  `hooks` is deliberately dropped —
+/// they fire only inside the REPL — so the receiver reconstructs an empty
+/// hook map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireContext {
     pub env_overrides: crate::types::EnvVars,
@@ -259,34 +173,34 @@ pub(crate) struct WireContext {
     pub grants: GrantStack,
     pub handlers: Vec<WireHandlerFrame>,
     pub args: Vec<String>,
-    pub modules: WireModules,
+    pub modules: crate::types::Modules,
     pub cwd: crate::types::Cwd,
 }
 
 impl WireMobile {
     /// Reify a [`Mobile`] into wire form against the supplied
-    /// intern context.  Inverse of [`Self::into_mobile`].
-    pub(crate) fn from_mobile(mobile: &Mobile, ctx: &mut InternCtx) -> Result<Self, Error> {
+    /// intern context.  Inverse of [`Self::into_runtime`].
+    pub(crate) fn from_runtime(mobile: &Mobile, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(Self {
             scope: SerialEnvSnapshot::from_runtime(&mobile.scope, ctx)?,
-            control: WireControl::from_control(&mobile.control),
-            context: WireContext::from_context(&mobile.context, ctx)?,
+            control: WireControl::from_runtime(&mobile.control),
+            context: WireContext::from_runtime(&mobile.context, ctx)?,
         })
     }
 
     /// Hydrate a [`Mobile`] from wire form against the scope-arc
     /// table produced by `build_arcs` on the enclosing scope table.
-    pub(crate) fn into_mobile(self, arcs: &ScopeArcs) -> Result<Mobile, Error> {
+    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<Mobile, Error> {
         Ok(Mobile {
             scope: self.scope.into_runtime(arcs)?,
-            control: self.control.into_control(),
-            context: self.context.into_context(arcs)?,
+            control: self.control.into_runtime(),
+            context: self.context.into_runtime(arcs)?,
         })
     }
 }
 
 impl WireContext {
-    pub(crate) fn from_context(h: &Context, ctx: &mut InternCtx) -> Result<Self, Error> {
+    pub(crate) fn from_runtime(h: &Context, ctx: &mut InternCtx) -> Result<Self, Error> {
         let mut handlers = Vec::new();
         for frame in &h.handlers {
             handlers.push(WireHandlerFrame::from_runtime(frame, ctx)?);
@@ -297,12 +211,12 @@ impl WireContext {
             grants: h.grants.clone(),
             handlers,
             args: h.args.clone(),
-            modules: WireModules::from_modules(&h.modules, ctx),
+            modules: h.modules.clone(),
             cwd: h.cwd.clone(),
         })
     }
 
-    pub(crate) fn into_context(self, arcs: &ScopeArcs) -> Result<Context, Error> {
+    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<Context, Error> {
         let handlers: Vec<HandlerFrame> = self
             .handlers
             .into_iter()
@@ -315,7 +229,7 @@ impl WireContext {
             handlers: HandlerStack::from(handlers),
             hooks: std::collections::HashMap::default(),
             args: self.args,
-            modules: self.modules.into_modules(arcs),
+            modules: self.modules,
             cwd: self.cwd,
         })
     }
@@ -336,7 +250,7 @@ pub(crate) fn install_shell_mobile(
     shell: &mut Shell,
     arcs: &ScopeArcs,
 ) -> Result<(), Error> {
-    let mut mobile = state.into_mobile(arcs)?;
+    let mut mobile = state.into_runtime(arcs)?;
     // The wire's stack was hydrated into a temporary HandlerStack.
     // Drain those frames and push them atop the receiver's existing
     // layers using the receiver's handle counter.

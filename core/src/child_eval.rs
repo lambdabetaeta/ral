@@ -18,12 +18,12 @@ use crate::evaluator::absorb_tail;
 use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
-use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, build_arcs};
+use crate::serial::{InternCtx, ScopeArcs, ScopeTable, SerialEnvSnapshot, SerialValue, build_arcs};
 use crate::source::FileId;
-use crate::subprocess::{WireExecNode, WireMobile, reexec_child_shell};
+use crate::subprocess::{WireMobile, reexec_child_shell};
 use crate::types::{
-    Break, CapturePolicy, Env, Error, Escape, ExecNode, LocationCursor, Mobile, Settled, Shell,
-    Status, Tail, Value,
+    Break, CapturePolicy, Env, Error, Escape, ExecNode, ExecNodeKind, LocationCursor, Mobile,
+    Settled, Shell, Status, Tail, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -125,6 +125,73 @@ pub(crate) enum WireOutcome {
     },
 }
 
+/// Wire mirror of `ExecNode`, using `SerialValue` for the value field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WireExecNode {
+    pub kind: ExecNodeKind,
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub status: i32,
+    pub script: String,
+    pub line: usize,
+    pub col: usize,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub value: SerialValue,
+    pub children: Vec<Self>,
+    pub start: i64,
+    pub end: i64,
+    pub principal: String,
+}
+
+impl WireExecNode {
+    pub(crate) fn from_runtime(node: ExecNode, ctx: &mut InternCtx) -> Result<Self, Error> {
+        let mut children = Vec::with_capacity(node.children.len());
+        for child in node.children {
+            children.push(Self::from_runtime(child, ctx)?);
+        }
+        Ok(Self {
+            kind: node.kind,
+            cmd: node.cmd,
+            args: node.args,
+            status: node.status,
+            script: node.script,
+            line: node.line,
+            col: node.col,
+            stdout: node.stdout,
+            stderr: node.stderr,
+            value: SerialValue::from_runtime(&node.value, ctx)?,
+            children,
+            start: node.start,
+            end: node.end,
+            principal: node.principal,
+        })
+    }
+
+    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<ExecNode, Error> {
+        let mut children = Vec::with_capacity(self.children.len());
+        for child in self.children {
+            children.push(child.into_runtime(arcs)?);
+        }
+        Ok(ExecNode {
+            kind: self.kind,
+            cmd: self.cmd,
+            args: self.args,
+            status: self.status,
+            script: self.script,
+            line: self.line,
+            col: self.col,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            value: self.value.into_runtime(arcs)?,
+            children,
+            start: self.start,
+            end: self.end,
+            principal: self.principal,
+        })
+    }
+}
+
 /// One audit node plus the scope table it interns against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireAuditNode {
@@ -195,7 +262,7 @@ pub(crate) fn pack_request(
         Some(env) => Some(SerialEnvSnapshot::from_runtime(env, &mut ctx)?),
         None => None,
     };
-    let mobile = WireMobile::from_mobile(mobile, &mut ctx)?;
+    let mobile = WireMobile::from_runtime(mobile, &mut ctx)?;
     Ok(ChildEvalRequest {
         scope_table: ctx.scope_table,
         body,
@@ -604,7 +671,7 @@ mod tests {
 
         let mobile = parent.mobile();
         let mut ctx = InternCtx::new();
-        let wire = WireMobile::from_mobile(&mobile, &mut ctx).expect("to wire");
+        let wire = WireMobile::from_runtime(&mobile, &mut ctx).expect("to wire");
         let request = ChildEvalRequest {
             scope_table: ctx.scope_table,
             body: compile_one("return unit"),
