@@ -35,13 +35,21 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
     l.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
+/// `1` when `l`'s first span is a marginal rail glyph (the 2-col shape the
+/// rail prepends), else `0` — the leading-span count the copy contract and
+/// the line wrappers skip so the rail chrome never lands in extracted text.
+pub(super) fn rail_skip(l: &Line<'_>) -> usize {
+    usize::from(
+        l.spans
+            .first()
+            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
+    )
+}
+
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
 pub(super) fn plain(line: &Line<'_>) -> String {
-    let skip = usize::from(line
-        .spans
-        .first()
-        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())));
+    let skip = rail_skip(line);
     line.spans[skip..]
         .iter()
         .map(|s| s.content.as_ref())
@@ -431,8 +439,7 @@ pub(super) fn subagent_header(
         ),
         size_bar(size),
     ];
-    // The error / empty suffix the breadcrumb carried, less the `[done in
-    // Ns]` case the elapsed readout now subsumes.
+    // The error / empty-output suffix beside the header.
     let suffix = match error {
         None if size == 0 => Some("[done, no output]".to_string()),
         None => None,
@@ -768,12 +775,17 @@ fn render_framed(
 
     // Lift a single-line leading heading into the top rule; everything else
     // renders inside.  A multi-line or non-text first mark leaves no title.
+    // A title wider than the inner budget is truncated so the top rule can
+    // never grow past the body rows on a narrow terminal.
     let marks = card.marks();
     let (title, body_marks): (Option<Vec<Span<'static>>>, &[Mark]) = match marks.first() {
         Some(Mark::Text { spans }) => {
             let head = render_text(spans);
             if head.len() == 1 {
-                (Some(head[0].spans.clone()), &marks[1..])
+                (
+                    Some(truncate_spans(&head[0].spans, max_inner.saturating_sub(1))),
+                    &marks[1..],
+                )
             } else {
                 (None, marks)
             }
@@ -864,6 +876,37 @@ fn span_run_width(spans: &[Span<'static>]) -> usize {
     spans.iter().map(ratatui::prelude::Span::width).sum()
 }
 
+/// Truncate a styled span run to at most `max_w` display columns, appending
+/// an `…` in the last column when content is dropped.  Keeps a lifted card
+/// heading from overrunning the frame's top rule on a narrow terminal.
+fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
+    if span_run_width(spans) <= max_w {
+        return spans.to_vec();
+    }
+    let budget = max_w.saturating_sub(1); // reserve the last column for `…`
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for s in spans {
+        if used >= budget {
+            break;
+        }
+        let mut kept = String::new();
+        for ch in s.content.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cw > budget {
+                break;
+            }
+            kept.push(ch);
+            used += cw;
+        }
+        if !kept.is_empty() {
+            out.push(Span::styled(kept, s.style));
+        }
+    }
+    out.push(Span::raw("…"));
+    out
+}
+
 /// Render a `text` mark — a run of optionally-roled spans into one or more
 /// `Line`s, breaking on embedded newlines so a multi-line span stays
 /// faithful.  Width-folding happens later in [`wrap_line`], which
@@ -904,8 +947,8 @@ fn render_measure(m: &Measure) -> Line<'static> {
 /// The quantitative value of a [`Measure`] — the readout then the bar,
 /// without the measure's own label (a fields row supplies its own label
 /// column).  A bounded measure (`max` present) reads as `value/max` with a
-/// proportional fill bar (subsuming the old progress meter); an unbounded
-/// one reads as `value[unit]` with a `log2` [`size_bar`].
+/// proportional fill bar; an unbounded one reads as `value[unit]` with a
+/// `log2` [`size_bar`].
 fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
     let white = Style::default().fg(Color::White);
     if let Some(max) = m.max {
@@ -931,7 +974,7 @@ fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
 /// A proportional fill bar `██████░░░░` of `done/total` — 10 cells, lime
 /// for the filled run and dim slate for the empty.  `total == 0` reads as
 /// no progress (all empty) rather than a divide-by-zero.  The bounded
-/// branch of [`measure_value_spans`]; subsumes the old `meter`.
+/// branch of [`measure_value_spans`].
 fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     const W: u32 = 10;
     #[allow(
@@ -1183,15 +1226,11 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'st
 
 // ── Provider-error rendering ────────────────────────────────────────────────
 
-/// Body keys subsumed by the rendered retry-after row, so a body
-/// dump doesn't also print the raw retry-after value the wait field
-/// already shows as a human duration + bar.
-const WAIT_KEYS: &[&str] = &[
-    "resets_in_seconds",
-    "resets_at",
-    "retry_after",
-    "retry_after_seconds",
-];
+/// Body keys carrying the retry-after wait as a second count, in precedence
+/// order — the readers [`wait_from_body`] consults, and (with the absolute
+/// `resets_at` twin) the keys the rendered wait field then suppresses from
+/// the body dump.
+const RETRY_SECS_KEYS: &[&str] = &["resets_in_seconds", "retry_after_seconds", "retry_after"];
 
 /// Render a [`ProviderErrorRecord`] as a structured multi-line block.
 ///
@@ -1226,7 +1265,13 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
                 fs.push(wait_field(secs));
             }
             match body {
-                Some(b) => fs.extend(body_fields(b, WAIT_KEYS)),
+                // Suppress the raw retry-after keys the wait field subsumes:
+                // the second-count readers plus the absolute `resets_at` twin.
+                Some(b) => {
+                    let consumed: Vec<&str> =
+                        RETRY_SECS_KEYS.iter().copied().chain(["resets_at"]).collect();
+                    fs.extend(body_fields(b, &consumed));
+                }
                 None => fs.push(text_field("cause", prettify(cause))),
             }
             fs
@@ -1285,7 +1330,7 @@ fn wait_field(secs: u64) -> FieldRow {
     FieldRow {
         label: "retry-after".into(),
         value: FieldValue::Inline(vec![
-            Span::raw(format!("{}  ", human_secs(secs))),
+            Span::raw(format!("{}  ", crate::resources::hms(secs, " "))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
         ]),
     }
@@ -1353,19 +1398,6 @@ fn prettify(s: &str) -> String {
     prettify_embedded_json(s).into_owned()
 }
 
-/// Format `s` seconds as a compact human duration: `12s`, `12m 46s`, or
-/// `2h 05m`.  The rate-limit wait is the one quantity a reader acts on,
-/// so it reads as a duration rather than a raw second count.
-fn human_secs(s: u64) -> String {
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m {:02}s", s / 60, s % 60)
-    } else {
-        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
-    }
-}
-
 /// The retry-after wait carried by a parsed `body`, if any: the first of
 /// the recognised second-count keys whose value reads as a number.  Used
 /// only when the response header didn't already supply the wait.
@@ -1376,12 +1408,10 @@ fn human_secs(s: u64) -> String {
 )]
 fn wait_from_body(body: &Value) -> Option<u64> {
     let obj = provider::error_object(body)?;
-    ["resets_in_seconds", "retry_after_seconds", "retry_after"]
-        .iter()
-        .find_map(|k| {
-            obj.get(*k)
-                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
-        })
+    RETRY_SECS_KEYS.iter().find_map(|k| {
+        obj.get(*k)
+            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+    })
 }
 
 /// One JSON value as the plain text a field row should show, with JSON
@@ -1480,12 +1510,7 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
     // contract still strips a leading rail glyph), and continuations re-indent
     // to their summed width.
     let spans = line.spans.as_slice();
-    let rail = usize::from(
-        spans
-            .first()
-            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
-    );
-    let mut head_len = rail;
+    let mut head_len = rail_skip(line);
     while spans
         .get(head_len)
         .is_some_and(|s| !s.content.is_empty() && s.content.chars().all(|c| c == ' '))

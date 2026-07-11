@@ -1,29 +1,36 @@
 //! Drag-selection helpers: column-aware text extraction and
 //! character-range highlighting.
-use super::line::plain;
-use super::palette::{RAIL_GLYPHS, RAIL_W};
+use super::line::{plain, rail_skip};
+use super::palette::RAIL_W;
 use ratatui::{
     style::Modifier,
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Extract plain text between two cell-column positions within a line.
-/// `start_cell` and `end_cell` are absolute cell columns within the text
-/// area (0 = left edge).  The rail glyph occupies the first [`RAIL_W`]
-/// columns; columns landing inside the rail clamp to the start of content.
+/// Normalize a screen cell-column range to content columns: subtract the
+/// [`RAIL_W`] rail gutter from each end (columns landing inside the rail
+/// clamp to the start of content) and order them low..high.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "small compile-time constant fits u16"
 )]
+fn content_range(start_cell: u16, end_cell: u16) -> (u16, u16) {
+    let lo = start_cell.saturating_sub(RAIL_W as u16);
+    let hi = end_cell.saturating_sub(RAIL_W as u16);
+    (lo.min(hi), lo.max(hi))
+}
+
+/// Extract plain text between two cell-column positions within a line.
+/// `start_cell` and `end_cell` are absolute cell columns within the text
+/// area (0 = left edge).  The rail glyph occupies the first [`RAIL_W`]
+/// columns; columns landing inside the rail clamp to the start of content.
 pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> String {
     let text = plain(line);
     if text.is_empty() {
         return String::new();
     }
-    let lo = start_cell.saturating_sub(RAIL_W as u16);
-    let hi = end_cell.saturating_sub(RAIL_W as u16);
-    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let (lo, hi) = content_range(start_cell, end_cell);
     let mut cell: u16 = 0;
     let mut byte_lo = text.len();
     let mut byte_hi = text.len();
@@ -48,19 +55,9 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
 /// Apply [`Modifier::REVERSED`] to a cell-column range within a [`Line`],
 /// splitting any span that straddles the boundary so the highlight stays
 /// granular.  The rail glyph (first [`RAIL_W`] columns) is excluded.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "small compile-time constant fits u16"
-)]
 pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cell: u16) {
-    let skip = usize::from(
-        line.spans
-            .first()
-            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
-    );
-    let lo = start_cell.saturating_sub(RAIL_W as u16);
-    let hi = end_cell.saturating_sub(RAIL_W as u16);
-    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let skip = rail_skip(line);
+    let (lo, hi) = content_range(start_cell, end_cell);
     if lo >= hi || skip >= line.spans.len() {
         return;
     }

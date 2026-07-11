@@ -112,7 +112,7 @@ pub fn rows_mark(rows: &[ProbeRow]) -> Mark {
     Mark::Fields { rows: fields }
 }
 
-/// A muted one-line section heading, for the frontend to title the rows it
+/// A strong one-line section heading, for the frontend to title the rows it
 /// appends beneath the agent's.
 pub fn section_mark(title: &str) -> Mark {
     Mark::Text {
@@ -259,17 +259,23 @@ pub fn frontend_rows(
     ]
 }
 
+/// The shared 3-tier `h/m/s` duration formatter — `2h05m` / `41m09s` /
+/// `12s` — with `sep` between the two units of the multi-unit forms:
+/// `terse_duration` passes `""`, the rate-limit readout `" "`.
+pub fn hms(secs: u64, sep: &str) -> String {
+    if secs >= 3600 {
+        format!("{}h{sep}{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{sep}{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// A duration as terse probe ink — `2h05m`, `41m09s`, `12s` — for the
 /// nearest-reap notes.
 pub fn terse_duration(d: Duration) -> String {
-    let s = d.as_secs();
-    if s >= 3600 {
-        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
-    } else if s >= 60 {
-        format!("{}m{:02}s", s / 60, s % 60)
-    } else {
-        format!("{s}s")
-    }
+    hms(d.as_secs(), "")
 }
 
 /// Total size in bytes of every regular file under `root`, recursively —
