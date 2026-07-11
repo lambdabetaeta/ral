@@ -6,13 +6,10 @@
 //! via `--ral-sandbox-exec`, or a bundled tool in-process) inheriting the
 //! confinement.
 //! `process-exec` is gated when the projection's `exec` field is
-//! `Restricted`: the profile renders a single combined
-//! `file-read* process-exec` allow rule over the exec_dirs and resolved
-//! [exec] literals, mirroring the idiom
-//! used by Apple-blessed build profiles (see BrianSwift/macOSSandboxBuild
-//! `confined.sb`).  `Unrestricted` emits a wildcard `(allow process-exec)`
-//! so an fs-only `grant [fs: …]` block does not attenuate exec at the OS
-//! layer.
+//! `Restricted` (see [`emit_exec_rules`] for the folded `file-read*
+//! process-exec` rule); `Unrestricted` emits a wildcard `(allow
+//! process-exec)` so an fs-only `grant [fs: …]` block does not attenuate
+//! exec at the OS layer.
 //!
 //! We deliberately do *not* apply per-command Seatbelt profiles in the
 //! parent ral process or inside plugin handlers: the overhead-vs-benefit
@@ -34,20 +31,13 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write;
 use std::os::raw::{c_char, c_int};
 
-pub(super) fn apply_current_process_policy(policy: &SandboxProjection) -> std::io::Result<()> {
-    let profile = build_profile(policy);
-    apply_profile(&profile, std::iter::empty::<(&str, &str)>())
-}
-
 /// Apply `policy` to the current process.
 pub(super) fn enter_current_process(policy: &SandboxProjection) -> Result<(), String> {
-    apply_current_process_policy(policy).map_err(|e| format!("ral: failed to enter sandbox: {e}"))
+    let profile = build_profile(policy);
+    apply_profile(&profile).map_err(|e| format!("ral: failed to enter sandbox: {e}"))
 }
 
-fn apply_profile<'a>(
-    profile: &str,
-    parameters: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> std::io::Result<()> {
+fn apply_profile(profile: &str) -> std::io::Result<()> {
     fn cstr(s: &str, what: &str) -> std::io::Result<CString> {
         CString::new(s).map_err(|_| {
             std::io::Error::new(
@@ -57,14 +47,8 @@ fn apply_profile<'a>(
         })
     }
     let profile_cstr = cstr(profile, "sandbox profile")?;
-    let mut parameter_storage = Vec::new();
-    for (key, value) in parameters {
-        parameter_storage.push(cstr(key, "sandbox parameter key")?);
-        parameter_storage.push(cstr(value, "sandbox parameter value")?);
-    }
-    let mut parameter_ptrs: Vec<*const c_char> =
-        parameter_storage.iter().map(|s| s.as_ptr()).collect();
-    parameter_ptrs.push(std::ptr::null());
+    // No SBPL parameters are used; pass a single null-terminated array.
+    let parameter_ptrs: [*const c_char; 1] = [std::ptr::null()];
 
     let mut errorbuf: *mut c_char = std::ptr::null_mut();
     let rc = unsafe {
@@ -92,10 +76,7 @@ fn apply_profile<'a>(
 /// the Apple-required carve-outs (mach-lookup for dyld, process-fork
 /// next to exec, root-literal for path resolution, /dev/{null,tty,…}
 /// writes for shell redirection).  Lifted into a sibling file so the
-/// rules live as readable SBPL rather than `format!()`'d strings, and
-/// to make the source idiom — the deny-default + folded `file-read*
-/// process-exec` shape from BrianSwift/macOSSandboxBuild's
-/// `confined.sb` — citable in one place.
+/// rules live as readable SBPL rather than `format!()`'d strings.
 const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
 pub(super) fn build_profile(policy: &SandboxProjection) -> String {
@@ -222,14 +203,13 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
             // Bundled coreutils / diffutils / ripgrep names dispatch
             // through `--ral-bundled-tool`, which re-execs the running
             // binary so the in-process uutils path can fire inside the
-            // child.  `is_uutils_tool` is the predicate that
-            // admits ral's own self-path under the sandbox grant, so
-            // `pwd`, `ls`, … work inside every restricted profile
-            // without each TOML naming wherever exarch (or any other
-            // ral-embedding binary) happens to live.
-            let self_exec = super::reexec::SANDBOX_SELF
-                .get()
-                .map(|s| s.exec_path.to_string_lossy().into_owned());
+            // child.  ral's own self-path is therefore admitted
+            // unconditionally here, so any bundled-tool re-exec works
+            // inside every restricted profile without each TOML naming
+            // wherever exarch (or any other ral-embedding binary) lives;
+            // the per-tool admission gate lives in
+            // runtime/command/vet.rs.
+            let self_exec = super::reexec::self_exec_path_string();
             let mut clauses = String::new();
             for path in allow_paths.iter().chain(self_exec.as_ref()) {
                 let _ = write!(clauses, "\n  (literal \"{}\")", escape_path(path));
@@ -301,13 +281,10 @@ enum SystemAccess {
 }
 
 /// Baseline system paths the runtime needs available regardless of
-/// user grant.  `Exec`-tagged entries are folded into the same
-/// combined `(allow file-read* process-exec …)` rule the user's
-/// `[exec]` admits go into — the idiom from
-/// BrianSwift/macOSSandboxBuild's `confined.sb` (`(allow file-read*
-/// process-exec (subpath "/bin") (subpath "/usr/bin")
-/// (subpath "/Applications/Xcode.app"))`) generalised here so every
-/// platform exec subpath comes with a free read.
+/// user grant.  `Exec`-tagged entries are folded into the same combined
+/// `(allow file-read* process-exec …)` rule the user's `[exec]` admits
+/// go into (see [`emit_exec_rules`]), so every platform exec subpath
+/// comes with a free read.
 ///
 /// User temp/workspace paths are deliberately absent; they must
 /// arrive via the active fs grant.

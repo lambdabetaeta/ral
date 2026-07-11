@@ -54,7 +54,8 @@ pub use signal::{
 pub use signal::{
     ForegroundGuard, PipelineRelay, ReapStatus, apply_group_active_process_limit,
     disown_pipeline_group, install_handlers, is_known_group, kill_pipeline_group,
-    release_win_group, reset_child_signals, try_reap_leader, wait_leader_blocking,
+    release_win_group, reset_child_signals, set_active_process_limit, try_reap_leader,
+    wait_leader_blocking,
 };
 
 #[cfg(not(any(unix, windows)))]

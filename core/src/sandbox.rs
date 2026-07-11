@@ -10,9 +10,10 @@
 //! there the in-process gate stands alone.
 //!
 //! The module is organised into platform backends (`linux`, `macos`,
-//! `windows`, `windows_restricted_token`) and a per-command launcher
-//! (`launch`) that confines a single external/bundled child under the
-//! platform backend.
+//! `windows`), a per-command launcher (`launch`) that confines a single
+//! external/bundled child under the platform backend, a binary-pinning
+//! and re-exec layer (`reexec`), and post-mortem kernel-denial
+//! diagnostics (`diag`).
 //!
 //! Entry points:
 //! - [`early_init`] — called once at program startup to consume
@@ -33,8 +34,6 @@ mod macos;
 mod reexec;
 #[cfg(windows)]
 mod windows;
-#[cfg(windows)]
-mod windows_restricted_token;
 
 use crate::types::{SandboxProjection, Shell};
 use std::process::Command;
@@ -164,17 +163,23 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(windows)]
     {
-        let dump = windows_restricted_token::dump_profile_for_windows(policy);
+        let dump = windows::dump_profile_for_windows(policy);
         eprintln!("--- restricted-token profile ---\n{dump}--- end restricted-token profile ---");
     }
 }
+
+/// Fork-bomb mitigation cap: the maximum number of live processes a
+/// grant-confined child's Job Object permits (Windows only).
+#[cfg(windows)]
+pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
 
 /// Assign OS-level resource limits to an already-spawned child process.
 ///
 /// On Unix the limits are applied before exec via a `pre_exec` hook in
 /// `make_command`; this function is a no-op there.  On Windows, where
 /// `pre_exec` does not exist, a Job Object is attached post-spawn to cap
-/// the process tree at 512 processes (preventing fork bombs).
+/// the process tree at [`ACTIVE_PROCESS_CAP`] processes (preventing fork
+/// bombs).
 pub fn apply_child_limits(_child: &crate::process::ChildHandle) {
     #[cfg(windows)]
     windows::apply_job_limits(_child);
@@ -190,7 +195,7 @@ pub fn apply_child_limits_in_pipeline(
     {
         match _leader {
             Some(crate::process::Pgid(p)) if crate::process::is_known_group(p) => {
-                if !crate::process::apply_group_active_process_limit(p, 512) {
+                if !crate::process::apply_group_active_process_limit(p, ACTIVE_PROCESS_CAP) {
                     eprintln!("ral: warning: failed to apply active-process limit to pipeline job");
                 }
             }
@@ -218,12 +223,8 @@ pub(crate) fn register_self_for_helpers() {
     reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline helper, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
 )]
 pub(crate) fn self_command() -> std::io::Result<Command> {
-    use std::os::unix::process::CommandExt;
-
     if let Some(s) = reexec::SANDBOX_SELF.get() {
-        let mut cmd = Command::new(&s.exec_path);
-        cmd.arg0(&s.arg0);
-        return Ok(cmd);
+        return Ok(s.reexec_command());
     }
     let exe = std::env::current_exe()?;
     Ok(Command::new(exe))

@@ -554,18 +554,25 @@ mod win_groups {
         if state.job.is_null() {
             return false;
         }
+        set_active_process_limit(state.job, limit)
+    }
+
+    /// Set an active-process limit on a Job Object handle.  The shared
+    /// kernel-call body behind both the per-child sandbox job and the
+    /// pipeline-group limit; returns `true` when `SetInformationJobObject`
+    /// succeeded.
+    pub(crate) fn set_active_process_limit(job: HANDLE, limit: u32) -> bool {
         unsafe {
             let mut info: JOBOBJECT_BASIC_LIMIT_INFORMATION = std::mem::zeroed();
             info.LimitFlags =
                 windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
             info.ActiveProcessLimit = limit;
-            let ok = SetInformationJobObject(
-                state.job,
+            SetInformationJobObject(
+                job,
                 JobObjectBasicLimitInformation,
                 &raw const info as *const _,
                 std::mem::size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() as u32,
-            );
-            ok != 0
+            ) != 0
         }
     }
 
@@ -630,6 +637,16 @@ pub fn release_win_group(leader: i32) {
 /// when applied.
 pub fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
     win_groups::apply_active_process_limit(leader, limit)
+}
+
+/// Set an active-process limit on a Job Object handle the caller owns.
+/// Used by `sandbox::apply_child_limits` for the per-child job it
+/// creates.  Returns `true` when applied.
+pub fn set_active_process_limit(
+    job: windows_sys::Win32::Foundation::HANDLE,
+    limit: u32,
+) -> bool {
+    win_groups::set_active_process_limit(job, limit)
 }
 
 /// True when the leader is a known live pipeline group.  Used to decide

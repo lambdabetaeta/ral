@@ -107,15 +107,12 @@ fn linux_sandboxed_command(
             Some(cwd.as_str()),
         )),
         LaunchTarget::BundledTool { tool } => {
-            let self_path = super::reexec::SANDBOX_SELF
-                .get()
-                .map(|s| s.arg0.clone()).map_or_else(std::env::current_exe, Ok)
-                .map_err(|e| {
-                    Break::Error(Error::new(
-                        format!("sandbox: cannot resolve self exe for bundled tool: {e}"),
-                        1,
-                    ))
-                })?;
+            let self_path = super::reexec::self_arg0().map_err(|e| {
+                Break::Error(Error::new(
+                    format!("sandbox: cannot resolve self exe for bundled tool: {e}"),
+                    1,
+                ))
+            })?;
             let mut tool_args = Vec::with_capacity(args.len() + 2);
             tool_args.push(crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG.to_string());
             tool_args.push(tool.to_string());

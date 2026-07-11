@@ -37,16 +37,59 @@ pub(super) struct SandboxSelf {
     pin: Pin,
     /// Exec target passed to `Command::new`.  Read on Unix only.
     #[cfg_attr(windows, allow(dead_code))]
-    pub exec_path: PathBuf,
+    exec_path: PathBuf,
     /// `argv[0]` for the spawned child.  Read on Unix only.
     #[cfg_attr(windows, allow(dead_code))]
-    pub arg0: PathBuf,
+    arg0: PathBuf,
+}
+
+#[cfg(unix)]
+impl SandboxSelf {
+    /// Build a re-exec `Command` for this pinned binary: exec the pinned
+    /// path with the on-disk name as `argv[0]` so the child sees a
+    /// recognisable name regardless of the exec mechanism.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline helper, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+    )]
+    pub(super) fn reexec_command(&self) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(&self.exec_path);
+        cmd.arg0(&self.arg0);
+        cmd
+    }
+}
+
+/// The pinned self `argv[0]` (on-disk path), or `current_exe()` when the
+/// binary was not pinned.  Used by the Linux bundled-tool re-exec, which
+/// hands bwrap the on-disk path (a `/proc/self/fd` target would neither
+/// bind nor resolve in bwrap's fresh `/proc`).
+///
+/// # Errors
+/// Returns `Err` if the binary was not pinned and `current_exe()` fails.
+#[cfg(target_os = "linux")]
+pub(super) fn self_arg0() -> std::io::Result<PathBuf> {
+    match SANDBOX_SELF.get() {
+        Some(s) => Ok(s.arg0.clone()),
+        None => std::env::current_exe(),
+    }
+}
+
+/// The pinned self exec path as a string, for the macOS Seatbelt
+/// `(literal …)` self-admit clause.  `None` when the binary was not
+/// pinned (sandbox-incapable).
+#[cfg(target_os = "macos")]
+pub(super) fn self_exec_path_string() -> Option<String> {
+    SANDBOX_SELF
+        .get()
+        .map(|s| s.exec_path.to_string_lossy().into_owned())
 }
 
 /// How we keep `exec_path` bound to the binary we registered.
 enum Pin {
-    /// Fd held purely for its `Drop`; `/proc/self/fd/<N>` resolves to the
-    /// boot inode regardless of what is at the on-disk path now.
+    /// Fd retained (never dropped) so it stays open for the process
+    /// lifetime; `/proc/self/fd/<N>` then resolves to the boot inode
+    /// regardless of what is at the on-disk path now.
     #[cfg(target_os = "linux")]
     Fd(#[allow(dead_code)] std::os::fd::OwnedFd),
     /// macOS / other-Unix fallback: snapshot checked before each spawn.
@@ -207,8 +250,8 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
     } else {
         Err(Error::new(
             format!(
-                "exarch binary at {} changed since startup; \
-                 restart exarch to pick up the new build",
+                "ral binary at {} changed since startup; \
+                 restart to pick up the new build",
                 s.arg0.display()
             ),
             1,
