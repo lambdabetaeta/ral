@@ -96,6 +96,21 @@ pub enum FieldVal {
     Measure(Measure),
 }
 
+impl FieldVal {
+    /// The value's plain text: inline spans concatenated, or a measure's
+    /// `value[/max][unit]` readout.  Shared by the [`summary_line`] rail
+    /// summary and the headless stderr condenser.
+    pub fn plain(&self) -> String {
+        match self {
+            Self::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
+            Self::Measure(m) => {
+                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
+                format!("{}{bound}{}", m.value, m.unit.as_deref().unwrap_or(""))
+            }
+        }
+    }
+}
+
 /// One `(label, value)` row of a [`Mark::Fields`] matrix — Bertin's
 /// selective alignment in miniature, every value landing in one shared
 /// label column.
@@ -1022,15 +1037,6 @@ pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card
 /// matrix reads `label value` pairs; a diff names its path; raw ink is its
 /// bytes, lossily.  Marks join with a space.
 pub fn summary_line(card: &Card) -> String {
-    fn field_val(v: &FieldVal) -> String {
-        match v {
-            FieldVal::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
-            FieldVal::Measure(m) => {
-                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
-                format!("{}{bound}{}", m.value, m.unit.as_deref().unwrap_or(""))
-            }
-        }
-    }
     let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut parts: Vec<String> = Vec::new();
     for mark in card.marks() {
@@ -1058,7 +1064,7 @@ pub fn summary_line(card: &Card) -> String {
             }
             Mark::Fields { rows } => rows
                 .iter()
-                .map(|f| format!("{} {}", f.label, field_val(&f.value)))
+                .map(|f| format!("{} {}", f.label, f.value.plain()))
                 .collect::<Vec<_>>()
                 .join(", "),
             Mark::Diff { path, .. } => format!("diff {path}"),

@@ -17,7 +17,7 @@
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
-use crate::card::{Card, FieldVal, Mark, Row};
+use crate::card::{Card, Mark, Row};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
 use crate::tui::SessionInfo;
@@ -116,7 +116,7 @@ fn card_stderr(card: &Card) -> Vec<String> {
             }
             Mark::Fields { rows } => {
                 for f in rows {
-                    out.push(format!("  {}: {}", f.label, field_value_text(&f.value)));
+                    out.push(format!("  {}: {}", f.label, f.value.plain()));
                 }
             }
             Mark::Diff { path, hunks } => {
@@ -148,17 +148,6 @@ fn card_stderr(card: &Card) -> Vec<String> {
         }
     }
     out
-}
-
-/// The plain text of a fields-row value for the stderr condenser.
-fn field_value_text(v: &FieldVal) -> String {
-    match v {
-        FieldVal::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
-        FieldVal::Measure(m) => match m.max {
-            Some(mx) => format!("{}/{mx}", m.value),
-            None => format!("{}{}", m.value, m.unit.as_deref().unwrap_or("")),
-        },
-    }
 }
 
 /// The `--output-format json` result object on stdout: the root's deliberate
