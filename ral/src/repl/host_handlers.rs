@@ -7,7 +7,7 @@
 use ral_core::diagnostic;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
 use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, Error, HandleState, Resident, WorkerEntry,
+    Break, BuiltinBody, BuiltinEntry, HandleState, Resident, WorkerEntry,
 };
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
@@ -35,8 +35,12 @@ pub fn build(
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-fn type_err(msg: &'static str) -> Break {
-    Break::Error(Error::new(msg, 1))
+/// The plugin name a `load-plugin`/`unload-plugin` invocation targets.
+/// Both verbs are `STRING_TO_UNIT`, so type-checking guarantees the one
+/// argument; an empty slice can only be an internal error, handled like the
+/// job verbs' "no current job" via `cmd_error` rather than a raised fault.
+fn plugin_name_arg(args: &[Value]) -> Option<String> {
+    args.first().map(std::string::ToString::to_string)
 }
 
 /// Resolve the job id a `fg`/`bg`/`disown` invocation targets: the explicit
@@ -49,13 +53,10 @@ fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
     }
 }
 
-/// The shared "no such job" elaboration for `fg`/`bg`/`disown`: the three
-/// verbs are strictly pgid-typed (`decisions/260705_session-ledger`'s
-/// listing-fold correspondence) — a thread-backed worker handle has no
-/// SIGCONT, no controlling terminal, no kernel-stopped state to resume. An
-/// id that resolves no pgid job is met with the correspondence to a
-/// handle's own eliminators, never a bare "no such job" that leaves a user
-/// who tried a `[wN]` designator from `jobs` with no next step.
+/// The "no such job" elaboration for `fg`/`bg`/`disown`, which are pgid-only:
+/// a worker handle has no SIGCONT, terminal, or kernel-stopped state, so an id
+/// that resolves no pgid job is pointed at the handle's own eliminators rather
+/// than left as a dead end for a user who tried a `[wN]` designator.
 const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a worker handle's own \
      eliminators are its analogues: `await` is its fg, `cancel` its kill (see `jobs`)";
 
@@ -188,15 +189,17 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         doc: "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
               pgid-only: a worker handle already runs detached — see `jobs`.",
         body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
-            let mut jt = jobs.lock().unwrap();
-            let Some(id) = job_id_arg(args, &jt) else {
-                diagnostic::cmd_error("bg", "no current job");
-                return Ok(Value::Unit);
+            let resumed = {
+                let mut jt = jobs.lock().unwrap();
+                let Some(id) = job_id_arg(args, &jt) else {
+                    diagnostic::cmd_error("bg", "no current job");
+                    return Ok(Value::Unit);
+                };
+                jt.resume_in_background(id)
             };
-            if jt.resume_in_background(id).is_none() {
+            if resumed.is_none() {
                 diagnostic::cmd_error("bg", NOT_A_PGID_JOB);
             }
-            drop(jt);
             Ok(Value::Unit)
         })),
     }
@@ -211,19 +214,21 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         doc: "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
         body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
-            let mut jt = jobs.lock().unwrap();
-            let Some(id) = job_id_arg(args, &jt) else {
-                diagnostic::cmd_error("disown", "no current job");
-                return Ok(Value::Unit);
+            let removed = {
+                let mut jt = jobs.lock().unwrap();
+                let Some(id) = job_id_arg(args, &jt) else {
+                    diagnostic::cmd_error("disown", "no current job");
+                    return Ok(Value::Unit);
+                };
+                jt.remove(id)
             };
-            match jt.remove(id) {
+            match removed {
                 Some(_job) => {
                     #[cfg(windows)]
                     ral_core::process::disown_pipeline_group(ral_core::process::Pgid(_job.pgid));
                 }
                 None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
             }
-            drop(jt);
             Ok(Value::Unit)
         })),
     }
@@ -237,11 +242,10 @@ fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
         type_rule: BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
         doc: "load-plugin <name>  — load a REPL plugin by name or path.",
         body: BuiltinBody::Captured(Arc::new(move |args, shell: &mut Shell| {
-            let name = match args.first() {
-                Some(v) => v.to_string(),
-                None => return Err(type_err("load-plugin: missing plugin name")),
+            let Some(name) = plugin_name_arg(args) else {
+                diagnostic::cmd_error("load-plugin", "missing plugin name");
+                return Ok(Value::Unit);
             };
-            let name = name.trim_matches('\'').trim_matches('"').to_string();
             if let Err(Break::Error(e)) =
                 super::plugin::load::load_plugin(&name, None, shell, &runtime)
             {
@@ -260,11 +264,10 @@ fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
         type_rule: BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
         doc: "unload-plugin <name>  — unload a previously loaded REPL plugin.",
         body: BuiltinBody::Captured(Arc::new(move |args, shell: &mut Shell| {
-            let name = match args.first() {
-                Some(v) => v.to_string(),
-                None => return Err(type_err("unload-plugin: missing plugin name")),
+            let Some(name) = plugin_name_arg(args) else {
+                diagnostic::cmd_error("unload-plugin", "missing plugin name");
+                return Ok(Value::Unit);
             };
-            let name = name.trim_matches('\'').trim_matches('"').to_string();
             if let Err(e) = super::plugin::load::unload_plugin(&name, shell, &runtime) {
                 diagnostic::cmd_error("unload-plugin", &e.message);
             }
@@ -331,13 +334,8 @@ mod tests {
         }
     }
 
-    /// The wart heals at the listing layer: the fold shows the pgid
-    /// `JobTable` entries exactly as before, then the shell's registered
-    /// worker handles, `[wN]`-marked so the two designator namespaces never
-    /// collide — a running worker reads `running (worker)`, a settled one
-    /// `done (worker)`.  A worker no longer in the slice (as `Shell::workers()`
-    /// hands back once an eliminator has observed it settled) simply does
-    /// not render again — the fold keeps no retention state of its own.
+    /// `render_jobs` lists pgid jobs first, then `[wN]`-marked worker handles
+    /// (`running`/`done (worker)`), and an observed-away worker never reappears.
     #[test]
     fn render_jobs_folds_pgid_and_worker_populations() {
         let mut jt = JobTable::new();
@@ -362,10 +360,8 @@ mod tests {
         );
     }
 
-    /// The exit-time composer names every still-running worker in one
-    /// compact line and is `None` when the registry holds none — the
-    /// deferred survivor warning landing as a fold, never gating or
-    /// delaying exit itself.
+    /// `survivor_warning` names every still-running worker in one line and is
+    /// `None` when the registry holds none.
     #[test]
     fn survivor_warning_names_running_workers_only() {
         assert_eq!(
