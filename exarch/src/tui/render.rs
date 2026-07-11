@@ -33,7 +33,23 @@ use super::matrix::matrix_bar;
 use super::select::highlight_range;
 use super::status::{StatusReadout, rule_line};
 use super::terminal::Term;
-use super::{LEFT_MARGIN, PROMPT_PAD_H, REGISTER_MIN_W, SPINNER};
+
+const PROMPT_PAD_H: u16 = 1;
+
+/// Left gutter for the transcript, queued-prompt strip, and rule line.
+/// Gives the marginal rail breathing room from the terminal edge so it
+/// reads as a Bertin data column rather than frame chrome.
+const LEFT_MARGIN: u16 = 2;
+/// Minimum useful width of the pinned-state register column, in columns.  Once
+/// the content area has this much space to the right of the `READ_W`-capped
+/// transcript, the register takes all of it.
+const REGISTER_MIN_W: u16 = 35;
+
+/// Braille spinner glyphs for the terminal tab title, rotated 4 ticks per frame (~15 fps).
+const SPINNER: &[char] = &[
+    '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{2807}', '\u{280F}',
+];
 
 /// Where the content area sat in the last drawn frame.
 #[derive(Clone, Copy)]
