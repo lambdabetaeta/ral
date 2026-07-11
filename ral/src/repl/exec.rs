@@ -1,14 +1,14 @@
-//! Single-input parse / typecheck / evaluate cycle, now routed through
-//! the transport seam.
+//! Single-input parse / typecheck / evaluate cycle, routed through the
+//! transport seam.
 //!
 //! [`step`] is the per-line entry point.  It dispatches a source turn
 //! through the [`IdentityTransport`] and drains the event stream for the
-//! terminal [`Report`](ral_core::transport::Report).  Lifecycle
-//! hooks (`pre-exec`, `chpwd`, `post-exec`) fire around the dispatch
-//! through [`IdentityTransport::with_shell`].
+//! terminal [`Report`].  Lifecycle hooks (`pre-exec`, `chpwd`,
+//! `post-exec`) fire around the dispatch through
+//! [`IdentityTransport::with_shell`].
 //!
-//! Job-control and plugin-lifecycle commands are still handled by the
-//! captured builtins installed at boot (see [`super::host_handlers`]).
+//! Job-control and plugin-lifecycle commands are handled by the captured
+//! builtins installed at boot (see [`super::host_handlers`]).
 
 use ral_core::transport::{self, Diagnostics, IdentityTransport, Program, Report, Turn};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
@@ -48,52 +48,41 @@ fn print_result(val: &Value) {
     }
 }
 
-/// The REPL lifecycle hooks, called through `transport.with_shell()` around
-/// each dispatch.
-struct ReplLifecycle<'a> {
-    runtime: &'a Arc<Mutex<PluginRuntime>>,
+/// Fire the `pre-exec` lifecycle hook before a dispatch.
+fn pre_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, src: &str) {
+    run_lifecycle_hook(runtime, shell, "pre-exec", &[Value::String(src.to_string())]);
 }
 
-impl ReplLifecycle<'_> {
-    fn pre_exec(&self, shell: &mut ral_core::Shell, src: &str) {
+/// Drain a pending `chpwd` then fire `post-exec` after a dispatch — both
+/// side-effects; neither redefines the turn status, which the transport
+/// already computed.
+fn post_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, src: &str, status: i32) {
+    if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
         run_lifecycle_hook(
-            self.runtime,
+            runtime,
             shell,
-            "pre-exec",
-            &[Value::String(src.to_string())],
+            "chpwd",
+            &[Value::map(vec![
+                (
+                    "old".into(),
+                    Value::String(old.to_string_lossy().into_owned()),
+                ),
+                (
+                    "new".into(),
+                    Value::String(new.to_string_lossy().into_owned()),
+                ),
+            ])],
         );
     }
-
-    fn post_exec(&self, shell: &mut ral_core::Shell, src: &str, status: i32) {
-        // chpwd drain then post-exec — both side-effects; neither redefines
-        // the turn status, which the transport already computed.
-        if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
-            run_lifecycle_hook(
-                self.runtime,
-                shell,
-                "chpwd",
-                &[Value::map(vec![
-                    (
-                        "old".into(),
-                        Value::String(old.to_string_lossy().into_owned()),
-                    ),
-                    (
-                        "new".into(),
-                        Value::String(new.to_string_lossy().into_owned()),
-                    ),
-                ])],
-            );
-        }
-        run_lifecycle_hook(
-            self.runtime,
-            shell,
-            "post-exec",
-            &[
-                Value::String(src.to_string()),
-                Value::Int(i64::from(status)),
-            ],
-        );
-    }
+    run_lifecycle_hook(
+        runtime,
+        shell,
+        "post-exec",
+        &[
+            Value::String(src.to_string()),
+            Value::Int(i64::from(status)),
+        ],
+    );
 }
 
 /// Parse, typecheck, and evaluate one trimmed REPL input through the
@@ -113,10 +102,8 @@ pub(super) fn execute_input(
     runtime: &Arc<Mutex<PluginRuntime>>,
     #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Option<u8> {
-    let lifecycle = ReplLifecycle { runtime };
-
     // Fire pre-exec hook through transport shell access.
-    transport.with_shell(|shell| lifecycle.pre_exec(shell, trimmed));
+    transport.with_shell(|shell| pre_exec(runtime, shell, trimmed));
 
     // Build the transport-level Turn from the source text.
     let turn = Turn {
@@ -131,9 +118,8 @@ pub(super) fn execute_input(
         stdin: TurnStdin::Inherit,
     };
 
-    // Dispatch and drain to the terminal Report.  The REPL renders neither
-    // live surface values nor deferred-worker surface batches today, so both
-    // regimes drop; it answers no enquiries — the honest absence error.
+    // Dispatch and drain to the terminal Report.  The REPL renders no live
+    // surface values or deferred batches, and answers no enquiries.
     let report =
         transport::dispatch_to_report(transport, turn, |_val| {}, |_batch| {}, |_req| {
             Err(transport::EnquiryError {
@@ -204,7 +190,7 @@ pub(super) fn execute_input(
             };
 
             // Fire post-exec hook.
-            transport.with_shell(|shell| lifecycle.post_exec(shell, trimmed, status));
+            transport.with_shell(|shell| post_exec(runtime, shell, trimmed, status));
 
             exit_code
         }

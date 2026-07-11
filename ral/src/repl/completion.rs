@@ -164,8 +164,8 @@ fn is_cmd_pos(before_token: &str) -> bool {
 
 /// Expand a tilde-prefixed directory component for completion.  Delegates to
 /// [`ral_core::path::tilde`] so the rule matches the rest of ral; returns
-/// `None` when the home directory is unavailable so the caller can fall back
-/// to non-tilde completion.
+/// `None` when the home directory is unavailable, in which case the caller
+/// offers no candidates — there is no non-tilde fallback.
 fn expand_tilde(dir: &str) -> Option<String> {
     let Some(parsed) = ral_core::path::tilde::TildePath::parse(dir) else {
         return Some(dir.to_string());
@@ -220,7 +220,7 @@ fn dir_entries(dir: &Path, needle: &str) -> Vec<Entry> {
 /// Whether `name` is offerable given the needle: a dotfile is hidden unless
 /// the needle itself starts with `.`.  The match against the needle is
 /// [`rank`]'s job; this is only the visibility gate.
-pub(super) fn dotfile_visible(name: &str, needle: &str) -> bool {
+fn dotfile_visible(name: &str, needle: &str) -> bool {
     needle.starts_with('.') || !name.starts_with('.')
 }
 

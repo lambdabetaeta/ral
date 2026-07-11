@@ -123,14 +123,14 @@ impl JobTable {
         }
     }
 
-    /// Register a pipeline group with the table.  `state` is `Running`
-    /// for backgrounded pipelines (`&`) and `Stopped` for ones the
-    /// kernel has just frozen via SIGTSTP (Unix only).  The returned
-    /// `id` is the short job number shown by `jobs` / accepted by `fg`
-    /// and `bg`.
+    /// Register a pipeline group with the table, returning the short job
+    /// number shown by `jobs` and accepted by `fg` / `bg`.  The one live
+    /// caller is the REPL's SIGTSTP path, which registers a just-frozen
+    /// foreground pipeline as `Stopped` (Unix only); `state` remains a
+    /// parameter because the unit tests build jobs in either state.
     ///
-    /// Windows: only ever called from the unit tests below; the live
-    /// REPL path that registers jobs is `cfg(unix)`-gated.
+    /// Windows: only ever reached from those tests; the live REPL path
+    /// that registers jobs is `cfg(unix)`-gated.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub fn add(&mut self, pgid: i32, cmd: String, state: JobState) -> usize {
         let id = self.jobs.keys().max().map_or(1, |n| n + 1);
@@ -569,16 +569,8 @@ mod tests {
         }
     }
 
-    /// Every facet a pgid job answers through [`Resident`]: a bare numeric
-    /// designator (a fold brackets it uniformly, matching a worker's own
-    /// `[wN]` without either chapter agreeing on bracketing itself), the
-    /// `"job"` population, a `"pgid"` capability, and no lease at all —
-    /// "human-owned" regardless of running or stopped, since nothing here
-    /// reclaims a pgid job on an idle clock the way the worker lease chain
-    /// does.  (`cancel` is not exercised here: like `resume_in_background`,
-    /// it signals a real pgid, and this file's own idiom is to keep a fake
-    /// pgid unsignalled in these tests — see `resume_flips_stopped_to_
-    /// running_and_returns_pgid`'s note above.)
+    /// A running job answers every [`Resident`] facet: designator,
+    /// population, capability kind, state label, and lease row.
     #[test]
     fn resident_facets_for_a_running_job() {
         let j = job(4, 1234, "sleep 100", JobState::Running);

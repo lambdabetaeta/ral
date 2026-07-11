@@ -49,10 +49,8 @@ pub struct Span {
 }
 
 impl Span {
-    /// Build from two (possibly inverted, possibly out-of-range) character
-    /// offsets and the text's character count `bound`.  Orders the pair,
-    /// clamps both ends to `[0, bound]`, and stores the result as
-    /// `start + len`.
+    /// Build a span from two character offsets and the text's character count
+    /// `bound`.  See the struct invariant for the ordering and clamping applied.
     pub fn clamped(a: usize, b: usize, bound: usize) -> Self {
         let start = a.min(b).min(bound);
         let end = a.max(b).min(bound);
