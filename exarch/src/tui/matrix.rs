@@ -21,8 +21,9 @@ pub(super) enum MatrixSort {
     Cost,
 }
 
-/// Columns the matrix label is truncated/padded to, so the step cells,
-/// token readout, and size bar align into a grid down the rows.
+/// Max title characters a matrix row's label keeps; a longer title is
+/// truncated to this. Column alignment down the rows comes from the
+/// measured [`MatrixWidths`], not this cap.
 pub(super) const MATRIX_LABEL_W: usize = 10;
 /// Most-recent step cells a matrix row shows; a longer run keeps the tail.
 pub(super) const MATRIX_STEPS_W: usize = 8;
@@ -95,9 +96,12 @@ pub(super) fn matrix_bar(
     // The value ramp is relative to the heaviest spender this frame: the
     // top row(s) read near-white, the rest step down, so "which child
     // burned the budget" is pre-attentive even though raw token counts
-    // dwarf `rail::value_step`'s line-count thresholds.
+    // dwarf `rail::value_step`'s line-count thresholds.  Root is excluded —
+    // its magnitude is never displayed (its token/step/bar cells are blank),
+    // so folding it in would leave the ramp short whenever root spends most.
     let max_tokens = rows
         .iter()
+        .filter(|(id, _)| *id != root)
         .map(|(_, vp)| {
             let u = vp.usage();
             u.input + u.output
@@ -250,7 +254,7 @@ impl MatrixRow {
 /// (session in its linger window) or `╳` (last block an error); otherwise
 /// each step renders `●` (a tool call landed within it) or `○` (none).
 /// Capped to [`MATRIX_STEPS_W`] keeping the most-recent steps.
-pub(super) fn step_cells(vp: &Viewport, dying: bool) -> String {
+fn step_cells(vp: &Viewport, dying: bool) -> String {
     let steps = vp.steps();
     let tail = steps.len().saturating_sub(MATRIX_STEPS_W);
     let mut s = String::new();
@@ -268,7 +272,7 @@ pub(super) fn step_cells(vp: &Viewport, dying: bool) -> String {
 /// value step for [`rail::lighten`]: the heaviest spender reads brightest,
 /// the rest step down by quartile of the maximum.  `max_tokens == 0`
 /// (no spend yet) reads flat at the base hue.
-pub(super) fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
+fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
     if max_tokens == 0 {
         return 0;
     }

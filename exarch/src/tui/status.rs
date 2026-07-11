@@ -2,9 +2,10 @@ use super::line::usage_text;
 use super::palette::{CYAN, PURPLE, SLATE};
 use super::rail;
 use crate::provider::Usage;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
+use unicode_width::UnicodeWidthStr;
 
 /// The rule line's right-side status readout: model name, the ctx%
 /// value-ramp inputs (`last_input` against `context_window`), and the
@@ -50,11 +51,16 @@ pub(super) fn rule_line(
         Some(p) => format!("{p}… "),
         None => String::new(),
     };
-    label.push_str(&" ".repeat(PHASE_SLOT_W.saturating_sub(label.len())));
-    left_w += PHASE_SLOT_W; spans.push(Span::styled(label, Style::default().fg(SLATE)));
+    // Pad by display width, not byte length: the `…` is 3 bytes but one
+    // column, so padding by `label.len()` would leave the slot 2 columns
+    // short and shift every field after it — the jitter the fixed slot exists
+    // to prevent.
+    let label_w = UnicodeWidthStr::width(label.as_str());
+    label.push_str(&" ".repeat(PHASE_SLOT_W.saturating_sub(label_w)));
+    left_w += PHASE_SLOT_W;
+    spans.push(Span::styled(label, Style::default().fg(SLATE)));
     // ── status model ──────────────────────────────────────────────────
     {
-        // always show model
         let segment: Vec<Span<'static>> = vec![
             Span::styled(
                 if status_model.is_empty() {
@@ -87,7 +93,7 @@ pub(super) fn rule_line(
         )]
         let pct = ((last_input as f64 / cap as f64) * 100.0).round() as u64;
         let pct = pct.min(999);
-        let bar = ctx_ramp(pct, CTX_BAR_W);
+        let bar = ctx_ramp(pct);
         left_w += bar.iter().map(Span::width).sum::<usize>();
         spans.extend(bar);
         let readout = Span::styled(format!(" {pct}%"), Style::default().fg(SLATE));
@@ -125,35 +131,42 @@ pub(super) fn rule_line(
 /// Width of the ctx% value-ramp bar, in cells.
 pub(super) const CTX_BAR_W: usize = 10;
 
-/// Build the ctx% value-ramp: `filled` cells lightened toward white by
-/// [`rail::value_step`] of the percentage (so near-full glows), then
-/// `CTX_BAR_W - filled` dim slate cells.  Reuses the rail's ramp so the
-/// bar and the marginal rail share one value scale.
-pub(super) fn ctx_ramp(pct: u64, bar_w: usize) -> Vec<Span<'static>> {
-    let pct = pct.min(100) as usize;
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "pct already clamped to 0..=100, result additionally clamped to bar_w"
-    )]
-    let filled = ((pct as f64 / 100.0) * bar_w as f64).round() as usize;
-    let filled = filled.min(bar_w);
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "pct already clamped to 0..=100"
-    )]
-    let pct_u32 = pct as u32;
-    let step = rail::value_step(Some(pct_u32));
-    let fill_col = rail::lighten(CYAN, step);
+/// A value-ramp bar's cell run: `filled` lit cells in `fill_col`, the rest
+/// dim slate — the shared body of the ctx and wait bars, so the two ramps
+/// paint their cells one way.
+fn bar_cells(filled: usize, bar_w: usize, fill_col: Color) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(bar_w);
-    spans.push(Span::styled("ctx ", Style::default().fg(SLATE)));
     for _ in 0..filled {
         spans.push(Span::styled("█", Style::default().fg(fill_col)));
     }
     for _ in filled..bar_w {
         spans.push(Span::styled("░", Style::default().fg(SLATE)));
     }
+    spans
+}
+
+/// Build the ctx% value-ramp: [`CTX_BAR_W`] cells whose filled run is
+/// lightened toward white by [`rail::value_step`] of the percentage (so
+/// near-full glows), the rest dim slate.  Reuses the rail's ramp so the bar
+/// and the marginal rail share one value scale.
+pub(super) fn ctx_ramp(pct: u64) -> Vec<Span<'static>> {
+    let pct = pct.min(100) as usize;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "pct already clamped to 0..=100, result additionally clamped to CTX_BAR_W"
+    )]
+    let filled = ((pct as f64 / 100.0) * CTX_BAR_W as f64).round() as usize;
+    let filled = filled.min(CTX_BAR_W);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "pct already clamped to 0..=100"
+    )]
+    let pct_u32 = pct as u32;
+    let fill_col = rail::lighten(CYAN, rail::value_step(Some(pct_u32)));
+    let mut spans = vec![Span::styled("ctx ", Style::default().fg(SLATE))];
+    spans.extend(bar_cells(filled, CTX_BAR_W, fill_col));
     spans.push(Span::styled(" ", Style::default().fg(SLATE)));
     spans
 }
@@ -195,13 +208,7 @@ pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     )]
     let filled = ((((secs + 1) as f64).log2() * 1.7).round() as usize).min(WAIT_BAR_W);
     let fill_col = rail::lighten(PURPLE, wait_step(secs));
-    let mut spans = Vec::with_capacity(WAIT_BAR_W + 1);
-    for _ in 0..filled {
-        spans.push(Span::styled("█", Style::default().fg(fill_col)));
-    }
-    for _ in filled..WAIT_BAR_W {
-        spans.push(Span::styled("░", Style::default().fg(SLATE)));
-    }
+    let mut spans = bar_cells(filled, WAIT_BAR_W, fill_col);
     spans.push(Span::styled(
         format!(" {secs}s "),
         Style::default().fg(SLATE),

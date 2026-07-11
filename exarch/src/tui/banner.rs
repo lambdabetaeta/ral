@@ -15,7 +15,7 @@ use super::line;
 use super::palette::{AGENT_HUES, CODE_BG, READ_W, SLATE};
 use super::md;
 use super::rail::{self, RailKind};
-use super::status::{CTX_BAR_W, ctx_ramp, wait_bar};
+use super::status::{ctx_ramp, wait_bar};
 
 pub(super) const ART: &str = include_str!("../../data/banner.txt");
 pub(super) const EAGLE: &str = include_str!("../../data/eagle.txt");
@@ -144,7 +144,10 @@ pub(super) fn join_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// plain slate-bold heads.  The samples derive from [`rail::RAIL_SHAPES`],
+/// The `/legend` panel: the transcript's visual vocabulary exhibited as a
+/// graphic — each rail shape, agent hue, value step, stratum, bar, and
+/// fidelity grade shown as the literal styled output it wears in the flow,
+/// under plain slate-bold heads.  The samples derive from [`rail::RAIL_SHAPES`],
 /// [`AGENT_HUES`], and the bar / grain / spark / fidelity builders, so a
 /// palette or shape change updates the legend with no edit here.
 pub(super) fn legend_panel() -> Vec<Line<'static>> {
@@ -194,12 +197,12 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
     ));
     ls.push(Line::default());
     ls.push(head("rail · value = magnitude (brighter is bigger)"));
-    // One shape, the same hue, stepped up the value ramp by feeding the
-    // four magnitude buckets `rail::value_step` reads — so the row *is* the
+    // One shape, the same hue, stepped up the value ramp by feeding one
+    // magnitude per `rail::value_step` bucket (0..=3) — so the row *is* the
     // ramp the rail lightens by, not a restatement of it.
     ls.extend(line::legend_rows(vec![(
         "small → large",
-        [None, Some(4), Some(20), Some(80)]
+        [Some(4), Some(20), Some(80), Some(200)]
             .into_iter()
             .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
             .collect(),
@@ -265,7 +268,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
     ls.push(head("status line · the two bars under the transcript"));
     ls.extend(line::legend_rows(vec![
         ("window", {
-            let mut v = ctx_ramp(72, CTX_BAR_W);
+            let mut v = ctx_ramp(72);
             v.push(note("fills and brightens toward a full context window"));
             v
         }),
@@ -328,7 +331,7 @@ mod tests {
     use crate::card::{FieldVal, Mark, Role};
     use crate::provider::scripted::Script;
     use crate::provider::{Provider, ProviderKind};
-    use crate::tui::{line, palette, rail};
+    use crate::tui::{line, rail};
     use std::path::{Path, PathBuf};
 
     /// A representative session: a fetched-catalog model (distinct slug,
@@ -509,13 +512,12 @@ mod tests {
     #[test]
     fn legend_wears_no_marginal_rail() {
         for l in legend_panel() {
-            if let Some(first) = l.spans.first() {
-                assert!(
-                    !palette::RAIL_GLYPHS.contains(&first.content.as_ref()),
-                    "a legend row leads with a rail glyph: {:?}",
-                    line::plain(&l)
-                );
-            }
+            assert_eq!(
+                line::rail_skip(&l),
+                0,
+                "a legend row leads with a rail glyph: {:?}",
+                line::plain(&l)
+            );
         }
     }
 }
