@@ -46,6 +46,9 @@ pub fn git() -> Option<GitStatus> {
         .args(["status", "--porcelain"])
         .output()
         .ok()?;
+    if !porcelain.status.success() {
+        return None;
+    }
     Some(GitStatus {
         branch,
         dirty: !porcelain.stdout.is_empty(),

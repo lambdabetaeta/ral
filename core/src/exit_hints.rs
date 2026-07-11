@@ -32,7 +32,8 @@ impl ExitHints {
     /// Lookup order:
     /// 1. Command-specific entry.
     /// 2. Wildcard (`*`) entry.
-    /// 3. No synthetic signal decoding.
+    ///
+    /// Signal-terminated statuses are not decoded into synthetic hints.
     pub fn lookup(&self, cmd: &str, status: i32) -> Option<String> {
         let name = crate::path::basename(cmd);
 

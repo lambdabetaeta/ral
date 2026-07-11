@@ -48,14 +48,8 @@ pub const UNDERLINE_RED: &str = "\x1b[4;31m";
 // to format a well-formed sequence once a caller has decided to.
 //
 // Two string terminators appear in the wild: BEL (`\x07`) and ST
-// (`ESC \`, `\x1b\\`).  Choice per sequence:
-//   * `osc_set_title` — BEL (long-established cross-terminal practice).
-//   * `osc8_link`     — ST  (specified in iTerm2's hyperlink note and
-//                            preferred by xterm; lets payload text
-//                            contain a literal BEL).
-//   * `osc52_copy`    — BEL (the terminator tmux's own `Ms` capability
-//                            emits, and the one most consistently
-//                            recognised by terminals that support OSC 52).
+// (`ESC \`, `\x1b\\`).  Each builder's own doc records which it emits
+// and why.
 
 /// Build an OSC 0 sequence to set the terminal window/icon title.
 ///
