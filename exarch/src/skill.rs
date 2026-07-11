@@ -35,6 +35,12 @@ pub struct Skill {
 // public API
 // ---------------------------------------------------------------------------
 
+/// The two skill roots, in precedence order: the project-local
+/// `.exarch/skills/` (cwd), then the user's `$XDG_CONFIG_HOME/exarch/skills/`.
+pub(crate) fn skill_roots(cwd: &Path, config_dir: &Path) -> [PathBuf; 2] {
+    [cwd.join(".exarch").join("skills"), config_dir.join("skills")]
+}
+
 /// Discover all skill directories from both roots — directory names only,
 /// no file reads.
 ///
@@ -44,10 +50,7 @@ pub struct Skill {
 pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
-    for root in [
-        cwd.join(".exarch").join("skills"),
-        config_dir.join("skills"),
-    ] {
+    for root in skill_roots(cwd, config_dir) {
         for (name, dir) in scan_dir(&root) {
             if seen.insert(name.clone()) {
                 skills.push((name, dir));
