@@ -1223,7 +1223,7 @@ impl Agent {
                     let msg = panic_msg(&p);
                     self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
                     digest = (
-                        AgentOutcome::Failed(format!("worker panicked: {msg}")),
+                        AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
                         None,
                     );
                     if !self.log.is_ready() {
@@ -2282,7 +2282,7 @@ pub(crate) fn render_reply(v: &serde_json::Value) -> String {
 }
 
 /// The message of a recovered panic payload, for either string shape.
-fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
     p.downcast_ref::<String>()
         .cloned()
         .or_else(|| p.downcast_ref::<&'static str>().map(|s| (*s).into()))
@@ -2870,7 +2870,6 @@ mod tests {
         assert!(child.is_ready());
     }
 
-    /// X12: a provider error mid-turn (e.g. "stream ended without End
     /// X12: a provider error mid-turn (e.g. "stream ended without End
     /// event") must not wedge the session.  When `apply` returns `Err`
     /// with the session stranded in `AwaitingAssistantAfterToolResults`,

@@ -2051,11 +2051,7 @@ where
         let h = s.spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
             if let Err(p) = &r {
-                let msg = p
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| p.downcast_ref::<&'static str>().map(|s| (*s).into()))
-                    .unwrap_or_else(|| "non-string payload".into());
+                let msg = crate::agent::panic_msg(p);
                 emit.emit(Kind::Error(format!("{WORKER_PANIC_PREFIX}{msg}")));
             }
             // Signal completion before the worker's `emit` (and its sender
