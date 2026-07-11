@@ -96,24 +96,6 @@ impl Signal {
         }
     }
 
-    /// True for job-control stop signals.
-    pub fn is_job_control_stop(self) -> bool {
-        #[cfg(unix)]
-        {
-            matches!(
-                self.number,
-                n if n == libc::SIGSTOP
-                    || n == libc::SIGTSTP
-                    || n == libc::SIGTTIN
-                    || n == libc::SIGTTOU
-            )
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    }
-
     /// True when a background process tried to read from its controlling
     /// terminal (SIGTTIN).
     pub fn is_background_tty_input(self) -> bool {
@@ -133,20 +115,6 @@ impl Signal {
         #[cfg(unix)]
         {
             self.number == libc::SIGTTOU
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    }
-
-    /// True for user-initiated stops (SIGSTOP, SIGTSTP).  The numeric
-    /// values diverge across platforms (Linux 19/20, macOS 17/18), so
-    /// matching on libc constants is required for portability.
-    pub fn is_user_initiated_stop(self) -> bool {
-        #[cfg(unix)]
-        {
-            self.number == libc::SIGSTOP || self.number == libc::SIGTSTP
         }
         #[cfg(not(unix))]
         {
@@ -181,65 +149,6 @@ impl Signal {
     /// Conventional shell exit code for a signal death.
     pub fn user_exit_code(self) -> i32 {
         128 + self.number
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn signal_names_follow_platform_constants() {
-        assert_eq!(Signal::new(libc::SIGKILL).display(), "9 (SIGKILL)");
-        assert_eq!(Signal::new(libc::SIGTTOU).name(), Some("SIGTTOU"));
-        assert!(Signal::new(libc::SIGSTOP).is_job_control_stop());
-        assert!(Signal::new(libc::SIGPIPE).is_sigpipe());
-    }
-
-    #[test]
-    fn ordinary_exit_and_signal_death_stay_distinct() {
-        assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), false),
-            Some(CommandFailure::ExitCode(137))
-        );
-        assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), false),
-            Some(CommandFailure::Signal(Signal::new(9)))
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopped_then_killed_reports_the_stop_status() {
-        let outcome = WaitOutcome::StoppedThenKilled {
-            stopped_by: Signal::new(libc::SIGSTOP),
-            killed_by: Signal::new(libc::SIGKILL),
-        };
-        assert_eq!(outcome.to_user_exit_code(), 128 + libc::SIGSTOP);
-        let failure = CommandFailure::from_outcome(outcome, false).unwrap();
-        assert!(failure.message("cmd").contains("stopped by signal"));
-        assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGSTOP);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_final_sigpipe_is_success() {
-        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
-        assert_eq!(CommandFailure::from_outcome(outcome, true), None);
-        assert!(CommandFailure::from_outcome(outcome, false).is_some());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn non_final_pipe_closing_is_success() {
-        // STATUS_PIPE_CLOSING reaches us as an ordinary `Exited` code on
-        // Windows; a non-final pipeline stage that died this way is the
-        // SIGPIPE analogue and must be forgiven.
-        let outcome = WaitOutcome::Exited(STATUS_PIPE_CLOSING as i32);
-        assert!(outcome.is_broken_pipe());
-        assert_eq!(CommandFailure::from_outcome(outcome, true), None);
-        assert!(CommandFailure::from_outcome(outcome, false).is_some());
     }
 }
 
@@ -293,11 +202,6 @@ impl WaitOutcome {
             Self::Signaled(sig) | Self::Stopped(sig) => sig.user_exit_code(),
             Self::StoppedThenKilled { stopped_by, .. } => stopped_by.user_exit_code(),
         }
-    }
-
-    /// True when the process is parked in a stopped state (not yet exited).
-    pub fn is_stopped(self) -> bool {
-        matches!(self, Self::Stopped(_))
     }
 
     /// True when the process exited successfully.
@@ -403,7 +307,7 @@ impl CommandFailure {
     /// Return a default hint when one is useful.
     pub fn default_hint(&self, cmd: &str) -> Option<String> {
         match self {
-            Self::ExitCode(_) | Self::Spawn(SpawnFailure::NotFound | _) => None,
+            Self::ExitCode(_) | Self::Spawn(_) => None,
             Self::Signal(sig) if sig.is_sigkill() => Some(
                 "the process was killed with SIGKILL; the kernel or another process may have terminated it"
                     .to_string(),
@@ -438,5 +342,63 @@ impl CommandFailure {
             Self::Spawn(SpawnFailure::NotFound | SpawnFailure::Io(_)) => 127,
             Self::Spawn(SpawnFailure::PermissionDenied) => 126,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_names_follow_platform_constants() {
+        assert_eq!(Signal::new(libc::SIGKILL).display(), "9 (SIGKILL)");
+        assert_eq!(Signal::new(libc::SIGTTOU).name(), Some("SIGTTOU"));
+        assert!(Signal::new(libc::SIGPIPE).is_sigpipe());
+    }
+
+    #[test]
+    fn ordinary_exit_and_signal_death_stay_distinct() {
+        assert_eq!(
+            CommandFailure::from_outcome(WaitOutcome::Exited(137), false),
+            Some(CommandFailure::ExitCode(137))
+        );
+        assert_eq!(
+            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), false),
+            Some(CommandFailure::Signal(Signal::new(9)))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_then_killed_reports_the_stop_status() {
+        let outcome = WaitOutcome::StoppedThenKilled {
+            stopped_by: Signal::new(libc::SIGSTOP),
+            killed_by: Signal::new(libc::SIGKILL),
+        };
+        assert_eq!(outcome.to_user_exit_code(), 128 + libc::SIGSTOP);
+        let failure = CommandFailure::from_outcome(outcome, false).unwrap();
+        assert!(failure.message("cmd").contains("stopped by signal"));
+        assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGSTOP);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_final_sigpipe_is_success() {
+        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
+        assert_eq!(CommandFailure::from_outcome(outcome, true), None);
+        assert!(CommandFailure::from_outcome(outcome, false).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_final_pipe_closing_is_success() {
+        // STATUS_PIPE_CLOSING reaches us as an ordinary `Exited` code on
+        // Windows; a non-final pipeline stage that died this way is the
+        // SIGPIPE analogue and must be forgiven.
+        let outcome = WaitOutcome::Exited(STATUS_PIPE_CLOSING as i32);
+        assert!(outcome.is_broken_pipe());
+        assert_eq!(CommandFailure::from_outcome(outcome, true), None);
+        assert!(CommandFailure::from_outcome(outcome, false).is_some());
     }
 }
