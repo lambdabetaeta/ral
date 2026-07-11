@@ -247,11 +247,8 @@ pub(super) fn load_profiles(is_login: bool, no_rc: bool, ctx: &mut RcCtx<'_>) {
 /// surface preference (`--surface` flag or rc `surface:`) decides.  A
 /// `Structural` request that cannot be honoured — no raw mode, or a binary
 /// built without the `structural` feature — warns and falls back to readline
-/// rather than degrading silently.
-///
-/// For the readline path, also wires up an `ExternalPrinter` sink on
-/// stdout via `shell.set_stdout(…)` so background output from `watch` blocks appears above
-/// the active prompt.
+/// rather than degrading silently.  The readline frontend routes background
+/// `watch` output above the prompt itself (see [`RustylineFrontend::new`]).
 pub(super) fn create_frontend(
     interactive_mode: ral_core::io::InteractiveMode,
     surface: Surface,
@@ -280,29 +277,7 @@ pub(super) fn create_frontend(
         }
         Surface::Readline => {}
     }
-    let mut rl_fe = RustylineFrontend::new(shell, edit_mode, bell, runtime);
-
-    if let Ok(printer) = rl_fe.rl.create_external_printer() {
-        use std::sync::Mutex as StdMutex;
-        struct RustylineSink<P: rustyline::ExternalPrinter + Send>(StdMutex<P>);
-        impl<P: rustyline::ExternalPrinter + Send + 'static> ral_core::io::ExternalWrite
-            for RustylineSink<P>
-        {
-            fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
-                let s = String::from_utf8_lossy(bytes).into_owned();
-                if let Ok(mut p) = self.0.lock() {
-                    p.print(s)
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                }
-                Ok(())
-            }
-        }
-        shell.set_stdout(ral_core::io::Sink::External(Arc::new(RustylineSink(
-            StdMutex::new(printer),
-        ))));
-    }
-
-    Box::new(rl_fe)
+    Box::new(RustylineFrontend::new(shell, edit_mode, bell, runtime))
 }
 
 // ── RC sourcing ─────────────────────────────────────────────────────────

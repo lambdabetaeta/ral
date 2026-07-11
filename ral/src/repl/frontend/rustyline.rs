@@ -22,7 +22,7 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, Read};
 
 pub(in crate::repl) struct RustylineFrontend {
-    pub(in crate::repl) rl: Editor<RalHelper, DefaultHistory>,
+    rl: Editor<RalHelper, DefaultHistory>,
     pub(in crate::repl) runtime: Arc<Mutex<PluginRuntime>>,
     pub(in crate::repl) edit_mode: EditMode,
     history_path: Option<String>,
@@ -30,7 +30,7 @@ pub(in crate::repl) struct RustylineFrontend {
 
 impl RustylineFrontend {
     pub(in crate::repl) fn new(
-        shell: &Shell,
+        shell: &mut Shell,
         edit_mode: EditMode,
         bell: BellStyle,
         runtime: Arc<Mutex<PluginRuntime>>,
@@ -44,11 +44,6 @@ impl RustylineFrontend {
             .completion_prompt_limit(30)
             .build();
 
-        // Route stdout through rustyline's ExternalPrinter so background output
-        // (from `watch` blocks) appears above the active prompt.
-        // We cannot easily wire this back to shell here without taking `&mut Shell`,
-        // so the caller patches stdout via `set_stdout` after construction.
-
         let mut rl: Editor<RalHelper, DefaultHistory> = Editor::with_config(config).unwrap();
         rl.bind_sequence(
             KeyEvent(KeyCode::Char('d'), Modifiers::CTRL),
@@ -61,12 +56,40 @@ impl RustylineFrontend {
             let _ = rl.load_history(path);
         }
 
-        Self {
+        let mut frontend = Self {
             rl,
             runtime,
             edit_mode,
             history_path,
+        };
+        frontend.wire_external_printer(shell);
+        frontend
+    }
+
+    /// Route the shell's stdout through rustyline's `ExternalPrinter` so
+    /// background output (from `watch` blocks) prints above the active prompt
+    /// instead of colliding with the line being edited.  A terminal that
+    /// cannot supply an external printer leaves stdout as it was.
+    fn wire_external_printer(&mut self, shell: &mut Shell) {
+        let Ok(printer) = self.rl.create_external_printer() else {
+            return;
+        };
+        use std::sync::Mutex as StdMutex;
+        struct RustylineSink<P: rustyline::ExternalPrinter + Send>(StdMutex<P>);
+        impl<P: rustyline::ExternalPrinter + Send + 'static> ral_core::io::ExternalWrite
+            for RustylineSink<P>
+        {
+            fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+                let s = String::from_utf8_lossy(bytes).into_owned();
+                if let Ok(mut p) = self.0.lock() {
+                    p.print(s).map_err(|e| std::io::Error::other(e.to_string()))?;
+                }
+                Ok(())
+            }
         }
+        shell.set_stdout(ral_core::io::Sink::External(Arc::new(RustylineSink(
+            StdMutex::new(printer),
+        ))));
     }
 
     /// Run rustyline's `readline` (with or without an initial buffer) and
@@ -178,7 +201,7 @@ impl Frontend for RustylineFrontend {
                 // *then* flush plugin diagnostics so they land on a durable
                 // line above the next prompt.  Order matters: printing
                 // before the escape would have its line clobbered.
-                if shell.terminal().startup_stdout_tty {
+                if shell.terminal().ui_round_trips_ok() {
                     let _ = std::io::stdout().write_all(b"\x1b[A\r\x1b[K");
                     let _ = std::io::stdout().flush();
                 }
