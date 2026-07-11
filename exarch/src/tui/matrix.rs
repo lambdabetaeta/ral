@@ -1,7 +1,6 @@
 use super::line;
-use super::palette::{AGENT_HUES, SLATE};
+use super::palette::{AGENT_HUES, CYAN, SLATE};
 use super::rail;
-use super::render::tab_bar;
 use super::viewport::Viewport;
 use crate::bus::AgentId;
 use crate::provider;
@@ -27,6 +26,39 @@ pub(super) enum MatrixSort {
 pub(super) const MATRIX_LABEL_W: usize = 10;
 /// Most-recent step cells a matrix row shows; a longer run keeps the tail.
 pub(super) const MATRIX_STEPS_W: usize = 8;
+
+/// One-row tab bar.  Focused tab in bold + cyan, live subagents in
+/// slate, dying subagents in slate dim until they age out.  Shown only
+/// when there is more than one tab — root-only sessions skip the row
+/// entirely.
+pub(super) fn tab_bar(
+    tabs: &[AgentId],
+    titles: &HashMap<AgentId, String>,
+    focused: AgentId,
+    dying: &HashMap<AgentId, Instant>,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(tabs.len() * 2);
+    for (i, &id) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let title = titles.get(&id).map_or("?", String::as_str);
+        let label: String = if id == focused {
+            format!("[{title}]")
+        } else {
+            format!(" {title} ")
+        };
+        let style = if id == focused {
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+        } else if dying.contains_key(&id) {
+            Style::default().fg(SLATE).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(SLATE)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans)
+}
 
 /// The multi-agent matrix: one row per live session, columns
 /// `label  steps  tokens  sizebar`.  Rows = agents in `sort` order,

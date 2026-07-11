@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::str;
-use std::time::Instant;
 
 use crossterm::{
     execute,
@@ -28,7 +27,7 @@ use super::App;
 use super::block::queued_prompt_rows;
 use super::gesture::COPY_TOAST_TTL;
 use super::line;
-use super::palette::{AGENT_HUES, CYAN, LIME_HOT, PINK, READ_W, SLATE};
+use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::matrix::matrix_bar;
 use super::select::highlight_range;
 use super::status::{StatusReadout, rule_line};
@@ -61,38 +60,6 @@ pub(super) struct FrameGeom {
 /// Whether the cell `(col, row)` lies inside `rect`.
 pub(super) fn contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
-}
-/// One-row tab bar.  Focused tab in bold + cyan, live subagents in
-/// slate, dying subagents in slate dim until they age out.  Shown only
-/// when there is more than one tab — root-only sessions skip the row
-/// entirely.
-pub(super) fn tab_bar(
-    tabs: &[AgentId],
-    titles: &HashMap<AgentId, String>,
-    focused: AgentId,
-    dying: &HashMap<AgentId, Instant>,
-) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(tabs.len() * 2);
-    for (i, &id) in tabs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("  "));
-        }
-        let title = titles.get(&id).map_or("?", String::as_str);
-        let label: String = if id == focused {
-            format!("[{title}]")
-        } else {
-            format!(" {title} ")
-        };
-        let style = if id == focused {
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
-        } else if dying.contains_key(&id) {
-            Style::default().fg(SLATE).add_modifier(Modifier::DIM)
-        } else {
-            Style::default().fg(SLATE)
-        };
-        spans.push(Span::styled(label, style));
-    }
-    Line::from(spans)
 }
 /// Paint the full frame: content area, queued-user strip, tab bar / matrix,
 /// prompt editor, status line, and footer.
