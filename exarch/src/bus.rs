@@ -28,7 +28,6 @@ use crate::provider::{Tuning, Usage};
 use crate::schedule::ScheduleId;
 use crate::transcript::Transcript;
 use ral_core::Value;
-use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
@@ -1170,131 +1169,6 @@ pub enum Kind {
     },
 }
 
-/// One grouped hunk of a whole-file diff, carried by a
-/// [`crate::card::Mark::Diff`].
-///
-/// A flat unified list of [`Row`]s — context,
-/// deletions, and insertions interleaved exactly as `similar`'s grouped ops
-/// yield them.
-/// `start` is the 1-indexed original line of the hunk's first
-/// row; the sink walks the rows from there, advancing an old- and a
-/// new-side counter — a `Context` advances both, a `Del` advances the old
-/// counter (and keeps its pre-edit number), an `Add` advances the new
-/// counter (and takes its post-edit number).
-#[derive(Clone, Debug, Serialize)]
-pub struct Hunk {
-    pub start: u32,
-    pub rows: Vec<Row>,
-}
-
-/// One run of a diff row's text: a contiguous slice flagged `emph` when it is
-/// the part that actually changed against the row's paired line — the
-/// intra-line word diff `similar` computes.
-///
-/// A context row, and the unchanged
-/// stretches that surround a change on a del/add row, carry `emph: false`.
-#[derive(Clone, Debug, Serialize)]
-pub struct Seg {
-    pub emph: bool,
-    pub text: String,
-}
-
-impl Seg {
-    /// A whole, unemphasised run — the shape a context row carries and the
-    /// default a plainly-constructed del/add row falls back to.
-    pub fn plain(text: impl Into<String>) -> Self {
-        Self {
-            emph: false,
-            text: text.into(),
-        }
-    }
-}
-
-/// One row of a [`Hunk`]'s unified line list: unchanged context, a removed
-/// line, or an inserted line.
-///
-/// Each carries its text as a run of [`Seg`]ments
-/// so a del/add can mark the words that changed against its paired line; a
-/// context row is a single unemphasised segment.
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "tag", content = "segs", rename_all = "snake_case")]
-pub enum Row {
-    Context(Vec<Seg>),
-    Del(Vec<Seg>),
-    Add(Vec<Seg>),
-}
-
-impl Row {
-    /// The row's segments, whatever its kind.
-    pub fn segs(&self) -> &[Seg] {
-        match self {
-            Self::Context(s) | Self::Del(s) | Self::Add(s) => s,
-        }
-    }
-
-    /// The row's full text — its segments concatenated, dropping the
-    /// inline-emphasis distinction (the plain-text/headless rendering).
-    pub fn text(&self) -> String {
-        self.segs().iter().map(|s| s.text.as_str()).collect()
-    }
-}
-
-/// Compute the whole-file line-level diff of `old` vs `new`, grouped into
-/// hunks with ±2 lines of context.  Each hunk's `start` is the 1-indexed
-/// original line of its first row, and its rows are the unified context /
-/// deletion / insertion list `similar` yields.  Shared by every diff-card
-/// producer: `edit-hash`/`edit-replace` (`agent_builtins.rs`) feed it through a
-/// `` `diff `` value the model-facing `surface` builtin forwards; a
-/// committed `>` redirect that overwrote an existing file (`card.rs`'s write-
-/// card preview) calls it directly, with no `Value` round-trip, since it
-/// already sits in the rendering layer.
-pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
-    let mut hunks = Vec::new();
-    for group in diff.grouped_ops(2) {
-        let first = group.first().expect("grouped_ops yields non-empty groups");
-        #[allow(clippy::cast_possible_truncation, reason="diff line index cannot approach u32::MAX")]
-        let start = first.old_range().start as u32 + 1;
-        let mut rows = Vec::new();
-        for op in &group {
-            // The *inline* changes carry, per row, the intra-line word diff
-            // `similar` computes against the row's paired line: a run of
-            // `(emphasised, text)` segments, where the emphasised runs are the
-            // bits that actually differ.  A context row reduces to one
-            // unemphasised segment, exactly the old line-level shape.
-            for change in diff.iter_inline_changes(op) {
-                let mut segs: Vec<Seg> = change
-                    .iter_strings_lossy()
-                    .map(|(emph, text)| Seg {
-                        emph,
-                        text: text.into_owned(),
-                    })
-                    .collect();
-                // `from_lines` keeps a trailing `\n` on each row's final
-                // segment; strip exactly one so the row carries the bare line,
-                // the way `rows_of` splits the file, dropping a segment the
-                // strip empties.
-                if let Some(last) = segs.last_mut() {
-                    if let Some(bare) = last.text.strip_suffix('\n') {
-                        last.text = bare.to_string();
-                    }
-                    if last.text.is_empty() {
-                        segs.pop();
-                    }
-                }
-                rows.push(match change.tag() {
-                    ChangeTag::Equal => Row::Context(segs),
-                    ChangeTag::Delete => Row::Del(segs),
-                    ChangeTag::Insert => Row::Add(segs),
-                });
-            }
-        }
-        hunks.push(Hunk { start, rows });
-    }
-    hunks
-}
-
 /// A run-scoped usage accumulator.
 ///
 /// Where a [`Transcript`] is **per-session**
@@ -2068,45 +1942,14 @@ where
 mod tests {
     use super::{
         AgentMessage, Boundary, Emitter, Event, FleetBus, INBOX_SOURCE_CAP, Inbox, InboxMsg,
-        InboxReject, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Row, Sink, Transcript, Turn, channel,
-        drain_pass, pump, whole_file_hunks,
+        InboxReject, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Sink, Transcript, Turn, channel,
+        drain_pass, pump,
     };
     use crate::cancel;
     use crate::provider::Tuning;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::mpsc::TryRecvError;
-
-    /// Our wiring of `similar`'s inline changes into [`Row`]s: a changed line
-    /// threads through as segments that concatenate back to the original line
-    /// (trailing newline stripped) and carry *both* an emphasised and an
-    /// unemphasised run, so the emph distinction the renderer needs survives.
-    /// *Which* words `similar` flags is its concern, not ours, so we don't
-    /// assert the boundary.
-    #[test]
-    fn whole_file_hunks_threads_inline_segments() {
-        let hunks = whole_file_hunks("alpha\nthe quick brown fox\n", "alpha\nthe quick red fox\n");
-        let rows: Vec<&Row> = hunks.iter().flat_map(|h| h.rows.iter()).collect();
-        let find = |want: fn(&Row) -> bool| *rows.iter().find(|r| want(r)).expect("the row");
-
-        // The shared `alpha` line maps to a context row of one unemphasised
-        // segment — our `Equal → Context` mapping.
-        let ctx = find(|r| matches!(r, Row::Context(_)));
-        assert_eq!(ctx.text(), "alpha");
-        assert!(ctx.segs().iter().all(|s| !s.emph));
-
-        // The edited line round-trips on each side, with the `\n` `from_lines`
-        // carries stripped, and keeps both an emphasised and an unchanged run.
-        for (row, text) in [
-            (find(|r| matches!(r, Row::Del(_))), "the quick brown fox"),
-            (find(|r| matches!(r, Row::Add(_))), "the quick red fox"),
-        ] {
-            assert_eq!(row.text(), text);
-            assert!(!row.segs().iter().any(|s| s.text.ends_with('\n')));
-            assert!(row.segs().iter().any(|s| s.emph), "an emphasised run");
-            assert!(row.segs().iter().any(|s| !s.emph), "an unchanged run");
-        }
-    }
 
     /// A scheduled-wakeup message with a fresh pending flag, for the inbox
     /// drain tests. `id` matters only to the dedupe tests below; the

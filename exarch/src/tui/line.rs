@@ -12,8 +12,9 @@ use super::palette::{
     CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_GLYPHS, RAIL_W, READ_W, RED, RED_HOT,
     SLATE,
 };
-use crate::bus::{Hunk, Row, Seg};
-use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
+use crate::card::{
+    Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
+};
 use crate::event::ProviderErrorRecord;
 use crate::provider;
 use ratatui::{

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use super::viewport::Viewport;
-use crate::bus::{AgentId, Hunk};
-use crate::card::{IoEvent, ObservationKind};
+use crate::bus::AgentId;
+use crate::card::{Hunk, IoEvent, ObservationKind};
 
 pub(super) struct SurfaceBuffer {
     patch_buf: Option<PatchBuf>,

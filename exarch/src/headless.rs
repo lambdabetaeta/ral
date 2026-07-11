@@ -16,8 +16,8 @@
 //! exactly as in the TUI, for the root and every forked child alike.
 
 use crate::agent::Agent;
-use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Row, Sink, pump};
-use crate::card::{Card, FieldVal, Mark};
+use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
+use crate::card::{Card, FieldVal, Mark, Row};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
 use crate::tui::SessionInfo;
