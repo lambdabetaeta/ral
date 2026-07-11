@@ -63,6 +63,13 @@ pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 /// context where stdout/stderr are plain Terminal/Stderr sinks, so the
 /// in-binary implementation is authoritative on every platform
 /// regardless of what PATH would have turned up.
+#[cfg_attr(
+    not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")),
+    allow(
+        unused_variables,
+        reason = "no bundled-tool feature is active, so `name` is not consulted and the fn is a constant `false`"
+    )
+)]
 pub(crate) fn is_uutils_tool(name: &str) -> bool {
     #[cfg(feature = "coreutils")]
     if COREUTILS_TOOLS.contains(&name) {
