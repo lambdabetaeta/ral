@@ -93,9 +93,7 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
 /// displaced frame's scope is freed, and a signal slot never points at a
 /// freed flag.
 struct TurnGuard<'s> {
-    // Dropped (after `Drop::drop` runs the swap) in declaration order:
-    // the slots un-publish before `saved` frees the displaced frame's
-    // cancel scope, so a signal slot never points at a freed flag.
+    // Declared before `saved` for the drop order the type doc explains.
     _fg: Option<CancelSlot>,
     _root: Option<CancelSlot>,
     shell: &'s mut Shell,
@@ -132,10 +130,8 @@ impl<'s> TurnGuard<'s> {
 
 impl Drop for TurnGuard<'_> {
     fn drop(&mut self) {
-        // Swap the saved frame back in; the new frame moves into `saved` and
-        // drops with the guard. The `_fg`/`_root` slots then un-publish in
-        // field order before `saved` frees the displaced frame's cancel scope,
-        // so a signal slot never points at a freed flag.
+        // Swap the saved frame back in; the displaced frame moves into `saved`
+        // and drops with the guard.
         std::mem::swap(&mut self.shell.turn, &mut self.saved);
     }
 }
