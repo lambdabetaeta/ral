@@ -56,6 +56,17 @@ pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntim
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Tag an error with the `load-plugin:` surface every plugin-load failure
+/// carries.  Shared by the loader and the manifest parser.
+pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
+    ral_core::types::Error::new(format!("load-plugin: {msg}"), 1)
+}
+
+/// Tag an error with the `unload-plugin:` surface.
+pub(super) fn unload_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
+    ral_core::types::Error::new(format!("unload-plugin: {msg}"), 1)
+}
+
 /// Which keymap the editor is in — the frontend-neutral reduction of
 /// rustyline's `EditMode`.  Both editor backends carry one of these to the
 /// shared hook/keybinding primitives so neither has to thread rustyline's

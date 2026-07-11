@@ -17,15 +17,7 @@ use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
 
 use super::manifest::LoadedPlugin;
-use super::{PluginRuntime, framed_turn_request, lock};
-
-fn load_err(msg: impl std::fmt::Display) -> Error {
-    Error::new(format!("load-plugin: {msg}"), 1)
-}
-
-fn unload_err(msg: impl std::fmt::Display) -> Error {
-    Error::new(format!("unload-plugin: {msg}"), 1)
-}
+use super::{PluginRuntime, framed_turn_request, load_err, lock, unload_err};
 
 /// Load a plugin by name (or path) with an optional options map.
 ///

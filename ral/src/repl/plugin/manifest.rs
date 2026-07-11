@@ -5,7 +5,7 @@
 //! and alias thunks, and yields a [`LoadedPlugin`] record plus the list
 //! of `(name, thunk)` pairs that the loader installs into env.
 
-use super::HookHealth;
+use super::{HookHealth, load_err};
 use ral_core::types::Error;
 use ral_core::{Map, Value};
 use std::collections::HashMap;
@@ -93,10 +93,6 @@ fn as_map_ref(val: &Value) -> Option<&Map> {
         Value::Map(m) => Some(m),
         _ => None,
     }
-}
-
-fn load_err(msg: impl std::fmt::Display) -> Error {
-    Error::new(format!("load-plugin: {msg}"), 1)
 }
 
 fn parse_hooks(entries: &Map) -> Result<HashMap<String, Value>, Error> {
