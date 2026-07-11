@@ -291,8 +291,11 @@ fn default_ro_binds() -> Vec<String> {
         "/usr",
         "/lib",
         "/lib64",
-        "/dev",
-        "/proc",
+        // `/dev` and `/proc` are deliberately absent: the virtual `--dev`
+        // and `--proc` mounts at the top of `make_command_with_policy`
+        // supply minimal safe versions, and a real read-only bind here
+        // would shadow them (last mount wins).  `/sys` has no bwrap
+        // virtual-mount op, so it is bound read-only.
         "/sys",
         "/etc/ld.so.conf",
         "/etc/ld.so.conf.d",
@@ -363,11 +366,8 @@ mod tests {
         );
     }
 
-    /// A deny path that does NOT exist at sandbox entry but lies under a
-    /// writable bind must still be overlaid: `--tmpfs DEST` creates its mount
-    /// point, so the overlay is unconditional.  Gating it on existence (as
-    /// the `--bind` source guard does) left such a path unmasked, and a
-    /// spawned child could create and write it under the bound subtree.
+    /// A deny path absent at sandbox entry but under a writable bind must
+    /// still be overlaid (see the `denied_binds` comment in the source).
     #[test]
     fn deny_overlay_is_emitted_for_a_nonexistent_path() {
         let dir =
