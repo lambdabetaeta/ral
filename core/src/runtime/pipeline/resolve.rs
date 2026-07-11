@@ -134,8 +134,11 @@ pub(super) struct StageSpec {
 fn stage_loc(stage: &Comp, shell: &Shell) -> crate::diagnostic::SourceLoc {
     let (line, col) = match (stage.span, shell.turn.loc.source.as_ref()) {
         (Some(sp), Some(src)) => src.byte_to_line_col(sp.start as usize),
-        (Some(sp), None) => (sp.start as usize, 0),
-        (None, _) => (0, 0),
+        // No span, or no source text to convert the byte offset against:
+        // fall back to the "unknown location" sentinel (as in
+        // `evaluator::comp`) rather than passing a raw byte offset off as
+        // a line number.
+        _ => (0, 0),
     };
     crate::diagnostic::SourceLoc {
         source: shell.turn.loc.current,
