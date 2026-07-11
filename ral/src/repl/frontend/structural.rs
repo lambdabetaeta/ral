@@ -39,7 +39,7 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
 
 use std::collections::HashSet;
@@ -52,7 +52,7 @@ use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
 use crate::repl::complete::style_ratatui;
-use crate::repl::completion::{self, Candidate, Sources};
+use crate::repl::completion::{self, Sources};
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use crate::repl::plugin::{
     HookEnvGuard, KeyChord, KeyName, Keymap, PendingKeybinding, PluginRuntime,
@@ -60,6 +60,9 @@ use crate::repl::plugin::{
 };
 use crate::repl::plugin_editor::{HighlightSpan, char_to_byte};
 use crate::repl::worksheet::Worksheet;
+
+mod menu;
+use menu::Menu;
 
 // ── Palette ───────────────────────────────────────────────────────────────
 
@@ -83,23 +86,6 @@ const MAX_VIEWPORT: u16 = 18;
 /// a menu opened on a fresh session (empty worksheet) still has space to drop
 /// down rather than being clipped to a two-row projection band.
 const MENU_MAX_ROWS: u16 = 6;
-
-/// An open completion menu: the ranked candidates from [`completion::complete`]
-/// and the buffer span they replace.  Tab opens it (when more than one
-/// candidate matches), Tab/↓ and ⇧Tab/↑ cycle the selection, Enter accepts the
-/// selected candidate, and Esc — or any editing key — dismisses it.
-struct Menu {
-    candidates: Vec<Candidate>,
-    selected: usize,
-    /// Byte offset into the trigger row where the chosen replacement starts.
-    replace_from: usize,
-    /// The editor row the menu was opened on; accept aborts if the cursor has
-    /// since left it.
-    row: usize,
-    /// Screen column the popup drops down under: the prompt prefix width plus
-    /// the token's start column, so the list aligns under what is being typed.
-    anchor_col: u16,
-}
 
 /// What [`StructuralFrontend::compose`]'s edit loop breaks with.  `Done` is a
 /// finished read; `Keybinding` is a plugin key that fired and must be
@@ -298,20 +284,17 @@ impl StructuralFrontend {
             // editing, so typing continues seamlessly.  Handled before the
             // normal dispatch so Tab/Enter/Esc mean menu actions here.
             if menu.is_some() {
-                let n = menu.as_ref().map_or(0, |m| m.candidates.len());
                 match k.code {
                     KeyCode::Tab | KeyCode::Down => {
-                        let m = menu.as_mut().unwrap();
-                        m.selected = (m.selected + 1) % n;
+                        menu.as_mut().unwrap().select_next();
                         continue;
                     }
                     KeyCode::BackTab | KeyCode::Up => {
-                        let m = menu.as_mut().unwrap();
-                        m.selected = (m.selected + n - 1) % n;
+                        menu.as_mut().unwrap().select_prev();
                         continue;
                     }
                     KeyCode::Enter => {
-                        accept_completion(&mut prompt, &menu.take().unwrap());
+                        menu.take().unwrap().accept(&mut prompt);
                         continue;
                     }
                     KeyCode::Esc => {
@@ -383,13 +366,7 @@ impl StructuralFrontend {
                             )]
                             let anchor_col =
                                 prompt_lines.last_w + line[..start].chars().count() as u16;
-                            menu = Some(Menu {
-                                candidates,
-                                selected: 0,
-                                replace_from: start,
-                                row,
-                                anchor_col,
-                            });
+                            menu = Some(Menu::open(candidates, start, row, anchor_col));
                         }
                     }
                 }
@@ -559,17 +536,6 @@ impl Frontend for StructuralFrontend {
 
 // ── The editor ──────────────────────────────────────────────────────────────
 
-/// A fresh editor: flat styling, no cursor-line underline (matching the
-/// surrounding chrome), and a plain cursor style — the widget's painted cursor
-/// cell is suppressed so the prompt shows the terminal's own (native, blinking)
-/// cursor instead, positioned each frame by [`render_prompt`].  The native
-/// cursor is the same in every mode; there is no painted vi modal-mode block.
-/// Whether the cursor sits at the very end of the buffer (last row, last
-/// column) — the position fish-style autosuggestion is accepted from.
-/// The cursor's absolute byte offset into the `\n`-joined buffer — the unit the
-/// buffer-change hooks and [`dispatch_keybinding`] expect (both convert to
-/// chars internally).  Sums each prior row's bytes plus its newline, then the
-/// cursor's byte column within its row.
 /// Whether a crossterm key event matches a frontend-neutral plugin [`KeyChord`].
 /// Ctrl/Alt must match exactly; Shift is ignored, as no bindable chord carries
 /// it.
@@ -597,29 +563,6 @@ fn key_matches(k: &KeyEvent, chord: &KeyChord) -> bool {
     }
 }
 
-// Replace the editor contents, leaving the cursor at the end — the unit of
-// every history recall and draft restore.
-// Move the cursor to a character offset into the (just-filled) buffer,
-// clamped to its length — restores an [`EditBuffer`] saved cursor as
-// closely as the row/col editor allows.
-// ── Completion ───────────────────────────────────────────────────────────────
-
-/// Apply the selected candidate of an open [`Menu`]: replace the token from
-/// the menu's `replace_from` to the current cursor (which has not moved while
-/// the menu owned the keys) with the chosen replacement.  Aborts if the cursor
-/// has left the trigger row.
-fn accept_completion(prompt: &mut PromptEditor, menu: &Menu) {
-    let row = prompt.row();
-    if row != menu.row {
-        return;
-    }
-    let Some(line) = prompt.line(row) else {
-        return;
-    };
-    let end = char_to_byte(&line, prompt.col());
-    let replacement = menu.candidates[menu.selected].replacement.clone();
-    prompt.replace_row_bytes(row, menu.replace_from, end, &replacement);
-}
 // ── Projection 1: the typed spine ───────────────────────────────────────────
 
 /// One pipeline stage's row in the spine: its source slice and value type.
@@ -1122,7 +1065,7 @@ fn render(
     // anchored under the token being completed; it owns the keys while open,
     // so the projections beneath it are inert and may be covered.
     if let Some(m) = menu {
-        render_menu(frame, rest, m);
+        m.render(frame, rest);
     }
 }
 
@@ -1407,8 +1350,7 @@ fn render_prompt(
     };
     editor.render(frame, editor_area);
     // No block on this editor, so the render area is the text rect.  The native
-    // cursor shows in every mode; the widget's painted cell is suppressed (set
-    // to a plain style in `new_textarea`).
+    // cursor shows in every mode; the editor suppresses its own painted cell.
     if let Some(pos) = editor.cursor_screen_position() {
         let x = editor_area.x + pos.x.min(editor_area.width.saturating_sub(1));
         let y = editor_area.y + pos.y.min(editor_area.height.saturating_sub(1));
@@ -1488,69 +1430,6 @@ fn render_projections(
         }
     }
     frame.render_widget(Paragraph::new(mx_lines), mx_area);
-}
-
-/// Draw the completion menu as a bordered popup dropping down over the top of
-/// the projection band, its left edge anchored under the token being completed
-/// (clamped to stay within the band).  The selected row is reversed; the list
-/// scrolls within [`MENU_MAX_ROWS`] so a long candidate set stays navigable.
-fn render_menu(frame: &mut ratatui::Frame, area: Rect, menu: &Menu) {
-    if area.height < 3 || menu.candidates.is_empty() {
-        return;
-    }
-    // Width fits the widest candidate plus borders; height fits the visible
-    // rows plus borders.  Both clamp to the band.
-    let widest = menu
-        .candidates
-        .iter()
-        .map(|c| {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
-            )]
-            let w = c.display.chars().count() as u16;
-            w
-        })
-        .max()
-        .unwrap_or(0);
-    let pop_w = (widest + 2).clamp(10, area.width);
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
-    )]
-    let visible = (menu.candidates.len() as u16)
-        .min(MENU_MAX_ROWS)
-        .min(area.height - 2);
-    let rect = Rect {
-        x: area.x + menu.anchor_col.min(area.width.saturating_sub(pop_w)),
-        y: area.y,
-        width: pop_w,
-        height: visible + 2,
-    };
-
-    // Scroll the window so the selected row stays visible.
-    let window = visible as usize;
-    let start = menu.selected.saturating_sub(window.saturating_sub(1));
-    let lines: Vec<Line> = menu
-        .candidates
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(window)
-        .map(|(i, c)| {
-            let mut style = Style::default().fg(NAME_HUE);
-            if i == menu.selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            Line::from(Span::styled(c.display.clone(), style))
-        })
-        .collect();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(SLATE));
-    frame.render_widget(Clear, rect);
-    frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 /// Commit the submitted line into scrollback above the viewport: the styled
