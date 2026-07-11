@@ -5,7 +5,7 @@
 //! the `cfg(not(any(unix, windows)))` stubs in [`crate::process::signal`].
 //! Every operation that would touch a channel errors; none is reachable.
 
-use super::common::{EnvNames, FrameReader, pipe_error};
+use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 use std::io::{Read, Write};
 
@@ -41,13 +41,6 @@ pub(crate) fn pass(_cmd: &mut crate::process::Launch, _env: &str, _ch: &Channel)
     Err(pipe_error(
         "process-staged pipelines are unavailable on this target",
     ))
-}
-
-pub(crate) fn reader<T>(ch: Channel, panic_msg: &'static str) -> FrameReader<T>
-where
-    T: serde::de::DeserializeOwned + Send + 'static,
-{
-    FrameReader::spawn(ch, panic_msg)
 }
 
 pub(crate) const ENV: EnvNames = EnvNames {

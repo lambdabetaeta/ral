@@ -10,8 +10,8 @@
 //! re-exported by the parent module: on Unix the channel is a
 //! socketpair, on Windows it is an anonymous-pipe Reader/Writer pair.  The
 //! primitives don't reach into platform-specific APIs — that's all
-//! tucked behind the [`platform::pass`] / [`platform::reader`]
-//! backend functions in the parent module.
+//! tucked behind the [`platform::pass`] backend function in the parent
+//! module.
 
 use std::io::BufReader;
 use std::marker::PhantomData;
@@ -67,7 +67,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> FrameReader<T> {
 /// canonical abort path).  The phantom `T` ties the gate to one
 /// payload type; [`FrameGate::settle`] turns it into a
 /// [`PendingFrame<T>`] queued for release.
-pub(crate) struct FrameGate<T> {
+struct FrameGate<T> {
     writer: platform::Channel,
     child_end: Option<platform::Channel>,
     _phantom: PhantomData<fn(T)>,
@@ -78,7 +78,7 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
     /// inheritable, and stash its identity in `env` on `cmd`.  The
     /// parent keeps the writer end; the child end is held until
     /// [`FrameGate::settle`].
-    pub(crate) fn wire(cmd: &mut crate::process::Launch, env: &str) -> Settled<Self> {
+    fn wire(cmd: &mut crate::process::Launch, env: &str) -> Settled<Self> {
         let (child_end, writer) = platform::pair()?;
         platform::pass(cmd, env, &child_end)?;
         Ok(Self {
@@ -92,8 +92,8 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
     /// for a later release.  Call once the spawn has returned: until
     /// then the child's reader fd / handle must remain open in the
     /// parent so the platform launch backend can admit it into the child.
-    pub(crate) fn settle(mut self, payload: T) -> PendingFrame<T> {
-        let _ = self.child_end.take();
+    fn settle(mut self, payload: T) -> PendingFrame<T> {
+        drop(self.child_end.take());
         PendingFrame {
             writer: self.writer,
             payload,
@@ -168,7 +168,8 @@ impl HelperProtocol {
         let job_gate = FrameGate::<ChildEvalRequest>::wire(cmd, env.job)?;
         let (report_reader_ch, report_writer) = platform::pair()?;
         platform::pass(cmd, env.report, &report_writer)?;
-        let report_reader = platform::reader(report_reader_ch, "pipeline report reader panicked");
+        let report_reader =
+            FrameReader::spawn(report_reader_ch, "pipeline report reader panicked");
 
         // An absent value channel must be cleared, not merely left
         // unset: a helper-evaluated stage can itself launch a pipeline
@@ -212,7 +213,7 @@ impl HelperProtocol {
             incoming_value,
             outgoing_value,
         } = self;
-        let _ = child_report_writer.take();
+        drop(child_report_writer.take());
         drop(incoming_value);
         drop(outgoing_value);
         (report_reader, job_gate.settle(job))

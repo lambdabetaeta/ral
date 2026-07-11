@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use super::super::helper::{
     JOB_HANDLE_ENV, REPORT_HANDLE_ENV, VALUE_IN_HANDLE_ENV, VALUE_OUT_HANDLE_ENV,
 };
-use super::common::{EnvNames, FrameReader, pipe_error};
+use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 
 /// Windows-side channel: one half of an anonymous OS pipe.
@@ -79,21 +79,15 @@ pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
 
 /// Stash `ch`'s numeric handle value in `env` and admit that handle to this
 /// one launch. The parent does not flip the inheritable bit here.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "one of the platform `pass` backends behind `platform::pass`; the fallback variant genuinely returns `Err`, so the `Settled<()>` signature is fixed across the backend family."
+)]
 pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) -> Settled<()> {
     let handle = ch.raw_handle();
-    cmd.env(env, format!("{}", handle as usize));
+    cmd.env(env, (handle as usize).to_string());
     cmd.admit_handle(handle);
     Ok(())
-}
-
-/// Spawn a [`FrameReader`] reading from the given channel.  Identical
-/// shape to the Unix backend; the read path is whichever variant the
-/// channel carries (gate report channels are always readers).
-pub(crate) fn reader<T>(ch: Channel, panic_msg: &'static str) -> FrameReader<T>
-where
-    T: serde::de::DeserializeOwned + Send + 'static,
-{
-    FrameReader::spawn(ch, panic_msg)
 }
 
 /// Env-var names this backend uses to pass channel handles to the helper.

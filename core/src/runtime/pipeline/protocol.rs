@@ -4,7 +4,7 @@
 //! blocks reading the gate's channel until the parent has finished
 //! spawning every stage and (for foreground pipelines) called
 //! `tcsetpgrp`; the parent then writes the frame and the child unblocks.
-//! [`FrameGate<T>`] is the parent side of that gate, generic over the
+//! `FrameGate<T>` is the parent side of that gate, generic over the
 //! frame type.  [`FrameReader<T>`] is the dual: a detached background
 //! thread that reads one frame from a child-side channel.
 //!
@@ -24,10 +24,9 @@
 //! `HANDLE` and wraps it via `from_raw_handle`).  Both backends present
 //! the same minimal API: `platform::Channel` (the channel type),
 //! `platform::pair` (allocate one), `platform::pass` (mark
-//! inheritable + stash in env on a `Command`), `platform::reader`
-//! (spawn a [`FrameReader`]).  Common code (the gate / reader /
-//! pending-frame primitives) is generic over `platform::Channel`
-//! and lives in [`common`].
+//! inheritable + stash in env on a `Command`).  Common code (the gate /
+//! reader / pending-frame primitives, including the [`FrameReader`]
+//! spawn) is generic over `platform::Channel` and lives in [`common`].
 
 mod common;
 
@@ -49,7 +48,8 @@ use unix as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub(super) use common::{FrameReader, HelperProtocol, PendingFrame, pipe_error};
+pub(super) use common::{FrameReader, HelperProtocol, pipe_error};
+use common::PendingFrame;
 
 #[cfg(unix)]
 pub(super) use unix::{Channel as ValueChannel, pair as create_value_pair, pass};

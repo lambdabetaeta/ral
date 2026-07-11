@@ -5,8 +5,8 @@
 //! `pre_exec` hook on the child clears `FD_CLOEXEC` so the fd survives
 //! `execve`; the helper / trampoline consumes the env var, wraps the fd
 //! inside `from_raw_fd`, and re-applies CLOEXEC.  All of this is wrapped
-//! behind the [`pair`] / [`pass`] / [`reader`] backend functions so the
-//! rest of the protocol module never reaches into `AsRawFd` directly.
+//! behind the [`pair`] / [`pass`] backend functions so the rest of the
+//! protocol module never reaches into `AsRawFd` directly.
 //!
 //! Clearing `FD_CLOEXEC` in the *child's* `pre_exec` rather than on the
 //! parent's fd is deliberate: the parent's copy keeps `FD_CLOEXEC` set
@@ -22,7 +22,7 @@
 use std::os::fd::AsRawFd;
 
 use super::super::helper::{JOB_FD_ENV, REPORT_FD_ENV, VALUE_IN_FD_ENV, VALUE_OUT_FD_ENV};
-use super::common::{EnvNames, FrameReader, pipe_error};
+use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 
 /// Unix-side channel type: a Unix-domain socketpair end.  Reads and
@@ -34,7 +34,7 @@ pub(crate) type Channel = std::os::unix::net::UnixStream;
 /// Allocate one socketpair.  Module-public because the Unix layer of
 /// the pipeline (for value-edge transport between adjacent ral
 /// helpers) wants the same socketpair primitive without going through
-/// a [`FrameGate`].
+/// a `FrameGate`.
 pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
     Channel::pair().map_err(pipe_error)
 }
@@ -56,16 +56,6 @@ pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) ->
     cmd.env(env, fd.to_string());
     cmd.clear_cloexec_on_spawn(fd);
     Ok(())
-}
-
-/// Spawn a [`FrameReader`] reading from the given channel.  Wrapping
-/// the spawn here keeps the reader-thread plumbing inside the
-/// platform module instead of in `common.rs`.
-pub(crate) fn reader<T>(ch: Channel, panic_msg: &'static str) -> FrameReader<T>
-where
-    T: serde::de::DeserializeOwned + Send + 'static,
-{
-    FrameReader::spawn(ch, panic_msg)
 }
 
 /// Env-var names this backend uses to pass channel fds to the helper.
