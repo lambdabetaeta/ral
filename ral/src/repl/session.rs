@@ -201,12 +201,7 @@ impl Session {
             .as_scope()
             .cause();
         if let Some(cause) = cancel_cause {
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "clamped to 0..=255, a byte exit status"
-            )]
-            let byte = cause.exit_code().clamp(0, 255) as u8;
-            self.exit_code = byte;
+            self.exit_code = crate::platform::exit_byte(cause.exit_code());
             return Flow::Break;
         }
 

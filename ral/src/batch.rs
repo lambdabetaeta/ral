@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::PRELUDE;
 use crate::cli::{BatchOpts, RunOpts};
-use crate::platform::{apply_session_capabilities, load_exit_hints, probe_terminal};
+use crate::platform::{apply_session_capabilities, exit_byte, load_exit_hints, probe_terminal};
 
 /// Serialise the execution tree root to JSON and emit it on stderr.
 fn emit_audit_tree(
@@ -246,11 +246,5 @@ pub(crate) fn run_batch(
         );
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "exit_code is clamped to 0..=255 at every arm above"
-    )]
-    let byte = exit_code as u8;
-    ExitCode::from(byte)
+    ExitCode::from(exit_byte(exit_code))
 }

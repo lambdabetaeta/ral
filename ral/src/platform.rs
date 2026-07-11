@@ -52,6 +52,21 @@ pub(crate) fn load_exit_hints() -> ExitHints {
     ExitHints::from_text(text)
 }
 
+/// Clamp a shell exit code to the `0..=255` process byte-status range.
+///
+/// Ral carries exit codes as `i32` (an `exit` argument, a signal-derived
+/// status, a cancel cause); the OS process status is a single byte. Every
+/// mode — batch, `-c`, the REPL turn loop — funnels its final code through
+/// here so the clamp-and-narrow lives in one place.
+pub(crate) fn exit_byte(code: i32) -> u8 {
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=255, a byte exit status"
+    )]
+    let byte = code.clamp(0, 255) as u8;
+    byte
+}
+
 /// Apply the `--capabilities` profiles as a session-wide ceiling, mapping the
 /// outcome to a process exit.
 ///
@@ -70,14 +85,7 @@ pub(crate) fn apply_session_capabilities(
             diagnostic::cmd_error("ral", &format!("--capabilities: {}", e.message));
             Err(ExitCode::from(2))
         }
-        Err(Break::Escape(Escape::Exit(code))) => {
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "clamped to 0..=255, a byte exit status"
-            )]
-            let byte = code.clamp(0, 255) as u8;
-            Err(ExitCode::from(byte))
-        }
+        Err(Break::Escape(Escape::Exit(code))) => Err(ExitCode::from(exit_byte(code))),
         #[cfg(unix)]
         Err(Break::Escape(Escape::Stopped { .. })) => Err(ExitCode::from(1)),
     }
