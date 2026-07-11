@@ -701,6 +701,47 @@ mod chokepoint_tests {
         );
     }
 
+    /// `remove_plugin_hooks` drops exactly the hooks in one plugin's
+    /// namespace — the mechanism a failed plugin load rolls back through and
+    /// an unload reverses through — leaving other plugins' and the session's
+    /// hooks untouched.  `unregister_hook` drops a single named hook.
+    #[test]
+    fn plugin_hooks_removed_by_namespace() {
+        use crate::types::{DefaultPolicy, HookName, HookSig};
+        let span = crate::source::Span {
+            start: 0,
+            end: 0,
+            file: crate::source::FileId::DUMMY,
+        };
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let body = { 1 }").expect("define a hook body");
+        let thunk = shell
+            .scope_lookup("body")
+            .cloned()
+            .expect("body must be bound");
+
+        let reg = |shell: &mut Shell, name: HookName| {
+            shell
+                .register_hook(name, thunk.clone(), HookSig::Prompt, DefaultPolicy::denied(), span)
+                .expect("register");
+        };
+        reg(&mut shell, HookName::plugin("p", "prompt"));
+        reg(&mut shell, HookName::plugin("p", "factory"));
+        reg(&mut shell, HookName::plugin("q", "prompt"));
+        reg(&mut shell, HookName::session("startup"));
+
+        // A single-name drop removes just that hook.
+        assert!(shell.unregister_hook(&HookName::plugin("p", "factory")));
+        assert!(!shell.has_hook(&HookName::plugin("p", "factory")));
+        assert!(!shell.unregister_hook(&HookName::plugin("p", "factory")));
+
+        // A namespace sweep removes the rest of plugin `p`, nothing else.
+        assert_eq!(shell.remove_plugin_hooks("p"), 1);
+        assert!(!shell.has_hook(&HookName::plugin("p", "prompt")));
+        assert!(shell.has_hook(&HookName::plugin("q", "prompt")));
+        assert!(shell.has_hook(&HookName::session("startup")));
+    }
+
     /// A `source`d file referencing a name that exists only in the caller's
     /// scope — never mentioned anywhere in the outer turn's own compiled
     /// program — is still renewed: the `check_source` harvest seam, not the

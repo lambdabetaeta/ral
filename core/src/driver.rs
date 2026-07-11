@@ -482,6 +482,27 @@ impl Shell {
         self.mobile.context.hooks.contains_key(name)
     }
 
+    /// Remove a single registered hook by name, returning whether one was
+    /// present.  The inverse of [`register_hook`] for a one-shot entry
+    /// point (a plugin factory) once it has served its purpose.
+    pub fn unregister_hook(&mut self, name: &HookName) -> bool {
+        self.mobile.context.hooks.remove(name).is_some()
+    }
+
+    /// Remove every hook registered under a plugin's namespace, returning
+    /// the number dropped.  A plugin's hook events and keybinding handlers
+    /// all live under `Namespace::Plugin(plugin_id)`; unloading the plugin
+    /// removes them in one sweep so no dispatchable entry point outlives the
+    /// plugin that owned it.  This is also the rollback path for a load that
+    /// fails after some of its hooks were committed.
+    pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
+        let before = self.mobile.context.hooks.len();
+        self.mobile.context.hooks.retain(|name, _| {
+            !matches!(&name.namespace, crate::types::Namespace::Plugin(id) if id == plugin_id)
+        });
+        before - self.mobile.context.hooks.len()
+    }
+
     /// The framed scaffold behind the turn door: materialise the IO regime
     /// from the turn's conditions, build and install the turn frame on the
     /// pre-minted `foreground`, evaluate `body` under the capability ceiling

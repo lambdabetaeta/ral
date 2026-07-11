@@ -2,9 +2,13 @@
 //!
 //! Resolves a plugin file path under `~/.config/ral/plugins/` or
 //! `RAL_PATH`, evaluates the file under a `ScriptContextGuard`, applies
-//! options, validates the result as a manifest, installs the alias
-//! bindings into `env`, and records the plugin in [`PluginRuntime`].
-//! Unloading reverses the env installation and drops the record.
+//! options, validates the result as a manifest, then — once every
+//! validation has passed — commits the plugin's hooks and alias bindings
+//! and records it in [`PluginRuntime`].  Commit is deferred past the
+//! validations so a rejected load leaves the session untouched, and any
+//! partial failure rolls the plugin's whole hook namespace back.
+//! Unloading is the exact inverse: it removes the plugin's hooks and
+//! keybindings, undoes the env installation, and drops the record.
 
 use ral_core::source::Span;
 use ral_core::transport::Program;
@@ -67,8 +71,32 @@ pub(crate) fn load_plugin(
     // thunks were compiled from, so a fault inside one renders against it.
     plugin.source = std::sync::Arc::from(source.as_str());
 
-    // Register hook and keybinding handlers in the hook table. Each fires
-    // as a `Program::Hook` through `Shell::run_turn`.
+    // All validations run before any hook or alias is committed, so a
+    // rejected load leaves the session exactly as it found it.
+    check_not_loaded(&plugin.name, runtime)?;
+    check_no_binding_conflicts(&bindings, &plugin.name, shell)?;
+
+    // Commit the hooks and alias bindings.  Any partial failure past this
+    // point rolls back the whole plugin namespace, so nothing dispatchable
+    // survives a failed load.
+    if let Err(e) = register_plugin_hooks(&plugin, shell).and_then(|()| install_bindings(&bindings, shell)) {
+        shell.remove_plugin_hooks(&plugin.name);
+        return Err(Break::Error(e));
+    }
+
+    let mut rt = lock(runtime);
+    rt.plugins.push(plugin);
+    rt.keybindings_dirty = true;
+    drop(rt);
+    Ok(())
+}
+
+/// Register a plugin's hook-event and keybinding handlers in the session
+/// hook table, each keyed under the plugin's namespace so
+/// [`Shell::remove_plugin_hooks`] can drop them all at unload (or roll back
+/// a failed load).  Every handler fires as a `Program::Hook` through
+/// `Shell::run_turn`.
+fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(), Error> {
     let origin = Span::new(ral_core::source::FileId(0), 0, 0);
     for (hook_event, handler) in &plugin.hooks {
         let sig = match hook_event.as_str() {
@@ -82,50 +110,43 @@ pub(crate) fn load_plugin(
                 kind: hook_event.clone(),
             },
         };
-        if let Err(e) = shell.register_hook(
-            HookName::plugin(plugin.name.clone(), hook_event.clone()),
-            handler.clone(),
-            sig,
-            DefaultPolicy::denied(),
-            origin,
-        ) {
-            return Err(Break::Error(load_err(format!(
-                "plugin '{}': hook '{}': {}",
-                plugin.name, hook_event, e
-            ))));
-        }
+        shell
+            .register_hook(
+                HookName::plugin(plugin.name.clone(), hook_event.clone()),
+                handler.clone(),
+                sig,
+                DefaultPolicy::denied(),
+                origin,
+            )
+            .map_err(|e| {
+                load_err(format!("plugin '{}': hook '{}': {e}", plugin.name, hook_event))
+            })?;
     }
     for (key_notation, handler) in &plugin.keybindings {
-        if let Err(e) = shell.register_hook(
-            HookName::plugin(plugin.name.clone(), format!("key:{key_notation}")),
-            handler.clone(),
-            HookSig::Hook {
-                kind: "keybinding".into(),
-            },
-            DefaultPolicy::leased(),
-            origin,
-        ) {
-            return Err(Break::Error(load_err(format!(
-                "plugin '{}': keybinding '{}': {}",
-                plugin.name, key_notation, e
-            ))));
-        }
+        shell
+            .register_hook(
+                HookName::plugin(plugin.name.clone(), format!("key:{key_notation}")),
+                handler.clone(),
+                HookSig::Hook {
+                    kind: "keybinding".into(),
+                },
+                DefaultPolicy::leased(),
+                origin,
+            )
+            .map_err(|e| {
+                load_err(format!(
+                    "plugin '{}': keybinding '{}': {e}",
+                    plugin.name, key_notation
+                ))
+            })?;
     }
-
-    check_not_loaded(&plugin.name, runtime)?;
-    check_no_binding_conflicts(&bindings, &plugin.name, shell)?;
-    install_bindings(&bindings, shell)?;
-
-    let mut rt = lock(runtime);
-    rt.plugins.push(plugin);
-    rt.keybindings_dirty = true;
-    drop(rt);
     Ok(())
 }
 
-/// Unload a plugin by name.  Removes its env bindings (innermost scope)
-/// and drops the runtime record.  Keybindings are rebound on the next
-/// readline iteration via the dirty flag.
+/// Unload a plugin by name, fully reversing its load: drops every hook and
+/// keybinding handler it registered, removes its env bindings (innermost
+/// scope), and drops the runtime record.  rustyline keybindings are rebound
+/// on the next readline iteration via the dirty flag.
 pub(crate) fn unload_plugin(
     name: &str,
     shell: &mut Shell,
@@ -139,6 +160,7 @@ pub(crate) fn unload_plugin(
         .ok_or_else(|| unload_err(format!("plugin '{name}' is not loaded")))?;
     let plugin = rt.plugins.remove(idx);
     drop(rt);
+    shell.remove_plugin_hooks(&plugin.name);
     for binding_name in &plugin.bindings {
         shell.remove_alias(binding_name);
     }
@@ -256,11 +278,15 @@ fn instantiate(
                 "<plugin>",
                 RequestedTerminalAccess::Denied,
                 Program::Hook {
-                    name: factory_name,
+                    name: factory_name.clone(),
                     args: vec![fo_arg],
                 },
             );
             let report = shell.run_turn(req);
+            // The factory is construction-time only: it built the manifest and
+            // is never dispatched again, so it leaves the hook table now rather
+            // than outliving the load.
+            shell.unregister_hook(&factory_name);
             match report {
                 TurnReport::Ran { result, .. } => result,
                 TurnReport::Static { .. } => {
