@@ -26,7 +26,7 @@
 //! both cases — only the seed differs.
 
 use crate::io::{Io, Sink, Source};
-use crate::process::{ForegroundCancelSlot, ForegroundScope, RootCancelSlot};
+use crate::process::{CancelSlot, ForegroundScope};
 use crate::syntax::parser::ParseError;
 use crate::typecheck::TypeError;
 use crate::types::{
@@ -96,8 +96,8 @@ struct TurnGuard<'s> {
     // Dropped (after `Drop::drop` runs the swap) in declaration order:
     // the slots un-publish before `saved` frees the displaced frame's
     // cancel scope, so a signal slot never points at a freed flag.
-    _fg: Option<ForegroundCancelSlot>,
-    _root: Option<RootCancelSlot>,
+    _fg: Option<CancelSlot>,
+    _root: Option<CancelSlot>,
     shell: &'s mut Shell,
     saved: TurnState,
 }
@@ -323,7 +323,7 @@ mod tests {
     /// with a zero transport status.
     #[test]
     fn clean_turn_runs_with_zero_status() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("$[1 + 1]")) {
             TurnReport::Ran { result, status, .. } => {
@@ -338,7 +338,7 @@ mod tests {
     /// diagnostic.
     #[test]
     fn parse_failure_is_static() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("let = ")) {
             TurnReport::Static { diagnostics } => {
@@ -354,7 +354,7 @@ mod tests {
     /// A type error never reaches evaluation: it returns type diagnostics.
     #[test]
     fn type_failure_is_static() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("$[1 + true]")) {
             TurnReport::Static { diagnostics } => {
@@ -371,7 +371,7 @@ mod tests {
     /// transport status.
     #[test]
     fn exit_escape_reports_code() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("exit 3")) {
             TurnReport::Ran { result, status, .. } => {
@@ -388,7 +388,7 @@ mod tests {
     /// `TurnIo::Capture` returns the turn's stdout in `Ran::captured`.
     #[test]
     fn capture_returns_stdout_bytes() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("echo hi")) {
             TurnReport::Ran { captured, .. } => {
@@ -410,7 +410,7 @@ mod tests {
     /// not the turn's internally-minted child).
     #[test]
     fn frame_restores_state_on_return() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(
             shell.turn.surface.is_none(),
@@ -456,7 +456,7 @@ mod tests {
     /// to its pre-turn value (`None`) exactly as `surface` is.
     #[test]
     fn desk_is_restored_to_its_pre_turn_value() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.turn.desk.is_none(), "no desk before the turn");
 
@@ -479,7 +479,7 @@ mod tests {
     /// turn's own settling.
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
         // Spawn a worker under a millisecond-scale idle lease and never
@@ -541,7 +541,7 @@ mod tests {
     /// `post_exec` saw the computed transport status.
     #[test]
     fn lifecycle_hooks_fire_with_status() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         #[derive(Clone)]
         struct Spy {
             pre: Arc<Mutex<bool>>,
@@ -581,7 +581,7 @@ mod tests {
     /// the eval into a `Break::Error` with transport status 130.
     #[test]
     fn published_foreground_slot_carries_request_into_eval() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct CancelInPreExec;
         impl TurnLifecycle for CancelInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -617,7 +617,7 @@ mod tests {
     /// unwind a published slot would have produced.
     #[test]
     fn forked_session_turn_does_not_publish_signal_slots() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct CancelInPreExec;
         impl TurnLifecycle for CancelInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -677,7 +677,7 @@ mod tests {
     /// the eval into a `Break::Error` with transport status 130.
     #[test]
     fn published_root_slot_carries_abort_into_eval() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct AbortInPreExec;
         impl TurnLifecycle for AbortInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -707,7 +707,7 @@ mod tests {
     /// pins the `timed_out` classification without sleeping on the reaper.
     #[test]
     fn deadline_cancel_reports_timed_out() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct DeadlineInPreExec;
         impl TurnLifecycle for DeadlineInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -742,7 +742,7 @@ mod tests {
     /// in it.
     #[test]
     fn inherit_leaves_session_streams_untouched() {
-        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
         shell.turn.io.stdout = Sink::Buffer(marker.clone());

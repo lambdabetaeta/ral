@@ -1,21 +1,27 @@
 //! Process subsystem: outcomes, signals, cancellation, and process-group placement.
 //!
-//! Three concerns sit under this umbrella:
+//! The concerns sitting under this umbrella:
 //!
 //!   * **Outcomes** ([`outcome`]) — structured shapes for what the OS
 //!     reported when an external command finished ([`Signal`],
 //!     [`WaitOutcome`]), plus the user-facing failure types the
 //!     evaluator surfaces ([`SpawnFailure`], [`CommandFailure`]).
-//!   * **Signals & cancellation** ([`signal`]) — the global termination
-//!     flag polled by the evaluator, [`CancelScope`] for cooperative
-//!     structured-concurrency cancellation, and the platform-specific
-//!     signal-handler / job-control machinery (`signal::unix`,
-//!     `signal::windows`).
-//!   * **Process-group placement** — [`Pgid`], [`PgidPolicy`],
-//!     [`ChildHandle`], and the platform `spawn_with_pgid` family live
-//!     in [`signal`] alongside the handlers they cooperate with at
-//!     fork / spawn time.
+//!   * **Signals & placement** ([`signal`]) — the escalation ladder polled
+//!     by the evaluator, the platform-specific signal-handler / job-control
+//!     machinery (`signal::unix`, `signal::windows`), and [`PgidPolicy`] /
+//!     [`ChildHandle`] for process-group placement at spawn time.
+//!   * **Cancellation** ([`cancel`]) — [`CancelScope`] and its typed
+//!     [`DurableRoot`] / [`ForegroundScope`] relation for cooperative
+//!     structured-concurrency cancellation, plus the signal-reachable slots
+//!     the handlers deliver onto.
+//!   * **Launch** ([`launch`]) — the owned [`Launch`] value the runtime
+//!     hands the subsystem to spawn one external command.
+//!   * **Lease** ([`lease`]) — [`TerminalLease`], the unforgeable
+//!     controlling-terminal-foreground authority.
+//!   * **Reaper** ([`reaper`]) — the process-global deadline daemon that
+//!     fires an armed lifetime ceiling as a [`CancelCause::Deadline`].
 
+pub mod cancel;
 pub mod launch;
 pub mod lease;
 pub mod outcome;
@@ -30,11 +36,12 @@ pub use lease::TerminalLease;
 
 pub use reaper::{Deadline, arm_callback, arm_lifetime};
 
-pub use signal::{
-    CancelCause, CancelScope, ChildHandle, DurableRoot, ForegroundCancelSlot, ForegroundScope,
-    Pgid, PgidPolicy, RootCancelSlot, check, clear, escalation_pending, foreground_cancel_cause,
+pub use cancel::{
+    CancelCause, CancelScope, CancelSlot, DurableRoot, ForegroundScope, foreground_cancel_cause,
     publish_durable_root, publish_foreground, request_foreground_cancel, request_root_cancel,
 };
+
+pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
 
 #[cfg(unix)]
 pub use signal::{
@@ -47,7 +54,7 @@ pub use signal::{
 pub use signal::{
     ForegroundGuard, PipelineRelay, ReapStatus, apply_group_active_process_limit,
     disown_pipeline_group, install_handlers, is_known_group, kill_pipeline_group,
-    release_win_group, reset_child_signals, spawn_with_pgid, try_reap_leader, wait_leader_blocking,
+    release_win_group, reset_child_signals, try_reap_leader, wait_leader_blocking,
 };
 
 #[cfg(not(any(unix, windows)))]

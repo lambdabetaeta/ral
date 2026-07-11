@@ -448,7 +448,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
 #[cfg(test)]
 mod wire_desk_tests {
     use super::*;
-    use crate::process::signal::SLOT_SERIAL;
+    use crate::process::cancel::SLOT_SERIAL;
     use crate::process::{CancelCause, publish_foreground};
 
     /// The round-trip: `enquire` writes `Event::Enquiry` stamped with the

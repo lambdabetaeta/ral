@@ -24,9 +24,11 @@
 //!
 //! ## Group ownership
 //!
-//! `spawn_with_pgid(NewLeader)` registers a Windows group for both
-//! standalone foreground externals and pipeline first stages.  The two
-//! cases differ only in who releases the group:
+//! `register_prepared_group` (called from the Windows launch boundary in
+//! `process::launch` after a `NewLeader` child is placed in its job)
+//! registers a Windows group for both standalone foreground externals and
+//! pipeline first stages.  The two cases differ only in who releases the
+//! group:
 //!
 //!   * **Standalone**: the [`crate::runtime::command::RunningChild`]
 //!     owns its own group and releases it on drop / wait completion.
@@ -109,7 +111,7 @@ mod win_groups {
         CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_LIMIT_INFORMATION,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
         JobObjectBasicLimitInformation, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -349,77 +351,6 @@ mod win_groups {
                 }
                 Some(leader)
             }
-        }
-    }
-
-    /// Legacy std-spawn path for non-pipeline callers until they migrate to
-    /// `process::launch`. It keeps standalone Windows groups working, but the
-    /// pipeline code no longer uses it.
-    pub(super) fn new_leader(leader: &std::process::Child) -> i32 {
-        use std::os::windows::io::AsRawHandle;
-        let leader_pid = leader.id() as i32;
-        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
-        let completion_port = if !job.is_null() {
-            install_kill_on_close(job);
-            let assigned =
-                unsafe { AssignProcessToJobObject(job, leader.as_raw_handle() as HANDLE) };
-            if assigned == 0 {
-                // The leader is outside the job, so abort-path
-                // `TerminateJobObject` will miss it (and `KILL_ON_JOB_CLOSE`
-                // won't reap it). Warn rather than silently degrade the
-                // tree-kill guarantee.
-                crate::diagnostic::shell_warning(&format!(
-                    "pipeline leader pid {leader_pid} could not be assigned to its job object \
-                     ({}); cancel may not kill the whole group",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            associate_completion_port(job)
-        } else {
-            std::ptr::null_mut()
-        };
-        let leader_handle = duplicate_process_handle(leader.as_raw_handle() as HANDLE);
-        let mut groups = GROUPS.lock().unwrap();
-        groups.push((
-            leader_pid,
-            GroupState {
-                job,
-                completion_port,
-                leader_handle,
-                member_handles: Vec::new(),
-                members: vec![leader.id()],
-                all_done: false,
-            },
-        ));
-        leader_pid
-    }
-
-    /// Add `member` to the group identified by `leader`, if any.  No-op
-    /// when the group has already been released (race against drop).
-    pub(super) fn join(leader: i32, member: &std::process::Child) {
-        use std::os::windows::io::AsRawHandle;
-        let mut groups = GROUPS.lock().unwrap();
-        if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
-            if !state.job.is_null() {
-                let assigned = unsafe {
-                    AssignProcessToJobObject(state.job, member.as_raw_handle() as HANDLE)
-                };
-                if assigned == 0 {
-                    // The member escaped the job; abort-path
-                    // `TerminateJobObject` won't reach it.
-                    crate::diagnostic::shell_warning(&format!(
-                        "pipeline member pid {} could not be assigned to job (leader {leader}) \
-                         ({}); cancel may not kill the whole group",
-                        member.id(),
-                        std::io::Error::last_os_error()
-                    ));
-                }
-            }
-            let dup = duplicate_process_handle(member.as_raw_handle() as HANDLE);
-            if !dup.is_null() {
-                state.member_handles.push(dup);
-            }
-            state.members.push(member.id());
         }
     }
 
@@ -672,7 +603,7 @@ mod win_groups {
 
 /// Windows analogue of the Unix `PipelineRelay`: a no-op marker.  The
 /// live-pipelines set is `win_groups::GROUPS` itself, populated by
-/// [`spawn_with_pgid`] and cleaned up by [`release_win_group`] from
+/// `register_prepared_group` and cleaned up by [`release_win_group`] from
 /// `PipelineGroup::Drop`.  `install` exists only to keep the cross-platform
 /// call site in `pipeline.rs` free of cfg gates.
 pub struct PipelineRelay;
@@ -730,111 +661,6 @@ pub(crate) fn register_prepared_group(
     win_groups::register(prepared, child).map(Pgid)
 }
 
-// ── Raw CreateProcessW child ───────────────────────────────────────────────
-
-pub(crate) struct RawChild {
-    process: std::os::windows::io::OwnedHandle,
-    pid: u32,
-    stdout: Option<std::fs::File>,
-    stderr: Option<std::fs::File>,
-}
-
-impl RawChild {
-    pub(crate) fn new(
-        process: std::os::windows::io::OwnedHandle,
-        pid: u32,
-        stdout: Option<std::fs::File>,
-        stderr: Option<std::fs::File>,
-    ) -> Self {
-        Self {
-            process,
-            pid,
-            stdout,
-            stderr,
-        }
-    }
-
-    pub(crate) fn id(&self) -> u32 {
-        self.pid
-    }
-
-    pub(crate) fn raw_process_handle(&self) -> HANDLE {
-        use std::os::windows::io::AsRawHandle;
-        self.process.as_raw_handle() as HANDLE
-    }
-
-    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
-        let ok = unsafe {
-            windows_sys::Win32::System::Threading::TerminateProcess(self.raw_process_handle(), 1)
-        };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.stdout
-            .take()
-            .map(|stdout| Box::new(stdout) as Box<dyn std::io::Read + Send>)
-    }
-
-    pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.stderr
-            .take()
-            .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>)
-    }
-
-    /// Block until the process exits and read its exit status — the
-    /// shared body of [`Self::wait_handling_stop`] and [`Self::reap`],
-    /// which differ only in how they map that status onward (a
-    /// [`crate::process::WaitOutcome`] vs. the raw [`std::process::ExitStatus`]
-    /// `ChildHandle::reap` needs cross-platform).
-    fn wait_and_exit_status(&self) -> std::io::Result<std::process::ExitStatus> {
-        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
-        let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
-        if r != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        self.exit_status()
-    }
-
-    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<crate::process::WaitOutcome> {
-        self.wait_and_exit_status()
-            .map(crate::process::WaitOutcome::from_exit_status)
-    }
-
-    pub(crate) fn try_wait_handling_stop(
-        &mut self,
-    ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
-        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-        use windows_sys::Win32::System::Threading::WaitForSingleObject;
-        match unsafe { WaitForSingleObject(self.raw_process_handle(), 0) } {
-            WAIT_OBJECT_0 => self
-                .exit_status()
-                .map(crate::process::WaitOutcome::from_exit_status)
-                .map(Some),
-            WAIT_TIMEOUT => Ok(None),
-            _ => Err(std::io::Error::last_os_error()),
-        }
-    }
-
-    pub(crate) fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.wait_and_exit_status()
-    }
-
-    fn exit_status(&self) -> std::io::Result<std::process::ExitStatus> {
-        use std::os::windows::process::ExitStatusExt;
-        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
-        let mut code = 0;
-        let ok = unsafe { GetExitCodeProcess(self.raw_process_handle(), &raw mut code) };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(std::process::ExitStatus::from_raw(code))
-    }
-}
-
 // ── Job-table primitives ───────────────────────────────────────────────────
 //
 // These are the Windows analogues of `kill(-pgid, …)` / `waitpid(-pgid, …)`
@@ -880,66 +706,7 @@ pub fn disown_pipeline_group(pgid: Pgid) {
     win_groups::disown(pgid.0);
 }
 
-// ── Process-group placement ────────────────────────────────────────────────
-
-/// Windows arm: there's no `pre_exec`, no pgid, no `setpgid`.  Three
-/// gestures replace them:
-///
-///   * `CREATE_NEW_PROCESS_GROUP` so the child can be addressed individually
-///     by `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`.
-///   * Job Object membership so the whole pipeline can be torn down with one
-///     `TerminateJobObject` on the abort path.  `NewLeader` creates a fresh
-///     job and assigns this stage; `Join` looks up the leader's job and
-///     assigns there.
-///   * No signal-disposition reset.
-///
-/// The returned `Pgid` is the leader pid (the *first* stage's pid),
-/// matching the value `pipeline/group.rs` already keys off.
-///
-/// **Known grandchild-escape window.** The child is spawned and *then*
-/// assigned to the job (`new_leader` / `join` below). A grandchild that
-/// the stage forks in the gap between resume and assignment is not pulled
-/// into the job, so abort-path `TerminateJobObject` cannot reach it. The
-/// Unix arm has no such window: `setpgid` runs in `pre_exec`, before the
-/// child's own code.
-///
-/// Helper-evaluated stages are gated before user code, so they do not
-/// normally fork in this window.  Direct external stages are not gated:
-/// a hostile or very early-forking program can escape the Job Object
-/// before `new_leader` / `join` assigns it.  Closing that gap requires
-/// creation-time job placement: either spawn suspended, assign to the
-/// job, then resume, or use a `PROC_THREAD_ATTRIBUTE_JOB_LIST` attribute
-/// list.  That means replacing this `std::process::Command` path with a
-/// custom `CreateProcessW` wrapper.
-pub fn spawn_with_pgid(
-    cmd: &mut std::process::Command,
-    pgid: PgidPolicy,
-) -> std::io::Result<(std::process::Child, Option<Pgid>)> {
-    use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
-    match pgid {
-        PgidPolicy::Inherit => {
-            let child = cmd.spawn()?;
-            Ok((child, None))
-        }
-        // Windows has no POSIX sessions; a new console process group is the
-        // nearest isolation, so `NewSession` lands on the same path as
-        // `NewLeader`.  The Unix arm's controlling-terminal severance has no
-        // analogue here, and exarch's signal-escape path is Unix-only.
-        PgidPolicy::NewLeader | PgidPolicy::NewSession => {
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-            let child = cmd.spawn()?;
-            let leader = win_groups::new_leader(&child);
-            Ok((child, Some(Pgid(leader))))
-        }
-        PgidPolicy::Join(p) => {
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-            let child = cmd.spawn()?;
-            win_groups::join(p.0, &child);
-            Ok((child, Some(p)))
-        }
-    }
-}
+// ── Wait handling ──────────────────────────────────────────────────────────
 
 /// Windows has no SIGTSTP analogue; the standard `Child::wait` is enough.
 /// Called only via `ChildHandle::wait_handling_stop`, which is the single

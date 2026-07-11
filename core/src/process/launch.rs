@@ -10,6 +10,9 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+pub(crate) use windows::RawChild;
+
 #[cfg(not(windows))]
 pub struct Launch {
     cmd: std::process::Command,
@@ -159,6 +162,14 @@ impl Launch {
         Self { cmd }
     }
 
+    /// Adopt an existing `Command`.
+    ///
+    /// Only the program, arguments, environment, and working directory are
+    /// the launch's contract: stdio and redirections must be set on the
+    /// returned `Launch`, never on the incoming `Command`. `std` exposes no
+    /// stdio getters, so the Windows raw-`CreateProcessW` path cannot copy
+    /// them across; treating them as uncarried on every platform keeps that a
+    /// documented contract rather than a Windows-only surprise.
     pub fn from_command(cmd: std::process::Command) -> Self {
         Self { cmd }
     }
@@ -274,6 +285,13 @@ impl Launch {
         }
     }
 
+    /// Adopt an existing `Command`.
+    ///
+    /// Only the program, arguments, environment, and working directory are
+    /// carried: `std` exposes no stdio getters, so any stdio or redirections
+    /// set on the incoming `Command` are dropped and must be re-set on the
+    /// returned `Launch`. This is a documented contract, matching the
+    /// non-Windows arm.
     pub fn from_command(cmd: std::process::Command) -> Self {
         let mut launch = Self::new(cmd.get_program());
         launch.args(cmd.get_args());
@@ -452,6 +470,7 @@ mod windows {
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
@@ -460,9 +479,10 @@ mod windows {
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
         InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
         ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+        WaitForSingleObject,
     };
 
     static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
@@ -516,7 +536,7 @@ mod windows {
             .map(|p| wide_null(p.as_os_str()))
             .transpose()?;
         let mut env = environment_block(&launch.env)?;
-        let mut attrs = AttributeList::new(inherited.len())?;
+        let mut attrs = AttributeList::new()?;
         attrs.update_handle_list(&inherited)?;
 
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
@@ -583,14 +603,12 @@ mod windows {
 
         let process = process.into_owned();
         drop(thread);
-        Ok(ChildHandle::from_windows_raw(
-            crate::process::signal::RawChild::new(
-                process,
-                pi.dwProcessId,
-                stdout.parent_stdout.take(),
-                stderr.parent_stderr.take(),
-            ),
-        ))
+        Ok(ChildHandle::from_windows_raw(RawChild::new(
+            process,
+            pi.dwProcessId,
+            stdout.parent_stdout.take(),
+            stderr.parent_stderr.take(),
+        )))
     }
 
     fn reject_batch(program: &OsStr) -> io::Result<()> {
@@ -760,7 +778,7 @@ mod windows {
     }
 
     impl AttributeList {
-        fn new(_handle_count: usize) -> io::Result<Self> {
+        fn new() -> io::Result<Self> {
             let mut bytes = 0usize;
             unsafe {
                 InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut bytes);
@@ -893,5 +911,110 @@ mod windows {
         }
         block.push(0);
         Ok(block)
+    }
+
+    // ── Raw CreateProcessW child ───────────────────────────────────────────
+    //
+    // The owning handle to a child spawned through this module's raw
+    // `CreateProcessW` boundary, plus the wait/reap methods `ChildHandle`
+    // dispatches to on Windows.
+
+    pub(crate) struct RawChild {
+        process: OwnedHandle,
+        pid: u32,
+        stdout: Option<std::fs::File>,
+        stderr: Option<std::fs::File>,
+    }
+
+    impl RawChild {
+        pub(crate) fn new(
+            process: OwnedHandle,
+            pid: u32,
+            stdout: Option<std::fs::File>,
+            stderr: Option<std::fs::File>,
+        ) -> Self {
+            Self {
+                process,
+                pid,
+                stdout,
+                stderr,
+            }
+        }
+
+        pub(crate) fn id(&self) -> u32 {
+            self.pid
+        }
+
+        pub(crate) fn raw_process_handle(&self) -> HANDLE {
+            self.process.as_raw_handle() as HANDLE
+        }
+
+        pub(crate) fn kill(&mut self) -> io::Result<()> {
+            let ok = unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(self.raw_process_handle(), 1)
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            self.stdout
+                .take()
+                .map(|stdout| Box::new(stdout) as Box<dyn std::io::Read + Send>)
+        }
+
+        pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            self.stderr
+                .take()
+                .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>)
+        }
+
+        /// Block until the process exits and read its exit status — the
+        /// shared body of [`Self::wait_handling_stop`] and [`Self::reap`],
+        /// which differ only in how they map that status onward (a
+        /// [`crate::process::WaitOutcome`] vs. the raw
+        /// [`std::process::ExitStatus`] `ChildHandle::reap` needs
+        /// cross-platform).
+        fn wait_and_exit_status(&self) -> io::Result<std::process::ExitStatus> {
+            let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
+            if r != WAIT_OBJECT_0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.exit_status()
+        }
+
+        pub(crate) fn wait_handling_stop(&mut self) -> io::Result<crate::process::WaitOutcome> {
+            self.wait_and_exit_status()
+                .map(crate::process::WaitOutcome::from_exit_status)
+        }
+
+        pub(crate) fn try_wait_handling_stop(
+            &mut self,
+        ) -> io::Result<Option<crate::process::WaitOutcome>> {
+            match unsafe { WaitForSingleObject(self.raw_process_handle(), 0) } {
+                WAIT_OBJECT_0 => self
+                    .exit_status()
+                    .map(crate::process::WaitOutcome::from_exit_status)
+                    .map(Some),
+                WAIT_TIMEOUT => Ok(None),
+                _ => Err(io::Error::last_os_error()),
+            }
+        }
+
+        pub(crate) fn reap(&mut self) -> io::Result<std::process::ExitStatus> {
+            self.wait_and_exit_status()
+        }
+
+        fn exit_status(&self) -> io::Result<std::process::ExitStatus> {
+            use std::os::windows::process::ExitStatusExt;
+            let mut code = 0;
+            let ok = unsafe { GetExitCodeProcess(self.raw_process_handle(), &raw mut code) };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(std::process::ExitStatus::from_raw(code))
+        }
     }
 }

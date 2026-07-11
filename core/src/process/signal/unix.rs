@@ -1,20 +1,26 @@
 //! Unix signal handling and process-group machinery.
 //!
-//! Three concerns interlock here:
+//! The concerns that interlock here:
 //!
 //!   * **Termination signals** (SIGINT/SIGTERM/SIGHUP) are translated
-//!     into a [`CancelCause`](super::CancelCause) on the published cancel
-//!     slots — the same delivery every other cancellation uses — and tick
-//!     the escalation ladder whose third delivery forces `_exit`.
+//!     into a [`CancelCause`](crate::process::CancelCause) on the published
+//!     cancel slots — the same delivery every other cancellation uses — and
+//!     tick the escalation ladder whose third delivery forces `_exit`.
 //!   * **Pipeline relays** keep the controlling tty with the shell while
 //!     mixed pipelines run, fanning Ctrl+C out to every external pgid.
 //!   * **Process-group placement** is the discipline applied at fork:
 //!     every external child gets `setpgid` + `reset_child_signals` via a
 //!     single `pre_exec` funnel.
+//!   * **Wait handling** for stopped children polls `waitpid` with
+//!     `WUNTRACED` so a SIGSTOP'd child is classified (parked or
+//!     killed-then-reaped) rather than mistaken for still-running.
+//!   * **Foreground / tty ownership** hands the controlling terminal to a
+//!     foreground child and restores the pgid and line discipline on drop.
 
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use super::{ESCALATION, Pgid, PgidPolicy};
+use crate::process::cancel::{CancelCause, request_foreground_cancel, request_root_cancel};
 
 // ── Termination handler ────────────────────────────────────────────────────
 
@@ -46,9 +52,9 @@ extern "C" fn handler(sig: libc::c_int) {
     // workers too.  Every wait loop already polls its scope, so this is
     // what preempts a blocked external child.
     if sig == libc::SIGINT {
-        super::request_foreground_cancel(super::CancelCause::Interrupt);
+        request_foreground_cancel(CancelCause::Interrupt);
     } else {
-        super::request_root_cancel(super::CancelCause::Terminate);
+        request_root_cancel(CancelCause::Terminate);
     }
     // Forward the same signal to any active pipeline groups so external
     // children die too.  The interactive shell rebinds SIGINT to the relay
@@ -94,7 +100,7 @@ extern "C" fn sigint_relay(_: libc::c_int) {
     // work unwinds at its next poll; a no-op between turns (idle Ctrl-C at
     // the prompt is still handled by the line editor). Detached workers poll
     // their own scopes, not the foreground, so they are spared.
-    super::request_foreground_cancel(super::CancelCause::Interrupt);
+    request_foreground_cancel(CancelCause::Interrupt);
     for slot in &RELAY_PGIDS {
         let pgid = slot.load(Ordering::Acquire);
         if pgid != 0 {
@@ -114,7 +120,7 @@ extern "C" fn sigquit_handler(_: libc::c_int) {
     // Ctrl-\ in cooked mode: reap the whole session. Cancel the durable
     // root, reaching the foreground turn and every detached worker. A no-op
     // between turns (null slot), so an idle Ctrl-\ does not core-dump.
-    super::request_root_cancel(super::CancelCause::RootAbort);
+    request_root_cancel(CancelCause::RootAbort);
 }
 
 /// The SIGQUIT handler for the interactive shell to install for the
@@ -267,6 +273,12 @@ impl PgidPolicy {
     }
 }
 
+/// The child's OS pid as a `pid_t`.
+#[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
+fn child_pid(child: &std::process::Child) -> libc::pid_t {
+    child.id() as libc::pid_t
+}
+
 /// Spawn `cmd` with a single, canonical pre-exec discipline:
 ///
 ///   1. inside the child (post-fork, pre-exec): apply `pgid`, then
@@ -329,11 +341,10 @@ where
     // it runs, either the child already applied the policy (a mirror
     // failure is then the benign post-`execve` `EACCES` race) or the
     // child's `pre_exec` failed and the spawn above returned the error.
-    #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
     let leader = match pgid {
         PgidPolicy::Inherit => None,
         PgidPolicy::NewLeader => {
-            let pid = child.id() as libc::pid_t;
+            let pid = child_pid(&child);
             unsafe { libc::setpgid(pid, pid) };
             Some(Pgid(pid))
         }
@@ -342,10 +353,10 @@ where
             // another into a new session — so there is no parent-side
             // mirror to close the race: the child's `pre_exec` is the sole
             // authority.  The new session's pgid equals the child's pid.
-            Some(Pgid(child.id() as libc::pid_t))
+            Some(Pgid(child_pid(&child)))
         }
         PgidPolicy::Join(p) => {
-            let pid = child.id() as libc::pid_t;
+            let pid = child_pid(&child);
             unsafe { libc::setpgid(pid, p.0) };
             Some(p)
         }
@@ -380,8 +391,7 @@ pub(super) fn wait_handling_stop(
     pgid: Option<Pgid>,
     park_on_stop: bool,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-    let pid = child.id() as libc::pid_t;
+    let pid = child_pid(child);
     let (r, status) = waitpid_eintr(pid, libc::WUNTRACED);
     if r < 0 {
         return Err(std::io::Error::last_os_error());
@@ -420,8 +430,7 @@ pub(super) fn try_wait_handling_stop(
     pgid: Option<Pgid>,
     park_on_stop: bool,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
-    #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-    let pid = child.id() as libc::pid_t;
+    let pid = child_pid(child);
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG | libc::WUNTRACED) };
     if r < 0 {
@@ -746,11 +755,9 @@ fn active_relay_slots() -> usize {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::super::{
-        CancelCause, CancelScope, SLOT_SERIAL, clear, escalation_pending, publish_durable_root,
-        publish_foreground,
-    };
+    use super::super::{clear, escalation_pending};
     use super::*;
+    use crate::process::cancel::{CancelScope, SLOT_SERIAL, publish_durable_root, publish_foreground};
     use std::sync::{Arc, Barrier, Mutex};
 
     // All relay tests share a process-wide lock because `RELAY_PGIDS` is a
@@ -872,7 +879,7 @@ mod tests {
     // ── Signal translation ─────────────────────────────────────────────────
 
     /// The batch/term handler translates SIGINT into a foreground
-    /// [`Interrupt`](super::super::CancelCause::Interrupt): the current
+    /// [`Interrupt`](crate::process::CancelCause::Interrupt): the current
     /// turn unwinds (and its blocked external wakes at the next scope
     /// poll), while the durable root — and with it every detached
     /// worker — is left untouched.  The delivery also ticks the
@@ -903,7 +910,7 @@ mod tests {
     }
 
     /// SIGTERM and SIGHUP are shutdown requests: the handler translates
-    /// them into a root [`Terminate`](super::super::CancelCause::Terminate),
+    /// them into a root [`Terminate`](crate::process::CancelCause::Terminate),
     /// reaching the foreground turn *and* every detached worker parented
     /// under the durable root — the semantics a `timeout(1)`- or
     /// systemd-style SIGTERM expects.  The foreground slot itself is not
@@ -967,8 +974,7 @@ mod tests {
             });
         }
         let mut child = cmd.spawn().expect("spawn sleep");
-        #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-        let child_pid = child.id() as libc::pid_t;
+        let child_pid = child_pid(&child);
 
         // Parent mirrors setpgid to close the race.
         unsafe {
