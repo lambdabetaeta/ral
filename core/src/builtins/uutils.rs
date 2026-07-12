@@ -30,6 +30,21 @@ macro_rules! declare_coreutils {
             )+)?
         ];
 
+        /// Names declared in the `unix:` block above.
+        ///
+        /// These are the coreutils tools whose upstream `uu_*` crate
+        /// depends on Unix-only uucore modules (`entries`, `process`,
+        /// `signals`) and so is never linked on Windows.  Present
+        /// unconditionally, not `cfg(unix)`-gated like
+        /// [`COREUTILS_TOOLS`]'s corresponding entries: a caller
+        /// outside this crate that must know "this bundled-tool name
+        /// doesn't exist on Windows" — exarch's profile loader drops
+        /// dead exec grants for these names on non-Unix — gets one
+        /// authoritative list instead of a second hardcoded copy.
+        pub const COREUTILS_UNIX_ONLY_TOOLS: &[&str] = &[
+            $($( $uname, )+)?
+        ];
+
         pub(crate) fn coreutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
             match tool {
                 $($cname => $cmodule::uumain(args.into_iter()),)+

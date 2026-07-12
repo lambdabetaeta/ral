@@ -151,11 +151,8 @@ return [
     'path:': 'allow',
 
     'xdg:bin/':            'allow',   # ${XDG_BIN_HOME:-~/.local/bin}
-    '/usr/bin/':           'allow',
-    '/bin/':               'allow',
+    'system:':             'allow',   # the platform's tool roots — see core/src/path/sigil.rs
     '/usr/local/bin/':     'allow',
-    '/opt/homebrew/bin/':  'allow',   # Apple-silicon Homebrew
-    '/opt/homebrew/sbin/': 'allow',
     '/usr/local/sbin/':    'allow',
     '/usr/sbin/':          'allow',
     '/sbin/':              'allow',
@@ -191,10 +188,6 @@ return [
     # OCaml — opam switch bins live at ~/.opam/<switch>/bin/ so the whole
     # tree needs a subpath prefix.
     '~/.opam/':              'allow',
-
-    # JVM — keg-only Homebrew formulae (openjdk, …) are not symlinked
-    # into /opt/homebrew/bin/, so their bin/ subdirs need a separate entry.
-    '/opt/homebrew/opt/':    'allow',
 
     # Universal version managers (cover multiple languages each).
     '~/.asdf/shims/':        'allow',

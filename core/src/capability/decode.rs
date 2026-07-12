@@ -213,10 +213,12 @@ fn require_absolute(
 /// names (`git`, `kubectl`) are names rather than paths and pass
 /// through unchanged.
 ///
-/// The `path:` sigil is expanded here: it reads `$PATH`, splits on `:`,
-/// and inserts each absolute component as a `dirs` entry with the given
-/// verdict.  `path:` only accepts `allow`/`deny` — a subcommand list
-/// makes no sense against a directory prefix.
+/// Two sigils expand to more than one directory and so are special-
+/// cased here rather than in [`freeze_absolute`]: `path:` (one `dirs`
+/// entry per `$PATH` component) and `system:` (one `dirs` entry per
+/// [`crate::path::sigil::system_tool_roots`] — the platform's tool
+/// roots). Both only accept `allow`/`deny` — a subcommand list makes
+/// no sense against a directory prefix.
 fn freeze_exec_map(
     map: ExecMap,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
@@ -226,23 +228,28 @@ fn freeze_exec_map(
     let freeze_key = |key: &str| -> Result<String, String> {
         Ok(freeze_absolute(key, ctx, err_prefix)?.into_string())
     };
+    let dir_verdict = |sigil: &str, policy: ExecPolicy| -> Result<ExecDir, String> {
+        match policy {
+            ExecPolicy::Allow => Ok(ExecDir::Allow),
+            ExecPolicy::Deny => Ok(ExecDir::Deny),
+            ExecPolicy::Subcommands(_) => Err(format!(
+                "{err_prefix}: '{sigil}' only takes 'allow' or 'deny', not a subcommand list"
+            )),
+        }
+    };
 
     let mut literals = BTreeMap::new();
     let mut dirs = BTreeMap::new();
 
-    // Expand `path:` sigil — one directory entry per PATH component.
     for (key, policy) in map.literals {
         if key == "path:" {
-            let verdict = match policy {
-                ExecPolicy::Allow => ExecDir::Allow,
-                ExecPolicy::Deny => ExecDir::Deny,
-                ExecPolicy::Subcommands(_) => {
-                    return Err(format!(
-                        "{err_prefix}: 'path:' only takes 'allow' or 'deny', not a subcommand list"
-                    ));
-                }
-            };
+            let verdict = dir_verdict("path:", policy)?;
             for d in path_dirs(err_prefix)? {
+                dirs.insert(d, verdict.clone());
+            }
+        } else if key == "system:" {
+            let verdict = dir_verdict("system:", policy)?;
+            for d in system_dirs() {
                 dirs.insert(d, verdict.clone());
             }
         } else {
@@ -255,11 +262,15 @@ fn freeze_exec_map(
         }
     }
 
-    // Also expand `path:/` — the decoder strips the trailing `/`, so a
-    // `'path:/': 'allow'` entry lands here as `"path:"` in `dirs`.
+    // A trailing `/` (`'path:/'`, `'system:/'`) strips to the same
+    // bare sigil and lands here in `map.dirs` instead of `map.literals`.
     for (key, dir) in map.dirs {
         if key == "path:" {
             for d in path_dirs(err_prefix)? {
+                dirs.insert(d, dir.clone());
+            }
+        } else if key == "system:" {
+            for d in system_dirs() {
                 dirs.insert(d, dir.clone());
             }
         } else {
@@ -271,18 +282,16 @@ fn freeze_exec_map(
     Ok(ExecMap { literals, dirs })
 }
 
-/// Split `$PATH`, normalise each absolute entry, skip empties and relatives.
+/// Split `$PATH` on the platform separator, normalise each absolute
+/// entry, skip empties and relatives.
 fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut dirs = Vec::new();
-    for entry in path.split(':') {
-        if entry.is_empty() {
-            continue;
+    for entry in std::env::split_paths(&path) {
+        if entry.as_os_str().is_empty() || !entry.is_absolute() {
+            continue; // skip empty and relative PATH entries silently
         }
-        if !crate::path::is_absolute(entry) {
-            continue; // skip relative PATH entries silently
-        }
-        let normalized = crate::path::NormalizedPrefix::from_surface(entry);
+        let normalized = crate::path::NormalizedPrefix::from_surface(&entry);
         dirs.push(normalized.into_string());
     }
     if dirs.is_empty() {
@@ -292,6 +301,18 @@ fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
         ));
     }
     Ok(dirs)
+}
+
+/// `system:` directory expansion — see
+/// [`crate::path::sigil::system_tool_roots`].  Unlike `path:` this can
+/// never expand to zero directories: the platform's own tool roots
+/// (`/usr/bin`+`/bin`, or `%SystemRoot%\System32`) are unconditional,
+/// so there is no empty-expansion error to raise.
+fn system_dirs() -> Vec<String> {
+    crate::path::sigil::system_tool_roots()
+        .into_iter()
+        .map(|p| crate::path::NormalizedPrefix::from_surface(&p).into_string())
+        .collect()
 }
 
 // ── Exec policy decoder ───────────────────────────────────────────────────

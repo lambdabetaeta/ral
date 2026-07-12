@@ -158,7 +158,7 @@ pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec 
 fn literal_vetoes(literals: &BTreeMap<String, ExecPolicy>, deny_names: &[&str]) -> bool {
     deny_names
         .iter()
-        .any(|n| matches!(literals.get(*n), Some(ExecPolicy::Deny)))
+        .any(|n| matches!(lookup_literal(literals, n), Some(ExecPolicy::Deny)))
 }
 
 /// Run the stack-level exec verdict over an explicit deny/allow name
@@ -182,9 +182,73 @@ fn match_literal_keys(
     literals: &BTreeMap<String, ExecPolicy>,
     names: &[&str],
 ) -> Option<ExecPolicy> {
-    let mut matched = names.iter().filter_map(|n| literals.get(*n).cloned());
+    let mut matched = names.iter().filter_map(|n| lookup_literal(literals, n).cloned());
     let first = matched.next()?;
     Some(matched.fold(first, ExecPolicy::meet))
+}
+
+/// Look up `name` among `literals`' keys: an exact match first (the
+/// only comparison off Windows, and the common case everywhere), and
+/// — under Windows path semantics — a case- and PATHEXT-insensitive
+/// scan when the exact lookup misses.  A profile's bare `git` must
+/// still admit a resolved `C:\...\GIT.EXE`: PATHEXT resolution picks
+/// the extension and Windows command lookup ignores case, so the
+/// policy author shouldn't have to spell either out — see
+/// [`names_match`].
+fn lookup_literal<'a>(
+    literals: &'a BTreeMap<String, ExecPolicy>,
+    name: &str,
+) -> Option<&'a ExecPolicy> {
+    if let Some(policy) = literals.get(name) {
+        return Some(policy);
+    }
+    if cfg!(windows) {
+        return literals
+            .iter()
+            .find(|(key, _)| names_match(key, name, true))
+            .map(|(_, policy)| policy);
+    }
+    None
+}
+
+/// Windows executable-name extensions PATHEXT resolution may append.
+/// Mirrors the default `path::which` falls back to (`.COM;.EXE;.BAT;
+/// .CMD`) when `%PATHEXT%` is unset.  `.bat`/`.cmd` candidates are
+/// refused later, at the spawn boundary (`process::launch`) — that is
+/// a separate, later gate on whether a resolved path may be launched
+/// at all, not on whether a *name* matches the exec policy, so both
+/// extensions still belong in this comparison.
+const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
+
+/// Strip a trailing extension recognised by [`WINDOWS_EXEC_EXTENSIONS`],
+/// case-insensitively.  `git.EXE` → `git`; a name with no extension, or
+/// with an extension that isn't in the set (`my.tool`), is returned
+/// unchanged.
+fn strip_windows_extension(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) => {
+            stem
+        }
+        _ => name,
+    }
+}
+
+/// True iff `literal` (an exec-map key) and `candidate` (one of a
+/// command's identity strings) name the same executable.
+///
+/// Off Windows this is a byte-exact comparison — the existing rule.
+/// Under Windows path semantics, command resolution is case-
+/// insensitive and PATHEXT makes the trailing extension transparent,
+/// so the comparison folds case and strips a recognised extension
+/// from both sides before comparing.  `windows` is a parameter rather
+/// than a `cfg(windows)` read inside this function so the Windows rule
+/// has a name and a unit test that runs on every host — the real
+/// platform gate lives at the one call site, [`lookup_literal`].
+fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
+    if !windows {
+        return literal == candidate;
+    }
+    strip_windows_extension(literal).eq_ignore_ascii_case(strip_windows_extension(candidate))
 }
 
 /// Find the deepest directory prefix that covers any absolute
@@ -207,4 +271,72 @@ fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<ExecDir> {
         }
     }
     best.map(|(_, p)| p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_match_off_windows_is_byte_exact() {
+        assert!(names_match("git", "git", false));
+        assert!(!names_match("git", "git.exe", false));
+        assert!(!names_match("git", "Git", false));
+    }
+
+    /// The Windows rule is exercised directly — no `cfg(windows)` on
+    /// this test — so it runs on every CI host, matching the plan's
+    /// requirement that Windows admission logic have a unit test
+    /// reachable from Unix CI.
+    #[test]
+    fn windows_names_match_ignores_case() {
+        assert!(names_match("git", "Git", true));
+        assert!(names_match("GIT", "git", true));
+    }
+
+    #[test]
+    fn windows_names_match_strips_pathext() {
+        assert!(names_match("git", "git.exe", true));
+        assert!(names_match("git", "GIT.EXE", true));
+        assert!(names_match("git", "git.cmd", true));
+        assert!(names_match("git", "git.CMD", true));
+        assert!(names_match("git", "git.com", true));
+        assert!(names_match("git", "git.bat", true));
+    }
+
+    #[test]
+    fn windows_names_match_rejects_unrelated_extension() {
+        assert!(!names_match("git", "git.tool", true));
+        assert!(!names_match("git", "gitx", true));
+    }
+
+    #[test]
+    fn windows_names_match_still_requires_the_same_stem() {
+        assert!(!names_match("git", "gitk.exe", true));
+    }
+
+    #[test]
+    fn strip_windows_extension_leaves_unknown_extensions_alone() {
+        assert_eq!(strip_windows_extension("my.tool"), "my.tool");
+        assert_eq!(strip_windows_extension("git"), "git");
+        assert_eq!(strip_windows_extension("git.EXE"), "git");
+    }
+
+    #[test]
+    fn lookup_literal_exact_match_always_hits() {
+        let literals = BTreeMap::from([("git".to_string(), ExecPolicy::Allow)]);
+        assert_eq!(lookup_literal(&literals, "git"), Some(&ExecPolicy::Allow));
+    }
+
+    /// `lookup_literal` itself reads the real `cfg(windows)`, so a case
+    /// mismatch only resolves on an actual Windows host — asserted
+    /// against `cfg!(windows)` rather than a fixed platform so this
+    /// test is honest on every CI host.  [`names_match`] above is where
+    /// the Windows rule itself gets a fixed-outcome test.
+    #[test]
+    fn lookup_literal_case_mismatch_follows_real_platform() {
+        let literals = BTreeMap::from([("git".to_string(), ExecPolicy::Allow)]);
+        let hit = lookup_literal(&literals, "Git");
+        assert_eq!(hit.is_some(), cfg!(windows));
+    }
 }

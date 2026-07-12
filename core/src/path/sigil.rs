@@ -26,6 +26,13 @@
 //! portable paths in `.exarch.toml` and `grant { fs: ... }`
 //! blocks without naming the host's home directory, XDG layout,
 //! or working directory directly.
+//!
+//! Two further sigils are `exec`-only, since each expands to more than
+//! one directory rather than a single path: `path:` (every `$PATH`
+//! component) and `system:` ([`system_tool_roots`], the platform's tool
+//! roots — see there for what that means per platform).  Both are
+//! recognised and expanded in `capability::decode`'s exec-map freeze,
+//! not here.
 
 use crate::path::basedir::{XdgKind, resolve_xdg};
 use crate::path::lex::fold_dots;
@@ -291,6 +298,83 @@ fn unknown_xdg_message(entry: &str) -> String {
     )
 }
 
+/// The platform's tool-root directories — what the `system:` exec
+/// sigil expands to (see `capability::decode`'s exec-map freeze).
+///
+/// Dispatches to [`unix_tool_roots`] or [`windows_tool_roots`] fed
+/// with the live filesystem and environment; both are exposed
+/// separately, parameterised over their inputs, so the shape of each
+/// platform's list has a unit test that runs on every host regardless
+/// of which one is compiling — see the tests below and
+/// `capability::exec`'s Windows name-comparison for the same pattern.
+pub fn system_tool_roots() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_default();
+        let program_files = std::env::var("ProgramFiles").unwrap_or_default();
+        let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_default();
+        let program_files_dirs: Vec<&str> = [program_files.as_str(), program_files_x86.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+        windows_tool_roots(&system_root, &program_files_dirs, crate::path::exists)
+    }
+    #[cfg(not(windows))]
+    {
+        unix_tool_roots(crate::path::exists)
+    }
+}
+
+/// Unix tool roots: `/usr/bin` and `/bin` unconditionally, plus
+/// whichever Homebrew prefix is present.
+///
+/// `exists` gates `/opt/homebrew` (Apple Silicon) and
+/// `/home/linuxbrew/.linuxbrew` (Linuxbrew) — the same two entries
+/// `sandbox::macos::system_paths`'s `Exec` set and `sandbox::linux`'s
+/// system-paths list carry, mirrored here for the capability layer's
+/// separate exec-admission concern.
+pub fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
+    for brew in ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"] {
+        if exists(brew) {
+            roots.push(brew.to_string());
+        }
+    }
+    roots
+}
+
+/// Windows tool roots: `%SystemRoot%\System32` and the bundled
+/// Windows PowerShell home unconditionally, plus Git-for-Windows'
+/// `usr\bin` when present.
+///
+/// `system_root` is the resolved `%SystemRoot%` value (empty when
+/// unset — falls back to the conventional `C:\Windows`);
+/// `program_files_dirs` are the resolved `%ProgramFiles%` /
+/// `%ProgramFiles(x86)%` values, whichever are set; `exists` gates
+/// whether a Git-for-Windows `usr\bin` under either is included.
+pub fn windows_tool_roots(
+    system_root: &str,
+    program_files_dirs: &[&str],
+    exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let system_root = if system_root.is_empty() {
+        r"C:\Windows"
+    } else {
+        system_root
+    };
+    let mut roots = vec![
+        format!(r"{system_root}\System32"),
+        format!(r"{system_root}\System32\WindowsPowerShell\v1.0"),
+    ];
+    for pf in program_files_dirs {
+        let git_bin = format!(r"{pf}\Git\usr\bin");
+        if exists(&git_bin) {
+            roots.push(git_bin);
+        }
+    }
+    roots
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
@@ -432,5 +516,84 @@ mod tests {
         // user-provided suffix is fixed.
         let out = expand_path_prefix("xdg:cache/foo", "/h");
         assert!(out.ends_with("/foo"), "got {out}");
+    }
+
+    #[test]
+    fn unix_tool_roots_always_carries_usr_bin_and_bin() {
+        let roots = unix_tool_roots(|_| false);
+        assert_eq!(roots, vec!["/usr/bin".to_string(), "/bin".to_string()]);
+    }
+
+    #[test]
+    fn unix_tool_roots_adds_present_homebrew_prefix_only() {
+        let roots = unix_tool_roots(|p| p == "/opt/homebrew");
+        assert_eq!(
+            roots,
+            vec![
+                "/usr/bin".to_string(),
+                "/bin".to_string(),
+                "/opt/homebrew".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unix_tool_roots_ignores_absent_homebrew_prefixes() {
+        let roots = unix_tool_roots(|_| false);
+        assert!(!roots.iter().any(|r| r.contains("homebrew")));
+    }
+
+    /// The Windows shape is exercised here — not gated on
+    /// `cfg(windows)` — so it runs under `cargo test --workspace` on
+    /// every CI host, including the macOS/Linux runners that never
+    /// compile the `cfg(windows)` half of `system_tool_roots`.
+    #[test]
+    fn windows_tool_roots_always_carries_system32_and_powershell() {
+        let roots = windows_tool_roots(r"C:\Windows", &[], |_| false);
+        assert_eq!(
+            roots,
+            vec![
+                r"C:\Windows\System32".to_string(),
+                r"C:\Windows\System32\WindowsPowerShell\v1.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_tool_roots_falls_back_when_system_root_unset() {
+        let roots = windows_tool_roots("", &[], |_| false);
+        assert!(roots[0].starts_with(r"C:\Windows"), "got {roots:?}");
+    }
+
+    #[test]
+    fn windows_tool_roots_adds_git_for_windows_usr_bin_when_present() {
+        let roots = windows_tool_roots(
+            r"C:\Windows",
+            &[r"C:\Program Files"],
+            |p| p == r"C:\Program Files\Git\usr\bin",
+        );
+        assert!(
+            roots.contains(&r"C:\Program Files\Git\usr\bin".to_string()),
+            "got {roots:?}"
+        );
+    }
+
+    #[test]
+    fn windows_tool_roots_omits_git_for_windows_when_absent() {
+        let roots = windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |_| false);
+        assert!(!roots.iter().any(|r| r.contains("Git")), "got {roots:?}");
+    }
+
+    #[test]
+    fn windows_tool_roots_checks_both_program_files_locations() {
+        let roots = windows_tool_roots(
+            r"C:\Windows",
+            &[r"C:\Program Files", r"C:\Program Files (x86)"],
+            |p| p == r"C:\Program Files (x86)\Git\usr\bin",
+        );
+        assert!(
+            roots.contains(&r"C:\Program Files (x86)\Git\usr\bin".to_string()),
+            "got {roots:?}"
+        );
     }
 }

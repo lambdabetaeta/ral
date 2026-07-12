@@ -1,12 +1,14 @@
 # `minimal` bake-in.  The smallest base that's actually useful as a
-# starting point for additive `--extend-base` composition: standard
-# system binaries (`/bin`, `/usr/bin`) + cwd + scratch, network on,
-# chdir allowed.  Nothing from the user's home except scratch:
-# `xdg:bin` is not admitted (so a fresh tool dropped in
-# `~/.local/bin` is a deliberate choice via extend-base, not an
-# implicit one); `/opt/homebrew` is not admitted (so user-installed
-# brew tools must be opted in); toolchain caches and `~/Library`
-# are not readable.
+# starting point for additive `--extend-base` composition: the
+# platform's tool roots (`system:` — see `core/src/path/sigil.rs`)
+# + cwd + scratch, network on, chdir allowed.  Nothing from the
+# user's home except scratch: `xdg:bin` is not admitted (so a fresh
+# tool dropped in `~/.local/bin` is a deliberate choice via
+# extend-base, not an implicit one); a Homebrew tree is not admitted
+# even though `system:` folds one in when present — an explicit
+# `deny` override below carves it back out, so user-installed brew
+# tools must be opted in; toolchain caches and `~/Library` are not
+# readable.
 #
 # The contrast with `reasonable`: this is "system tools only,
 # nothing pulled from my home or homebrew, network on so I can
@@ -50,26 +52,29 @@ return [
     ],
   ],
 
-  # Subpath admittance for the standard system binary directories,
-  # plus cwd and scratch.  No per-name enumeration of coreutils:
-  # every coreutil lives under `/bin/` or `/usr/bin/` and gets
-  # admitted by the subpath rule.  This admits more than coreutils —
-  # `make`, `find`, `xargs`, `git`, `curl`, `tar`, `awk`, `sed`,
-  # `pkg-config`, `clang`, … — which matches what users actually
-  # want from "tight but functional."
+  # Subpath admittance for the platform's tool roots, plus cwd and
+  # scratch.  No per-name enumeration of coreutils: every coreutil
+  # lives under a tool root and gets admitted by the subpath rule.
+  # This admits more than coreutils — `make`, `find`, `xargs`, `git`,
+  # `curl`, `tar`, `awk`, `sed`, `pkg-config`, `clang`, … — which
+  # matches what users actually want from "tight but functional."
   #
-  # Apple's toolchain (CommandLineTools, Xcode) is folded in
-  # automatically by the macOS sandbox base — see
-  # `core/src/sandbox/macos.rs::system_paths`.  Building from source
-  # works without listing each tool here.
+  # `system:` folds in a Homebrew tree when one exists on the host
+  # (see `core/src/path/sigil.rs::system_tool_roots`); the explicit
+  # `deny` below carves it back out so `minimal` stays "system tools
+  # only" regardless of host.  Apple's toolchain (CommandLineTools,
+  # Xcode) is folded in automatically by the macOS sandbox base — see
+  # `core/src/sandbox/macos.rs::system_paths` — so building from
+  # source works without listing each tool here.
   #
-  # `bash` and `zsh` live under `/bin/` (admitted by subpath above), but
-  # a literal-match `'deny'` overrides the subpath rule.  Autoconf-style
-  # `configure` scripts and `make` recipes shell out via `/bin/sh -c`
-  # and need `sh` itself; bash/zsh are agent quality-of-life only.
+  # `bash` and `zsh` live under a tool root (admitted by `system:`
+  # above), but a literal-match `'deny'` overrides the subpath rule.
+  # Autoconf-style `configure` scripts and `make` recipes shell out
+  # via `/bin/sh -c` and need `sh` itself; bash/zsh are agent
+  # quality-of-life only.
   exec: [
-    '/bin/':     'allow',
-    '/usr/bin/': 'allow',
+    'system:':   'allow',
+    '/opt/homebrew/': 'deny',  # system: folds Homebrew in when present; minimal opts it back out
     'cwd:/':     'allow',
     '/tmp/':     'allow',
     'tempdir:/': 'allow',

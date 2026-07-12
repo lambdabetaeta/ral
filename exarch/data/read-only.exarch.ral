@@ -81,11 +81,8 @@ return [
   # denial, rather than having "tool not found" surprise.
   exec: [
     'xdg:bin/':            'allow',
-    '/usr/bin/':           'allow',
-    '/bin/':               'allow',
+    'system:':             'allow',   # the platform's tool roots — see core/src/path/sigil.rs
     '/usr/local/bin/':     'allow',
-    '/opt/homebrew/bin/':  'allow',
-    '/opt/homebrew/sbin/': 'allow',
     '/usr/local/sbin/':    'allow',
     '/usr/sbin/':          'allow',
     '/sbin/':              'allow',

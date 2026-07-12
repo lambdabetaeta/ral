@@ -31,13 +31,14 @@ return [
   ],
 
   # Exec by subpath only.  No per-name allow-list: the build sandbox
-  # trusts whatever lives in the standard binary dirs.  Apple's
-  # toolchain (CommandLineTools, Xcode, /opt/homebrew) is folded in
-  # automatically by the OS sandbox base, so `gcc → cc1 → as → ld`
+  # trusts whatever lives in the platform's tool roots (`system:` —
+  # see `core/src/path/sigil.rs`), including a Homebrew tree when the
+  # host has one — a build jail plausibly needs a Homebrew-installed
+  # compiler.  Apple's toolchain (CommandLineTools, Xcode) is folded
+  # in automatically by the OS sandbox base, so `gcc → cc1 → as → ld`
   # resolves without listing each tool here.
   exec: [
-    '/bin/':           'allow',      # sh, bash
-    '/usr/bin/':       'allow',      # uname, dirname, env, sed, awk
+    'system:':         'allow',      # sh, bash, uname, dirname, env, sed, awk, …
     '/usr/local/bin/': 'allow',      # user-installed CLI tools
     'cwd:/':           'allow',      # ./configure, ./build.sh, etc.
     'tempdir:/':       'allow',      # build-tree-shadowed scratch

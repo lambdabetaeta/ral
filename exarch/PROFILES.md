@@ -7,23 +7,21 @@ in the binary, in descending order of authority:
 | profile      | net | reads                                              | writes                          | exec                                                                  |
 |--------------|-----|----------------------------------------------------|---------------------------------|-----------------------------------------------------------------------|
 | `dangerous`  | —   | inherit (no attenuation)                           | inherit                         | inherit                                                               |
-| `reasonable` | on  | broad: cwd + xdg:* + toolchain caches + ~/Library  | cwd + scratch + xdg:cache       | system bins + xdg:bin + /opt/homebrew + curated named tools incl. git |
+| `reasonable` | on  | broad: cwd + xdg:* + toolchain caches + ~/Library  | cwd + scratch + xdg:cache       | `system:` + xdg:bin + curated named tools incl. git                  |
 | `edit-only`  | on  | same as reasonable                                 | cwd + scratch                   | same as reasonable (build tools denied)                              |
 | `read-only`  | on  | same as reasonable                                 | scratch only                    | same as reasonable                                                    |
-| `minimal`    | on  | cwd + scratch                                      | cwd + scratch + xdg:cache       | `/bin/` + `/usr/bin/` + cwd + scratch (no git, no bash/zsh)           |
-| `confined`   | off | cwd + scratch                                      | cwd + scratch                   | `/bin/` + `/usr/bin/` + `/usr/local/bin/` + cwd + scratch             |
-|--------------|-----|----------------------------------------------------|---------------------------------|-----------------------------------------------------------------------|
-| `dangerous`  | —   | inherit (no attenuation)                           | inherit                         | inherit                                                               |
-| `reasonable` | on  | broad: cwd + xdg:* + toolchain caches + ~/Library  | cwd + scratch + xdg:cache       | system bins + xdg:bin + /opt/homebrew + curated named tools incl. git |
-| `read-only`  | on  | same as reasonable                                 | scratch only                    | same as reasonable                                                    |
-| `minimal`    | on  | cwd + scratch                                      | cwd + scratch + xdg:cache       | `/bin/` + `/usr/bin/` + cwd + scratch (no git, no bash/zsh)           |
-| `confined`   | off | cwd + scratch                                      | cwd + scratch                   | `/bin/` + `/usr/bin/` + `/usr/local/bin/` + cwd + scratch             |
+| `minimal`    | on  | cwd + scratch                                      | cwd + scratch + xdg:cache       | `system:` (Homebrew opted back out) + cwd + scratch (no git/bash/zsh) |
+| `confined`   | off | cwd + scratch                                      | cwd + scratch                   | `system:` + `/usr/local/bin/` + cwd + scratch                        |
 
-Apple's toolchain (`/Library/Developer/CommandLineTools`,
-`/Applications/Xcode.app/Contents/Developer`, `/opt/homebrew`) is
-folded into every profile's exec admit at the OS sandbox layer
-automatically — see `core/src/sandbox/macos.rs::system_paths`.  No
-profile needs to spell out where ld and as live.
+`system:` is a sigil resolving to the platform's tool roots
+(`/usr/bin`+`/bin`+Homebrew-when-present on Unix; `%SystemRoot%\
+System32`+the PowerShell home+Git-for-Windows' `usr\bin`-when-present
+on Windows) — see `core/src/path/sigil.rs::system_tool_roots`.  Apple's
+toolchain (`/Library/Developer/CommandLineTools`,
+`/Applications/Xcode.app/Contents/Developer`) is folded into every
+profile's exec admit at the OS sandbox layer automatically — see
+`core/src/sandbox/macos.rs::system_paths`.  No profile needs to spell
+out where ld and as live.
 
 ## What to use when
 
@@ -67,8 +65,8 @@ hallucinate) but want to give maximal flexibility for real work.
   persistent state (`xdg:config`, `xdg:data`, `xdg:state`, `~/.ssh`,
   `xdg:bin`, system dirs).
 - Exec: 80+ named tools (coreutils, curl, gh, rg, fd, jq,
-  python, tar, …) plus subpath admits for `/usr/bin/`, `/bin/`,
-  `/usr/local/bin/`, `/opt/homebrew/bin/`, `/usr/sbin/`, etc.
+  python, tar, …) plus `system:` (the platform's tool roots) and
+  subpath admits for `/usr/local/bin/`, `/usr/sbin/`, etc.
   `bash` and `zsh` explicitly denied — `sh` itself is allowed
   because autoconf-style `configure` shells out via `/bin/sh -c`.
   `git` is admitted: `~/.gitconfig` and `xdg:config/git` are in
@@ -102,12 +100,13 @@ Smallest profile that's actually useful as a base for
 - Reads: cwd + scratch only — no `xdg:*`, no `~/.cargo`, no
   `~/Library`, nothing user-installed.
 - Writes: cwd + scratch + `xdg:cache`.
-- Exec: `/bin/` + `/usr/bin/` (covers coreutils, sh, make, find,
-  xargs, awk, sed, clang, pkg-config, …) + cwd + scratch.  No
-  `xdg:bin`, no `/opt/homebrew`.  `git`, `bash`, and `zsh` denied
-  — minimal's principle is deliberate opt-ins, so even tools that
-  live under `/usr/bin/` are excluded if they touch surfaces
-  outside cwd + scratch.  Add git back via
+- Exec: `system:` (covers coreutils, sh, make, find, xargs, awk,
+  sed, clang, pkg-config, … under the platform's tool roots) + cwd
+  + scratch.  No `xdg:bin`; Homebrew is explicitly denied even
+  though `system:` would otherwise fold it in when present.  `git`,
+  `bash`, and `zsh` denied — minimal's principle is deliberate
+  opt-ins, so even tools that live under a tool root are excluded
+  if they touch surfaces outside cwd + scratch.  Add git back via
   `--extend-base exarch/examples/git.exarch.ral`.
 
 Use for: "I want my agent to operate on this tree with the standard
@@ -132,7 +131,7 @@ Tight build-and-nothing-else profile.
 - Network **off**.
 - Reads: cwd + scratch.
 - Writes: cwd + scratch.
-- Exec: `/bin/` + `/usr/bin/` + `/usr/local/bin/` + cwd + scratch
+- Exec: `system:` + `/usr/local/bin/` + cwd + scratch
   (subpath-only, no per-name lattice).
 
 Apple's toolchain comes for free via the OS sandbox base, so
@@ -204,12 +203,6 @@ binary at build time via `include_str!`:
 exarch/data/dangerous.exarch.ral
 exarch/data/reasonable.exarch.ral
 exarch/data/edit-only.exarch.ral
-exarch/data/read-only.exarch.ral
-exarch/data/minimal.exarch.ral
-exarch/data/confined.exarch.ral
-```
-exarch/data/dangerous.exarch.ral
-exarch/data/reasonable.exarch.ral
 exarch/data/read-only.exarch.ral
 exarch/data/minimal.exarch.ral
 exarch/data/confined.exarch.ral

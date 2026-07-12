@@ -62,17 +62,45 @@ pub(super) fn resolve_base(
     };
     let mut shell = Shell::new(TerminalState::default());
     let virtual_path = format!("<built-in:{name}>");
-    ral_core::capability::load_capabilities_from_str(&mut shell, text, &virtual_path, ctx).map_err(
-        |e| match e {
-            ral_core::types::Break::Error(err) => format!(
-                "exarch: built-in base '{name}' failed to parse: {}",
-                err.message
-            ),
-            other @ ral_core::types::Break::Escape(_) => {
-                format!("exarch: built-in base '{name}' failed: {other:?}")
-            }
-        },
+    let mut caps = ral_core::capability::load_capabilities_from_str(
+        &mut shell,
+        text,
+        &virtual_path,
+        ctx,
     )
+    .map_err(|e| match e {
+        ral_core::types::Break::Error(err) => format!(
+            "exarch: built-in base '{name}' failed to parse: {}",
+            err.message
+        ),
+        other @ ral_core::types::Break::Escape(_) => {
+            format!("exarch: built-in base '{name}' failed: {other:?}")
+        }
+    })?;
+    drop_dead_exec_grants(&mut caps, cfg!(unix));
+    Ok(caps)
+}
+
+/// Remove exec literal entries naming a bundled coreutils tool that
+/// does not exist as a bundled tool on this platform — the
+/// `coreutils-unix-only` set (`id`, `kill`, `stat`, `tac`, `test`,
+/// `timeout`), whose upstream `uu_*` crates never link on Windows —
+/// so a rendered profile never advertises a grant it cannot honour.
+///
+/// `unix_available` is a parameter rather than a `cfg(unix)` read
+/// inside this function so the drop has a unit test that runs on
+/// every host: the real call site in [`resolve_base`] passes
+/// `cfg!(unix)`, and the test below passes `false` directly to check
+/// the Windows shape without a Windows machine.
+fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
+    if unix_available {
+        return;
+    }
+    if let Some(exec) = caps.exec.as_mut() {
+        exec.literals.retain(|name, _| {
+            !ral_core::builtins::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str())
+        });
+    }
 }
 
 /// Preserve otherwise-unrestricted filesystem authority while still
@@ -301,14 +329,22 @@ mod tests {
 
     /// Regression: a command at /opt/homebrew/bin/cmake — invoked
     /// by short name OR full absolute path — must be admitted by
-    /// reasonable's `/opt/homebrew/bin/` subpath key in `exec`
-    /// even though cmake itself is not a per-name entry.
+    /// reasonable's `system:` exec grant even though cmake itself is
+    /// not a per-name entry.  `system:` only contributes a Homebrew
+    /// root when one exists on the host (the plan's "when present"
+    /// qualifier), so this test is a no-op on a Homebrew-less
+    /// machine rather than a false regression — GitHub's hosted macOS
+    /// runners ship Homebrew pre-installed, so the assertion still
+    /// runs in CI.
     ///
     /// Unix-only: the path under test (`/opt/homebrew/bin/cmake`) has
     /// no Windows analogue in the bake-in policy.
     #[cfg(unix)]
     #[test]
-    fn reasonable_admits_cmake_under_opt_homebrew_bin() {
+    fn reasonable_admits_cmake_under_homebrew_when_present() {
+        if !ral_core::path::exists("/opt/homebrew") {
+            return;
+        }
         let home = ral_core::path::home_from_env();
         let ctx = FreezeCtx {
             home: &home,
@@ -318,8 +354,8 @@ mod tests {
         assert!(
             caps.exec
                 .as_ref()
-                .is_some_and(|m| m.dirs.contains_key("/opt/homebrew/bin")),
-            "reasonable should list /opt/homebrew/bin in exec dirs"
+                .is_some_and(|m| m.dirs.contains_key("/opt/homebrew")),
+            "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
         );
 
         let mut shell = Shell::default();
@@ -458,13 +494,16 @@ mod tests {
         }
     }
 
-    /// `minimal` admits the *system* git under `/usr/bin/` (its own
-    /// header lists git among what the subpath rule allows) but not a
-    /// Homebrew git under `/opt/homebrew/bin` — minimal admits no
-    /// homebrew tree, so user-installed brew tools stay opt-in.  A
-    /// non-root cwd keeps the `cwd:/` allow from masking the test: under
-    /// `cwd: /` everything resolves inside the working tree.  The git
-    /// extension's `git: 'allow'` is what carries a Homebrew install.
+    /// `minimal` admits the *system* git under `/usr/bin/` (folded into
+    /// `system:`'s tool-root grant) but not a Homebrew git under
+    /// `/opt/homebrew/bin` — minimal carries an explicit
+    /// `/opt/homebrew/': 'deny'` override precisely so `system:`
+    /// including Homebrew when present doesn't widen minimal's
+    /// documented "no homebrew tree" narrowing; user-installed brew
+    /// tools stay opt-in.  A non-root cwd keeps the `cwd:/` allow from
+    /// masking the test: under `cwd: /` everything resolves inside the
+    /// working tree.  The git extension's `git: 'allow'` is what
+    /// carries a Homebrew install.
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
@@ -562,5 +601,105 @@ mod tests {
                 "join with reasonable should preserve {denied} deny ({resolved})"
             );
         }
+    }
+
+    /// Every base that declares `exec` must admit the platform's live
+    /// tool roots — i.e. `system:` really expanded, wiring-wise.  Not
+    /// gated on `cfg(unix)`: on a real Windows host (`windows-check`)
+    /// `system_tool_roots` walks the Windows branch instead, and this
+    /// same assertion holds — a base's `system:` grant is always a
+    /// superset of whatever this host's tool roots are.
+    #[test]
+    fn every_exec_base_admits_live_system_tool_roots() {
+        let home = ral_core::path::home_from_env();
+        // An absolute path on every platform (unlike the Unix-shaped
+        // `/work` literal other tests in this file use, which is not
+        // absolute under Windows path semantics — those tests are
+        // `cfg(unix)`-gated for exactly that reason; this one is not).
+        let cwd = std::env::temp_dir();
+        let ctx = FreezeCtx { home: &home, cwd: &cwd };
+        let roots = ral_core::path::sigil::system_tool_roots();
+        for (name, text) in [
+            ("reasonable", REASONABLE_RAL),
+            ("edit-only", EDIT_ONLY_RAL),
+            ("read-only", READ_ONLY_RAL),
+            ("minimal", MINIMAL_RAL),
+            ("confined", CONFINED_RAL),
+        ] {
+            let caps = load(name, text, &ctx);
+            let exec = caps
+                .exec
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} should declare exec"));
+            for root in &roots {
+                let normalized = ral_core::path::NormalizedPrefix::from_surface(root).into_string();
+                assert!(
+                    exec.dirs.contains_key(&normalized),
+                    "{name} should admit the live system tool root {normalized}"
+                );
+            }
+        }
+    }
+
+    /// Windows fixture: `system_tool_roots`' Windows branch, exercised
+    /// directly with synthetic env values so it produces a sane
+    /// Windows grant set from any host — `%SystemRoot%\System32`, the
+    /// bundled PowerShell home, and Git-for-Windows' `usr\bin` when a
+    /// synthetic "install" is present.
+    #[test]
+    fn windows_tool_roots_produce_a_sane_grant_set() {
+        let roots = ral_core::path::sigil::windows_tool_roots(
+            r"C:\Windows",
+            &[r"C:\Program Files"],
+            |p| p == r"C:\Program Files\Git\usr\bin",
+        );
+        assert!(roots.contains(&r"C:\Windows\System32".to_string()), "{roots:?}");
+        assert!(
+            roots.contains(&r"C:\Windows\System32\WindowsPowerShell\v1.0".to_string()),
+            "{roots:?}"
+        );
+        assert!(
+            roots.contains(&r"C:\Program Files\Git\usr\bin".to_string()),
+            "{roots:?}"
+        );
+    }
+
+    /// Windows fixture: the `coreutils-unix-only` grants (`tac`,
+    /// `test`, among the shipped bases) are dropped when the platform
+    /// can't back them, so `reasonable`'s rendered exec map never
+    /// advertises a bundled tool Windows doesn't have.  `false`
+    /// simulates "not unix" from any host — see [`drop_dead_exec_grants`].
+    #[cfg(unix)]
+    #[test]
+    fn reasonable_drops_unix_only_bundled_tool_grants_off_unix() {
+        let home = ral_core::path::home_from_env();
+        let ctx = FreezeCtx {
+            home: &home,
+            cwd: Path::new("/"),
+        };
+        let mut caps = load("reasonable", REASONABLE_RAL, &ctx);
+        {
+            let exec = caps.exec.as_ref().expect("reasonable declares exec");
+            assert!(exec.literals.contains_key("tac"), "host build should still bundle tac");
+            assert!(exec.literals.contains_key("test"), "host build should still bundle test");
+        }
+
+        drop_dead_exec_grants(&mut caps, false);
+
+        let exec = caps.exec.as_ref().expect("reasonable declares exec");
+        for dead in ral_core::builtins::uutils::COREUTILS_UNIX_ONLY_TOOLS {
+            assert!(
+                !exec.literals.contains_key(*dead),
+                "'{dead}' should be dropped when the platform can't bundle it"
+            );
+        }
+        assert!(
+            exec.literals.contains_key("git"),
+            "an ordinary named binary must survive the drop"
+        );
+        assert!(
+            exec.literals.contains_key("cat"),
+            "a cross-platform bundled tool must survive the drop"
+        );
     }
 }
