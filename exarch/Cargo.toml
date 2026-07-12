@@ -76,7 +76,12 @@ ral-core = { path = "../core", features = ["grep", "coreutils", "coreutils-unix-
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

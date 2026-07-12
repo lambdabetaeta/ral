@@ -78,6 +78,14 @@ model (its provider is resolved as the available provider whose list
 contains it). With no `--model` and no saved selection, the first available
 provider's default model is used.
 
+Every path above goes through XDG with Linux-shaped defaults, even on
+Windows: config lives under `%USERPROFILE%\.config\exarch`, state (session
+logs, the model-picker selection, the OAuth token store) under
+`%USERPROFILE%\.local\state\exarch` — not `%APPDATA%`. This is deliberate,
+not an oversight: it keeps one config/state layout across every platform
+rather than a Windows-specific Known Folders migration with no functional
+payoff. Set `XDG_CONFIG_HOME`/`XDG_STATE_HOME` to relocate either.
+
 ## Sandbox
 
 The boundary is the active profile's `Capabilities`, pushed onto the

@@ -58,6 +58,21 @@
 //! worker — and force-exits on the third delivery.
 //! [`crate::bootstrap::boot_shell`] owns that ceremony for exarch session
 //! shells, including `/clear` rebuilds.
+//!
+//! Windows has no single process-wide disposition to capture and replace:
+//! `SetConsoleCtrlHandler` instead keeps a list of handler routines, run
+//! last-registered-first until one returns `TRUE`.  `install` registers its
+//! own routine there — strictly after `ral_core::process::install_handlers`
+//! runs (the same ordering requirement as Unix), which puts exarch's
+//! routine ahead of ral's `ctrlc`-installed one in that list.  On Ctrl-C or
+//! Ctrl-Break it calls [`raise`] and always returns `FALSE` ("not
+//! handled"), so the delivery still reaches ral's handler afterwards and
+//! its own escalation ladder (Ctrl-Break fan-out, then
+//! `TerminateJobObject`, then `ExitProcess`) runs exactly as it would
+//! without exarch installed — exarch only piggybacks a turn-cancel onto
+//! the delivery, it never gates or intercepts escalation.  The decision of
+//! which events cancel the turn is [`ctrl_event_decision`], a pure function
+//! testable without a real console handler.
 
 use ral_core::process::CancelCause;
 use std::sync::Arc;
@@ -208,7 +223,7 @@ pub fn install() {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn install() {}
 
 #[cfg(unix)]
@@ -291,6 +306,129 @@ fn deliver_interrupt() {
 
 #[cfg(not(any(unix, windows)))]
 fn deliver_interrupt() {}
+
+/// Whether a delivered Windows console-control event cancels the trunk's
+/// turn, and whether exarch's handler reports it as handled to the OS.
+///
+/// Pulled out of [`console_ctrl_handler`] as a pure function of the event
+/// code so the decision is unit-testable without a real console handler —
+/// `SetConsoleCtrlHandler` cannot be exercised in a test, but the decision
+/// it drives can, the same reason [`Token`]'s cause is a plain `u8` rather
+/// than something only readable inside a handler.
+///
+/// Only Ctrl-C and Ctrl-Break cancel the turn — the same two events the
+/// `ctrlc` crate reacts to.  The second element is always `false`
+/// ("not handled"): every delivery, cancelling or not, must still reach
+/// ral's handler afterwards, since that is where the escalation ladder
+/// lives — exarch never gates or intercepts it, only piggybacks a
+/// turn-cancel onto the same delivery.
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        reason = "only called from console_ctrl_handler, which is cfg(windows); \
+                  exercised directly by this module's own tests on every host"
+    )
+)]
+pub(crate) fn ctrl_event_decision(ctrl_type: u32) -> (bool, bool) {
+    const CTRL_C_EVENT: u32 = 0;
+    const CTRL_BREAK_EVENT: u32 = 1;
+    let cancels_turn = ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT;
+    (cancels_turn, false)
+}
+
+/// Set-once guard for [`install`]'s `SetConsoleCtrlHandler` registration.
+/// Unlike Unix's `libc::signal`, which simply overwrites the same
+/// disposition on every call, `SetConsoleCtrlHandler(_, TRUE)` *appends* a
+/// new handler routine to the process's list each time it is called — so
+/// without this guard, every `/clear` rebuild (each of which re-runs
+/// [`crate::bootstrap::boot_shell`], and so `install`) would register
+/// another copy.  Harmless individually ([`raise`] is idempotent), but
+/// unbounded growth over repeated rebuilds is not the "install once, keep
+/// working" contract `install` has on Unix.
+#[cfg(windows)]
+static WIN_CTRL_HANDLER_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+/// Register exarch's console-ctrl handler.  Must run after
+/// `ral_core::process::install_handlers` (see the module doc for why); the
+/// handler translates Ctrl-C/Ctrl-Break into a turn-cancel via
+/// [`ctrl_event_decision`] and always defers to whatever ral's own handler
+/// does next.
+#[cfg(windows)]
+pub fn install() {
+    WIN_CTRL_HANDLER_INSTALLED.call_once(|| {
+        // SAFETY: `console_ctrl_handler` matches `PHANDLER_ROUTINE`'s
+        // `unsafe extern "system" fn(u32) -> BOOL` signature; `TRUE` (`1`)
+        // adds it to the process's handler list rather than removing it.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(console_ctrl_handler),
+                1,
+            );
+        }
+    });
+}
+
+/// The routine Windows calls on Ctrl-C/Ctrl-Break/console-close events.
+/// Runs on a dedicated OS thread (not signal context), so plain atomics —
+/// the same ones [`raise`] already uses for the Unix handler — are all it
+/// needs. A safe `extern "system" fn` coerces to `PHANDLER_ROUTINE`'s
+/// `unsafe extern "system" fn` pointer type, the same way `chained` (the
+/// Unix counterpart, just above) is a plain `extern "C" fn`.
+#[cfg(windows)]
+extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::Win32::Foundation::BOOL {
+    let (cancels_turn, handled) = ctrl_event_decision(ctrl_type);
+    if cancels_turn {
+        raise();
+    }
+    windows_sys::Win32::Foundation::BOOL::from(handled)
+}
+
+/// [`ctrl_event_decision`] is a plain function of a `u32` event code, so it
+/// is exercised natively on every platform this crate builds for — no
+/// `cfg(windows)`, no real console handler required.
+#[cfg(test)]
+mod ctrl_event_decision_tests {
+    use super::ctrl_event_decision;
+
+    #[test]
+    fn ctrl_c_and_ctrl_break_cancel_the_turn() {
+        assert_eq!(
+            ctrl_event_decision(0),
+            (true, false),
+            "CTRL_C_EVENT cancels the turn and defers to ral's handler"
+        );
+        assert_eq!(
+            ctrl_event_decision(1),
+            (true, false),
+            "CTRL_BREAK_EVENT cancels the turn and defers to ral's handler"
+        );
+    }
+
+    #[test]
+    fn other_console_events_never_cancel_the_turn() {
+        // CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6.
+        for ctrl_type in [2, 5, 6] {
+            assert_eq!(
+                ctrl_event_decision(ctrl_type),
+                (false, false),
+                "event {ctrl_type} is not a turn-cancel signal"
+            );
+        }
+    }
+
+    #[test]
+    fn every_event_defers_to_rals_handler() {
+        for ctrl_type in 0..8 {
+            let (_, handled) = ctrl_event_decision(ctrl_type);
+            assert!(
+                !handled,
+                "exarch must never report an event as handled — ral's \
+                 escalation ladder always has to run afterwards"
+            );
+        }
+    }
+}
 
 #[cfg(all(test, unix))]
 #[allow(

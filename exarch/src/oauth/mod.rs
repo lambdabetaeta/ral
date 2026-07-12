@@ -523,10 +523,179 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
-#[cfg(not(unix))]
+/// Write `bytes` to `path`, then stamp an owner-only DACL onto it: one
+/// explicit ACE granting the current process's owner full control, no
+/// inherited ACEs — the Windows analogue of the Unix arm's mode `0600`.
+/// Built fresh via `SetEntriesInAclW` with no prior ACL to merge (so
+/// nothing the parent directory would otherwise hand down survives), then
+/// applied with `PROTECTED_DACL_SECURITY_INFORMATION` so inheritance from
+/// the parent stays cut off going forward too.
+#[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:token-write-nonunix] oauth token store write on non-unix (no owner-only mode to set); credential persistence infrastructure, not turn-time model data I/O."
+    reason = "[io-door:silent:token-write-windows] writes the OAuth token file, then stamps an owner-only DACL onto it; credential store infra, not turn-time data I/O"
+)]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    windows_dacl::restrict_to_owner(path)
+}
+
+#[cfg(windows)]
+mod windows_dacl {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
+        SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// RAII wrapper closing a process token handle exactly once, so every
+    /// early return below (a query failure, an ACL-build failure) doesn't
+    /// need its own `CloseHandle` call.
+    struct OwnedToken(HANDLE);
+
+    impl Drop for OwnedToken {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` is a handle this guard owns exclusively,
+                // obtained from a successful `OpenProcessToken`.
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    /// Fetch the current process's owner SID as an owned buffer (a
+    /// `TOKEN_USER` followed inline by its SID bytes, per
+    /// `GetTokenInformation`'s contract): query once to size the buffer,
+    /// once more to fill it.
+    fn current_process_owner() -> std::io::Result<Vec<u8>> {
+        use windows_sys::Win32::Security::GetTokenInformation;
+
+        let mut raw_token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle needing no
+        // close; `raw_token` is an out-param this call fills on success.
+        let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let token = OwnedToken(raw_token);
+
+        let mut needed: u32 = 0;
+        // SAFETY: a null buffer with zero length is the documented way to
+        // size a `GetTokenInformation` query; `needed` is filled with the
+        // required size regardless of the (expected) failure.
+        unsafe {
+            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        // SAFETY: `buf` is sized exactly to `needed`, as just reported by
+        // the sizing call above.
+        let ok = unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(buf)
+    }
+
+    /// Rebuild `path`'s DACL from scratch with a single ACE: full control
+    /// for the current process's owner, no inherited ACEs.
+    pub(super) fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+        let owner_buf = current_process_owner()?;
+        // SAFETY: `owner_buf` holds a fully-populated `TOKEN_USER` from the
+        // successful `GetTokenInformation` call above; `owner_buf` outlives
+        // every use of the `PSID` it hands out below.
+        let owner_sid = unsafe { (*owner_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            // The trustee-by-SID form reinterprets this field as the PSID
+            // pointer per the Win32 contract; both are raw `*mut _` under
+            // windows-sys, so the cast is a bit-preserving reinterpret (see
+            // `core::sandbox::windows::dacl::trustee_for` for the same
+            // pattern).
+            ptstrName: owner_sid as *mut u16,
+        };
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_ALL_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: trustee,
+        };
+
+        let mut new_acl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `ea` outlives the call; passing a null prior ACL builds a
+        // fresh ACL containing only this one entry — no merge with
+        // whatever the parent directory would otherwise hand down.
+        let rc = unsafe { SetEntriesInAclW(1, &ea, std::ptr::null(), &mut new_acl) };
+        if rc != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+
+        let path_w: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `path_w` is NUL-terminated and kept alive for the call;
+        // `new_acl` was just built by `SetEntriesInAclW`.
+        // `PROTECTED_DACL_SECURITY_INFORMATION` alongside
+        // `DACL_SECURITY_INFORMATION` stops the object from inheriting
+        // ACEs from its parent afterwards, so the freshly-built
+        // single-entry ACL is the whole story: owner only, nothing
+        // inherited — the DACL analogue of `chmod 0600`.
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                path_w.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_acl,
+                std::ptr::null_mut(),
+            )
+        };
+        // SAFETY: `new_acl` was allocated by `SetEntriesInAclW` (which uses
+        // `LocalAlloc` internally); free it exactly once, regardless of
+        // whether the apply above succeeded.
+        unsafe {
+            if !new_acl.is_null() {
+                LocalFree(new_acl.cast());
+            }
+        }
+        if rc != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-write-nonunix] oauth token store write with no owner-only mode available on this platform; credential persistence infrastructure, not turn-time model data I/O."
 )]
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)

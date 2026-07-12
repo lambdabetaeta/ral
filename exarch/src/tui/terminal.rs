@@ -86,32 +86,50 @@ pub(super) fn restore_terminal_modes() {
     if KBD_ENHANCED.swap(false, Ordering::AcqRel) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(
-        io::stdout(),
-        Show,
-        // Pop any-motion reporting (1003) before the rest of mouse capture,
-        // balancing the raw enable in `apply_terminal_modes`.
-        Print("\x1b[?1003l"),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    );
+    // Each step below runs as its own `execute!` call rather than one batched
+    // call: `execute!`/`queue!` chain commands with `.and_then`, so a single
+    // failing write would abort every later command in the same batch.
+    // conhost supports neither the kitty keyboard protocol nor DECSET 1003
+    // and just ignores the bytes rather than erroring, but a batch is not
+    // the place to bet on that — keeping each step independent means one
+    // terminal quirk can never leave the console stuck in the alternate
+    // screen or still capturing the mouse.
+    let _ = execute!(io::stdout(), Show);
+    // Pop any-motion reporting (1003) before the rest of mouse capture,
+    // balancing the raw enable in `apply_terminal_modes`.
+    let _ = execute!(io::stdout(), Print("\x1b[?1003l"));
+    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
 
-/// Resolve the editor to launch for `C-x C-e`: `$VISUAL`, then `$EDITOR`,
-/// then `vi`.  The value is split on whitespace so a spec like `emacsclient
-/// -t` or `code --wait` keeps its arguments.
-pub(super) fn editor_command() -> (String, Vec<String>) {
-    let spec = std::env::var("VISUAL")
-        .ok()
+/// The editor spec used when neither `$VISUAL` nor `$EDITOR` is set: `vi` on
+/// Unix, `notepad` on Windows (`vi` isn't installed there).
+#[cfg(windows)]
+pub(super) const DEFAULT_EDITOR: &str = "notepad";
+#[cfg(not(windows))]
+pub(super) const DEFAULT_EDITOR: &str = "vi";
+
+/// Pick the editor spec: `visual` if non-blank, else `editor` if non-blank,
+/// else `default`.  Pulled out of [`editor_command`] as a pure function of
+/// its inputs so the fallback logic is unit-testable without touching the
+/// process environment.
+pub(super) fn pick_editor_spec(visual: Option<&str>, editor: Option<&str>, default: &str) -> String {
+    visual
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vi".to_string());
+        .or_else(|| editor.filter(|s| !s.trim().is_empty()))
+        .unwrap_or(default)
+        .to_string()
+}
+
+/// Resolve the editor to launch for `C-x C-e`: `$VISUAL`, then `$EDITOR`,
+/// then [`DEFAULT_EDITOR`].  The value is split on whitespace so a spec like
+/// `emacsclient -t` or `code --wait` keeps its arguments.
+pub(super) fn editor_command() -> (String, Vec<String>) {
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    let spec = pick_editor_spec(visual.as_deref(), editor.as_deref(), DEFAULT_EDITOR);
     let mut parts = spec.split_whitespace().map(str::to_string);
     let program = parts
         .next()
@@ -184,14 +202,16 @@ pub struct TerminalGuard {
     term: Term,
     #[cfg(unix)]
     stderr_backup: Option<std::os::fd::RawFd>,
+    #[cfg(windows)]
+    stderr_backup: Option<WindowsStderrBackup>,
 }
 
 impl TerminalGuard {
-    #[cfg_attr(not(unix), allow(unused_variables))]
+    #[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
     pub fn enter(stderr_log: &Path) -> io::Result<Self> {
         install_panic_restore_hook();
         TUI_ACTIVE.store(true, Ordering::Release);
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let mut stderr_backup = Some(match redirect_stderr_to_file(stderr_log) {
             Ok(backup) => backup,
             Err(e) => {
@@ -204,7 +224,7 @@ impl TerminalGuard {
             Err(e) => {
                 restore_terminal_modes();
                 TUI_ACTIVE.store(false, Ordering::Release);
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 if let Some(backup) = stderr_backup.take() {
                     restore_stderr(backup);
                 }
@@ -213,7 +233,7 @@ impl TerminalGuard {
         };
         Ok(Self {
             term,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             stderr_backup,
         })
     }
@@ -230,7 +250,7 @@ impl Drop for TerminalGuard {
         // Restore stderr last — while teardown is running, any stray
         // diagnostics still belong in the log file, not on the user's
         // freshly-restored prompt row.
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(backup) = self.stderr_backup.take() {
             restore_stderr(backup);
         }
@@ -290,6 +310,198 @@ pub(super) fn restore_stderr(backup: std::os::fd::RawFd) {
         libc::close(backup);
     }
 }
+
+/// Everything [`restore_stderr`] needs to undo [`redirect_stderr_to_file`]'s
+/// two redirections on Windows.
+///
+/// Unlike the Unix path, `SetStdHandle` does not duplicate the handle it is
+/// given — it stores the pointer as-is — so `log_handle` must stay open and
+/// owned for as long as the redirect is active; closing it out from under
+/// `SetStdHandle` would leave `STD_ERROR_HANDLE` dangling. It is closed
+/// exactly once, in `restore_stderr`.
+#[cfg(windows)]
+pub(super) struct WindowsStderrBackup {
+    /// `STD_ERROR_HANDLE`'s value before the redirect, restored via
+    /// `SetStdHandle`.  May be null/invalid if nothing had set it, which
+    /// `SetStdHandle` tolerates on restore the same way it did on entry.
+    backup_std_handle: windows_sys::Win32::Foundation::HANDLE,
+    /// A `dup` of the CRT's fd 2 before the redirect, restored via `_dup2`.
+    backup_crt_fd: libc::c_int,
+    /// The log file's handle, installed as `STD_ERROR_HANDLE`; owned by
+    /// this backup and closed on restore.
+    log_handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: `HANDLE` is a raw pointer with no thread-affinity; this backup is
+// only ever moved from the thread that opens the TUI to the thread that
+// tears it down (never shared concurrently), the same pattern
+// `core::process::signal::windows::GroupState` uses for the same reason.
+#[cfg(windows)]
+unsafe impl Send for WindowsStderrBackup {}
+
+/// Windows counterpart of [`redirect_stderr_to_file`]: there is no `dup2`
+/// onto a single kernel fd table, so two independent redirections are
+/// needed, both undone by [`restore_stderr`].
+///
+/// `std::io::stderr` calls `GetStdHandle(STD_ERROR_HANDLE)` fresh on every
+/// write rather than caching it, so `SetStdHandle` alone redirects every
+/// `eprintln!` exarch itself writes (and the writes of any child spawned
+/// with `Stdio::inherit()`, since that inherits the *current* std handle).
+/// It does not touch the CRT's fd table, though: linked C code that writes
+/// to fd 2 via `_write`/the `stderr` `FILE*` reaches the old target
+/// regardless of `SetStdHandle` — so the CRT fd is redirected too, via
+/// `_dup2` reached through `libc`'s Windows CRT bindings (`_dup`, `_dup2`,
+/// `_open_osfhandle`), the same call the Unix path makes through the kernel
+/// directly.  Both are restored on exit, mirroring
+/// `TerminalGuard.stderr_backup`'s lifecycle exactly.
+#[cfg(windows)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
+)]
+pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBackup> {
+    use std::fs::OpenOptions;
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, FALSE, HANDLE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
+    use windows_sys::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    // `into_raw_handle` hands the handle out without running `File`'s
+    // `Drop` — see `WindowsStderrBackup`'s doc for why it must stay open.
+    let log_handle = file.into_raw_handle() as HANDLE;
+
+    // A second, independent handle to the same file for the CRT fd path:
+    // `_open_osfhandle` (below) gives the handle it's passed to the CRT fd
+    // it creates, which is closed — taking its handle with it — once
+    // `_dup2` has duplicated it onto fd 2 and the temporary fd is no
+    // longer needed.  Sharing `log_handle` for that would close the very
+    // handle `SetStdHandle` is holding.
+    let mut crt_handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: `log_handle` is open (just obtained above); `crt_handle` is
+    // an out-param this call fills on success.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            log_handle,
+            GetCurrentProcess(),
+            &mut crt_handle,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        let e = io::Error::last_os_error();
+        // SAFETY: `log_handle` is a handle this call owns and hasn't
+        // handed off yet.
+        unsafe {
+            CloseHandle(log_handle);
+        }
+        return Err(e);
+    }
+
+    // SAFETY: `crt_handle` is a valid, freshly duplicated handle owned by
+    // this call; `_open_osfhandle` adopts it into the CRT fd table, so it
+    // must not be `CloseHandle`d directly after this succeeds.
+    let crt_fd = unsafe { libc::open_osfhandle(crt_handle as isize, libc::O_APPEND) };
+    if crt_fd < 0 {
+        let e = io::Error::last_os_error();
+        // SAFETY: `_open_osfhandle` failed, so `crt_handle` was never
+        // adopted and is still this call's to close; `log_handle` likewise.
+        unsafe {
+            CloseHandle(crt_handle);
+            CloseHandle(log_handle);
+        }
+        return Err(e);
+    }
+
+    // SAFETY: fd 2 is always a valid CRT fd in a normal process; `_dup`
+    // either returns a new fd or `-1` with errno set.
+    let backup_crt_fd = unsafe { libc::dup(2) };
+    if backup_crt_fd < 0 {
+        let e = io::Error::last_os_error();
+        // SAFETY: `crt_fd` is this call's to close; doing so also closes
+        // the `crt_handle` it adopted.  `log_handle` is still ours too.
+        unsafe {
+            libc::close(crt_fd);
+            CloseHandle(log_handle);
+        }
+        return Err(e);
+    }
+    // SAFETY: `crt_fd` is open for the duration of this call; `_dup2`
+    // atomically closes fd 2's existing CRT entry and duplicates `crt_fd`
+    // onto it, so the two hold independent handles to the same file
+    // afterwards — the CRT analogue of the Unix `dup2` call above.
+    let r = unsafe { libc::dup2(crt_fd, 2) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        // SAFETY: `backup_crt_fd`/`crt_fd` are both this call's to close;
+        // `dup2` did not take ownership of either on failure.
+        unsafe {
+            libc::close(backup_crt_fd);
+            libc::close(crt_fd);
+            CloseHandle(log_handle);
+        }
+        return Err(e);
+    }
+    // SAFETY: `_dup2` already duplicated `crt_fd`'s handle onto fd 2;
+    // closing the temporary fd does not affect fd 2's own copy.
+    unsafe {
+        libc::close(crt_fd);
+    }
+
+    // SAFETY: `GetStdHandle`/`SetStdHandle` take no invariant beyond the
+    // named constant; a null/invalid `backup_std_handle` is a legitimate
+    // "nothing was set" reading that `restore_stderr` passes straight back
+    // to `SetStdHandle`, exactly as `GetStdHandle` returned it.
+    let backup_std_handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, log_handle) } == 0 {
+        let e = io::Error::last_os_error();
+        // SAFETY: undo the CRT-fd redirect and release `log_handle`, which
+        // `SetStdHandle` never adopted since the call failed.
+        unsafe {
+            libc::dup2(backup_crt_fd, 2);
+            libc::close(backup_crt_fd);
+            CloseHandle(log_handle);
+        }
+        return Err(e);
+    }
+
+    Ok(WindowsStderrBackup {
+        backup_std_handle,
+        backup_crt_fd,
+        log_handle,
+    })
+}
+
+/// Restore both redirections made by [`redirect_stderr_to_file`]: the CRT
+/// fd via `_dup2` (mirroring the Unix restore), then `STD_ERROR_HANDLE` via
+/// `SetStdHandle`, then close the log handle this backup owned. Best-effort,
+/// same rationale as the Unix restore: any failure inside the TUI's drop
+/// has nowhere useful to surface.
+#[cfg(windows)]
+pub(super) fn restore_stderr(backup: WindowsStderrBackup) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+
+    // SAFETY: `backup.backup_crt_fd` is a live fd from `_dup`; `_dup2` is
+    // idempotent on the target and `_close` releases the backup — same
+    // shape as the Unix restore.
+    unsafe {
+        libc::dup2(backup.backup_crt_fd, 2);
+        libc::close(backup.backup_crt_fd);
+    }
+    // SAFETY: `backup.backup_std_handle` is whatever `GetStdHandle` held
+    // before the redirect (possibly null/invalid, which `SetStdHandle`
+    // tolerates); `backup.log_handle` is this backup's own handle, valid
+    // until the `CloseHandle` below.
+    unsafe {
+        SetStdHandle(STD_ERROR_HANDLE, backup.backup_std_handle);
+        CloseHandle(backup.log_handle);
+    }
+}
+
 /// Raw-byte ceiling for an OSC 52 yank: base64-expanded (3→4 bytes) this
 /// stays under the tightest common per-sequence cap (kitty's 8 KiB), so
 /// the terminal accepts rather than silently drops the sequence.
@@ -326,4 +538,34 @@ pub(super) fn tail_bytes(text: &str, cap: usize) -> &str {
     }
     let start = ral_core::text::ceil_char_boundary(text, text.len() - cap);
     &text[start..]
+}
+
+#[cfg(test)]
+mod tests {
+    //! [`pick_editor_spec`] is a plain function of its three string
+    //! arguments, so the `$VISUAL`/`$EDITOR`/default fallback logic is
+    //! exercised here without touching the process environment or the
+    //! platform default (`DEFAULT_EDITOR` is passed in, not read).
+
+    use super::pick_editor_spec;
+
+    #[test]
+    fn visual_wins_when_set_and_non_blank() {
+        assert_eq!(
+            pick_editor_spec(Some("emacsclient -t"), Some("nano"), "vi"),
+            "emacsclient -t"
+        );
+    }
+
+    #[test]
+    fn editor_wins_when_visual_is_unset_or_blank() {
+        assert_eq!(pick_editor_spec(None, Some("nano"), "vi"), "nano");
+        assert_eq!(pick_editor_spec(Some("   "), Some("nano"), "vi"), "nano");
+    }
+
+    #[test]
+    fn default_wins_when_both_are_unset_or_blank() {
+        assert_eq!(pick_editor_spec(None, None, "vi"), "vi");
+        assert_eq!(pick_editor_spec(Some(""), Some("  "), "notepad"), "notepad");
+    }
 }
