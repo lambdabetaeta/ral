@@ -60,23 +60,14 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     );
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
-    // network. A ChatGPT plan login has no catalog endpoint, so its curated plan
-    // models are seeded directly and it is excluded from the fetch; a flat-rate
-    // gateway (opencode Go) lists live through genai like any other API-key
-    // provider.
+    // network. API-key providers list through genai; ChatGPT subscriptions list
+    // through the Codex backend. Both paths share the same cache and result
+    // channel, so provider kind does not leak into the picker.
     let mut rx = None;
     let to_fetch: Vec<_> = picker
         .loading_providers()
         .into_iter()
         .filter(|id| {
-            if store.is_subscription(id) {
-                let models = crate::oauth::PLAN_MODELS
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect();
-                picker.set_models(id, picker::ModelsState::Loaded(models));
-                return false;
-            }
             match ctx.catalog.cached(id) {
                 Some(models) => {
                     picker.set_models(id, picker::ModelsState::Loaded(models));

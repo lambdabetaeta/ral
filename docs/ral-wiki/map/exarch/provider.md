@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 25e66c1
-generated_at_date: 2026-07-03
-covers_paths: [exarch/src/provider.rs, exarch/src/pricing.rs]
+generated_at_commit: 87152d7
+generated_at_date: 2026-07-12
+covers_paths: [exarch/src/provider.rs, exarch/src/pricing.rs, exarch/src/models.rs, exarch/src/oauth/, exarch/src/tui/model_picker.rs]
 ---
 
 # Map: exarch / provider
@@ -56,8 +56,19 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
   renders the body, and an `AuthResolver` redirects every request to the Codex
   backend with the login's bearer and account headers, read live from the
   shared cell so a mid-session refresh is picked up without rebuilding.
-  `refresh_if_stale` renews the token before a request when it is near expiry,
-  upserting just that account's entry.
+  `refresh_cell_if_stale` is the common renewal door for inference and catalog
+  requests, upserting just that account's entry.
+
+## Model catalogs
+
+**The picker asks each provider for its own names and retains manual entry as
+the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
+
+- API-key providers list through genai's `all_model_names`.
+- ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
+  their live OAuth cell after the common stale-token check.
+- OpenRouter serving endpoints remain a separate, intent-driven request after
+  a model is selected.
 
 ## The streaming and summary paths
 

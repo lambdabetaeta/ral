@@ -3748,3 +3748,9 @@ Amended [[decisions/260705_leases-and-budgets|leases-and-budgets]] (primary),
 [[decisions/260705_session-ledger|session-ledger]] (the worker chapter's
 listing-fold entry), and the superseded-by note on
 [[decisions/260617_long-running-work|long-running-work]].
+
+## [2026-07-12] ingest | ChatGPT model catalogs are live
+
+The model picker now reads each ChatGPT account's Codex catalog through its
+OAuth cell instead of a curated table. Inference and catalog requests share
+one stale-token renewal door; [[map/exarch/provider|provider]] records the flow.

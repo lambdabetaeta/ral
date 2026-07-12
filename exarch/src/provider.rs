@@ -894,7 +894,7 @@ fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
             let token = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(Some(AuthData::RequestOverride {
                 url: oauth::RESPONSES_URL.to_string(),
-                headers: Headers::from(oauth::request_headers(&token)),
+                headers: Headers::from(oauth::request_headers(&token, "text/event-stream")),
             }))
         } else {
             Ok(None)
@@ -1154,22 +1154,8 @@ impl Engine {
         let Some(cell) = &transport.token_cell else {
             return;
         };
-        // Copy the token out only when a refresh is actually due — the common
-        // case finds it fresh and returns under the lock without cloning.
-        let current = {
-            let token = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !token.is_stale() {
-                return;
-            }
-            token.clone()
-        };
-        match self.runtime.block_on(oauth::refresh(&current)) {
-            Ok(fresh) => {
-                // Upsert this account's token, leaving any other signed-in
-                // account untouched — a whole-file overwrite would drop them.
-                let _ = oauth::save_one(&fresh);
-                *cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
-            }
+        match self.runtime.block_on(oauth::refresh_cell_if_stale(cell)) {
+            Ok(()) => {}
             Err(e) => eprintln!("exarch: ChatGPT token refresh failed: {e}"),
         }
     }

@@ -1,12 +1,11 @@
 //! Live model lists, cached with a TTL, behind a network seam.
 //!
-//! A provider's model list is the provider's to know, not exarch's: it is
-//! fetched via genai's `Client::all_model_names` rather than restated in a
-//! hardcoded table that would go stale. Fetching is **lazy** (the picker
-//! pulls a provider's list the first time it is shown), **cached** to the
-//! XDG cache dir with a TTL, and **manual entry** is always the fallback —
-//! a list that fails to fetch, or that omits the wanted model, never
-//! blocks a selection.
+//! A provider's model list is the provider's to know, not exarch's: API-key
+//! providers list through genai and ChatGPT subscriptions list through the
+//! Codex backend. Fetching is **lazy** (the picker pulls a provider's list
+//! when it is shown), **cached** to the XDG cache dir with a TTL, and **manual
+//! entry** is always the fallback — a list that fails to fetch, or that omits
+//! the wanted model, never blocks a selection.
 //!
 //! All network I/O sits behind the [`ModelSource`] trait so `cargo test`
 //! drives the resolution logic and the in-memory memo against a fake and
@@ -14,6 +13,7 @@
 //! so the disk cache and the TTL-staleness path are not exercised by them.
 
 use crate::credential::{Credential, CredentialStore};
+use crate::oauth;
 use crate::provider::{ProviderId, ProviderKind};
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
@@ -26,6 +26,8 @@ use std::time::Duration;
 /// on the order of weeks; a day keeps the picker snappy on repeat opens
 /// while still picking up new models within a session or two.
 const TTL: Duration = Duration::from_hours(24);
+
+const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 
 /// One upstream provider `OpenRouter` can route a given model to — a row of the
 /// `/model` overlay's provider control.
@@ -88,12 +90,10 @@ pub trait ModelSource {
 /// without sharing the catalog's caches.
 #[derive(Clone)]
 pub struct LiveSource {
-    /// Each available API-key provider's key, cloned out of the store so the
-    /// source can build a listing client without holding the store. A `ChatGPT`
-    /// login carries no listable key — its Codex backend exposes no catalog —
-    /// so that provider is absent here and the picker falls back to manual
-    /// entry.
-    keys: BTreeMap<ProviderId, String>,
+    /// Each resolved credential, cloned out of the store so a background
+    /// listing thread needs neither the store nor the UI thread. OAuth cells
+    /// stay shared, so a refreshed token is visible to the catalog request.
+    credentials: BTreeMap<ProviderId, Credential>,
     /// One genai client, reused across every provider's listing call — the
     /// per-provider endpoint and key ride the per-call `ProviderConfig`.
     client: Client,
@@ -101,16 +101,13 @@ pub struct LiveSource {
 
 impl LiveSource {
     pub fn new(store: &CredentialStore) -> Self {
-        let keys = store
+        let credentials = store
             .available()
             .into_iter()
-            .filter_map(|id| match store.get(&id) {
-                Some(Credential::ApiKey(key)) => Some((id, key.clone())),
-                _ => None,
-            })
+            .filter_map(|id| store.get(&id).cloned().map(|credential| (id, credential)))
             .collect();
         Self {
-            keys,
+            credentials,
             client: Client::builder().with_reqwest(crate::tls::client()).build(),
         }
     }
@@ -118,42 +115,26 @@ impl LiveSource {
 
 impl ModelSource for LiveSource {
     fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
-        let key = self
-            .keys
+        let credential = self
+            .credentials
             .get(id)
             .ok_or_else(|| format!("{} has no resolved credential", id.label()))?;
-        // Pass the provider's endpoint (when it has a custom one) and the
-        // in-memory key explicitly, so listing does not depend on the
-        // client's auth resolver being consulted for a catalog request. The
-        // endpoint comes from the `ProviderId` — the single source — so this
-        // does not restate provider knowledge. A custom provider lists through
-        // its declared endpoint and adapter exactly as a famous one does.
-        let provider_config = ProviderConfig {
-            endpoint: id.endpoint().map(Endpoint::from_owned),
-            auth: Some(AuthData::from_single(key.clone())),
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build listing runtime: {e}"))?;
-        runtime
-            .block_on(
-                self.client
-                    .all_model_names(id.default_adapter(), provider_config),
-            )
-            .map_err(|e| format!("list models for {}: {e}", id.label()))
+        match credential {
+            Credential::ApiKey(key) => self.list_api_key(id, key),
+            Credential::OAuth(cell) => self.list_chatgpt(id, cell),
+        }
     }
 
-    /// `GET https://openrouter.ai/api/v1/models/{model}/endpoints`. The listing
-    /// is public, but the `OpenRouter` key is sent when available so the call
-    /// shares the account's rate budget rather than the anonymous one. A
-    /// short-lived current-thread runtime backs the request, as for [`Self::list`].
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
         let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
-        let key = self
-            .keys
-            .iter()
-            .find_map(|(id, k)| (id.famous() == Some(ProviderKind::Openrouter)).then(|| k.clone()));
+        let key = self.credentials.iter().find_map(|(id, credential)| {
+            (id.famous() == Some(ProviderKind::Openrouter))
+                .then(|| match credential {
+                    Credential::ApiKey(key) => Some(key.clone()),
+                    Credential::OAuth(_) => None,
+                })
+                .flatten()
+        });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -183,6 +164,88 @@ impl ModelSource for LiveSource {
                 .collect())
         })
     }
+}
+
+impl LiveSource {
+    fn list_api_key(&self, id: &ProviderId, key: &str) -> Result<Vec<String>, String> {
+        // Pass the provider's endpoint (when it has a custom one) and the
+        // in-memory key explicitly, so listing does not depend on the
+        // client's auth resolver being consulted for a catalog request. The
+        // endpoint comes from the `ProviderId` — the single source — so this
+        // does not restate provider knowledge. A custom provider lists through
+        // its declared endpoint and adapter exactly as a famous one does.
+        let provider_config = ProviderConfig {
+            endpoint: id.endpoint().map(Endpoint::from_owned),
+            auth: Some(AuthData::from_single(key.to_owned())),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build listing runtime: {e}"))?;
+        runtime
+            .block_on(
+                self.client
+                    .all_model_names(id.default_adapter(), provider_config),
+            )
+            .map_err(|e| format!("list models for {}: {e}", id.label()))
+    }
+
+    /// `GET /backend-api/codex/models?client_version=<exarch version>` is the
+    /// subscription catalog. It is authenticated with the same live OAuth cell
+    /// as a Responses request, so a refreshed token is used without rebuilding
+    /// the catalog source.
+    fn list_chatgpt(
+        &self,
+        id: &ProviderId,
+        cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
+    ) -> Result<Vec<String>, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build subscription model-list runtime: {e}"))?;
+        runtime.block_on(async {
+            oauth::refresh_cell_if_stale(cell)
+                .await
+                .map_err(|e| format!("refresh login for {}: {e}", id.label()))?;
+            let token = cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let url = format!(
+                "{CHATGPT_MODELS_URL}?client_version={}",
+                env!("CARGO_PKG_VERSION")
+            );
+            let request = oauth::request_headers(&token, "application/json")
+                .into_iter()
+                .fold(crate::tls::client().get(url), |r, (k, v)| r.header(k, v));
+            let response = request.send()
+                .await
+                .map_err(|e| format!("list models for {}: {e}", id.label()))?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(format!(
+                    "list models for {}: Codex backend returned HTTP {status}: {body}",
+                    id.label()
+                ));
+            }
+            let body: CodexModelsResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("parse models for {}: {e}", id.label()))?;
+            Ok(body.models.into_iter().map(|model| model.slug).collect())
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct CodexModelsResponse {
+    models: Vec<CodexModel>,
+}
+
+#[derive(Deserialize)]
+struct CodexModel {
+    slug: String,
 }
 
 /// `OpenRouter`'s `/endpoints` envelope: the model object carries the serving

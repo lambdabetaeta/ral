@@ -33,12 +33,6 @@ pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-/// The models the `ChatGPT` plan serves through the Codex backend, newest
-/// first. The plan exposes no catalog endpoint, so this curated list is
-/// the picker's source for a subscription provider's models — the
-/// API-key path lists live via genai instead.
-pub(crate) const PLAN_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
-
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
@@ -321,9 +315,35 @@ pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> 
     })
 }
 
+/// Renew the token in a shared credential cell when it is near expiry.
+///
+/// Both inference and catalog requests enter through this door, so neither can
+/// accidentally authenticate with a stale token merely because it happened
+/// first in a session. Persistence is best-effort: a fresh in-memory token is
+/// immediately useful even when the state directory cannot be written.
+pub(crate) async fn refresh_cell_if_stale(
+    cell: &std::sync::Arc<std::sync::Mutex<OAuthToken>>,
+) -> Result<(), String> {
+    let current = {
+        let token = cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !token.is_stale() {
+            return Ok(());
+        }
+        token.clone()
+    };
+    let fresh = refresh(&current).await?;
+    let _ = save_one(&fresh);
+    *cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+    Ok(())
+}
+
 /// The headers a Codex-backend model request carries for this token,
 /// returned as lowercase `(name, value)` pairs.
-pub(crate) fn request_headers(token: &OAuthToken) -> Vec<(String, String)> {
+pub(crate) fn request_headers(token: &OAuthToken, accept: &str) -> Vec<(String, String)> {
     vec![
         (
             "authorization".into(),
@@ -336,7 +356,7 @@ pub(crate) fn request_headers(token: &OAuthToken) -> Vec<(String, String)> {
             "user-agent".into(),
             format!("codex_cli_rs/{}", env!("CARGO_PKG_VERSION")),
         ),
-        ("accept".into(), "text/event-stream".into()),
+        ("accept".into(), accept.into()),
     ]
 }
 
