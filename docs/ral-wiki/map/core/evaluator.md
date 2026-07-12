@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d744648
-generated_at_date: 2026-07-05
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -12,18 +12,20 @@ machine's own verbs are crate-private.** Two reach outside the module:
 
 - `eval_top_level(comp, shell)` (`pub(crate)`) — the turn-evaluation verb a tool
   call, a REPL turn, or a script line settles through. Hosts never call it: they
-  enter through the framed `Shell::run_source_turn` door in
-  [[map/core/runtime|runtime]], the sole way into evaluation
-  ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]). The post-run
-  `Mobile` is *installed* on the parent shell on every outcome (Ok / Error /
-  Exit), because a top-level turn is a resume point.
+  enter through the framed `Shell::run_turn` door (`core/src/driver.rs`, over
+  the turn spine in `core/src/turn.rs`), the sole way into evaluation — its
+  `Turn` carries a `Program` of source text or a registered hook
+  ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
+  [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+  The post-run `Mobile` is *installed* on the parent shell on every outcome
+  (Ok / Error / Exit), because a top-level turn is a resume point.
 - `evaluate(comp, shell)` — a bare tail-absorbed run with no mobile contract, for
   callers already inside a session (module load, prelude bootstrap, capability
   profiles, REPL plugin / config loading).
 
 `apply(callee, args, shell)` is `pub(crate)`: it reduces a `Value` (closure or
 thunk) applied to arguments, absorbing tail signals through the trampoline. A
-host reaches it only through the value turn door (`Shell::run_value_turn`) or the
+host reaches it only through the turn door's hook-program arm or the
 in-frame builtin wrapper, so an unframed reduction is unconstructable.
 
 The result surface is `Settled<Value>` carrying `Escape` / `BodyResult`; tail
@@ -80,12 +82,13 @@ Internals:
   the RAII redirect-frame install/unwind (`within_redirect_frame`) that wraps an
   `Exec` or scope carrying `> file` syntax, distinct from the external-command
   fd machinery in [[map/core/runtime|runtime]]'s `command/redirect.rs`.
-- The command/pipeline/transport machinery — external-command dispatch,
+- The command/pipeline machinery — external-command dispatch,
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine
-  reaches at `pipeline::run_pipeline`, `command_call::run_call`, the `command`
-  redirect guards, and `transport::dispatch`, and which re-enters the machine
-  only through the verbs above
+  reaches at `pipeline::run_pipeline`, `command_call::run_call`, and the
+  `command` redirect guards, and which re-enters the machine
+  only through the verbs above; the boundary verbs themselves always evaluate
+  their body in process, OS confinement being per-child in `build_command`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `audit.rs` — execution-tree recording.
 

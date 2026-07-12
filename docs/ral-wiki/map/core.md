@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -8,7 +8,7 @@ covers_paths: [core/src/lib.rs]
 
 **`core/` is the `ral-core` crate — the language engine — and a host reaches it
 through two narrow crate-root seams: a compile-then-typecheck pipeline that turns
-source into typed IR, and the framed turn doors that are the only entry into
+source into typed IR, and the framed turn door that is the only entry into
 evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
 binaries, `ral` and [[map/exarch|exarch]], embed it.
 
@@ -22,18 +22,22 @@ a host deliberately steps past the seam
 
 ## The evaluation seam
 
-Evaluation enters only through the *framed turn doors* on `Shell`, never the
-reduction primitive behind them. A host states policy; core owns resources.
+Evaluation enters only through the *framed turn door* on `Shell`, never the
+reduction primitive behind it. A host states policy; core owns resources.
 
-- `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
-  `Shell::run_value_turn(thunk, args, src, TurnRequest)` runs one from an
-  already-evaluated thunk applied to argument values. Both are synchronous and
-  runtime-agnostic, and both return one flat `TurnReport`
-  ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
-- Completion is the call returning, never a channel disconnecting, so a detached
+- `Shell::run_turn(TurnRequest)` runs one whole `Turn`, synchronously and
+  runtime-agnostic, returning one flat `TurnReport`. Its `Program` is either
+  source text or a registered hook applied to first-order arguments —
+  `Shell::register_hook` stores compiled hooks by name in the session-lived
+  hook table ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
+- Completion is the call returning, never a channel disconnecting, so a deferred
   worker holding a surface clone cannot keep a turn from ending
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
-- The reduction host behind the doors is crate-private, so a host cannot start an
+- The seam itself is transport-parametric: `transport` is the frame algebra
+  (Attach/Dispatch/Event/Control) a front-end speaks, run in-process as the
+  identity transport or across a socket to the `engine` child
+  ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+- The reduction host behind the door is crate-private, so a host cannot start an
   unframed evaluation that would foreground or capture against a stale frame.
 
 ## host and driver

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -18,25 +18,28 @@ page owns the rendering.
 
 ## The hook model
 
-A *hook* is a thunk a plugin registers for one of five events; `call_plugin_hook`
-in `plugin.rs` is the single primitive that runs one. It brackets the call by
-taking the live `plugin_context` aside, installing the per-call one so `_ed-*`
-builtins resolve, applying the handler, then taking the (now-populated) context
-back and restoring the prior one. *Framing* decides whether the handler runs in
-the caller's turn or a fresh one:
+A *hook* is a thunk a plugin registers for one of five events — registered
+into the shell's hook table under a `HookName` at load time.
+`call_plugin_hook` in `plugin.rs` is the single primitive that runs one. It
+brackets the call by taking the live `plugin_context` aside, installing the
+per-call one so `_ed-*` builtins resolve, applying the handler, then taking
+the (now-populated) context back and restoring the prior one. *Framing*
+decides whether the handler runs in the caller's turn or a fresh one:
 
 - `HookFraming::InFrame` — lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`)
   fire from inside the command's own turn frame, so the handler is applied in
-  place; a second frame would nest.
+  place; a second frame would nest. `run_lifecycle_hook` (a `fold_hook` over
+  the loaded plugins) is the entry [[map/repl/loop|`exec.rs`]] calls around
+  each dispatch.
 - `HookFraming::Framed(FramedHook)` — keybinding, buffer-change, and prompt
-  hooks fire during the frontend `read`, outside any frame, so they evaluate
-  through the value turn door (`Shell::run_value_turn`, a `framed_turn_request`)
-  ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The `FramedHook`
-  carries the per-hook policy: the terminal authority (`Leased` for keybinding
-  dispatch, so an `_ed-tui` body can foreground a captured pipeline; `Denied`
-  elsewhere), a `kind` label, and an optional foreground budget arming the
-  turn's wall. Plugins run with the host authority (`Capabilities::root()`) the
-  framed turn already carries.
+  hooks fire during the frontend `read`, outside any frame, so they establish
+  one through `Shell::run_turn` (`framed_turn_request`, a `Program::Hook`
+  turn) ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
+  `FramedHook` carries the per-hook policy: the terminal authority (`Leased`
+  for keybinding dispatch, so an `_ed-tui` body can foreground a captured
+  pipeline; `Denied` elsewhere), a `kind` label for the turn's root context,
+  and an optional budget arming the turn's wall. Plugins run with the host
+  authority (`Capabilities::root()`) the framed turn already carries.
 
 ## Source-mapped faults and the buffer-change breaker
 
@@ -81,8 +84,9 @@ own builtin table.
 before each hook/keybinding call and splits its data flow explicitly: `inputs`
 (history, `in_readline`), `outputs` (ghost text, highlight spans, pushed
 buffer, accept flag), the live `editor_state`, and a per-plugin `state_cell`.
-All cursor offsets here are **character** offsets; `char_to_byte` / `byte_to_char`
-convert at the rustyline boundary so plugin code never handles UTF-8.
+All cursor offsets here are **character** offsets; core's
+`text::char_to_byte` / `text::byte_to_char` convert at the rustyline
+boundary so plugin code never handles UTF-8.
 
 ## Runtime, manifests, loading
 
@@ -108,24 +112,27 @@ structural surface matches it against crossterm's.
   — plugins run with host authority; to attenuate, wrap the invocation in
   `grant { … }`.
 - `plugin/load.rs` — resolves a plugin under `~/.config/ral/plugins/` or
-  `RAL_PATH`, typechecks and evaluates it under a `ScriptContextGuard`,
-  instantiates a parameterised plugin block through the value turn door,
-  installs alias bindings, and records it (retaining the file source on the
-  `LoadedPlugin`). Hooks and aliases are committed only after every validation
-  passes, so a rejected load rolls back cleanly; unloading is the exact inverse,
-  removing the plugin's hooks and keybindings and undoing the env installation.
+  `RAL_PATH`, typechecks and evaluates it, instantiates a parameterised plugin
+  block through a framed hook turn, registers its hooks into the shell's hook
+  table (`register_plugin_hooks`), installs alias bindings, and records it
+  (retaining the file source on the `LoadedPlugin`). Registration is
+  reversible: hooks and aliases are committed only after every validation
+  passes, so a rejected load rolls back cleanly; unloading is the exact
+  inverse, unregistering the plugin's hooks and keybindings and undoing the
+  env installation.
 - `keybinding.rs` — when a plugin-registered key fires, rustyline stashes a
   `PendingKeybinding` and accepts the line; `dispatch_keybinding` then runs the
   handler outside the readline borrow under `HookFraming::Framed` with `Leased`
-  terminal, resolving the owning plugin by name
+  terminal, resolving the owning plugin by **name**
   (`PluginRuntime::resolve_keybinding`) and loading/saving its `state_cell`
   exactly as the buffer-change path does. A `PendingKeybinding` carries the
-  plugin's **name**, not its position in the runtime `Vec` — `unload_plugin`
-  compacts that vector, so an index would address the wrong plugin after an
-  unload. `sync_plugins` reconciles rustyline's binding table by full
-  unbind-then-rebind, dropping the sequences a removed plugin owned;
-  `keybinding_chords` is the neutral counterpart a frontend matching keys itself
-  reads instead.
+  plugin's name plus a binding index *within* it, never a position in the
+  runtime `Vec` — `unload_plugin` compacts that vector, so a runtime index
+  would address the wrong plugin after an unload; a resolution miss re-edits
+  the line unchanged. `sync_plugins` reconciles rustyline's binding table by
+  full unbind-then-rebind, dropping the sequences a removed plugin owned;
+  `keybinding_chords` is the neutral counterpart a frontend matching keys
+  itself reads instead.
 
 ## Captured session commands
 

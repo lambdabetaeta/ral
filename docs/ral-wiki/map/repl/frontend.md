@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
-covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs]
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
+covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs]
 ---
 
 # Map: repl / frontend
@@ -34,7 +34,9 @@ dumb terminals whatever was asked):
   features; just `read_line` with a `> ` continuation prompt.
 - `rustyline.rs::RustylineFrontend` — the default editor: completion, plugin
   keybindings, ghost text, highlights, and rustyline history, on TTYs that
-  support raw mode and ANSI.
+  support raw mode and ANSI. Its constructor wires the shell's stdout onto
+  rustyline's `ExternalPrinter`, so background `watch` output lands above the
+  live prompt.
 - `structural.rs::StructuralFrontend` — the ratatui inline-viewport projection
   surface (`structural` feature, `--surface structural`): the typed spine,
   worksheet, and handles matrix around the prompt, plus Tab completion (below).
@@ -42,8 +44,8 @@ dumb terminals whatever was asked):
   It drives the same in-editor plugin surface the rustyline backend does, off the
   shared [[map/repl/plugins|`PluginRuntime`]] rather than a parallel copy: each
   iteration runs `run_buffer_change_hooks` and reads back the fish-style ghost
-  suggestion and highlight spans (overlaid as ratatui cells via `style_ratatui`,
-  arm-for-arm with `style_ansi`), accepts the ghost on right-arrow at buffer end,
+  suggestion and highlight spans (overlaid as ratatui cells via
+  `highlight_style::style_ratatui`), accepts the ghost on right-arrow at buffer end,
   and matches `keybinding_chords` against the keypress. A matched chord breaks
   the loop to a `Composed::Keybinding` outcome — no new `Read` variant — tears
   down the viewport and raw mode, then runs `dispatch_keybinding`, so an
@@ -57,13 +59,12 @@ owns all cursor positioning, key dispatch (Emacs and Vim via edtui
 `EditorEventHandler`), height hinting, and highlight rendering. Both
 frontends show the terminal native cursor in **every** mode, the same shape
 throughout (no painted vi modal-mode block). One implementation, not a copy each.
-plain `set_cursor_style` at construction. One implementation, not a copy each.
 The structural surface handles shell-line chords before the editor:
 **Ctrl-U kills to line-start** (readline unix-line-discard, not edtui
 undo), in emacs and in vi-Insert mode. vi Normal/Visual keep the edtui keymap.
 Ctrl-D on a non-empty buffer deletes the char under the cursor;
 only an empty buffer reads as `Eof`.
-## Completion
+
 ## Completion
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the
@@ -81,11 +82,13 @@ alphabetically.
   implements `Hinter`/`Highlighter` — ghost text and syntax highlights are *not*
   computed here; they come from plugin `buffer-change` hooks recorded in the
   [[map/repl/plugins|`PluginRuntime`]], and `RalHelper` only paints what the
-  runtime last produced. `style_ansi` is the source of truth for the legal
-  highlight-style vocabulary `_ed-highlight` validates against.
-- `structural.rs` drives the engine as a **drop-down menu band**: Tab completes
-  the token under the cursor — a unique match is spliced in place
-  (`apply_candidate`), several open a bordered popup (`render_menu`) over the
+  runtime last produced. `highlight_style.rs::STYLES` is the one data-driven
+  table of legal highlight styles — each row gives the name, its ANSI escape
+  (`style_ansi`, which `_ed-highlight` validates against), and its ratatui cell
+  style (`style_ratatui`) — so the two surfaces cannot drift.
+- `structural.rs` drives the engine as a **drop-down menu band**
+  (`structural/menu.rs`): Tab completes the token under the cursor — a unique
+  match is spliced in place, several open a bordered popup rendered over the
   top of the projection band, anchored under the token. Tab/↓ and ⇧Tab/↑ cycle
   the selection, Enter accepts, Esc (or any editing key) dismisses. The lower
   band reserves room for the menu so a fresh session still has space to drop it

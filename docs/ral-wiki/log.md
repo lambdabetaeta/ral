@@ -3754,3 +3754,50 @@ listing-fold entry), and the superseded-by note on
 The model picker now reads each ChatGPT account's Codex catalog through its
 OAuth cell instead of a curated table. Inference and catalog requests share
 one stale-token renewal door; [[map/exarch/provider|provider]] records the flow.
+
+## [2026-07-12] lint | Turn-door narrative caught up with the unified door
+
+The prose in [[internals/a-turn-end-to-end|a-turn-end-to-end]] still spoke of
+two doors (`run_source_turn`/`run_value_turn`); both are now the single
+`Shell::run_turn` dispatching on the `Program` sum, so the narrative now speaks
+of source and hook arms. Anchors verified, page re-stamped at `668499f`.
+
+## [2026-07-12] lint | Plotkin–Pretnar comparison caught up with handlers-are-lambdas
+
+The "handlers are ordinary runtime blocks — thunks included" claim in
+[[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]] predated
+[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]
+and [[decisions/260622_functions-and-handlers|functions-and-handlers]]: a handler
+is now a lambda of install-site arity, installed by `within` or `handle`. Claim
+rewritten, page re-stamped at `668499f`.
+
+## [2026-07-12] lint | Rows-and-handlers comparison caught up with handlers-are-lambdas
+
+The "machines part only at the reify point" claim in
+[[related/rows-and-handlers|rows-and-handlers]] predated
+[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]
+and [[decisions/260622_functions-and-handlers|functions-and-handlers]]: the
+machines now also part at the clause interface — Links clauses bind each
+operation's arguments at row-assigned types, a ral handler is one lambda per
+name over the argv as a single list. Claim rewritten, page re-stamped at
+`668499f`.
+
+## [2026-07-12] lint | System C comparison confirmed against handlers-are-lambdas
+
+Checked every claim in [[related/system-c|system-c]] against
+[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]
+and [[decisions/260622_functions-and-handlers|functions-and-handlers]]: unlike
+the Plotkin–Pretnar page, it never characterises a ral handler's shape or
+calling convention, so nothing is invalidated — the masking, capability-set,
+thunking, and resumption comparisons all stand. Page re-stamped at `668499f`.
+
+## [2026-07-12] lint | drift sync
+
+Whole-wiki drift sync at `668499f`: every [[map/core|core]], [[map/repl|repl]],
+and [[map/exarch|exarch]] map page re-ingested and re-stamped, the
+[[internals/a-turn-end-to-end|a-turn-end-to-end]] and
+[[internals/output-capture-and-detachment|output-capture-and-detachment]]
+narratives re-verified, and `docs/SPEC.md` brought up to HEAD alongside. The
+load-bearing shift is the single turn door — `Shell::run_turn` dispatching on
+the `Program` sum over the transport-parametric seam — reflected across the
+map pages, the index one-liners, and the turn narrative.

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a590f4f
-verified_at_date: 2026-06-18
+verified_at_commit: 668499f
+verified_at_date: 2026-07-12
 against: [design/effects-handlers, design/syscalls-are-effects, design/pipelines]
 ---
 
@@ -59,8 +59,13 @@ primary.
   ral takes the single-language alternative their §9 sketches, and the
   obligation is vacuous by design: the external-command theory has **no
   equations** (the world validates none), every clause set is trivially a
-  model, so handlers are ordinary runtime blocks installed by `within` — thunks
-  included.
+  model, so a handler is an ordinary runtime lambda — a per-name clause unary
+  over the argv, a catch-all binary
+  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]) —
+  installed for a scope by `within` or persistently by `handle`
+  ([[decisions/260622_functions-and-handlers|functions-and-handlers]]), in a
+  single language where thunks are first-class values rather than the
+  obstruction their two-calculus split works around.
 - **The pipe is not a handler — and could not be.** They cannot express
   `t₁ | t₂` ("the difficulty is very much like that with the CCS parallel
   combinator") and leave it as the paper's principal open question. ral agrees

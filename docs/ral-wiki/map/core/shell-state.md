@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b91043e
-generated_at_date: 2026-07-06
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -12,9 +12,12 @@ everything `crate::types::*`.
 
 ## Values
 
-- `value.rs` — `Value` (the runtime [[design/cbpv|value]] category), plus the
-  handler machinery: `HandlerFrame`, `HandlerStack`, `FrameHandle`,
-  `BuiltinEntry` / `BuiltinTable`. Handlers are deep and self-masking, with no
+- `value.rs` — `Value` (the runtime [[design/cbpv|value]] category); beside it
+  `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
+  `FrameHandle`), `builtin.rs` (`BuiltinEntry` / `BuiltinTable`, kept separate
+  from the handler stack), and `handle.rs` (the concurrency substrate behind
+  `Value::Handle`: `HandleInner`, `CompletedHandle`, `SurfaceBuffer`).
+  Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* or alias arm is always a lambda: `HandlerEntry` carries its
   `HandlerArity` (`Unary` for a per-name arm or alias, `CatchAll` for `within
@@ -54,16 +57,21 @@ field name *is* the invariant** — joined by `Shell`
   `ControlState` + dynamic `Context`) that crosses evaluation boundaries and
   thread spawns. `mobile` is the public embedding seam.
 - **`TurnState`** — the dynamic frame a top-level turn installs and restores on
-  teardown: the pipeline-stage `Io`, the `surface` sink, the foreground
-  `cancel` scope, the source-position `loc` cursor, the detached-worker
-  `WorkerLease` (`detached_lease` — the idle bound and absolute backstop
+  teardown: the pipeline-stage `Io`, the `surface` sink, the `deferred` sink
+  (a detached worker's completion delivery — `None` outside an agent host),
+  the `desk` answering the turn's enquiries
+  ([[decisions/260706_enquiry-channel|enquiry-channel]]), the foreground
+  `cancel` scope, the source-position `loc` cursor, the deferred-worker
+  `WorkerLease` (`deferred_lease` — the idle bound and absolute backstop
   travel as one value; `None` never reaps), the `worker_cap` admission bound
   (`Some(cap)` refuses a spawn of any class while `cap` workers still run;
   `None` admits freely, and both flow into same-thread bodies and spawned
   workers alike), and the turn's `TerminalAccess`.
 - **`SessionState`** — what survives every turn's teardown: the durable cancel
-  `root` that detached workers parent under, the `sources` registry rendered
-  against after a turn returns, the `exit_hints` table, the host-installed
+  `root` that detached workers parent under (with `publishes_signal_slots`,
+  true only for the one signal-facing session per process), the `sources`
+  registry rendered against after a turn returns (reset and reseeded at each
+  turn start), the `exit_hints` table, the host-installed
   `builtins`, and the session's `terminal_lease`.
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger); the
@@ -107,7 +115,11 @@ field name *is* the invariant** — joined by `Shell`
   site — the evaluator's four writers (`assign_pattern`'s `Name`/`...rest`
   arms, `eval_letrec`'s two installs) all route here. Host verbs
   (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
-  call to them precedes arming. The same chokepoint runs a second, orthogonal
+  call to them precedes arming. Idleness is *use-observation*, not
+  re-installation: `Shell::run_turn`'s source arm ticks the committed-turn
+  clock, and a lease is renewed by reference — the compiled program's
+  `ir::referenced_names` at each successful compile ([[map/core/ir|ir]]), plus
+  the resolved name at an `Env`-arm command dispatch. The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install
   whose value's `Value::shallow_size` (a structural estimate — `String`/
   `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
@@ -136,8 +148,10 @@ borrowed `Value`; `Shell::surface` forwards onto the installed sink and is inert
 when none is present (a bare REPL). Turn-scoped, not a persistent capability — a
 turn door installs it, so a clone of it has no liveness role and can never decide
 a turn is over. A *detached* worker does not receive the live sink: its events
-buffer into a bounded `SurfaceBuffer`, drained into the `CompletedHandle` and
-replayed through the awaiting turn's surface on the first `await` / `race`.
+buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
+the awaiting turn's surface on the first `await` / `race`, or handed to the
+session-lived `deferred` sink at the worker's own completion, whichever renders
+first (a shared `joined` latch decides).
 
 ### Terminal handoff
 
@@ -175,7 +189,10 @@ Methods on `Shell` live by concern, one submodule each:
   [[map/core/capabilities|`capability::check_*(&Context, …)`]] decisions,
   splitting the disjoint context/audit borrow for the audit-bearing checks;
 - `cwd.rs` (`Cwd`), `inherit.rs` (the flow matrix, below), `modules.rs`,
-  `control.rs`, `repl.rs` (`ReplScratch`, owned by the [[map/repl|REPL]] layer).
+  `control.rs`, `hooks.rs` (the session-lived hook table of named turn-entry
+  points — prompt render, startup, plugin hooks — resolved by the turn door's
+  hook-program arm), `repl.rs` (`ReplScratch`, owned by the [[map/repl|REPL]]
+  layer).
 
 ## The flow matrix
 

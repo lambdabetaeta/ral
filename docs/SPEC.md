@@ -1,3 +1,4 @@
+<!-- verified_at_commit: 668499f -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -69,6 +70,7 @@ expr-block    = '$[' expr ']'
 redir         = NUMBER? '>'  word
               | NUMBER? '>~' word
               | NUMBER? '<'  word
+              | NUMBER? '<<' word
               | NUMBER? '>>' word
               | NUMBER  '>&' NUMBER
 expr          = orexpr
@@ -329,6 +331,20 @@ Scoping is lexical; closures capture at definition. A name is resolved
 implicitly only in head position (§4); elsewhere use `$name`. Tail
 calls reuse the current frame.
 
+**Top-level bindings may not shadow PATH commands.**  At the session
+scope — the persisted top level of a script or interactive session —
+a `let` is refused, before its RHS runs, when the name resolves to a
+command on the effective `PATH` (honouring `within [env: PATH]`):
+binding `sort` or `git` to a value would silently shadow the command
+in head position (§4).  The check covers every name a destructuring
+pattern binds and the names of recursive definitions; reachability is
+the pure filesystem question, independent of any active `grant`.  The
+guard is top-level only: `let`s inside blocks and lambda bodies,
+lambda parameters, and the prelude's internal bindings are exempt, so
+a nested `let git` still shadows within its block by design.  Only the
+PATH layer is protected — prelude functions and builtins remain
+shadowable.
+
 **Recursion and generalisation.** A maximal run of consecutive named
 `let`s in the same scope forms a **group**, on which the elaborator
 builds a dependency graph (with an edge `i → j` whenever `let_j`'s
@@ -470,7 +486,7 @@ Head interpretation is syntactic:
 3. **Explicit value head.** Any other head form (for example `$map`,
    `!$f`, or a block literal) stays in the value/function world:
    external command lookup is never performed for it, and if it does
-   not evaluate to a callable block value, it is an error.
+   not evaluate to a block value, it is an error.
 
 Outside head position, plain and slash words are strings; tilde words
 are string-typed path values:
@@ -563,9 +579,15 @@ Principal return types at the `let` boundary:
 | Stage                                              | Return              |
 |----------------------------------------------------|---------------------|
 | buffering byte-output (externals, `echo`, `grep`)  | decoded `String`    |
-| streaming reducer (`map-lines`, `filter-lines`, `each-line`) | `Unit` |
+| line rewriter (`map-lines`)                        | decoded `String`    |
+| streaming consumer (`filter-lines`, `each-line`)   | `Unit`; lines flush |
 | encoder (`to-X`)                                   | `Bytes`             |
 | decoder (`from-X`), value builtin, ordinary function | its structured value |
+
+The general rule behind the first two rows is the value-boundary rule
+of §4.3: a byte-output stage whose value is `Unit` binds its bytes,
+decoded as a `String` with one trailing newline stripped; any other
+value binds directly.
 
 A returned `String` is data, never re-lexed, split, or globbed. For
 binary, finish the pipeline with `| from-bytes`. Mode mismatches
@@ -578,7 +600,8 @@ The final stage's disposition:
 - statement position — bytes to the terminal (unless redirected);
   return discarded;
 - `let` RHS — return bound; bytes still flow
-  (`let x = echo hi > f` redirects bytes to `f` and binds `"hi"`);
+  (`let x = echo hi > f` redirects the bytes to `f`, so the capture
+  is empty and `x` binds `""`);
 - `spawn` — buffered in the handle (§13).
 
 Adjacent external stages share a direct OS pipe. Byte stages run
@@ -656,8 +679,9 @@ rejects the implicit conversion.
 ### 4.3  Block return
 
 A block returns its last command's result. If that last command is
-byte-output, the block yields the decoded `String` for it alone.
-`{}` yields `Unit`.
+byte-output with a `Unit` value, the block yields the decoded
+`String` for its bytes alone, with one trailing newline stripped;
+any other value is returned as itself. `{}` yields `Unit`.
 
 ```
 let b = { echo one; echo two }
@@ -669,8 +693,8 @@ Non-final byte-output commands flush to the surrounding visible stream
 in real time, so their side-effects remain observable:
 
 ```
-let v = { echo visible; echo captured }
-#         ^ prints to stdout        ^ v == "captured"
+let v = !{ echo visible; echo captured }
+#          ^ prints to stdout        ^ v == "captured"
 ```
 
 Captures nest: each block saves the outer stream and restores it on
@@ -824,7 +848,13 @@ Where `$name` would otherwise be followed by `[`, the form
 
 Both quoted forms may span multiple lines, and the REPL prompts for
 continuation while a quote remains open.  `dedent` strips the common
-leading indentation from a multiline literal:
+leading indentation from a multiline literal and trims the blank
+framing lines at both ends — the newline after the opening quote and
+any trailing newline (CRLF included) fall away, so the example below
+yields exactly the three `SELECT`…`true` lines.  Interior blank lines
+and CRLF terminators are preserved verbatim.  A single content line
+keeps its leading whitespace: with no peers to share a common indent,
+stripping would erase the indentation rather than align anything.
 
 ```
 let msg = dedent '
@@ -902,14 +932,22 @@ and reject circular references and bound recursion depth.
 
 `$env` is a read-only map of environment variables and `$nproc` the
 CPU count as an `Int`.  Overrides are scoped through `within [env: …]`
-(§3.2); there is no `setenv`.
+(§3.2); there is no `setenv`.  Three further pseudo-variables are
+computed at access time, chiefly for prompt bodies: `$CWD` is the
+logical working directory with a home-directory prefix abbreviated to
+`~`, `$STATUS` the last recorded exit status as an `Int`, and `$USER`
+the user name from the environment.  Like `$env`, `$args`, `$script`,
+and `$nproc`, they are resolved on read and never stored in scope.
 
 `~/.ralrc` is a ral script whose last expression is a configuration
 map with optional keys `env`, `prompt`, `bindings`, `aliases`,
-`edit_mode` (`"emacs"` or `"vi"`), `plugins`, and `theme`.  Both
-`bindings` and `aliases` route by value shape: thunk entries install
-as alias handler frames (command-callable, persist past `within`
-blocks), every other value lands in the interactive value namespace.
+`edit_mode` (`"emacs"` or `"vi"`), `bell` (`Bool`), `surface`,
+`recursion_limit`, `startup` (a block run after rc loading),
+`plugins`, and `theme`.  `aliases` routes by value shape: a function
+entry installs as an alias handler frame (dispatched in head
+position, persisting past `within` blocks), every other value lands
+in the interactive value namespace.  `bindings` entries always land
+in the value namespace, functions included.
 `plugins` lists the plugins to load at startup (§18.1).  Aliases can
 also be installed or removed at runtime via the `alias NAME { |args|
 BODY }` and `unalias NAME` builtins. Alias names may not claim a
@@ -1112,9 +1150,9 @@ value, source location, and a hint when obvious.
 `stderr` flows to the terminal during normal execution.  Three
 boundaries surface it differently:
 
-- `try` puts the failing command's stderr (decoded as UTF-8)
-  into `message: String`.  No raw bytes — wrap the body in `&` if you
-  need the bytes.
+- `try` does not capture stderr: `message: String` carries only the
+  synthetic status text (§10.1), and the failing command's fd 2 bytes
+  stream live to the terminal.  Wrap in `audit` for the bytes.
 - `audit` records each command's stderr as `Bytes` in its tree node,
   indexed by position; `ral --audit`'s JSON output renders them as
   lossy UTF-8.
@@ -1132,11 +1170,28 @@ echo $r[stderr]
 
 ### 10.7  Signals
 
-SIGINT, SIGTERM, and SIGHUP set a flag that the evaluator checks
-between statements; once observed, the flag begins an unwinding
-during which `guard` cleanups run.  A second signal arriving in the
-unwinding window is deferred until cleanup completes, and a third
-terminates the process immediately.
+A delivered SIGINT, SIGTERM, or SIGHUP is translated into a
+**cancellation cause** on the session's cancel-scope tree; there is
+no separate signal flag.  SIGINT cancels the current foreground turn
+(message `"interrupted"`, status 130); SIGTERM and SIGHUP cancel the
+session root (message `"terminated"`, status 143 = 128 + SIGTERM), so
+detached workers (§13) unwind along with the foreground, and an
+interactive session exits with 143 at the next prompt.
+
+Cancellation is cooperative, observed at poll points: between
+statements and tail-call steps, between iterations of the iterating
+builtins, at pipeline stage launches, and inside every wait on an
+external command — a blocked external is preempted too, and torn down
+by cause: SIGINT-first for an interrupt, SIGTERM-first for a
+terminate, each with a short grace period before a process-group
+SIGKILL.  At the poll point the cancellation surfaces as an ordinary
+failure, so the unwinding runs `guard` cleanups on the way out.  The
+cause is sticky for the turn and monotone — a later, weaker cause
+never masks a stronger one — so a `try` may observe the failure but
+cannot suppress the unwinding: the next poll point raises it again.
+A third delivered signal terminates the process immediately with
+status 128 + signal; interactive Ctrl-C is cooperative and never
+escalates to this floor.
 
 ## 11  Capabilities (`grant`)
 
@@ -1160,7 +1215,7 @@ grant [
 
 ### 11.1  `exec`
 
-A unified map keyed by one of three shapes:
+A unified map keyed by one of four shapes:
 
 - **bare command name** (`git`, `kubectl`) — match by name as the
   user typed it, after PATH lookup.
@@ -1171,6 +1226,12 @@ A unified map keyed by one of three shapes:
   sigils (§11.2.1) may appear at the head of literal-path or subpath
   keys (`xdg:bin/`, `~/.cargo/bin/`, `cwd:/`); they're rewritten to
   absolute paths at policy load.
+- **`path:`** (or `path:/`) — expands at policy load into one
+  subpath key per absolute component of `$PATH`, each carrying the
+  given verdict.  Relative PATH entries are skipped; an expansion
+  yielding no directories is a load error.  Like any subpath key it
+  takes only `'allow'` or `'deny'`.  PATH is snapshotted once at
+  load, so a later PATH mutation cannot widen the grant.
 
 Each value is the policy.  Bare-name and literal-path keys carry the
 full lattice:
@@ -1193,6 +1254,13 @@ JSON) and never appear in user-written profiles or grant blocks.
 1. **Literal hits win.**  An exact key match (bare name or
    absolute path) wins over any sibling subpath that would also
    admit the same binary.  An explicit literal `Deny` vetoes.
+   Command identity is deny-broad, allow-narrow: a `'deny'`
+   matches any of the command's forms — the name as typed, the
+   resolved absolute path, or the basename of either — so
+   `'bash': 'deny'` also vetoes `/bin/bash` invoked by path, even
+   under a covering `'/bin/': 'allow'`.  An allow matches only the
+   form the policy named, so a planted `/tmp/evil/rg` invoked by
+   path never inherits a bare `'rg': 'allow'`.
 2. **Otherwise the longest matching subpath wins.**  Deeper prefix
    beats shallower, so `'/usr/bin/sensitive/': 'Deny'` carves a
    hole inside `'/usr/bin/': 'Allow'` for binaries under the
@@ -1243,7 +1311,7 @@ paths are also enforced for externals as defence in depth.
 
 #### 11.2.1  Path-prefix sigils
 
-Two sigils are recognised at the head of a path string in any
+Five sigils are recognised at the head of a path string in any
 `fs.read`, `fs.write`, `fs.deny`, or path-shaped `exec` key (literal
 path or subpath), and resolved once at policy load:
 
@@ -1256,6 +1324,17 @@ path or subpath), and resolved once at policy load:
   `~/.cache`, `~/.local/state`, `~/.local/bin` — universally, so
   cross-platform tools that respect XDG behave the same on macOS
   and Linux.
+- `cwd:` and `cwd:sub` — the working directory in force when the
+  policy is frozen.  Resolved exactly once, so a later `cd` cannot
+  retarget the region.
+- `tempdir:` and `tempdir:sub` — the platform scratch directory,
+  `std::env::temp_dir()` (`$TMPDIR` on macOS, `/tmp` on Linux).
+  Unlike `xdg:` there is no under-HOME guard: `$TMPDIR`
+  legitimately lives outside HOME.
+- `gitdir:` and `gitdir:sub` — the real git directory of the
+  freeze-time working directory, resolving a worktree `.git`
+  pointer file to the directory it names; falls back to the
+  working directory itself when it is not inside a repository.
 
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
 
@@ -1264,12 +1343,13 @@ entry is rejected at load: it would otherwise anchor to the live
 working directory at check time, so the same grant would authorise a
 different region after a `cd`.  To name a location relative to the
 working directory in force when the grant is frozen, write `cwd:sub`
-(§11.9).  A bare command name in `exec` (no `/`, no sigil) is a name,
+(above).  A bare command name in `exec` (no `/`, no sigil) is a name,
 not a path, and is exempt.
 
 Resolution is one-shot at policy load: tokens are rewritten into
 concrete absolute paths in the policy itself, so later mutation of
-HOME or `XDG_*_HOME` cannot widen what was already authorised.  An
+HOME or `XDG_*_HOME` — or a later `cd` — cannot widen what was
+already authorised.  An
 `xdg:NAME[/sub]` token whose resolved base sits outside HOME is
 rejected at load — for example, with `XDG_DATA_HOME=/etc` set in
 the calling environment, a policy naming `xdg:data` errors instead
@@ -1353,6 +1433,12 @@ Nested grants can only reduce authority.  Per dimension:
 - `audit` — logical OR.
 - `editor` — per-boolean AND (inner can only disable).
 
+For both `exec` subpath keys and `fs` prefixes, containment is
+judged on the symlink-resolved form: a prefix that lexically nests
+under an outer layer's ceiling but resolves — through a symlink —
+outside it does not survive the intersection, so composition can
+only remove authority, never add it.
+
 A dimension that *no* layer in the stack opined on stays at ambient
 authority — there is no implicit deny from omission across the stack,
 only within a layer that opted into the dimension.
@@ -1391,8 +1477,15 @@ OS-level enforcement varies:
   external or bundled command spawned inside the `grant` is launched
   inside Seatbelt when `fs:` is present, when `net` is `false`, or
   when `exec:` is present.  Under exec
-  attenuation the Seatbelt profile renders the meet-folded admit
-  set as a path allow-list, so the OS layer also gates spawns
+  attenuation the Seatbelt profile renders a path allow-list
+  projected through the live gate — each literal's resolved
+  identity is re-judged by the same full-stack check §11.1
+  describes, so the OS layer admits a path only where the
+  in-process gate would — plus deny carve-outs in the gate's three
+  veto shapes: absolute `deny` literals as paths, `deny` subpaths
+  as subtrees, and bare-name `deny`s as final-path-component
+  matches, path-agnostic so the veto holds wherever the name
+  resolves.  The OS layer thus also gates spawns
   that the in-process check can't see — including binaries
   re-execed by interpreters like `sh -c "…"`, `xargs CMD`, or
   `find -exec`.  When `fs:` is absent the OS layer passes fs
@@ -1401,7 +1494,13 @@ OS-level enforcement varies:
   A spawned command is wrapped in bwrap when `fs:` is present or
   `net` is `false`; pure exec attenuation does not enter the
   OS sandbox because bwrap has no path-based exec filter.
-  In-process exec checks still apply.
+  In-process exec checks still apply.  Under an `fs:` restriction
+  the sandbox mounts bwrap's minimal virtual `/dev` and `/proc`
+  and a fresh tmpfs `/tmp` in place of the host's — the real
+  device and process trees are not bound into the sandbox — with
+  system directories (`/bin`, `/usr`, `/lib*`, `/sys`, and
+  selected `/etc` files) bound read-only alongside the granted
+  prefixes.
 - **Windows / non-Unix** — in-process `exec` / `fs` checks still
   apply (and `net` has no in-process gate), but OS-level fs/net
   confinement is unavailable (no bubblewrap, no Seatbelt).  Consequently, when an evaluation
@@ -1417,6 +1516,11 @@ OS-level enforcement varies:
   through the process-spawn machinery and does not depend on the
   fs/net sandbox backend.
 
+On macOS and Linux, when a sandboxed command fails after a
+kernel-level denial, the error's hint reproduces the denial lines
+the kernel attributed to the command's process tree — naming the
+denied path under Seatbelt, the blocked syscall under seccomp.
+
 ### 11.9  Capability profiles (`.ral` files)
 
 A capability profile is an ordinary ral script whose terminal expression
@@ -1426,7 +1530,9 @@ with the same lowercase string conventions.  Loading runs the file
 through the standard parse + elaborate + evaluate pipeline; the
 returned map walks into a `Capabilities` via the same parser the
 inline `grant` operator uses, resolving every `~` / `xdg:` / `cwd:` /
-`tempdir:` sigil against the load-time home and working directory.
+`tempdir:` / `gitdir:` sigil against the load-time home and working
+directory, and expanding any exec `path:` entry against the
+load-time `$PATH`.
 
 ```
 # my-profile.ral
@@ -1484,8 +1590,9 @@ within [handlers: [deploy: { |args| echo ok }]] {
 ### 13.1  Model
 
 A concurrent block is a thunk evaluated on a worker thread.
-`spawn B` and `watch "L" B` are the two primitives: each schedules
-`B` — a block / thunk — to run concurrently and returns a
+`spawn B` is the primitive; `watch "L" B` (§13.5) and the durable
+`service "D" B` (§13.4) are its host-installed siblings.  Each
+schedules `B` — a block / thunk — to run concurrently and returns a
 `Handle α` immediately.  The body executes against the worker's own
 `Shell`, built from the captured environment the spawning thunk
 carries; mobile mutations made by the body die with the worker
@@ -1504,9 +1611,9 @@ let h = long-job arg &            # spawns, binds Handle α to h
 grep pat file & ? echo fallback   # either arm of a ?-chain may be &
 ```
 
-`par`, `spawn`, and `watch` all produce the same kind of `Handle`.
-`par` is *not* a primitive: it is prelude code over `spawn` and
-`await`.
+`par`, `spawn`, `watch`, and `service` all produce the same kind of
+`Handle`.  `par` is *not* a primitive: it is prelude code over
+`spawn` and `await`.
 
 ### 13.2  `par` vs `map`
 
@@ -1607,8 +1714,8 @@ Where `await` *blocks* and *re-raises* a failed block, `poll` neither
 waits nor raises: it reports the terminal outcome — value or error — as
 data, never as a failure of `poll` itself.  A pending `poll` is a pull-based
 read of a running worker's output — the headless counterpart to `watch`
-(§13.5), which streams it live.  `poll` still fails on a cancelled or
-forgotten handle, exactly as `await` does — a detached handle has no outcome
+(§13.5), which streams it live.  `poll` still fails on a cancelled
+handle, exactly as `await` does — a cancelled handle has no outcome
 to sample.  The prelude predicate `is-done h` reduces `poll` to a `Bool`:
 `true` once `` `settled ``, `false` while `` `pending ``.
 
@@ -1617,11 +1724,73 @@ to sample.  The prelude predicate `is-done h` reduces `poll` to a `Bool`:
 A spawned worker is *detached*: it hangs under the session's durable
 cancel root, not under the turn's foreground scope, so it outlives the
 turn that launched it and a foreground cancel — a turn deadline or an
-interrupt — does not reach it. It is stopped only by `cancel h`, by a
-root abort, by host-process exit, or — under a host that arms one — by a
-lifetime ceiling that reaps an abandoned worker after a fixed bound.
-There is no detach operator: dropping a handle binding is
-fire-and-forget, and the worker keeps running until one of those stops it.
+interrupt — does not reach it.  There is no detach operator: dropping
+a handle binding is fire-and-forget, and the worker keeps running
+until something below stops it.
+
+Every spawn also files an entry in the spawning shell's **worker
+registry** — `spawn`, `watch`, `service`, and the trailing `&` alike,
+with no policy attached at the door.  The entry pairs the handle with
+a stable id (`wN`), the spawn time, and a command label, so a host
+can list its workers and take a live handle back; enumeration never
+mutates the registry.  The entry is removed the moment the worker is
+*observed* settled — by `await`, by `race` (winner and cancelled
+losers alike), or by a `` `settled `` `poll` — or is explicitly
+`cancel`led; a `` `pending `` `poll` removes nothing.  A nested
+`spawn` inside a worker registers into the owning shell's registry; a
+pipeline stage or a sub-agent fork starts with an empty one of its
+own.
+
+A worker is stopped by `cancel h`, by a root abort, by host-process
+exit, or by the host's lease policy.  Under a frame that grants a
+**worker lease** — an agent host does; the interactive REPL grants
+none and never reaps — a still-running worker is reaped once it has
+gone *unobserved* for the lease's idle bound, and unconditionally at
+an absolute backstop measured from spawn.  Each eliminator naming the
+handle (`poll` in either arm, each sweep of a blocked `await`/`race`)
+renews the observation clock, but no amount of polling extends a
+worker past the backstop, and listing renews nothing.  A reap cancels
+the worker's own scope — the body unwinds with status 130 and settles
+as an error, so a later `await`/`poll` still observes the partial
+output and the failure — and replaces the registry entry with a reap
+notice the host drains into its transcript.  A settled entry is an
+unclaimed result: one that nobody claims within the host's retention
+bound (counted in ral-call epochs from when the host's sweep first
+observed it settled) is likewise swept with a notice.  On the same
+agent hosts, a sibling **binding lease** covers top-level session
+bindings: a non-baseline name idle past a call bound is pruned, and a
+session-scope install past a size threshold draws a residency warning
+— hosts that arm neither ledger (the REPL, scripts) never expire
+anything.
+
+Under a frame that supplies a **live-worker cap**, admission is
+decided at the spawn door: a birth of any class is refused while the
+cap's worth of workers are already running or being born, with an
+error naming the remedies (`spawn: N workers already live on this
+agent; await or cancel one`).  The seat is reserved atomically at
+admission, so concurrent spawns racing the same free seat cannot
+overshoot the cap; settled entries lingering under retention never
+block admission.
+
+`service "DESC" B` births a **durable** worker: an ordinary buffered
+spawn whose registration carries no idle lease and no backstop — its
+bound is legibility, not time.  The description is mandatory,
+non-empty, and single-line, and becomes the entry's command label in
+listings.  A service still counts toward the cap (live work is live
+work) and dies only by `cancel`, by the host discarding its session
+context, or with the process.  Availability mirrors `watch` (§13.5)
+host-wise: an agent host, whose lease would otherwise reap long work,
+installs it; the interactive and batch ral hosts leave it uninstalled
+— they grant no lease, so every one of their spawns is already
+durable.
+
+Detached background work cannot signal the terminal owner.  A
+worker's stdin is wired to `/dev/null` rather than inheriting fd 0,
+and a detached non-interactive external child is started in its own
+session (`setsid`) with no controlling terminal, so nothing it runs
+can `tcgetpgrp` or signal the process that owns the tty.  An
+*interactive* background child keeps sharing the shell's process
+group, so terminal-driven SIGINT still reaches it.
 
 ### 13.5  Live watching: `watch`
 
@@ -1650,7 +1819,7 @@ let h = watch "build" { cargo build }
 watch "deploy" { step-1; step-2 }
 let target = "prod"
 watch "build-$target" { make }     # interpolation
-_await $h
+await $h
 ```
 
 In contrast to `&`, the streamed handle's buffers stay empty, so the
@@ -1671,8 +1840,8 @@ in the framing sink at teardown.
 
 ### 13.6  Concurrent blocks and the sandbox boundary
 
-`spawn`/`watch` do **not** re-dispatch the body into a confined
-evaluation.  The worker thread runs the body in-process; the OS
+`spawn`/`watch`/`service` do **not** re-dispatch the body into a
+confined evaluation.  The worker thread runs the body in-process; the OS
 sandbox, if any, wraps the worker by virtue of wrapping the parent
 process (process-level OS confinement is inherited by every thread
 in that process), and the in-ral capability stack still gates the
@@ -1705,7 +1874,9 @@ currently executing, as handed to the interpreter.  Inside a loaded
 module or plugin `$script` refers to *that* file, matching the scope
 used for module-relative path resolution (§8).  Under `ral -c`, in
 the REPL, and while the prelude is loading, `$script` is unbound —
-reading it fails like any undefined variable.
+reading it fails like any undefined variable.  The ambient
+pseudo-variables `$CWD`, `$STATUS`, and `$USER` (§9) resolve the same
+way in scripts: computed at access, never stored in scope.
 
 ```
 #!/usr/bin/env ral
@@ -1789,7 +1960,9 @@ any other redirect operand — a raw string, an interpolating string, or
 a dereference.  The payload must be separated from the operator by
 whitespace: a glued payload (`<<EOF`, `<<'EOF'`) is rejected at the
 lexer as a heredoc attempt, and a bare word after `<< ` is a parse
-error.  One newline
+error (a path-shaped one is pointed at `< path` instead).  Bash's
+spelling `<<<` and a file-descriptor prefix other than `0` are
+likewise rejected — `<<` always feeds stdin.  One newline
 at the very front of the value is dropped at evaluation, so a
 multiline raw-string body may start on the line below the command;
 raw-string literals themselves remain verbatim in every position.
@@ -1801,7 +1974,7 @@ on `< $path` for reads, an encoder on `> $path` for writes.
 
 ```
 let body = from-string < $p          # read string
-let s    = from-lines  < $p          # read Step String
+let s    = from-lines  < $p          # read Stream String
 let xs   = from-lines-list $p        # read list of lines
 let v    = from-json   < $p          # read JSON
 let b    = from-bytes  < $p          # read raw bytes
@@ -1864,7 +2037,7 @@ across modes: scripts run identically under any of them.
 
 Most builtins are registered with their clean names directly and are
 the canonical user-facing commands.  A few carry a leading `_` to mark
-them as implementation primitives consumed by the prelude (§16.3).
+them as implementation primitives (§16.3).
 Return-type rules follow §4.2.
 
 Hosts may also register static host builtins: Rust atoms owned by the
@@ -1872,7 +2045,8 @@ embedding process rather than by `ral-core`.  A host entry carries its
 names, call function, computation hint, arity, documentation, and
 optional type scheme together.  Registration rejects collisions with
 core names or earlier host names, while re-registering the same static
-table is a no-op.  The `ral` REPL uses this for `_ed-*`; `exarch` uses
+table is a no-op.  The `ral` REPL uses this for `_ed-*`,
+`load-plugin` / `unload-plugin`, and job control (§18); `exarch` uses
 it for agent atoms such as `grep-files`, `line-hash`, `explore-dir`, and
 `edit-hash`.  Those exarch names are not core ral features.
 
@@ -1881,15 +2055,27 @@ it for agent atoms such as `grep-files`, `line-hash`, `explore-dir`, and
 | Builtin | Purpose |
 |---|---|
 | `fail` | Raise a failure with an error record `fail [status: N, message?: M, ...]`; `fail $e` re-raises a caught error verbatim (`fail [status: 0]` is an error) |
-| `echo` | Write UTF-8 bytes plus newline to stdout; at a value boundary the final line is captured as `String` |
 | `source`, `use` | §8 |
 | `glob` | Sorted path glob |
 | `length` | Length of list, map, string, or bytes |
 | `keys` | Map keys in sorted order |
 | `has` | Test map membership |
 | `ask` | `/dev/tty` prompt; fails on EOF |
-| `which` | Resolve lookup target; `String` or failure |
 | `cwd` | Current directory as `String` |
+| `help` | Arity 0; print an overview of builtins, prelude, and library |
+| `explain` | Arity 1; doc, type signature, and source location for one name |
+| `clear`, `reset` | Arity 0 terminal control, returning `Unit`; an argument is an arity error |
+| `round` | `round <x> <places>` — round a `Float` to `<places>` decimal places (0..308), halves away from zero; always returns a `Float` |
+| `floor`, `ceil`, `trunc` | Map a `Float` to the `Int` in the named direction; all four rounding builtins reject an `Int` at the type level (it is already rounded) and refuse non-finite or out-of-range inputs |
+| `from-csv`, `to-csv` | CSV codec pair on the §15 codec discipline: `from-csv` decodes channel bytes to a list of header-keyed records (every field a `String`); `to-csv <records>` emits a header plus one row per record, columns being the first record's keys in sorted order |
+
+`echo` is surface syntax, not a builtin: unless the name is locally
+bound (a user binding shadows the sugar), the elaborator lowers
+`echo a b …xs` to `to-line !{intercalate ' ' [str a, str b, …]}`,
+with a spread becoming `map str $xs`.  Each argument is rendered with
+`str` and the space-joined line follows the byte/value boundary rules
+of §4.3 — bytes plus newline to stdout; at a value boundary the final
+line is captured as `String`.
 
 ### 16.2  Predicates
 
@@ -1901,15 +2087,13 @@ All return `Bool`, and a `false` return is itself successful:
 ### 16.3  Underscore-prefixed builtins
 
 A few builtins carry a leading `_` to mark them as implementation
-internals — the prelude wraps them, and user scripts should not call
-them directly:
+internals that user scripts should not call directly:
 
-| Builtin | Wrapped by | Purpose |
-|---|---|---|
-| `_type` | — | Compile-time type-annotation passthrough |
-| `_ed-*` | — | REPL line-editor interface (§18.1) |
-| `_plugin` | Prelude `load-plugin` / `unload-plugin` | Plugin lifecycle (§18.1) |
-| `_ansi-ok` | — | Probe for ANSI terminal support |
+| Builtin | Purpose |
+|---|---|
+| `_type` | Compile-time type-annotation passthrough |
+| `_ed-*` | REPL line-editor interface (§18.1) |
+| `_ansi-ok` | Probe for ANSI terminal support |
 
 Everything else (collections, strings, codecs, filesystem queries,
 control flow, concurrency, predicates, shell state) is registered
@@ -1917,7 +2101,7 @@ with its clean name directly — `map`, `filter`, `fold`, `each`,
 `sort-list`, `sort-list-by`, `range`, `upper`, `lower`, `re-split`,
 `re-match`, `re-replace`, `string-replace`, `glob`, `exists`,
 `int`, `float`, `str`, `spawn`,
-`await`, `poll`, `fail`, `par`, and so on.  The five scope operators
+`await`, `poll`, `fail`, `race`, and so on.  The five scope operators
 (`within`, `grant`, `try`, `guard`, `audit`) are *not* builtins; they
 are control-operator keywords with dedicated grammar arms (§1) and
 dedicated typing rules.  The regex-backed builtins are namespaced with the `re-` prefix
@@ -1979,9 +2163,42 @@ other binding, a prelude name is implicit in head position and
 explicit elsewhere through `$` (§4), and currying (§4.5) supports
 partial application of any parameterised one.
 
-The canonical source is `core/src/prelude.ral`.  A normative listing
-will appear in this section once the surface is stable; until then,
-treat the source file as authoritative.
+The canonical source is `core/src/prelude.ral`, which remains
+authoritative for bodies and doc comments.  The current surface,
+grouped:
+
+  - **Control flow and lists.**  `for` (`for <list> <fn>`, the
+    argument-flipped `each`), `reduce`, `reverse`, `last`,
+    `take-while`, `drop-while`, `take`, `drop`, `first`, `elem`,
+    `nub` (de-duplication by `equal`, first-seen order), `zip`,
+    `flat-map`, `enumerate`, `concat`, `sum`, `id`, `cross`
+    (cartesian product of two lists, each pair combined by a
+    two-argument block), `group-by` (string-keyed partition,
+    first-seen order within each group), and `median-by` / `median`
+    (the element at the median key, lower-middle on even length,
+    failing on the empty list).
+  - **Strings.**  `lines` and `words` (edge empties trimmed),
+    `indent n s` (prepend `n` spaces to every non-empty line of `s`,
+    composing with `dedent`, §5), and `bytes-to-string` (the decoder
+    round-trip `to-bytes $b | from-string` as a named shorthand).
+  - **Maps.**  `get` (lookup with default), `entries`, `values`,
+    `union`, `intersection`, `difference`.
+  - **Errors and concurrency.**  `retry`, `attempt`, `succeeds`,
+    `par`, `is-done`, and `defer` (spawn a thunk wrapped in `audit`,
+    so failure is data in the audit tree and `await` on the handle
+    never re-raises).
+  - **Filesystem queries.**  `line-count`, `file-empty`.
+  - **Streams and line I/O.**  `stream-cons`, `stream-nil`,
+    `stream-to-list`, `stream-take`, `stream-drop`, `stream-map`,
+    `stream-fold`, `stream-each`, `from-lines-list`, `map-lines`,
+    `filter-lines`, `each-line`.
+  - **JSON Lines.**  `from-jsonl`, a 0-arity decoder over the byte
+    channel (§15) yielding a Stream of values — only the per-line
+    decode is lazy, so it gives no bounded-memory guarantee over a
+    very large source — and `to-jsonl <items>`, one compact JSON
+    value per line.
+  - **Terminal styling.**  The `ansi-*` constants (empty strings when
+    stdout lacks ANSI support) and `styled <code> <text>`.
 
 ## 18  Interactive layer
 
@@ -2000,6 +2217,18 @@ its process group.  At the prompt, it discards the current line and
 redraws.  In a non-interactive script, it begins the unwinding
 process described in §10.7.
 
+**Value display.** A REPL turn that produces a value echoes it back
+through the shared value pretty-printer — the same renderer exarch's
+value channel uses, tuned per surface.  Collections print bracketed,
+inline while they fit the width and one entry per line beyond it;
+nesting past a fixed depth collapses to a count marker
+(`[...N items]`, `[:...N pairs]`); and a long string sitting directly
+on a map key is elided to a head and tail around an
+`[…elided N characters…]` marker.  List items and top-level strings
+print whole.  The `theme` key of `~/.ralrc` (§9) sets the prefix and
+colour.  Runtime errors print as full diagnostics — message, exit
+status, source span, and hint — exactly as a batch run renders them.
+
 ### 18.x  Job control (Ctrl-Z, `fg`, `bg`, `jobs`, `disown`)
 
 Pressing Ctrl-Z while a foreground external command is running parks
@@ -2008,14 +2237,26 @@ the prompt re-appears, and a notification of the form
 `[N] stopped\t<cmd> (SIGTSTP)` is printed where `N` is the job number.
 
 `jobs` lists every parked or backgrounded job: id, state
-(`running`/`stopped`), pgid, and the original command line.  `fg [N]`
-resumes job `N` (or the most recent if omitted) in the foreground:
+(`running`/`stopped`), pgid, and the original command line.  It then
+folds in the shell's registered worker handles (§13.4) — `spawn`,
+`watch`, and the trailing `&` — marked `[wN]`, a designator namespace
+of its own so it never collides with a pgid job's `[N]`, shown
+`running (worker)` while live and `done (worker)` once settled but
+unclaimed, until an eliminator observes the entry away; listing
+mutates nothing.  `fg [N]` resumes job `N` (or the most recent if
+omitted) in the foreground:
 SIGCONT is sent to the whole pgid, the controlling terminal is handed
 back, and the wait drains exits and re-stops via `waitpid(-pgid,
 WUNTRACED)`.  `bg [N]` resumes a stopped job in the background.
 `disown [N]` removes the job from the table without signalling it; on
 shell exit, surviving jobs are sent SIGTERM, given five seconds, then
-SIGKILLed.
+SIGKILLed.  `fg`, `bg`, and `disown` are pgid-only: naming a worker's
+`wN` fails, with the error pointing at the worker analogues — `await`
+is a worker's `fg`, `cancel` its kill.  A still-running worker has no
+pgid to sweep and dies with the process, so before the exit sweep the
+REPL names the survivors once on stderr (`ral: N workers still
+running and will not survive this exit: …`); the warning never gates
+or delays exit.
 
 What ral deliberately does *not* do, contrary to bash:
 
@@ -2059,7 +2300,7 @@ binding.
     name: Str,
     capabilities: [exec: …, fs: …, net: …, editor: …, shell: …],
     hooks: [event-name: {handler}],
-    keybindings: [[key: Str, handler: {F Bool}]],
+    keybindings: [[key: Str, handler: {Map → F Any}]],
     aliases: [name: {[Str] → F Any}],
 ]
 ```
@@ -2083,16 +2324,18 @@ time and removed at unload.  An alias name collision with an existing
 `rc` or plugin-registered alias is a load-time error. An alias whose
 name is a lexical/prelude/builtin binding is a load-time error.
 
-**`_plugin 'load' <name-or-path> [<options-map>]`** resolves a plugin
-file (`~/.config/ral/plugins/$name.ral`, `$RAL_PATH`, or a literal
-path), evaluates it, and registers the resulting plugin. If the
-module's return value is a block, the options map is applied to it
-as a single argument to obtain the manifest; if omitted it defaults
-to `[:]`. If the module returns a manifest map directly, a non-empty
-options map is a load-time error.  **`_plugin 'unload' <name>`**
-removes it.
+**`load-plugin <name-or-path>`** resolves a plugin file
+(`~/.config/ral/plugins/$name.ral`, `$RAL_PATH`, or a literal path),
+evaluates it, and registers the resulting plugin.  If the module's
+return value is a block, the options map is applied to it as a
+single argument to obtain the manifest; the interactive builtin
+passes none (it defaults to `[:]`) — options are supplied through
+the `~/.ralrc` `plugins:` entries below.  If the module returns a
+manifest map directly, a non-empty options map is a load-time error.
+**`unload-plugin <name>`** removes it.  Both are host builtins
+registered by the ral REPL (§16), not core builtins.
 
-**`_str 'shell-quote' <s>`** and **`_str 'shell-split' <s>`** form a
+**`shell-quote <s>`** and **`shell-split <s>`** form a
 POSIX-style round-trip pair.  `shell-quote` returns one argument in a
 form a compatible shell parser will re-read as a single argument;
 `shell-split` tokenises a shell-quoted string back into a list of
@@ -2103,7 +2346,8 @@ but stable enough to round-trip ordinary text arguments.
 **The `_ed-*` family** provides the line-editor interface for plugin
 handlers.  Every op is its own builtin (no string-op dispatch); each
 is inert in non-interactive contexts (a call from a non-REPL script
-raises).  All are gated by the `editor` capability (§11.5).
+raises).  All but `_ed-hyperlink` — a string-shaping operation, not
+an editor mutation — are gated by the `editor` capability (§11.5).
 
 | Builtin | Gate | Description |
 |---|---|---|
@@ -2122,6 +2366,8 @@ raises).  All are gated by the `editor` capability (§11.5).
 | `_ed-parse` | read | tokenize buffer at cursor → `[words, current, offset]` |
 | `_ed-ghost` | write | `<text> →` set/clear ghost (hint) text |
 | `_ed-highlight` | write | `<spans> →` set highlight spans `[{start, end, style}]`; empty list clears |
+| `_ed-clipboard` | write | `<text> → Bool` — OSC 52 system-clipboard write; `false` when the host terminal can't |
+| `_ed-hyperlink` | — | `<uri> <text> → Str` — wrap text in an OSC 8 hyperlink; plain text when the terminal can't render one |
 | `_ed-state` | write | `<default> <updater> →` per-plugin persistent cell, read-modify-write |
 
 `_ed-tui` installs a capture buffer around the body using the same
@@ -2136,27 +2382,32 @@ error message in `output` and the failure status in `status` —
 so plugins can switch on `status` without wrapping the call in
 `try`.
 
-**Hooks.** Five events fire at well-defined moments, with handlers
-called as thunks against the real `Env` (not a snapshot) and wrapped
-in `grant`.  `buffer-change` (`{Str → Str → Int → F Unit}`) fires on
-each keystroke that changes the buffer; `pre-exec` (`{Str → F Unit}`)
-runs before command evaluation and `post-exec` (`{Str → Int → F
-Unit}`) runs after, receiving the exit status; `chpwd` (`{Str → Str
-→ F Unit}`) fires after `cd` with the old and new paths; and
-`prompt` (`{Str → F Str}`) runs just before the prompt is drawn,
-receiving the base prompt and returning the rendered one.
+**Hooks.** Five events fire at well-defined moments.  Every handler
+takes exactly one parameter — arity is checked at registration and a
+mismatch is a load-time error (the rc `prompt:` *body* is the one
+zero-parameter form).  `buffer-change` (`{Map → F Unit}`) fires on
+each keystroke that changes the buffer, receiving
+`[old_buf: Str, line: Str, pos: Int, history: [Str], keymap: Str,
+state]`; `pre-exec` (`{Str → F Unit}`) runs before command
+evaluation, receiving the source line, and `post-exec` runs after it;
+`chpwd` (`{Map → F Unit}`) fires after `cd`, receiving
+`[old: Str, new: Str]`; and `prompt` (`{Str → F Str}`) runs just
+before the prompt is drawn, receiving the base prompt and returning
+the rendered one.
 
 `buffer-change` hooks fire inside the line editor with the runtime
 lock released, so handlers must communicate through plugin context
 rather than shared state to avoid reentrancy; `_ed-tui` is rejected
 from inside one.
 
-**Keybinding dispatch.** Handlers are tried in reverse load order:
-returning `true` consumes the key, `false` passes it to the next
-handler or to built-in editing.  An error is treated as a consume
-and is logged.
+**Keybinding dispatch.** A chord is owned by exactly one handler —
+the most recently loaded plugin that binds it.  The handler receives
+one context record, `[line: Str, cursor: Int, history: [Str],
+keymap: Str, state]`, and acts through the `_ed-*` ops; its return
+value is not consulted.  An error is logged above the next prompt
+and the line returns to editing.
 
-The two write sub-commands `accept` and `push` interact with the
+The two write ops `_ed-accept` and `_ed-push` interact with the
 prompt's lifecycle.  `accept` marks the current buffer for immediate
 execution once the handler returns, in place of re-entering the line
 editor; `push` saves the buffer and clears it, restoring it on the
@@ -2166,8 +2417,8 @@ like fzf-driven directory hops.
 
 **`~/.ralrc` integration.** The RC map gains an optional `plugins`
 key, a list of `[plugin: Str, options?: Map]` entries loaded at
-startup, equivalent to calling `_plugin 'load' name options` for
-each.  `options`, when present, is passed as the single argument to
+startup through the same resolution path as `load-plugin`.
+`options`, when present, is passed as the single argument to
 the plugin's top-level block:
 
 ```
@@ -2289,15 +2540,47 @@ SCC is generalised at the binding point, while a mutually recursive
 SCC is monomorphic within its group and generalised only after the
 fixed point is reached.
 
+Handler thunks in a `within [handlers: …]` map are typechecked under
+the calling convention of §3.2 (a unary lambda receiving the argv
+list), each inferred exactly once; inside the body, a call to a
+handled name is typed against the handler's generalised result rather
+than the external-command signature, with the handler's pipeline
+modes pinned to the head it reinterprets.  The catch-all `handler:`
+is likewise checked for well-typedness, but binds nothing — it
+matches all names, so the type system can say nothing specific about
+any of them.
+
 ### 20.6  Type errors
 
-A type error aborts the program with exit status 1, and the message
-carries the source position together with the expected and inferred
-types:
+A type error aborts the program with exit status 1.  Each error is
+data before it is prose: a **kind** — the structural cause (type
+mismatch, missing row field, wrong builtin arity, …), carrying a
+stable code in the `T0002`–`T0062` range — paired, for constraint
+failures, with a **reason** recording why the two types were required
+to agree (an `if` condition against `Bool`, adjacent pipeline stages,
+an argument against a parameter, …).  The diagnostic layer renders
+the pair as a caret-annotated report: code, message, source span,
+and, when the kind and reason admit one, a hint:
 
 ```
-script.ral:12:5: type error: type mismatch: Int vs String
+[T0010] Error: couldn't match type Integer with type Bool
+   ╭─[ script.ral:1:4 ]
+   │
+ 1 │ if 1 { return 42 } else { return "hello" }
+   │    ┬
+   │    ╰── Integer doesn't match Bool
+   │
+   │ Help: the condition of an `if` must be a Bool — either
+   │       `true`/`false` or an expression that produces one
+───╯
 ```
+
+Mismatch messages are symmetric — "couldn't match X with Y" rather
+than expected/actual — because the orientation depends on which side
+raised the constraint.  Every checking path runs the same
+typechecker: a REPL turn, `source`, a script run, and the baking of
+the prelude itself, so an ill-typed prelude definition is a build
+failure rather than a latent error.
 
 ### 20.7  Row polymorphism and record types
 

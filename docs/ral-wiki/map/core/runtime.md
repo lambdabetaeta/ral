@@ -1,17 +1,17 @@
 ---
-generated_at_commit: 110771c
-generated_at_date: 2026-07-02
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
 # Map: core / runtime
 
 `core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
-dispatches into — command execution, pipeline orchestration, and the local-vs-
-confined transport choice. It re-enters evaluation only through `call::invoke`,
+dispatches into — command execution, pipeline orchestration, and the
+per-child confinement choice. It re-enters evaluation only through `call::invoke`,
 `eval_block`, and `absorb_tail`; the evaluator reaches it at
-`pipeline::run_pipeline`, `command_call::run_call`, the `command` redirect
-guards, and `transport::dispatch`
+`pipeline::run_pipeline`, `command_call::run_call`, and the `command` redirect
+guards
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `command_call.rs` — `run_call`, the single site that resolves a head
@@ -109,9 +109,10 @@ guards, and `transport::dispatch`
     edges are data-last application, the producer
     forced once by `force_pipe_value`
     ([[decisions/260609_pure-pipe-equation|pure-pipe-equation]]).
-- `transport.rs` — the local-run router for the boundary verbs. **A `grant` is a
-  dynamic effect scope, not a process boundary, so the grant body always
-  evaluates locally** ([[decisions/260610_value-edge-locality|value-edge-locality]]):
+- **A `grant` is a dynamic effect scope, not a process boundary, so the grant
+  body always evaluates locally** — the boundary verbs (`eval_top_level` /
+  `eval_block`) run their body in process, with no router in between
+  ([[decisions/260610_value-edge-locality|value-edge-locality]]):
   nested grants compose by intersection over authority, an algebra of the
   evaluator's dynamic context. Confinement happens elsewhere — the
   RAL-owned effects are decided in process by `capability::check_*`
@@ -140,5 +141,3 @@ guards, and `transport::dispatch`
 
 The `Shell` state these thread is [[map/core/shell-state|shell-state]]; the serde
 mirror and wire envelope they ride is [[map/core/transport|transport]].
-</content>
-</invoke>

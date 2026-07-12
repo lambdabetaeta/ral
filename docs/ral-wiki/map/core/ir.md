@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -49,6 +49,11 @@ the evaluator reads.
 `TildePath`). `IrPattern = Pattern<Arc<Comp>>` — the same `Pattern` shape as the
 AST, but map-pattern defaults are pre-elaborated computations, so no parser syntax
 leaks through ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
+
+`referenced_names` (`pub(crate)`) collects a compiled program's variable and
+command-head names in one exhaustive, wildcard-free walk — the use-observation
+signal the [[map/core/shell-state|binding-lease ledger]] renews on
+([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 
 This shape is what the prelude bake serialises with `postcard`; adding a field to
 `CompKind`, `Val`, or `Pattern` invalidates every emitted blob (see

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/prelude.ral]
 ---
 
@@ -8,14 +8,17 @@ covers_paths: [core/src/prelude.ral]
 
 `core/src/prelude.ral` is the standard library, written in ral and baked into the
 binary at build time. `build.rs` reads it, scans its top-level `let` bindings
-into `PRELUDE_EXPORTS`, and the consumer build scripts serialise the elaborated
-IR as a `postcard` blob (the schema hazard documented in `core/src/lib.rs`). It
+into `PRELUDE_EXPORTS`, and the consumer build scripts serialise the annotated
+IR — typechecked by the same `bake_prelude` path the runtime uses,
+[[map/core/typecheck|typecheck]] — as a `postcard` blob (the schema hazard
+documented in `core/src/lib.rs`). It
 is evaluated once per process and its bindings are cloned into every fresh
 environment ([[map/core/builtins|register]]).
 
 The prelude holds the *library-level* surface: higher-order list and string
 combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,
-`enumerate`, `flat-map`, `zip`, `cross`, `group-by`, `median-by`, `lines`, `words`, `map-lines`, the `stream-*`
+`enumerate`, `flat-map`, `zip`, `cross`, `nub`, `group-by`, `median-by`,
+`lines`, `words`, `indent`, `map-lines`, `defer`, the `stream-*`
 eliminators, …) layered over the directly-registered Rust builtins (`each`,
 `map`, `filter`, `fold`, …). These are ordinary [[design/cbpv|values]] of fixed
 arity ([[invariants/fixed-arity|fixed-arity]]).

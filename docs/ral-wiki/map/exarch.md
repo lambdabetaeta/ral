@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e5ce15
-generated_at_date: 2026-06-24
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -8,8 +8,9 @@ covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, e
 
 exarch is a small LLM coding agent — a separate workspace binary that
 **embeds** [[map/core|ral-core]] (`ral-core = { path = "../core" }`). A model
-(Anthropic / OpenAI / OpenRouter / DeepSeek, or a signed-in ChatGPT account) is
-given one `shell` tool, and each call is evaluated as a *ral top-level turn*
+(Anthropic / OpenAI / Gemini / xAI / Qwen / OpenRouter / DeepSeek / OpenCode, a
+`custom` provider, or a signed-in ChatGPT account) is
+given one `ral` tool, and each call is evaluated as a *ral top-level turn*
 against a persistent in-process `Shell`, under capabilities the user chose. It
 ships as one executable ([[invariants/single-binary|single-binary]]); the same
 binary re-execs itself as the [[map/core/capabilities|OS sandbox child]].
@@ -38,8 +39,10 @@ crate) is the session path; `main.rs` is the thin shell over it.
 - **Subcommands** (`cli.rs`) run an out-of-band action and exit before any session
   setup: `login` / `logout` / `accounts` manage signed-in ChatGPT accounts (see
   below), `--model` and the session flags are ignored on this path.
-- **Session.** Absent a subcommand, `run` resolves the initial provider+model,
-  composes the capability lattice (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
+- **Session.** Absent a subcommand, `run` resolves the initial provider+model
+  (`--provider` pins the identity; `--effort` sets reasoning effort; `--chat`
+  drops the system prompt and all tools), composes the capability lattice
+  (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the trunk
   [[map/exarch/agent|`Agent`]] + `Provider`, and hands off to one frontend — the
   inline TUI or, under `--headless`, the pipe-friendly headless runner — which
@@ -95,7 +98,7 @@ can inherit a live key.**
   exarch's host builtins and source the `agent.ral` library, register its docs,
   suppress ANSI colour at the source, and seed the exit hints.
 - **Machine probing** — `host::snapshot` formats the live machine into the
-  prompt'\''s `Host` section over core'\''s `ral_core::host` probes (`os`, `now`, `cwd`,
+  prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
   `user`, `home`, `git`, `exarch logs`), best-effort: a missing value drops its line.
 - **`Scratch`** — the disposable per-session directory exposed as
   `$EXARCH_SCRATCH`, with the legacy build-tool homes (`CARGO_HOME`, …) redirected
@@ -111,40 +114,48 @@ can inherit a live key.**
 ## System prompt
 
 `prompt::assemble` builds the prompt from `(heading, body)` sections walked by one
-uniform renderer, in order **persona, `Grant`, `Host`, `Ral`, `Script style`,
-[`Workspace`], [`Headless`]**.
+uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`, `Tasks`,
+`Script style`, `Host`, [`Workspace`], [`Skills`], `Agent`|`Surfacing`**.
 
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
-  the session as a *progressively expanding script of reusable definitions*: the
-  agent saves what it searches for in a definition, and definitions, working
-  directory, and concurrent threads persist across turns.
-- **`Grant`** sits directly under the persona, before the tool reference tempts
-  the model to reach for authority it lacks: a static legend (`data/grant-legend.md`)
-  over the live capability bullets (or one ambient-authority line when nothing is
-  attenuated). The set of builtins is *not* listed — the agent discovers it at
-  runtime with `help`, so the prompt cannot drift.
-- **`Ral`** (`data/ral.md`) is the language reference, framed around definitions
-  rather than bindings; its handler docs follow the lambda-only install rule
+  the session as *one continuing shell script*: definitions, working directory,
+  and worker threads persist across turns, and the working method is act early,
+  batch what belongs together, never re-derive.
+- **`Ral`** (`data/ral.md`) is the language and tool reference; its handler docs
+  follow the lambda-only install rule
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]):
   per-command `handlers:` entries are unary `{ |args| … }`, the catch-all
-  `handler:` binary `{ |name args| … }`. Its `## Surfacing` section teaches the
-  five Bertin marks and the role set ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
-  → [[map/exarch/cards|cards]]).
+  `handler:` binary `{ |name args| … }`.
+- **`Editing`** documents the file-editing scheme the `--edit` flag selects:
+  line-hash (`data/edit-hash.md`) or string-replace (`data/edit-replace.md`);
+  only the prompt text switches, both builtins stay registered
+  ([[design/hash-addressed-editing|hash-addressed-editing]]).
+- **`Builtins`** (`builtin_index`) lists every builtin and prelude function by
+  *name only* — a progressive-disclosure index the agent expands at runtime with
+  `help`/`explain`, so the prompt cannot drift.
+- **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
   a nervous probe — define then query, parameterised blocks, records for knobs,
-  blocks as policy, long-running work behind `spawn`/`await`.
+  blocks as policy, long-running work behind `defer`/`await`.
+- **`Host`** is the environment snapshot (`host::snapshot`, [[#Bootstrap]]) with
+  the live grant under it: a static legend (`data/grant-legend.md`) over the
+  capability bullets, or one ambient-authority line when nothing is attenuated.
 - **`Workspace`** (`discover_agents`) collects the `AGENTS.md` instruction files,
   outermost first so the deepest file's recency wins: the operator's
   `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd
   (the walk stops at the first `.git` entry; outside a repo, only `cwd/AGENTS.md`).
-  Present whenever any is found; project guidance that cannot widen the `Grant`
+  Present whenever any is found; project guidance that cannot widen the grant
   ([[design/agents-md-injection|agents-md-injection]]).
-- **`Headless`** (`data/headless.md`) is appended last under `--headless`, where
-  recency carries, warning that assistant prose now *is* the output.
+- **`Skills`** lists each discovered readable skill as one `name: description`
+  line, loaded on demand with the `skill` builtin — progressive disclosure again.
+- The closing section is chosen by mode, last where recency carries: headless
+  gets **`Agent`** (`data/agent.md`), the `reply` return-channel contract;
+  interactive gets **`Surfacing`** (`data/surface.md`), the five Bertin marks and
+  the role set ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
+  → [[map/exarch/cards|cards]]).
 
-`--system FILE...` collapses the persona, `Ral`, and `Script style` slots into one
-user-supplied section (the user takes responsibility for the tool reference);
-`Grant`, `Host`, `Workspace`, and a headless `Headless` still surround it.
+`--system FILE...` replaces *only* the persona slot with the user-supplied files;
+every other section stands.
 
 ## Subsystems
 
@@ -158,7 +169,10 @@ user-supplied section (the user takes responsibility for the tool reference);
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — the tool registry: `ral`, the universal spawn family, `reply`, the schedule family, `fff`; one axis (`replies`) gates the conversing trunk vs every returning agent. The sub-agent model this axis describes is [[design/agents|agents]].
+- [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family
+  (`amnemon`/`mnemon`, fuel-gated), `reply`, the schedule family; the `Returns`
+  gate separates the conversing trunk from every returning agent. The sub-agent
+  model is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms: the hash-addressed edit
   primitives and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and
@@ -172,14 +186,15 @@ user-supplied section (the user takes responsibility for the tool reference);
 
 ## Sandbox
 
-exarch does not invent its own sandbox. Each turn is evaluated under a
-**profile's capabilities pushed onto ral's capability stack** —
-`Shell::with_capabilities(caps, |s| eval_top_level(…, s))` — so the safety
+exarch does not invent its own sandbox. Each tool call is one transport `Turn`
+carrying the **profile's capabilities in `Turn.caps`**, dispatched across the
+host seam (`shell_eval::run_shell`, → [[map/exarch/shell-eval|shell-eval]]) and
+pushed onto ral's capability stack by core's turn door — so the safety
 boundary *is* ral's [[design/grant|grant]] mechanism — authority attenuated by
 intersection. There is no source-level `grant { … }` the model could escape;
 the frame is installed by the host. Profiles ship as `.exarch.ral` files in
-`exarch/data/` (`dangerous`, `reasonable`, `read-only`, `minimal`, `confined`);
-see `exarch/PROFILES.md` and [[map/exarch/policy|policy]].
+`exarch/data/` (`dangerous`, `reasonable`, `edit-only`, `read-only`, `minimal`,
+`confined`); see `exarch/PROFILES.md` and [[map/exarch/policy|policy]].
 
 ## Scheduled wakeups
 
@@ -194,9 +209,10 @@ indefinitely is real authority. The inbox/reaper mechanics live on the
 
 ## Where to look
 
-- `exarch/data/{system.md, ral.md, script-style.md, grant-legend.md, headless.md, agent.ral}` —
-  the persona rules, ral reference, reusable-script guide, grant legend, headless
-  warning, and the embedded agent helper library.
+- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, grant-legend.md, surface.md, agent.md, agent.ral}` —
+  the persona rules, ral reference, editing schemes, task kit, reusable-script
+  guide, grant legend, surfacing guidance, headless reply contract, and the
+  embedded agent helper library.
 - Provider configuration — a famous provider auto-populates from its env key, an
   unusual one from a hand-written XDG `config.ral`
   ([[decisions/260613_provider-config-ral-script|provider-config-ral-script]]).

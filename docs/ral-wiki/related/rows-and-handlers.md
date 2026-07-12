@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a590f4f
-verified_at_date: 2026-06-18
+verified_at_commit: 668499f
+verified_at_date: 2026-07-12
 against: [design/effects-handlers, design/row-types, design/types, design/scoping]
 ---
 
@@ -25,9 +25,15 @@ type records and variants, never computations.
   `ℓ ∉ BL(E)` side condition); handlers are deep — the clause's continuation is
   re-wrapped in the same handler. That is ral's
   [[internals/handler-dispatch|handler-dispatch]]: innermost-first lookup,
-  frame fall-through, deep frames. The machines part only at the reify point —
+  frame fall-through, deep frames. The machines part at the reify point —
   their generalised CEK captures the unwound frames as a first-class `k`; ral
-  resumes in place and never reifies.
+  resumes in place and never reifies — and at the clause interface: a Links
+  handler binds each operation's arguments positionally, at the types its
+  effect row assigns them; a ral handler is one lambda per name, unary over
+  the argv as a single `List α`, the catch-all binary over name and argv, its
+  arity fixed by the install site
+  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]],
+  [[decisions/260622_functions-and-handlers|functions-and-handlers]]).
 - **Equations are dropped on both sides.** "As with most other implementations
   of effect handlers, we do not consider equations" — ral agrees, with the
   sharper reason that its external-command theory is free

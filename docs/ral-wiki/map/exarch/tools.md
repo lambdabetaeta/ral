@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5d9f588
-generated_at_date: 2026-07-03
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
 
@@ -33,8 +33,10 @@ The tools that ship:
   synchronously, through [[map/exarch/shell-eval|`run_shell`]]. Its input is a
   required `cmd` (the ral source) and a required one-line `description` (shown on
   the [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
-  tool-call block). A fixed 30s call timeout bounds inline work; anything longer
-  belongs in a `spawn` that outlives the turn.
+  tool-call block; oversize descriptions are truncated, never rejected). An
+  optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
+  (60s) — a default, not a cap: raise it for known-long work, or `spawn` what
+  should outlive the turn.
 - `commit` / `verify_commitment` (`tools/commitment.rs`) — the write and check
   halves of a protected `commitment:*` pin
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
@@ -77,8 +79,8 @@ The tools that ship:
   model memory: `amnemon` is tabula rasa, while `mnemon` imports the parent's
   model-visible context and appends the tool call's prompt as the child's fresh
   final prompt. Both take a **mandatory `permissions`** parameter — one of the
-  five [[map/exarch/policy|base]] names (`confined`, `minimal`, `read-only`,
-  `reasonable`, `dangerous`) — so every spawn states the child's ceiling
+  six [[map/exarch/policy|base]] names (`confined`, `minimal`, `read-only`,
+  `edit-only`, `reasonable`, `dangerous`) — so every spawn states the child's ceiling
   explicitly. The child is born with `parent ⊓ resolve_base(permissions)`
   (`policy::narrow`): a lattice *meet*, so the base can only **narrow** the child
   below the parent, never escalate it past the parent's authority — naming a base
@@ -100,7 +102,7 @@ The tools that ship:
   the focused agent's `fuel` is below 2 — the chair needs a unit to be born and
   a second to spawn its own partner
   ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
-- `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
+- `reply` (`tools/reply.rs`), gated by `Gate::Returns` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
   extended to the headless trunk by
   [[decisions/260623_reply-terminates-returning-agents]]). Its `result` argument
@@ -113,18 +115,11 @@ The tools that ship:
   writes the structure faithfully to its json `result`.
   `reply` is the *sole* return path — there is no prose scrape — so a returning
   agent that never calls it returns nothing and fails (re-nudged within the
-  [[map/exarch/agent|nudge]] budget first). Withheld only from the conversing
-  (interactive) trunk.
+  [[map/exarch/agent|nudge]] budget first). Withheld only from conversing
+  nodes — the interactive trunk and each `/branch` tab.
 - the **schedule family** — `schedule` / `schedules` / `unschedule`
   (`tools/schedule.rs`) — self-armed wakeups (a cron expression or `after <dur>`)
   posted into the agent's *own* inbox. Gated by schedule authority, so a
   sub-agent may wake itself when the trunk was launched `--allow-schedule`.
-- `fff` (`tools/fff.rs`) — frecency-ranked fuzzy filename search over the working
-  tree via the `fff-search` crate. The first call per directory blocks on a
-  background scan, then caches a `FilePicker` (scan thread + filesystem watcher)
-  in a process-global registry keyed by canonical path; later calls — including
-  forked children sharing the cwd — reuse the live index. Databases live under a
-  per-pid `$TMPDIR` directory.
-
-Editing and content search are *not* tools: the model runs them as ral host
-atoms inside `ral` — see [[map/exarch/builtins|builtins]].
+Editing, content search, and filename search (`fff`) are *not* tools: the model
+runs them as ral host atoms inside `ral` — see [[map/exarch/builtins|builtins]].

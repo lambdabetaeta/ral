@@ -1,75 +1,82 @@
 ---
-generated_at_commit: d501492
-generated_at_date: 2026-07-06
-covers_paths: [exarch/src/agent_builtins.rs, exarch/data/agent.ral]
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
+covers_paths: [exarch/src/agent_builtins.rs, exarch/src/agent_builtins/, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
 
 exarch's **resident host atoms and the thin ral helpers over them** — the
-search, line-witness, and edit surface the model reaches through the `shell`
+search, line-witness, and edit surface the model reaches through the `ral`
 tool. The Rust atoms register above ral-core and core never inspects them
 ([[internals/builtins-registry|builtins-registry]];
 [[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]). The
 *why* of witnessed editing is
 [[design/hash-addressed-editing|hash-addressed-editing]].
 
-The shared identity is the *witness*: a `line_hash` is the letter `h` followed
-by six hex of a Blake3 digest of a line with trailing whitespace stripped, and a
-`window-hash` folds that over a line and its ±3 neighbours. The `h` prefix keeps
-the witness un-lexable as an integer, so a hash never elaborates to `Val::Int`
-and silently fails to compare against the recomputed `String`
+The shared identity is the *witness*: the letter `h` followed by six hex of a
+Blake3 digest (trailing whitespace stripped), computed over the smallest
+symmetric window of neighbouring lines — at least ±`MIN_RADIUS` (5), grown until
+it names the line uniquely, falling back to the absolute index past
+`MAX_RADIUS` — with the target's offset and the radius folded in
+(`window_hashes`, an *adaptive-context* witness). The hashing is private Rust:
+the model never constructs a witness, only copies one from `view-text` into
+`edit-hash`, and both derive identical witnesses from identical content. The `h`
+prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
+`Val::Int` and silently fails to compare against the recomputed `String`
 ([[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]).
 
 ## Rust atoms — `agent_builtins.rs`
 
 `EXARCH_BUILTINS` is the slice `agent_builtins::install_on` registers into the
-shell (called by `bootstrap::boot_shell` and by the sandbox-IPC child's shell
-extension). The bulk-I/O atoms read in Rust, **below the redirect frame**, so
-each is one logical operation that surfaces once and never raises a per-file
-read or write io card ([[map/exarch/io-surface|io-surface]]).
+shell, together with core's host-selected `SERVICE_BUILTIN`
+(`AGENT_BUILTIN_SETS`, the one source of truth); it is called by
+`bootstrap::boot_shell` and named as the wire engine child's builtin installer.
+The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
+logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 
-- `line-hash <s>` → `String`. The `h`-tagged six-hex Blake3 of a single line —
-  the irreducibly-Rust digest the whole witness layer is built from. Numbering,
-  slicing, and tagging compose in ral; only the digest cannot.
-- `window-hash <rows> <i>` → `String`. The witness for line `i` (0-indexed) of
-  the row list: the `line-hash` of the ±3 neighbours' own `line-hash`es, prefixed
-  by the target's offset within the (edge-clamped) window. Context distinguishes
-  repeated lines; the offset distinguishes lines in a file too short for the
-  window to shift. Shared by `view`, `grep-files`, and `edit-hash`, so a read and an
-  edit always compute the same hash.
-- `grep-files <pattern>` → `[{ file, line, text, hash }]`. An ignore-aware Rust
+- `view-text <path> <start> <end>` → `[{line, hash, text}]`. The read primitive:
+  the half-open line range `[start, end)`, each row carrying its 1-based line
+  number, its witness, and its text. Reads the whole file (the witness depends
+  on file-wide uniqueness) and surfaces one `{io:"read", path}` card.
+- `grep-files <pattern>` → `[{ file, line, text }]`. An ignore-aware Rust
   regex walk of the cwd (`search_tree`, binary detection quits at NUL, each file
-  gated by `check_fs_read`), reading every matched file once and stamping each hit
-  with its `window-hash` from those same rows — the very row list `edit-hash` will
-  rebuild, so a search result feeds straight into a batch. A non-UTF-8 match
-  carries an empty-string witness, a value no `window-hash` produces, so it
-  resolves to no line. Emits exactly one `{io:"grep", scope, pattern}` surface
-  for the whole search ([[map/exarch/io-surface|io-surface]]).
-- `edit <path> <edits>` → `Unit`. The edit verb: `edits` is a list of
-  `[hash, new-text]` pairs. Read the file once, resolve each hash to the one line
-  whose `window-hash` matches (zero matches, several matches, or two pairs on one
-  line all fail before any write), splice every named line in a single pass over
-  the original rows (a real newline in `new-text` splits the line, an empty string
-  deletes it), and write back atomically. Resolving against one snapshot makes the
-  batch atomic and non-interfering. The read door and the atomic write door both
-  run in Rust below the redirect frame, so `edit-hash` raises no read or write io card;
-  it surfaces only one whole-file `diff` card — the original-vs-final line-level
-  diff grouped into hunks by the `similar` crate with ±2 lines of context, built
-  by `diff_card_value` and handed to the core `surface` builtin
-  ([[map/exarch/cards|cards]]). A no-op edit yields no hunks and surfaces nothing.
+  gated by `check_fs_read`, the walk polling the cancel check per entry via the
+  one sanctioned `cancellable` door). Emits exactly one `{io:"grep", scope,
+  pattern}` surface for the whole search ([[map/exarch/io-surface|io-surface]]).
+- `edit-hash <path> <edits>` → `Unit`. The edit verb: `edits` is a list of
+  `[hash: …, line: …]` records. Read the file once, resolve each hash to the one
+  line whose witness matches (zero matches, several matches, a stale witness, or
+  two records on one line all fail before any write), splice every named line in
+  a single pass over the original rows (a real newline in the replacement splits
+  the line, an empty string deletes it), and write back through core's atomic
+  write door (`Shell::atomic_write`). Resolving against one snapshot makes the
+  batch atomic and non-interfering. The Rust read raises no read card; the atomic
+  write surfaces one committed `write` io event whose old/new snapshots the write
+  card renders as a whole-file diff ([[map/exarch/cards|cards]]). A stderr note
+  names the replaced lines and warns on suspicious `\n`-style escapes (the
+  replacement text is verbatim).
+- `edit-replace <path> <from> <to>` → `Unit`. The string-replace sibling:
+  replace the one literal occurrence of `from`, erroring (file untouched) on
+  zero or several matches; same silent read, same atomic write, same write card.
 - `explore-dir <n>` → `[String]`. List directory entries to depth `n`,
-  ignore-aware (`git_global(false)`), skipping the root and any denied path.
+  ignore-aware, skipping the root and any denied path.
+- `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
+  the available skills (fresh scan each call, filtered by the grant), then load
+  one skill's full `SKILL.md` body on demand.
+- `fff <query>` → `[String]`. Frecency-ranked fuzzy filename search over the
+  working tree (`fff_index`, the `fff-search` crate); the per-directory index is
+  cached process-globally, so forked children sharing the cwd reuse it.
 
-Reads resolve through `checked_read_path` / `check_fs_read`; the `edit-hash` write
-goes through `check_fs_write` under the turn's pushed [[design/grant|grant]]
+Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
+through core's atomic door under the turn's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 
 ## Legibility by lease class — `service`, `service-handle`
 
 There is no model-facing listing over the worker registry at all —
 `workers` was retired: a listing carrying live `Value::Handle`s cannot cross
-the host seam (`SerialValue::from_ground` rejects them), and returning the
+the host seam (`SerialValue`'s decoder rejects them), and returning the
 registry as a language value was mislayered in the first place — enumeration,
 reaping, and caps belong to the host and the lease layer, never this door
 ([[decisions/260705_leases-and-budgets|leases-and-budgets]]). Legibility now
@@ -83,14 +90,14 @@ splits by class instead:
 - A `service`-born worker (`class: Durable`) is bound only by legibility, so
   that bound is structural: the host reconciles a protected `services` pin —
   one row per live service, keyed by id and its birth description, born and
-  retired at the same boundary pass `drain_worker_reaps` runs at
+  retired at the same ready-boundary pass `reap_bindings` runs at
   (`Agent::reconcile_service_pins`, `card::services_pin_card`). The pin is
   unwritable by the program, the same way a `commitment:*` pin is
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
 
 `service <desc> <thunk>` → `Handle`. The durable-birth verb: an ordinary
 buffered spawn registered under the durable class, which arms no lease chain
-— no idle reap, no 24 h backstop. `desc` is now a mandatory, non-empty,
+— no idle reap, no 24 h backstop. `desc` is a mandatory, non-empty,
 single-line `String` — the whole legibility bound a durable birth declares,
 so it cannot be absent — and lands verbatim (trimmed) as the registry
 entry's `cmd`, which is what the `services` pin renders. Cancellable through
@@ -117,25 +124,22 @@ control is [[map/repl/jobs|repl/jobs]].
 
 ## ral helpers — `agent.ral`
 
-Sourced into the shell at boot; the line readers over the `window-hash` builtin,
-plus the faithful split they share:
+Sourced into the shell at boot:
 
-- `_rows s` — split a body on raw `\n`, keeping the trailing empty a terminal
-  newline produces, so rejoining with `\n` reproduces the body exactly. The
-  byte-faithful split (unlike the edge-trimming `lines`) is what lets a trailing
-  newline survive an edit and the window-hashes be computed over the file's actual
-  line structure — the ral twin of the Rust `rows_of`.
-- `view-text start end` — the read primitive: materialise stdin's lines, tag each in
-  `[start, end)` as `<line-no>\t<window-hash>\t<text>`. Bounds `< 1` fail; an empty
-  range yields nothing.
-- `view-text-around line peek` — `view-text` of the `2*peek + 1` lines centred on `line`,
-  clamped at the top of the file.
+- `view-text-around path line peek` — the one thin helper over the atoms:
+  `view-text` of the `2*peek + 1` lines centred on `line`, clamped at the top of
+  the file.
+- the **tasks kit** — `mk-task`/`add-task`/`transition`/`surface-progress` and
+  friends, the pure-ral task list whose status changes surface a pinned card
+  ([[map/exarch/cards|cards]]).
+- `set-goal` / `clear-goal` — pin or drop a session goal under the `goal`
+  register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
 
 ## Where to look
 
-- `exarch/src/agent_builtins.rs` — the Rust atoms, their type schemes, and
-  `EXARCH_BUILTINS`.
+- `exarch/src/agent_builtins.rs` (+ `agent_builtins/fff_index.rs`) — the Rust
+  atoms, their type schemes, and `EXARCH_BUILTINS`.
 - `exarch/data/agent.ral` — the helper library; seeded by `boot_shell`
   ([[map/exarch|exarch]] hub).
-- The model-facing tools that carry these calls are
-  [[map/exarch/tools|shell / agent / fff]].
+- The model-facing tool that carries these calls is
+  [[map/exarch/tools|`ral`]].

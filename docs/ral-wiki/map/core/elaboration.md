@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 

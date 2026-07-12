@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d501492
-generated_at_date: 2026-07-06
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -81,11 +81,13 @@ Bodies are grouped by concern, one submodule each:
   `/clear`, and process exit
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
   The spawn door also enforces the frame's admission cap
-  (`TurnState::worker_cap`): a birth of any class is refused — before any
-  thread or registry entry exists — while `cap` registered workers are
-  still running, with an error naming `await`/`cancel` as the remedies
-  (`workers` is retired — [[map/exarch/builtins|builtins]]); settled entries
-  lingering under retention hold no seat. A
+  (`TurnState::worker_cap`): a birth of any class *reserves* its seat at
+  the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
+  running or reserved, with an error naming `await`/`cancel` as the
+  remedies, the reservation held across thread spawn and released into the
+  registered entry, so a racing sibling birth never sees a filling seat as
+  free (`workers` is retired — [[map/exarch/builtins|builtins]]); settled
+  entries lingering under retention hold no seat. A
   settled entry's own lease is retention: the host's per-call epoch sweep
   (`Shell::advance_worker_epoch`) stamps an entry at the first sweep that
   observes it settled and expires it — a `Retention`-cause `ReapNotice` on
@@ -121,6 +123,11 @@ Bodies are grouped by concern, one submodule each:
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
 - `misc.rs` — including `surface`, which forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;
+- `math.rs` — the Float rounding builtins (`round`, `floor`, `ceil`, `trunc`);
+- `help.rs` — `help` (arity-0 command index) and `explain <name>` lookup;
+- `print.rs` — the value pretty-printer shared by the REPL and exarch's
+  tool-result rendering (`PrintParams`; a rendering utility, not a registered
+  builtin);
 - `util.rs` — shared helpers, JSON coercion.
 
 The capability `Value`-map decoder is *not* a builtin: it lives beside the

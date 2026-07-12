@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 412c140
-generated_at_date: 2026-07-05
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -13,9 +13,11 @@ one inbound inbox**, defined by `bus.rs`:
   consumes them. A `Kind` is a token, boundary, usage, tool call/result,
   sub-agent lifecycle, a transient `Phase` label naming the worker's current
   synchronous op (shown beside the spinner, recorded to `events.json`), or a
-  `Card` — a render document a kit raises through the `surface` builtin, decoded
-  onto the bus by [[map/exarch/shell-eval|shell-eval]]'s host sink and drawn by
-  one generic interpreter ([[map/exarch/cards|cards]]).
+  decoded surface class — a `Card` render document a kit raises through the
+  `surface` builtin, a structural `Io` event, a housekeeping `Notice`, a
+  `Pin`/`Unpin`, or a worker's `Done` — decoded onto the bus by
+  [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` and drawn by one
+  generic interpreter ([[map/exarch/cards|cards]]).
 - `Inbox` is the typed inbound twin — a per-session queue of `InboxMsg`s, each
   carrying its source and drain boundary. User steering drains mid-turn at a
   tool boundary (`drain_tool`); a scheduled wakeup or a settled async agent
@@ -48,16 +50,15 @@ uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]
 headless and test sinks build a **per-turn** bus that closes when the worker
 finishes, keeping async children muted to their own log.
 
-`event.rs` is the canonical per-session record. `SessionLog` owns three things:
+`event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
-- the in-memory `Vec<SessionEvent>` — renders the next provider request, drives
+- the in-memory event mirror — renders the next provider request, drives
   the protocol state machine (`is_ready` gates a fresh prompt and `quiesce` winds
   any in-flight turn back to it, so a turn never strands a prompt mid-protocol;
   [[invariants/turn-ends-ready|turn-ends-ready]]);
 - a pretty-printed `events.json`, appended as each event lands — the post-mortem
-  "model view";
-- the spill directory, where oversize tool outputs land under a content-hashed
-  name for [[map/exarch/agent|`cap_and_spill`]].
+  "model view". Oversize tool-result sections are elided head+tail at the
+  [[map/exarch/agent|digest]] caps before they ever enter the log.
 
 The TUI writes a sibling `user.log` from the same stream — the "user view" —
 flushed as each block lands so it survives an abnormal exit. Both files live
@@ -65,12 +66,13 @@ under the durable per-run log directory (`bootstrap::log_run_dir`,
 `$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
 file lives in one place: `tui/viewport.rs` keeps both the tee writer
 (`open_log`) and the `/export` copy (`export_log`) beside each other, the
-single `user.log` I/O door, so `Repl::cmd_export` resolves and guards the
-destination but never reaches the filesystem itself.
+single `user.log` I/O door, so the `/export` handler (`tui/commands.rs`,
+`resolve_export_path`) resolves and guards the destination but never reaches
+the filesystem itself.
 
 Two `Sink` implementations:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,matrix,md,model_picker,picker,prompt,rail,render,select,status,surface,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,surface,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
  a memoised flatten of those blocks into wrapped visual rows. A tool call is
@@ -133,13 +135,11 @@ Two `Sink` implementations:
  (`BeginSynchronizedUpdate` / `EndSynchronizedUpdate`) so the emulator swaps
  the whole diff atomically — without it a tail-following redraw tears while a
  full page streams tool calls. The same steadiness is held in the scroll
- arithmetic: `Viewport::render_window` head-anchors the trailing live segment
- (`TailAnchor` pins its head row at the greatest height it has reached), so a
- burst of streaming calls coalesces into one group whose churn opens a
- transient gap below rather than shoving the committed transcript up and down.
- The scrollbar reads true because `render_window` maps `offset` (first visible
- row, topping at `total - height`) onto ratatui's `[0, total-1]` cursor range
- and clamps it (`scrollbar_pos`), so the thumb actually reaches the bottom.
+ arithmetic: `Viewport::render_window` computes `offset` (first visible row,
+ topping at `total - height`) over a memoised whole-buffer flatten, and
+ reports scroll position as a fixed-position magnitude on the rule line
+ (`RenderWindow::scroll_pct`, rendered `⇣ 72%` / `⇣ bot`) rather than an
+ animated right-margin scrollbar.
 
  The `rule_line` carries a value-ramp `ctx%` bar and an elapsed-wait bar
  (elapsed wall-time on the live phase, resetting per round-trip); the live
@@ -164,54 +164,69 @@ Two `Sink` implementations:
  `cancel::raise_interrupt` and cascades `agents.cancel(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
  one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
- Straggler tokens the worker already emitted into the unbounded bus before the
+ Straggler tokens the worker already emitted into the bus before the
  cancel noticed are dropped by `App`'s `root_clear_drain` guard, which arms in
  `App::clear` and disarms at the next `UserPromptEcho`.
- window ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
- It owns the REPL loop and the raw-mode / bracketed-paste /
- alt-screen / mouse-capture guard. A prompt the user submits while a turn runs
- is posted to the `Inbox`; the root dispatch loop drains non-slash steering at
- the next safe tool boundary, and `Repl::drive` delivers the rest at the turn
+ The TUI owns the REPL loop and the raw-mode / bracketed-paste /
+ alt-screen / mouse-capture guard. Every tab shares one submit path: a typed
+ line goes to the *focused* agent (the prompt chrome follows the focused tab,
+ not the trunk), and a prompt submitted while a turn runs
+ is posted to the `Inbox`; the dispatch loop drains non-slash steering at
+ the next safe tool boundary, and the rest lands at the turn
  boundary — a coalesced human run, or a wakeup / settled agent as its own
  marked turn. A committed human turn echoes on the `RailShape::Prompt` band;
  a wakeup stays dim, ambient chrome with no rail glyph (`RailShape::Plain`).
  Slash-prefixed prompts
- stay on the REPL command path. View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`) run on the UI thread; session commands (`/clear`,
- `/compact`, `/discuss`, `/quit`) enter the focused agent's inbox as
- `Command` turns and run in `ReplControl`. `/discuss` is the one command in
- that class that forks work instead of mutating the current context: it starts
+ stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
+ tab). View commands (`/help`, `/legend`, `/copy`,
+ `/export`, `/model`, `/resources`) run on the UI thread; session commands
+ (`/clear`, `/compact`, `/discuss`, `/branch`, `/quit`) enter the focused
+ agent's inbox as `Command` turns and run in `ReplControl`. `/discuss`
+ forks work instead of mutating the current context: it starts
  a `mnemon` chair agent which conducts the bounded two-agent protocol
- recorded in [[decisions/260702_discuss-command|discuss-command]]. The idle wait
+ recorded in [[decisions/260702_discuss-command|discuss-command]]. `/branch`
+ forks a *conversing* tab from the focused context — a peer conversation
+ under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,
+ the one command admitted off the trunk, kills the focused branch and its
+ subtree. The idle wait
  selects over input, inbox, and the session bus
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
-- `headless.rs` — one-shot pipe: assistant tokens to stdout, every other event
-  condensed to one line on stderr, exit after one seed turn. Takes the default
-  `Sink::drive` and a per-turn bus, so its async children stay muted.
+- `headless.rs` — one-shot pipe: assistant tokens to stdout (or, under
+  `--output-format json`, one result object built from the root's `reply`),
+  every other event condensed to one line on stderr, exit after one seed turn.
+  Takes the default `Sink::drive` and a per-turn bus, so its async children stay
+  muted. It is a display only — the durable `transcript.jsonl` / `events.json`
+  are written by each session's own `transcript.rs` / `event.rs` seams, in
+  headless exactly as in the TUI.
 
-`cancel.rs` is the per-root-turn cancellation layered on ral's interrupt
-handling. A `run_turn` mints a `Token` (an `Arc<AtomicBool>`) and threads it
-through `apply` → dispatch → tools → child sessions; a sub-agent shares the
-parent's token, so one active-turn Ctrl-C or Esc cancels the whole tree
-([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]). The token's
-flag is published into a lock-free `AtomicPtr` slot for the signal handler (a
-handler must not lock); `is_set` reads the same slot, so the provider's
-mid-stream cancel race — which holds no token — observes the same cancellation.
+`cancel.rs` is the per-agent turn cancellation layered on ral's interrupt
+handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
+whole drive; the drive loop `reset`s it at each genuine turn boundary. Esc /
+Ctrl-C interrupt the *focused tab's* current turn — never a cascade, never a
+subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): on the trunk
+they route through `raise_interrupt`, which cancels the trunk's published token
+and asks ral to cancel the current turn's foreground scope; on any other
+focused tab, `agents.interrupt(id)` unwinds that agent's turn and eval root
+through the registry. Only the trunk `publish`es its token's flag into the
+lock-free process-global slot for the OS signal handler (a handler must not
+lock), so the provider's mid-stream cancel race observes the same cancellation.
 The TUI key table keeps UI control separate from cancellation: idle Ctrl-C/Ctrl-D
-quit, overlays close, and only active-turn Ctrl-C/Esc set the root token and
-drive ral's non-escalating foreground cancel. A single press stops the turn loop /
-in-flight HTTP future and unwinds the in-flight eval at its next `signal::check`;
-because the path never `fetch_add`s, repeated presses cannot reach ral's
-third-signal `_exit` ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
-A genuine external signal still routes through ral's escalating handler.
-Minting is the reset, so the flag never clears at every `apply`; exarch session
-shells are rebuilt only through `bootstrap::boot_shell`, which discards stale ral
-interrupts before library loading and returns with the cancel chain installed
-over ral's handlers. `/clear` therefore works after Esc and SIGINT after
-`/clear` still raises cancel. `host.rs` snapshots the machine (OS, date, cwd,
+quit, overlays close, and only active-turn Ctrl-C/Esc drive ral's
+non-escalating foreground cancel. A single press stops the turn loop /
+in-flight HTTP future and unwinds the in-flight eval at its next poll point;
+because the path never escalates the signal count, repeated presses cannot
+reach ral's third-signal `_exit`
+([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
+A genuine external signal still routes through ral's one cause-carrying
+delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
+Exarch session shells are rebuilt only through `bootstrap::boot_shell`, which
+discards stale ral interrupts before library loading and returns with the
+cancel chain installed over ral's handlers. `/clear` therefore works after Esc
+and SIGINT after `/clear` still raises cancel. `host.rs` snapshots the machine (OS, date, cwd,
 user, git state) once at startup for the [[map/exarch/policy|system prompt]].
-        - `tui.rs` — thin façade (~840 lines): module declarations, re-exports, App struct with orchestration methods delegating to components
+        - `tui.rs` — thin façade (~60 lines): module declarations and re-exports
+        - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `KeyMode`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
@@ -223,5 +238,6 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card`, `legend_panel`, ART/EAGLE constants
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `StatusReadout`, `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
-        - `tui/matrix.rs` — agent matrix: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`
+        - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, `tab_bar`, justified row projection, `step_cells`
+        - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues)
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`

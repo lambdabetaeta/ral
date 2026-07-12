@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a28d34c
-generated_at_date: 2026-07-05
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -17,7 +17,7 @@ re-derived from process state** — the foreground handoff is gated on a held
 ## IO — `core/src/io/`
 
 `io.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
-interactive / terminal / launch_role / capture_outer / capture_depth), and
+interactive / terminal / launch_role / capture_outer), and
 *`LaunchRole`* — the process-group role distinguishing the top-level
 orchestrator (`TopLevel`) from a pipeline-local child (`PipelineStage`). It
 decides pgid *placement* (a top-level standalone external may lead its own
@@ -83,16 +83,23 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   its own `Run`, fired outside the heap lock so it cannot deadlock
   ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]).
-- `signal.rs` — the global termination flag (`check` / `clear` /
-  `is_interrupted`) polled cooperatively in hot loops
-  ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]);
-  `interrupt` sets that flag to exactly 1 without escalating toward the
-  third-signal `_exit` — the non-escalating unwind a raw-mode frontend drives on
-  Esc ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]);
-  the cause-bearing `CancelScope` tree (`DurableRoot` / `ForegroundScope`,
-  `CancelCause`) for structured-concurrency cancellation, with the per-turn
-  signal-reachable slots (`request_foreground_cancel` / `request_root_cancel`)
-  that let a handler or TUI thread cancel a scope it cannot hold; `Pgid` /
+- `cancel.rs` — the cause-bearing `CancelScope` tree (`DurableRoot` /
+  `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
+  polled cooperatively in hot loops
+  ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]), with the
+  process-global `CancelSlot` publications that let a signal handler or TUI
+  thread cancel a scope it cannot hold.
+- `signal.rs` — *signals are causes*: the platform handlers translate each
+  delivered signal into a `CancelCause` on the published slots — SIGINT →
+  foreground `Interrupt`, SIGTERM/SIGHUP → root `Terminate` — so one
+  cancel-aware wait loop serves user interrupts, timeouts, and termination
+  alike ([[decisions/260706_signals-are-causes|signals-are-causes]]).
+  `check` is scope-only; `clear` is the boundary acknowledgment; the
+  `ESCALATION` counter backs only the third-delivery `_exit` ladder
+  (`escalation_pending` is the probe). A raw-mode frontend's Esc drives the
+  same non-escalating foreground cancel
+  ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
+  Also `Pgid` /
   `PgidPolicy` / `ChildHandle` and the platform `spawn_with_pgid` family for
   process-group placement. Unix `ForegroundGuard` takes the `&TerminalLease`,
   performs the `tcsetpgrp` handoff, snapshots and restores tty foreground /
@@ -107,7 +114,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   rendering, explicit helper-handle allow lists, the launch mutex, suspended
   create → Job Object assignment → resume, and the widened `ChildHandle` raw
   process wrapper ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
-  The whole stop-work flow — the `Interrupt < Explicit < Deadline < RootAbort`
+  The whole stop-work flow — the
+  `Interrupt < Explicit < Deadline < Terminate < RootAbort`
   order — is narrated in
   [[internals/cancellation|cancellation]].
 

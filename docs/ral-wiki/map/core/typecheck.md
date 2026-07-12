@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/mode.rs]
 ---
 
@@ -68,10 +68,18 @@ Internals:
 
 - `infer.rs` — the `Inferencer`; `infer_comp`;
 - `unify.rs` — `Unifier`;
-- `scheme.rs` — `Scheme`, `TypeError`;
+- `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, rows);
+- `scheme.rs` — `Scheme`;
+- `error.rs` — the error taxonomy: `TypeError` / `TypeErrorKind`, with
+  constraint provenance as data (`Reason`, `CompDiff`);
+- `explain.rs` — the single home of every user-facing type-checker sentence
+  (hints and `TypeErrorKind::render_label`), a pure function of the error data
+  so each message is unit-testable;
+- `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
+  IR with schemes and ground wires;
 - `generalize.rs`;
 - `env.rs` — `TyEnv`, `InferCtx`;
-- `fmt.rs` — diagnostics;
+- `fmt.rs` — type display;
 - `builtins.rs` — per-builtin type rules (`builtin_arity`, `builtin_type_hint`),
   whose arity rules enforce [[invariants/fixed-arity|fixed-arity]];
 - `scope.rs` — the five structural scope nodes.

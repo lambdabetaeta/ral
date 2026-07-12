@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 129914e
-generated_at_date: 2026-06-24
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -25,7 +25,7 @@ widens the ceiling, then any number of commuting meets attenuate from it**:
 - adds each restrict file's path to `fs.deny_paths` (below).
 
 Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
-`tempdir:` sigil against the session's home and working directory inside
+`tempdir:` / `gitdir:` sigil against the session's home and working directory inside
 `ral_core::capability`'s decode pass — so composition runs entirely on
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
 An `xdg:` path escaping `$HOME` is rejected at the profile that names it, before
@@ -56,11 +56,13 @@ uses, so deny entries land as `NormalizedPrefix`es in the grant-side normal form
 The `--extend-base` file is *not* denied: it widens authority, so denying writes
 to it is a trust-source concern, not a self-protection one.
 
-`policy/base.rs` embeds the five bake-in profiles from `exarch/data/*.exarch.ral`
+`policy/base.rs` embeds the six bake-in profiles from `exarch/data/*.exarch.ral`
 via `include_str!`, ordered from most to least authority:
 
 - `dangerous` — `Capabilities::root`, lattice top, no attenuation;
 - `reasonable` — default; everyday tooling + standard binary dirs;
+- `edit-only` — reasonable's reads, writes to the working tree and scratch,
+  network on; for patch/refactor jobs that never run a build;
 - `read-only` — reasonable's reads/exec, writes only to scratch;
 - `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
   narrow base for additive `--extend-base`;
@@ -78,10 +80,8 @@ can't silently widen a jail:
 
 - `dangerous` is `Capabilities::default` (lattice top);
 - `git` admitted in `reasonable`/`read-only` (commit flows work without
-  `--extend-base`), denied in `minimal` (keeps it a deliberate-opt-in base);
-- `bash`/`zsh` denied despite `/bin/` sitting in exec dirs — a literal `'deny'`
-  overrides the subpath admit, while `/bin/sh` stays allowed as build
-  infrastructure;
+  `--extend-base`); `minimal` admits only the *system* git under `/usr/bin/`
+  (a Homebrew git stays opt-in via the git extension);
 - `read-only` reads but does not write `cwd:`;
 - `confined` is net-off, exec-by-subpath-only (no bare-name admits), no
   home-reaching prefixes;
@@ -90,9 +90,9 @@ can't silently widen a jail:
 
 `exarch/examples/git.exarch.ral` is the canonical `--extend-base` that lifts
 `minimal`/`confined` into a git-capable shape; a test pins that joining it into
-`minimal` admits `git` and adds `~/.gitconfig`, and that `FsPolicy::join`
-intersects deny sets (a one-sided deny means the other side admits, so the
-widened result must too).
+`minimal` keeps `git` admitted and adds `~/.gitconfig`, and that `FsPolicy::join`
+**unions** deny sets — a one-sided veto survives the join, so an overlay stays
+purely additive without re-stating the base's credential denies.
 
 The system-prompt assembly that renders this frozen authority into the `Grant`
 section lives on [[map/exarch|exarch]], which owns `prompt.rs` and `data/`.

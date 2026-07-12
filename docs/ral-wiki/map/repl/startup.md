@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1c2a010
-generated_at_date: 2026-06-29
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -21,6 +21,11 @@ identically in `main` and in a test constructor
 ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]] keeps hosts
 uniform). The chain is two-staged around the sandbox:
 
+- **Engine entry** (Unix) — `--engine` hands the process to
+  `ral_core::engine::run_engine` before anything else: the wire-engine child
+  boots the real shell itself, and the REPL's installer tag
+  (`ENGINE_INSTALLER_TAG = "repl"`) maps to "install nothing", since the
+  captured host builtins are boot-time closures a child cannot construct.
 - **Helper trampolines** — `try_run_pipeline_stage_helper` (the parent re-execs
   `current_exe()` to run one pipeline stage in a fresh subprocess) and
   `test_helper::try_run_test_helper`.
@@ -70,8 +75,9 @@ every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` / `--dump-ast`;
   that do not own argv — and still wins over the surface choice. Surface
   internals live in [[map/repl/frontend|frontend]].
 - **Interactive/script fork.** `InteractiveOpts::reads_stdin_as_script` encodes
-  the precedence: `-s` forces stdin-as-script, `-i` forces the REPL, otherwise
-  stdin being a tty decides. The REPL path hands off to
+  the precedence: `-s` forces stdin-as-script and beats `-i`, `-i` forces the
+  REPL, otherwise stdin being a tty decides; a script positional, if present,
+  is run instead of either. The REPL path hands off to
   [[map/repl/loop|`repl::run_interactive`]].
 
 ## Batch execution
@@ -80,7 +86,7 @@ every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` / `--dump-ast`;
 elaborates, typechecks, then **runs the program through core's framed turn door
 rather than evaluating it directly**
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]): the same
-`Shell::run_source_turn` entry every host shares
+`Shell::run_turn` entry every host shares, handed a `Program::Source` turn
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
 - **The check.** The inference pass is not optional — it writes the mode wires
@@ -93,25 +99,27 @@ rather than evaluating it directly**
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); a
   clean check returns the fully annotated comp, any type error is fatal, and
   `--check` runs the same check and exits without evaluating.
-- **The turn.** `shell.run_source_turn(source, TurnRequest { … })` runs the
-  annotated comp under `Capabilities::root()` with no turn or detached limit,
-  inheriting IO and stdin. Its `TurnReport` has two arms: `Ran` yields the
-  `result` to score; `Static` cannot occur on this path (batch already
-  typechecked) and is treated defensively as a fatal exit.
+- **The turn.** `shell.run_turn(TurnRequest { … })` with
+  `Program::Source(source)` runs the annotated comp under
+  `Capabilities::root()` with no turn or detached limit, inheriting IO and
+  stdin. Its `TurnReport` has two arms: `Ran` yields the `result` to score;
+  `Static` cannot occur on this path (batch already typechecked) and is
+  treated defensively as a fatal exit.
 - **The foreground gate.** The request's `RequestedTerminalAccess` is `Leased`
-  only when the session minted a startup-foreground lease, else `Denied` — the
-  authority to hand the controlling terminal to a child is a held value, not an
-  inferred predicate ([[decisions/260619_terminal-lease|terminal-lease]]).
+  only when the probed terminal carries `startup_foreground`, else `Denied` —
+  the authority to hand the controlling terminal to a child is a held value,
+  not an inferred predicate ([[decisions/260619_terminal-lease|terminal-lease]]).
 - **The verdict.** The `Settled` result is scored into an exit code: `Ok`
-  reports the shell's `last_status`; `Escape::Exit(code)` clamps and returns it;
-  `Error` prints a runtime diagnostic (unless `--audit` will carry it) and
-  returns the error's exit code; on Unix a `Stopped` escape exits 1.
-- **Capabilities and audit.** `run_batch` owns `--capabilities` composition
-  through `apply_session_capabilities`, a thin map from
-  `ral_core::capability::apply_session_profiles`'s outcome to a process exit;
-  the composition itself (load each `.ral` profile, `meet` left-to-right, freeze
-  against home/cwd, push one permanent session ceiling) lives in core
-  ([[design/grant|grant]]). `--audit` wraps the run in a traced
+  reports the shell's `last_status`; `Escape::Exit(code)` clamps and returns it
+  (`platform::exit_byte`); `Error` prints a runtime diagnostic (unless
+  `--audit` will carry it) and returns the error's exit code; on Unix a
+  `Stopped` escape exits 1.
+- **Capabilities and audit.** `--capabilities` composition goes through
+  `platform.rs::apply_session_capabilities` (shared with the REPL boot), a
+  thin map from `ral_core::capability::apply_session_profiles`'s outcome to a
+  process exit; the composition itself (load each `.ral` profile, `meet`
+  left-to-right, freeze against home/cwd, push one permanent session ceiling)
+  lives in core ([[design/grant|grant]]). `--audit` wraps the run in a traced
   [[map/core/evaluator|execution tree]] emitted as JSON.
 
 ## Embedding and the baked prelude
@@ -128,8 +136,9 @@ installs the prelude's type hints. `BakedPrelude` lazily `postcard`-decodes the
 IR and scheme blobs on first access. Probing the underlying machine is a
 separate concern, owned by `ral_core::host`.
 
-`build.rs` is the git-hash block — stamping `RAL_GIT_HASH` into the version
-string — plus one call to `ral_core::driver::bake_prelude_to_out_dir`, which
+`build.rs` is the git-hash block — stamping `RAL_VERSION_SUFFIX` (`+<hash>`
+in a git checkout, empty in a release tarball) into the version string — plus
+one call to `ral_core::driver::bake_prelude_to_out_dir`, which
 parses, elaborates, and `bake_prelude`s `prelude.ral` (annotating each top-level
 bind with its inferred scheme and harvesting those same schemes off one checked
 pass), then serialises the *annotated* `Comp` and the harvested schemes into
@@ -142,10 +151,12 @@ scope[0], so the per-turn seed and the baked list agree by construction
 
 ## Platform glue
 
-`ral/src/platform.rs` centralises the host queries the binary needs:
-`probe_terminal` (under `RAL_INTERACTIVE_MODE`), `home_dir` / `user_name`, and
+`ral/src/platform.rs` centralises the host queries and shared exits the
+binary needs: `probe_terminal` (under `RAL_INTERACTIVE_MODE`), `home_dir`,
 `load_exit_hints` (user override in the data dir, else the embedded
-`data/exit-hints.txt`). Default-env seeding is core's: `boot_shell` calls
+`data/exit-hints.txt`), `exit_byte` (the one clamp-and-narrow every mode's
+final code funnels through), and `apply_session_capabilities` (above).
+Default-env seeding is core's: `boot_shell` calls
 `Shell::seed_default_env_vars`.
 
 Before any builtin lookup, `main` calls `repl::register_host_surface()` to

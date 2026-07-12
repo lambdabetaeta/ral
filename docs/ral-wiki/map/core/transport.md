@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
 ---
 
@@ -10,10 +10,14 @@ The wire layer that carries a shell across a process boundary. When a pipeline
 stage runs in a re-exec'd helper, the [[internals/evaluator-machine|Mobile half]]
 of the shell — a computation, its captured closure, the relevant parent state —
 is serialised to JSON, framed, and reconstituted on the other side of a re-exec
-of this [[invariants/single-binary|same binary]]. (A [[design/grant|grant]] no
-longer rides this wire: its body evaluates locally, and external children are
+of this [[invariants/single-binary|same binary]]. (A [[design/grant|grant]] does
+not ride this wire: its body evaluates locally, and external children are
 confined per-command — see
-[[decisions/260617_sandbox-external-children|sandbox-external-children]].)
+[[decisions/260617_sandbox-external-children|sandbox-external-children]].
+Distinct from all of this is the crate-root `core/src/transport.rs`, the
+transport-parametric *host seam* — the frame algebra between a front-end and
+the engine, with `engine.rs` and the `wire.rs` socket channel —
+[[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].)
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
 through a constructor that defaults a field the wire carries, and no kind may
@@ -38,8 +42,11 @@ realisations:
 
 ## Value & environment mirror — `core/src/serial.rs`
 
-`SerialValue` is the serde-round-trippable mirror of the runtime `Value`. Around
-it:
+`FOValue` is the serde-round-trippable *first-order* value — data all the way
+down, first-order by construction via an uninhabited-by-default extension slot
+— and the host seam's shared value vocabulary. `SerialValue = FOValue<Closure>`
+fills that slot with closures, the mirror of the runtime `Value` this wire
+carries. Around it:
 
 - `SerialLambda` / `SerialThunk` for closures, `SerialEnvSnapshot` for an `Env`;
   `SerialBinding` mirrors a scope entry — value *and* scheme — so a re-exec'd
@@ -71,7 +78,7 @@ never reaching past them):
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
   carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);
-- `WireModules`, `WireControl`.
+- `WireControl`.
 
 `install_shell_mobile` reinstates a received mobile bundle into a child `Shell`.
 `reexec_child_shell` is the one constructor the
@@ -84,8 +91,9 @@ conversions share the `InternCtx` from `serial.rs`.
 
 `write_frame` / `read_frame` are length-prefixed JSON frames (a `u32` length
 followed by the `serde_json` body). One codec carries the
-[[internals/pipeline-execution|pipeline-stage helper]]'s request/response frames,
-the single re-exec'd eval protocol.
+[[internals/pipeline-execution|pipeline-stage helper]]'s request/response frames
+— the single re-exec'd eval protocol — and the host seam's front-end⇄engine
+`WireChannel` frames (`core/src/wire.rs`).
 
 This layer is the mechanism behind the Mobile/Local split that the
 [[internals/evaluator-machine|evaluator machine]] describes and that the

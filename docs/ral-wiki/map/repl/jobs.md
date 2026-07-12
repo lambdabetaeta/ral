@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b91043e
-generated_at_date: 2026-07-06
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -13,7 +13,7 @@ stage is placed in its own pgid — set in each stage's `pre_exec` on Unix, via
 waiting, and foreground handoff always target the whole group. There is no
 pid/pgid ambiguity here: only the group.
 
-`waitpid_retry` swallows `EINTR` so an interrupted wait is never mistaken for
+Core's `waitpid_eintr` swallows `EINTR` so an interrupted wait is never mistaken for
 `ECHILD` (which would flip a live job to "gone"). The table backs the four
 captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
 `disown` — and is reaped each turn and on exit by the [[map/repl/loop|session]].
@@ -48,8 +48,8 @@ skips the handoff.
 
 `sleep 10 &` desugars to `spawn` — an in-process handle, invisible to `jobs`
 until now. `host_handlers.rs::render_jobs` folds *both* populations into one
-listing: `JobTable`'s pgid groups exactly as above, then `shell.workers()`'s
-registered handles, marked `[wN]` — a designator namespace of its own so it
+listing: `JobTable`'s pgid groups exactly as above, then the `shell.workers()`
+snapshot it is handed, marked `[wN]` — a designator namespace of its own so it
 can never collide with a pgid's `[n]`. A worker reads `running (worker)`
 while live and `done (worker)` once settled but unclaimed (the POSIX-`Done`
 analogue); once an eliminator observes it away it is simply absent from the

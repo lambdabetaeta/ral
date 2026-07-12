@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
-covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/agent_builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
+covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/transcript.rs, exarch/src/tui/surface.rs, exarch/src/agent_builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -72,38 +72,43 @@ activity adds no concept. The event is a public `Value::Map`, reaching the same
 
 ## Binding to a card — exarch
 
-`AgentSink::emit` ([[map/exarch/shell-eval|shell-eval]]) is now a **two-decoder**
-sink: it tries `value_to_io` first — an `io`-keyed map decodes into the typed
-`IoEvent` (`exarch/src/card.rs`) and is bound to a card by `io_card`, emitted as
+`decode_surface` ([[map/exarch/shell-eval|shell-eval]]) is the shared surface
+decoder: an `io`-keyed map decodes into the typed `IoEvent`
+(`exarch/src/card.rs`) and is bound to a card by `io_card`, emitted as
 **`Kind::Io { event, card }`** (`bus.rs`) so the bus event carries *both* the
-raw structural event and the rendered mark tree. Anything else falls back to
-`value_to_card` → `Kind::Card`; a non-card, non-io value drops, the same graceful
-degradation as before.
+raw structural event and the rendered mark tree. The other surface shapes (pin,
+notice, card, done) have their own arms; a value matching none drops, the same
+graceful degradation as before.
 
-`io_card` adds **zero new marks** — each event is one `text` mark of roled spans
-([[map/exarch/cards|cards]]). The operation is a *nominal category*, so it is
-carried by a word, not a mirror-orientation glyph: read is a `muted` `Read:` label
-+ a `path` span; write is `muted` `Write:` + `path` + the mode in parentheses +
-an outcome span roled `ok`/`warn`/`bad` for committed/aborted/failed; exec keeps
-the conventional `$` prompt, the program as `path`, each arg as plain ink, and a
-`→ status` tail roled `ok`/`bad`; grep is a `grep` verb, the pattern as `code`,
-and the cwd scope as `path`. `Role::Path` carries a real hue (cyan), so the
-subject of every row stands as figure against the muted label and the body prose.
-No file-size or byte-count `measure` is ever surfaced.
+`io_card` composes from the existing marks ([[map/exarch/cards|cards]]). The
+operation is a *nominal category*, so it is carried by a word, not a
+mirror-orientation glyph: read is a `muted` `read` verb + a `path` span; write
+reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
+event), the outcome roled `ok`/`warn`/`bad` for committed/aborted/failed — and
+a *committed* write previews its content below the heading (`write_preview`): a
+whole-file `diff` mark against the prior snapshot when core supplied one (an
+atomic write over an existing file, both sides UTF-8 and under the read cap),
+else the first lines of the new content as one `listing` mark; exec keeps the
+conventional `$` prompt, the program as `path`, each arg as plain ink, and a
+`→ status` tail roled `ok`/`bad`; grep is the pattern as `code` `in` the cwd
+scope as `path`. `Role::Path` carries a real hue, so the subject of every row
+stands as figure against the muted label and the body prose.
 
-The TUI renders `Kind::Io` not one card per event but **grouped by kind**. Core
-surfaces each effect as its own `Kind::Io`, so a burst would read as `Read…`,
-`$…`, `Read…`, `$…` — noisy clutter at the rail. An `IoBuf` (`tui.rs`, beside the
-patch buffer but kept separate, its keys differing) buckets a consecutive run —
-even *interleaved*, order-independent — into four deduped buckets (reads by path,
-execs by argv, greps by `(scope, pattern)`, writes by path keeping the latest
-outcome), flushed at the four turn boundaries through `io_group_card` into **one
-card per non-empty kind** in a fixed Read → Exec → Grep → Write order. Each group
-reuses the exact `io_card` span vocabulary, so a lone surface renders identically;
-the one departure is that the exec group **drops the `→ status` tail** — a comma-
-joined run reads as the *set* of commands run, and per-command status survives in
-the structured event. The render path is shared with `Kind::Card` (`render_card`),
-so width-reflow and the rest are free.
+The TUI renders observation `Kind::Io`s not one card per event but **grouped by
+kind**. Core surfaces each effect as its own `Kind::Io`, so a burst would read
+as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. An
+`ObservationBuf` (`tui/surface.rs`, beside the patch buffer but kept separate)
+buckets a consecutive run — even *interleaved*, order-independent — into deduped
+buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
+the turn boundaries through per-kind group helpers into **one card per
+non-empty kind** in a fixed Read → Exec → Grep order. Writes never join the
+buffer: each write is its own block (its diff/listing preview is a barrier, not
+a foldable observation). Each group reuses the exact `io_card` span vocabulary,
+so a lone surface renders identically; the one departure is that the exec group
+**drops the `→ status` tail** — a comma-joined run reads as the *set* of
+commands run, and per-command status survives in the structured event. The
+render path is shared with `Kind::Card` (`render_card`), so width-reflow and
+the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 
@@ -115,26 +120,22 @@ helpers moved below the line into [[map/exarch/builtins|builtins]]
 (`agent_builtins.rs`), where their reads happen in Rust and never reach the
 frame:
 
-- **`grep-files`** folds the witness stamp into the search's single pass: one
-  `fs::read` per matched file (the `search_tree` walk reads the bytes the search
-  already needs), `window-hash` stamped on each hit from the same rows, and **one**
-  `{io:"grep", scope:".", pattern}` surface for the whole logical search — not one
-  read card per file. A matched file that is not valid UTF-8 (un-editable, so
-  `edit-hash` can never touch it) is *flagged* with an empty-string witness — a value
-  no `window-hash` ever produces, unmistakably "no witness" — rather than failing
-  the whole search.
-- **`window-hash`** is now a Rust fold over the resident `line-hash`, shared by
-  `grep-files` and `edit-hash` — one implementation across the boundary, not a WET
-  copy.
-- **`edit-hash`** ([[design/hash-addressed-editing|hash-addressed editing]]) reads,
-  resolves witnesses, atomically rebuilds, and writes entirely in Rust, then
-  surfaces its `diff` card directly — its single read and write are sub-steps of
-  one logical operation, so no read/write card appears beside the diff. With
-  `edit-hash` below the line, **no** ral helper does internal I/O and no suppression
-  mechanism exists anywhere.
-
-`view-text` stays in ral: its `<` is the model's own read at the call site, and
-surfaces once, correctly.
+- **`view-text`** reads the whole file in Rust (its adaptive-context witnesses
+  depend on file-wide uniqueness) and surfaces its own single `{io:"read",
+  path}` card — one logical read, one surface, matching the shape the redirect
+  frame would have pushed.
+- **`grep-files`** does one `fs::read` per matched file (the `search_tree` walk
+  reads the bytes the search already needs) and emits **one**
+  `{io:"grep", scope:".", pattern}` surface for the whole logical search — not
+  one read card per file.
+- **`edit-hash`** / **`edit-replace`**
+  ([[design/hash-addressed-editing|hash-addressed editing]]) read, resolve,
+  atomically rebuild, and write entirely in Rust through core's atomic write
+  door (`Shell::atomic_write`) — the read is silent (a sub-step of one logical
+  operation) and the door's single committed `write` event, carrying the
+  old/new snapshots, is what renders as the whole-file diff card. With the
+  editors below the line, **no** ral helper does internal I/O and no
+  suppression mechanism exists anywhere.
 
 The residual on the record: `source` / `use` read ral *code* via `read_to_string`
 outside the redirect frame — code-loading, visible as its own statement, not
@@ -142,11 +143,12 @@ turn-time data I/O — and surface nothing by design.
 
 ## Machine log
 
-`headless.rs::event_record` serialises `Kind::Io` as `("io", {event, card})` in
-`transcript.jsonl`: the raw structural event (snake-case `io`/`mode`/`outcome`)
-beside the rendered mark tree, two consumers from one shape. The model-protocol
-`events.json` ([[map/exarch/frontend|frontend]]) carries no cards and is
-unchanged.
+`transcript.rs::event_record` serialises `Kind::Io` as `("io", {event})` in the
+session-owned `transcript.jsonl`: the raw structural event (snake-case
+`io`/`mode`/`outcome`) is the forensic record; the rendered card — and the
+serde-skipped old/new preview bytes — are rendering, landing only in the TUI's
+`user.log`. The model-protocol `events.json`
+([[map/exarch/frontend|frontend]]) carries no cards and is unchanged.
 
 ## Enforcement — every door is accounted for
 
@@ -158,8 +160,9 @@ child-wait.
   fs/process *constructors* — `File::{open,create,create_new}`,
   `OpenOptions::open`, the one-shot `fs::{read,read_to_string,write,read_dir,
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
-  rename,copy,set_permissions}`, `Command::new`, and `CommandExt::exec`. Every
-  call site is then a door or a lint failure. Enforcement rides the pre-existing
+  rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
+  `ignore::WalkBuilder::build` (directory walks root at the one cancellable
+  grep door). Every call site is then a door or a lint failure. Enforcement rides the pre-existing
   `[workspace.lints.clippy] disallowed_methods = "deny"` table (the four real
   crates opt in via `[lints] workspace = true`); plain `cargo clippy --workspace
   --all-targets` is the command CI runs. The ADR's literal `-D
@@ -195,7 +198,7 @@ decision), [[decisions/260619_surface-carries-documents|surface-carries-document
 (the card/mark grammar these surfaces compose from),
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]] (core names the
 operation, exarch the card), [[map/exarch/cards|cards]] (the marks and the
-decoder), [[map/exarch/shell-eval|shell-eval]] (the `AgentSink` seam),
+decoder), [[map/exarch/shell-eval|shell-eval]] (the `decode_surface` seam),
 [[map/exarch/builtins|builtins]] (the witness/search/edit atoms the bulk helpers
 became), [[map/core/runtime|runtime]] (the redirect frame and exec completion
 doors), [[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],

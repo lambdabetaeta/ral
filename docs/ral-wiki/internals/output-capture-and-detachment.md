@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d501492
-verified_at_date: 2026-07-06
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild::drain, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire]
+verified_at_commit: 668499f
+verified_at_date: 2026-07-12
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire]
 ---
 
 # Output capture and detachment
@@ -20,7 +20,7 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
 
 - `Sink::pump` spawns a thread running `io::copy(child_pipe, sink)` until the pipe
   reaches end-of-file (`core/src/io/sink.rs`).
-- The pump is joined *after* the child is waited: `WaitedChild::drain` joins the
+- The pump is joined *after* the child is waited: `WaitedChild` joins the
   pump handles, and the typestate makes draining-before-waiting unwritable
   (`core/src/runtime/command/child.rs`, [[map/core/runtime|runtime]]). A foreground
   command returns only once every byte the child wrote has been copied and the

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/syntax/]
 ---
 
@@ -15,6 +15,8 @@ sees raw bytes and bare words.
   carries a `FileId`. A digit glued to a comparison operator inside `$[…]`
   (`$[2>3]`, lexed as the file-descriptor redirect `2>`) earns a diagnostic
   that names the shape and asks for spaces, not a bare "redirect" token.
+  `<<` is the here-string redirect; the bash spellings (`<<<`, a glued
+  heredoc `<<EOF`) earn targeted diagnostics naming ral's form.
 - `ast.rs` — the surface AST. `Ast` is the expression node and `Stmt` the
   statement node; the enum is deliberately wide and flat
   ([[decisions/260530_ast-stays-flat|ast-stays-flat]]).

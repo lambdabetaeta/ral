@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 87152d7
+generated_at_commit: 668499f
 generated_at_date: 2026-07-12
-covers_paths: [exarch/src/provider.rs, exarch/src/pricing.rs, exarch/src/models.rs, exarch/src/oauth/, exarch/src/tui/model_picker.rs]
+covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/pricing.rs, exarch/src/models.rs, exarch/src/oauth/, exarch/src/tui/model_picker.rs]
 ---
 
 # Map: exarch / provider

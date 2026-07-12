@@ -1,48 +1,55 @@
 ---
-generated_at_commit: b91043e
-generated_at_date: 2026-07-06
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs, exarch/src/config.rs]
 ---
 
 # Map: exarch / agent
 
-`agent.rs` (was `session.rs`) is the turn driver. An `Agent` is the **uniform
-node** of a run: the canonical [[map/exarch/frontend|event log]] (`AgentLog`),
-the persistent [[map/core/shell-state|`Shell`]], the agent `Capabilities`, its
-own inbox, tools, nudger, `cancel::Token`, and an owned hot-swappable
-`ProviderHandle`. What every node *shares* — the registry, the one
-[[map/exarch/frontend|`FleetBus`]], the focused-agent handle, and whether a human
-is attached — lives on the thin [[#The Fleet|`Fleet`]], not on the node
+`agent.rs` is the turn driver. An `Agent` is the **uniform node** of a run: the
+canonical [[map/exarch/frontend|event log]] (`AgentLog`), the persistent
+[[map/core/shell-state|`Shell`]] behind its own `IdentityTransport` (the
+canonical turn and probe vocabulary,
+[[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
+`Capabilities`, its own inbox, tools, nudger, `cancel::Token`, an owned
+hot-swappable `ProviderHandle`, the shared focused-agent handle
+(`focus: Arc<AtomicU64>`, `NO_FOCUS` sentinel in `bus.rs`), and the inherited
+`interactive` flag. What every node *shares* — the registry, the one
+[[map/exarch/frontend|`FleetBus`]], and the transport `Engine` — lives on the
+thin [[#The Fleet|`Fleet`]], not on the node
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]). There is no
 `Session`, no `is_root`: every distinction reduces to **position in the tree**,
-read from `parent: Option<AgentId>` together with the fleet's
-`interactive`/`focus`. Output caps are fixed `digest.rs` constants, not per-agent
-state.
+read from `parent: Option<AgentId>` together with `interactive`/`focus`. Output
+caps are fixed `digest.rs` constants, not per-agent state.
 
-The **trunk** is the parent-less node (`parent = None`). When the fleet is
-`interactive` the trunk *converses* — it withholds `reply` and parks
-unconditionally for its ever-present human — but both behaviours fall out of
-position, never an `is_root` branch:
+The **trunk** is the parent-less node (`parent = None`). An `interactive` node
+built to converse — the interactive trunk, and every `/branch` tab
+([[decisions/260705_branch-minimal|branch-minimal]]) — withholds `reply` and
+parks for its human, but both behaviours fall out of construction and position,
+never an `is_root` branch:
 
 ```
-  returns(a)    ⟺  ¬(a.parent = None ∧ fleet.interactive)   // everyone but the conversing trunk
-  park_mode(a)  =  Held           if conversing(a) ∨ fleet.focus = a.id
+  returns(a)    ⟺  a's tool view holds reply       // fixed at construction; false only for a conversing node
+  conversing(a) =  a.interactive ∧ ¬returns(a)
+  park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /clear or /close reaped it
+                   Held           if conversing(a) ∨ focus = a.id
                    HeldByChildren if a has live descendants
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
 ```
 
-`returns` (`agent.rs:1133`) is the inverse of `parent = None ∧ interactive` — the
-old `is_root && interactive` reply gate
-([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]),
-re-read through tree position. `park_mode` (`agent.rs:1144`, returning a
-`ParkMode` of `Held` / `HeldByChildren` / `UntilCancelled` / `Quiesce`,
-`bus.rs:48`) replaces the
-deleted `park_when_idle` flag: a present human (the conversing trunk, or the
-agent the human `TAB`bed to) holds the node parked; live descendants hold it
+`returns` (`agent.rs`) is **derived from the tool view** — the single source of
+truth, so the nudge layer, parking, and the advertised tools cannot disagree
+([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
+`park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `HeldByChildren` /
+`UntilCancelled` / `Quiesce`, `bus.rs`) is the `should_park` verdict: a present
+human (a conversing node, or the agent the human `TAB`bed to) holds the node
+parked — unless the registry no longer lists it, since an unlisted conversing
+node is unreachable and parking it would be a zombie; live descendants hold it
 until their results drain; a live self-schedule holds it until cancelled;
 otherwise it terminates at quiescence — the one-shot contract a headless trunk
-and a settled sub-agent both satisfy.
+and a settled sub-agent both satisfy. `--chat` builds the trunk with no system
+prompt and an empty tool view — a bare conversation, the same drive loop.
 
 ## The drive loop
 
@@ -102,16 +109,21 @@ Three nested loops, the same for trunk and child alike:
   sub-agent has no human writer, so its inbox holds no steering and this is always
   empty.
 
-Every pass through `drive`'s top — its own ready boundary, both freshly entered
-and after a settled iteration — also drains this shell's reap
-notices (`Shell::take_worker_reap_notices`) and emits one `Kind::WorkerReaped`
-per entry: a worker removed by policy — the lease chain's idle or backstop
-bound on a running worker, or the retention sweep expiring a settled entry's
-unclaimed result — rather than one an eliminator observed away. Transcript and
-TUI only — the rendered one-liner is [[map/exarch/cards|cards]]'s `reap_card`,
-the completion card's sibling — never model-facing, since delivery of a reap to
-the model itself is deferred
-([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+Worker-reap and large-binding notices need no drain at `drive`'s top:
+core's own engine pushes both as `` `notice `` surface classes at the ready
+boundary of the turn that produced them
+([[decisions/260706_enquiry-channel|enquiry-channel]]), decoded by
+[[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Kind::Notice` at
+the emit seam. A reap notice names a worker removed by policy — the lease
+chain's idle or backstop bound on a running worker, or the retention sweep
+expiring a settled entry's unclaimed result — rather than one an eliminator
+observed away. Transcript and TUI only — the rendered one-liner is
+[[map/exarch/cards|cards]]'s `reap_card`, the completion card's sibling — never
+model-facing, since delivery of a reap to the model itself is deferred
+([[decisions/260705_leases-and-budgets|leases-and-budgets]]). What `drive`'s
+top still runs, each pass its own ready boundary: `reconcile_service_pins`
+(the protected `services` pin is (re-)born or dies here), `reap_bindings`
+(below), and `check_disk_warn`.
 
 The retention clock is the agent's **ral-call epoch** (`Agent::ral_epoch`):
 incremented once at the top of every `run_shell` call — a failed eval is
@@ -132,14 +144,14 @@ and `for_test`) and `Agent::replace_shell` (`/clear`) — each calling
 `Shell::arm_binding_lease` with [[map/exarch/shell-eval|shell-eval]]'s
 `BINDING_IDLE_CALLS` (256) and `LARGE_BINDING_BYTES` (1 MiB) right after
 `seed_session_dir` and right before `shell.mobile_snapshot()`, so seeding,
-arming, and checkpointing stay one visible sequence. `Agent::reap_bindings`,
-called at the drive loop's top beside `drain_worker_reaps`, drains both
-axes: it emits one `Kind::LargeBinding` per notice queued at the install
-chokepoint since the last drain (a residency nudge, independent of whether
-anything prunes this pass), then prunes idle top-level names and emits one
-`Kind::BindingsPruned` per boundary — transcript and TUI only, the same
-posture as `Kind::WorkerReaped` — and, in the same statement, adopts the
-prune verb's returned post-prune `MobileSnapshot` as `Agent::durable`: the
+arming, and checkpointing stay one visible sequence. The large-binding
+residency nudge rides the pushed `` `notice `` channel above.
+`Agent::reap_bindings`, called at the drive loop's top, keeps the prune half
+host-called: `Shell::prune_idle_bindings` prunes idle top-level names and
+hands back the post-prune `MobileSnapshot` (a snapshot cannot ride the
+surface seam), which the agent adopts as `Agent::durable` in the same
+statement it emits one compact `Notice::Prune` `Kind::Notice` naming what
+fell — transcript and TUI only, the same posture as a reap notice. The
 verb's signature pairs the notices with the checkpoint, so a later panic
 rollback can never resurrect a name this pass just pruned.
 
@@ -147,12 +159,14 @@ rollback can never resurrect a name this pass just pruned.
 ([[invariants/probe-convention|probe-convention]]): routed exactly as
 `/clear` — an `InboxMsg::Command` drained at the turn boundary, handled by
 the TUI's `Control` against the agent the drive loop owns —
-`Agent::resource_rows` surveys what this thread may legally read (the worker
-registry's running/settled split with the nearest time-to-reap, inbox depth
-per source, the event log's mirror length and history bytes, the shell's
-binding count alongside its leased count and largest binding's shallow-size
-estimate, log-dir and scratch disk walked at invocation, and the sub-agent
-ceiling as a lease row), and `emit_resources` posts one `Kind::Resources`
+`Agent::resource_rows` surveys what this thread may legally read — the worker
+registry's running/settled split with the nearest time-to-reap and the
+binding-ledger figures read as *data* through the transport's Enquiry desk
+(`probe_workers` and its sibling probes,
+[[decisions/260706_enquiry-channel|enquiry-channel]]), plus inbox depth per
+source, the event log's mirror length and history bytes, log-dir and scratch
+disk walked at invocation, and the sub-agent ceiling as a lease row — and
+`emit_resources` posts one `Kind::Resources`
 carrying the raw rows beside their rendered card — the `Kind::Io` pairing,
 so `transcript.jsonl` records the figures. The frontend appends the rows
 for the accumulators *it* owns (viewports, views, the bus) at render time;
@@ -185,7 +199,9 @@ The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
 remain — `must_reply` for a returning agent (`returns()`), `continue` on
-truncation, empty/early-stop repair, and the one pinned-state reminder — are
+truncation, empty/early-stop repair, the one-shot latch that turns a headless
+root's *first* `reply` back for self-verification before honouring the next,
+and the one pinned-state reminder — are
 driven off the same `react` rule. Live descendants make the agent wait:
 `must_reply` is suspended, and pin/no-pin reminders wait too, since the agent has
 already delegated the next actionable fact. Once the descendants settle, the
@@ -209,22 +225,24 @@ Ordinary model-authored `surface` cannot reach either path.
 ## The Fleet
 
 `fleet.rs` is the thin run-as-a-whole: `{ agents: AgentRegistry, bus: FleetBus,
-focus: Arc<AtomicU64>, interactive: bool }`. It owns no turn logic — the trunk
+engine: Arc<provider::Engine> }`. It owns no turn logic — the trunk
 and each child drive themselves; the fleet is only where the frontend reads "all
-live agents", "which one the human is attached to", "which inbox receives a
-marked `message`", and "the bus to drain". The
+live agents" and "the bus to drain". The
 frontend ([[map/exarch/frontend|`tui::run`]] / `headless::run`) builds it from
 handles the trunk already minted at construction, so fleet and nodes never
 disagree about what is shared.
 
-- **`alive() ⟺ registry non-empty`** — the literal "dies when no active agents
+- **The fleet is alive while the registry is non-empty** — the literal "dies
+  when no active agents
   remain". An agent removes itself at termination (`reply`, quiescence, cancel);
-  the conversing trunk stays until `/quit` because it parks; a headless trunk
-  leaves at quiescence; a sub-agent leaves on settle. There is no human-less
-  daemon: nothing lingers without a present human, running work, or a bounded
-  self-schedule.
-- **Focus is dynamic.** `focus: Arc<AtomicU64>` names the attached agent;
-  `NO_FOCUS` (`AgentId::MAX`) is the sentinel — off the TUI it never moves, and in
+  a conversing node stays until `/quit` (or `/close`) because it parks; a
+  headless trunk leaves at quiescence; a sub-agent leaves on settle. There is no
+  human-less daemon: nothing lingers without a present human, running work, or a
+  bounded self-schedule.
+- **Focus is dynamic.** The shared `focus: Arc<AtomicU64>` handle (minted by the
+  trunk, cloned to every node and the frontend) names the attached agent;
+  `NO_FOCUS` (`AgentId::MAX`, `bus.rs`) is the sentinel — off the TUI it never
+  moves, and in
   the TUI it means the frontend resolves focus to the trunk. `TAB` moves it
   (the TUI), notifying the previous and new focused inboxes; the focused agent
   receives the human's typed lines as fresh turns and owns `Esc`. A de-focused
@@ -235,8 +253,9 @@ disagree about what is shared.
 
 ## Cancellation cascades the subtree, across both layers
 
-The single cascade serves three callers — `agent_cancel`, the per-agent ceiling,
-and `Esc`. `AgentRegistry::Entry` carries a `parent` link, so the registry is the
+The single cascade serves the deliberate teardowns — `agent_cancel`, a
+returning agent's `reply`, and the `/clear` / `/close` subtree reaps.
+`AgentRegistry::Entry` carries a `parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
 subtree, `cancel_descendants(root)` abandons a returning agent's children without
 advancing the global generation, and `clear_subtree(root)` reaps a subtree and
@@ -250,12 +269,12 @@ unwinds at the evaluator's poll points instead of grinding to its
 `timeout_secs` wall. The trunk registers no eval-root — its session outlives
 any cancel; Esc reaches its turn through the published foreground slot
 ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
-[[internals/cancellation|cancellation]]). `Esc` targets
-`fleet.focus`'s turn and its subtree (not "the root") — the focused agent's
-published token is cleared each turn boundary (`Token::reset`) and the cascade
-carries the cancel down. This generalises
-[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] from one root-turn
-token to a per-focus token over a subtree.
+[[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
+**per-tab turn interrupt**, not a cascade: they stop only the *focused* agent's
+current turn (`AgentRegistry::interrupt(id)`, or `cancel::raise_interrupt` on
+the trunk), leaving its descendants running
+([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
+sticky token is cleared at each turn boundary (`Token::reset`).
 
 Cancelling `eval_root` already reaches a cancelled node's own detached `ral`
 workers with no edge of its own: a worker's cancel scope is a child of its
@@ -291,14 +310,16 @@ durable class included — reaching it through the transport while it is still
 unambiguously *this* shell, since there is no way back to it once the
 transport is swapped. A worker settling after the cancel still tries to flush
 its deferred `done` batch through the boundary it captured before the clear;
-the same generation guard (`InboxBoundary`,
+the same generation guard (`deferred_sink`'s admission check,
 [[map/exarch/shell-eval|shell-eval]]) that already drops a stale agent result
 drops that flush too, so no pre-clear worker output survives into the rebuilt
 context. It is the focused agent's, not a fleet-wide reset.
 
-`compact` runs `provider.summarize` over the history when it crosses
-`COMPACT_THRESHOLD` (`digest.rs`, 500 KiB) and `AgentLog::can_compact` holds (no
-pending tool results). It is called at the **top of `apply`**, where the agent is
+`compact` runs `provider.summarize` over the history when context pressure
+crosses the window's reserve (`digest.rs`'s `compaction_due` — used tokens
+into the top 15% of a known window; `COMPACT_THRESHOLD`, 500 KiB of serialised
+history, is the fallback when the window is unknown) and `AgentLog::can_compact`
+holds (no pending tool results). It is called at the **top of `apply`**, where the agent is
 `ReadyForUser` ([[invariants/turn-ends-ready|turn-ends-ready]]) and the gate
 actually holds — every provider round-trip passes through here, so long
 autonomous and headless turns stay bounded without an interactive `/compact`. A
@@ -320,7 +341,7 @@ Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
 by construction: no walk, no cost, ever. Configured, it rides the same
 `ral_epoch` the settled-worker and binding-lease sweeps already read,
 amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, at the same
-ready boundary as `drain_worker_reaps`/`reap_bindings` in `drive`'s loop.
+ready boundary as `reconcile_service_pins`/`reap_bindings` in `drive`'s loop.
 Crossing the ceiling (session log dir + `EXARCH_SCRATCH`, summed via the
 existing `resources::dir_size`) emits one `Kind::SystemNote`, latched until
 a later check finds the total back under — one warning per excursion, not
@@ -347,33 +368,40 @@ agent's `tools_for` view drops `amnemon`/`mnemon`
 chain bottoms out a fixed number of generations down. The fork mirrors on the
 bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
 
-`fork_remembering` is the mnemon variant: it uses the same shell/provider fork
-and asks `AgentLog` to import the parent's model-visible context. The spawn site
-still seeds the tool call's prompt through the child's inbox, so the prompt
-enters through the same turn path as amnemon. `AgentLog` drops a pending
+`fork` is `fork_with(caps, returns: true)` — the *returning*-child
+constructor; `branch` is `fork_with(self.caps, returns: false)` plus
+`inherit_context`, minting a *conversing* peer tab with the parent's verbatim
+authority ([[decisions/260705_branch-minimal|branch-minimal]]).
+`fork_remembering` is the mnemon variant: the same fork plus
+`inherit_context`, which asks `AgentLog` to import the parent's model-visible
+context ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]). The
+spawn site still seeds the tool call's prompt through the child's inbox, so the
+prompt enters through the same turn path as amnemon. `AgentLog` drops a pending
 unanswered assistant tool-call frame when the parent is mid-dispatch, so the
 child inherits a request context rather than a dangling provider protocol. The
 amnemon path uses plain `fork`; both spawn modes seed the launch prompt into
 the child's inbox.
 
 Routing the fork through core matters because the builtin table is the easiest
-thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit-hash`,
-`explore-dir`, `line-hash` ([[map/exarch/shell-eval|agent_builtins]]) — live in
-the agent's dispatch table, *outside* `Mobile`, and the `view-text` /
-`view-text-around` helpers in `agent.ral` call `window-hash`. A fork that copied
-only `mobile.scope` and `mobile.context` would leave the child's `view-text`
-resolving to nothing and falling through to a failed PATH lookup. `fork_session`
-copies `agent.builtins` as part of the flow matrix, so the decision lives in one
-place and the table cannot be silently severed at this call site.
+thing to drop. The exarch host builtins — `view-text`, `grep-files`,
+`edit-hash`, `edit-replace`, `explore-dir`, `fff`, the skill loaders
+([[map/exarch/builtins|builtins]]) — live in the agent's dispatch table,
+*outside* `Mobile`, and the `view-text-around` helper in `agent.ral` calls
+`view-text`. A fork that copied only `mobile.scope` and `mobile.context` would
+leave the child's `view-text-around` resolving to nothing and falling through
+to a failed PATH lookup. `fork_session` copies `agent.builtins` as part of the
+flow matrix, so the decision lives in one place and the table cannot be
+silently severed at this call site.
 
-`digest.rs` holds `cap_and_spill` and the fixed byte caps for what the *model*
-sees in history: the four tool-result sections (stdout/stderr/value/audit) share
-`TOOL_RESULT_CAP` (~10 KiB, halved into a head and tail digest), alongside
-separate caps for `fff` results, opaque error blobs, agent replies, and the
-history-compaction threshold. Oversize sections spill to the session dir under a
-content-hashed name the model can `head` / `tail` / `rg`. The user always sees
-the full text live; caps only shape the model's view. `run_shell` here threads to
-[[map/exarch/shell-eval|shell-eval]]; cancellation is the task-level `cancel` flag.
+`digest.rs` holds `clip` and the fixed per-section byte caps for what the
+*model* sees in history: each tool-result section has its own cap
+(`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), alongside separate caps
+for opaque error blobs (`OPAQUE_CAP`), agent replies (`AGENT_REPLY_CAP`), and
+the history-compaction threshold. An oversize section keeps a head+tail digest
+and elides the middle, with a banner nudging the model to scope the query at
+its source and re-read in slices — the same rendering the transcript records,
+so the user never sees more of a result than the model does. `run_shell` here
+threads to [[map/exarch/shell-eval|shell-eval]].
 
 ## See also
 

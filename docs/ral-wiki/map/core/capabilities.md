@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b864280
-generated_at_date: 2026-06-27
+generated_at_commit: 668499f
+generated_at_date: 2026-07-12
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -47,13 +47,20 @@ keyed by name/path under the three-valued `ExecPolicy`, `dirs` keyed by
 slash-free directory prefix under the two-valued `ExecDir`
 ([[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]).
 
-Path resolution for grant matching is `core/src/path/`: a fixed four-stage rule,
+Path resolution for grant matching is `core/src/path/`: a fixed staged rule,
 plus `which.rs` for PATH search.
 
-- expand — `sigil.rs`, `tilde.rs`;
+- expand — `sigil.rs` (the five path-prefix sigils: `~`, `xdg:`, `cwd:`,
+  `tempdir:`, `gitdir:` — the last three policy-only, expanded at freeze;
+  `git.rs` backs `gitdir:` discovery), `tilde.rs`;
 - lex — `lex.rs`;
 - canonicalise — `canon.rs`;
 - match — `lex::path_within`.
+
+`resolver.rs` composes the stages — `Resolver::resolve` is the *sole*
+constructor of a `ResolvedPath` (`resolved.rs`, with its grant-side twin
+`NormalizedPrefix`), so canonicalisation cannot run before
+sigil-expansion-then-lex: the ordering is in the types, not convention.
 
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
@@ -125,13 +132,13 @@ Linux has no path-exec filter so there the in-process gate stands alone.
   the only platform that emits the host re-exec tail. The grant body itself
   evaluates locally — `transport::dispatch` no longer re-execs it
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-- Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap),
-  `windows.rs` (Job Objects, capping the child tree at 512 processes) +
-  `windows_restricted_token.rs` (a restricted token with every privilege dropped
-  and integrity lowered to Low — the Chrome-renderer model: a file unreadable to
-  the restricting SID set is unreadable to the child). The Windows backends supply
+- Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap), and
+  `windows.rs` (Job Objects capping the child tree at 512 processes, plus a
+  restricted token with every privilege dropped and integrity lowered to Low —
+  the Chrome-renderer model: a file unreadable to the restricting SID set is
+  unreadable to the child). The Windows backend supplies
   resource caps and a profile dump; no path exists yet to confine a per-command
-  child through them, so the entrypoint and launcher fail closed.
+  child through it, so the entrypoint and launcher fail closed.
 
 `macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
 profile inherits: deny-default, libSystem/dyld startup allowances, common device
@@ -148,7 +155,8 @@ The notification-center carve-out is named in the POSIX shared-memory namespace
 Path-scoped *exec* confinement is unenforced on Linux (no landlock backend) —
 [[decisions/260530_linux-exec-confinement|linux-exec-confinement]].
 
-`diag.rs` turns a kernel-reported sandbox denial into an actionable hint on the
+`diag.rs` (with per-platform readers in `diag/macos.rs` / `diag/linux.rs`) turns
+a kernel-reported sandbox denial into an actionable hint on the
 failing command's `Error`: it reads the kernel log over the call's wall window
 (Seatbelt on macOS, the seccomp record inside bwrap on Linux), keeps only lines
 attributable to the call's descendant PIDs, and appends them. **Only a `file-*`
