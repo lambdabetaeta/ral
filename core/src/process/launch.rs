@@ -11,6 +11,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[cfg(windows)]
+use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
+
+#[cfg(windows)]
 pub(crate) use windows::RawChild;
 
 #[cfg(not(windows))]
@@ -29,6 +32,19 @@ pub struct Launch {
     stderr: StdioSpec,
     creation_flags: u32,
     admitted_handles: Vec<std::os::windows::io::RawHandle>,
+    security_capabilities: Option<SecurityCapabilitiesAttr>,
+}
+
+/// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload for a confined
+/// spawn: an AppContainer SID plus its capability-SID array. Kept as raw
+/// `windows-sys` FFI values rather than the AppContainer profile / capability
+/// types that build them (`sandbox::windows::appcontainer`) — this module
+/// owns the spawn boundary and its attribute-list plumbing, not AppContainer
+/// policy, so it only borrows the raw SID values the caller keeps alive.
+#[cfg(windows)]
+struct SecurityCapabilitiesAttr {
+    app_container_sid: PSID,
+    capabilities: Vec<SID_AND_ATTRIBUTES>,
 }
 
 #[cfg(windows)]
@@ -282,6 +298,7 @@ impl Launch {
             stderr: StdioSpec::Inherit,
             creation_flags: 0,
             admitted_handles: Vec::new(),
+            security_capabilities: None,
         }
     }
 
@@ -368,6 +385,32 @@ impl Launch {
         if !self.admitted_handles.contains(&handle) {
             self.admitted_handles.push(handle);
         }
+    }
+
+    /// Attach `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` to the spawn: an
+    /// AppContainer SID plus its capability-SID array (built by
+    /// `sandbox::windows::appcontainer` — an `AppContainerProfile`'s SID and
+    /// a `CapabilitySids`' entries). `app_container_sid` and every SID inside
+    /// `capabilities` must stay valid until [`Self::spawn`] returns: this
+    /// only borrows their raw values into the attribute list at spawn time,
+    /// it does not take ownership.
+    ///
+    /// No caller sets this yet — the per-command sandbox launcher
+    /// (`sandbox/launch.rs`, W1c) is where it gets threaded through.
+    #[allow(
+        dead_code,
+        reason = "wired by the W1c per-command sandbox launcher, not yet landed"
+    )]
+    pub fn security_capabilities(
+        &mut self,
+        app_container_sid: PSID,
+        capabilities: &[SID_AND_ATTRIBUTES],
+    ) -> &mut Self {
+        self.security_capabilities = Some(SecurityCapabilitiesAttr {
+            app_container_sid,
+            capabilities: capabilities.to_vec(),
+        });
+        self
     }
 
     /// Lower this launch through the raw `CreateProcessW` boundary and spawn
@@ -472,6 +515,7 @@ mod windows {
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
+    use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -480,9 +524,9 @@ mod windows {
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-        ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
@@ -536,8 +580,34 @@ mod windows {
             .map(|p| wide_null(p.as_os_str()))
             .transpose()?;
         let mut env = environment_block(&launch.env)?;
-        let mut attrs = AttributeList::new()?;
+
+        // The handle list is always present; the security-capabilities
+        // attribute is present only when a caller has staged an
+        // AppContainer spawn via `Launch::security_capabilities`.
+        let attr_count: u32 = if launch.security_capabilities.is_some() {
+            2
+        } else {
+            1
+        };
+        let mut attrs = AttributeList::new(attr_count)?;
         attrs.update_handle_list(&inherited)?;
+
+        // Build the SECURITY_CAPABILITIES value now (rather than inside
+        // `AttributeList`) so its address is a plain local that outlives the
+        // `CreateProcessW` call below without any self-referential storage:
+        // the `Capabilities` pointer inside it borrows
+        // `launch.security_capabilities`'s own `Vec`, which `launch` keeps
+        // alive for this whole function.
+        let security_caps_value: Option<SECURITY_CAPABILITIES> =
+            launch.security_capabilities.as_mut().map(|caps| SECURITY_CAPABILITIES {
+                AppContainerSid: caps.app_container_sid,
+                Capabilities: caps.capabilities.as_mut_ptr(),
+                CapabilityCount: caps.capabilities.len() as u32,
+                Reserved: 0,
+            });
+        if let Some(value) = security_caps_value.as_ref() {
+            attrs.update_security_capabilities(value)?;
+        }
 
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -778,14 +848,23 @@ mod windows {
     }
 
     impl AttributeList {
-        fn new() -> io::Result<Self> {
+        /// Allocate an attribute list sized for exactly `attribute_count`
+        /// `UpdateProcThreadAttribute` entries. The count must match the
+        /// number of `update_*` calls the caller goes on to make — Win32
+        /// sizes the underlying buffer from it up front.
+        fn new(attribute_count: u32) -> io::Result<Self> {
             let mut bytes = 0usize;
             unsafe {
-                InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut bytes);
+                InitializeProcThreadAttributeList(null_mut(), attribute_count, 0, &raw mut bytes);
             }
             let mut buf = vec![0; bytes];
             let ok = unsafe {
-                InitializeProcThreadAttributeList(buf.as_mut_ptr() as *mut _, 1, 0, &raw mut bytes)
+                InitializeProcThreadAttributeList(
+                    buf.as_mut_ptr() as *mut _,
+                    attribute_count,
+                    0,
+                    &raw mut bytes,
+                )
             };
             if ok == 0 {
                 return Err(io::Error::last_os_error());
@@ -812,6 +891,26 @@ mod windows {
             if ok == 0 {
                 return Err(io::Error::other(
                     "could not launch pipeline helper with an explicit handle list",
+                ));
+            }
+            Ok(())
+        }
+
+        fn update_security_capabilities(&mut self, value: &SECURITY_CAPABILITIES) -> io::Result<()> {
+            let ok = unsafe {
+                UpdateProcThreadAttribute(
+                    self.as_mut_ptr(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                    value as *const SECURITY_CAPABILITIES as *const _,
+                    std::mem::size_of::<SECURITY_CAPABILITIES>(),
+                    null_mut(),
+                    null(),
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::other(
+                    "could not launch sandboxed child with AppContainer security capabilities",
                 ));
             }
             Ok(())
