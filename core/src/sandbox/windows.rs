@@ -11,7 +11,14 @@
 //!   `RAL_DUMP_SANDBOX_PROFILE`.  It enforces nothing.
 //!
 //! This module owns the Job Object plumbing and the profile-dump
-//! advisory.
+//! advisory.  Its submodules carry the per-command AppContainer
+//! backend: `appcontainer` (profile lifecycle + LowBox spawn
+//! capabilities) and `dacl` (grant-ACE apply/restore engine), both
+//! imitating MXC's Tier-3 processcontainer backend
+//! (github.com/microsoft/mxc @ 0e7c3dd).
+
+pub(crate) mod appcontainer;
+pub(crate) mod dacl;
 
 use crate::types::SandboxProjection;
 use windows_sys::Win32::Foundation::CloseHandle;

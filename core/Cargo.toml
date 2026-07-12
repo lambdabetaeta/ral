@@ -137,6 +137,8 @@ windows-sys  = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     # ProcessPrng — OS CSPRNG for the sandbox capability token.
+    "Win32_Security_Isolation",
+    # AppContainer profile / LowBox SID derivation for the per-command sandbox.
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",
