@@ -140,6 +140,27 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-stat"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:self-reexec"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:verify-stat"),
+    ("core/src/sandbox/windows/dacl.rs", "io-door:silent:dacl-apply"),
+    (
+        "core/src/sandbox/windows/dacl.rs",
+        "io-door:silent:dacl-ledger-read",
+    ),
+    (
+        "core/src/sandbox/windows/dacl.rs",
+        "io-door:silent:dacl-ledger-remove",
+    ),
+    (
+        "core/src/sandbox/windows/dacl.rs",
+        "io-door:silent:dacl-ledger-sweep",
+    ),
+    (
+        "core/src/sandbox/windows/dacl.rs",
+        "io-door:silent:dacl-ledger-write",
+    ),
+    (
+        "core/src/sandbox/windows/dacl.rs",
+        "io-door:silent:dacl-state-dir",
+    ),
     ("core/src/subprocess_codec.rs", "io-door:silent:frame-dump"),
     (
         "core/src/subprocess_codec.rs",
