@@ -96,11 +96,16 @@ enum Pin {
     #[cfg(all(unix, not(target_os = "linux")))]
     Stat { dev: u64, ino: u64 },
     /// Windows NTFS analogue of `(dev, ino)`: volume serial + the two
-    /// halves of the file index.  Snapshot checked before each spawn.
+    /// halves of the file index.  Captured at boot; unconsulted until a
+    /// Windows `verify_unswapped` (parity with the macOS guard) lands
+    /// alongside the per-command Windows sandbox (W1).
     #[cfg(windows)]
     NtfsStat {
+        #[allow(dead_code)]
         volume_serial: u32,
+        #[allow(dead_code)]
         index_high: u32,
+        #[allow(dead_code)]
         index_low: u32,
     },
 }

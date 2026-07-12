@@ -701,6 +701,9 @@ enum MxState {
     Running,
     Completed,
     Cancelled,
+    /// Only ever constructed by the Unix `From<JobState>` conversion below
+    /// (Windows has no SIGTSTP analogue to park a job in this state).
+    #[cfg_attr(windows, allow(dead_code))]
     Stopped,
 }
 

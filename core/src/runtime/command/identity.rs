@@ -158,6 +158,7 @@ fn absolutize(s: &str, ctx: &Context) -> Option<String> {
 mod tests {
     use super::*;
     use crate::types::Shell;
+    #[cfg(unix)]
     use std::collections::BTreeMap;
 
     #[test]

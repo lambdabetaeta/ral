@@ -4,16 +4,20 @@
 # before pushing.  Mirrors the `check` job in
 # .github/workflows/ci.yml; kept in lock-step with that file.
 #
-# The `windows-check` job needs a Windows host and is out of scope
-# here.  The closest local approximation for Windows is
-#   cargo check --target x86_64-pc-windows-gnu --tests
-# (compile-only, no test execution).
+# Windows is cross-checked here too (`cargo check`, which never links)
+# against the shipping x86_64-pc-windows-msvc ABI — exarch is excluded
+# because its rustls -> aws-lc-sys dependency compiles C against
+# Windows system headers, impossible from a Unix host.  Only *test
+# execution* on real Windows still needs the windows-check CI job
+# (.github/workflows/windows.yml).
 #
 # Steps:
 #   1. cargo build --workspace --all-targets   (RUSTFLAGS=-D warnings)
 #   2. cargo test --workspace
-#   3. uv run scripts/render-site.py
-#   4. for f in examples/*.ral: cargo run -p ral -- --check $f
+#   3. cargo check --workspace --exclude exarch --all-targets
+#        --target x86_64-pc-windows-msvc
+#   4. uv run scripts/render-site.py
+#   5. for f in examples/*.ral: cargo run -p ral -- --check $f
 #
 # Exits non-zero on the first failing step (default ral semantics —
 # external command failures propagate).
@@ -40,6 +44,16 @@ within [dir: $repo_root] {
         }
         step 'cargo test --workspace' {
             cargo test --workspace
+        }
+
+        # Poisoned cross-CC so blake3's build script (via uucore and
+        # exarch) sees NoCompiler and falls back to its pure-Rust
+        # intrinsics instead of hunting for ml64.exe.  Scoped to this
+        # one step; shipped builds never set this variable.
+        within [env: [CC_x86_64_pc_windows_msvc: 'cc-absent-use-blake3-pure-fallback']] {
+            step 'cargo check --workspace --exclude exarch --target x86_64-pc-windows-msvc' {
+                cargo check --workspace --exclude exarch --all-targets --target x86_64-pc-windows-msvc
+            }
         }
     }
 

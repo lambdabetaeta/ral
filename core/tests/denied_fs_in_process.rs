@@ -1,4 +1,5 @@
 #![allow(clippy::disallowed_methods)]
+#![cfg(unix)]
 
 //! Negative acceptance tests for the sandbox-external-children safety
 //! invariant (`decisions/260617_sandbox-external-children.md`,

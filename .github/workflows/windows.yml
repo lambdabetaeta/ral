@@ -1,0 +1,54 @@
+name: Windows
+# The one job no local machine covers: real Windows test *execution*
+# (a `cargo check --target x86_64-pc-windows-msvc` proves the workspace
+# compiles, but never runs a test), plus exarch's Windows-only dep tree
+# (windows-sys, cfg(windows) console paths) that a Unix host cannot build
+# at all.  Runs on every push to main so this drift is caught continuously
+# rather than only when someone remembers to dispatch it; the Linux jobs
+# in ci.yml stay manual to keep Actions-minutes spend down.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The `coreutils` feature pulls in `uu_timeout`, which currently
+      # does not build on Windows; build / test the cores that do.
+      - name: cargo build (core)
+        run: cargo build -p ral-core
+      - name: cargo build (ral)
+        run: cargo build -p ral
+      - name: cargo build (ral with grep + ripgrep)
+        run: cargo build -p ral --features grep,ripgrep
+      # exarch carries cfg(windows) console paths and a windows-sys dep that
+      # compile nowhere else; its default `coreutils` feature stays on the
+      # Windows-buildable subset (coreutils-unix-only is cfg(unix)-gated).
+      - name: cargo build (exarch)
+        run: cargo build -p exarch
+
+      - name: cargo test (core)
+        run: cargo test -p ral-core
+      - name: cargo test (ral)
+        run: cargo test -p ral
+      - name: cargo test (ral with grep + ripgrep)
+        run: cargo test -p ral --features grep,ripgrep
+      - name: cargo test (exarch)
+        run: cargo test -p exarch

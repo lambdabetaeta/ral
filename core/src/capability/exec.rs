@@ -165,7 +165,7 @@ fn literal_vetoes(literals: &BTreeMap<String, ExecPolicy>, deny_names: &[&str]) 
 /// pair, returning whether the command is admitted (not denied).  Lets
 /// a test feed the narrow set as both sets — reproducing the pre-fix
 /// gate, which had no broad veto identity — against the fixed gate.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn admits_for_test(ctx: &Context, deny: &[&str], allow: &[&str]) -> bool {
     !matches!(
         evaluate_exec(ctx, ExecNames { deny, allow }),

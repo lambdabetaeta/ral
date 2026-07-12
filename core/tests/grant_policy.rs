@@ -7,10 +7,11 @@
 //! No internals are reached into — the policies and their meet/join
 //! semantics are the contract.
 
-use ral_core::types::{
-    Capabilities, ExecDir, ExecMap, ExecPolicy, ExecProjection, FsPolicy, Shell,
-};
+#[cfg(unix)]
+use ral_core::types::ExecProjection;
+use ral_core::types::{Capabilities, ExecDir, ExecMap, ExecPolicy, FsPolicy, Shell};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::path::Path;
 
 #[test]
@@ -412,6 +413,10 @@ fn bare_admit_and_subcommand_gating_unregressed() {
 /// A broad fs grant, so `sandbox_projection()` returns `Some` on every
 /// platform (it short-circuits to `None` for an exec-only restriction
 /// off macOS) and the exec dimension under test is observable.
+///
+/// Unix-only: every caller below is `#[cfg(unix)]` (the Seatbelt/bwrap
+/// projection shape this models is Unix-specific).
+#[cfg(unix)]
 fn projection_fs() -> FsPolicy {
     FsPolicy {
         read_prefixes: vec!["/".into()],
@@ -423,6 +428,9 @@ fn projection_fs() -> FsPolicy {
 /// Model the SBPL last-match-wins shape the macOS renderer emits: a
 /// resolved path is admitted when an allow rule (literal or subpath)
 /// covers it and no later deny rule (literal or subpath) does.
+///
+/// Unix-only: its sole caller is `#[cfg(unix)]`.
+#[cfg(unix)]
 fn projection_admits(exec: &ExecProjection, resolved: &str) -> bool {
     match exec {
         ExecProjection::Unrestricted => true,

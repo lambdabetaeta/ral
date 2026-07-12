@@ -54,7 +54,9 @@ pub mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
 pub mod syntax;
-#[cfg(test)]
+// Unix-only: every consumer of its env-mutation helpers is a
+// `#[cfg(unix)]` test (Windows path/env assertions live elsewhere).
+#[cfg(all(test, unix))]
 pub(crate) mod test_env;
 pub mod test_helper;
 pub mod text;

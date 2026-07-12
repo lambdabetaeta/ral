@@ -20,10 +20,20 @@ use std::process::Command;
 /// What [`sandboxed_command`] should run under the OS sandbox.  A host
 /// program is its resolved path/bare name; a bundled tool is run as a
 /// child placement of ral itself (`ral --ral-bundled-tool <tool> …`).
+///
+/// Both fields are read only by the Linux/macOS backends; the Windows arm
+/// fails closed before ever matching on `target` (no sandbox backend yet —
+/// W1), so the fields are dead there until that lands.
 #[derive(Clone, Copy)]
 pub(crate) enum LaunchTarget<'a> {
-    Host { program: &'a str },
-    BundledTool { tool: &'a str },
+    Host {
+        #[cfg_attr(windows, allow(dead_code))]
+        program: &'a str,
+    },
+    BundledTool {
+        #[cfg_attr(windows, allow(dead_code))]
+        tool: &'a str,
+    },
 }
 
 /// Build a `Command` that runs `target` + `args` under the OS sandbox for

@@ -3,7 +3,9 @@ name: CI
 # Actions tab or `gh workflow run ci.yml`.  Kept deliberately lean
 # (single Linux runner, no cross-targets) so it stays cheap in Actions
 # minutes.  Cross-target builds live in build-binaries.yml (v* tags or
-# manual dispatch).
+# manual dispatch).  The Windows job lives in windows.yml instead,
+# where it auto-runs on push to main — it is the one job no local
+# machine covers.
 on:
   workflow_dispatch:
 
@@ -63,39 +65,3 @@ jobs:
           for f in examples/*.ral kit/*.ral plugins/*.ral; do
             cargo run -p ral --quiet -- --check "$f"
           done
-
-  windows-check:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "stable"
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      # The `coreutils` feature pulls in `uu_timeout`, which currently
-      # does not build on Windows; build / test the cores that do.
-      - name: cargo build (core)
-        run: cargo build -p ral-core
-      - name: cargo build (ral)
-        run: cargo build -p ral
-      - name: cargo build (ral with grep + ripgrep)
-        run: cargo build -p ral --features grep,ripgrep
-      # exarch carries cfg(windows) console paths and a windows-sys dep that
-      # compile nowhere else; its default `coreutils` feature stays on the
-      # Windows-buildable subset (coreutils-unix-only is cfg(unix)-gated).
-      - name: cargo build (exarch)
-        run: cargo build -p exarch
-
-      - name: cargo test (core)
-        run: cargo test -p ral-core
-      - name: cargo test (ral)
-        run: cargo test -p ral
-      - name: cargo test (ral with grep + ripgrep)
-        run: cargo test -p ral --features grep,ripgrep
-      - name: cargo test (exarch)
-        run: cargo test -p exarch

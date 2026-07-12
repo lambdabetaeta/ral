@@ -50,6 +50,7 @@
 use std::sync::atomic::Ordering;
 
 use super::{ESCALATION, Pgid, PgidPolicy};
+use crate::process::cancel::{CancelCause, request_foreground_cancel};
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Signal handler installation ────────────────────────────────────────────
@@ -65,7 +66,7 @@ pub fn install_handlers() {
     // ladder per active interrupt sequence, not for the lifetime of the
     // shell.
     let _ = ctrlc::set_handler(|| {
-        super::request_foreground_cancel(super::CancelCause::Interrupt);
+        request_foreground_cancel(CancelCause::Interrupt);
         let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
         match prev {
             // First delivery: cooperative cancel via Ctrl-Break.

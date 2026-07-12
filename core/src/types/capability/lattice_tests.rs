@@ -38,11 +38,16 @@ fn break_msg(b: Break) -> String {
     }
 }
 
+#[cfg(unix)]
 use crate::test_env::{with_var, with_vars_cleared};
 
 /// Run `f` with every `XDG_*_HOME` override removed, restoring them
 /// after, so `xdg:` sigils resolve to the home-joined defaults and the
 /// escape guard sees paths under the synthetic test home.
+///
+/// Unix-only: every consumer below is `#[cfg(unix)]` (Windows path
+/// normalisation defeats the literal Unix-shaped assertions).
+#[cfg(unix)]
 fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
     with_vars_cleared(
         &[

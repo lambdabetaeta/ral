@@ -526,6 +526,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::process::TerminalLease;
 
     /// The handoff door: the lease borrow is reachable *only* when the turn's

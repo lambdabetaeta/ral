@@ -65,20 +65,14 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     // ── core ──────────────────────────────────────────────────────────────
     ("core/src/builtins/fs.rs", "io-door:silent:file-info"),
     ("core/src/builtins/fs.rs", "io-door:silent:list-dir"),
-    ("core/src/builtins/misc.rs", "io-door:silent:ask-tty"),
-    ("core/src/builtins/modules.rs", "io-door:silent:module-load"),
+    ("core/src/builtins/fs.rs", "io-door:silent:stat-follow"),
+    ("core/src/builtins/fs.rs", "io-door:silent:stat-nofollow"),
     (
-        "core/src/builtins/predicates.rs",
-        "io-door:silent:stat-follow",
-    ),
-    (
-        "core/src/builtins/predicates.rs",
-        "io-door:silent:stat-nofollow",
-    ),
-    (
-        "core/src/builtins/predicates.rs",
+        "core/src/builtins/fs.rs",
         "io-door:silent:writable-stat-nonunix",
     ),
+    ("core/src/builtins/misc.rs", "io-door:silent:ask-tty"),
+    ("core/src/builtins/modules.rs", "io-door:silent:module-load"),
     ("core/src/builtins/uutils.rs", "io-door:silent:diff-read"),
     ("core/build.rs", "io-door:silent:prelude-bake-build"),
     ("core/src/capability/load.rs", "io-door:silent:cap-load"),
@@ -144,6 +138,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/sandbox/linux.rs", "io-door:surface:bwrap-launch"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-open"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-stat"),
+    ("core/src/sandbox/reexec.rs", "io-door:silent:self-reexec"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:verify-stat"),
     ("core/src/subprocess_codec.rs", "io-door:silent:frame-dump"),
     (
@@ -159,6 +154,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     ("exarch/src/agent_builtins.rs", "io-door:surface:grep-read"),
     ("exarch/src/agent_builtins.rs", "io-door:surface:grep-walk"),
+    (
+        "exarch/src/agent_builtins/fff_index.rs",
+        "io-door:silent:fff-db-dir",
+    ),
     ("exarch/src/bootstrap.rs", "io-door:silent:log-run-dir"),
     (
         "exarch/src/bootstrap.rs",
@@ -194,7 +193,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/skill.rs", "io-door:surface:skill-list"),
     ("exarch/src/state.rs", "io-door:silent:state-read"),
     ("exarch/src/state.rs", "io-door:silent:state-write"),
-    ("exarch/src/agent_builtins.rs", "io-door:silent:fff-db-dir"),
     ("exarch/src/resources.rs", "io-door:silent:resources-disk-probe"),
     ("exarch/src/transcript.rs", "io-door:silent:transcript-file"),
     (

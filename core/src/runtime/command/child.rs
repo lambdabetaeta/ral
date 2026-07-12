@@ -4,7 +4,9 @@
 //! → drained makes "drain before wait" and "wait twice" unwritable.
 
 use crate::io::Sink;
-use crate::types::{Break, Error, Escape, Settled};
+use crate::types::{Break, Error, Settled};
+#[cfg(unix)]
+use crate::types::Escape;
 
 /// Who owns the platform process-group bookkeeping on Windows.
 ///

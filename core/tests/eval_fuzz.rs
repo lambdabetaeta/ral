@@ -2521,6 +2521,9 @@ fn audit_fs_write_denied_recorded() {
 /// Find an immediate child of `parent` whose `cmd` matches `name`, or
 /// `None`.  The traversal helpers above (`has_cap_check`) recurse; for
 /// scope ownership we need to check direct-child placement.
+///
+/// Unix-only: its sole caller is `#[cfg(unix)]` (the fixture execs `/bin/true`).
+#[cfg(unix)]
 fn child_named<'a>(parent: &'a Value, name: &str) -> Option<&'a Value> {
     match parent {
         Value::Map(m) => match m.get("children") {

@@ -24,6 +24,7 @@ pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prel
 /// closures over co-resident state (`repl::host_handlers`), which a wire
 /// engine child cannot construct — so this tag maps to "install nothing",
 /// the honest absence the bare REPL already gives every other host facility.
+#[cfg(unix)]
 pub(crate) const ENGINE_INSTALLER_TAG: &str = "repl";
 
 fn main() -> ExitCode {

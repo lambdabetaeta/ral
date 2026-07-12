@@ -368,7 +368,10 @@ impl Shell {
     }
 }
 
-#[cfg(test)]
+// Unix-only: both tests assert a minted `TerminalLease` is `Some`, but
+// `mint_at_startup` returns `None` unconditionally on platforms with no
+// `tcsetpgrp` (Windows), so the assertions cannot hold there.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::process::TerminalLease;
@@ -382,7 +385,6 @@ mod tests {
     /// `Leased`, and the lease is plainly still held after the body since it
     /// never moved.
     #[test]
-    #[cfg(unix)]
     fn lambda_body_shares_the_session_terminal_lease() {
         let mut shell = Shell::default();
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
@@ -415,7 +417,6 @@ mod tests {
     /// witness, so a sub-agent can never foreground an external command and
     /// seize the controlling terminal the host's TUI owns.
     #[test]
-    #[cfg(unix)]
     fn fork_session_holds_no_terminal_authority() {
         let mut parent = Shell::default();
         parent.session.terminal_lease = TerminalLease::mint_at_startup(true);

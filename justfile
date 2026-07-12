@@ -27,6 +27,14 @@ build:
 check:
     cargo check --workspace --all-targets
 
+# Cross-check the workspace against the shipping Windows ABI — catches
+# `cfg(windows)` drift (unused imports, dead fields) a native check
+# can't see.  exarch is excluded: its rustls -> aws-lc-sys dependency
+# compiles C against Windows system headers, impossible from a Unix
+# host, so exarch's Windows drift is gated by windows-check CI instead.
+check-windows:
+    CC_x86_64_pc_windows_msvc=cc-absent-use-blake3-pure-fallback RUSTFLAGS='-D warnings' cargo check --workspace --exclude exarch --all-targets --target x86_64-pc-windows-msvc
+
 # Run the workspace test suite.  The `ral-core/test-util` feature pulls
 # in the sandbox integration test that needs the confinement-token seam.
 test:
