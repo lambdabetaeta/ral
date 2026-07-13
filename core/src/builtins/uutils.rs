@@ -271,7 +271,80 @@ declare_coreutils! {
         "stat" => uu_stat,
         "tac" => uu_tac,
         "test" => uu_test,
+        // `timeout` is the one entry here worth a native Windows port —
+        // see the design note below, kept beside the declaration it
+        // concerns rather than filed away in a planning doc.
         "timeout" => uu_timeout,
+    }
+}
+
+// `timeout` — scoped follow-up (Windows-port W3.9), not implemented here.
+//
+// `uu_timeout` depends on `uucore` with its `process`/`signals` features
+// (arbitrary named-signal delivery, process groups, `rustix::process`),
+// which is why it sits in the `unix:` block above rather than `cross:`:
+// upstreaming a Windows arm into `uucore` itself is a large, cross-cutting
+// change to someone else's crate, correctly out of scope here.
+//
+// A *native* `timeout` (this crate's own code, not a `uu_timeout` port) is
+// plausible and worth building, but is a real feature addition rather
+// than a run-well fix, so it is deliberately not started in this pass.
+// Two shapes were considered:
+//
+//   1. A bundled-tool shim wired into `coreutils_invoke`/`COREUTILS_TOOLS`
+//      like every `uu_*` entry above, spawning the child through
+//      `process::launch::Launch` (which already places a Windows child in
+//      its own Job Object per `PgidPolicy::NewLeader`) and racing
+//      `WaitForSingleObject` against the deadline, killing via the
+//      existing `kill_pipeline_group` Job-Object path
+//      (`process::signal::windows`) on expiry. Argv-compatible with GNU
+//      `timeout DURATION COMMAND...`, so scripts don't need a Windows-only
+//      spelling — at the cost of reproducing (or deliberately not
+//      reproducing) GNU's flag surface (`--signal`, `--kill-after`,
+//      `--preserve-status`, `--foreground`), which has no Windows
+//      equivalent for "arbitrary signal number" and would need its own
+//      documented, narrower semantics.
+//   2. A ral-native builtin (`timeout $seconds { block }`), composing with
+//      the language's own block/thunk syntax the way `spawn`/`cancel` do,
+//      sidestepping argv-compatibility questions entirely by not
+//      pretending to be GNU `timeout`. Cleaner fit for the language, but a
+//      new builtin is a bigger surface (grammar, SPEC, registry, tests)
+//      than a coreutils shim and is a design decision on its own, not a
+//      Windows-port side effect.
+//
+// Recommendation: (1), since it keeps scripts portable without a
+// Windows-specific spelling and reuses process/launch machinery that
+// already exists; (2) is worth a separate proposal if a shell-native
+// timeout construct is wanted independent of Windows. Either way this
+// needs its own review, not a rushed addition to a run-well pass — hence
+// deferred. What *is* in scope here and already true: `which`/help output
+// never advertises `timeout` (or the other `unix:` names) on Windows,
+// because `COREUTILS_TOOLS` never contains them there — see the
+// `#[cfg(feature = "coreutils")]` test below, and `declare_coreutils!`'s
+// `#[cfg(all(unix, feature = "coreutils-unix-only"))]` gate on each
+// `unix:` entry plus the `[target.'cfg(unix)'.dependencies]` stanza in
+// `Cargo.toml` that keeps the upstream `uu_*` crates themselves out of
+// the Windows dependency graph entirely (not just unused — unresolved).
+
+#[cfg(all(test, feature = "coreutils"))]
+mod hygiene_tests {
+    use super::*;
+
+    /// Regression pin for the claim above: every `unix:`-declared tool
+    /// name is advertised in `COREUTILS_TOOLS` exactly when the platform
+    /// and feature both allow it, never merely because the feature is on.
+    /// Keyed against the real `cfg!` rather than a fixed platform, like
+    /// `capability::exec`'s `lookup_literal_case_mismatch_follows_real_platform`,
+    /// so this is honest (and still runs) on every host.
+    #[test]
+    fn unix_only_tools_are_advertised_iff_unix_and_feature_on() {
+        for name in COREUTILS_UNIX_ONLY_TOOLS {
+            assert_eq!(
+                COREUTILS_TOOLS.contains(name),
+                cfg!(all(unix, feature = "coreutils-unix-only")),
+                "{name} advertised-set mismatch"
+            );
+        }
     }
 }
 

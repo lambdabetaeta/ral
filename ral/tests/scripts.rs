@@ -182,3 +182,43 @@ fn scripts() {
         failures.join("\n\n")
     );
 }
+
+/// A `.ral` source authored on Windows (Notepad, VS Code set to CRLF) has
+/// `\r\n` line endings throughout — inside comments, between statements,
+/// and inside a multi-line raw-string literal. This proves the lexer
+/// treats CRLF as one logical newline everywhere, not just at top level.
+///
+/// Synthesized here rather than checked into the repo as a real CRLF
+/// file: with no `.gitattributes` override, `core.autocrlf` differs by
+/// contributor and platform, so a checked-in CRLF fixture risks being
+/// silently renormalized (or double-CR'd) on some future checkout.
+/// Building the exact bytes at test time sidesteps that.
+#[test]
+fn crlf_source_lexes_and_runs() {
+    let lf = "\
+# CRLF fixture -- this comment, and every line below, is CRLF once converted.
+let peek = 2
+echo $[$peek + 1]
+
+let greeting = \"hello\"
+echo $greeting
+
+# A raw string spanning the converted newline keeps its content verbatim
+# (the embedded CR survives -- that's the raw-string contract, not a
+# bug); the lexer must still find the closing '# on the far side of it.
+echo #'raw
+line'#
+";
+    let crlf = lf.replace('\n', "\r\n");
+    assert!(
+        !lf.contains('\r'),
+        "fixture must be authored LF-only before the conversion"
+    );
+
+    let out = common::run("crlf-fixture", &crlf);
+    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+    assert_eq!(
+        strip_cr(out.stdout.as_bytes()),
+        strip_cr(b"3\r\nhello\r\nraw\r\nline\r\n")
+    );
+}

@@ -103,6 +103,12 @@ impl CommandIdentity {
 
 /// Surface rendering of `name`: bare and path heads are returned
 /// verbatim; tilde heads expand against the effective `HOME`.
+///
+/// A `~user` head that cannot resolve (no `getpwnam(3)` analogue off
+/// Unix) falls back to its literal spelling — [`CommandIdentity::resolve`]
+/// never fails, so an unresolvable named user is left to fail naturally
+/// downstream as an ordinary missing-command/missing-path error, the
+/// same as any other head that doesn't exist.
 fn render(name: &CommandName, ctx: &Context) -> String {
     match name {
         CommandName::Bare(name) => name.clone(),
@@ -110,6 +116,7 @@ fn render(name: &CommandName, ctx: &Context) -> String {
         CommandName::TildePath(path) => {
             let home = ctx.home();
             expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home)
+                .unwrap_or_else(|| path.to_literal())
         }
     }
 }

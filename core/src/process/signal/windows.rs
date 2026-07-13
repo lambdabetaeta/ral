@@ -523,6 +523,22 @@ mod win_groups {
         leader_exit_code(handle)
     }
 
+    /// `CTRL_BREAK_EVENT` to every member of one group — the
+    /// [`break_all`] fan-out narrowed to a single leader, for a caller
+    /// (`JobTable::cleanup`) that wants the cooperative signal scoped to
+    /// the job it is tearing down rather than every live pipeline.
+    /// Idempotent: no-op when the group is already gone.
+    pub(super) fn break_group(leader: i32) {
+        let groups = GROUPS.lock().unwrap();
+        if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) {
+            for &pid in &state.members {
+                unsafe {
+                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+                }
+            }
+        }
+    }
+
     /// `TerminateJobObject` the group: every member dies immediately
     /// with the given exit code (1 — there's no signal number to pass
     /// through, and it lines up with what `kill -9` would surface as).
@@ -715,6 +731,14 @@ pub fn try_reap_leader(pgid: Pgid) -> ReapStatus {
 /// `JobTable::cleanup` on shell exit.  Idempotent.
 pub fn kill_pipeline_group(pgid: Pgid) {
     win_groups::kill_group(pgid.0);
+}
+
+/// `SIGTERM` analogue: `CTRL_BREAK_EVENT` to every member of the group,
+/// giving well-behaved children the chance to wind down on their own
+/// before `JobTable::cleanup` escalates to [`kill_pipeline_group`] — the
+/// same grace Unix's `SIGTERM`-then-`SIGKILL` pair gives.  Idempotent.
+pub fn break_pipeline_group(pgid: Pgid) {
+    win_groups::break_group(pgid.0);
 }
 
 /// `disown` analogue: clear `KILL_ON_JOB_CLOSE` and release the group

@@ -433,6 +433,29 @@ pub(crate) use windows_sys::Win32::System::Console::{
     SetConsoleMode,
 };
 
+/// Snapshot the console mode of the stdin handle, for restoring via
+/// [`restore_console_mode`] after raw mode leaves it dirty — the Windows
+/// analogue of `process::termios_snapshot`/`tcsetattr` on Unix, used by
+/// the panic hook. `None` when stdin is not attached to a console
+/// (`GetConsoleMode` fails — redirected to a pipe or file), mirroring
+/// `termios_snapshot`'s `None` on a non-tty stdin.
+#[cfg(windows)]
+pub fn console_mode_snapshot() -> Option<u32> {
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode: u32 = 0;
+    (unsafe { GetConsoleMode(h, &mut mode) } != 0).then_some(mode)
+}
+
+/// Restore a console mode captured by [`console_mode_snapshot`] onto the
+/// stdin handle.
+#[cfg(windows)]
+pub fn restore_console_mode(mode: u32) {
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    unsafe {
+        SetConsoleMode(h, mode);
+    }
+}
+
 /// Returns true when the given Win32 standard-handle ID is attached to a
 /// console (not a pipe, file, or NUL).  Used as `isatty` on Windows.
 #[cfg(windows)]

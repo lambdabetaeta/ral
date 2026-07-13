@@ -2359,6 +2359,20 @@ mod tests {
         );
     }
 
+    /// A raw string is verbatim: a source authored with CRLF line endings
+    /// (Notepad, VS Code set to CRLF) carries the `\r` into the literal's
+    /// value rather than losing it — that's the raw-string contract, not
+    /// a CRLF-intolerance bug. What must still work regardless is finding
+    /// the closing `'#` on the far side of the embedded `\r\n`.
+    #[test]
+    fn bumped_string_multiline_preserves_embedded_cr() {
+        let toks = tok_types("#'line1\r\nline2'#");
+        assert_eq!(
+            toks,
+            vec![Token::SingleQuoted("line1\r\nline2".into()), Token::Eof]
+        );
+    }
+
     #[test]
     fn bumped_string_no_escape_processing() {
         // \n inside a literal is two literal bytes, not a newline.

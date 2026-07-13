@@ -131,36 +131,60 @@ fn claim_terminal() -> Result<(), String> {
 }
 
 /// Save terminal state and install a panic hook that restores it and writes a crash log.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
-)]
+///
+/// Unix snapshots termios and restores it with `tcsetattr`; Windows
+/// snapshots the console mode and restores it with `SetConsoleMode`
+/// (`ral_core::io::console_mode_snapshot`/`restore_console_mode`) — the
+/// two platforms' analogues of "undo whatever raw mode left dirty" before
+/// [`write_crash_log`] runs.  Either arm is a no-op when stdin isn't a
+/// real terminal (no termios / console mode to snapshot).
 pub(super) fn setup_panic_hook() {
     #[cfg(unix)]
     {
         let saved = ral_core::process::termios_snapshot();
         if let Some(t) = saved {
-            let home = crate::platform::home_dir();
             std::panic::set_hook(Box::new(move |info| {
                 unsafe {
                     libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const t);
                 }
-                let dir = ral_core::path::basedir::resolve_xdg(
-                    ral_core::path::basedir::XdgKind::State,
-                    &home,
-                )
-                .join("ral");
-                let _ = std::fs::create_dir_all(&dir);
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
-                let path = dir.join(format!("crash-{ts}.log")).display().to_string();
-                let bt = std::backtrace::Backtrace::force_capture();
-                let _ = std::fs::write(&path, format!("{info}\n\n{bt}"));
-                eprintln!("ral: panic — crash log: {path}");
+                write_crash_log(info);
             }));
         }
     }
+    #[cfg(windows)]
+    {
+        let saved = ral_core::io::console_mode_snapshot();
+        if let Some(mode) = saved {
+            std::panic::set_hook(Box::new(move |info| {
+                ral_core::io::restore_console_mode(mode);
+                write_crash_log(info);
+            }));
+        }
+    }
+}
+
+/// Write the panic report both platform hooks share: `$XDG_STATE_HOME/ral/
+/// crash-<unix-ts>.log` holding the panic message and a captured
+/// backtrace, after the terminal/console has already been restored by the
+/// caller.
+#[cfg(any(unix, windows))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
+)]
+fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) {
+    let home = crate::platform::home_dir();
+    let dir =
+        ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home)
+            .join("ral");
+    let _ = std::fs::create_dir_all(&dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let path = dir.join(format!("crash-{ts}.log")).display().to_string();
+    let bt = std::backtrace::Backtrace::force_capture();
+    let _ = std::fs::write(&path, format!("{info}\n\n{bt}"));
+    eprintln!("ral: panic — crash log: {path}");
 }
 
 /// Bind the default `RAL_PROMPT` thunk, returning

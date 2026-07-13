@@ -10,7 +10,9 @@
 //! and have always lived alongside [`resolve_path`] for that
 //! reason.  The macOS firmlink table and its toggle live in
 //! [`super::canon`]; the matcher reuses them so it and the
-//! canonicaliser see the same view.
+//! canonicaliser see the same view.  [`starts_with_identity`] is the
+//! per-pair comparison `path_within` folds over every alias pair,
+//! carrying Windows path identity (case, separator, `\\?\`-verbatim).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -37,16 +39,72 @@ pub fn path_aliases(p: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// True iff some alias of `path` starts with some alias of
-/// `prefix`, i.e. `path` lies inside `prefix` modulo the host's
-/// known firmlinks.
+/// True iff some alias of `path` starts with some alias of `prefix`.
 ///
-/// Pure helper used by both the runtime grant
-/// matcher and the nested grant intersector.
+/// I.e. `path` lies inside `prefix` modulo the host's known firmlinks
+/// and, under Windows path identity, modulo case, separator spelling,
+/// and a `\\?\`-verbatim prefix — see [`starts_with_identity`]. Pure
+/// helper used by both the runtime grant matcher and the nested grant
+/// intersector.
 pub fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
-    ps.iter().any(|p| qs.iter().any(|q| p.starts_with(q)))
+    ps.iter().any(|p| {
+        qs.iter().any(|q| {
+            starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), cfg!(windows))
+        })
+    })
+}
+
+/// Component-wise prefix test under one of two path-identity rulesets.
+///
+/// Off Windows (`windows == false`): the existing byte-exact rule,
+/// delegated to [`Path::starts_with`] (component-aware — `/tmp` does
+/// not spuriously match `/tmpx`).
+///
+/// Under Windows path identity (`windows == true`): `/` and `\` are
+/// the same separator, components compare case-insensitively (`git`
+/// grants must admit `C:\WORK` a grant wrote as `c:\work`), and a
+/// `\\?\`-verbatim prefix — what `std::fs::canonicalize` returns on
+/// Windows — is equivalent to its non-verbatim spelling, so a grant
+/// resolved through `canonicalise_lenient` still matches a candidate
+/// that was never canonicalized. `\\?\UNC\server\share` likewise folds
+/// to `\\server\share`.
+///
+/// Pure string logic rather than `std::path::Path` — whose separator
+/// and prefix parsing is fixed at compile time to the build target,
+/// not switchable at runtime — so the Windows rule is exercised by a
+/// unit test on every host regardless of which platform is compiling.
+/// `windows` is a parameter rather than a `cfg!(windows)` read buried
+/// in this function so that test is possible; the real platform gate
+/// lives at the one call site, [`path_within`]. Mirrors
+/// `capability::exec::names_match` and
+/// `path::sigil::{unix,windows}_tool_roots`, the same pattern applied
+/// to command-name and tool-root comparisons.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn starts_with_identity(path: &str, prefix: &str, windows: bool) -> bool {
+    if !windows {
+        return Path::new(path).starts_with(Path::new(prefix));
+    }
+    let path = windows_identity_components(path);
+    let prefix = windows_identity_components(prefix);
+    path.len() >= prefix.len() && path[..prefix.len()] == prefix[..]
+}
+
+/// Split a path string into lower-cased components under Windows path
+/// identity: a leading `\\?\` (verbatim prefix) is stripped, a
+/// verbatim UNC form `UNC\server\share` right after it is folded to
+/// `\server\share`, and `/` and `\` are both treated as separators.
+fn windows_identity_components(p: &str) -> Vec<String> {
+    let s = p.strip_prefix(r"\\?\").unwrap_or(p);
+    let s = s
+        .strip_prefix("UNC\\")
+        .or_else(|| s.strip_prefix("UNC/"))
+        .map_or_else(|| s.to_string(), |rest| format!(r"\{rest}"));
+    s.split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 /// Resolve `path` against `cwd`, normalising `.` and `..`
@@ -336,5 +394,63 @@ mod tests {
             Path::new("/private/tmp/foo"),
             Path::new("/tmp")
         ));
+    }
+
+    // `starts_with_identity` is exercised directly with `windows: true`
+    // rather than behind `cfg(windows)`, so the Windows path-identity
+    // rule has a fixed-outcome unit test on every host — the pattern
+    // `capability::exec::names_match` and `sigil::windows_tool_roots`
+    // established.
+
+    #[test]
+    fn windows_identity_ignores_case() {
+        assert!(starts_with_identity(r"C:\WORK\sub", r"c:\work", true));
+        assert!(starts_with_identity(r"c:\Work\Sub", r"C:\WORK", true));
+    }
+
+    #[test]
+    fn windows_identity_unifies_forward_and_back_slashes() {
+        assert!(starts_with_identity(r"c:/work/sub", r"C:\work", true));
+        assert!(starts_with_identity(r"C:\work\sub", "c:/work", true));
+    }
+
+    #[test]
+    fn windows_identity_strips_verbatim_prefix() {
+        assert!(starts_with_identity(r"\\?\C:\work\sub", r"C:\work", true));
+        assert!(starts_with_identity(r"C:\work\sub", r"\\?\C:\work", true));
+        assert!(starts_with_identity(
+            r"\\?\C:\work\sub",
+            r"\\?\c:\WORK",
+            true
+        ));
+    }
+
+    #[test]
+    fn windows_identity_folds_verbatim_unc() {
+        assert!(starts_with_identity(
+            r"\\?\UNC\server\share\sub",
+            r"\\server\share",
+            true
+        ));
+    }
+
+    #[test]
+    fn windows_identity_respects_component_boundaries() {
+        // `C:\work` must not pseudo-match `C:\workshop`, mirroring the
+        // existing substring-pseudomatch guard off Windows.
+        assert!(!starts_with_identity(r"C:\workshop", r"C:\work", true));
+    }
+
+    #[test]
+    fn windows_identity_rejects_unrelated_drive() {
+        assert!(!starts_with_identity(r"D:\work\sub", r"C:\work", true));
+    }
+
+    #[test]
+    fn windows_identity_off_flag_is_byte_exact() {
+        // With `windows: false` the rule is the pre-existing byte-exact
+        // one, regardless of build target — same contract as
+        // `capability::exec::names_match`'s `windows: false` arm.
+        assert!(!starts_with_identity(r"C:\WORK", r"C:\work", false));
     }
 }

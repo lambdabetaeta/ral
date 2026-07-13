@@ -499,6 +499,89 @@ mod windows_args {
         }
         Ok(())
     }
+
+    // ── Unicode round-trip (item W3.8) ──────────────────────────────────
+    //
+    // `make_command_line`/`append_arg` own the UTF-16 conversion at the
+    // spawn boundary; these tests exercise that seam directly (no spawn
+    // needed) with non-ASCII *and* non-BMP (astral-plane, surrogate-pair)
+    // text, so a regression that mangles wide-char conversion — not just
+    // quoting — is caught. `cfg(windows)`: `OsStrExt::encode_wide` doesn't
+    // exist off Windows, so this only builds and runs on Windows CI.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Decode a `make_command_line` buffer back to a `String`,
+        /// dropping the trailing NUL `make_command_line` always appends.
+        fn decode(wide: &[u16]) -> String {
+            let (last, body) = wide.split_last().expect("non-empty command line");
+            assert_eq!(*last, 0, "make_command_line must NUL-terminate");
+            String::from_utf16(body).expect("well-formed UTF-16")
+        }
+
+        /// A program path and a lone plain argument (no space/quote/
+        /// backslash, so `append_arg` takes its no-quoting branch and the
+        /// wide buffer is exactly the UTF-16 re-encoding of the input) —
+        /// isolates the encode/decode round-trip from the quoting rules.
+        #[test]
+        fn plain_arg_round_trips_non_ascii_and_non_bmp() {
+            let program = std::ffi::OsString::from(r"C:\Users\café\bin\日本語.exe");
+            let arg = std::ffi::OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
+            let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
+            let decoded = decode(&cmd);
+            assert_eq!(
+                decoded,
+                format!(
+                    "\"{}\" {}",
+                    program.to_str().unwrap(),
+                    arg.to_str().unwrap()
+                )
+            );
+        }
+
+        /// The same text, but the argument also contains a space — forces
+        /// `append_arg`'s quoting branch, so this proves the astral-plane
+        /// characters survive being wrapped in quotes too, not just the
+        /// unquoted path.
+        #[test]
+        fn quoted_arg_round_trips_non_ascii_and_non_bmp() {
+            let program = std::ffi::OsString::from(r"C:\Program Files\ral.exe");
+            let arg = std::ffi::OsString::from("🎉 café 日本語 with spaces");
+            let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
+            let decoded = decode(&cmd);
+            assert_eq!(
+                decoded,
+                format!(
+                    "\"{}\" \"{}\"",
+                    program.to_str().unwrap(),
+                    arg.to_str().unwrap()
+                )
+            );
+        }
+
+        /// A surrogate-pair character (astral plane) sitting directly
+        /// against the arg boundary and against an escaped embedded quote
+        /// — the two spots most likely to split a surrogate pair if the
+        /// backslash-doubling logic walked `u16` units carelessly. Built
+        /// with `format!`/interpolation rather than hand-escaped string
+        /// literals, so the expected value is unambiguous to read.
+        #[test]
+        fn non_bmp_survives_adjacent_to_escaped_quote() {
+            let q = '"';
+            let program = std::ffi::OsString::from(r"C:\ral.exe");
+            let arg = std::ffi::OsString::from(format!("🎉{q}🎊 quoted 🎊{q}🎉"));
+            let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
+            let decoded = decode(&cmd);
+            // Quoted (embedded spaces) with each embedded `"` escaped by
+            // one preceding backslash.
+            let expected_payload = format!("🎉\\{q}🎊 quoted 🎊\\{q}🎉");
+            assert_eq!(
+                decoded,
+                format!("\"{}\" \"{expected_payload}\"", program.to_str().unwrap())
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -681,6 +764,17 @@ mod windows {
         )))
     }
 
+    /// Refuse to launch a `.bat`/`.cmd` image outright — the correct
+    /// posture for CVE-2024-24576 (Rust std's own `.bat`/`.cmd` argument
+    /// quoting could be broken out of by a crafted argument, because
+    /// batch-file argument quoting has no single safe encoding: `cmd.exe`
+    /// re-interprets the command line through its own escaping rules,
+    /// layered on top of `CreateProcessW`'s). Rather than synthesize a
+    /// `cmd /c` wrapper — which is exactly the unsafe quoting problem,
+    /// one layer removed — this launcher declines the image entirely
+    /// until a from-scratch, tested port of that quoting exists (see the
+    /// ADR at `docs/ral-wiki/decisions/260702_windows-spawn-boundary.md`,
+    /// §"Treat command-line quoting as security").
     fn reject_batch(program: &OsStr) -> io::Result<()> {
         let Some(ext) = std::path::Path::new(program).extension() else {
             return Ok(());
@@ -689,7 +783,16 @@ mod windows {
         if ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Windows raw launch refuses .bat/.cmd until batch-file quoting is implemented safely",
+                format!(
+                    "refusing to launch '{}': .bat/.cmd images are not supported on the \
+                     raw Windows launch path. ral will not synthesize a `cmd /c` wrapper \
+                     to run it, because batch-file argument quoting has no safe general \
+                     encoding (the CVE-2024-24576 class of bug) — a crafted argument could \
+                     inject additional commands through cmd.exe's own escaping rules. Invoke \
+                     the batch file through cmd.exe yourself if you accept that risk, or run \
+                     the underlying program directly.",
+                    std::path::Path::new(program).display()
+                ),
             ));
         }
         Ok(())
@@ -1010,6 +1113,63 @@ mod windows {
         }
         block.push(0);
         Ok(block)
+    }
+
+    // ── Unicode round-trip (item W3.8) ──────────────────────────────────
+    //
+    // `wide_null` owns the program-path/cwd UTF-16 conversion and
+    // `environment_block` owns the env-block conversion; both are tested
+    // directly with non-ASCII and non-BMP (surrogate-pair) text. Only
+    // builds and runs on Windows CI (`OsStrExt::encode_wide` is
+    // Windows-only).
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn decode_wide_null(v: &[u16]) -> String {
+            let (last, body) = v.split_last().expect("non-empty");
+            assert_eq!(*last, 0, "wide_null must NUL-terminate");
+            String::from_utf16(body).expect("well-formed UTF-16")
+        }
+
+        #[test]
+        fn wide_null_round_trips_non_ascii_and_non_bmp() {
+            let s = "🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語";
+            let encoded = wide_null(OsStr::new(s)).unwrap();
+            assert_eq!(decode_wide_null(&encoded), s);
+        }
+
+        #[test]
+        fn wide_null_round_trips_a_non_ascii_program_path() {
+            let path = r"C:\Users\café\日本語プロジェクト\ral.exe";
+            let encoded = wide_null(OsStr::new(path)).unwrap();
+            assert_eq!(decode_wide_null(&encoded), path);
+        }
+
+        /// `environment_block` layers `edits` over the live process
+        /// environment; the round-trip claim under test is only about the
+        /// UTF-16 conversion of one injected non-ASCII/non-BMP entry, so
+        /// the assertion searches the decoded block for that entry's
+        /// `KEY=value\0` run rather than comparing the whole block (which
+        /// also carries whatever the test process inherited).
+        #[test]
+        fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
+            let key = super::super::env_key(OsStr::new("RAL_UNICODE_TEST_VAR"));
+            let value = OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
+            let edits = std::collections::BTreeMap::from([(key, EnvEdit::Set(value.clone()))]);
+            let block = environment_block(&edits).unwrap();
+            // The block is a flat run of NUL-terminated `KEY=value` pairs
+            // plus one extra trailing NUL marking the end of the whole
+            // block; strip that outer terminator, then decode and split
+            // on the per-entry NULs to search.
+            let (_, body) = block.split_last().expect("non-empty");
+            let text = String::from_utf16(body).expect("well-formed UTF-16");
+            let expected = format!("RAL_UNICODE_TEST_VAR={}", value.to_str().unwrap());
+            assert!(
+                text.split('\u{0}').any(|entry| entry == expected),
+                "expected entry {expected:?} not found in environment block"
+            );
+        }
     }
 
     // ── Raw CreateProcessW child ───────────────────────────────────────────

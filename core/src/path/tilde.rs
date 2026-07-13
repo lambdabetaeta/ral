@@ -12,6 +12,17 @@
 //! sigil expander in `path::sigil` and the `cd` builtin both go
 //! through this function so the rule is one-and-the-same.
 //!
+//! `~user` (a *named* user, as opposed to bare `~`/`~/...`, which
+//! never call [`get_user_home`]) has no answer off Unix: there is no
+//! `getpwnam(3)` analogue, and Windows user profile directories aren't
+//! enumerable from a username without an NT account lookup this
+//! codebase doesn't carry.  [`get_user_home`] returns `None` there
+//! rather than fabricating `/home/<name>`, and [`expand_tilde_path`]
+//! propagates that as `None` — every caller decides its own honest
+//! fallback (see the call sites: a policy freeze errors, a `cd`
+//! errors, an interpolated value errors, PATH/command resolution and
+//! tab completion pass the literal spelling through unexpanded).
+//!
 //! Also home to the `$HOME` / `$USER` lookup helpers (`home`,
 //! `home_from_env`, `home_from_env_or_dot`, `user_name`,
 //! `user_name_from_env`), which pin which env var each resolution reads
@@ -43,6 +54,18 @@ impl TildePath {
             }),
         }
     }
+
+    /// Reconstruct the literal `~user/suffix` spelling this value
+    /// parsed from.  Used as the honest fallback at call sites that
+    /// cannot fail (PATH/command resolution) when [`expand_tilde_path`]
+    /// returns `None`: passing the un-expanded spelling through means
+    /// resolution fails downstream as an ordinary missing-path/missing-
+    /// command error, rather than silently matching a fabricated path.
+    pub fn to_literal(&self) -> String {
+        let user = self.user.as_deref().unwrap_or_default();
+        let suffix = self.suffix.as_deref().unwrap_or_default();
+        format!("~{user}{suffix}")
+    }
 }
 
 /// Look up `username`'s home directory via the reentrant
@@ -52,9 +75,9 @@ impl TildePath {
 /// Falls back to `/home/<name>` when the lookup fails or the
 /// username contains a NUL byte.
 #[cfg(unix)]
-pub fn get_user_home(username: &str) -> String {
+pub fn get_user_home(username: &str) -> Option<String> {
     use std::ffi::CString;
-    let fallback = || format!("/home/{username}");
+    let fallback = || Some(format!("/home/{username}"));
     let Ok(c_name) = CString::new(username) else {
         return fallback();
     };
@@ -86,33 +109,41 @@ pub fn get_user_home(username: &str) -> String {
         if rc != 0 || result.is_null() {
             return fallback();
         }
-        return unsafe {
+        return Some(unsafe {
             std::ffi::CStr::from_ptr((*result).pw_dir)
                 .to_string_lossy()
                 .into_owned()
-        };
+        });
     }
 }
 
+/// No `getpwnam(3)` analogue exists off Unix, and there is no honest
+/// way to turn a bare username into a Windows profile directory
+/// without an account lookup this codebase doesn't carry — so a named
+/// user's home is unresolvable here.  Bare `~`/`~/...` never call this
+/// (they resolve against the caller-supplied `home`, i.e. `%USERPROFILE%`
+/// on Windows), so only `~user`/`~user/...` are affected.
 #[cfg(not(unix))]
-pub fn get_user_home(username: &str) -> String {
-    format!("/home/{username}")
+pub fn get_user_home(_username: &str) -> Option<String> {
+    None
 }
 
 /// Expand a tilde shape against a home directory.
 ///
-/// `home` is the current user's home (used for `~` and `~/...`);
-/// `~user` / `~user/...` resolves through [`get_user_home`].  No
+/// `home` is the current user's home (used for `~` and `~/...`, always
+/// resolvable); `~user` / `~user/...` resolves through
+/// [`get_user_home`], which is `None` off Unix — see the module note.
+/// `None` propagates; every caller picks its own honest fallback. No
 /// filesystem access — pure once `home` and `user` are fixed.
-pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -> String {
+pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -> Option<String> {
     let base = match user {
         None => home.to_string(),
-        Some(user) => get_user_home(user),
+        Some(user) => get_user_home(user)?,
     };
-    match suffix {
+    Some(match suffix {
         None => base,
         Some(suffix) => format!("{base}{suffix}"),
-    }
+    })
 }
 
 /// Abbreviate `path` for display by folding a leading `home` prefix to
@@ -175,4 +206,55 @@ pub fn user_name(env_overrides: &crate::types::EnvVars) -> String {
 /// seeding).
 pub fn user_name_from_env() -> String {
     user_name(&crate::types::EnvVars::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_tilde_expands_to_home_on_every_platform() {
+        assert_eq!(expand_tilde_path(None, None, "/h"), Some("/h".to_string()));
+    }
+
+    #[test]
+    fn bare_tilde_with_suffix_expands_on_every_platform() {
+        assert_eq!(
+            expand_tilde_path(None, Some("/sub"), "/h"),
+            Some("/h/sub".to_string())
+        );
+    }
+
+    /// Unix's `get_user_home` fabricates a conventional `/home/<name>`
+    /// only as a last resort, when `getpwnam_r` itself cannot find the
+    /// user — a pre-existing behaviour this task doesn't change. Uses a
+    /// username vanishingly unlikely to exist so the test hits that
+    /// fallback branch rather than a real account.
+    #[cfg(unix)]
+    #[test]
+    fn unix_named_user_falls_back_when_lookup_misses() {
+        let home = get_user_home("ral-tilde-test-no-such-user-8f3c1a");
+        assert_eq!(home, Some("/home/ral-tilde-test-no-such-user-8f3c1a".to_string()));
+    }
+
+    /// The behaviour the plan requires: off Unix there is no
+    /// `getpwnam(3)` analogue, so a *named* user's home is
+    /// unresolvable — `None`, never a fabricated `/home/<name>`. This
+    /// only runs where it is meaningful (Windows CI); on Unix hosts the
+    /// sibling test above pins the real behaviour instead.
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_named_user_is_unresolvable_not_fabricated() {
+        assert_eq!(get_user_home("bob"), None);
+        assert_eq!(expand_tilde_path(Some("bob"), None, "/h"), None);
+        assert_eq!(expand_tilde_path(Some("bob"), Some("/sub"), "/h"), None);
+    }
+
+    #[test]
+    fn to_literal_reconstructs_the_parsed_spelling() {
+        assert_eq!(TildePath::parse("~bob/sub").unwrap().to_literal(), "~bob/sub");
+        assert_eq!(TildePath::parse("~bob").unwrap().to_literal(), "~bob");
+        assert_eq!(TildePath::parse("~/sub").unwrap().to_literal(), "~/sub");
+        assert_eq!(TildePath::parse("~").unwrap().to_literal(), "~");
+    }
 }

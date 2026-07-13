@@ -91,6 +91,13 @@ pub fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
 /// rather than erroring.  Not a fail-open (an absolute-only grant still
 /// denies `/x`), but callers that want the freeze pass's "unset HOME is
 /// a configuration error" behaviour must use `freeze_one` instead.
+///
+/// A `~user` that [`expand_tilde_path`] cannot resolve (no
+/// `getpwnam(3)` analogue off Unix) passes through unexpanded, the same
+/// as an unrecognised sigil: [`Resolver::resolve`](super::Resolver::resolve)
+/// is infallible by design, and a literal `~user` prefix that never
+/// matches anything is the honest fail-closed outcome, not a fabricated
+/// path that might.
 pub fn expand_path_prefix(input: &str, home: &str) -> String {
     if let Some((kind, sub)) = parse_xdg_token(input) {
         let base = resolve_xdg(kind, home);
@@ -100,7 +107,8 @@ pub fn expand_path_prefix(input: &str, home: &str) -> String {
         };
     }
     if let Some(t) = TildePath::parse(input) {
-        return expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), home);
+        return expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), home)
+            .unwrap_or_else(|| input.to_string());
     }
     input.to_string()
 }
@@ -172,8 +180,9 @@ pub fn freeze_path_list(
 ///
 /// # Errors
 /// Returns `Err` if the entry names an unknown `xdg:` token, if an `xdg:`
-/// path escapes `$HOME` after folding, or if `$HOME` is unset while the
-/// entry uses a home-relative sigil (`~`, `xdg:`).
+/// path escapes `$HOME` after folding, if `$HOME` is unset while the
+/// entry uses a home-relative sigil (`~`, `xdg:`), or if the entry is a
+/// `~user` naming another user's home, which cannot be resolved off Unix.
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, String> {
     if looks_like_xdg(entry) {
@@ -193,10 +202,22 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
     }
     if let Some(t) = TildePath::parse(entry) {
         require_home(ctx)?;
-        let expanded = expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), ctx.home);
+        let expanded = expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), ctx.home)
+            .ok_or_else(|| unresolvable_named_user_message(entry))?;
         return Ok(NormalizedPrefix::freeze(Path::new(&expanded)));
     }
     Ok(NormalizedPrefix::freeze(Path::new(entry)))
+}
+
+/// A `~user` (named-user) sigil has no home to resolve off Unix: there
+/// is no `getpwnam(3)` analogue, so surface the configuration error
+/// rather than silently freezing a grant that can never match anything.
+fn unresolvable_named_user_message(entry: &str) -> String {
+    format!(
+        "'{entry}' names another user's home directory, which this platform \
+         cannot resolve (no getpwnam(3) equivalent) — replace it with an \
+         explicit absolute path, or use bare `~`/`~/...` for the current user."
+    )
 }
 
 /// The two home-relative sigils (`~`, `xdg:`) cannot resolve without a
@@ -492,6 +513,26 @@ mod tests {
     #[test]
     fn tilde_expands_against_home() {
         assert_eq!(expand_path_prefix("~/foo", "/h"), "/h/foo");
+    }
+
+    /// Off Unix, `~user` cannot be resolved (no `getpwnam(3)`
+    /// analogue); `expand_path_prefix` passes it through unexpanded
+    /// rather than fabricating a path — the same treatment an unknown
+    /// sigil gets, since `Resolver::resolve` is infallible by design.
+    #[cfg(not(unix))]
+    #[test]
+    fn named_user_tilde_passes_through_unchanged_off_unix() {
+        assert_eq!(expand_path_prefix("~bob/foo", "/h"), "~bob/foo");
+    }
+
+    /// `freeze_one` is fallible, so a `~user` grant entry that cannot be
+    /// resolved is a load-time error off Unix, not a silently frozen
+    /// grant that can never match anything.
+    #[cfg(not(unix))]
+    #[test]
+    fn freeze_rejects_named_user_tilde_off_unix() {
+        let err = frozen(&["~bob/secrets"], &ctx("/h", Path::new("/cwd"))).unwrap_err();
+        assert!(err.contains("~bob/secrets"), "{err}");
     }
 
     #[test]

@@ -17,10 +17,11 @@
 //! pgid?" confusion: there is only the group here.
 //!
 //! Provides jobs/fg/bg/disown.  On shell exit, the group is taken down
-//! gracefully first (`SIGTERM` to the pgid on Unix; `Ctrl-Break`
-//! fan-out is already wired through the `SetConsoleCtrlHandler` on
-//! Windows, with `TerminateJobObject` as the hard stop), then a 5-second
-//! grace, then forcibly (`SIGKILL` / `TerminateJobObject`).
+//! gracefully first (`SIGTERM` to the pgid on Unix; `CTRL_BREAK_EVENT`
+//! to every member on Windows, via the same escalation-ladder primitive
+//! `SetConsoleCtrlHandler` uses), then a 5-second grace during which
+//! natural exits are reaped, then forcibly (`SIGKILL` /
+//! `TerminateJobObject`).
 //!
 //! Platform notes:
 //!   * Unix exposes the full job-control surface: SIGTSTP parks a
@@ -235,12 +236,28 @@ impl JobTable {
     /// group) drops the entry, and closing the Job handle via
     /// `release_win_group` takes any straggler members down through
     /// `KILL_ON_JOB_CLOSE`.  This collapses the whole pipeline as soon
-    /// as the leader exits — strictly aggressive compared to Unix's
-    /// "wait for every member to be reaped" semantics, but acceptable
-    /// while the `JobTable` on Windows can only ever hold a single-stage
-    /// foreground job (no SIGTSTP, no `&`-flow yet).  When `&` is wired
-    /// through, this should grow into a Job-Object-`ACTIVE_PROCESS_ZERO`
-    /// poll instead.
+    /// as the leader exits, rather than waiting for every member to be
+    /// reaped individually the way the Unix arm does.
+    ///
+    /// That is not the soundness gap it looks like: no live path ever
+    /// puts a multi-stage job in this table to begin with, on either
+    /// platform.  `&` (`Ast::Background`) desugars to the `spawn`
+    /// builtin (`elaborator.rs`), which registers into the separate,
+    /// platform-independent `Worker` resident registry
+    /// (`shell.local.workers`) — never `JobTable`.  The *only* live
+    /// caller of [`Self::add`] is the Unix `Break::Stopped` arm in
+    /// `repl/exec.rs`, reached when a foreground pipeline parks on
+    /// `SIGTSTP`; Windows has no SIGTSTP analogue and cannot enter that
+    /// state (`Escape::Stopped` is a Unix-only evaluator escape — see
+    /// the crate doc's non-goal list). So in live operation the Windows
+    /// arm of `reap` never observes a real entry; every one it might
+    /// see is a unit-test fixture built directly with [`Self::add`].
+    /// Growing this into a Job-Object `ACTIVE_PROCESS_ZERO` poll would
+    /// buy leader-exit-vs-member-exit precision for a job shape that
+    /// cannot occur here — there is no live multi-stage Windows job for
+    /// it to reap correctly or incorrectly.  If `&` or a stopped-job
+    /// equivalent is ever wired through `JobTable` on Windows, revisit
+    /// this; until then, the collapse-on-leader-exit behaviour is inert.
     pub fn reap(&mut self) {
         #[cfg(unix)]
         {
@@ -331,12 +348,18 @@ impl JobTable {
 
         #[cfg(windows)]
         {
-            use ral_core::process::{Pgid, kill_pipeline_group, release_win_group};
+            use ral_core::process::{Pgid, break_pipeline_group, kill_pipeline_group, release_win_group};
 
-            // Polite first pass: a 5s grace where natural exits are
-            // reaped.  No SIGTERM equivalent — the Ctrl-Break fan-out
-            // happens through the SetConsoleCtrlHandler path on the
-            // shell-exit signal; here we just give the children time.
+            // Polite first pass: `CTRL_BREAK_EVENT` to every member of
+            // every job, then a 5s grace where natural exits are
+            // reaped — the same cooperative-signal-then-wait shape as
+            // the Unix arm's SIGTERM, reusing the escalation ladder's
+            // break primitive rather than a second raw
+            // `GenerateConsoleCtrlEvent` call site.
+            for job in self.jobs.values() {
+                break_pipeline_group(Pgid(job.pgid));
+            }
+
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !self.jobs.is_empty() && std::time::Instant::now() < deadline {
                 self.reap();

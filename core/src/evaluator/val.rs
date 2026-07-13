@@ -74,11 +74,22 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
                 payload,
             })
         }
-        Val::TildePath(path) => Ok(Value::String(expand_tilde_path(
-            path.user.as_deref(),
-            path.suffix.as_deref(),
-            &shell.mobile.context.home(),
-        ))),
+        Val::TildePath(path) => {
+            let home = shell.mobile.context.home();
+            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home)
+                .map(Value::String)
+                .ok_or_else(|| {
+                    shell.err_hint(
+                        format!(
+                            "cannot resolve {}: no way to look up another user's home \
+                             directory on this platform",
+                            path.to_literal()
+                        ),
+                        "use bare ~ for the current user, or spell out an explicit path",
+                        1,
+                    )
+                })
+        }
     }
 }
 

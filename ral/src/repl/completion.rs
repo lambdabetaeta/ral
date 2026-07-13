@@ -164,8 +164,10 @@ fn is_cmd_pos(before_token: &str) -> bool {
 
 /// Expand a tilde-prefixed directory component for completion.  Delegates to
 /// [`ral_core::path::tilde`] so the rule matches the rest of ral; returns
-/// `None` when the home directory is unavailable, in which case the caller
-/// offers no candidates — there is no non-tilde fallback.
+/// `None` when the home directory is unavailable, or when the component
+/// names another user's home and this platform has no way to look one up
+/// (no `getpwnam(3)` equivalent) — either way the caller offers no
+/// candidates rather than completing against a fabricated path.
 fn expand_tilde(dir: &str) -> Option<String> {
     let Some(parsed) = ral_core::path::tilde::TildePath::parse(dir) else {
         return Some(dir.to_string());
@@ -174,11 +176,7 @@ fn expand_tilde(dir: &str) -> Option<String> {
     if home == "." {
         return None;
     }
-    Some(ral_core::path::tilde::expand_tilde_path(
-        parsed.user.as_deref(),
-        parsed.suffix.as_deref(),
-        &home,
-    ))
+    ral_core::path::tilde::expand_tilde_path(parsed.user.as_deref(), parsed.suffix.as_deref(), &home)
 }
 
 /// A directory entry offered as a path candidate.  Carries `is_dir` so the
