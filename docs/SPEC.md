@@ -1523,10 +1523,12 @@ OS-level enforcement varies:
   `privateNetworkClientServer` capability SIDs; `net: false` grants
   neither, and a LowBox token holding no network capability cannot
   open a socket at all — real kernel-enforced denial, not a
-  fail-closed refusal to run.  `deny_paths` are not expressed by this
-  backend — AppContainer grants are allow-only, so a `deny` nested
-  inside a granted prefix is not enforced at the OS layer (the
-  in-process gate still evaluates it).  Each external command inside
+  fail-closed refusal to run.  A `deny_path` nested inside a granted
+  prefix is stamped as an explicit deny-ACE for the AppContainer SID,
+  which canonical ACL ordering places ahead of the inherited allow, so
+  the deny wins at the OS layer; a `deny_path` outside every grant is
+  unreachable under deny-by-default and is not stamped.  Each external
+  command inside
   a `grant` is additionally assigned to a Job Object capping its
   process tree at 512 — that limit operates through the process-spawn
   machinery and does not depend on the fs/net sandbox backend.

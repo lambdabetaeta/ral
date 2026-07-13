@@ -125,7 +125,7 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+    ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
     NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
@@ -390,10 +390,35 @@ impl DaclManager {
         readonly: &[PathBuf],
     ) -> Result<(), DaclError> {
         for p in readwrite {
-            self.apply_one(sid_str, p, RW_MASK)?;
+            self.apply_one(sid_str, p, RW_MASK, AceType::Allow)?;
         }
         for p in readonly {
-            self.apply_one(sid_str, p, RO_MASK)?;
+            self.apply_one(sid_str, p, RO_MASK, AceType::Allow)?;
+        }
+        Ok(())
+    }
+
+    /// Stamp an explicit **deny**-ACE for `sid_str` on each path in `denied`,
+    /// denying the full `FILE_ALL_ACCESS` surface.  Callers use this for a
+    /// `deny_path` nested inside a granted read/write prefix: the enclosing
+    /// allow-ACE is inheritable, so it would otherwise propagate down and
+    /// expose the nested path; an explicit deny stamped here precedes the
+    /// inherited allow in canonical ACL order (`SetEntriesInAclW` places
+    /// explicit-deny before inherited-allow), so the deny wins.  A
+    /// `deny_path` *not* inside any granted prefix needs no stamp — the
+    /// AppContainer is deny-by-default, so it is already unreachable.
+    ///
+    /// Denies go through the same [`apply_one`](Self::apply_one) lifecycle as
+    /// grants — per-path mutex, prior-state capture, ledger-before-apply — so
+    /// [`restore`](Self::restore) and [`recover_orphaned_state`] revert them
+    /// identically.
+    ///
+    /// after mxc filesystem_dacl.rs::DaclManager::add_deny_aces (0e7c3dd)
+    pub fn add_deny_aces(&mut self, sid_str: &str, denied: &[PathBuf]) -> Result<(), DaclError> {
+        // FILE_ALL_ACCESS = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF.
+        let deny_mask: u32 = 0x001F_01FF;
+        for p in denied {
+            self.apply_one(sid_str, p, deny_mask, AceType::Deny)?;
         }
         Ok(())
     }
@@ -439,7 +464,13 @@ impl DaclManager {
         clippy::disallowed_methods,
         reason = "[io-door:silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the allow-ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
     )]
-    fn apply_one(&mut self, sid_str: &str, path: &Path, mask: u32) -> Result<(), DaclError> {
+    fn apply_one(
+        &mut self,
+        sid_str: &str,
+        path: &Path,
+        mask: u32,
+        ace_type: AceType,
+    ) -> Result<(), DaclError> {
         let canonical = canonicalize_local(path)?;
         let inheritable = fs::metadata(&canonical)
             .map_err(|e| DaclError::Win32 {
@@ -458,7 +489,7 @@ impl DaclManager {
             canonical_path: canonical,
             sid_string: sid_str.to_string(),
             access_mask: mask,
-            ace_type: AceType::Allow,
+            ace_type,
             inheritable,
             prior_state,
         };
@@ -478,6 +509,7 @@ impl DaclManager {
             &entry.sid_string,
             entry.access_mask,
             entry.inheritable,
+            entry.ace_type,
         )
     }
 
@@ -1005,8 +1037,11 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
     }
 }
 
-/// Apply a single explicit allow ACE to `path`'s DACL via
-/// `SetEntriesInAclW(GRANT)` + `SetNamedSecurityInfoW`.  The caller
+/// Apply a single explicit allow-or-deny ACE to `path`'s DACL via
+/// `SetEntriesInAclW` + `SetNamedSecurityInfoW`.  `SetEntriesInAclW` merges
+/// the new ACE into the existing DACL in canonical order — explicit-deny
+/// before explicit-allow before inherited — so a deny stamped on a path that
+/// inherits an allow from an enclosing grant wins.  The caller
 /// ([`DaclManager::apply_one`]) holds the per-path mutex for the whole
 /// scan-persist-apply sequence.
 ///
@@ -1016,6 +1051,7 @@ fn apply_explicit_ace(
     sid_str: &str,
     access_mask: u32,
     inheritable: bool,
+    ace_type: AceType,
 ) -> Result<(), DaclError> {
     let sid = OwnedSid::parse(sid_str)?;
     let inheritance: u32 = if inheritable {
@@ -1023,9 +1059,13 @@ fn apply_explicit_ace(
     } else {
         0
     };
+    let access_mode = match ace_type {
+        AceType::Allow => GRANT_ACCESS,
+        AceType::Deny => DENY_ACCESS,
+    };
     let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
-        grfAccessMode: GRANT_ACCESS,
+        grfAccessMode: access_mode,
         grfInheritance: inheritance,
         Trustee: trustee_for(&sid),
     };
@@ -2025,6 +2065,135 @@ mod tests {
                 report.errors
             );
             assert!(matches!(synthetic.try_exists(), Ok(false)));
+        });
+    }
+
+    /// Full DACL walk (inherited ACEs included, unlike
+    /// [`scan_explicit_aces_for_sid`]) returning, in ACL order, the
+    /// `(AceType byte, inherited?)` of every allow/deny ACE for `sid_str` —
+    /// so a test can assert canonical ordering.
+    fn sid_ace_sequence(path: &Path, sid_str: &str) -> Vec<(u8, bool)> {
+        let sid = OwnedSid::parse(sid_str).unwrap();
+        let path_w = wide(path);
+        let mut existing_dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                path_w.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut existing_dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        assert_eq!(rc, ERROR_SUCCESS, "GetNamedSecurityInfoW failed");
+        let mut out = Vec::new();
+        if !existing_dacl.is_null() {
+            let mut info = ACL_SIZE_INFORMATION::default();
+            unsafe {
+                GetAclInformation(
+                    existing_dacl,
+                    &mut info as *mut _ as *mut c_void,
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                );
+            }
+            let inherited_bit = INHERITED_ACE as u8;
+            for i in 0..info.AceCount {
+                let mut ace_ptr: *mut c_void = std::ptr::null_mut();
+                if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) } == 0 {
+                    continue;
+                }
+                let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+                if header.AceType != 0x00 && header.AceType != 0x01 {
+                    continue;
+                }
+                let ace_struct = ace_ptr as *const ACCESS_ALLOWED_ACE;
+                let ace_sid = (unsafe { &raw const (*ace_struct).SidStart }) as PSID;
+                if unsafe { EqualSid(ace_sid, sid.as_psid()) } != 0 {
+                    out.push((header.AceType, (header.AceFlags & inherited_bit) != 0));
+                }
+            }
+        }
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(sd);
+        }
+        out
+    }
+
+    /// A deny stamped on a path nested inside a granted (inheritable) prefix
+    /// produces an explicit deny-ACE that precedes the inherited allow in
+    /// canonical order — so the deny wins — and is fully reverted on restore.
+    #[test]
+    fn deny_nested_in_grant_overrides_inherited_allow_and_reverts() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let parent = td.path().to_path_buf();
+            let child = parent.join("cred");
+            std::fs::create_dir(&child).unwrap();
+            let sid = "S-1-1-0";
+
+            let mut m = DaclManager::new().unwrap();
+            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[])
+                .unwrap();
+            m.add_deny_aces(sid, std::slice::from_ref(&child)).unwrap();
+
+            // Exactly one explicit (non-inherited) ACE for the SID on the
+            // child, and it is a deny.
+            let explicit = scan_explicit_aces_for_sid(&child, sid).unwrap();
+            assert_eq!(explicit.len(), 1, "one explicit ACE expected: {explicit:?}");
+            assert_eq!(explicit[0].ace_type, AceType::Deny);
+
+            // Canonical order: the explicit deny precedes the inherited allow.
+            let seq = sid_ace_sequence(&child, sid);
+            let deny_idx = seq
+                .iter()
+                .position(|(t, inh)| *t == 0x01 && !*inh)
+                .expect("explicit deny present in DACL");
+            if let Some(allow_idx) = seq.iter().position(|(t, _)| *t == 0x00) {
+                assert!(deny_idx < allow_idx, "deny must precede allow: {seq:?}");
+            }
+
+            m.restore().unwrap();
+            assert!(m.applied.is_empty());
+            let after = scan_explicit_aces_for_sid(&child, sid).unwrap();
+            assert!(
+                after.is_empty(),
+                "restore must remove our explicit deny: {after:?}"
+            );
+        });
+    }
+
+    /// The deny stamp goes through the same ledger as a grant: recorded in
+    /// memory and persisted to disk with `AceType::Deny`.
+    #[test]
+    fn deny_ace_recorded_in_ledger() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let parent = td.path().to_path_buf();
+            let child = parent.join("secret");
+            std::fs::create_dir(&child).unwrap();
+            let sid = "S-1-1-0";
+
+            let mut m = DaclManager::new().unwrap();
+            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[])
+                .unwrap();
+            m.add_deny_aces(sid, std::slice::from_ref(&child)).unwrap();
+
+            assert!(
+                m.applied.iter().any(|a| a.ace_type == AceType::Deny),
+                "in-memory ledger must record the deny stamp"
+            );
+            let persisted = read_ledger(&m.ledger_path).unwrap();
+            assert!(
+                persisted.applied.iter().any(|a| a.ace_type == AceType::Deny),
+                "on-disk ledger must record the deny stamp"
+            );
+
+            m.restore().unwrap();
         });
     }
 }

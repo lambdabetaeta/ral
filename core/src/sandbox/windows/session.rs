@@ -113,10 +113,12 @@ fn profile_name() -> String {
 ///
 /// An `Unrestricted` fs projection stamps no projection prefixes (only the
 /// program image, if any) — the AppContainer is deny-by-default, so such a
-/// child otherwise reads only the `ALL APPLICATION PACKAGES` system paths. The
-/// projection's `deny_paths` are not stamped: AppContainer grants are
-/// allow-only, and a deny nested inside a granted prefix is a rule this
-/// backend cannot express.
+/// child otherwise reads only the `ALL APPLICATION PACKAGES` system paths.
+///
+/// A `deny_path` nested inside a granted read/write prefix gets an explicit
+/// deny-ACE (via [`DaclManager::add_deny_aces`]) so the deny overrides the
+/// enclosing (inherited) allow; a `deny_path` outside every grant is already
+/// unreachable under deny-by-default and is not stamped.
 pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
@@ -151,6 +153,20 @@ pub(crate) fn confine(
         .dacl
         .grant_appcontainer_access(&sid_str, &readwrite, &readonly)
         .map_err(|e| dacl_break(&e))?;
+
+    // `deny_paths` nested inside a granted read/write prefix: the enclosing
+    // allow-ACE is inheritable and would expose them to the confined child
+    // (an external process not subject to ral's in-process fs check), so the
+    // deny must be expressed as an explicit deny-ACE. A `deny_path` outside
+    // every granted prefix needs no stamp — the deny-by-default AppContainer
+    // already makes it unreachable.
+    let deny = nested_denies(&spec);
+    if !deny.is_empty() {
+        sandbox
+            .dacl
+            .add_deny_aces(&sid_str, &deny)
+            .map_err(|e| dacl_break(&e))?;
+    }
 
     let profile_sid: PSID = sandbox.profile.sid();
     let capabilities: &[SID_AND_ATTRIBUTES] = if projection.net {
@@ -195,10 +211,78 @@ pub(crate) fn teardown() {
     }
 }
 
+/// The projection's `deny_paths` that fall inside a granted read/write
+/// prefix — the ones an inheritable allow-ACE would otherwise expose, and so
+/// need an explicit deny-ACE.  A `deny_path` outside every grant is already
+/// unreachable under the deny-by-default AppContainer and is omitted.
+/// Containment uses [`crate::path::path_within_str`], the same Windows
+/// path-identity notion the capability layer's grant matcher uses.
+fn nested_denies(spec: &crate::types::SandboxBindSpec) -> Vec<PathBuf> {
+    spec.deny_paths
+        .iter()
+        .filter(|d| {
+            let d = d.as_str();
+            spec.read_prefixes
+                .iter()
+                .chain(spec.write_prefixes.iter())
+                .any(|g| crate::path::path_within_str(d, g.as_str()))
+        })
+        .map(PathBuf::from)
+        .collect()
+}
+
 fn io_break(context: &str, e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("{context}: {e}"), 1))
 }
 
 fn dacl_break(e: &DaclError) -> Break {
     Break::Error(Error::new(format!("sandbox: fs grant failed: {e}"), 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nested_denies;
+    use crate::types::SandboxBindSpec;
+
+    fn spec(read: &[&str], write: &[&str], deny: &[&str]) -> SandboxBindSpec {
+        let own = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect();
+        SandboxBindSpec {
+            read_prefixes: own(read),
+            write_prefixes: own(write),
+            deny_paths: own(deny),
+        }
+    }
+
+    #[test]
+    fn deny_nested_in_read_prefix_is_stamped() {
+        let s = spec(
+            &[r"C:\Users\me\.config"],
+            &[],
+            &[r"C:\Users\me\.config\gh"],
+        );
+        let denies = nested_denies(&s);
+        assert_eq!(denies, vec![std::path::PathBuf::from(r"C:\Users\me\.config\gh")]);
+    }
+
+    #[test]
+    fn deny_nested_in_write_prefix_is_stamped() {
+        let s = spec(&[], &[r"C:\work"], &[r"C:\work\secret"]);
+        assert_eq!(nested_denies(&s).len(), 1);
+    }
+
+    #[test]
+    fn deny_outside_every_grant_is_omitted() {
+        // Deny-by-default already makes this unreachable, so no explicit
+        // deny-ACE is needed.
+        let s = spec(&[r"C:\work"], &[r"C:\work\out"], &[r"C:\Users\me\.ssh"]);
+        assert!(nested_denies(&s).is_empty());
+    }
+
+    #[test]
+    fn deny_matches_prefix_case_and_separator_insensitively() {
+        // Windows path identity: the grant matcher folds case and `/`↔`\`,
+        // so the nested-deny detection must too (it shares path_within_str).
+        let s = spec(&[r"C:\Users\Me\.config"], &[], &["c:/users/me/.config/op"]);
+        assert_eq!(nested_denies(&s).len(), 1);
+    }
 }

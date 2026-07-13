@@ -91,8 +91,10 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
         }
         if !fs.deny_paths.is_empty() {
             out.push_str(
-                "    deny_paths (NOT enforced by this backend: AppContainer grants are\n\
-                     \x20     allow-only, so a deny nested inside a granted prefix is not expressed):\n",
+                "    deny_paths: one nested inside a granted read/write prefix gets an\n\
+                     \x20     explicit deny-ACE (deny FILE_ALL_ACCESS) that overrides the\n\
+                     \x20     enclosing allow; one outside every grant is already unreachable\n\
+                     \x20     under deny-by-default and is not stamped:\n",
             );
             for p in &fs.deny_paths {
                 out.push_str(&format!("      {}\n", p.as_str()));
