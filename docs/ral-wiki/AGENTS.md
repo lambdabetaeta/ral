@@ -104,15 +104,17 @@ the `design/` exploration that an ingest files back.
 
 ## Navigation files
 
-**`index.md`** — content catalog. Every page listed once under its category with
-a one-line summary. Read this first when answering a query, then drill into
-pages. Update it on every ingest.
+**`index.md`** — content catalog, and the only whole-corpus view: the layers,
+what's covered, where the gaps are. Every page listed once under its category
+with a one-line thesis. Read this first when answering a query, then drill
+into pages. It carries **no stamps** — provenance lives in page frontmatter,
+where the drift lint reads it — so an ingest touches the index only when a
+page's *thesis* changes (or a page is added or superseded), not on every
+restamp.
 
-**`log.md`** — append-only timeline. Each entry begins `## [YYYY-MM-DD] kind | title`
-(kind ∈ ingest, query, lint, migrate) so `grep '^## \[' log.md | tail` works.
-Keep an entry to two or three sentences: name what changed and wikilink the pages
-touched. It is a timeline pointing at the work, not a place to restate it — the
-detail belongs in the pages the entry links to, never duplicated here.
+There is no separate timeline file: git history is the timeline (each sync
+commits with a message naming the pass), and `decisions/` carries the "why it
+changed" story.
 
 ## Searching the wiki (qmd)
 
@@ -173,7 +175,7 @@ dropped file. When a commit/PR lands or a decision is reached:
 4. If an invariant was discovered or changed, add/edit an `invariants/` page.
 5. If the change alters a runtime flow or the machine model an `internals/` page
    narrates, update that page and re-verify its `anchors`.
-6. Update `index.md`; append a `log.md` entry.
+6. Update `index.md` where a page's thesis changed or a page was added.
 7. Rebuild the qmd index — `./scripts/wiki-index.sh` (see Search) — so retrieval
    reflects the new pages.
 Fold this into the existing "commit after every parcel of work" habit — the

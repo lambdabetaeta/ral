@@ -11,8 +11,9 @@ single freeze settled the result. **The decision: freeze at decode time and
 carry one `Capabilities` everywhere** — there is no syntactic stage, so the
 boundary becomes a pass inside the one constructor rather than a type split.
 
-This **supersedes** the same-day analyses that declined to unify (`log.md`
-2026-06-05, "why two types" and "what unification would cost"). Those declined a
+This **supersedes** the same-day analyses that declined to unify (the
+2026-06-05 wiki-log entries "why two types" and "what unification would
+cost" — the log file is retired; git history keeps them). Those declined a
 typestate `Capabilities<Stage>` — a `Raw` marker plus a serde `bound`
 incantation — on legibility grounds, and they were right about *that* shape.
 This move is different in kind: it does not parameterise the type, it **deletes

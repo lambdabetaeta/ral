@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c754c6b
+generated_at_commit: 7c1b647
 generated_at_date: 2026-07-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---

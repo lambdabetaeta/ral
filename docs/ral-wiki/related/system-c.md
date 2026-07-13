@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 668499f
-verified_at_date: 2026-07-12
+verified_at_commit: 7c1b647
+verified_at_date: 2026-07-13
 against: [design/grant, design/effects-handlers, design/cbpv, design/syscalls-are-effects, design/scoping]
 ---
 
