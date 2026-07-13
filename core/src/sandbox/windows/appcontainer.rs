@@ -10,12 +10,14 @@
 // for future diffing against upstream (see `dev/docs/260712_windows_port.md`,
 // W1).
 
-//! Session-scoped AppContainer profile and LowBox spawn capabilities.
+//! AppContainer profile lifecycle and LowBox spawn capabilities.
 //!
-//! One shell session gets one AppContainer profile, created the first time
-//! a grant becomes enforceable and deleted at session end. This module owns
-//! that profile's lifecycle plus the `SECURITY_CAPABILITIES` construction
-//! that a confined spawn threads through
+//! A shell session registers one AppContainer profile per distinct fs
+//! projection it confines (`session` owns the keying and naming), each
+//! created the first time its projection becomes enforceable and deleted at
+//! session end. This module owns the profile lifecycle primitives plus the
+//! `SECURITY_CAPABILITIES` construction that a confined spawn threads
+//! through
 //! [`crate::process::launch::Launch::security_capabilities`]. Filesystem
 //! grants (ACE stamping on host paths for the profile's SID) are `dacl`'s
 //! job, not this module's; net capability inclusion here is the entire
@@ -143,8 +145,9 @@ impl Drop for OwnedContainerSid {
     }
 }
 
-/// A session-scoped AppContainer profile: one per shell session, created the
-/// first time a grant becomes enforceable and deleted at session end.
+/// A registered AppContainer profile: one per distinct fs projection of a
+/// shell session, created the first time that projection becomes
+/// enforceable and deleted at session end.
 pub(crate) struct AppContainerProfile {
     name: String,
     sid: OwnedContainerSid,
@@ -161,7 +164,8 @@ impl AppContainerProfile {
     pub(crate) fn create_or_reuse(name: &str) -> io::Result<Self> {
         let name_wide = to_wide(name);
         let display_wide = to_wide("ral sandboxed command");
-        let desc_wide = to_wide("AppContainer profile for a ral shell session's sandboxed commands");
+        let desc_wide =
+            to_wide("AppContainer profile for one fs projection of a ral shell session");
 
         let mut sid: PSID = ptr::null_mut();
         // SAFETY: the three wide strings are valid null-terminated UTF-16
@@ -211,6 +215,11 @@ impl AppContainerProfile {
         self.sid.0
     }
 
+    /// The profile's registered name, for ledger bookkeeping.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     /// The profile's SID in `S-1-15-...` string form, for ACE targeting and
     /// session ledger keys.
     pub(crate) fn sid_string(&self) -> io::Result<String> {
@@ -223,15 +232,26 @@ impl AppContainerProfile {
     /// delete succeeds, since there is nothing further to do with either
     /// once this returns.
     pub(crate) fn delete(self) -> io::Result<()> {
-        let name_wide = to_wide(&self.name);
-        // SAFETY: `name_wide` is a valid null-terminated UTF-16 string for
-        // the duration of the call.
-        let hr = unsafe { DeleteAppContainerProfile(name_wide.as_ptr()) };
-        if hr < 0 {
-            return Err(hresult_err("DeleteAppContainerProfile", hr));
-        }
-        Ok(())
+        delete_profile_by_name(&self.name)
     }
+}
+
+// after mxc appcontainer_runner.rs::delete_app_container_profile (0e7c3dd)
+/// Delete the AppContainer profile registered as `name`, by name alone —
+/// the orphan-recovery path, where no live [`AppContainerProfile`] value
+/// exists for a crashed session's ledgered profile. The ledger is written
+/// before the OS-level create, so a recorded name may never have been
+/// registered; the caller tolerates failure here rather than this function
+/// guessing which HRESULT means "was never there".
+pub(crate) fn delete_profile_by_name(name: &str) -> io::Result<()> {
+    let name_wide = to_wide(name);
+    // SAFETY: `name_wide` is a valid null-terminated UTF-16 string for
+    // the duration of the call.
+    let hr = unsafe { DeleteAppContainerProfile(name_wide.as_ptr()) };
+    if hr < 0 {
+        return Err(hresult_err("DeleteAppContainerProfile", hr));
+    }
+    Ok(())
 }
 
 // after mxc appcontainer_runner.rs::OwnedCapabilitySid (0e7c3dd)

@@ -1,32 +1,61 @@
-//! Session-scoped AppContainer confinement state.
+//! Session-scoped AppContainer confinement state, with projection-keyed
+//! authority.
 //!
-//! One shell session (the ral-core process) gets one AppContainer profile,
-//! created lazily the first time a Windows projection becomes enforceable,
-//! plus a session-scoped [`DaclManager`] that stamps grant ACEs for that
-//! profile's SID and reverts them at teardown. [`confine`] wires both into a
-//! [`Launch`]: it ensures the profile exists, stamps the projection's fs
-//! prefixes, and attaches the `SECURITY_CAPABILITIES` the spawn boundary
-//! threads into `CreateProcessW`.
+//! One shell session (the ral-core process) holds one [`SessionSandbox`]:
+//! a single session-scoped [`DaclManager`] (one ledger, one restore point)
+//! plus **one AppContainer profile per distinct fs projection** the session
+//! confines, each created lazily the first time its projection becomes
+//! enforceable. [`confine`] wires this into a [`Launch`]: it resolves the
+//! command's projection to its profile (minting one if the projection is
+//! new), stamps the projection's fs prefixes for that profile's SID, and
+//! attaches the `SECURITY_CAPABILITIES` the spawn boundary threads into
+//! `CreateProcessW`.
+//!
+//! **Why projection-keyed.** The ACEs stamped for a SID are exactly its own
+//! projection's paths, so a confined child's OS-level authority is the
+//! projection its command declared — never the union of what other commands
+//! in the session stamped. A `grant` that narrows, or a subagent forked
+//! with narrowed permissions, freezes a different projection, hashes to a
+//! different key, and spawns under a SID that has never been granted the
+//! wider paths: attenuation is enforced at the kernel, per projection.
+//! Commands sharing one frozen projection (the overwhelmingly common case —
+//! every turn of an agent session under one policy) share one SID and one
+//! stamp, so the per-grant cost is paid once per *distinct* projection, not
+//! per command. Recorded in
+//! `docs/ral-wiki/decisions/260713_projection-keyed-appcontainer.md`.
+//!
+//! Key identity comes from [`SandboxProjection::bind_spec`], whose prefix
+//! lists are deduplicated and sorted — structural equality of the key is
+//! projection identity, not spelling accident. Profile names are unique by
+//! construction (session pid + a monotonic counter), never by content hash:
+//! a name collision would silently merge two projections' authority under
+//! one derived SID, so it must be impossible rather than unlikely.
 //!
 //! Lifecycle:
 //! - [`boot_recover`] runs once per session at [`crate::sandbox::early_init`]
-//!   and reclaims DACL grants a crashed prior session left stamped (the
-//!   durable record is the ledger, not this process's memory).
-//! - [`confine`] creates the session state on first use and accumulates
-//!   grants into it, idempotently, for the session's lifetime. A `granted`
-//!   memo on [`SessionSandbox`] tracks every `(path, access-kind)` already
-//!   stamped so a repeat command re-declaring the same prefix does not
-//!   re-apply it — `DaclManager`'s ledger is append-only-per-*new*-grant,
-//!   so skipping a redundant one is what keeps a long session's ledger from
-//!   growing (and fsync-rewriting) on every single command.
-//! - [`teardown`] reverts every grant and deletes the profile. The state
-//!   lives in a process-global whose `Drop` is not guaranteed at process
-//!   exit, so this is the explicit cleanup path; a session that exits without
-//!   reaching it leaves its ledger for the next boot's sweep. Wired into
-//!   `ral`'s and `exarch`'s clean-shutdown seams via
-//!   [`crate::sandbox::teardown_session`].
+//!   and reclaims what a crashed prior session left behind — stamped DACL
+//!   grants and registered profiles (the durable record is the ledger, not
+//!   this process's memory).
+//! - [`confine`] creates the session state on first use, mints per-
+//!   projection profiles as new projections arrive (ledgered *before* the
+//!   OS-level create, the same ordering the DACL engine protects for ACEs),
+//!   and stamps grants idempotently: a per-projection `granted` memo tracks
+//!   every `(path, access-kind)` already stamped for that SID, so a repeat
+//!   command under the same projection re-applies (and re-fsyncs the ledger
+//!   for) nothing.
+//! - [`teardown`] reverts every grant, then deletes every profile. ACEs are
+//!   deliberately *not* reverted when a grant frame exits: a detached
+//!   worker spawned under a SID legitimately outlives its frame with the
+//!   authority it was born with, and once no live child holds a SID its
+//!   lingering ACEs are inert — no other token carries that SID, and only
+//!   this session's own spawns can mint one. The state lives in a
+//!   process-global whose `Drop` is not guaranteed at process exit, so
+//!   [`teardown`] is the explicit cleanup path (wired into `ral`'s and
+//!   `exarch`'s clean-shutdown seams via
+//!   [`crate::sandbox::teardown_session`]); a session that exits without
+//!   reaching it leaves its ledger for the next boot's sweep.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -39,7 +68,7 @@ use super::appcontainer::{AppContainerProfile, CapabilitySids};
 use super::dacl::{self, DaclError, DaclManager};
 
 /// The three independent access levels [`confine`] stamps; the key type of
-/// [`SessionSandbox::granted`]'s memo, so a repeat request for the same
+/// [`ProjectionSandbox::granted`]'s memo, so a repeat request for the same
 /// `(path, kind)` is recognised and skipped regardless of which fs list it
 /// arrived through.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,27 +78,55 @@ enum GrantKind {
     Deny,
 }
 
-/// One shell session's confinement state: the AppContainer profile every
-/// confined child spawns under, the DACL guard that stamps (and later
-/// reverts) grant ACEs for that profile's SID, the network capability SIDs
-/// (built lazily the first time a `net: true` projection is confined), and
-/// a memo of every `(path, access-kind)` this session has already stamped
-/// so a later command re-declaring the same prefix does not re-apply it.
-struct SessionSandbox {
+/// Identity of one fs projection, as [`SandboxProjection::bind_spec`]
+/// renders it: deduplicated, sorted prefix lists, so structural equality is
+/// projection identity. `net` is deliberately absent — network authority is
+/// carried per-spawn as capability SIDs, never stamped on disk, so it needs
+/// no SID of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectionKey {
+    read: Vec<String>,
+    write: Vec<String>,
+    deny: Vec<String>,
+}
+
+/// One projection's confinement state: the AppContainer profile its
+/// confined children spawn under, and the memo of every `(path,
+/// access-kind)` already stamped for that profile's SID.
+struct ProjectionSandbox {
     profile: AppContainerProfile,
-    dacl: DaclManager,
-    network_caps: Option<CapabilitySids>,
     granted: HashSet<(PathBuf, GrantKind)>,
 }
 
-// SAFETY: the raw SIDs `SessionSandbox` holds (the profile SID, the network
-// capability SIDs) point at process-global OS-owned memory
-// (`FreeSid`/`LocalFree`-managed), not thread-local state. Every access to the
-// struct is serialized by [`cell`]'s `Mutex`; the only lock-free reads are the
-// raw SID pointer *values* copied into a `Launch` by
+impl ProjectionSandbox {
+    /// Record that `paths` are now stamped at `kind`, for future
+    /// memo filtering.
+    fn mark_granted(&mut self, paths: &[PathBuf], kind: GrantKind) {
+        self.granted
+            .extend(paths.iter().cloned().map(|p| (p, kind)));
+    }
+}
+
+/// One shell session's confinement state: the DACL guard that stamps (and
+/// at teardown reverts) grant ACEs, the network capability SIDs (built
+/// lazily the first time a `net: true` projection is confined), and the
+/// per-projection sandboxes keyed by fs-projection identity.
+struct SessionSandbox {
+    dacl: DaclManager,
+    network_caps: Option<CapabilitySids>,
+    projections: HashMap<ProjectionKey, ProjectionSandbox>,
+    next_profile_index: u32,
+}
+
+// SAFETY: the raw SIDs `SessionSandbox` holds (each projection's profile
+// SID, the network capability SIDs) point at process-global OS-owned memory
+// (`FreeSid`/`LocalFree`-managed), not thread-local state. Every access to
+// the struct is serialized by [`cell`]'s `Mutex`; the only lock-free reads
+// are the raw SID pointer *values* copied into a `Launch` by
 // `Launch::security_capabilities`, which reference immutable OS memory that
-// lives until [`teardown`] frees it — and teardown runs only at session
-// shutdown, never concurrently with a spawn.
+// lives until [`teardown`] frees it — projection entries are never removed
+// before then, and teardown runs only at session shutdown, never
+// concurrently with a spawn.
 unsafe impl Send for SessionSandbox {}
 
 fn cell() -> &'static Mutex<Option<SessionSandbox>> {
@@ -79,61 +136,72 @@ fn cell() -> &'static Mutex<Option<SessionSandbox>> {
 
 impl SessionSandbox {
     fn create() -> Settled<Self> {
-        let profile = AppContainerProfile::create_or_reuse(&profile_name())
-            .map_err(|e| io_break("sandbox: create AppContainer profile", &e))?;
         let dacl = DaclManager::new().map_err(|e| dacl_break(&e))?;
         Ok(Self {
-            profile,
             dacl,
             network_caps: None,
-            granted: HashSet::new(),
+            projections: HashMap::new(),
+            next_profile_index: 0,
         })
     }
 
-    /// Drop every path already stamped at `kind` this session — the memo
-    /// that keeps a repeat command from re-applying (and re-fsyncing the
-    /// ledger for) a grant it already holds.
-    fn drop_already_granted(&self, paths: Vec<PathBuf>, kind: GrantKind) -> Vec<PathBuf> {
-        filter_out_granted(&self.granted, paths, kind)
-    }
-
-    /// Record that `paths` are now stamped at `kind`, for future
-    /// [`drop_already_granted`](Self::drop_already_granted) calls.
-    fn mark_granted(&mut self, paths: &[PathBuf], kind: GrantKind) {
-        self.granted
-            .extend(paths.iter().cloned().map(|p| (p, kind)));
-    }
-
-    /// The network capability SID array, derived once on first request. For a
-    /// `net: false` projection this is never called — the empty array *is* the
-    /// enforcement (an AppContainer with no network capability cannot open a
-    /// socket).
-    fn ensure_network_caps(&mut self) -> Settled<&[SID_AND_ATTRIBUTES]> {
-        if self.network_caps.is_none() {
-            let caps = CapabilitySids::build(true)
-                .map_err(|e| io_break("sandbox: derive network capability SIDs", &e))?;
-            self.network_caps = Some(caps);
+    /// Ensure `key`'s projection has a profile, minting one when the
+    /// projection is new: allocate a fresh name (a failed create burns its
+    /// index so a retry never re-records the same name), ledger it, then
+    /// register it with the OS — ledger-before-create, so a crash between
+    /// the two leaves recovery deleting a profile that may not exist, never
+    /// a registered profile the ledger does not know.
+    fn ensure_projection(&mut self, key: &ProjectionKey) -> Settled<()> {
+        if self.projections.contains_key(key) {
+            return Ok(());
         }
-        Ok(self
-            .network_caps
-            .as_ref()
-            .expect("network caps built above")
-            .entries())
+        let index = self.next_profile_index;
+        self.next_profile_index += 1;
+        let name = profile_name(index);
+        self.dacl
+            .record_profile(&name)
+            .map_err(|e| dacl_break(&e))?;
+        let profile = AppContainerProfile::create_or_reuse(&name)
+            .map_err(|e| io_break("sandbox: create AppContainer profile", &e))?;
+        self.projections.insert(
+            key.clone(),
+            ProjectionSandbox {
+                profile,
+                granted: HashSet::new(),
+            },
+        );
+        Ok(())
     }
 }
 
-/// One profile per shell session; the ral-core process *is* the session, so
-/// its pid keys the profile. `create_or_reuse` transparently adopts a
-/// same-named profile a crashed prior session with the recycled pid left
-/// registered, and [`boot_recover`] reclaims that session's stamped ACEs.
-fn profile_name() -> String {
-    format!("ral.sandbox.s{}", std::process::id())
+/// The network capability SID array, derived once per session on first
+/// request. For a `net: false` projection this is never called — the empty
+/// array *is* the enforcement (an AppContainer with no network capability
+/// cannot open a socket).
+fn ensure_network_caps(slot: &mut Option<CapabilitySids>) -> Settled<&[SID_AND_ATTRIBUTES]> {
+    if slot.is_none() {
+        let caps = CapabilitySids::build(true)
+            .map_err(|e| io_break("sandbox: derive network capability SIDs", &e))?;
+        *slot = Some(caps);
+    }
+    Ok(slot.as_ref().expect("network caps built above").entries())
 }
 
-/// Confine `launch` under this session's AppContainer: ensure the profile
-/// exists, stamp the projection's fs prefixes (plus the program image) into
-/// the session DACL guard, and attach the `SECURITY_CAPABILITIES` (profile
-/// SID + network capability SIDs) the spawn boundary threads into
+/// One profile per distinct fs projection, its name unique by construction:
+/// the session's pid keys the session, a monotonic per-session counter keys
+/// the projection. `create_or_reuse` transparently adopts a same-named
+/// profile a crashed prior session with the recycled pid left registered —
+/// after [`boot_recover`] has already swept that session's ACEs and deleted
+/// its ledgered profiles.
+fn profile_name(index: u32) -> String {
+    format!("ral.sandbox.s{}.p{index}", std::process::id())
+}
+
+/// Confine `launch` under its projection's AppContainer: resolve the
+/// projection to this session's profile for it (minting one if the
+/// projection is new), stamp the projection's fs prefixes (plus the program
+/// image) for that profile's SID, and attach the `SECURITY_CAPABILITIES`
+/// (profile SID + network capability SIDs) the spawn boundary threads into
 /// `CreateProcessW`.
 ///
 /// `program_image`, when `Some`, is the resolved path of the binary the child
@@ -144,13 +212,14 @@ fn profile_name() -> String {
 /// resolve) leaves the image's readability to the fs read projection / the
 /// `ALL APPLICATION PACKAGES` system paths.
 ///
-/// The profile SID and capability SIDs outlive every spawn: the session owns
+/// The profile SIDs and capability SIDs outlive every spawn: the session owns
 /// them for the process lifetime, so `launch` may safely borrow their raw
 /// values into the attribute list it copies at spawn time.
 ///
 /// An `Unrestricted` fs projection stamps no projection prefixes (only the
 /// program image, if any) — the AppContainer is deny-by-default, so such a
 /// child otherwise reads only the `ALL APPLICATION PACKAGES` system paths.
+/// Every `Unrestricted` projection shares the one empty-key profile.
 ///
 /// Every `deny_path` gets an explicit deny-ACE (via
 /// [`DaclManager::add_deny_aces`]), unconditionally — there is no "already
@@ -172,12 +241,26 @@ pub(crate) fn confine(
     }
     let sandbox = guard.as_mut().expect("session created above");
 
-    let sid_str = sandbox
+    let spec = projection.bind_spec();
+    let key = ProjectionKey {
+        read: spec.read_prefixes.clone(),
+        write: spec.write_prefixes.clone(),
+        deny: spec.deny_paths.clone(),
+    };
+    sandbox.ensure_projection(&key)?;
+    let SessionSandbox {
+        dacl,
+        network_caps,
+        projections,
+        ..
+    } = sandbox;
+    let proj = projections.get_mut(&key).expect("projection ensured above");
+
+    let sid_str = proj
         .profile
         .sid_string()
         .map_err(|e| io_break("sandbox: AppContainer SID string", &e))?;
 
-    let spec = projection.bind_spec();
     let readwrite: Vec<PathBuf> = spec.write_prefixes.iter().map(PathBuf::from).collect();
     let mut readonly: Vec<PathBuf> = spec
         .read_prefixes
@@ -193,26 +276,24 @@ pub(crate) fn confine(
     }
 
     // Three independent filters narrow what actually needs stamping,
-    // cheapest first: the session memo (a repeat of an already-applied
+    // cheapest first: the projection's memo (a repeat of an already-applied
     // grant is pure syscall + ledger-fsync waste — see the module doc);
     // existence ([`existing_paths`] — a path that is not there cannot be
     // stamped, and hard-failing here would refuse every sandboxed command
     // under a base whose deny set names a commonly-absent path, e.g.
     // `xdg:config/{gh,op,gcloud}`); and the well-known-SID effective-access
     // filter (a real `GetNamedSecurityInfoW` + DACL walk, so it runs last).
-    let readwrite = sandbox.drop_already_granted(readwrite, GrantKind::ReadWrite);
-    let readonly = sandbox.drop_already_granted(readonly, GrantKind::ReadOnly);
+    let readwrite = filter_out_granted(&proj.granted, readwrite, GrantKind::ReadWrite);
+    let readonly = filter_out_granted(&proj.granted, readonly, GrantKind::ReadOnly);
     let readwrite = existing_paths(readwrite);
     let readonly = existing_paths(readonly);
     let readwrite = dacl::filter_paths_needing_grant(readwrite, dacl::RW_MASK);
     let readonly = dacl::filter_paths_needing_grant(readonly, dacl::RO_MASK);
 
-    sandbox
-        .dacl
-        .grant_appcontainer_access(&sid_str, &readwrite, &readonly)
+    dacl.grant_appcontainer_access(&sid_str, &readwrite, &readonly)
         .map_err(|e| dacl_break(&e))?;
-    sandbox.mark_granted(&readwrite, GrantKind::ReadWrite);
-    sandbox.mark_granted(&readonly, GrantKind::ReadOnly);
+    proj.mark_granted(&readwrite, GrantKind::ReadWrite);
+    proj.mark_granted(&readonly, GrantKind::ReadOnly);
 
     // Every `deny_path` is stamped unconditionally (see this function's doc
     // for why "outside every grant" is not actually safe to skip on
@@ -222,19 +303,17 @@ pub(crate) fn confine(
     // AppContainer already have this access", which is irrelevant to
     // subtracting access via a deny.
     let deny: Vec<PathBuf> = spec.deny_paths.iter().map(PathBuf::from).collect();
-    let deny = sandbox.drop_already_granted(deny, GrantKind::Deny);
+    let deny = filter_out_granted(&proj.granted, deny, GrantKind::Deny);
     let deny = existing_paths(deny);
     if !deny.is_empty() {
-        sandbox
-            .dacl
-            .add_deny_aces(&sid_str, &deny)
+        dacl.add_deny_aces(&sid_str, &deny)
             .map_err(|e| dacl_break(&e))?;
-        sandbox.mark_granted(&deny, GrantKind::Deny);
+        proj.mark_granted(&deny, GrantKind::Deny);
     }
 
-    let profile_sid: PSID = sandbox.profile.sid();
+    let profile_sid: PSID = proj.profile.sid();
     let capabilities: &[SID_AND_ATTRIBUTES] = if projection.net {
-        sandbox.ensure_network_caps()?
+        ensure_network_caps(network_caps)?
     } else {
         &[]
     };
@@ -242,9 +321,10 @@ pub(crate) fn confine(
     Ok(())
 }
 
-/// Reclaim DACL grants a crashed prior session left stamped. Best-effort and
-/// idempotent — logged, never fatal: a failed sweep must not stop a session
-/// from starting, and any ledger it cannot clear is retried on the next boot.
+/// Reclaim what a crashed prior session left behind — stamped DACL grants
+/// and registered AppContainer profiles. Best-effort and idempotent —
+/// logged, never fatal: a failed sweep must not stop a session from
+/// starting, and any ledger it cannot clear is retried on the next boot.
 pub(crate) fn boot_recover() {
     match dacl::recover_orphaned_state() {
         Ok(report) => {
@@ -252,10 +332,11 @@ pub(crate) fn boot_recover() {
                 crate::dbg_trace!(
                     "sandbox-win",
                     "orphan DACL recovery: {} ledger(s) processed, {} ACE(s) restored, \
-                     {} pruned (target gone)",
+                     {} pruned (target gone), {} profile(s) deleted",
                     report.files_processed,
                     report.aces_restored,
                     report.aces_pruned_missing,
+                    report.profiles_deleted,
                 );
             }
             for e in &report.errors {
@@ -266,14 +347,20 @@ pub(crate) fn boot_recover() {
     }
 }
 
-/// Tear down the session sandbox: revert every stamped grant ACE, then delete
-/// the AppContainer profile. Idempotent; a no-op when no session state was
-/// ever created.
+/// Tear down the session sandbox: revert every stamped grant ACE, then
+/// delete every projection's AppContainer profile. Idempotent; a no-op when
+/// no session state was ever created.
 pub(crate) fn teardown() {
-    let Some(mut sandbox) = cell().lock().unwrap_or_else(|e| e.into_inner()).take() else {
+    let Some(sandbox) = cell().lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return;
     };
-    if let Err(e) = sandbox.dacl.restore() {
+    let SessionSandbox {
+        mut dacl,
+        network_caps: _,
+        mut projections,
+        next_profile_index: _,
+    } = sandbox;
+    if let Err(e) = dacl.restore() {
         crate::diagnostic::shell_warning(&format!(
             "sandbox session teardown: DACL restore failed: {e}"
         ));
@@ -281,13 +368,27 @@ pub(crate) fn teardown() {
     // Non-fatal per-entry restore failures accumulate here instead of
     // surfacing as `Err` above (see `DaclManager::restore`'s doc); route
     // them to the same diagnostic seam rather than dropping them.
-    for w in sandbox.dacl.warnings() {
+    for w in dacl.warnings() {
         crate::diagnostic::shell_warning(&format!("sandbox session teardown: {w}"));
     }
-    if let Err(e) = sandbox.profile.delete() {
-        crate::diagnostic::shell_warning(&format!(
-            "sandbox session teardown: delete AppContainer profile failed: {e}"
-        ));
+    for (_, proj) in projections.drain() {
+        let name = proj.profile.name().to_string();
+        match proj.profile.delete() {
+            Ok(()) => {
+                if let Err(e) = dacl.forget_profile(&name) {
+                    crate::diagnostic::shell_warning(&format!(
+                        "sandbox session teardown: ledger update for profile {name} failed: {e}"
+                    ));
+                }
+            }
+            Err(e) => {
+                // The name stays ledgered; the next boot's sweep re-attempts
+                // the deletion.
+                crate::diagnostic::shell_warning(&format!(
+                    "sandbox session teardown: delete AppContainer profile {name} failed: {e}"
+                ));
+            }
+        }
     }
 }
 
@@ -308,11 +409,10 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The pure half of the session grant memo: drop every path already
-/// recorded in `granted` at `kind`. Split out from
-/// [`SessionSandbox::drop_already_granted`] so the memo's filtering logic
-/// is unit-testable without standing up a real AppContainer profile / DACL
-/// manager.
+/// The pure half of the per-projection grant memo: drop every path already
+/// recorded in `granted` at `kind`. A free function so the memo's filtering
+/// logic is unit-testable without standing up a real AppContainer profile /
+/// DACL manager.
 fn filter_out_granted(
     granted: &HashSet<(PathBuf, GrantKind)>,
     paths: Vec<PathBuf>,
@@ -334,7 +434,7 @@ fn dacl_break(e: &DaclError) -> Break {
 
 #[cfg(test)]
 mod tests {
-    use super::{GrantKind, existing_paths, filter_out_granted};
+    use super::{GrantKind, ProjectionKey, existing_paths, filter_out_granted, profile_name};
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -384,5 +484,38 @@ mod tests {
             GrantKind::Deny,
         );
         assert_eq!(kept, vec![PathBuf::from(r"C:\Users\me\.ssh")]);
+    }
+
+    #[test]
+    fn projection_key_identity_is_the_fs_triple() {
+        let a = ProjectionKey {
+            read: vec![r"C:\work".into()],
+            write: vec![r"C:\work\out".into()],
+            deny: vec![],
+        };
+        let same = a.clone();
+        let narrower = ProjectionKey {
+            read: vec![r"C:\work".into()],
+            write: vec![],
+            deny: vec![],
+        };
+        let denied = ProjectionKey {
+            deny: vec![r"C:\work\secret".into()],
+            ..a.clone()
+        };
+        assert_eq!(a, same);
+        assert_ne!(a, narrower);
+        assert_ne!(a, denied);
+    }
+
+    #[test]
+    fn profile_name_is_pid_and_counter_keyed_within_the_length_cap() {
+        let n0 = profile_name(0);
+        let n1 = profile_name(1);
+        assert_ne!(n0, n1);
+        assert!(n0.starts_with(&format!("ral.sandbox.s{}.p", std::process::id())));
+        // AppContainer profile names cap at 64 UTF-16 code units; the
+        // worst case (ten-digit pid, ten-digit counter) must stay inside.
+        assert!(profile_name(u32::MAX).encode_utf16().count() <= 64);
     }
 }

@@ -10,11 +10,12 @@
 //!   actually enforces for a projection, for `RAL_DUMP_SANDBOX_PROFILE`.
 //!
 //! This module owns the Job Object plumbing and the profile dump.  Its
-//! submodules carry the per-command AppContainer backend: `appcontainer`
-//! (profile lifecycle + LowBox spawn capabilities), `dacl` (grant-ACE
-//! apply/restore engine) — both imitating MXC's Tier-3 processcontainer
-//! backend (github.com/microsoft/mxc @ 0e7c3dd) — and `session`, which owns
-//! the per-session profile/DACL lifecycle those two compose into.
+//! submodules carry the AppContainer backend: `appcontainer` (profile
+//! lifecycle + LowBox spawn capabilities), `dacl` (grant-ACE apply/restore
+//! engine) — both imitating MXC's Tier-3 processcontainer backend
+//! (github.com/microsoft/mxc @ 0e7c3dd) — and `session`, which composes the
+//! two into projection-keyed confinement: one profile per distinct fs
+//! projection, held in session state until teardown.
 
 pub(crate) mod appcontainer;
 pub(crate) mod dacl;
@@ -57,7 +58,11 @@ pub(super) fn apply_job_limits(child: &crate::process::ChildHandle) {
 pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
     let mut out = String::new();
     out.push_str("AppContainer (LowBox token) profile:\n");
-    out.push_str("  profile: one per shell session (name ral.sandbox.s<pid>)\n");
+    out.push_str(
+        "  profile: one per distinct fs projection of the session\n\
+         \x20     (name ral.sandbox.s<pid>.p<n>); this projection's SID sees\n\
+         \x20     only the ACEs stamped below, never another projection's\n",
+    );
     out.push_str("  fs: deny-by-default; the ALL APPLICATION PACKAGES group's\n");
     out.push_str("      system-path reads plus the allow-ACEs stamped below\n");
     out.push_str(&format!(

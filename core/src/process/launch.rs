@@ -394,8 +394,8 @@ impl Launch {
     /// `capabilities` must stay valid until [`Self::spawn`] returns: this
     /// only borrows their raw values into the attribute list at spawn time,
     /// it does not take ownership.  The per-command sandbox launcher
-    /// (`sandbox::windows::session::confine`) threads a session-owned profile
-    /// SID and capability array through here.
+    /// (`sandbox::windows::session::confine`) threads the projection's
+    /// session-owned profile SID and capability array through here.
     pub fn security_capabilities(
         &mut self,
         app_container_sid: PSID,

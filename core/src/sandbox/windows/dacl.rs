@@ -8,36 +8,31 @@
 // breadcrumb naming its upstream counterpart, for future diffing against
 // upstream (see `dev/docs/260712_windows_port.md`, W1).
 
-//! Crash-safe grant-ACE apply/restore engine for the session-scoped
-//! AppContainer sandbox.
+//! Crash-safe grant-ACE apply/restore engine for the AppContainer sandbox
+//! backend.
 //!
 //! [`DaclManager`] stamps allow-ACEs for an AppContainer SID onto host
 //! filesystem prefixes so a LowBox-token child can read or read-write them,
 //! and reverts every stamp it made — on explicit [`DaclManager::restore`] or
-//! on [`Drop`]. The lifecycle is **session-scoped, not per-spawn**:
+//! on [`Drop`]. The *manager* is **session-scoped, not per-spawn**:
 //! [`crate::sandbox::windows::session`] creates exactly one `DaclManager`
-//! per shell session and holds it in session-global state for the
-//! session's whole lifetime, accumulating every confined command's grants
-//! into it; [`crate::sandbox::windows::session::teardown`] is what finally
-//! calls [`restore`](DaclManager::restore), and only runs at session end.
+//! per shell session (one ledger, one restore point) and holds it in
+//! session-global state; [`crate::sandbox::windows::session::teardown`] is
+//! what finally calls [`restore`](DaclManager::restore), and only runs at
+//! session end.  *Authority*, by contrast, is **projection-keyed**: the
+//! session mints one AppContainer SID per distinct fs projection, so the
+//! ACEs stamped for a SID are exactly that projection's paths, and a
+//! confined child's OS-level authority is its own declared projection —
+//! never the union of what other projections in the session stamped.  A
+//! narrower `grant` therefore gets a narrower SID, enforced at the kernel.
 //!
-//! **Consequence worth stating plainly:** because the profile SID and its
-//! stamped ACEs are shared across every command the session confines, and
-//! nothing revokes a grant between commands, a session's confinement
-//! *widens monotonically* over its lifetime — a child spawned by command 2
-//! can open any path command 1's grant stamped, even if command 2's own
-//! declared projection is narrower, because the OS access check at
-//! open-time sees the union of ACEs ever stamped for the session SID, not
-//! just the ones the current command's projection asked for. The same
-//! persistence cuts the other way for denies: an explicit deny-ACE stamped
-//! for command 1's `deny_path` canonically precedes any allow a later
-//! command stamps, so command 2 stays blocked on that path even where its
-//! own projection grants it — attenuation-safe, but cross-command
-//! interference all the same. Both directions are a deliberate consequence
-//! of the session-scoped-profile decision
-//! (`dev/docs/260712_windows_port.md`, W1), not an oversight — narrowing
-//! per command would require a fresh AppContainer SID (and profile
-//! create/delete round trip) on every spawn.
+//! ACEs persist until session teardown rather than being reverted when a
+//! grant frame exits.  That is deliberate, and safe: a detached worker
+//! spawned under a SID legitimately outlives its frame with the authority
+//! it was born with (revoking ACEs under it would break its opens without
+//! revoking its token), and once no live child holds a SID its lingering
+//! ACEs are inert — no other token carries that SID, and only this
+//! session's own spawns can mint one.
 //!
 //! # Design
 //!
@@ -104,12 +99,13 @@
 //!
 //! # Caveats carried over from upstream
 //!
-//! - **The container id must be per-session.** Two concurrent stampers
-//!   sharing one AppContainer SID clobber each other's grants — the
-//!   merge-then-restore dance above only defends against *sequential*
+//! - **The container id must be unique to its stamper.** Two concurrent
+//!   stampers sharing one AppContainer SID clobber each other's grants —
+//!   the merge-then-restore dance above only defends against *sequential*
 //!   overlapping grants on one path, not concurrent ones from two SIDs that
-//!   happen to be the same string. Callers must derive a fresh SID per
-//!   session.
+//!   happen to be the same string. The session satisfies this by deriving
+//!   profile names from its pid plus a per-session counter (one per
+//!   projection), and by serializing all stamping under the session lock.
 //! - **Apply/restore is O(prefixes) syscalls.** Each prefix is its own
 //!   mutex acquisition, DACL scan, and `SetNamedSecurityInfoW` round trip;
 //!   there is no batching across prefixes.
@@ -321,6 +317,14 @@ struct Ledger {
     /// unrelated process).
     started_at_filetime: u64,
     applied: Vec<AppliedAce>,
+    /// Names of the AppContainer profiles this session has registered, one
+    /// per distinct fs projection, recorded via
+    /// [`DaclManager::record_profile`] *before* the OS-level create (the
+    /// same ledger-before-mutation ordering as ACEs), so the orphan sweep
+    /// deletes a crashed session's profiles alongside restoring its ACEs.
+    /// `default` keeps ledgers written before this field existed parseable.
+    #[serde(default)]
+    profiles: Vec<String>,
 }
 
 /// Aggregated outcome of [`recover_orphaned_state`].
@@ -330,6 +334,9 @@ pub struct RecoveryReport {
     pub files_processed: usize,
     /// Total ACEs successfully removed across all orphaned ledgers.
     pub aces_restored: usize,
+    /// AppContainer profiles deleted (or found already gone) across all
+    /// orphaned ledgers.
+    pub profiles_deleted: usize,
     /// ACEs pruned because their target path no longer exists — there is
     /// nothing to restore on a deleted file, so the entry is dropped rather
     /// than retained-and-retried forever.
@@ -348,10 +355,12 @@ pub struct RecoveryReport {
 /// call [`restore`](Self::restore) to undo explicitly, or simply drop the
 /// guard — [`Drop`] restores best-effort. [`crate::sandbox::windows::session`]
 /// holds exactly one of these per shell session (not one per spawn): create
-/// it once at session start, grant into it on every command that confines
-/// one, and drop (or `restore`) it once at session end — see the
-/// session-scoped-lifecycle note at the top of this module for the
-/// consequence that accumulation across commands carries.
+/// it once at session start, grant into it — under each projection's own
+/// SID — on every command that confines one, and drop (or `restore`) it
+/// once at session end. It also ledgers the session's AppContainer profile
+/// registrations ([`record_profile`](Self::record_profile) /
+/// [`forget_profile`](Self::forget_profile)) so the orphan sweep deletes a
+/// crashed session's profiles.
 ///
 /// after mxc filesystem_dacl.rs::DaclManager (0e7c3dd)
 #[derive(Debug)]
@@ -359,6 +368,7 @@ pub struct DaclManager {
     run_id: String,
     ledger_path: PathBuf,
     applied: Vec<AppliedAce>,
+    profiles: Vec<String>,
     warnings: Vec<String>,
     process_start_filetime: u64,
 }
@@ -378,9 +388,44 @@ impl DaclManager {
             run_id,
             ledger_path,
             applied: Vec::new(),
+            profiles: Vec::new(),
             warnings: Vec::new(),
             process_start_filetime,
         })
+    }
+
+    /// Record an AppContainer profile name in the ledger, durably, *before*
+    /// the caller registers it with the OS — the same
+    /// ledger-before-mutation ordering [`apply_one`](Self::apply_one)
+    /// protects for ACEs.  A crash between this write and the
+    /// `CreateAppContainerProfile` call leaves recovery attempting to
+    /// delete a profile that was never created, which it treats as already
+    /// gone.
+    pub fn record_profile(&mut self, name: &str) -> Result<(), DaclError> {
+        self.profiles.push(name.to_string());
+        if let Err(e) = self.persist_ledger() {
+            self.profiles.pop();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Drop a profile name from the ledger after the caller has deleted the
+    /// OS-level profile.  Removes the ledger file outright once nothing —
+    /// no ACE, no profile — remains recorded.
+    pub fn forget_profile(&mut self, name: &str) -> Result<(), DaclError> {
+        self.profiles.retain(|p| p != name);
+        self.checkpoint()
+    }
+
+    /// Persist the ledger, or remove it when it records nothing.
+    fn checkpoint(&self) -> Result<(), DaclError> {
+        if self.applied.is_empty() && self.profiles.is_empty() {
+            remove_ledger_best_effort(&self.ledger_path);
+            Ok(())
+        } else {
+            self.persist_ledger()
+        }
     }
 
     /// Warnings accumulated during apply/restore (non-fatal issues).
@@ -463,12 +508,7 @@ impl DaclManager {
         // processes tail-first.
         remaining.reverse();
         self.applied = remaining;
-        if self.applied.is_empty() {
-            remove_ledger_best_effort(&self.ledger_path);
-        } else {
-            self.persist_ledger()?;
-        }
-        Ok(())
+        self.checkpoint()
     }
 
     /// after mxc filesystem_dacl.rs::DaclManager::apply_one (0e7c3dd)
@@ -532,6 +572,7 @@ impl DaclManager {
             image_name: current_image_basename(),
             started_at_filetime: self.process_start_filetime,
             applied: self.applied.clone(),
+            profiles: self.profiles.clone(),
         };
         write_ledger(&self.ledger_path, &ledger)
     }
@@ -617,6 +658,19 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
                 }
             }
         }
+        // Delete the dead session's AppContainer profiles. Never retained
+        // for retry: the ledger is written before the OS-level create, so a
+        // recorded profile may never have existed (deletion then reports
+        // not-found, counted as already gone), and a genuinely undeletable
+        // profile is an inert registry entry — no process can acquire its
+        // SID except a spawn this codebase performs — so noting the failure
+        // beats re-attempting it at every boot forever.
+        for name in &ledger.profiles {
+            match super::appcontainer::delete_profile_by_name(name) {
+                Ok(()) => report.profiles_deleted += 1,
+                Err(e) => report.errors.push(format!("delete profile {name}: {e}")),
+            }
+        }
         if remaining.is_empty() {
             if let Err(e) = fs::remove_file(&path) {
                 report
@@ -631,6 +685,7 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
                 image_name: ledger.image_name,
                 started_at_filetime: ledger.started_at_filetime,
                 applied: remaining,
+                profiles: Vec::new(),
             };
             if let Err(e) = write_ledger(&path, &pending) {
                 report
@@ -1862,6 +1917,7 @@ mod tests {
                     inherit_flags: (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
                 }],
             }],
+            profiles: vec!["ral.sandbox.s42.p0".into()],
         };
         let bytes = serde_json::to_vec(&l).unwrap();
         let parsed: Ledger = serde_json::from_slice(&bytes).unwrap();
@@ -1873,6 +1929,7 @@ mod tests {
         assert_eq!(parsed.applied[0].ace_type, AceType::Allow);
         assert_eq!(parsed.applied[0].prior_state.len(), 1);
         assert_eq!(parsed.applied[0].prior_state[0].access_mask, 0x01FF);
+        assert_eq!(parsed.profiles, vec!["ral.sandbox.s42.p0".to_string()]);
     }
 
     #[test]
@@ -1892,6 +1949,7 @@ mod tests {
         }"#;
         let parsed: Ledger = serde_json::from_slice(json).expect("legacy ledger must parse");
         assert!(parsed.applied[0].prior_state.is_empty());
+        assert!(parsed.profiles.is_empty());
     }
 
     // The RW_MASK/RO_MASK shape invariants (superset relationship,
@@ -2218,12 +2276,66 @@ mod tests {
                     image_name: "ral.exe".into(),
                     started_at_filetime: 0,
                     applied: m.applied.clone(),
+                    profiles: Vec::new(),
                 };
                 write_ledger(&synthetic, &l).unwrap();
                 m.applied.clear();
             }
             let report = recover_orphaned_state().unwrap();
             assert!(report.files_processed >= 1);
+        });
+    }
+
+    #[test]
+    fn record_and_forget_profile_round_trip_the_ledger() {
+        with_scoped_state_dir(|| {
+            let mut m = DaclManager::new().unwrap();
+            m.record_profile("ral.sandbox.s1.p0").unwrap();
+            let persisted = read_ledger(&m.ledger_path).unwrap();
+            assert_eq!(persisted.profiles, vec!["ral.sandbox.s1.p0".to_string()]);
+            m.forget_profile("ral.sandbox.s1.p0").unwrap();
+            // Nothing recorded — the ledger file is removed outright.
+            assert!(matches!(m.ledger_path.try_exists(), Ok(false)));
+        });
+    }
+
+    #[test]
+    fn recovery_deletes_dead_sessions_profiles() {
+        with_scoped_state_dir(|| {
+            // One profile genuinely registered, one ledgered but never
+            // created (the crash window between record_profile and the OS
+            // create). Recovery must delete the first and consume the
+            // ledger either way — a recorded-but-absent profile is never
+            // retried forever.
+            let created = format!("ral.test.recovery.{}", std::process::id());
+            let ghost = format!("ral.test.recovery.ghost.{}", std::process::id());
+            let profile = super::super::appcontainer::AppContainerProfile::create_or_reuse(
+                &created,
+            )
+            .expect("test profile creation");
+            drop(profile); // frees the in-memory SID; the OS profile stays registered
+
+            let dir = ensure_ledger_dir().unwrap();
+            let synthetic = dir.join("pid-2147483646-profiles.json");
+            let l = Ledger {
+                run_id: "pid-2147483646-profiles".into(),
+                pid: 0x7FFF_FFFE,
+                image_name: "ral.exe".into(),
+                started_at_filetime: 0,
+                applied: Vec::new(),
+                profiles: vec![created, ghost],
+            };
+            write_ledger(&synthetic, &l).unwrap();
+
+            let report = recover_orphaned_state().unwrap();
+            assert!(
+                report.profiles_deleted >= 1,
+                "the registered profile must be deleted: {report:?}"
+            );
+            assert!(
+                matches!(synthetic.try_exists(), Ok(false)),
+                "the orphaned ledger must be consumed: {report:?}"
+            );
         });
     }
 
@@ -2248,6 +2360,7 @@ mod tests {
                     inheritable: false,
                     prior_state: Vec::new(),
                 }],
+                profiles: Vec::new(),
             };
             write_ledger(&synthetic, &l).unwrap();
 

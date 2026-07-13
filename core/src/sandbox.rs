@@ -267,16 +267,17 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 }
 
 /// Tear down the per-session OS sandbox at a clean shutdown seam: revert
-/// grant ACEs and delete the session's AppContainer profile.
+/// grant ACEs and delete the session's AppContainer profiles (one per
+/// distinct fs projection it confined).
 ///
 /// Windows only; a no-op elsewhere, where per-command confinement holds no
 /// session-global state. Called once from each front end's clean-shutdown
 /// seam (`ral`'s `Drop for Session`, `exarch`'s `main`) — cheap and
 /// idempotent, so a portable seam calling it unconditionally costs nothing
 /// on Unix. A session that exits without reaching it (a panic unwinding
-/// past the seam, an abrupt `process::exit`) leaves its DACL ledger for the
-/// next process start's boot sweep ([`early_init`]) to reclaim, and its
-/// profile as an inert registry entry a same-pid successor reuses.
+/// past the seam, an abrupt `process::exit`) leaves its DACL ledger — which
+/// also names its registered profiles — for the next process start's boot
+/// sweep ([`early_init`]) to reclaim.
 pub fn teardown_session() {
     #[cfg(windows)]
     windows::session::teardown();
