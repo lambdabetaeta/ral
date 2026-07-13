@@ -33,7 +33,7 @@ use std::os::raw::{c_char, c_int};
 
 /// Apply `policy` to the current process.
 pub(super) fn enter_current_process(policy: &SandboxProjection) -> Result<(), String> {
-    let profile = build_profile(policy);
+    let profile = build_profile(policy)?;
     apply_profile(&profile).map_err(|e| format!("ral: failed to enter sandbox: {e}"))
 }
 
@@ -79,10 +79,10 @@ fn apply_profile(profile: &str) -> std::io::Result<()> {
 /// rules live as readable SBPL rather than `format!()`'d strings.
 const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
-pub(super) fn build_profile(policy: &SandboxProjection) -> String {
+pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String> {
     let mut lines: Vec<String> = vec![BASE_PROFILE.to_string()];
     let deny_paths = match &policy.fs {
-        FsProjection::Restricted(fs) => emit_fs_restricted(&mut lines, fs),
+        FsProjection::Restricted(fs) => emit_fs_restricted(&mut lines, fs)?,
         FsProjection::Unrestricted => {
             // No fs attenuation in the stack: pass fs through.  Lets
             // exec-only grants enter the OS sandbox for the sake of
@@ -93,7 +93,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> String {
         }
     };
 
-    emit_exec_rules(&mut lines, &policy.exec);
+    emit_exec_rules(&mut lines, &policy.exec)?;
 
     // Per-path deny rules.  Emitted *after* the broad allows so
     // Seatbelt's last-match-wins semantics let the deny override.
@@ -113,18 +113,25 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> String {
         lines.push("(allow network*)".to_string());
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 /// Emit the per-prefix `(allow file-read* …)` / `(allow file-write* …)`
 /// rules and ancestor-metadata carve-outs for a restricted fs policy.
 /// Returns the expanded deny_paths so the caller can layer them after
 /// every allow rule has been written (Seatbelt is last-match-wins).
-fn emit_fs_restricted(lines: &mut Vec<String>, fs: &crate::types::FsPolicy) -> Vec<String> {
-    let read_prefixes = match_variants_list(&fs.read_prefixes);
-    let write_prefixes = match_variants_list(&fs.write_prefixes);
-    let deny_paths = match_variants_list(&fs.deny_paths);
-    let system_read_paths = existing_system_read_paths();
+///
+/// `Err` when a grant prefix's firmlink/canonical expansion is not
+/// valid UTF-8 — see [`crate::path::match_variants_list`]'s fail-closed
+/// contract.
+fn emit_fs_restricted(
+    lines: &mut Vec<String>,
+    fs: &crate::types::FsPolicy,
+) -> Result<Vec<String>, String> {
+    let read_prefixes = match_variants_list(&fs.read_prefixes)?;
+    let write_prefixes = match_variants_list(&fs.write_prefixes)?;
+    let deny_paths = match_variants_list(&fs.deny_paths)?;
+    let system_read_paths = existing_system_read_paths()?;
     emit_ancestor_metadata(lines, system_read_paths.iter().map(String::as_str));
     emit_read_subpaths(lines, system_read_paths.iter().map(String::as_str));
     // For each grant prefix, also allow file-read-metadata on its
@@ -146,7 +153,7 @@ fn emit_fs_restricted(lines: &mut Vec<String>, fs: &crate::types::FsPolicy) -> V
             escape_path(prefix)
         ));
     }
-    deny_paths
+    Ok(deny_paths)
 }
 
 /// Render the `process-exec` rules.  `Unrestricted` emits a wildcard
@@ -176,7 +183,7 @@ fn emit_fs_restricted(lines: &mut Vec<String>, fs: &crate::types::FsPolicy) -> V
 /// platform exec base (`/bin`, `/usr`, the toolchain dirs) is folded
 /// in whenever those paths exist, so a user policy with no `[exec]`
 /// entries still admits the system binaries.
-fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
+fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) -> Result<(), String> {
     match exec {
         ExecProjection::Unrestricted => {
             lines.push("(allow process-exec)".to_string());
@@ -197,9 +204,9 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
             // exec-denied even though they're readable via
             // `system_paths`.  Same idiom as
             // BrianSwift/macOSSandboxBuild's `confined.sb`.
-            let user_dirs = match_variants_list(allow_dirs);
-            let system_dirs = existing_system_exec_paths();
-            let deny_dirs = match_variants_list(deny_dirs);
+            let user_dirs = match_variants_list(allow_dirs)?;
+            let system_dirs = existing_system_exec_paths()?;
+            let deny_dirs = match_variants_list(deny_dirs)?;
             // Bundled coreutils / diffutils / ripgrep names dispatch
             // through `--ral-bundled-tool`, which re-execs the running
             // binary so the in-process uutils path can fire inside the
@@ -263,6 +270,7 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
             }
         }
     }
+    Ok(())
 }
 
 /// What ops a baseline system path needs to admit.  Every entry is
@@ -330,14 +338,14 @@ fn system_paths() -> &'static [(&'static str, SystemAccess)] {
 /// (`/private/etc` → `[/etc, /private/etc]`) so the rendered
 /// profile matches whichever form Seatbelt presents at MAC-hook
 /// time.
-fn existing_system_read_paths() -> Vec<String> {
+fn existing_system_read_paths() -> Result<Vec<String>, String> {
     match_variants_list(&filter_existing(system_paths().iter().map(|(p, _)| *p)))
 }
 
 /// Host-existing system paths admitted for exec — the `Exec`-tagged
 /// subset of [`system_paths`].  Folded into the combined exec rule
 /// alongside user policy admits when exec is `Restricted`.
-fn existing_system_exec_paths() -> Vec<String> {
+fn existing_system_exec_paths() -> Result<Vec<String>, String> {
     match_variants_list(&filter_existing(
         system_paths()
             .iter()
@@ -409,7 +417,7 @@ mod tests {
 
     #[test]
     fn mac_shell_profile_allows_general_exec_when_unrestricted() {
-        let profile = build_profile(&SandboxProjection::default());
+        let profile = build_profile(&SandboxProjection::default()).unwrap();
         assert!(profile.contains("(allow process-exec)"));
         // The restricted form must not appear when exec is unrestricted.
         assert!(!profile.contains("(allow file-read* process-exec"));
@@ -427,7 +435,7 @@ mod tests {
             },
             ..SandboxProjection::default()
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         // Folded `file-read* process-exec` rule (idiom from
         // BrianSwift/macOSSandboxBuild's confined.sb).
         assert!(
@@ -468,7 +476,7 @@ mod tests {
             },
             ..SandboxProjection::default()
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         // Both the user's admit and the system base appear in one
         // combined rule — confined.sb idiom.
         let combined = profile
@@ -497,7 +505,7 @@ mod tests {
             },
             ..SandboxProjection::default()
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         // Empty user policy => only the platform exec base admitted.
         // Same shape as `system_read_paths`: an empty user fs grant
         // doesn't deny libc and dyld, and an empty exec map doesn't
@@ -521,7 +529,7 @@ mod tests {
             },
             ..SandboxProjection::default()
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         let allow_idx = profile
             .find("(allow file-read* process-exec")
             .expect("missing broad allow");
@@ -556,7 +564,7 @@ mod tests {
             },
             ..SandboxProjection::default()
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         let allow_idx = profile
             .find("(allow file-read* process-exec")
             .expect("missing broad allow");
@@ -583,13 +591,14 @@ mod tests {
         let profile = build_profile(&SandboxProjection {
             net: false,
             ..SandboxProjection::default()
-        });
+        })
+        .unwrap();
         assert!(!profile.contains("(allow network*)"));
     }
 
     #[test]
     fn mac_profile_allows_common_dev_writes() {
-        let profile = build_profile(&SandboxProjection::default());
+        let profile = build_profile(&SandboxProjection::default()).unwrap();
         for path in ["/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty"] {
             assert!(
                 profile.contains(&format!("(allow file-write* (literal \"{path}\"))")),
@@ -600,7 +609,7 @@ mod tests {
 
     #[test]
     fn mac_profile_leaves_tty_ioctl_available_for_tui_children() {
-        let profile = build_profile(&SandboxProjection::default());
+        let profile = build_profile(&SandboxProjection::default()).unwrap();
         assert!(profile.contains("(allow file-ioctl)"));
         assert!(
             !profile.contains("(deny file-ioctl (literal \"/dev/tty\"))"),
@@ -610,7 +619,7 @@ mod tests {
 
     #[test]
     fn mac_profile_names_notification_center_as_posix_shm() {
-        let profile = build_profile(&SandboxProjection::default());
+        let profile = build_profile(&SandboxProjection::default()).unwrap();
         assert!(
             profile.contains(
                 "(allow ipc-posix-shm (ipc-posix-name \"apple.shm.notification_center\"))"
@@ -643,7 +652,7 @@ mod tests {
             fs: FsProjection::Restricted(FsPolicy::default()),
             ..SandboxProjection::default()
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         assert!(
             profile
                 .contains("(allow file-read* (subpath \"/Library/Developer/CommandLineTools\"))")
@@ -654,7 +663,7 @@ mod tests {
 
     #[test]
     fn mac_profile_does_not_grant_tmp_as_system_read_path() {
-        let profile = build_profile(&SandboxProjection::default());
+        let profile = build_profile(&SandboxProjection::default()).unwrap();
         assert!(!profile.contains("(allow file-read* (subpath \"/tmp\"))"));
         assert!(!profile.contains("(allow file-read* (subpath \"/private/tmp\"))"));
     }
@@ -676,7 +685,7 @@ mod tests {
             net: true,
             exec: ExecProjection::default(),
         };
-        let profile = build_profile(&policy);
+        let profile = build_profile(&policy).unwrap();
         for form in ["/tmp/work", "/private/tmp/work"] {
             let allow_idx = profile
                 .find(&format!("(allow file-write* (subpath \"{form}\"))"))

@@ -362,9 +362,11 @@ unsafe impl Send for WindowsStderrBackup {}
 pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBackup> {
     use std::fs::OpenOptions;
     use std::os::windows::io::IntoRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, FALSE, HANDLE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, FALSE, HANDLE,
+    };
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
-    use windows_sys::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     // `into_raw_handle` hands the handle out without running `File`'s
@@ -403,8 +405,13 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
 
     // SAFETY: `crt_handle` is a valid, freshly duplicated handle owned by
     // this call; `_open_osfhandle` adopts it into the CRT fd table, so it
-    // must not be `CloseHandle`d directly after this succeeds.
-    let crt_fd = unsafe { libc::open_osfhandle(crt_handle as isize, libc::O_APPEND) };
+    // must not be `CloseHandle`d directly after this succeeds.  `O_BINARY`
+    // keeps the CRT fd's writes byte-for-byte: without it the CRT layer
+    // translates `\n` to `\r\n`, so C writers and Rust writers (which go
+    // straight to the handle, untranslated) would disagree on the log's
+    // bytes.
+    let crt_fd =
+        unsafe { libc::open_osfhandle(crt_handle as isize, libc::O_APPEND | libc::O_BINARY) };
     if crt_fd < 0 {
         let e = io::Error::last_os_error();
         // SAFETY: `_open_osfhandle` failed, so `crt_handle` was never

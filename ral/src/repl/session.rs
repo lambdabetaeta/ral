@@ -285,5 +285,8 @@ impl Drop for Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .cleanup();
+        // Windows-only, no-op elsewhere: reverts this session's AppContainer
+        // grant ACEs and deletes its profile.
+        ral_core::sandbox::teardown_session();
     }
 }

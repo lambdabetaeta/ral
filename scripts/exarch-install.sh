@@ -31,7 +31,7 @@ case "$os" in
         ;;
     *)
         echo "Unsupported OS: $os" >&2
-        echo "exarch is built for macOS and Linux only." >&2
+        echo "This installer covers macOS and Linux only; on Windows, use exarch-install.ps1 instead." >&2
         exit 1
         ;;
 esac

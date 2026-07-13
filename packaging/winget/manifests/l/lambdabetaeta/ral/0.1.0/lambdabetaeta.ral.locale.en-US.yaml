@@ -1,4 +1,14 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+#
+# This manifest is pinned to v0.1.0, a pre-port binary: on Windows its
+# sandbox is a fail-closed stub (every enforceable `grant` projection is
+# refused), not the AppContainer confinement macOS/Linux get. The
+# Description below is scoped to what v0.1.0 actually does. A v0.1.1 cut
+# should (a) restore the "real OS-level confinement on every platform"
+# claim once it points at a build with the AppContainer sandbox, and
+# (b) switch the installer to the ral-windows-allutils.exe asset — see
+# packaging/scoop/ral.json and scripts/install.ps1, which already made
+# that switch.
 PackageIdentifier: lambdabetaeta.ral
 PackageVersion: 0.1.0
 PackageLocale: en-US
@@ -9,15 +19,17 @@ Author: G. A. Kavvos
 PackageName: ral
 PackageUrl: https://github.com/lambdabetaeta/ral
 License: MIT OR Apache-2.0
-LicenseUrl: https://github.com/lambdabetaeta/ral/blob/main/README.md
+LicenseUrl: https://github.com/lambdabetaeta/ral/blob/main/LICENSE-MIT
 ShortDescription: A shell grounded on algebraic effects
 Description: >-
   ral is a shell built on one idea: running an external command is performing
-  an algebraic effect. Pipelines are typed (bytes vs. values), authority is
-  scoped and can only shrink (grant), and every sandboxed command runs under
-  real OS-level confinement (AppContainer on Windows, Seatbelt on macOS,
-  bubblewrap on Linux). This package installs the bare ral.exe; it does not
-  include ral-sh, which has no Windows equivalent.
+  an algebraic effect. Pipelines are typed (bytes vs. values), and authority
+  is scoped and can only shrink (grant). On macOS and Linux, every sandboxed
+  command runs under real OS-level confinement (Seatbelt, bubblewrap); on
+  Windows, per-command sandboxing is still in development, so a `grant` that
+  would need to confine an external command is refused rather than silently
+  unenforced. This package installs the bare ral.exe; it does not include
+  ral-sh, which has no Windows equivalent.
 Moniker: ral
 Tags:
   - shell

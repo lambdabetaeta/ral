@@ -41,9 +41,11 @@
 //! re-exec child end-to-end without an external helper binary (`bwrap` on
 //! Linux is commonly absent in CI). The *other* fail-closed axis —
 //! `projection_enforceable` rejecting `net: false` on a backend with no
-//! kernel network enforcement (Windows) — is covered by the unit test
-//! `sandbox::tests::projection_enforceable_rejects_net_false_on_windows`
-//! and is not re-driven through the eval path here.
+//! kernel network enforcement — is covered by the unit tests
+//! `sandbox::tests::projection_enforceable_net_false_tracks_net_enforced`
+//! and, on Windows specifically (where the AppContainer backend *does*
+//! enforce it), `sandbox::tests::projection_enforceable_allows_net_false_on_windows`;
+//! neither is re-driven through the eval path here.
 
 #![cfg(all(feature = "test-util", target_os = "macos"))]
 

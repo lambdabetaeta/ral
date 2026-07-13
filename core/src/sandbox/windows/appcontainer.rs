@@ -74,9 +74,7 @@ use windows_sys::Win32::Foundation::LocalFree;
 /// as already negative) is not needed here — every input is a genuine Win32
 /// error code.
 // `AppContainerProfile::create_or_reuse` is this function's only non-test
-// caller and is itself unreached until W1c wires up the session launcher;
-// see the `impl AppContainerProfile` block below.
-#[allow(dead_code, reason = "reached only through create_or_reuse, not yet landed")]
+// caller; see the `impl AppContainerProfile` block below.
 const fn hresult_from_win32(code: u32) -> i32 {
     ((code & 0x0000_FFFF) | (0x7 << 16) | 0x8000_0000) as i32
 }
@@ -152,11 +150,6 @@ pub(crate) struct AppContainerProfile {
     sid: OwnedContainerSid,
 }
 
-// Tested directly (`profile_create_reuse_sid_string_and_delete_round_trip`),
-// but every method is `pub(crate)` and only the not-yet-landed W1c session
-// wiring (and W1b's DACL ledger, for `sid`/`sid_string`) calls them outside
-// tests, so the whole surface stays unreached in a plain (non-test) build.
-#[allow(dead_code, reason = "consumed by the W1b/W1c session wiring, not yet landed")]
 impl AppContainerProfile {
     // after mxc appcontainer_runner.rs::AppContainerScriptRunner::create_app_container_sid (0e7c3dd)
     /// Create the AppContainer profile named `name`, or — when a prior
@@ -212,11 +205,6 @@ impl AppContainerProfile {
         })
     }
 
-    /// The profile name this instance was created or reused with.
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Borrow the profile's `PSID` for building `SECURITY_CAPABILITIES` or
     /// targeting an ACE at this principal. Valid only while `self` is alive.
     pub(crate) fn sid(&self) -> PSID {
@@ -250,12 +238,8 @@ impl AppContainerProfile {
 /// Owned capability `PSID` from `DeriveCapabilitySidsFromName`, freed with
 /// `LocalFree` on drop — that API's SIDs are `LocalAlloc`'d, unlike the
 /// `FreeSid`-owned container SID above.
-// Only constructed by `CapabilitySids::build`, which is itself only reached
-// from tests until W1c wires up a confined spawn.
-#[allow(dead_code, reason = "consumed by CapabilitySids::build, not yet landed outside tests")]
 struct OwnedCapabilitySid(PSID);
 
-#[allow(dead_code, reason = "consumed by CapabilitySids::build, not yet landed outside tests")]
 impl OwnedCapabilitySid {
     /// Derive the capability SID for `name` (e.g. `internetClient`). Frees
     /// every SID array `DeriveCapabilitySidsFromName` returns except the one
@@ -325,7 +309,6 @@ impl Drop for OwnedCapabilitySid {
 /// The two well-known capability names MXC's Tier 3 grants for outbound
 /// network access (`appcontainer_runner.rs::spawn_suspended`,
 /// `mxc-sdk/src/policy.rs::apply_backend`, both 0e7c3dd).
-#[allow(dead_code, reason = "consumed by CapabilitySids::build, not yet landed outside tests")]
 const NETWORK_CAPABILITIES: [&str; 2] = ["internetClient", "privateNetworkClientServer"];
 
 /// The capability-SID array for a confined spawn's `SECURITY_CAPABILITIES`.
@@ -335,15 +318,11 @@ const NETWORK_CAPABILITIES: [&str; 2] = ["internetClient", "privateNetworkClient
 /// [`crate::process::launch::Launch::security_capabilities`] copies from —
 /// the owner must outlive that call, since the copied entries still point at
 /// this struct's `LocalAlloc`'d memory.
-// Tested directly (`capability_sids_*`); only the not-yet-landed W1c spawn
-// wiring calls `build`/`entries` outside tests.
-#[allow(dead_code, reason = "consumed by the W1c session wiring, not yet landed")]
 pub(crate) struct CapabilitySids {
     _owned: Vec<OwnedCapabilitySid>,
     entries: Vec<SID_AND_ATTRIBUTES>,
 }
 
-#[allow(dead_code, reason = "consumed by the W1c session wiring, not yet landed")]
 impl CapabilitySids {
     // after mxc appcontainer_runner.rs::AppContainerScriptRunner::spawn_suspended
     // (capability-SID derivation loop, 0e7c3dd)
@@ -427,7 +406,7 @@ mod tests {
 
         // First create: the plain `CreateAppContainerProfile` success path.
         let profile = AppContainerProfile::create_or_reuse(&name).expect("first create succeeds");
-        assert_eq!(profile.name(), name);
+        assert_eq!(profile.name, name);
         assert!(!profile.sid().is_null());
         let sid_string = profile.sid_string().expect("SID converts to string form");
         assert!(

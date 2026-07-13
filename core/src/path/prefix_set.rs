@@ -271,4 +271,39 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).ok();
     }
+
+    /// `PrefixSet::meet` folds over `path_within_str`
+    /// ([`super::lex::path_within`]), whose Windows-identity branch —
+    /// case-insensitive, separator-unifying comparison — only fires
+    /// under a genuine `cfg!(windows)` build (the real platform gate
+    /// lives at `path_within`, per its own doc comment).  So, like the
+    /// macOS-only alias tests above, this is gated on `cfg(windows)`
+    /// rather than run host-independently: a grant on `C:\work` must
+    /// still admit `c:/WORK/sub` (same drive, different case and
+    /// separator spelling) once folded through the composed meet, not
+    /// just through `starts_with_identity` in isolation (pinned
+    /// already in `lex`'s own tests).
+    #[cfg(windows)]
+    #[test]
+    fn meet_admits_windows_case_and_separator_variant() {
+        let result = set(&[r"C:\work"]).meet(set(&["c:/WORK/sub"]));
+        assert!(
+            !result.surface().is_empty(),
+            "a grant on C:\\work must admit c:/WORK/sub through the composed meet"
+        );
+    }
+
+    /// Same property, through a `\\?\`-verbatim spelling — what
+    /// `std::fs::canonicalize` returns on Windows — so a grant
+    /// resolved through canonicalisation still meets a candidate that
+    /// was never canonicalized.
+    #[cfg(windows)]
+    #[test]
+    fn meet_admits_windows_verbatim_prefix_variant() {
+        let result = set(&[r"C:\work"]).meet(set(&[r"\\?\C:\work\sub"]));
+        assert!(
+            !result.surface().is_empty(),
+            "a grant on C:\\work must admit \\\\?\\C:\\work\\sub through the composed meet"
+        );
+    }
 }

@@ -132,10 +132,16 @@ return [
     whoami:    'allow',
     yes:       'allow',
 
-    # Shells
+    # Shells.  `cmd`/`powershell`/`pwsh` are the Windows analogues of
+    # bash/zsh — `system:` admits them unconditionally via
+    # `%SystemRoot%\System32` and the PowerShell home, so they get the
+    # same deny.
     sh:   'allow',
     bash: 'deny',
     zsh:  'deny',
+    cmd:        'deny',
+    powershell: 'deny',
+    pwsh:       'deny',
 
     # Version control.  `git` is denied — the agent edits files
     # directly; committing is a human decision.  Use ral builtins

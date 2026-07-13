@@ -523,38 +523,52 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
-/// Write `bytes` to `path`, then stamp an owner-only DACL onto it: one
-/// explicit ACE granting the current process's owner full control, no
-/// inherited ACEs — the Windows analogue of the Unix arm's mode `0600`.
-/// Built fresh via `SetEntriesInAclW` with no prior ACL to merge (so
-/// nothing the parent directory would otherwise hand down survives), then
-/// applied with `PROTECTED_DACL_SECURITY_INFORMATION` so inheritance from
-/// the parent stays cut off going forward too.
+/// Create `path` with an owner-only DACL already in force, then write
+/// `bytes` to it — the Windows analogue of the Unix arm's mode `0600` at
+/// `open`.  The DACL (one explicit ACE granting the current process's
+/// owner full control, no inherited ACEs, built via `SetEntriesInAclW`) is
+/// carried in the `SECURITY_ATTRIBUTES` passed to `CreateFileW` itself, so
+/// the file never exists with the parent directory's inherited ACL even
+/// for an instant — unlike stamping a DACL on afterwards, there is no
+/// window and no permanently-over-permissioned file if a later step fails.
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:token-write-windows] writes the OAuth token file, then stamps an owner-only DACL onto it; credential store infra, not turn-time data I/O"
+    reason = "[io-door:silent:token-write-windows] creates the OAuth token file with an owner-only DACL already in force and writes it; credential store infra, not turn-time data I/O"
 )]
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)?;
-    windows_dacl::restrict_to_owner(path)
+    use std::io::Write;
+    let mut file = windows_dacl::create_owner_only(path)?;
+    file.write_all(bytes)
 }
 
 #[cfg(windows)]
 mod windows_dacl {
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
     use std::path::Path;
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_SUCCESS, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        TRUE,
+    };
     use windows_sys::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
-        SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
+        TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
-        TOKEN_QUERY, TOKEN_USER, TokenUser,
+        ACL, InitializeSecurityDescriptor, NO_INHERITANCE, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+        SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
-    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, CreateFileW,
+    };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// The only security-descriptor revision Win32 defines
+    /// (`SECURITY_DESCRIPTOR_REVISION` in `winnt.h`, stable since NT) — not
+    /// worth a whole extra `windows-sys` feature for one ABI constant.
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
     /// RAII wrapper closing a process token handle exactly once, so every
     /// early return below (a query failure, an ACL-build failure) doesn't
@@ -617,9 +631,14 @@ mod windows_dacl {
         Ok(buf)
     }
 
-    /// Rebuild `path`'s DACL from scratch with a single ACE: full control
-    /// for the current process's owner, no inherited ACEs.
-    pub(super) fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    /// Build a single-ACE ACL granting the current process's owner full
+    /// control — the same access an owner-only file would have — and no
+    /// other entries, so nothing the parent directory would otherwise hand
+    /// down survives.  The caller wraps it in a security descriptor and
+    /// frees it after `CreateFileW` returns (the kernel copies the
+    /// descriptor's contents into the new file object at creation time, so
+    /// nothing here needs to outlive that call).
+    fn owner_only_acl() -> std::io::Result<*mut ACL> {
         let owner_buf = current_process_owner()?;
         // SAFETY: `owner_buf` holds a fully-populated `TOKEN_USER` from the
         // successful `GetTokenInformation` call above; `owner_buf` outlives
@@ -645,50 +664,97 @@ mod windows_dacl {
             Trustee: trustee,
         };
 
-        let mut new_acl: *mut ACL = std::ptr::null_mut();
+        let mut acl: *mut ACL = std::ptr::null_mut();
         // SAFETY: `ea` outlives the call; passing a null prior ACL builds a
         // fresh ACL containing only this one entry — no merge with
         // whatever the parent directory would otherwise hand down.
-        let rc = unsafe { SetEntriesInAclW(1, &ea, std::ptr::null(), &mut new_acl) };
+        let rc = unsafe { SetEntriesInAclW(1, &ea, std::ptr::null(), &mut acl) };
         if rc != ERROR_SUCCESS {
             return Err(std::io::Error::from_raw_os_error(rc as i32));
         }
+        Ok(acl)
+    }
 
-        let path_w: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // SAFETY: `path_w` is NUL-terminated and kept alive for the call;
-        // `new_acl` was just built by `SetEntriesInAclW`.
-        // `PROTECTED_DACL_SECURITY_INFORMATION` alongside
-        // `DACL_SECURITY_INFORMATION` stops the object from inheriting
-        // ACEs from its parent afterwards, so the freshly-built
-        // single-entry ACL is the whole story: owner only, nothing
-        // inherited — the DACL analogue of `chmod 0600`.
-        let rc = unsafe {
-            SetNamedSecurityInfoW(
-                path_w.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                new_acl,
-                std::ptr::null_mut(),
-            )
-        };
-        // SAFETY: `new_acl` was allocated by `SetEntriesInAclW` (which uses
+    /// Create `path` (truncating any existing file, matching the Unix
+    /// arm's `create + truncate`) with an owner-only DACL already in
+    /// force: one explicit ACE granting the current process's owner full
+    /// control, no inherited ACEs, `SE_DACL_PROTECTED` so the object never
+    /// picks up inheritable ACEs from the parent either.  Returns the open
+    /// file for the caller to write through — there is no separate "stamp
+    /// the DACL" step, so no window exists where the file carries whatever
+    /// the parent directory would otherwise hand down.
+    pub(super) fn create_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
+        let acl = owner_only_acl()?;
+
+        let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let sd_ptr: PSECURITY_DESCRIPTOR = std::ptr::addr_of_mut!(sd).cast();
+        let result = (|| -> std::io::Result<std::fs::File> {
+            // SAFETY: `sd` is a local, stack-allocated `SECURITY_DESCRIPTOR`
+            // that `InitializeSecurityDescriptor` fills in place.
+            if unsafe { InitializeSecurityDescriptor(sd_ptr, SECURITY_DESCRIPTOR_REVISION) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `sd` was just initialised; `acl` is a live ACL from
+            // `SetEntriesInAclW` that outlives this call (freed below,
+            // after `CreateFileW` has copied the descriptor's contents).
+            if unsafe { SetSecurityDescriptorDacl(sd_ptr, TRUE, acl, FALSE) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Mark the DACL protected so `CreateFileW` does not merge in
+            // any inheritable ACEs from the parent directory — the same
+            // guarantee `PROTECTED_DACL_SECURITY_INFORMATION` gave the
+            // old stamp-after-write path, applied at creation instead.
+            // SAFETY: `sd` carries the DACL just attached above.
+            if unsafe { SetSecurityDescriptorControl(sd_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED) }
+                == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd_ptr,
+                bInheritHandle: FALSE,
+            };
+            let path_w: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // SAFETY: `path_w` is NUL-terminated and kept alive for the
+            // call; `sa` carries the owner-only, protected descriptor just
+            // built, so the file is created with that DACL atomically —
+            // no window where a default or inherited DACL applies.
+            let handle = unsafe {
+                CreateFileW(
+                    path_w.as_ptr(),
+                    GENERIC_WRITE,
+                    0,
+                    &sa,
+                    CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `handle` is a just-created, valid file handle opened
+            // for `GENERIC_WRITE` with no other owner.
+            Ok(unsafe { std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle) })
+        })();
+
+        // SAFETY: `acl` was allocated by `SetEntriesInAclW` (which uses
         // `LocalAlloc` internally); free it exactly once, regardless of
-        // whether the apply above succeeded.
+        // which step above failed or succeeded — `CreateFileW` (if
+        // reached) has already copied the descriptor's contents into the
+        // new file object by the time this runs.
         unsafe {
-            if !new_acl.is_null() {
-                LocalFree(new_acl.cast());
+            if !acl.is_null() {
+                LocalFree(acl.cast());
             }
         }
-        if rc != ERROR_SUCCESS {
-            return Err(std::io::Error::from_raw_os_error(rc as i32));
-        }
-        Ok(())
+        result
     }
 }
 

@@ -144,8 +144,12 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(target_os = "macos")]
     {
-        let profile = macos::build_profile(policy);
-        eprintln!("--- seatbelt profile ---\n{profile}\n--- end seatbelt profile ---");
+        match macos::build_profile(policy) {
+            Ok(profile) => {
+                eprintln!("--- seatbelt profile ---\n{profile}\n--- end seatbelt profile ---");
+            }
+            Err(e) => eprintln!("--- seatbelt profile error ---\n{e}"),
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -266,10 +270,13 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 /// grant ACEs and delete the session's AppContainer profile.
 ///
 /// Windows only; a no-op elsewhere, where per-command confinement holds no
-/// session-global state.  Not yet wired to a front-end shutdown seam — a
-/// session that exits without calling it leaves its DACL ledger for the next
-/// process start's boot sweep ([`early_init`]) to reclaim, and its profile as
-/// an inert registry entry a same-pid successor reuses.
+/// session-global state. Called once from each front end's clean-shutdown
+/// seam (`ral`'s `Drop for Session`, `exarch`'s `main`) — cheap and
+/// idempotent, so a portable seam calling it unconditionally costs nothing
+/// on Unix. A session that exits without reaching it (a panic unwinding
+/// past the seam, an abrupt `process::exit`) leaves its DACL ledger for the
+/// next process start's boot sweep ([`early_init`]) to reclaim, and its
+/// profile as an inert registry entry a same-pid successor reuses.
 pub fn teardown_session() {
     #[cfg(windows)]
     windows::session::teardown();

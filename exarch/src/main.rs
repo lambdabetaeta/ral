@@ -13,13 +13,17 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = exarch::dispatch_pre_main() {
         std::process::exit(i32::from(code));
     }
-    match exarch::run() {
+    let code = match exarch::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("exarch: {e}");
             std::process::ExitCode::from(1)
         }
-    }
+    };
+    // Windows-only, no-op elsewhere: reverts this session's AppContainer
+    // grant ACEs and deletes its profile.
+    ral_core::sandbox::teardown_session();
+    code
 }
 
 // Test-binary counterpart to the pre-`main` re-exec dispatch at the top of

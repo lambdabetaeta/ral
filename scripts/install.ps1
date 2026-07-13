@@ -7,16 +7,18 @@ $Tag  = "latest"
 
 # ── Platform detection ────────────────────────────────────────────────────────
 
+# There is no system coreutils to fall back on on Windows, so the bundled
+# subset (coreutils, diffutils, grep, ripgrep) is the product, not an add-on
+# — every channel ships the `-allutils` build.
 $arch = $env:PROCESSOR_ARCHITECTURE
 switch ($arch) {
-    "AMD64" { $Artifact = "ral-windows.exe" }
+    "AMD64" { $Artifact = "ral-windows-allutils.exe" }
     "ARM64" {
         Write-Host "No native ARM64 Windows build; using x86_64 (runs under Windows 11's x64 emulation)."
-        $Artifact = "ral-windows.exe"
+        $Artifact = "ral-windows-allutils.exe"
     }
     default {
         Write-Error "Unsupported Windows architecture: $arch"
-        exit 1
     }
 }
 
@@ -35,7 +37,6 @@ try {
     $actual   = (Get-FileHash (Join-Path $tmp "ral.exe") -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected) {
         Write-Error "Checksum mismatch!`n  expected: $expected`n  got:      $actual"
-        exit 1
     }
     Write-Host "Checksum OK."
 
@@ -48,7 +49,10 @@ try {
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (($userPath -split ";") -notcontains $installDir) {
-        $sample = 'setx PATH "$env:Path;' + $installDir + '"'
+        # Not `setx PATH "$env:Path;<dir>"`: that bakes the *merged*
+        # machine+user PATH into the user PATH, and setx silently truncates
+        # at 1024 characters. Read and write the user PATH only.
+        $sample = "[Environment]::SetEnvironmentVariable(`"Path`", [Environment]::GetEnvironmentVariable(`"Path`",`"User`") + `";$installDir`", `"User`")"
         Write-Host ""
         Write-Host "Note: $installDir is not on your PATH."
         Write-Host "Add it for future sessions (PowerShell):"

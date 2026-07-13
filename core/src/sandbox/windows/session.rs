@@ -13,12 +13,20 @@
 //!   and reclaims DACL grants a crashed prior session left stamped (the
 //!   durable record is the ledger, not this process's memory).
 //! - [`confine`] creates the session state on first use and accumulates
-//!   grants into it, idempotently, for the session's lifetime.
+//!   grants into it, idempotently, for the session's lifetime. A `granted`
+//!   memo on [`SessionSandbox`] tracks every `(path, access-kind)` already
+//!   stamped so a repeat command re-declaring the same prefix does not
+//!   re-apply it — `DaclManager`'s ledger is append-only-per-*new*-grant,
+//!   so skipping a redundant one is what keeps a long session's ledger from
+//!   growing (and fsync-rewriting) on every single command.
 //! - [`teardown`] reverts every grant and deletes the profile. The state
 //!   lives in a process-global whose `Drop` is not guaranteed at process
 //!   exit, so this is the explicit cleanup path; a session that exits without
-//!   reaching it leaves its ledger for the next boot's sweep.
+//!   reaching it leaves its ledger for the next boot's sweep. Wired into
+//!   `ral`'s and `exarch`'s clean-shutdown seams via
+//!   [`crate::sandbox::teardown_session`].
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -30,14 +38,28 @@ use crate::types::{Break, Error, SandboxProjection, Settled};
 use super::appcontainer::{AppContainerProfile, CapabilitySids};
 use super::dacl::{self, DaclError, DaclManager};
 
+/// The three independent access levels [`confine`] stamps; the key type of
+/// [`SessionSandbox::granted`]'s memo, so a repeat request for the same
+/// `(path, kind)` is recognised and skipped regardless of which fs list it
+/// arrived through.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum GrantKind {
+    ReadWrite,
+    ReadOnly,
+    Deny,
+}
+
 /// One shell session's confinement state: the AppContainer profile every
 /// confined child spawns under, the DACL guard that stamps (and later
-/// reverts) grant ACEs for that profile's SID, and — built lazily the first
-/// time a `net: true` projection is confined — the network capability SIDs.
+/// reverts) grant ACEs for that profile's SID, the network capability SIDs
+/// (built lazily the first time a `net: true` projection is confined), and
+/// a memo of every `(path, access-kind)` this session has already stamped
+/// so a later command re-declaring the same prefix does not re-apply it.
 struct SessionSandbox {
     profile: AppContainerProfile,
     dacl: DaclManager,
     network_caps: Option<CapabilitySids>,
+    granted: HashSet<(PathBuf, GrantKind)>,
 }
 
 // SAFETY: the raw SIDs `SessionSandbox` holds (the profile SID, the network
@@ -64,7 +86,22 @@ impl SessionSandbox {
             profile,
             dacl,
             network_caps: None,
+            granted: HashSet::new(),
         })
+    }
+
+    /// Drop every path already stamped at `kind` this session — the memo
+    /// that keeps a repeat command from re-applying (and re-fsyncing the
+    /// ledger for) a grant it already holds.
+    fn drop_already_granted(&self, paths: Vec<PathBuf>, kind: GrantKind) -> Vec<PathBuf> {
+        filter_out_granted(&self.granted, paths, kind)
+    }
+
+    /// Record that `paths` are now stamped at `kind`, for future
+    /// [`drop_already_granted`](Self::drop_already_granted) calls.
+    fn mark_granted(&mut self, paths: &[PathBuf], kind: GrantKind) {
+        self.granted
+            .extend(paths.iter().cloned().map(|p| (p, kind)));
     }
 
     /// The network capability SID array, derived once on first request. For a
@@ -115,10 +152,15 @@ fn profile_name() -> String {
 /// program image, if any) — the AppContainer is deny-by-default, so such a
 /// child otherwise reads only the `ALL APPLICATION PACKAGES` system paths.
 ///
-/// A `deny_path` nested inside a granted read/write prefix gets an explicit
-/// deny-ACE (via [`DaclManager::add_deny_aces`]) so the deny overrides the
-/// enclosing (inherited) allow; a `deny_path` outside every grant is already
-/// unreachable under deny-by-default and is not stamped.
+/// Every `deny_path` gets an explicit deny-ACE (via
+/// [`DaclManager::add_deny_aces`]), unconditionally — there is no "already
+/// unreachable, skip it" case. An AppContainer token retains the `Everyone`
+/// SID, and `ALL APPLICATION PACKAGES` grants are system-wide, so a
+/// `deny_path` that falls outside every read/write prefix *this* projection
+/// granted is not actually unreachable: it is reachable through whichever
+/// ambient system grant the token already carries. MXC stamps every
+/// `deny_path` the same way, with no containment filter
+/// (`dispatcher.rs`'s `build_t3_dacl`, 0e7c3dd).
 pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
@@ -149,23 +191,45 @@ pub(crate) fn confine(
             readonly.push(image);
         }
     }
+
+    // Three independent filters narrow what actually needs stamping,
+    // cheapest first: the session memo (a repeat of an already-applied
+    // grant is pure syscall + ledger-fsync waste — see the module doc);
+    // existence ([`existing_paths`] — a path that is not there cannot be
+    // stamped, and hard-failing here would refuse every sandboxed command
+    // under a base whose deny set names a commonly-absent path, e.g.
+    // `xdg:config/{gh,op,gcloud}`); and the well-known-SID effective-access
+    // filter (a real `GetNamedSecurityInfoW` + DACL walk, so it runs last).
+    let readwrite = sandbox.drop_already_granted(readwrite, GrantKind::ReadWrite);
+    let readonly = sandbox.drop_already_granted(readonly, GrantKind::ReadOnly);
+    let readwrite = existing_paths(readwrite);
+    let readonly = existing_paths(readonly);
+    let readwrite = dacl::filter_paths_needing_grant(readwrite, dacl::RW_MASK);
+    let readonly = dacl::filter_paths_needing_grant(readonly, dacl::RO_MASK);
+
     sandbox
         .dacl
         .grant_appcontainer_access(&sid_str, &readwrite, &readonly)
         .map_err(|e| dacl_break(&e))?;
+    sandbox.mark_granted(&readwrite, GrantKind::ReadWrite);
+    sandbox.mark_granted(&readonly, GrantKind::ReadOnly);
 
-    // `deny_paths` nested inside a granted read/write prefix: the enclosing
-    // allow-ACE is inheritable and would expose them to the confined child
-    // (an external process not subject to ral's in-process fs check), so the
-    // deny must be expressed as an explicit deny-ACE. A `deny_path` outside
-    // every granted prefix needs no stamp — the deny-by-default AppContainer
-    // already makes it unreachable.
-    let deny = nested_denies(&spec);
+    // Every `deny_path` is stamped unconditionally (see this function's doc
+    // for why "outside every grant" is not actually safe to skip on
+    // Windows) — filtered only by the memo and by existence, the same two
+    // cheap filters the grants get. Denies are deliberately *not* run
+    // through the well-known-SID filter: that filter answers "does the
+    // AppContainer already have this access", which is irrelevant to
+    // subtracting access via a deny.
+    let deny: Vec<PathBuf> = spec.deny_paths.iter().map(PathBuf::from).collect();
+    let deny = sandbox.drop_already_granted(deny, GrantKind::Deny);
+    let deny = existing_paths(deny);
     if !deny.is_empty() {
         sandbox
             .dacl
             .add_deny_aces(&sid_str, &deny)
             .map_err(|e| dacl_break(&e))?;
+        sandbox.mark_granted(&deny, GrantKind::Deny);
     }
 
     let profile_sid: PSID = sandbox.profile.sid();
@@ -184,6 +248,16 @@ pub(crate) fn confine(
 pub(crate) fn boot_recover() {
     match dacl::recover_orphaned_state() {
         Ok(report) => {
+            if report.files_processed > 0 {
+                crate::dbg_trace!(
+                    "sandbox-win",
+                    "orphan DACL recovery: {} ledger(s) processed, {} ACE(s) restored, \
+                     {} pruned (target gone)",
+                    report.files_processed,
+                    report.aces_restored,
+                    report.aces_pruned_missing,
+                );
+            }
             for e in &report.errors {
                 crate::dbg_trace!("sandbox-win", "orphan DACL recovery: {e}");
             }
@@ -204,6 +278,12 @@ pub(crate) fn teardown() {
             "sandbox session teardown: DACL restore failed: {e}"
         ));
     }
+    // Non-fatal per-entry restore failures accumulate here instead of
+    // surfacing as `Err` above (see `DaclManager::restore`'s doc); route
+    // them to the same diagnostic seam rather than dropping them.
+    for w in sandbox.dacl.warnings() {
+        crate::diagnostic::shell_warning(&format!("sandbox session teardown: {w}"));
+    }
     if let Err(e) = sandbox.profile.delete() {
         crate::diagnostic::shell_warning(&format!(
             "sandbox session teardown: delete AppContainer profile failed: {e}"
@@ -211,23 +291,36 @@ pub(crate) fn teardown() {
     }
 }
 
-/// The projection's `deny_paths` that fall inside a granted read/write
-/// prefix — the ones an inheritable allow-ACE would otherwise expose, and so
-/// need an explicit deny-ACE.  A `deny_path` outside every grant is already
-/// unreachable under the deny-by-default AppContainer and is omitted.
-/// Containment uses [`crate::path::path_within_str`], the same Windows
-/// path-identity notion the capability layer's grant matcher uses.
-fn nested_denies(spec: &crate::types::SandboxBindSpec) -> Vec<PathBuf> {
-    spec.deny_paths
-        .iter()
-        .filter(|d| {
-            let d = d.as_str();
-            spec.read_prefixes
-                .iter()
-                .chain(spec.write_prefixes.iter())
-                .any(|g| crate::path::path_within_str(d, g.as_str()))
-        })
-        .map(PathBuf::from)
+/// Drop paths that do not exist on disk. A grant or deny on an absent path
+/// cannot be stamped (`WRITE_DAC` needs an object to apply to), and unlike
+/// Linux's bwrap overlay — which can mask a path that is not there with an
+/// empty tmpfs even for a deny (`sandbox/linux.rs`'s `--tmpfs` overlay is
+/// deliberately *not* gated on existence) — Windows has no analogous "deny
+/// something that might later exist" primitive. If the child later creates
+/// the path under a granted read/write prefix, that is within the grant's
+/// own authority, not a gap this filter opens. Skipping rather than
+/// hard-failing also matches the Linux backend's own existence guard on its
+/// ro/rw binds (`sandbox/linux.rs`'s `ro_binds` / `rw_binds` loops).
+fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|p| crate::path::exists(&p.to_string_lossy()))
+        .collect()
+}
+
+/// The pure half of the session grant memo: drop every path already
+/// recorded in `granted` at `kind`. Split out from
+/// [`SessionSandbox::drop_already_granted`] so the memo's filtering logic
+/// is unit-testable without standing up a real AppContainer profile / DACL
+/// manager.
+fn filter_out_granted(
+    granted: &HashSet<(PathBuf, GrantKind)>,
+    paths: Vec<PathBuf>,
+    kind: GrantKind,
+) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|p| !granted.contains(&(p.clone(), kind)))
         .collect()
 }
 
@@ -241,48 +334,55 @@ fn dacl_break(e: &DaclError) -> Break {
 
 #[cfg(test)]
 mod tests {
-    use super::nested_denies;
-    use crate::types::SandboxBindSpec;
+    use super::{GrantKind, existing_paths, filter_out_granted};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
 
-    fn spec(read: &[&str], write: &[&str], deny: &[&str]) -> SandboxBindSpec {
-        let own = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect();
-        SandboxBindSpec {
-            read_prefixes: own(read),
-            write_prefixes: own(write),
-            deny_paths: own(deny),
-        }
+    #[test]
+    fn existing_paths_drops_a_path_that_is_not_there() {
+        let td = tempfile::tempdir().unwrap();
+        let present = td.path().to_path_buf();
+        let absent = td.path().join("does-not-exist-xyzzy");
+        assert_eq!(existing_paths(vec![present.clone(), absent]), vec![present]);
     }
 
     #[test]
-    fn deny_nested_in_read_prefix_is_stamped() {
-        let s = spec(
-            &[r"C:\Users\me\.config"],
-            &[],
-            &[r"C:\Users\me\.config\gh"],
+    fn memo_drops_a_path_already_granted_at_the_same_kind() {
+        let mut granted = HashSet::new();
+        granted.insert((PathBuf::from(r"C:\work"), GrantKind::ReadWrite));
+        let kept = filter_out_granted(
+            &granted,
+            vec![PathBuf::from(r"C:\work"), PathBuf::from(r"C:\other")],
+            GrantKind::ReadWrite,
         );
-        let denies = nested_denies(&s);
-        assert_eq!(denies, vec![std::path::PathBuf::from(r"C:\Users\me\.config\gh")]);
+        assert_eq!(kept, vec![PathBuf::from(r"C:\other")]);
     }
 
     #[test]
-    fn deny_nested_in_write_prefix_is_stamped() {
-        let s = spec(&[], &[r"C:\work"], &[r"C:\work\secret"]);
-        assert_eq!(nested_denies(&s).len(), 1);
+    fn memo_is_specific_to_access_kind() {
+        // A path already granted read-only is not "already covered" for a
+        // read-write request at the same path: the two are stamped with
+        // different access masks, so a read-write command must still stamp
+        // its own ACE even where a narrower one already exists.
+        let mut granted = HashSet::new();
+        granted.insert((PathBuf::from(r"C:\work"), GrantKind::ReadOnly));
+        let kept = filter_out_granted(
+            &granted,
+            vec![PathBuf::from(r"C:\work")],
+            GrantKind::ReadWrite,
+        );
+        assert_eq!(kept, vec![PathBuf::from(r"C:\work")]);
     }
 
     #[test]
-    fn deny_outside_every_grant_is_omitted() {
-        // Deny-by-default already makes this unreachable, so no explicit
-        // deny-ACE is needed.
-        let s = spec(&[r"C:\work"], &[r"C:\work\out"], &[r"C:\Users\me\.ssh"]);
-        assert!(nested_denies(&s).is_empty());
-    }
-
-    #[test]
-    fn deny_matches_prefix_case_and_separator_insensitively() {
-        // Windows path identity: the grant matcher folds case and `/`↔`\`,
-        // so the nested-deny detection must too (it shares path_within_str).
-        let s = spec(&[r"C:\Users\Me\.config"], &[], &["c:/users/me/.config/op"]);
-        assert_eq!(nested_denies(&s).len(), 1);
+    fn memo_lets_an_unrelated_path_through() {
+        let mut granted = HashSet::new();
+        granted.insert((PathBuf::from(r"C:\work"), GrantKind::Deny));
+        let kept = filter_out_granted(
+            &granted,
+            vec![PathBuf::from(r"C:\Users\me\.ssh")],
+            GrantKind::Deny,
+        );
+        assert_eq!(kept, vec![PathBuf::from(r"C:\Users\me\.ssh")]);
     }
 }

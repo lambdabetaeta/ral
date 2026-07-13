@@ -51,8 +51,10 @@ jobs:
       - name: Stage install scripts
         run: |
           mkdir -p site/scripts
-          cp scripts/install.sh        site/scripts/install.sh
-          cp scripts/exarch-install.sh site/scripts/exarch-install.sh
+          cp scripts/install.sh         site/scripts/install.sh
+          cp scripts/exarch-install.sh  site/scripts/exarch-install.sh
+          cp scripts/install.ps1        site/scripts/install.ps1
+          cp scripts/exarch-install.ps1 site/scripts/exarch-install.ps1
 
       # The wiki (docs/ral-wiki) is published under site/wiki/ by Quartz v5, but
       # the Quartz build is minutes long, so we don't pay it on every push.  The

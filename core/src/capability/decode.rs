@@ -521,4 +521,24 @@ mod tests {
             "{msg}"
         );
     }
+
+    /// M4 regression: `insert_dir_meet` must resolve a same-key
+    /// collision to `Deny` regardless of which verdict is inserted
+    /// first.  Before the fix, `freeze_exec_map`'s two insertion loops
+    /// (`system:`/`path:` expansion, then explicit `dirs` entries)
+    /// resolved a collision by last-write-wins — correct only by
+    /// accident of loop order, and silently flipped to widening by a
+    /// harmless-looking reorder or resigil.
+    #[test]
+    fn insert_dir_meet_lets_deny_win_regardless_of_insertion_order() {
+        let mut allow_then_deny = BTreeMap::new();
+        insert_dir_meet(&mut allow_then_deny, "/x".to_string(), ExecDir::Allow);
+        insert_dir_meet(&mut allow_then_deny, "/x".to_string(), ExecDir::Deny);
+        assert_eq!(allow_then_deny.get("/x"), Some(&ExecDir::Deny));
+
+        let mut deny_then_allow = BTreeMap::new();
+        insert_dir_meet(&mut deny_then_allow, "/x".to_string(), ExecDir::Deny);
+        insert_dir_meet(&mut deny_then_allow, "/x".to_string(), ExecDir::Allow);
+        assert_eq!(deny_then_allow.get("/x"), Some(&ExecDir::Deny));
+    }
 }

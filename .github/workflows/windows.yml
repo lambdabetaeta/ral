@@ -30,14 +30,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # The `coreutils` feature pulls in `uu_timeout`, which currently
-      # does not build on Windows; build / test the cores that do.
       - name: cargo build (core)
         run: cargo build -p ral-core
       - name: cargo build (ral)
         run: cargo build -p ral
       - name: cargo build (ral with grep + ripgrep)
         run: cargo build -p ral --features grep,ripgrep
+      # The exact feature set build-binaries.yml's build-windows-allutils job
+      # ships as ral-windows-allutils.exe; uu_timeout and the rest of
+      # coreutils-unix-only (core/Cargo.toml's coreutils-unix-only feature)
+      # stay out of this because that feature is cfg(unix)-gated at the
+      # workspace level, not because `coreutils` itself fails to build here.
+      - name: cargo build (ral with coreutils,diffutils,grep,ripgrep)
+        run: cargo build -p ral --features coreutils,diffutils,grep,ripgrep
       # exarch carries cfg(windows) console paths and a windows-sys dep that
       # compile nowhere else; its default `coreutils` feature stays on the
       # Windows-buildable subset (coreutils-unix-only is cfg(unix)-gated).
@@ -50,5 +55,7 @@ jobs:
         run: cargo test -p ral
       - name: cargo test (ral with grep + ripgrep)
         run: cargo test -p ral --features grep,ripgrep
+      - name: cargo test (ral with coreutils,diffutils,grep,ripgrep)
+        run: cargo test -p ral --features coreutils,diffutils,grep,ripgrep
       - name: cargo test (exarch)
         run: cargo test -p exarch

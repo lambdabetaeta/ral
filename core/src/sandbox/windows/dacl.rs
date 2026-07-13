@@ -14,10 +14,25 @@
 //! [`DaclManager`] stamps allow-ACEs for an AppContainer SID onto host
 //! filesystem prefixes so a LowBox-token child can read or read-write them,
 //! and reverts every stamp it made — on explicit [`DaclManager::restore`] or
-//! on [`Drop`]. It is also the *guard*: W1c creates one per confined spawn,
-//! holds it across the child process's lifetime (so the grant lives exactly
-//! as long as the child needs it), and lets it fall out of scope (or calls
-//! `restore` explicitly) when the child exits.
+//! on [`Drop`]. The lifecycle is **session-scoped, not per-spawn**:
+//! [`crate::sandbox::windows::session`] creates exactly one `DaclManager`
+//! per shell session and holds it in session-global state for the
+//! session's whole lifetime, accumulating every confined command's grants
+//! into it; [`crate::sandbox::windows::session::teardown`] is what finally
+//! calls [`restore`](DaclManager::restore), and only runs at session end.
+//!
+//! **Consequence worth stating plainly:** because the profile SID and its
+//! stamped ACEs are shared across every command the session confines, and
+//! nothing revokes a grant between commands, a session's confinement
+//! *widens monotonically* over its lifetime — a child spawned by command 2
+//! can open any path command 1's grant stamped, even if command 2's own
+//! declared projection is narrower, because the OS access check at
+//! open-time sees the union of ACEs ever stamped for the session SID, not
+//! just the ones the current command's projection asked for. This is a
+//! deliberate consequence of the session-scoped-profile decision
+//! (`dev/docs/260712_windows_port.md`, W1), not an oversight — narrowing
+//! per command would require a fresh AppContainer SID (and profile
+//! create/delete round trip) on every spawn.
 //!
 //! # Design
 //!
@@ -99,18 +114,6 @@
 //! `#[cfg(windows)] mod windows;`). Repeating it here as an inner
 //! `#![cfg(windows)]` would trip clippy's `duplicated_attributes` lint.
 
-// This parcel (W1b) lands the engine on its own: every item below is
-// exercised by this file's own `#[cfg(test)]` unit tests, but has no
-// production caller yet — W1c wires `DaclManager` and
-// `recover_orphaned_state` into `sandbox/launch.rs`, `sandbox/reexec.rs`,
-// and session boot. Until then the non-test build sees no consumer at all,
-// which `dead_code` cannot distinguish from a genuinely unused item; same
-// situation and remedy as the `NtfsStat` fields in `sandbox/reexec.rs`.
-#![allow(
-    dead_code,
-    reason = "consumed by W1c (sandbox/launch.rs, sandbox/reexec.rs, session boot), not wired here"
-)]
-
 use std::ffi::c_void;
 use std::fs;
 use std::io::{self, Write};
@@ -165,13 +168,14 @@ use windows_sys::Win32::System::Threading::{
 /// AppContainer is already a code-execution sandbox, so `FILE_EXECUTE` on a
 /// host file grants nothing a compromised child couldn't already do
 /// in-memory.
-const RW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+pub(crate) const RW_MASK: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 
 /// Access mask granted on a read-only prefix: read + execute, for the same
 /// `chdir`-needs-`FILE_TRAVERSE` reason as [`RW_MASK`].
 ///
 /// after mxc filesystem_dacl.rs::RO_MASK (0e7c3dd)
-const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
 const _: () = {
     assert!(RW_MASK == FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE);
@@ -337,9 +341,12 @@ pub struct RecoveryReport {
 ///
 /// Apply grants via [`grant_appcontainer_access`](Self::grant_appcontainer_access);
 /// call [`restore`](Self::restore) to undo explicitly, or simply drop the
-/// guard — [`Drop`] restores best-effort. W1c holds one of these across a
-/// confined child's lifetime: create it, grant, spawn, then drop (or
-/// `restore`) once the child exits.
+/// guard — [`Drop`] restores best-effort. [`crate::sandbox::windows::session`]
+/// holds exactly one of these per shell session (not one per spawn): create
+/// it once at session start, grant into it on every command that confines
+/// one, and drop (or `restore`) it once at session end — see the
+/// session-scoped-lifecycle note at the top of this module for the
+/// consequence that accumulation across commands carries.
 ///
 /// after mxc filesystem_dacl.rs::DaclManager (0e7c3dd)
 #[derive(Debug)]
@@ -836,6 +843,17 @@ fn canonicalize_local(path: &Path) -> Result<PathBuf, DaclError> {
 /// after mxc filesystem_dacl.rs::OwnedSid (0e7c3dd)
 struct OwnedSid(PSID);
 
+// SAFETY: a `PSID` from `ConvertStringSidToSidW` is a private, immutable
+// `LocalAlloc`'d buffer — nothing else in the process holds or mutates it.
+// Sharing the pointer value across threads (as [`well_known_ac_sids`]'s
+// process-wide cache does) is sound because every use is a read-only Win32
+// call (`EqualSid`, `AddAccessAllowedAceEx`, …); ownership for the eventual
+// `LocalFree` still belongs to whichever `OwnedSid` value is dropped, same
+// as upstream (filesystem_dacl.rs::OwnedSid, 0e7c3dd, which asserts the
+// same two impls).
+unsafe impl Send for OwnedSid {}
+unsafe impl Sync for OwnedSid {}
+
 /// The longest well-formed SID the Win32 SID grammar can produce is well
 /// under 200 characters (15 sub-authorities x ~10 digits, plus the `S-1-`
 /// prefix and separators); cap generously at 256 to reject obviously
@@ -1244,6 +1262,171 @@ fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<Pri
     Ok(prior)
 }
 
+// -------------------------------------------------------------------------
+// Effective-access filter: skip grants the well-known AC SIDs already cover
+// -------------------------------------------------------------------------
+
+/// SIDs every AppContainer process token implicitly belongs to. A grant to
+/// any of these is observed by every AppContainer the OS launches, so a
+/// per-session grant that only restates it is redundant — and, on a system
+/// path this session's account does not own, would fail `WRITE_DAC` for no
+/// gain.
+///
+/// - `S-1-15-2-1` — `APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES`.
+/// - `S-1-15-2-2` — `APPLICATION PACKAGE AUTHORITY\ALL RESTRICTED APPLICATION PACKAGES`.
+/// - `S-1-1-0`    — `Everyone`. AppContainer tokens DO retain Everyone; they
+///   strip `Authenticated Users` and `Users`, so those are deliberately
+///   omitted here.
+///
+/// after mxc filesystem_dacl.rs::WELL_KNOWN_AC_SIDS (0e7c3dd)
+const WELL_KNOWN_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2", "S-1-1-0"];
+
+fn well_known_ac_sids() -> &'static [OwnedSid] {
+    static CACHE: std::sync::OnceLock<Vec<OwnedSid>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            WELL_KNOWN_AC_SIDS
+                .iter()
+                .map(|s| OwnedSid::parse(s).expect("well-known AC SID must parse"))
+                .collect()
+        })
+        .as_slice()
+}
+
+/// Walk the effective DACL on `path` and compute the access mask granted to
+/// a process whose only relevant identities are the well-known
+/// AppContainer-membership SIDs ([`WELL_KNOWN_AC_SIDS`]). Inherited ACEs are
+/// included; explicit grants to a *specific* AppContainer SID are not — the
+/// caller is presumably deciding whether such a grant is needed.
+///
+/// Walking is canonical: a `DENY` ACE matching one of these SIDs marks bits
+/// as denied, and a later `ALLOW` ACE can only add bits that have not
+/// already been denied — matching Windows' own access-check order. Returns
+/// 0 when the DACL is empty or NULL (treated as "grants nothing", not
+/// "grants everything" — the caller falls back to attempting the real
+/// grant, which may then fail `WRITE_DAC`).
+///
+/// after mxc filesystem_dacl.rs::compute_appcontainer_effective_access (0e7c3dd)
+fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> {
+    let well_known = well_known_ac_sids();
+    let path_w = wide(path);
+
+    let mut existing_dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: see apply_explicit_ace — same query shape.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut existing_dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
+    }
+    if existing_dacl.is_null() {
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(sd);
+        }
+        return Ok(0);
+    }
+
+    let mut info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: `info` is a stack out-param sized exactly to the class asked for.
+    let ok = unsafe {
+        GetAclInformation(
+            existing_dacl,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        let err = io::Error::last_os_error();
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(sd);
+        }
+        return Err(win32_err_str(path, &format!("GetAclInformation: {err}")));
+    }
+
+    let mut allowed: u32 = 0;
+    let mut denied: u32 = 0;
+    for i in 0..info.AceCount {
+        let mut ace_ptr: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `i` is within `info.AceCount`, which GetAclInformation
+        // just reported for this exact ACL.
+        if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) } == 0 {
+            continue;
+        }
+        // SAFETY: filled by a successful GetAce; every ACE begins with an
+        // ACE_HEADER.
+        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        let ace_type = match header.AceType {
+            0x00 => AceType::Allow,
+            0x01 => AceType::Deny,
+            _ => continue,
+        };
+        let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
+        // SAFETY: same shared-prefix reasoning as scan_explicit_aces_for_sid.
+        let ace_mask = unsafe { (*mask_and_sid).Mask };
+        let ace_sid = (unsafe { &raw const (*mask_and_sid).SidStart }) as PSID;
+        // SAFETY: both pointers reference valid SID buffers for this call.
+        let matches = well_known
+            .iter()
+            .any(|s| unsafe { EqualSid(ace_sid, s.as_psid()) } != 0);
+        if !matches {
+            continue;
+        }
+        match ace_type {
+            AceType::Deny => denied |= ace_mask & !allowed,
+            AceType::Allow => allowed |= ace_mask & !denied,
+        }
+    }
+    unsafe {
+        windows_sys::Win32::Foundation::LocalFree(sd);
+    }
+    Ok(allowed)
+}
+
+/// Whether the well-known AppContainer-membership SIDs already grant
+/// `needed_mask` on `path`, without any per-session ACE. `false` on any
+/// error reading the DACL — the caller then attempts (and may fail) the
+/// real grant rather than silently assuming a coverage it could not verify.
+///
+/// after mxc fallback_detector.rs::appcontainer_already_grants (0e7c3dd)
+fn appcontainer_already_grants(path: &Path, needed_mask: u32) -> bool {
+    match compute_appcontainer_effective_access(path) {
+        Ok(effective) => (effective & needed_mask) == needed_mask,
+        Err(_) => false,
+    }
+}
+
+/// Drop every path in `paths` that the well-known AppContainer SIDs already
+/// grant `needed_mask` on — a per-session ACE restating that access would
+/// be redundant, and on a system path this session's account does not own
+/// would fail `WRITE_DAC` for no gain. This is the gap that would otherwise
+/// block W2: stamping a `system:`-sigil root (e.g. `System32`, which
+/// `ALL APPLICATION PACKAGES` already reads system-wide) would fail closed
+/// for a non-admin session even though nothing needed stamping.
+///
+/// Only grant paths are filtered here. `deny_paths` are never filtered —
+/// denying is about *subtracting* access, which a well-known-group grant
+/// cannot do, so every deny is still attempted (see
+/// [`crate::sandbox::windows::session::confine`]).
+///
+/// after mxc dispatcher.rs::filter_paths_needing_grant (0e7c3dd)
+pub(crate) fn filter_paths_needing_grant(paths: Vec<PathBuf>, needed_mask: u32) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|p| !appcontainer_already_grants(p, needed_mask))
+        .collect()
+}
+
 /// Canonical-order bucket for an ACE (per Microsoft's documented "order of
 /// ACEs in a DACL"): explicit deny, then explicit allow, then explicit
 /// other, then inherited (any type, original order preserved within each
@@ -1368,7 +1551,7 @@ fn replace_explicit_aces_for_sid_inner(
         let mut info = ACL_SIZE_INFORMATION::default();
         // SAFETY: `existing_dacl` is non-null and came from a successful
         // GetNamedSecurityInfoW query.
-        unsafe {
+        let ok = unsafe {
             GetAclInformation(
                 existing_dacl,
                 &mut info as *mut _ as *mut c_void,
@@ -1376,10 +1559,19 @@ fn replace_explicit_aces_for_sid_inner(
                 AclSizeInformation,
             )
         };
-        // GetAclInformation's only failure modes here are programmer error
-        // (bad class/size), so a zero AceCount on failure degrades to "no
-        // kept entries" rather than a hard error — matching the query's
-        // own already-validated inputs.
+        // A failure here must not silently degrade to "no kept entries":
+        // that would rebuild the target's DACL as if every other
+        // trustee's explicit ACE (allow or deny) had never existed,
+        // dropping them from a user directory. Propagate instead, matching
+        // upstream (filesystem_dacl.rs::replace_explicit_aces_for_sid_inner,
+        // 0e7c3dd) and this file's own `scan_explicit_aces_for_sid`, which
+        // treats the same call's failure as fatal.
+        if ok == 0 {
+            return Err(win32_err_str(
+                path,
+                &format!("GetAclInformation: {}", io::Error::last_os_error()),
+            ));
+        }
         let inherited_bit = INHERITED_ACE as u8;
         for i in 0..info.AceCount {
             let mut ace_ptr: *mut c_void = std::ptr::null_mut();
@@ -2194,6 +2386,54 @@ mod tests {
             );
 
             m.restore().unwrap();
+        });
+    }
+
+    /// A fresh temp dir grants the well-known AC SIDs nothing, so the
+    /// filter keeps it; once `Everyone` is explicitly granted the needed
+    /// mask, the filter drops it as redundant. Mirrors upstream's
+    /// `filter_paths_needing_grant_drops_well_known_grant`
+    /// (dispatcher.rs, 0e7c3dd).
+    #[test]
+    fn filter_paths_needing_grant_drops_well_known_grant() {
+        with_scoped_state_dir(|| {
+            let td_grant = tempfile::tempdir().unwrap();
+            let td_no_grant = tempfile::tempdir().unwrap();
+
+            let mut mgr = DaclManager::new().unwrap();
+            mgr.grant_appcontainer_access(
+                "S-1-1-0",
+                std::slice::from_ref(&td_grant.path().to_path_buf()),
+                &[],
+            )
+            .unwrap();
+
+            let input = vec![
+                td_grant.path().to_path_buf(),
+                td_no_grant.path().to_path_buf(),
+            ];
+            let kept = filter_paths_needing_grant(input, RW_MASK);
+            assert!(
+                !kept.iter().any(|p| p == td_grant.path()),
+                "already-granted path should be filtered out: kept={kept:?}"
+            );
+            assert!(
+                kept.iter().any(|p| p == td_no_grant.path()),
+                "non-granted path should survive the filter: kept={kept:?}"
+            );
+
+            mgr.restore().unwrap();
+        });
+    }
+
+    /// `compute_appcontainer_effective_access` returns 0 on a fresh temp
+    /// dir (no well-known-SID grant present).
+    #[test]
+    fn effective_access_is_zero_on_fresh_dir() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let access = compute_appcontainer_effective_access(td.path()).unwrap();
+            assert_eq!(access, 0);
         });
     }
 }

@@ -142,43 +142,108 @@ pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
 }
 
 /// List-shaped [`match_variants`]: expand every entry to its firmlink
-/// equivalents, flatten, dedupe.
+/// equivalents, flatten, dedupe, and render to strings for the
+/// Seatbelt profile text.
 ///
 /// A grant for `/tmp/work` produces
 /// `[/tmp/work, /private/tmp/work]`, since Seatbelt may present either
 /// form to the MAC hook depending on the syscall.  Used by the macOS
 /// sandbox profile builder when laying out subpath rules.  Accepts the
 /// grant-side [`NormalizedPrefix`](super::NormalizedPrefix)es and the
-/// renderer's bare strings alike — both are already in normal form.
+/// renderer's bare strings alike — both are backed by `String`, so
+/// always valid UTF-8 on the way in.
+///
+/// The `Err` case handles the way out: [`canonicalise_lenient`]'s
+/// `realpath(3)` call can surface a symlink target or mount whose name
+/// is not valid Unicode, even though every input string was.  A
+/// Seatbelt rule is a string literal, so a variant that is not valid
+/// UTF-8 cannot be rendered without changing which inode it names —
+/// silently substituting a lossy string would grant or deny the wrong
+/// path.  Fail-closed here matches the sandbox's posture everywhere
+/// else: a grant the renderer cannot express faithfully is refused,
+/// not approximated.  See [`match_variants_paths`] for the byte-level
+/// dedup and the point the error is raised.
+///
+/// # Errors
+///
+/// Returns `Err` when a firmlink/canonical expansion of one of the
+/// inputs is not valid UTF-8 (see above) rather than rendering a lossy
+/// approximation.
 #[allow(clippy::disallowed_methods)]
-pub fn match_variants_list<S: AsRef<str>>(paths: &[S]) -> Vec<String> {
+pub fn match_variants_list<S: AsRef<str>>(paths: &[S]) -> Result<Vec<String>, String> {
+    match_variants_paths(paths.iter().map(|p| Path::new(p.as_ref())))
+}
+
+/// Path-level engine behind [`match_variants_list`]: dedupes on the
+/// exact path bytes (`BTreeSet<PathBuf>`, never a `to_string_lossy`
+/// rendering — two distinct non-UTF-8 paths can lossy-decode to the
+/// same U+FFFD-substituted string, which would misattribute one
+/// path's grant to the other), then commits each surviving variant to
+/// a string once, failing closed on the first one that is not valid
+/// UTF-8.
+///
+/// Factored out from [`match_variants_list`] so this logic can be
+/// exercised directly with genuine non-UTF-8 [`Path`]s in tests —
+/// [`match_variants_list`]'s `S: AsRef<str>` bound means it can never
+/// be handed one.
+fn match_variants_paths<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for p in paths {
-        for v in match_variants(Path::new(p.as_ref())) {
-            let s = v.to_string_lossy().into_owned();
-            if seen.insert(s.clone()) {
-                out.push(s);
+        for v in match_variants(p) {
+            if seen.insert(v.clone()) {
+                // `{v:?}` deliberately, not `.display()`: the error exists
+                // because `v` is not valid UTF-8, and `Display` would
+                // paper over that with the very U+FFFD lossy substitution
+                // this function refuses to render into a Seatbelt rule.
+                #[allow(clippy::unnecessary_debug_formatting)]
+                let s = v.to_str().ok_or_else(|| {
+                    format!(
+                        "ral: sandbox grant path is not valid UTF-8, refusing to render \
+                         it into a Seatbelt rule that could name the wrong path: {v:?}"
+                    )
+                })?;
+                out.push(s.to_string());
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// If `p` begins with one of the macOS firmlink roots (in either
 /// direction), return the toggled variant; otherwise `None`.
-/// Pure string operation — no filesystem access — so it works on
-/// non-existent paths and inside a sandbox where canonicalise calls
-/// would fail.
+/// Pure byte operation — no filesystem access, no UTF-8 round-trip —
+/// so it works on non-existent paths, inside a sandbox where
+/// canonicalise calls would fail, and on a path whose tail is not
+/// valid UTF-8.  Firmlink roots are ASCII, so splicing at their
+/// boundary never lands inside a multi-byte sequence, and every tail
+/// byte is copied through unchanged — on every target, not just Unix,
+/// since [`FIRMLINKS`] is compiled (empty off macOS) everywhere and a
+/// Windows build must still typecheck this function.
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
-    let s = p.to_string_lossy();
+    let bytes = p.as_os_str().as_encoded_bytes();
     for (firm, canon) in FIRMLINKS {
-        for (from, to) in [(*canon, *firm), (*firm, *canon)] {
-            if let Some(rest) = s.strip_prefix(from)
-                && (rest.is_empty() || rest.starts_with('/'))
+        for (from, to) in [
+            (canon.as_bytes(), firm.as_bytes()),
+            (firm.as_bytes(), canon.as_bytes()),
+        ] {
+            if let Some(rest) = bytes.strip_prefix(from)
+                && (rest.is_empty() || rest[0] == b'/')
             {
-                return Some(PathBuf::from(format!("{to}{rest}")));
+                let mut out = Vec::with_capacity(to.len() + rest.len());
+                out.extend_from_slice(to);
+                out.extend_from_slice(rest);
+                // Safety: `out` is an ASCII firmlink-root literal
+                // concatenated with `rest`, an unmodified suffix of
+                // `p`'s own encoded bytes.  Splicing at an ASCII
+                // boundary can't land inside a multi-byte UTF-8/WTF-8
+                // sequence, so `out` is exactly as validly encoded as
+                // `p.as_os_str()` was.
+                let os = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&out) };
+                return Some(PathBuf::from(os));
             }
         }
     }
@@ -259,5 +324,88 @@ mod tests {
             v.iter()
                 .all(|p| p == Path::new("/Users/nobody/projects/foo"))
         );
+    }
+
+    /// Security regression: `firmlink_toggle` must preserve a non-UTF-8
+    /// tail byte-for-byte.  The old `to_string_lossy`-based
+    /// implementation replaced it with U+FFFD, so the returned "twin"
+    /// no longer named the real inode — an under-grant on the twin
+    /// side, and a collision hazard if two distinct non-UTF-8 paths
+    /// happened to lossy-decode to the same substituted string.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn firmlink_toggle_preserves_non_utf8_tail_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let input = PathBuf::from(OsStr::from_bytes(b"/tmp/\xFFghost"));
+        let toggled = firmlink_toggle(&input).expect("/tmp is a firmlink root");
+        assert_eq!(
+            toggled.as_os_str().as_bytes(),
+            b"/private/tmp/\xFFghost",
+            "got {toggled:?}"
+        );
+
+        // And the reverse direction.
+        let canon = PathBuf::from(OsStr::from_bytes(b"/private/tmp/\xFFghost"));
+        let back = firmlink_toggle(&canon).expect("/private/tmp is a firmlink root");
+        assert_eq!(back.as_os_str().as_bytes(), b"/tmp/\xFFghost", "got {back:?}");
+    }
+
+    /// Security regression: two distinct non-UTF-8 paths must not
+    /// collapse into one `match_variants_paths` entry.  The old
+    /// `BTreeSet<String>` dedup keyed on `to_string_lossy`, under which
+    /// both paths below decode to the same U+FFFD-substituted string —
+    /// collapsing them would attribute one path's grant to the other.
+    #[cfg(unix)]
+    #[test]
+    fn match_variants_paths_does_not_collide_distinct_non_utf8_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let a: &[u8] = b"/opt/\xFFsecret";
+        let b: &[u8] = b"/opt/\xFEsecret";
+        // Sanity: both really do lossy-collide, or this test proves
+        // nothing.
+        assert_eq!(
+            Path::new(OsStr::from_bytes(a)).to_string_lossy(),
+            Path::new(OsStr::from_bytes(b)).to_string_lossy(),
+        );
+
+        let pa = PathBuf::from(OsStr::from_bytes(a));
+        let pb = PathBuf::from(OsStr::from_bytes(b));
+        let err = match_variants_paths([pa.as_path(), pb.as_path()].into_iter())
+            .expect_err("non-UTF-8 paths must fail closed, not render lossily");
+        // Fail-closed, not silent collision: an error naming the
+        // problem, not a one-entry `Vec` that quietly merged the two.
+        assert!(err.contains("not valid UTF-8"), "got {err:?}");
+    }
+
+    /// The step-4 boundary decision: a grant path that cannot be
+    /// rendered into a Seatbelt string literal without changing which
+    /// inode it names must fail closed (an `Err`), never fall back to
+    /// a lossy `(subpath …)` rule that would grant or deny the wrong
+    /// path.  This path never touches a firmlink root, isolating the
+    /// boundary behaviour from the toggle fix above.
+    #[cfg(unix)]
+    #[test]
+    fn match_variants_paths_fails_closed_on_non_utf8_variant() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let p = PathBuf::from(OsStr::from_bytes(
+            b"/this/should/not/exist/anywhere/\xFFghost",
+        ));
+        let err = match_variants_paths([p.as_path()].into_iter())
+            .expect_err("non-UTF-8 grant path must be refused, not lossily rendered");
+        assert!(err.contains("not valid UTF-8"), "got {err:?}");
+    }
+
+    /// A wholly ASCII path list still round-trips as `Ok`, so the
+    /// fail-closed path doesn't fire on the common case.
+    #[test]
+    fn match_variants_list_ok_on_ascii_paths() {
+        let v = match_variants_list(&["/some/non/existent/path"]).expect("ASCII path must be Ok");
+        assert!(v.iter().any(|p| p == "/some/non/existent/path"));
     }
 }

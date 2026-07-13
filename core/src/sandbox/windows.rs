@@ -91,10 +91,12 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
         }
         if !fs.deny_paths.is_empty() {
             out.push_str(
-                "    deny_paths: one nested inside a granted read/write prefix gets an\n\
-                     \x20     explicit deny-ACE (deny FILE_ALL_ACCESS) that overrides the\n\
-                     \x20     enclosing allow; one outside every grant is already unreachable\n\
-                     \x20     under deny-by-default and is not stamped:\n",
+                "    deny_paths: every one gets an explicit deny-ACE (deny\n\
+                     \x20     FILE_ALL_ACCESS), unconditionally -- an AppContainer token\n\
+                     \x20     retains Everyone and ALL APPLICATION PACKAGES grants are\n\
+                     \x20     system-wide, so a path outside this projection's own grants\n\
+                     \x20     is not actually unreachable (skipped only if it does not\n\
+                     \x20     exist, or this session already denied it):\n",
             );
             for p in &fs.deny_paths {
                 out.push_str(&format!("      {}\n", p.as_str()));

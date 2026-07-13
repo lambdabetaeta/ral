@@ -558,6 +558,12 @@ The value namespace is consulted only through `$name` and through the
 implicit head step; bare non-head words and map-key positions never
 trigger either kind of lookup.
 
+**Platform.** On Windows the `$env[PATH]` walk is PATHEXT-aware: a
+candidate spelled without an extension is retried with each suffix
+named in `%PATHEXT%` (`.COM;.EXE;.BAT;.CMD` if the variable is unset)
+until one names an existing file, so a bare `git` resolves to
+`git.exe` without the caller spelling the extension.
+
 A `command` whose `head` is an explicit value head must carry at least
 one argument or redirection — a bare `$f` standing alone is a value,
 not a call.  Bare and path heads with zero arguments are still
@@ -659,6 +665,18 @@ on the group's Job Object before forgetting the children.  Ctrl-C
 escalates: first delivery fans `CTRL_BREAK_EVENT` to every active
 member, a second `TerminateJobObject`s every live group, a third
 forces ral to exit.
+
+A resolved `.bat`/`.cmd` image is refused outright rather than run:
+this is the CVE-2024-24576 posture, not a gap.  Batch-file argument
+quoting has no single safe general encoding — `cmd.exe` re-interprets
+the command line through its own escaping rules, layered on top of
+`CreateProcessW`'s — so a crafted argument can break out of any
+quoting a launcher applies.  ral does not synthesize a `cmd /c`
+wrapper to work around this, because that wrapper is exactly the
+unsafe quoting problem one layer removed; the command fails with an
+error naming the file and explaining the refusal, and invoking the
+batch file through `cmd.exe` directly remains the caller's escape
+hatch if they accept the risk.
 
 A ral stage in a byte pipeline is therefore a subshell with respect to
 mutation: changes it makes to its `cwd`, environment, aliases,

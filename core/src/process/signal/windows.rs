@@ -42,10 +42,22 @@
 //!
 //! ## Ctrl-C escalation
 //!
-//! 1st Ctrl-C: increment the signal counter and fan
-//! `CTRL_BREAK_EVENT` out to every active member of every live group.
-//! 2nd Ctrl-C: `TerminateJobObject` on every live group (hard kill that
-//! reaches descendants too).  3rd Ctrl-C: `_exit(130)`.
+//! [`install_handlers`] installs the base disposition a plain `ral`
+//! process gets with no interactive frontend layered on top: 1st Ctrl-C
+//! (or Ctrl-Break): increment the signal counter and fan `CTRL_BREAK_EVENT`
+//! out to every active member of every live group.  2nd: `TerminateJobObject`
+//! on every live group (hard kill that reaches descendants too, detached
+//! workers included -- a deliberate termination request gets no exemption).
+//! 3rd: `ExitProcess(130)`.
+//!
+//! [`relay_interrupt`] is the non-escalating alternative a frontend with its
+//! own turn-cancel ladder (exarch) calls directly instead: it cancels the
+//! foreground scope and fans `CTRL_BREAK_EVENT` out to every live
+//! *non-detached* group, never touching the counter above -- the Windows
+//! analogue of Unix's non-escalating `relay_handler`.  A detached
+//! background worker's group is never in that fan-out, matching Unix's
+//! `RELAY_PGIDS` (a detached worker's pgid is never registered there
+//! either).
 
 use std::sync::atomic::Ordering;
 
@@ -84,6 +96,20 @@ pub fn install_handlers() {
             },
         }
     });
+}
+
+/// Non-escalating turn-cancel relay: cancels the current turn's foreground
+/// scope and fans `CTRL_BREAK_EVENT` out to every live, non-detached
+/// pipeline group.  The Windows analogue of Unix's non-escalating
+/// `relay_handler` (`sigint_relay`) -- unlike the ladder [`install_handlers`]
+/// installs, this never ticks [`ESCALATION`] and never reaches a detached
+/// worker's group.  A frontend with its own turn-cancel contract (exarch)
+/// calls this directly, in-process, for a Ctrl-C/Ctrl-Break it has already
+/// decided to treat as a turn-cancel, instead of re-injecting a console
+/// event that would re-enter `install_handlers`'s escalating disposition.
+pub fn relay_interrupt() {
+    request_foreground_cancel(CancelCause::Interrupt);
+    win_groups::break_foreground();
 }
 
 // ── Inherited dispositions / child-signal reset ────────────────────────────
@@ -148,6 +174,14 @@ mod win_groups {
         /// the next reap call returns immediately rather than blocking
         /// on the (potentially closed) completion port.
         pub all_done: bool,
+        /// True for a detached background worker's group (spawned under
+        /// `PgidPolicy::NewSession`), false for a foreground job or
+        /// pipeline leader (`PgidPolicy::NewLeader`).  [`break_foreground`]
+        /// (the turn-cancel relay) filters on this so a trunk interrupt
+        /// never reaches a detached worker; [`break_all`]/[`terminate_all`]
+        /// (the escalation ladder for a genuine termination request) do
+        /// not filter, and reach every group regardless.
+        pub detached: bool,
     }
 
     // SAFETY: `HANDLE` is a raw pointer; we never share it outside the
@@ -226,6 +260,10 @@ mod win_groups {
         NewLeader {
             job: HANDLE,
             completion_port: HANDLE,
+            /// Carried through from the `PgidPolicy` that requested this
+            /// group, so [`register`] can tag the resulting `GroupState`
+            /// -- see its doc for why the distinction matters.
+            detached: bool,
         },
         Join {
             leader: i32,
@@ -241,6 +279,7 @@ mod win_groups {
         match policy {
             super::PgidPolicy::Inherit => Ok(PreparedGroup::None),
             super::PgidPolicy::NewLeader | super::PgidPolicy::NewSession => {
+                let detached = matches!(policy, super::PgidPolicy::NewSession);
                 let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
                 if job.is_null() {
                     return Err(std::io::Error::last_os_error());
@@ -256,6 +295,7 @@ mod win_groups {
                 Ok(PreparedGroup::NewLeader {
                     job,
                     completion_port,
+                    detached,
                 })
             }
             super::PgidPolicy::Join(super::Pgid(leader)) => {
@@ -294,6 +334,7 @@ mod win_groups {
                 PreparedGroup::NewLeader {
                     job,
                     completion_port,
+                    ..
                 } => {
                     if !completion_port.is_null() {
                         CloseHandle(completion_port);
@@ -321,6 +362,7 @@ mod win_groups {
             PreparedGroup::NewLeader {
                 job,
                 completion_port,
+                detached,
             } => {
                 let leader_pid = child_pid as i32;
                 let leader_handle = duplicate_process_handle(child_handle);
@@ -334,6 +376,7 @@ mod win_groups {
                         member_handles: Vec::new(),
                         members: vec![child_pid],
                         all_done: false,
+                        detached,
                     },
                 ));
                 Some(leader_pid)
@@ -361,6 +404,22 @@ mod win_groups {
     pub(super) fn break_all() {
         let groups = GROUPS.lock().unwrap();
         for (_, state) in groups.iter() {
+            for &pid in &state.members {
+                unsafe {
+                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+                }
+            }
+        }
+    }
+
+    /// Send `CTRL_BREAK_EVENT` to every member of every live,
+    /// non-detached pipeline group — [`break_all`] narrowed to skip a
+    /// detached background worker's group (`GroupState::detached`).  The
+    /// turn-cancel relay ([`super::relay_interrupt`]) uses this instead of
+    /// `break_all` so a trunk interrupt can never reach a detached worker.
+    pub(super) fn break_foreground() {
+        let groups = GROUPS.lock().unwrap();
+        for (_, state) in groups.iter().filter(|(_, s)| !s.detached) {
             for &pid in &state.members {
                 unsafe {
                     GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);

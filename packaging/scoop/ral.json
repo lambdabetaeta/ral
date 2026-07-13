@@ -1,9 +1,12 @@
 {
     "##": [
-        "Tracks ral-windows.exe from build-binaries.yml's build-windows job; the",
-        "allutils variant (ral-windows-allutils.exe) is not packaged separately.",
-        "hash is the sha256 published alongside the release asset as",
-        "ral-windows.exe.sha256 -- update both together on every version bump.",
+        "Tracks ral-windows-allutils.exe from build-binaries.yml's",
+        "build-windows-allutils job. There is no system coreutils to fall back",
+        "on on Windows, so the bundled subset (coreutils, diffutils, grep,",
+        "ripgrep) is the product; every channel ships this build, not the",
+        "plain ral-windows.exe. The hash is the sha256 published alongside the",
+        "release asset as ral-windows-allutils.exe.sha256 -- update both",
+        "together on every version bump.",
         "Does not include ral-sh: a POSIX login-shell shim with no Windows",
         "equivalent."
     ],
@@ -13,8 +16,8 @@
     "license": "MIT OR Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/lambdabetaeta/ral/releases/download/v0.1.0/ral-windows.exe#/ral.exe",
-            "hash": "5504c40a0da2e400a202638e97aa67b8c3b24acd07d9965e332db13e3ec8259e"
+            "url": "https://github.com/lambdabetaeta/ral/releases/download/v0.1.0/ral-windows-allutils.exe#/ral.exe",
+            "hash": "186557f2ffcd2ca6b917c60abf62a73b19089fe0e06464f380461c30c3437d63"
         }
     },
     "bin": "ral.exe",
@@ -22,7 +25,7 @@
     "autoupdate": {
         "architecture": {
             "64bit": {
-                "url": "https://github.com/lambdabetaeta/ral/releases/download/v$version/ral-windows.exe#/ral.exe"
+                "url": "https://github.com/lambdabetaeta/ral/releases/download/v$version/ral-windows-allutils.exe#/ral.exe"
             }
         }
     }

@@ -23,6 +23,17 @@ profile's exec admit at the OS sandbox layer automatically — see
 `core/src/sandbox/macos.rs::system_paths`.  No profile needs to spell
 out where ld and as live.
 
+A few profile entries are genuinely Unix-only literals (`/tmp`,
+`/usr/local/bin/`, `/opt/homebrew/`, …) with no Windows analogue — a
+rooted path with no drive letter.  Rather than failing the whole
+profile to load on a platform where such an entry can't resolve, the
+freeze pass (`core::capability::decode`) drops it as a dead grant, the
+same treatment a bundled-tool name Windows can't back already gets
+(`drop_dead_exec_grants`).  `policy show` never advertises a grant it
+can't back.  `bash`/`zsh` denies are mirrored by `cmd`/`powershell`/
+`pwsh` denies in `minimal`, `edit-only`, and `read-only` — the
+Windows shells `system:` admits unconditionally.
+
 ## What to use when
 
 ```
@@ -104,9 +115,10 @@ Smallest profile that's actually useful as a base for
   sed, clang, pkg-config, … under the platform's tool roots) + cwd
   + scratch.  No `xdg:bin`; Homebrew is explicitly denied even
   though `system:` would otherwise fold it in when present.  `git`,
-  `bash`, and `zsh` denied — minimal's principle is deliberate
-  opt-ins, so even tools that live under a tool root are excluded
-  if they touch surfaces outside cwd + scratch.  Add git back via
+  `bash`, and `zsh` denied (`cmd`/`powershell`/`pwsh` too, on
+  Windows) — minimal's principle is deliberate opt-ins, so even
+  tools that live under a tool root are excluded if they touch
+  surfaces outside cwd + scratch.  Add git back via
   `--extend-base exarch/examples/git.exarch.ral`.
 
 Use for: "I want my agent to operate on this tree with the standard

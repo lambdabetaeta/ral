@@ -16,7 +16,6 @@ switch ($arch) {
     }
     default {
         Write-Error "Unsupported Windows architecture: $arch"
-        exit 1
     }
 }
 
@@ -28,14 +27,21 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomF
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Write-Host "Downloading $Artifact from $Repo ($Tag)"
-    Invoke-WebRequest -Uri $url            -OutFile (Join-Path $tmp "exarch.exe")
-    Invoke-WebRequest -Uri "$url.sha256"   -OutFile (Join-Path $tmp "exarch.exe.sha256")
+    try {
+        Invoke-WebRequest -Uri $url          -OutFile (Join-Path $tmp "exarch.exe")
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmp "exarch.exe.sha256")
+    }
+    catch {
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+            Write-Error "No Windows exarch release exists yet; build from source (cargo build --release -p exarch) or wait for the next release."
+        }
+        throw
+    }
 
     $expected = (Get-Content (Join-Path $tmp "exarch.exe.sha256") -Raw).Trim()
     $actual   = (Get-FileHash (Join-Path $tmp "exarch.exe") -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected) {
         Write-Error "Checksum mismatch!`n  expected: $expected`n  got:      $actual"
-        exit 1
     }
     Write-Host "Checksum OK."
 
@@ -48,7 +54,10 @@ try {
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (($userPath -split ";") -notcontains $installDir) {
-        $sample = 'setx PATH "$env:Path;' + $installDir + '"'
+        # Not `setx PATH "$env:Path;<dir>"`: that bakes the *merged*
+        # machine+user PATH into the user PATH, and setx silently truncates
+        # at 1024 characters. Read and write the user PATH only.
+        $sample = "[Environment]::SetEnvironmentVariable(`"Path`", [Environment]::GetEnvironmentVariable(`"Path`",`"User`") + `";$installDir`", `"User`")"
         Write-Host ""
         Write-Host "Note: $installDir is not on your PATH."
         Write-Host "Add it for future sessions (PowerShell):"

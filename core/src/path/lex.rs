@@ -100,19 +100,57 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, windows: bool) -> b
 }
 
 /// Split a path string into lower-cased components under Windows path
-/// identity: a leading `\\?\` (verbatim prefix) is stripped, a
-/// verbatim UNC form `UNC\server\share` right after it is folded to
-/// `\server\share`, and `/` and `\` are both treated as separators.
+/// identity: a leading verbatim prefix (`\\?\`, or the all-forward-slash
+/// spelling `//?/`) is stripped, a verbatim UNC form
+/// `UNC\server\share` (either separator) right after it is folded to
+/// `\server\share`, and `/` and `\` are both treated as separators for
+/// everything else.
+///
+/// The verbatim-prefix strip recognises both separator spellings for
+/// the same reason every other rule here does: this function's whole
+/// premise is that `/` and `\` are interchangeable under Windows path
+/// identity, so special-casing the verbatim-prefix token to only the
+/// backslash spelling would carve out one silent exception to that
+/// premise — a `//?/C:/work`-spelled deny prefix, for instance, would
+/// silently fail to fold to the same components as a `\\?\C:\work`
+/// grant, missing the match a deny needs to close.  (Real Windows
+/// itself only recognises the backslash spelling as a genuine
+/// verbatim escape at the `CreateFileW` boundary — this is purely an
+/// internal-matcher normalisation, not a claim about OS behaviour.)
+///
+/// The case fold is ASCII-only (`to_ascii_lowercase`), not full
+/// Unicode `to_lowercase` — matching
+/// `capability::exec::names_match`'s fold, so path components and
+/// command names apply one Windows case-insensitivity rule rather
+/// than two different ones.  Neither is the real NTFS `$UpCase`
+/// table (a pinned, Unicode-aware mapping baked into the driver);
+/// ASCII-only is the conservative approximation, since it can never
+/// claim a non-ASCII equivalence `$UpCase` wouldn't honour, at the
+/// cost of missing non-ASCII folds `$UpCase` would make.
 fn windows_identity_components(p: &str) -> Vec<String> {
-    let s = p.strip_prefix(r"\\?\").unwrap_or(p);
+    let s = strip_verbatim_prefix(p);
     let s = s
         .strip_prefix("UNC\\")
         .or_else(|| s.strip_prefix("UNC/"))
         .map_or_else(|| s.to_string(), |rest| format!(r"\{rest}"));
     s.split(['/', '\\'])
         .filter(|c| !c.is_empty())
-        .map(str::to_lowercase)
+        .map(str::to_ascii_lowercase)
         .collect()
+}
+
+/// Strip a leading verbatim prefix — two separators, `?`, a separator
+/// — under either slash spelling (`\\?\` or `//?/`, and the mixed
+/// forms in between).  See [`windows_identity_components`] for why
+/// both spellings are recognised here.
+fn strip_verbatim_prefix(p: &str) -> &str {
+    let b = p.as_bytes();
+    let is_sep = |c: u8| c == b'/' || c == b'\\';
+    if b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3]) {
+        &p[4..]
+    } else {
+        p
+    }
 }
 
 /// True iff `path` would be absolute under Windows path rules: a
@@ -434,8 +472,12 @@ mod tests {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
-        let prefix_bytes: &[u8] = b"/tmp/\xFFsecret";
-        let candidate_bytes: &[u8] = b"/tmp/\xFEsecret";
+        // `/opt` (unlike `/tmp`, `/var`, `/etc`) is not a macOS
+        // firmlink source, so `path_aliases` doesn't route these
+        // through `firmlink_toggle`'s own `to_string_lossy` call — this
+        // test isolates `path_within`'s comparison, not the aliasing.
+        let prefix_bytes: &[u8] = b"/opt/\xFFsecret";
+        let candidate_bytes: &[u8] = b"/opt/\xFEsecret";
         // Sanity: both single invalid bytes really do lossy-collide, or
         // this test proves nothing.
         assert_eq!(
@@ -497,6 +539,32 @@ mod tests {
     fn windows_identity_folds_verbatim_unc() {
         assert!(starts_with_identity(
             r"\\?\UNC\server\share\sub",
+            r"\\server\share",
+            true
+        ));
+    }
+
+    /// L1/L2 regression: the all-forward-slash spelling of the
+    /// verbatim prefix (`//?/C:/work`) must fold identically to the
+    /// backslash spelling (`\\?\C:\work`) — real Windows only accepts
+    /// the backslash form at the `CreateFileW` boundary, but this
+    /// matcher's whole premise is that `/` and `\` are interchangeable,
+    /// so a deny authored in one spelling must still catch an access
+    /// spelled the other way.  Without this, a `//?/`-spelled access
+    /// path would bypass a `\\?\`- or plain-spelled deny.
+    #[test]
+    fn windows_identity_strips_forward_slash_verbatim_prefix() {
+        assert!(starts_with_identity(r"//?/C:/work/sub", r"C:\work", true));
+        assert!(starts_with_identity(r"C:\work\sub", "//?/c:/work", true));
+        assert!(starts_with_identity(r"//?/C:/work/sub", r"\\?\c:\WORK", true));
+        // Mixed separators within the same verbatim spelling.
+        assert!(starts_with_identity(r"//?\C:\work/sub", r"C:\work", true));
+    }
+
+    #[test]
+    fn windows_identity_folds_forward_slash_verbatim_unc() {
+        assert!(starts_with_identity(
+            "//?/UNC/server/share/sub",
             r"\\server\share",
             true
         ));

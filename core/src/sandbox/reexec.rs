@@ -14,10 +14,10 @@
 //!   (devfs entries lack the X bit), so we snapshot `(dev, ino)` at boot
 //!   and verify immediately before each spawn.  An atomic-rename swap
 //!   (the cargo-install pattern) flips the inode, which we catch.
-//! - **Windows**: snapshot `BY_HANDLE_FILE_INFORMATION` triple
-//!   `(volume_serial, file_index_high, file_index_low)` — the NTFS
-//!   analogue of `(dev, ino)`.  Verified the same way before each
-//!   confined spawn.
+//! - **Windows**: no swap guard. Confinement is the AppContainer token the
+//!   *parent* applies to `CreateProcessW` (`sandbox::windows::session`),
+//!   not a re-exec of this binary, so there is no parent-side self re-exec
+//!   for a swap check to protect (`Pin::Unguarded` below).
 //!
 //! `argv[0]` is the resolved on-disk path so the child sees a recognisable
 //! name regardless of exec mechanism.
@@ -109,22 +109,16 @@ enum Pin {
     /// macOS / other-Unix fallback: snapshot checked before each spawn.
     #[cfg(all(unix, not(target_os = "linux")))]
     Stat { dev: u64, ino: u64 },
-    /// Windows NTFS analogue of `(dev, ino)`: volume serial + the two
-    /// halves of the file index.  Captured at boot but never consulted:
-    /// Windows confinement applies the AppContainer token to the parent's
-    /// spawn rather than re-execing ral, so there is no parent-side self
-    /// re-exec for a swap guard to protect (the bundled-tool multicall uses
-    /// the live `current_exe` and, being short-lived, does not guard swaps —
-    /// see `runtime::pipeline::helper::self_reexec`).
+    /// Windows carries no swap guard: confinement applies the AppContainer
+    /// token to the parent's spawn rather than re-execing ral, so there is
+    /// no parent-side self re-exec for a swap check to protect (the
+    /// bundled-tool multicall uses the live `current_exe` and, being
+    /// short-lived, does not guard swaps — see
+    /// `runtime::pipeline::helper::self_reexec`). This variant carries no
+    /// payload; it exists only so `register_sandbox_self` has the same
+    /// `Option<(Pin, PathBuf)>` shape on every platform.
     #[cfg(windows)]
-    NtfsStat {
-        #[allow(dead_code)]
-        volume_serial: u32,
-        #[allow(dead_code)]
-        index_high: u32,
-        #[allow(dead_code)]
-        index_low: u32,
-    },
+    Unguarded,
 }
 
 pub(super) static SANDBOX_SELF: OnceLock<SandboxSelf> = OnceLock::new();
@@ -192,51 +186,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 
 #[cfg(windows)]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
-    let stat = ntfs_stat(arg0)?;
-    Some((
-        Pin::NtfsStat {
-            volume_serial: stat.0,
-            index_high: stat.1,
-            index_low: stat.2,
-        },
-        arg0.to_path_buf(),
-    ))
-}
-
-#[cfg(windows)]
-fn ntfs_stat(path: &std::path::Path) -> Option<(u32, u32, u32)> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
-    };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    let handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            0, // no access bits required for metadata
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null_mut(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return None;
-    }
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe { GetFileInformationByHandle(handle, &mut info as *mut _) };
-    unsafe { CloseHandle(handle) };
-    if ok == 0 {
-        return None;
-    }
-    Some((
-        info.dwVolumeSerialNumber,
-        info.nFileIndexHigh,
-        info.nFileIndexLow,
-    ))
+    Some((Pin::Unguarded, arg0.to_path_buf()))
 }
 
 /// Refuse to spawn if our executable on disk has been swapped since
@@ -290,8 +240,9 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 /// On Windows there is no child re-entry: confinement is not something the
 /// child enters, it is the LowBox token the *parent* applies at spawn time
 /// via `Launch::security_capabilities` (see `sandbox::windows::session`). So
-/// `--sandbox-projection` is never passed to a Windows child, `policy` is
-/// always `None` here, and this entrypoint has nothing to do.
+/// `--sandbox-projection` is never passed to a Windows child by any
+/// legitimate caller — the separate `#[cfg(windows)]` arm below treats
+/// seeing one anyway as fail-closed, not a no-op.
 #[cfg(unix)]
 pub(super) fn maybe_enter_process_sandbox(
     args_without_policy: &[String],
@@ -306,10 +257,23 @@ pub(super) fn maybe_enter_process_sandbox(
 #[cfg(windows)]
 pub(super) fn maybe_enter_process_sandbox(
     _args_without_policy: &[String],
-    _policy: Option<&crate::types::SandboxProjection>,
+    policy: Option<&crate::types::SandboxProjection>,
 ) -> Result<Option<u8>, String> {
-    // The parent already confined this child's spawn with the AppContainer
-    // token; there is no sandbox to enter here.
+    // The parent already confines this child's spawn with the AppContainer
+    // token before `CreateProcessW` runs, so there is no sandbox for the
+    // child itself to enter — every legitimate Windows caller
+    // (`sandboxed_command`'s windows arm, `launch.rs`) therefore never emits
+    // `--sandbox-projection`. Seeing one here means a caller regressed to
+    // the Unix shape or the flag was forged; fail closed rather than
+    // silently running the child unconfined, matching the pre-W1 stub's
+    // refusal on this same path.
+    if policy.is_some() {
+        return Err(
+            "ral: --sandbox-projection is not valid on Windows (confinement is applied by the \
+             parent at spawn time, not entered by the child); refusing to run unconfined"
+                .into(),
+        );
+    }
     Ok(None)
 }
 

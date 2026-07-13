@@ -121,7 +121,7 @@ pub(super) fn root_fs_policy() -> FsPolicy {
 mod tests {
     use super::*;
     use ral_core::path::sigil::{FreezeCtx, expand_path_prefix};
-    use ral_core::types::{Capabilities, ExecPolicy, Shell};
+    use ral_core::types::{Capabilities, ExecDir, ExecPolicy, Shell};
     use std::path::Path;
 
     /// Load and freeze a bake-in against `ctx`.  Freezing happens inside
@@ -161,6 +161,61 @@ mod tests {
         ] {
             load(name, text, &ctx);
         }
+    }
+
+    /// C1 regression, Windows fixture: every bake-in carries Unix-only
+    /// absolute literals (`/tmp`, `/usr/local/bin/`, `/opt/homebrew/`,
+    /// …) — rooted paths with no drive letter.  Before the fix these
+    /// failed the freeze pass's absoluteness check and the *entire*
+    /// profile refused to load, leaving `dangerous` the only usable
+    /// Windows base.  Now they are dropped as dead grants at freeze
+    /// time and every base loads cleanly.  Windows-only: the freeze
+    /// pass's foreign-rooted branch only fires under a real
+    /// `cfg!(windows)`.
+    #[cfg(windows)]
+    #[test]
+    fn bakeins_parse_on_windows() {
+        let home = ral_core::path::home_from_env();
+        let ctx = FreezeCtx {
+            home: &home,
+            cwd: Path::new(r"C:\work"),
+        };
+        for (name, text) in [
+            ("minimal", MINIMAL_RAL),
+            ("reasonable", REASONABLE_RAL),
+            ("read-only", READ_ONLY_RAL),
+            ("edit-only", EDIT_ONLY_RAL),
+            ("confined", CONFINED_RAL),
+            ("dangerous", DANGEROUS_RAL),
+        ] {
+            load(name, text, &ctx);
+        }
+    }
+
+    /// C1 regression, Windows fixture: the Unix-only `/tmp` fs literal
+    /// and the `/opt/homebrew/` exec-dir override in `minimal` are
+    /// both foreign-rooted on Windows and must be dropped rather than
+    /// carried forward as grants that can never match a real access —
+    /// `policy show` should never advertise authority it can't back.
+    #[cfg(windows)]
+    #[test]
+    fn minimal_drops_foreign_rooted_grants_on_windows() {
+        let home = ral_core::path::home_from_env();
+        let ctx = FreezeCtx {
+            home: &home,
+            cwd: Path::new(r"C:\work"),
+        };
+        let caps = load("minimal", MINIMAL_RAL, &ctx);
+        let fs = caps.fs.as_ref().expect("minimal declares fs");
+        assert!(
+            !fs.read_prefixes.iter().any(|p| p.as_str() == "/tmp"),
+            "the Unix-only '/tmp' literal must not survive freeze on Windows"
+        );
+        let exec = caps.exec.as_ref().expect("minimal declares exec");
+        assert!(
+            !exec.dirs.contains_key("/opt/homebrew"),
+            "the foreign-rooted '/opt/homebrew/' override must not survive freeze on Windows"
+        );
     }
 
     /// `confined` is the build-jail profile: net off, no user-home
@@ -603,12 +658,18 @@ mod tests {
         }
     }
 
-    /// Every base that declares `exec` must admit the platform's live
-    /// tool roots — i.e. `system:` really expanded, wiring-wise.  Not
-    /// gated on `cfg(unix)`: on a real Windows host (`windows-check`)
-    /// `system_tool_roots` walks the Windows branch instead, and this
-    /// same assertion holds — a base's `system:` grant is always a
-    /// superset of whatever this host's tool roots are.
+    /// Every base that declares `exec` must *admit* (not merely
+    /// reference) the platform's live tool roots — i.e. `system:`
+    /// really expanded, wiring-wise, to an `Allow` verdict.  Asserting
+    /// only `contains_key` would pass on a `Deny` entry too, missing
+    /// the whole point of "admits".  Not gated on `cfg(unix)`: on a
+    /// real Windows host (`windows-check`) `system_tool_roots` walks
+    /// the Windows branch instead, and this same assertion holds.
+    ///
+    /// One documented exception: `minimal` explicitly denies Homebrew
+    /// even though `system:` folds it in when present (see
+    /// `minimal_admits_system_git_not_homebrew`) — that override must
+    /// survive, so this test asserts `Deny` there instead of `Allow`.
     #[test]
     fn every_exec_base_admits_live_system_tool_roots() {
         let home = ral_core::path::home_from_env();
@@ -633,9 +694,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             for root in &roots {
                 let normalized = ral_core::path::NormalizedPrefix::from_surface(root).into_string();
-                assert!(
-                    exec.dirs.contains_key(&normalized),
-                    "{name} should admit the live system tool root {normalized}"
+                let expected = if name == "minimal" && root == "/opt/homebrew" {
+                    ExecDir::Deny
+                } else {
+                    ExecDir::Allow
+                };
+                assert_eq!(
+                    exec.dirs.get(&normalized),
+                    Some(&expected),
+                    "{name} should carry a {expected:?} verdict for the live system tool root {normalized}"
                 );
             }
         }

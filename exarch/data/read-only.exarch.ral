@@ -139,10 +139,16 @@ return [
     whoami:    'allow',
     yes:       'allow',
 
-    # Shells
+    # Shells.  `cmd`/`powershell`/`pwsh` are the Windows analogues of
+    # bash/zsh — `system:` admits them unconditionally via
+    # `%SystemRoot%\System32` and the PowerShell home, so they get the
+    # same deny.
     sh:   'allow',
     bash: 'deny',
     zsh:  'deny',
+    cmd:        'deny',
+    powershell: 'deny',
+    pwsh:       'deny',
 
     # Version control.  `git` is admitted; review work needs
     # `git log`, `git diff`, `git show`.  Writes go to scratch only,

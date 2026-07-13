@@ -11,7 +11,7 @@
 # the one MSVC ABI that ships — a Linux docker host cannot link MSVC binaries
 # (no Windows SDK/CRT import libraries), and the MinGW cross target this
 # script used to build was dropped along with x86_64-pc-windows-gnu
-# (decisions/260712_windows_port.md, W6.1).
+# (dev/docs/260712_windows_port.md, W6.1).
 #
 # Flags:
 #   --linux          include the Linux musl matrix
@@ -37,8 +37,10 @@
 #   <name>.sha256 next to each binary
 #
 # exarch is built without the `coreutils,diffutils,grep,ripgrep` features
-# (those belong to ral) and only for Linux + macOS — Windows is not a
-# target.
+# (those belong to ral).  This script only builds the Unix matrix (Linux +
+# macOS, the two ABIs a Linux docker host / a Darwin host can produce);
+# GHA's windows-latest runner builds and publishes the Windows exarch
+# artifact separately (see .github/workflows/build-binaries.yml).
 #
 # Build caches in   target/release-cache/:
 #   registry/        shared cargo registry (mounted into every docker run)

@@ -24,9 +24,12 @@
 //!
 //! Windows is different in kind: an AppContainer denial surfaces only as
 //! `ERROR_ACCESS_DENIED` on the confined child, with no kernel audit log
-//! naming the path.  There is nothing to scrape, so the Windows hint is a
-//! fixed, pathless note that names the grant surfaces — it never fabricates
-//! a path it does not have.
+//! naming the path.  There is nothing to scrape, so the hint is gated on the
+//! exit code instead of a log line — only a plausibly access-denied exit
+//! (`ERROR_ACCESS_DENIED` / `STATUS_ACCESS_DENIED`) gets the fixed, pathless
+//! note that names the grant surfaces; any other nonzero exit under an
+//! active sandbox gets no sandbox speculation at all. It never fabricates a
+//! path it does not have.
 
 use crate::types::{Error, Shell};
 use std::collections::{HashMap, HashSet};
@@ -87,7 +90,7 @@ pub(crate) fn augment_failure(
     if shell.sandbox_projection().is_none() {
         return err;
     }
-    let Some(diagnostic) = collect_denial_hint(pids, since) else {
+    let Some(diagnostic) = collect_denial_hint(pids, since, err.exit_code()) else {
         return err;
     };
     let hint = match err.hint.take() {
@@ -100,7 +103,7 @@ pub(crate) fn augment_failure(
 /// The platform's denial hint for a command that failed under an active
 /// sandbox, or `None` when there is nothing to say.
 #[cfg(not(windows))]
-fn collect_denial_hint(pids: &HashSet<u32>, since: Instant) -> Option<String> {
+fn collect_denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> Option<String> {
     if pids.is_empty() {
         return None;
     }
@@ -116,11 +119,37 @@ fn collect_denial_hint(pids: &HashSet<u32>, since: Instant) -> Option<String> {
     Some(build_hint(&denials))
 }
 
-/// Windows has no kernel denial log to scrape and no per-PID attribution,
-/// so any failure under an active sandbox yields the same fixed, pathless
-/// hint (never a fabricated path).
+/// Exit codes that plausibly indicate the AppContainer denied an access,
+/// gating the Windows hint the way the Unix hints are gated on an actual
+/// kernel denial line — without this, a confined child that simply exits
+/// nonzero for an unrelated reason (`diff` reporting a difference, a normal
+/// `grep` miss) would have the sandbox speculatively blamed.
+///
+/// `ERROR_ACCESS_DENIED` (5) is the raw Win32 code a well-behaved child
+/// surfaces verbatim when it does not translate its own Win32 failures
+/// (common for small native tools and `cmd`-style wrappers).
+/// `STATUS_ACCESS_DENIED` (`0xC0000022`, an NTSTATUS) surfaces as the exit
+/// code when the OS itself terminates the process during initialization —
+/// e.g. a denied read while loading a dependency — before the program's own
+/// code ever runs.
 #[cfg(windows)]
-fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant) -> Option<String> {
+fn plausible_access_denied_exit(code: i32) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32 as i32;
+    code == ERROR_ACCESS_DENIED || code == STATUS_ACCESS_DENIED
+}
+
+/// Windows has no kernel denial log to scrape and no per-PID attribution, so
+/// the hint is gated on the exit code alone: only when it plausibly denotes
+/// an access-denied failure ([`plausible_access_denied_exit`]) does a
+/// failure under an active sandbox get the fixed, pathless hint (never a
+/// fabricated path) — an unrelated nonzero exit under the same sandbox gets
+/// no hint at all.
+#[cfg(windows)]
+fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) -> Option<String> {
+    if !plausible_access_denied_exit(exit_code) {
+        return None;
+    }
     Some(
         "the command failed while an OS sandbox (AppContainer) was active. On Windows a blocked \
          filesystem access surfaces only as an access-denied error on the command, with no kernel \
@@ -343,5 +372,22 @@ mod tests {
         let me = std::process::id();
         let kids = sample_descendants(me);
         assert!(!kids.contains(&me), "root pid must be excluded");
+    }
+
+    /// The Windows hint gate recognises both plausible access-denied exit
+    /// codes and rejects an ordinary nonzero exit (`diff` reporting a
+    /// difference, a failed `grep`), so a ran-fine-but-exited-1 command
+    /// under an active sandbox gets no fabricated sandbox speculation.
+    #[cfg(windows)]
+    #[test]
+    fn plausible_access_denied_exit_recognises_both_codes_and_rejects_ordinary_exits() {
+        assert!(plausible_access_denied_exit(5), "ERROR_ACCESS_DENIED");
+        assert!(
+            plausible_access_denied_exit(0xC000_0022_u32 as i32),
+            "STATUS_ACCESS_DENIED"
+        );
+        assert!(!plausible_access_denied_exit(0));
+        assert!(!plausible_access_denied_exit(1));
+        assert!(!plausible_access_denied_exit(2));
     }
 }
