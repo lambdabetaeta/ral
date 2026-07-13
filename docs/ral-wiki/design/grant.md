@@ -43,8 +43,8 @@ the structured primitives, closing the bypass.
 The grant body evaluates locally. RAL-owned filesystem effects are checked in
 process by `check_fs_op` before the syscall; each external or bundled child the
 body spawns is confined under the effective projection — per-command Seatbelt
-on macOS and bwrap on Linux, the session-scoped AppContainer on Windows
-([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
+on macOS and bwrap on Linux, the projection's own AppContainer on Windows
+([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
 frozen `Capabilities`, so configuration is the grant value written as source,

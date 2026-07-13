@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c754c6b
+generated_at_commit: 917119f
 generated_at_date: 2026-07-13
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
@@ -43,7 +43,8 @@ binding-edge / effect-verdict model the structural surface projects.
 - Teardown — transport detach, history flush, the
   [[map/repl/jobs|survivor warning]], `JobTable::cleanup`, and
   `ral_core::sandbox::teardown_session` (reverts the session's AppContainer
-  grant ACEs on Windows; a no-op elsewhere) — lives in
+  grant ACEs and deletes its per-projection profiles on Windows; a no-op
+  elsewhere) — lives in
   `Drop for Session`, so it covers a panic unwinding through the owned
   `Session` as well as the orderly exit; a crash mid-turn neither orphans a
   stopped group nor loses history.

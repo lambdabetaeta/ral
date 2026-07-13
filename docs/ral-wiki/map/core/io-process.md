@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c754c6b
+generated_at_commit: 917119f
 generated_at_date: 2026-07-13
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
@@ -120,8 +120,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
-  attribute a confined spawn attaches (the session AppContainer's SID and
-  capability SIDs — [[map/core/capabilities|capabilities]]), the launch mutex,
+  attribute a confined spawn attaches (its projection's AppContainer SID and
+  the capability SIDs — [[map/core/capabilities|capabilities]]), the launch mutex,
   suspended create → Job Object assignment → resume, and the widened
   `ChildHandle` raw process wrapper
   ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).

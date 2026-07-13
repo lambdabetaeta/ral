@@ -201,13 +201,12 @@ ral runs natively on Windows, MSVC-built: the interactive session (structural
 and rustyline frontends), pipelines, redirects, and `&` backgrounding all
 work; scripts authored with CRLF line endings parse; the bundled coreutils
 subset covers everyday use. Each external command inside a `grant` is
-confined under a session-scoped AppContainer (LowBox token) — the fs
-allow-list is enforced by ACEs stamped for the container's SID on the granted
-prefixes, and `net: false` is enforced by withholding the network capability
-SIDs, so a denied command cannot open a socket at all. Because the container
-is session-scoped, the OS layer enforces the union of the projections the
-session has confined so far, not each command's own (SPEC §11.8). This
-confinement is exercised on CI, not merely asserted.
+confined under an AppContainer (LowBox token) keyed to its own fs projection
+— the fs allow-list is enforced by ACEs stamped for that projection's SID on
+the granted prefixes, so a narrowed grant is narrowed at the kernel, and
+`net: false` is enforced by withholding the network capability SIDs, so a
+denied command cannot open a socket at all (SPEC §11.8). This confinement is
+exercised on CI, not merely asserted.
 
 Documented degradations, not bugs:
 

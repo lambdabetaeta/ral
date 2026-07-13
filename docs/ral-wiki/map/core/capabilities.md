@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7c1b647
+generated_at_commit: 917119f
 generated_at_date: 2026-07-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -143,8 +143,8 @@ still bounds which images a child can *read*, and so load, at all).
   pinned self (`ral --sandbox-projection <json> --ral-sandbox-exec <host>`, or
   `--ral-bundled-tool <tool>`) so the child enters Seatbelt in `early_init`, then
   `serve_sandbox_exec` `execve`s the host target inside it; Windows builds the
-  target's `Launch` directly and `windows::session::confine` attaches the
-  session AppContainer's LowBox `SECURITY_CAPABILITIES`, so the parent's own
+  target's `Launch` directly and `windows::session::confine` attaches its
+  projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
   spawn is the confinement point — never a re-exec child. The
   `--ral-sandbox-exec` sentinel and `serve_sandbox_exec`'s execve arm are
   `cfg(target_os = "macos")`, the only platform that emits the host re-exec
@@ -153,21 +153,24 @@ still bounds which images a child can *read*, and so load, at all).
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap), and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
-  AppContainer backend in three submodules — `appcontainer.rs`, the session
-  profile lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`,
+  AppContainer backend in three submodules — `appcontainer.rs`, the profile
+  lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`,
   the crash-safe grant/deny ACE apply/restore engine with a durably persisted
   ledger, per-path named mutexes, and boot-time orphan recovery; `session.rs`,
-  the session-scoped state the two compose into). The module docs of those
-  three files carry the full protocol; the shape is imitated from MXC's Tier-3
-  processcontainer backend, breadcrumbed per unit
-  ([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
+  the projection-keyed session state the two compose into). The module docs of
+  those three files carry the full protocol; the shape is imitated from MXC's
+  Tier-3 processcontainer backend, breadcrumbed per unit
+  ([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
 
-The Windows backend is **session-scoped, not per-spawn**: one AppContainer
-profile and one `DaclManager` per shell session, grants accumulating as ACEs
-for the session SID until `teardown_session`, so the OS layer enforces the
-*union* of the session's projections while the in-process gate still judges
-each command's own stack
-([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
+The Windows backend is **projection-keyed**: one `DaclManager` per shell
+session, one AppContainer profile per *distinct fs projection* (`SessionSandbox`
+maps `bind_spec` identity to profile), so the ACEs behind a SID are exactly its
+own projection's paths and a confined child's kernel-checked authority is the
+projection its command declared — a narrowed grant or subagent gets a narrower
+SID. Stamps persist until `teardown_session` (a detached worker keeps its
+birth authority; a SID with no live child is inert); profile registrations are
+ledgered before the OS create so the boot sweep deletes a crashed session's
+profiles ([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
 Within that shape: `deny_paths` nested inside a grant are stamped
 unconditionally as explicit deny-ACEs, which canonical ACL ordering places
 ahead of any allow; the child's program image is granted read-only so a

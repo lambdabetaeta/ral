@@ -1,5 +1,5 @@
 ---
-verified_at_commit: c754c6b
+verified_at_commit: 917119f
 verified_at_date: 2026-07-13
 anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox]
 ---
@@ -85,18 +85,20 @@ child:
   --ral-sandbox-exec <host>` for a host external, or `--ral-bundled-tool <tool>`
   for a bundled tool — that enters Seatbelt in `early_init`
   (`maybe_enter_process_sandbox`) and then runs the one target inside it;
-- *Windows* attaches the session AppContainer's LowBox `SECURITY_CAPABILITIES`
-  to the child's own `CreateProcessW` (`windows::session::confine`), so the
-  parent's spawn is the confinement point — no re-exec child.
+- *Windows* attaches the projection's AppContainer LowBox
+  `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
+  (`windows::session::confine`), so the parent's spawn is the confinement
+  point — no re-exec child.
 
-On Windows the *token* is per-command but the *filesystem authority behind it*
-is session-scoped: grants become ACEs for one session-lived AppContainer SID
-and accumulate until session teardown, so the kernel-level check enforces the
-union of the session's projections while the in-process gate still judges each
-command against its own stack — confinement widens monotonically for allows
-and persists for denies, per-command narrowing being the price of not minting
-a fresh profile per spawn
-([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
+On Windows filesystem authority is projection-keyed: the session mints one
+AppContainer SID per distinct fs projection, the ACEs behind a SID are exactly
+that projection's paths, and the kernel-level check therefore enforces the
+same projection the in-process gate judges — a narrowed grant or a subagent's
+narrowed permissions hold at the OS layer, because the wider paths were never
+granted to the narrower SID. Stamps persist until session teardown rather
+than frame exit (a detached worker keeps the authority it was born with; a
+SID with no live child is inert)
+([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
 
 The launcher pins the *current binary* (`SANDBOX_SELF`, fixed at `early_init`) so
 an on-disk swap cannot subvert it. Because confinement is per-command, the gate

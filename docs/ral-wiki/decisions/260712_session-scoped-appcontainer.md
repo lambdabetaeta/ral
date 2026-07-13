@@ -1,8 +1,15 @@
 ---
-status: active
+status: superseded
 ---
 
 # Session-scoped AppContainer, imitating MXC Tier 3
+
+> Superseded (2026-07-13) by
+> [[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]:
+> the session-wide SID's union-of-projections consequence was judged unsafe
+> for within-session attenuation (narrowed grants, subagent permissions), so
+> SIDs are now keyed by fs-projection identity. The MXC-imitation ground
+> rules and the DACL engine below carry over unchanged.
 
 **The Windows OS sandbox is one AppContainer profile per shell session, with
 filesystem authority expressed as grant/deny ACEs stamped for the session's

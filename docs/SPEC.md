@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 7c1b647 -->
+<!-- verified_at_commit: 917119f -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -1558,28 +1558,31 @@ OS-level enforcement varies:
   system directories (`/bin`, `/usr`, `/lib*`, `/sys`, and
   selected `/etc` files) bound read-only alongside the granted
   prefixes.
-- **Windows** — a session-scoped AppContainer (LowBox token): one
-  profile per shell session, created lazily on first use and torn
-  down at session exit.  A spawned command is confined under it when
-  `fs:` is present or `net` is `false`; pure exec attenuation does not
-  enter the OS sandbox (AppContainer has no path-based exec filter —
-  as on Linux, the in-process exec check is the only gate).  Fs grants
-  are expressed as allow-ACEs stamped for the AppContainer's SID on
-  the projection's read and read-write prefixes, inheritable so a
+- **Windows** — a projection-keyed AppContainer (LowBox token): the
+  session registers one profile per *distinct fs projection* it
+  confines, created lazily the first time that projection becomes
+  enforceable and torn down at session exit.  A spawned command is
+  confined under its projection's profile when `fs:` is present or
+  `net` is `false`; pure exec attenuation does not enter the OS
+  sandbox (AppContainer has no path-based exec filter — as on Linux,
+  the in-process exec check is the only gate).  Fs grants are
+  expressed as allow-ACEs stamped for that profile's SID on the
+  projection's read and read-write prefixes, inheritable so a
   directory's descendants are covered without a manual walk; every
-  stamp is written to a session ledger before the ACL is touched, so
-  a session that crashes mid-grant is repaired by the next session's
-  boot-time sweep rather than left with dangling ACEs on user
-  directories.  Because every confined command runs under the same
-  session SID and stamps persist until session teardown, the OS layer
-  enforces the *union* of the projections the session has confined so
-  far, not each command's own: a later command can open any path an
-  earlier command's projection granted, even where its own projection
-  is narrower, and stays blocked on any path an earlier command's
-  `deny_path` stamped, even where its own projection grants it.  This
-  is a deliberate trade — per-command narrowing at the OS layer would
-  cost a fresh AppContainer profile per spawn — and it is unique to
-  Windows: Seatbelt and bwrap build a fresh per-command sandbox.
+  stamp — and every profile registration — is written to a session
+  ledger before the OS is touched, so a session that crashes
+  mid-grant is repaired by the next session's boot-time sweep rather
+  than left with dangling ACEs on user directories or orphaned
+  profiles.  Because the ACEs stamped for a SID are exactly its own
+  projection's paths, a confined child's kernel-checked authority is
+  the projection its command declared — never the union of what other
+  commands in the session stamped: a narrower `grant` freezes a
+  different projection and spawns under a SID the wider paths were
+  never granted to.  Commands sharing one frozen projection share one
+  SID and its stamps, so the profile cost is paid once per distinct
+  projection, not per spawn; the stamps themselves persist until
+  session teardown (a detached worker keeps the authority it was born
+  with, and a SID with no live child is inert).
   AppContainer is deny-by-default, which cuts the
   opposite way from macOS/Linux: when the active projection has no
   `fs:` grant (confinement triggered by `net: false` alone), the
