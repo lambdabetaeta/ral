@@ -1,5 +1,4 @@
 #![allow(clippy::disallowed_methods)]
-#![cfg(unix)]
 
 //! Negative acceptance tests for the sandbox-external-children safety
 //! invariant (`decisions/260617_sandbox-external-children.md`,
@@ -108,7 +107,6 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 /// (external `/bin/echo`): here the producer is a builtin whose bytes flow
 /// through the same in-process `open_file` gate, proving the gate is on the
 /// redirect open, not on the command kind.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_denies_builtin_redirect() {
     let dir = scratch("wbuiltin");
@@ -131,7 +129,6 @@ fn grant_fs_write_denies_builtin_redirect() {
 /// the write set succeeds and the file lands.  This proves the denial above
 /// is enforcement of the granted region, not a blanket "grant blocks all
 /// redirects" failure.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_allows_redirect_inside_set() {
     let dir = scratch("wallow");
@@ -153,7 +150,6 @@ fn grant_fs_write_allows_redirect_inside_set() {
 /// `>>` append to a denied path is rejected too — append takes the same
 /// `check_fs_write` arm in `open_file`, so a pre-existing file is never
 /// touched and a missing one is never created.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_denies_append_redirect() {
     let dir = scratch("wappend");
@@ -187,7 +183,6 @@ fn grant_fs_write_denies_append_redirect() {
 /// so that, if the gate were bypassed, the effect would be observable on
 /// disk; the assertion that the effect file is absent proves the body never
 /// ran.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_denies_source_outside_set() {
     let dir = scratch("source");
@@ -216,7 +211,6 @@ fn grant_fs_read_denies_source_outside_set() {
 }
 
 /// `use` of a `.ral` module outside the read set is denied at the same gate.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_denies_use_outside_set() {
     let dir = scratch("use");
@@ -236,7 +230,6 @@ fn grant_fs_read_denies_use_outside_set() {
 /// Positive control for module loading: `source` of a file *inside* the read
 /// set runs, and its body effect lands inside the write set.  This proves the
 /// denials above gate on the region, not on `source`/`use` per se.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_allows_source_inside_set() {
     let dir = scratch("sourceok");
@@ -272,7 +265,6 @@ fn grant_fs_read_allows_source_inside_set() {
 
 /// `< /denied` stdin redirect is denied at `check_fs_read`: the parent tries
 /// to open the input file before spawning `head`, and the open is gated.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_denies_stdin_redirect() {
     let dir = scratch("stdin");
@@ -292,7 +284,6 @@ fn grant_fs_read_denies_stdin_redirect() {
 /// `2> /denied` stderr redirect is denied at `check_fs_write`: the parent
 /// tries to open the stderr target file before spawning the command, and the
 /// open is gated, so the file is never created.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_denies_stderr_redirect() {
     let dir = scratch("stderr");
@@ -315,7 +306,6 @@ fn grant_fs_write_denies_stderr_redirect() {
 /// Positive control for redirects: a `<` stdin redirect from a file *inside*
 /// the read set succeeds, proving the gate is on the region, not on the
 /// presence of a redirect.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_allows_stdin_redirect_inside_set() {
     let dir = scratch("stdinok");
@@ -351,7 +341,6 @@ fn grant_fs_read_allows_stdin_redirect_inside_set() {
 /// is denied at `check_fs_op` inside the helper.  The seed bytes reach the
 /// stage (so the helper genuinely ran), but the denied redirect target is
 /// never created.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_denies_helper_stage_redirect() {
     let dir = scratch("helper");
@@ -375,6 +364,11 @@ fn grant_fs_write_denies_helper_stage_redirect() {
 /// redirecting into a path *inside* the write set succeeds and the file
 /// lands.  This proves the helper enforces the granted region (carries the
 /// stack correctly) rather than failing on every redirect.
+///
+/// Unix-only: unlike its denial twin above (whose redirect is refused before
+/// the stage command spawns), this control lets the redirect open succeed and
+/// then actually spawns the external `/bin/echo`, which has no Windows
+/// counterpart.
 #[cfg(unix)]
 #[test]
 fn grant_fs_write_allows_helper_stage_redirect_inside_set() {
@@ -408,7 +402,6 @@ fn grant_fs_write_allows_helper_stage_redirect_inside_set() {
 /// before `symlink_metadata` — so the denial fires whether or not the path
 /// exists.  Asserting on the grant-denial message (not an io error)
 /// proves the gate, not the missing file, rejected the call.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_denies_file_info_outside_set() {
     let dir = scratch("fileinfo");
@@ -428,7 +421,6 @@ fn grant_fs_read_denies_file_info_outside_set() {
 /// Positive control for `file-info`: under a grant that *does* permit the
 /// path, the stat runs and returns the file's metadata map.  This proves
 /// the denial above gates on the region, not on `file-info` per se.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_allows_file_info_inside_set() {
     let dir = scratch("fileinfook");
@@ -455,7 +447,6 @@ fn grant_fs_read_allows_file_info_inside_set() {
 /// `check_fs_read`, before `canonicalise_strict` — so the denial fires
 /// whether or not the path exists.  The grant-denial message (not an io
 /// error) proves the gate rejected the call.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_denies_resolve_path_outside_set() {
     let dir = scratch("resolve");
@@ -476,7 +467,6 @@ fn grant_fs_read_denies_resolve_path_outside_set() {
 /// path, the canonicalisation runs and returns an absolute path.  This
 /// proves the denial above gates on the region, not on `resolve-path`
 /// per se.
-#[cfg(unix)]
 #[test]
 fn grant_fs_read_allows_resolve_path_inside_set() {
     let dir = scratch("resolveok");
@@ -490,7 +480,7 @@ fn grant_fs_read_allows_resolve_path_inside_set() {
     let out = must_succeed(&script);
     match out {
         Value::String(s) => assert!(
-            s.starts_with('/'),
+            std::path::Path::new(&s).is_absolute(),
             "granted resolve-path must return an absolute path, got {s:?}"
         ),
         other => panic!("resolve-path should return a String, got {other:?}"),
@@ -512,7 +502,6 @@ fn grant_fs_read_allows_resolve_path_inside_set() {
 /// `temp-dir` under a grant whose write set is a strict subdirectory of the
 /// system temp root is denied at `check_fs_write` on `std::env::temp_dir()`,
 /// before any directory is created.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_denies_temp_dir_outside_set() {
     let dir = scratch("tmpdir");
@@ -525,7 +514,6 @@ fn grant_fs_write_denies_temp_dir_outside_set() {
 /// temp root, the create runs and returns a path.  This proves the denial
 /// above gates on the region, not on `temp-dir` per se.  The returned
 /// directory is cleaned up.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_allows_temp_dir_inside_set() {
     let root = std::env::temp_dir();
@@ -546,7 +534,6 @@ fn grant_fs_write_allows_temp_dir_inside_set() {
 /// `temp-file` under a grant whose write set is a strict subdirectory of the
 /// system temp root is denied at `check_fs_write` on `std::env::temp_dir()`,
 /// before any file is created.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_denies_temp_file_outside_set() {
     let dir = scratch("tmpfile");
@@ -559,7 +546,6 @@ fn grant_fs_write_denies_temp_file_outside_set() {
 /// temp root, the create runs and returns a path.  This proves the denial
 /// above gates on the region, not on `temp-file` per se.  The returned
 /// file is cleaned up.
-#[cfg(unix)]
 #[test]
 fn grant_fs_write_allows_temp_file_inside_set() {
     let root = std::env::temp_dir();

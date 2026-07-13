@@ -283,8 +283,10 @@ fn external_argv_lists_program_then_args() {
 
 /// A bundled (uutils) command run inline emits exactly one exec event —
 /// the inline door fires and the external door does not double-fire.
-/// `printf ''` produces no output and exits 0.
-#[cfg(all(unix, feature = "coreutils"))]
+/// `printf ''` produces no output and exits 0.  Portable: the bundled tool
+/// runs in-process on every platform, so the exec-event shape is not
+/// Unix-specific (unlike the `/usr/bin`/`/bin` external tests above).
+#[cfg(feature = "coreutils")]
 #[test]
 fn inline_bundled_emits_single_exec_event() {
     let mut shell = fresh_shell();

@@ -89,17 +89,13 @@ pub(crate) use launch::{LaunchTarget, sandboxed_command};
 pub(crate) use diag::{augment_failure, sample_descendants};
 
 /// Whether this platform's OS backend can actually enforce a network
-/// restriction (`net: false`).  Linux (`--unshare-net`) and macOS
-/// (deny-default Seatbelt) can; the Windows restricted-token backend has
-/// no kernel network enforcement.
+/// restriction (`net: false`).  Linux (`--unshare-net`), macOS (deny-default
+/// Seatbelt), and Windows (an AppContainer granted no network capability SID
+/// cannot open a socket) all can.
 fn net_enforced() -> bool {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         true
-    }
-    #[cfg(windows)]
-    {
-        false
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -164,7 +160,7 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     #[cfg(windows)]
     {
         let dump = windows::dump_profile_for_windows(policy);
-        eprintln!("--- restricted-token profile ---\n{dump}--- end restricted-token profile ---");
+        eprintln!("--- appcontainer profile ---\n{dump}--- end appcontainer profile ---");
     }
 }
 
@@ -246,10 +242,37 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
     // Pin this binary's executable so a per-command `--sandbox-projection`
     // child re-execs *us*, immune to on-disk swaps.
     reexec::register_sandbox_self();
+    // Boot sweep: reclaim DACL grants a crashed prior session left stamped.
+    // Only a primary session process runs it — a confined re-exec child
+    // (bundled-tool multicall, pipeline-stage helper) is not a session boot
+    // and cannot reach the ledger from inside its AppContainer anyway.
+    #[cfg(windows)]
+    {
+        use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, HELPER_FLAG};
+        let is_reexec_child = argv
+            .iter()
+            .any(|a| a == BUNDLED_TOOL_FLAG || a == HELPER_FLAG);
+        if !is_reexec_child {
+            windows::session::boot_recover();
+        }
+    }
     if let Some(code) = reexec::maybe_enter_process_sandbox(&stripped, policy.as_ref())? {
         return Ok((stripped, Some(code)));
     }
     Ok((stripped, None))
+}
+
+/// Tear down the per-session OS sandbox at a clean shutdown seam: revert
+/// grant ACEs and delete the session's AppContainer profile.
+///
+/// Windows only; a no-op elsewhere, where per-command confinement holds no
+/// session-global state.  Not yet wired to a front-end shutdown seam — a
+/// session that exits without calling it leaves its DACL ledger for the next
+/// process start's boot sweep ([`early_init`]) to reclaim, and its profile as
+/// an inert registry entry a same-pid successor reuses.
+pub fn teardown_session() {
+    #[cfg(windows)]
+    windows::session::teardown();
 }
 
 /// The OS-sandbox stage of the pre-`main` dispatch, as an `Option<u8>`
@@ -393,19 +416,18 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn projection_enforceable_rejects_net_false_on_windows() {
-        // Windows has no kernel network enforcement, so a `net: false`
-        // projection must fail closed rather than run with net ignored.
+    fn projection_enforceable_allows_net_false_on_windows() {
+        // An AppContainer granted no network capability SID cannot open a
+        // socket, so `net: false` is enforceable on Windows — the projection
+        // is accepted rather than refused.
         let p_net_false = SandboxProjection {
             fs: crate::types::FsProjection::default(),
             net: false,
             exec: crate::types::ExecProjection::default(),
         };
-        let err = projection_enforceable(&p_net_false)
-            .expect_err("net: false must be rejected where net is unenforceable");
         assert!(
-            err.contains("offline mode"),
-            "fail-closed message must explain the offline restriction; got: {err:?}"
+            projection_enforceable(&p_net_false).is_ok(),
+            "net: false must be enforceable on Windows via the AppContainer backend"
         );
     }
 
