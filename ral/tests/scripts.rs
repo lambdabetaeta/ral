@@ -161,7 +161,18 @@ fn scripts() {
 /// A `.ral` source authored on Windows (Notepad, VS Code set to CRLF) has
 /// `\r\n` line endings throughout — inside comments, between statements,
 /// and inside a multi-line raw-string literal. This proves the lexer
-/// treats CRLF as one logical newline everywhere, not just at top level.
+/// treats CRLF as one logical newline everywhere, not just at top level:
+/// it still finds the raw string's closing `'#` on the far side of a
+/// CRLF-turned-LF newline, and the run reproduces LF-only output exactly.
+///
+/// Disk-loaded source is run through `normalize_source_text`
+/// (core/src/source.rs) before lexing, which strips every `\r` —
+/// including inside the raw string — so this integration path does not
+/// observe CR *preservation*; the raw-string contract (a `\r` inside the
+/// literal is carried into its value verbatim) is pinned directly against
+/// un-normalized in-memory source by the lexer unit test
+/// `bumped_string_multiline_preserves_embedded_cr`
+/// (core/src/syntax/lexer.rs:2362-2374).
 ///
 /// Synthesized here rather than checked into the repo as a real CRLF
 /// file: with no `.gitattributes` override, `core.autocrlf` differs by
@@ -179,8 +190,8 @@ let greeting = \"hello\"
 echo $greeting
 
 # A raw string spanning the converted newline keeps its content verbatim
-# (the embedded CR survives -- that's the raw-string contract, not a
-# bug); the lexer must still find the closing '# on the far side of it.
+# once normalized (the lexer must still find the closing '# on the far
+# side of it, even though normalization turned this into a plain LF).
 echo #'raw
 line'#
 ";
@@ -193,7 +204,8 @@ line'#
     let out = common::run("crlf-fixture", &crlf);
     assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
     assert_eq!(
-        strip_cr(out.stdout.as_bytes()),
-        strip_cr(b"3\r\nhello\r\nraw\r\nline\r\n")
+        out.stdout.as_bytes(),
+        b"3\nhello\nraw\nline\n",
+        "normalized-CRLF run must reproduce exact LF-only output"
     );
 }

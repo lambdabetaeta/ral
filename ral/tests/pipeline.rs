@@ -16,123 +16,17 @@
 
 mod common;
 
-use common::{Output, ral_bin};
-use std::io::Write;
+use common::{Output, fresh_tmp_path, ral_bin};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(1);
-
-fn fresh_tmp_script_path(prefix: &str) -> PathBuf {
-    let mut tmp = std::env::temp_dir();
-    let pid = std::process::id();
-    let id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    tmp.push(format!("{prefix}_{pid}_{id}_{nanos}.ral"));
-    tmp
-}
-
-/// A fresh, unique temp path for a redirect target file.
-fn fresh_tmp_out(prefix: &str) -> PathBuf {
-    let mut tmp = std::env::temp_dir();
-    let pid = std::process::id();
-    let id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
-    tmp.push(format!("{prefix}_{pid}_{id}.txt"));
-    tmp
-}
-
 fn run(script: &str) -> Output {
-    run_with_stdin(script, b"")
-}
-
-fn run_with_stdin(script: &str, stdin_data: &[u8]) -> Output {
-    // Write script to a temp file so ral-run can read it.
-    let tmp = fresh_tmp_script_path("ral_test");
-    std::fs::write(&tmp, script).unwrap();
-
-    let mut child = Command::new(ral_bin())
-        .arg(&tmp)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn ral-run");
-
-    if !stdin_data.is_empty() {
-        child.stdin.take().unwrap().write_all(stdin_data).unwrap();
-    }
-
-    let out = child.wait_with_output().unwrap();
-    std::fs::remove_file(&tmp).ok();
-
-    Output {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        status: out.status.code().unwrap_or(1),
-    }
+    common::run("ral_test", script)
 }
 
 fn run_with_timeout(args: &[&str], script: &str, timeout: Duration) -> Option<Output> {
-    use std::io::Read;
-
-    let tmp = fresh_tmp_script_path("ral_test");
-    std::fs::write(&tmp, script).unwrap();
-
-    let mut child = Command::new(ral_bin());
-    child
-        .args(args)
-        .arg(&tmp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = child.spawn().expect("spawn ral-run");
-    let stdout_reader = child.stdout.take().map(|mut stdout| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-            buf
-        })
-    });
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            buf
-        })
-    });
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait().unwrap() {
-            Some(status) => {
-                std::fs::remove_file(&tmp).ok();
-                return Some(Output {
-                    stdout: stdout_reader
-                        .and_then(|jh| jh.join().ok())
-                        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-                        .unwrap_or_default(),
-                    stderr: stderr_reader
-                        .and_then(|jh| jh.join().ok())
-                        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-                        .unwrap_or_default(),
-                    status: status.code().unwrap_or(1),
-                });
-            }
-            None if start.elapsed() > timeout => {
-                child.kill().ok();
-                let _ = child.wait();
-                std::fs::remove_file(&tmp).ok();
-                return None;
-            }
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    }
+    common::run_with_timeout("ral_test", args, script, timeout)
 }
 
 // ── All-external pipelines ───────────────────────────────────────────────────
@@ -373,7 +267,7 @@ fn pipeline_stage_redirect_to_file_is_honored() {
 fn aliased_command_stdout_redirect_is_honored() {
     // `alias` installs a handler frame.  `myecho … > file` must send the
     // forwarded `/bin/echo`'s stdout to the file, not the terminal.
-    let path = fresh_tmp_out("ral_alias_stdout");
+    let path = fresh_tmp_path("ral_alias_stdout", "txt");
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
 
@@ -400,7 +294,7 @@ fn aliased_command_stdout_redirect_is_honored() {
 fn aliased_command_stderr_redirect_is_honored() {
     // `2> file` on an aliased head captures the forwarded command's stderr,
     // mirroring the stdout direction.
-    let path = fresh_tmp_out("ral_alias_stderr");
+    let path = fresh_tmp_path("ral_alias_stderr", "txt");
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
 
@@ -428,7 +322,7 @@ fn aliased_command_stdin_redirect_is_honored() {
     // `< file` into an aliased head feeds the file to the forwarded command's
     // stdin: `with_redirects` installs the stdin source for the handler body
     // via `install_stdin_redirect`, and the forwarded `/bin/cat` consumes it.
-    let path = fresh_tmp_out("ral_alias_stdin");
+    let path = fresh_tmp_path("ral_alias_stdin", "txt");
     let path_str = path.display().to_string();
     std::fs::write(&path, "stdin_marker\n").unwrap();
 
@@ -446,64 +340,13 @@ fn aliased_command_stdin_redirect_is_honored() {
 }
 
 #[test]
-fn handler_mock_redirect_captures_builtin_stdout() {
-    // A `within [handlers:]` mock whose body is the ral `echo` builtin:
-    // `foo > file` routes the builtin's stdout into the file.  Exercises the
-    // value-returning / builtin-forwarding handler shape, not just externals.
-    let path = fresh_tmp_out("ral_handler_mock");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "within [handlers: [foo: {{ |args| echo mock_marker }}]] {{ foo > '{path_str}' }}\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(
-        !o.stdout.contains("mock_marker"),
-        "mock output leaked to the terminal: {}",
-        o.stdout
-    );
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("mock_marker"),
-        "handler mock redirect file did not capture the builtin's stdout"
-    );
-}
-
-#[test]
-fn catch_all_handler_redirect_is_honored() {
-    // The catch-all `within [handler: …]` resolves through the same
-    // `Resolution::Handler` arm as per-name handlers, so its redirect must be
-    // honored too.  The thunk binds `(name, args)` and echoes the name.
-    let path = fresh_tmp_out("ral_catchall");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "within [handler: {{ |name _args| echo $name }}] {{ catchme > '{path_str}' }}\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("catchme"),
-        "catch-all handler redirect file did not capture the body's stdout"
-    );
-}
-
-#[test]
 fn pipeline_stage_handler_redirect_to_file_is_honored() {
     // A handler-resolved pipeline stage classifies as a Ral stage, so its
     // redirect rides in the stage comp and must be installed when the helper
     // re-evaluates that comp through `run_call`.  `foo > file | cat` routes
     // the handler's stdout to the file; the pipe sees EOF, so `cat` emits
     // nothing — matching the single-command path.
-    let path = fresh_tmp_out("ral_pipe_handler");
+    let path = fresh_tmp_path("ral_pipe_handler", "txt");
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
 
@@ -1426,7 +1269,7 @@ fn run_pty_repl_until(
     timeout: Duration,
     done: impl Fn(&str) -> bool,
 ) -> Option<Output> {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::process::CommandExt;
 

@@ -143,11 +143,12 @@ pub(super) fn setup_panic_hook() {
     {
         let saved = ral_core::process::termios_snapshot();
         if let Some(t) = saved {
+            let crash_dir = crash_log_dir();
             std::panic::set_hook(Box::new(move |info| {
                 unsafe {
                     libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const t);
                 }
-                write_crash_log(info);
+                write_crash_log(&crash_dir, info);
             }));
         }
     }
@@ -155,36 +156,45 @@ pub(super) fn setup_panic_hook() {
     {
         let saved = ral_core::io::console_mode_snapshot();
         if let Some(mode) = saved {
+            let crash_dir = crash_log_dir();
             std::panic::set_hook(Box::new(move |info| {
                 ral_core::io::restore_console_mode(mode);
-                write_crash_log(info);
+                write_crash_log(&crash_dir, info);
             }));
         }
     }
 }
 
-/// Write the panic report both platform hooks share: `$XDG_STATE_HOME/ral/
-/// crash-<unix-ts>.log` holding the panic message and a captured
-/// backtrace, after the terminal/console has already been restored by the
-/// caller.
+/// Crash-log directory (`$XDG_STATE_HOME/ral`), resolved at hook-install
+/// time so an unset or changed `HOME` mid-session cannot redirect the
+/// crash log.
+#[cfg(any(unix, windows))]
+fn crash_log_dir() -> std::path::PathBuf {
+    let home = crate::platform::home_dir();
+    ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home)
+        .join("ral")
+}
+
+/// Write the panic report both platform hooks share: `dir/crash-<unix-ts>.
+/// log` holding the panic message and a captured backtrace, after the
+/// terminal/console has already been restored by the caller.  Every write
+/// (including the stderr notice) ignores errors — a panic hook must not
+/// panic.
 #[cfg(any(unix, windows))]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
 )]
-fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) {
-    let home = crate::platform::home_dir();
-    let dir =
-        ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home)
-            .join("ral");
-    let _ = std::fs::create_dir_all(&dir);
+fn write_crash_log(dir: &std::path::Path, info: &std::panic::PanicHookInfo<'_>) {
+    use std::io::Write as _;
+    let _ = std::fs::create_dir_all(dir);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let path = dir.join(format!("crash-{ts}.log")).display().to_string();
     let bt = std::backtrace::Backtrace::force_capture();
     let _ = std::fs::write(&path, format!("{info}\n\n{bt}"));
-    eprintln!("ral: panic — crash log: {path}");
+    let _ = writeln!(std::io::stderr(), "ral: panic — crash log: {path}");
 }
 
 /// Bind the default `RAL_PROMPT` thunk, returning

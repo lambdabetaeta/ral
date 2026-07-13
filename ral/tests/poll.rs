@@ -165,6 +165,51 @@ fn poll_settled_err_carries_status_and_stderr() {
     );
 }
 
+// Same as `poll_settled_err_carries_status_and_stderr`, but the failing
+// producer is a real external process rather than the `fail` builtin.
+// Unix-only: pins that an external's nonzero exit and its actual stderr
+// fd bytes surface through spawn→poll as a `settled` `err` with
+// status+stderr, a code path (waitpid/exit-status mapping, pipe-drained
+// stderr) distinct from the in-interpreter `fail` builtin.
+#[cfg(unix)]
+#[test]
+fn poll_settled_err_carries_status_and_stderr_for_external_process() {
+    let out = run_poll(
+        r#"
+        let h = spawn { /bin/sh -c "echo before-fail >&2; exit 7" }
+        sleep 0.2
+        let polled = poll $h
+        case $polled [
+            `settled: { |s|
+                case $s[outcome] [
+                    `ok: { |_| echo unexpected-ok },
+                    `err: { |e| echo "status=$e[status]" }
+                ]
+                echo !{to-bytes $s[stderr] | from-string}
+            },
+            `pending: { |_| echo unexpected-pending }
+        ]
+        echo after-poll
+        "#,
+    );
+    assert_eq!(
+        out.status, 0,
+        "poll must not re-raise a failed block; stderr: {}",
+        out.stderr
+    );
+    assert!(out.stdout.contains("status=7"), "stdout: {:?}", out.stdout);
+    assert!(
+        out.stdout.contains("before-fail"),
+        "stdout: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("after-poll"),
+        "stdout: {:?}",
+        out.stdout
+    );
+}
+
 // Repeated polls of a failed handle report identical `` `settled `` outcomes
 // (the bytes are drained once into the cache on completion).
 #[test]

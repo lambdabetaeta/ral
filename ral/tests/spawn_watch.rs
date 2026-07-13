@@ -93,6 +93,32 @@ fn watch_stderr_is_prefixed_err() {
     );
 }
 
+// Same as `watch_stderr_is_prefixed_err`, but driven through `sh` so the
+// child emits directly to fd 2 without ral's error-handling path.  Unix-only:
+// `sh -c` is not portable to Windows.
+#[cfg(unix)]
+#[test]
+fn watch_stderr_is_prefixed_err_from_external_shell() {
+    let out = run(
+        "ral_spawn_watch",
+        r#"
+        let h = watch "job" { sh -c "echo out; echo err 1>&2" }
+        await $h
+        "#,
+    );
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("[job] out"),
+        "missing stdout prefix in: {:?}",
+        out.stdout,
+    );
+    assert!(
+        out.stdout.contains("[job:err] err"),
+        "missing stderr prefix in: {:?}",
+        out.stdout,
+    );
+}
+
 // Labels are evaluated in the caller's scope and may interpolate.
 #[test]
 fn watch_label_interpolates_from_caller_scope() {

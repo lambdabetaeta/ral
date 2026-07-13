@@ -226,38 +226,15 @@ impl JobTable {
 
     /// Reap any pipeline members that have exited or stopped (non-blocking).
     ///
-    /// Unix: `waitpid(-pgid, …, WNOHANG | WUNTRACED)` drains ready events
-    /// until the call would block (`r == 0`) or no members remain
-    /// (`r < 0`, ECHILD), in which case the job is dropped from the
-    /// table.
-    ///
-    /// Windows: poll the leader's duplicated process handle with a zero
-    /// timeout via `try_reap_leader`.  An exit (or an unknown / closed
-    /// group) drops the entry, and closing the Job handle via
-    /// `release_win_group` takes any straggler members down through
-    /// `KILL_ON_JOB_CLOSE`.  This collapses the whole pipeline as soon
-    /// as the leader exits, rather than waiting for every member to be
-    /// reaped individually the way the Unix arm does.
-    ///
-    /// That is not the soundness gap it looks like: no live path ever
-    /// puts a multi-stage job in this table to begin with, on either
-    /// platform.  `&` (`Ast::Background`) desugars to the `spawn`
-    /// builtin (`elaborator.rs`), which registers into the separate,
-    /// platform-independent `Worker` resident registry
-    /// (`shell.local.workers`) — never `JobTable`.  The *only* live
-    /// caller of [`Self::add`] is the Unix `Break::Stopped` arm in
-    /// `repl/exec.rs`, reached when a foreground pipeline parks on
-    /// `SIGTSTP`; Windows has no SIGTSTP analogue and cannot enter that
-    /// state (`Escape::Stopped` is a Unix-only evaluator escape — see
-    /// the crate doc's non-goal list). So in live operation the Windows
-    /// arm of `reap` never observes a real entry; every one it might
-    /// see is a unit-test fixture built directly with [`Self::add`].
-    /// Growing this into a Job-Object `ACTIVE_PROCESS_ZERO` poll would
-    /// buy leader-exit-vs-member-exit precision for a job shape that
-    /// cannot occur here — there is no live multi-stage Windows job for
-    /// it to reap correctly or incorrectly.  If `&` or a stopped-job
-    /// equivalent is ever wired through `JobTable` on Windows, revisit
-    /// this; until then, the collapse-on-leader-exit behaviour is inert.
+    /// Unix: `waitpid(-pgid, …, WNOHANG | WUNTRACED)` drains ready
+    /// events; ECHILD drops the job from the table.  Windows: poll the
+    /// leader via `try_reap_leader`; an exit (or unknown group) drops the
+    /// entry and closes the Job handle, killing stragglers through
+    /// `KILL_ON_JOB_CLOSE`.  No live path populates `JobTable` on
+    /// Windows — the only live [`Self::add`] caller is the Unix
+    /// `Break::Stopped` arm in `repl/exec.rs` (`&` registers `Worker`s,
+    /// never `JobTable` jobs) — so the Windows arm here is exercised only
+    /// by unit-test fixtures; revisit if that changes.
     pub fn reap(&mut self) {
         #[cfg(unix)]
         {
@@ -350,12 +327,9 @@ impl JobTable {
         {
             use ral_core::process::{Pgid, break_pipeline_group, kill_pipeline_group, release_win_group};
 
-            // Polite first pass: `CTRL_BREAK_EVENT` to every member of
-            // every job, then a 5s grace where natural exits are
-            // reaped — the same cooperative-signal-then-wait shape as
-            // the Unix arm's SIGTERM, reusing the escalation ladder's
-            // break primitive rather than a second raw
-            // `GenerateConsoleCtrlEvent` call site.
+            // Polite first pass: `CTRL_BREAK_EVENT` to every job, then a
+            // 5s grace where natural exits are reaped — the Windows
+            // analogue of the Unix arm's SIGTERM.
             for job in self.jobs.values() {
                 break_pipeline_group(Pgid(job.pgid));
             }

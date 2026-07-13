@@ -474,6 +474,59 @@ echo done
     );
 }
 
+// ── Handler-resolved head redirects (builtin bodies) ────────────────────────
+
+#[test]
+fn handler_mock_redirect_captures_builtin_stdout() {
+    // A `within [handlers:]` mock whose body is the ral `echo` builtin:
+    // `foo > file` routes the builtin's stdout into the file.  Exercises the
+    // value-returning / builtin-forwarding handler shape, not just externals.
+    let path = common::fresh_tmp_path("ral_handler_mock", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let o = run_pipe(&format!(
+        "within [handlers: [foo: {{ |args| echo mock_marker }}]] {{ foo > '{path_str}' }}\n"
+    ));
+    let body = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert!(
+        !o.stdout.contains("mock_marker"),
+        "mock output leaked to the terminal: {}",
+        o.stdout
+    );
+    assert_eq!(
+        body.as_deref().map(str::trim_end),
+        Some("mock_marker"),
+        "handler mock redirect file did not capture the builtin's stdout"
+    );
+}
+
+#[test]
+fn catch_all_handler_redirect_is_honored() {
+    // The catch-all `within [handler: …]` resolves through the same
+    // `Resolution::Handler` arm as per-name handlers, so its redirect must be
+    // honored too.  The thunk binds `(name, args)` and echoes the name.
+    let path = common::fresh_tmp_path("ral_catchall", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let o = run_pipe(&format!(
+        "within [handler: {{ |name _args| echo $name }}] {{ catchme > '{path_str}' }}\n"
+    ));
+    let body = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(
+        body.as_deref().map(str::trim_end),
+        Some("catchme"),
+        "catch-all handler redirect file did not capture the body's stdout"
+    );
+}
+
 // ── Outer stdin redirect feeds pipeline boundary ─────────────────────────────
 
 fn write_tmp_lines(prefix: &str, lines: &[&str]) -> PathBuf {

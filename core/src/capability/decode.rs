@@ -7,6 +7,21 @@
 //! attenuation touches only the dimensions it lists.  The author is the
 //! live user, so every malformed shape is a strict error carrying a
 //! shape-specific hint.
+//!
+//! One kind of path-shaped entry is *not* a shape error: a well-formed
+//! absolute path that names a location foreign to this platform (a
+//! Unix prefix like `/usr/local/bin` frozen on a Windows build, which
+//! has a root but no drive letter).  Such an entry can never match a
+//! real access here, so it is dropped as a dead grant rather than
+//! rejected — the same "unusable on this platform" treatment
+//! `exarch::policy::base::drop_dead_exec_grants` gives a bundled-tool
+//! name Windows can't back.  Because this dropping lives in the one
+//! decoder both the `grant [...]` builtin and the capability-file
+//! loader share, a `--extend-base`/user capability file gets it for
+//! free, alongside the built-in bases.  A genuinely relative entry
+//! (no root at all, on any platform) is still a strict error: that is
+//! an authoring ambiguity (re-anchoring to a future `cd`), not a
+//! platform mismatch.
 
 use crate::types::{
     Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, FsPolicy, List, Settled, ShellPolicy,
@@ -73,28 +88,55 @@ fn string_list(items: &List, what: &str, err_prefix: &str) -> Settled<Vec<String
         .collect()
 }
 
-/// Freeze one sigil-or-path entry and require the result absolute,
-/// naming the spelling the author wrote on rejection.  Shared by the fs
-/// prefix lists and the exec map keys.
+/// Freeze one sigil-or-path entry and classify the result. Shared by
+/// the fs prefix lists and the exec map keys.
+///
+/// * Absolute here: kept.
+/// * Rooted under a foreign platform's convention (a Unix prefix like
+///   `/usr/local/bin`, frozen on a build where it has a root but no
+///   drive letter): dropped (`Ok(None)`) as a dead grant — it can
+///   never match a real access on this host, so silently omitting it
+///   is more honest than erroring the whole profile out.
+/// * Genuinely relative (no root at all): a strict error naming the
+///   spelling the author wrote.  A bare relative prefix (`proj`,
+///   `./a`) folds to a still-relative path that would otherwise
+///   re-anchor to the *live* cwd at check time — the same grant
+///   meaning a different directory after a `cd` — so this is rejected
+///   rather than silently dropped, pointing at the absolute form or
+///   the `cwd:` sigil that pins "relative to here" at freeze.
 fn freeze_absolute(
     entry: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Result<crate::path::NormalizedPrefix, String> {
+) -> Result<Option<crate::path::NormalizedPrefix>, String> {
     let frozen = crate::path::sigil::freeze_one(entry, ctx)?;
-    require_absolute(&frozen, entry, err_prefix)?;
-    Ok(frozen)
+    if frozen.is_absolute() {
+        return Ok(Some(frozen));
+    }
+    if crate::path::lex::is_foreign_rooted(frozen.as_str(), cfg!(windows)) {
+        return Ok(None);
+    }
+    Err(format!(
+        "{err_prefix}: relative path '{entry}' is not allowed — \
+         use an absolute path, or cwd:{entry} for \"relative to here\""
+    ))
 }
 
-/// Freeze each raw fs entry, requiring the result absolute.
+/// Freeze each raw fs entry, requiring the result absolute.  An entry
+/// that freezes to a foreign-rooted dead grant (see [`freeze_absolute`])
+/// is silently omitted rather than erroring.
 fn freeze_prefix_list(
     raw: Vec<String>,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
 ) -> Settled<Vec<crate::path::NormalizedPrefix>> {
-    raw.into_iter()
-        .map(|entry| freeze_absolute(&entry, ctx, err_prefix).map_err(sig))
-        .collect()
+    let mut out = Vec::new();
+    for entry in raw {
+        if let Some(frozen) = freeze_absolute(&entry, ctx, err_prefix).map_err(sig)? {
+            out.push(frozen);
+        }
+    }
+    Ok(out)
 }
 
 /// A capability bool field: strictly `true` or `false`, any other shape
@@ -185,27 +227,6 @@ pub(crate) fn decode_capability_map(
     Ok(caps)
 }
 
-/// A frozen path-shaped grant entry must be absolute.  A bare relative
-/// prefix (`proj`, `./a`) folds to a still-relative path that would
-/// otherwise re-anchor to the *live* cwd at check time — the same grant
-/// meaning a different directory after a `cd`.  Reject it, naming the
-/// spelling the author wrote and pointing at the absolute form or the
-/// `cwd:` sigil that pins "relative to here" at freeze.
-fn require_absolute(
-    frozen: &crate::path::NormalizedPrefix,
-    raw: &str,
-    err_prefix: &str,
-) -> Result<(), String> {
-    if frozen.is_absolute() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{err_prefix}: relative path '{raw}' is not allowed — \
-             use an absolute path, or cwd:{raw} for \"relative to here\""
-        ))
-    }
-}
-
 /// Freeze sigils in exec map keys.  Every `dirs` key is a path/sigil,
 /// so all are frozen and must resolve absolute; among `literals`, only
 /// the path-shaped keys (`xdg:bin`, `~/.cargo/bin`, absolute literal
@@ -225,8 +246,10 @@ fn freeze_exec_map(
     err_prefix: &str,
 ) -> Result<ExecMap, String> {
     use crate::path::sigil::looks_like_path_or_sigil;
-    let freeze_key = |key: &str| -> Result<String, String> {
-        Ok(freeze_absolute(key, ctx, err_prefix)?.into_string())
+    // `None` means the key froze to a foreign-rooted dead grant (see
+    // `freeze_absolute`) — the caller skips inserting it.
+    let freeze_key = |key: &str| -> Result<Option<String>, String> {
+        Ok(freeze_absolute(key, ctx, err_prefix)?.map(crate::path::NormalizedPrefix::into_string))
     };
     let dir_verdict = |sigil: &str, policy: ExecPolicy| -> Result<ExecDir, String> {
         match policy {
@@ -245,19 +268,19 @@ fn freeze_exec_map(
         if key == "path:" {
             let verdict = dir_verdict("path:", policy)?;
             for d in path_dirs(err_prefix)? {
-                dirs.insert(d, verdict.clone());
+                insert_dir_meet(&mut dirs, d, verdict.clone());
             }
         } else if key == "system:" {
             let verdict = dir_verdict("system:", policy)?;
             for d in system_dirs() {
-                dirs.insert(d, verdict.clone());
+                insert_dir_meet(&mut dirs, d, verdict.clone());
             }
+        } else if looks_like_path_or_sigil(&key) {
+            if let Some(frozen) = freeze_key(&key)? {
+                literals.insert(frozen, policy);
+            }
+            // else: foreign-rooted dead grant — dropped, see `freeze_absolute`.
         } else {
-            let key = if looks_like_path_or_sigil(&key) {
-                freeze_key(&key)?
-            } else {
-                key
-            };
             literals.insert(key, policy);
         }
     }
@@ -267,19 +290,37 @@ fn freeze_exec_map(
     for (key, dir) in map.dirs {
         if key == "path:" {
             for d in path_dirs(err_prefix)? {
-                dirs.insert(d, dir.clone());
+                insert_dir_meet(&mut dirs, d, dir.clone());
             }
         } else if key == "system:" {
             for d in system_dirs() {
-                dirs.insert(d, dir.clone());
+                insert_dir_meet(&mut dirs, d, dir.clone());
             }
-        } else {
-            let frozen = freeze_key(&key)?;
-            dirs.insert(frozen, dir);
+        } else if let Some(frozen) = freeze_key(&key)? {
+            insert_dir_meet(&mut dirs, frozen, dir);
         }
     }
 
     Ok(ExecMap { literals, dirs })
+}
+
+/// Insert `verdict` under `key` in `dirs`, meeting with any verdict
+/// already at that key rather than overwriting it.  `system:`'s
+/// expansion and an author's explicit directory grant can name the
+/// same resolved directory (`system:` folding in a Homebrew root that
+/// an author also carves back out with an explicit `deny`); the two
+/// insertion loops above populate `dirs` in a fixed order, but which
+/// loop "wins" must not be an accident of that order.  `ExecDir` is
+/// two-valued, so meeting is just "deny beats allow" — `Deny` is the
+/// sticky veto, matching `ExecPolicy`'s lattice.
+fn insert_dir_meet(dirs: &mut BTreeMap<String, ExecDir>, key: String, verdict: ExecDir) {
+    dirs.entry(key)
+        .and_modify(|existing| {
+            if verdict == ExecDir::Deny {
+                *existing = ExecDir::Deny;
+            }
+        })
+        .or_insert(verdict);
 }
 
 /// Split `$PATH` on the platform separator, normalise each absolute

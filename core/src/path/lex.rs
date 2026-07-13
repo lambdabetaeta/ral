@@ -49,11 +49,19 @@ pub fn path_aliases(p: &Path) -> Vec<PathBuf> {
 pub fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
-    ps.iter().any(|p| {
-        qs.iter().any(|q| {
-            starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), cfg!(windows))
+    if cfg!(windows) {
+        ps.iter().any(|p| {
+            qs.iter().any(|q| {
+                starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), true)
+            })
         })
-    })
+    } else {
+        // Off Windows, compare the original `&Path`s directly rather than
+        // through `to_string_lossy`: two distinct non-UTF-8 paths can both
+        // lossy-decode to the same replacement-character string, which
+        // would make the matcher treat them as identical.
+        ps.iter().any(|p| qs.iter().any(|q| p.starts_with(q)))
+    }
 }
 
 /// Component-wise prefix test under one of two path-identity rulesets.
@@ -105,6 +113,38 @@ fn windows_identity_components(p: &str) -> Vec<String> {
         .filter(|c| !c.is_empty())
         .map(str::to_lowercase)
         .collect()
+}
+
+/// True iff `path` would be absolute under Windows path rules: a
+/// drive-letter prefix (`C:\`, `c:/`) or a UNC/verbatim form (`\\`,
+/// `//`) followed by a root.  Pure string logic rather than
+/// `std::path::Path` — whose absoluteness rule is fixed at compile
+/// time to the build target — for the same reason
+/// [`windows_identity_components`] is: it lets [`is_foreign_rooted`]
+/// classify a path's Windows-absoluteness from any host.
+fn is_windows_absolute(path: &str) -> bool {
+    if path.starts_with(r"\\") || path.starts_with("//") {
+        return true;
+    }
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
+}
+
+/// True iff `path` is rooted under POSIX rules (a leading `/`) but not
+/// absolute under Windows rules — a Unix-absolute path (`/tmp`,
+/// `/usr/local/bin`) frozen on a build where it has a root but no
+/// drive letter, so it resolves nowhere.  Always `false` when
+/// `windows` is `false`: off Windows, "rooted" and "absolute" coincide
+/// (`NormalizedPrefix::is_absolute` already covers that case), so
+/// there is no foreign-rooted class to detect.
+///
+/// `windows` is a parameter rather than a `cfg!(windows)` read so this
+/// classification has a fixed-outcome unit test on every host —
+/// mirrors [`starts_with_identity`] and
+/// `capability::exec::names_match`; the real platform gate lives at
+/// the one call site, `capability::decode`'s absoluteness check.
+pub(crate) fn is_foreign_rooted(path: &str, windows: bool) -> bool {
+    windows && path.starts_with('/') && !is_windows_absolute(path)
 }
 
 /// Resolve `path` against `cwd`, normalising `.` and `..`
@@ -381,6 +421,34 @@ mod tests {
     #[test]
     fn path_within_no_substring_pseudomatch() {
         assert!(!path_within(Path::new("/tmpx"), Path::new("/tmp")));
+    }
+
+    /// Security regression: off Windows, `path_within` must compare the
+    /// original `&Path`s, not their `to_string_lossy` forms — two
+    /// distinct non-UTF-8 byte sequences can lossy-decode to the same
+    /// U+FFFD-substituted string, which would make an unrelated path
+    /// falsely match a grant prefix.
+    #[cfg(unix)]
+    #[test]
+    fn path_within_does_not_collide_distinct_non_utf8_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let prefix_bytes: &[u8] = b"/tmp/\xFFsecret";
+        let candidate_bytes: &[u8] = b"/tmp/\xFEsecret";
+        // Sanity: both single invalid bytes really do lossy-collide, or
+        // this test proves nothing.
+        assert_eq!(
+            Path::new(OsStr::from_bytes(prefix_bytes)).to_string_lossy(),
+            Path::new(OsStr::from_bytes(candidate_bytes)).to_string_lossy(),
+        );
+
+        let prefix = Path::new(OsStr::from_bytes(prefix_bytes));
+        let candidate_path = PathBuf::from(OsStr::from_bytes(candidate_bytes)).join("file");
+        assert!(
+            !path_within(&candidate_path, prefix),
+            "distinct non-UTF-8 paths must not collide via lossy string comparison"
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -182,7 +182,7 @@ fn match_literal_keys(
     literals: &BTreeMap<String, ExecPolicy>,
     names: &[&str],
 ) -> Option<ExecPolicy> {
-    let mut matched = names.iter().filter_map(|n| lookup_literal(literals, n).cloned());
+    let mut matched = names.iter().filter_map(|n| lookup_literal(literals, n));
     let first = matched.next()?;
     Some(matched.fold(first, ExecPolicy::meet))
 }
@@ -195,18 +195,24 @@ fn match_literal_keys(
 /// the extension and Windows command lookup ignores case, so the
 /// policy author shouldn't have to spell either out — see
 /// [`names_match`].
-fn lookup_literal<'a>(
-    literals: &'a BTreeMap<String, ExecPolicy>,
-    name: &str,
-) -> Option<&'a ExecPolicy> {
+///
+/// Under Windows path identity, distinct keys can be fold-equal (`GIT`
+/// and `git` are one name to the OS).  A `BTreeMap` keeps both as
+/// separate entries, so every fold-equal match is meet-folded rather
+/// than taking whichever the map's iteration order finds first — a
+/// literal `Deny` on one spelling must veto even when another spelling
+/// says `Allow`, regardless of key insertion order.
+fn lookup_literal(literals: &BTreeMap<String, ExecPolicy>, name: &str) -> Option<ExecPolicy> {
     if let Some(policy) = literals.get(name) {
-        return Some(policy);
+        return Some(policy.clone());
     }
     if cfg!(windows) {
-        return literals
+        let mut matches = literals
             .iter()
-            .find(|(key, _)| names_match(key, name, true))
-            .map(|(_, policy)| policy);
+            .filter(|(key, _)| names_match(key, name, true))
+            .map(|(_, policy)| policy.clone());
+        let first = matches.next()?;
+        return Some(matches.fold(first, ExecPolicy::meet));
     }
     None
 }
@@ -233,22 +239,38 @@ fn strip_windows_extension(name: &str) -> &str {
     }
 }
 
+/// True iff `name` itself ends in a recognised executable extension —
+/// i.e. the author pinned a specific extension rather than writing a
+/// bare stem.
+fn names_an_extension(name: &str) -> bool {
+    strip_windows_extension(name).len() != name.len()
+}
+
 /// True iff `literal` (an exec-map key) and `candidate` (one of a
 /// command's identity strings) name the same executable.
 ///
 /// Off Windows this is a byte-exact comparison — the existing rule.
 /// Under Windows path semantics, command resolution is case-
-/// insensitive and PATHEXT makes the trailing extension transparent,
-/// so the comparison folds case and strips a recognised extension
-/// from both sides before comparing.  `windows` is a parameter rather
-/// than a `cfg(windows)` read inside this function so the Windows rule
-/// has a name and a unit test that runs on every host — the real
-/// platform gate lives at the one call site, [`lookup_literal`].
+/// insensitive and PATHEXT makes a *candidate's* trailing extension
+/// transparent, so an unextended `literal` (`git`) matches any
+/// PATHEXT-resolved candidate (`git.exe`, `GIT.CMD`, …) stem- and
+/// case-insensitively.  But a `literal` that itself names an extension
+/// (`git.exe`) is a pin, not a stem: the author asked for exactly that
+/// resolved form, so only case is folded, not the extension — a
+/// planted `git.com` (which default PATHEXT resolution tries first)
+/// must not slip through a `git.exe: 'allow'` pin. `windows` is a
+/// parameter rather than a `cfg(windows)` read inside this function so
+/// the Windows rule has a name and a unit test that runs on every host
+/// — the real platform gate lives at the one call site,
+/// [`lookup_literal`].
 fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
     if !windows {
         return literal == candidate;
     }
-    strip_windows_extension(literal).eq_ignore_ascii_case(strip_windows_extension(candidate))
+    if names_an_extension(literal) {
+        return literal.eq_ignore_ascii_case(candidate);
+    }
+    literal.eq_ignore_ascii_case(strip_windows_extension(candidate))
 }
 
 /// Find the deepest directory prefix that covers any absolute
@@ -315,6 +337,20 @@ mod tests {
         assert!(!names_match("git", "gitk.exe", true));
     }
 
+    /// M1 regression: a literal that itself names an extension is a
+    /// pin, not a stem — it must not admit a different PATHEXT
+    /// candidate for the same stem.  Without this, a profile pinning
+    /// `git.exe: 'allow'` would also admit a planted `git.com`, which
+    /// default PATHEXT resolution tries first.
+    #[test]
+    fn windows_names_match_extension_pin_is_exact() {
+        assert!(names_match("git.exe", "git.exe", true));
+        assert!(names_match("git.exe", "GIT.EXE", true));
+        assert!(!names_match("git.exe", "git.com", true));
+        assert!(!names_match("git.exe", "git.bat", true));
+        assert!(!names_match("git.exe", "git", true));
+    }
+
     #[test]
     fn strip_windows_extension_leaves_unknown_extensions_alone() {
         assert_eq!(strip_windows_extension("my.tool"), "my.tool");
@@ -325,7 +361,7 @@ mod tests {
     #[test]
     fn lookup_literal_exact_match_always_hits() {
         let literals = BTreeMap::from([("git".to_string(), ExecPolicy::Allow)]);
-        assert_eq!(lookup_literal(&literals, "git"), Some(&ExecPolicy::Allow));
+        assert_eq!(lookup_literal(&literals, "git"), Some(ExecPolicy::Allow));
     }
 
     /// `lookup_literal` itself reads the real `cfg(windows)`, so a case
@@ -338,5 +374,25 @@ mod tests {
         let literals = BTreeMap::from([("git".to_string(), ExecPolicy::Allow)]);
         let hit = lookup_literal(&literals, "Git");
         assert_eq!(hit.is_some(), cfg!(windows));
+    }
+
+    /// M2 regression: `GIT` and `git` are fold-equal keys under Windows
+    /// path identity.  A `BTreeMap` keeps them as two entries, so a
+    /// naive first-match scan resolves the collision by iteration
+    /// order — here `"GIT" < "git"` byte-wise, so the pre-fix `.find`
+    /// would return `GIT`'s `Allow` and never see `git`'s `Deny`.  The
+    /// fix meet-folds every fold-equal hit, so the veto always wins
+    /// regardless of order.
+    #[test]
+    fn lookup_literal_meets_fold_equal_keys_deny_wins() {
+        let literals = BTreeMap::from([
+            ("GIT".to_string(), ExecPolicy::Allow),
+            ("git".to_string(), ExecPolicy::Deny),
+        ]);
+        let hit = lookup_literal(&literals, "Git.exe");
+        assert_eq!(hit.is_some(), cfg!(windows));
+        if cfg!(windows) {
+            assert_eq!(hit, Some(ExecPolicy::Deny));
+        }
     }
 }
