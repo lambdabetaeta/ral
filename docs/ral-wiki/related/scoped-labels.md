@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 7c1b647
+verified_at_commit: a7eb4f7
 verified_at_date: 2026-07-13
 against: [design/row-types, internals/type-inference, design/scoping]
 ---
