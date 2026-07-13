@@ -35,8 +35,9 @@ pub(super) struct SandboxSelf {
     /// Platform anchor binding `exec_path` to the boot inode.
     #[allow(dead_code)]
     pin: Pin,
-    /// Exec target passed to `Command::new`.  Read on Unix only.
-    #[cfg_attr(windows, allow(dead_code))]
+    /// Exec target passed to `Command::new` on Unix, and — on Windows —
+    /// the bundled-tool self-reexec image the AppContainer is granted RO
+    /// access to (see [`self_exec_path`]).
     exec_path: PathBuf,
     /// `argv[0]` for the spawned child.  Read on Unix only.
     #[cfg_attr(windows, allow(dead_code))]
@@ -83,6 +84,19 @@ pub(super) fn self_exec_path_string() -> Option<String> {
     SANDBOX_SELF
         .get()
         .map(|s| s.exec_path.to_string_lossy().into_owned())
+}
+
+/// The pinned self exec path (Windows), for granting the AppContainer read
+/// access to the bundled-tool self-reexec image (`ral.exe`).  Falls back to
+/// the live `current_exe` when the binary was not pinned; `None` only if that
+/// also fails, in which case the image is left ungranted and its readability
+/// rests on the fs read projection.
+#[cfg(windows)]
+pub(super) fn self_exec_path() -> Option<PathBuf> {
+    if let Some(s) = SANDBOX_SELF.get() {
+        return Some(s.exec_path.clone());
+    }
+    std::env::current_exe().ok()
 }
 
 /// How we keep `exec_path` bound to the binary we registered.

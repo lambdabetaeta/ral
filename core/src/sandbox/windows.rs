@@ -69,6 +69,13 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
             "no network capability SID granted; the LowBox token cannot open a socket"
         }
     ));
+    out.push_str(
+        "  program image: the confined child's binary is granted RO (read+execute)\n\
+             \x20     so the LowBox token can load it (an absolute host path or the\n\
+             \x20     bundled-tool ral.exe; a bare-name host program rests on the fs\n\
+             \x20     read projection / ALL APPLICATION PACKAGES) -- mirrors the Linux\n\
+             \x20     bind of the program path\n",
+    );
     out.push_str("  fs allow-ACEs (SID = the profile's AppContainer SID):\n");
     if let Some(fs) = policy.fs.as_policy() {
         out.push_str("    read-write (FILE_GENERIC_READ|WRITE|EXECUTE|DELETE):\n");

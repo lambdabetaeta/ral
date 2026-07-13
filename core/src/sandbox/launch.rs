@@ -92,11 +92,22 @@ fn windows_sandboxed_command(
     target: LaunchTarget,
     args: &[String],
 ) -> Settled<crate::process::Launch> {
-    let mut launch = match target {
+    // The AppContainer child must be able to read+execute its program image;
+    // a user-installed binary is not readable by the LowBox token otherwise
+    // (only the ALL APPLICATION PACKAGES system paths are).  `session::confine`
+    // stamps this path RO, mirroring the Linux backend binding the program
+    // path RO into the bwrap argv.
+    let (mut launch, image): (crate::process::Launch, Option<std::path::PathBuf>) = match target {
         LaunchTarget::Host { program } => {
             let mut launch = crate::process::Launch::new(program);
             launch.args(args);
-            launch
+            // Only an absolute program path can be granted here: a bare name
+            // resolves on PATH by the loader (System32 tools are ALL
+            // APPLICATION PACKAGES-readable), and a name we have not resolved
+            // is not a path we can stamp — so a bare-name image's readability
+            // rests on the fs read projection / AAP, not on an image grant.
+            let image = crate::path::is_absolute(program).then(|| std::path::PathBuf::from(program));
+            (launch, image)
         }
         LaunchTarget::BundledTool { tool } => {
             use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
@@ -108,10 +119,13 @@ fn windows_sandboxed_command(
             })?;
             launch.arg(tool);
             launch.args(args);
-            launch
+            // The confined child is ral.exe itself; grant it RO so the token
+            // can load the image the `--ral-bundled-tool` self-reexec targets.
+            let image = super::reexec::self_exec_path();
+            (launch, image)
         }
     };
-    super::windows::session::confine(&mut launch, projection)?;
+    super::windows::session::confine(&mut launch, projection, image.as_deref())?;
     Ok(launch)
 }
 

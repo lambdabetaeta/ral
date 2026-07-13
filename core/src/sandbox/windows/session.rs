@@ -19,7 +19,7 @@
 //!   exit, so this is the explicit cleanup path; a session that exits without
 //!   reaching it leaves its ledger for the next boot's sweep.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
@@ -94,20 +94,34 @@ fn profile_name() -> String {
 }
 
 /// Confine `launch` under this session's AppContainer: ensure the profile
-/// exists, stamp the projection's fs prefixes into the session DACL guard,
-/// and attach the `SECURITY_CAPABILITIES` (profile SID + network capability
-/// SIDs) the spawn boundary threads into `CreateProcessW`.
+/// exists, stamp the projection's fs prefixes (plus the program image) into
+/// the session DACL guard, and attach the `SECURITY_CAPABILITIES` (profile
+/// SID + network capability SIDs) the spawn boundary threads into
+/// `CreateProcessW`.
+///
+/// `program_image`, when `Some`, is the resolved path of the binary the child
+/// will execute; it is granted RO (read + execute) so the LowBox token can
+/// load the image — parity with the Linux backend binding the program path RO
+/// into the bwrap argv, since a user-installed image is otherwise unreadable
+/// to the AppContainer. `None` (a bare-name host program the caller could not
+/// resolve) leaves the image's readability to the fs read projection / the
+/// `ALL APPLICATION PACKAGES` system paths.
 ///
 /// The profile SID and capability SIDs outlive every spawn: the session owns
 /// them for the process lifetime, so `launch` may safely borrow their raw
 /// values into the attribute list it copies at spawn time.
 ///
-/// An `Unrestricted` fs projection stamps no prefixes — the AppContainer is
-/// deny-by-default, so such a child reads only the `ALL APPLICATION PACKAGES`
-/// system paths. The projection's `deny_paths` are not stamped: AppContainer
-/// grants are allow-only, and a deny nested inside a granted prefix is a rule
-/// this backend cannot express.
-pub(crate) fn confine(launch: &mut Launch, projection: &SandboxProjection) -> Settled<()> {
+/// An `Unrestricted` fs projection stamps no projection prefixes (only the
+/// program image, if any) — the AppContainer is deny-by-default, so such a
+/// child otherwise reads only the `ALL APPLICATION PACKAGES` system paths. The
+/// projection's `deny_paths` are not stamped: AppContainer grants are
+/// allow-only, and a deny nested inside a granted prefix is a rule this
+/// backend cannot express.
+pub(crate) fn confine(
+    launch: &mut Launch,
+    projection: &SandboxProjection,
+    program_image: Option<&Path>,
+) -> Settled<()> {
     let mut guard = cell().lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(SessionSandbox::create()?);
@@ -121,12 +135,18 @@ pub(crate) fn confine(launch: &mut Launch, projection: &SandboxProjection) -> Se
 
     let spec = projection.bind_spec();
     let readwrite: Vec<PathBuf> = spec.write_prefixes.iter().map(PathBuf::from).collect();
-    let readonly: Vec<PathBuf> = spec
+    let mut readonly: Vec<PathBuf> = spec
         .read_prefixes
         .iter()
         .filter(|p| !spec.write_prefixes.contains(*p))
         .map(PathBuf::from)
         .collect();
+    if let Some(image) = program_image {
+        let image = image.to_path_buf();
+        if !readwrite.contains(&image) && !readonly.contains(&image) {
+            readonly.push(image);
+        }
+    }
     sandbox
         .dacl
         .grant_appcontainer_access(&sid_str, &readwrite, &readonly)

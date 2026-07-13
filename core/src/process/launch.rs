@@ -393,14 +393,9 @@ impl Launch {
     /// a `CapabilitySids`' entries). `app_container_sid` and every SID inside
     /// `capabilities` must stay valid until [`Self::spawn`] returns: this
     /// only borrows their raw values into the attribute list at spawn time,
-    /// it does not take ownership.
-    ///
-    /// No caller sets this yet — the per-command sandbox launcher
-    /// (`sandbox/launch.rs`, W1c) is where it gets threaded through.
-    #[allow(
-        dead_code,
-        reason = "wired by the W1c per-command sandbox launcher, not yet landed"
-    )]
+    /// it does not take ownership.  The per-command sandbox launcher
+    /// (`sandbox::windows::session::confine`) threads a session-owned profile
+    /// SID and capability array through here.
     pub fn security_capabilities(
         &mut self,
         app_container_sid: PSID,
