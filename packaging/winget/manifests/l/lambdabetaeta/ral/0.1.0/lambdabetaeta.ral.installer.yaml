@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+PackageIdentifier: lambdabetaeta.ral
+PackageVersion: 0.1.0
+InstallerType: portable
+Commands:
+  - ral
+InstallModes:
+  - interactive
+  - silent
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/lambdabetaeta/ral/releases/download/v0.1.0/ral-windows.exe
+    InstallerSha256: 5504C40A0DA2E400A202638E97AA67B8C3B24ACD07D9965E332DB13E3EC8259E
+ManifestType: installer
+ManifestVersion: 1.10.0

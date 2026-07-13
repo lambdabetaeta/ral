@@ -106,9 +106,13 @@ The Exarch process itself is not sandboxed — it still needs HTTPS for
 the model API.  Each tool call is evaluated as a top-level turn under
 the profile's caps; when those caps include filesystem or network
 restrictions, ral re-execs a child process under the platform sandbox
-(Seatbelt on macOS, bwrap on Linux) and the child evaluates the
-computation there, returning the post-run program state to the parent.
-Exec permissions are checked in ral before spawning; file/network
-permissions are also enforced by the OS sandbox where supported.
+(Seatbelt on macOS, bwrap on Linux, a per-command AppContainer LowBox
+token on Windows) and the child evaluates the computation there,
+returning the post-run program state to the parent. Exec permissions
+are checked in ral before spawning; file/network permissions are also
+enforced by the OS sandbox where supported. On Windows the fs
+allow-list is enforced by ACEs stamped for the AppContainer's SID on
+the granted prefixes, and `net: false` withholds the network
+capability SIDs so a denied command cannot open a socket at all.
 
 Treat Exarch as a development tool, not a hardened jail.

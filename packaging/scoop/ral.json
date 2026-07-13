@@ -1,0 +1,29 @@
+{
+    "##": [
+        "Tracks ral-windows.exe from build-binaries.yml's build-windows job; the",
+        "allutils variant (ral-windows-allutils.exe) is not packaged separately.",
+        "hash is the sha256 published alongside the release asset as",
+        "ral-windows.exe.sha256 -- update both together on every version bump.",
+        "Does not include ral-sh: a POSIX login-shell shim with no Windows",
+        "equivalent."
+    ],
+    "version": "0.1.0",
+    "description": "A shell grounded on algebraic effects",
+    "homepage": "https://github.com/lambdabetaeta/ral",
+    "license": "MIT OR Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/lambdabetaeta/ral/releases/download/v0.1.0/ral-windows.exe#/ral.exe",
+            "hash": "5504c40a0da2e400a202638e97aa67b8c3b24acd07d9965e332db13e3ec8259e"
+        }
+    },
+    "bin": "ral.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/lambdabetaeta/ral/releases/download/v$version/ral-windows.exe#/ral.exe"
+            }
+        }
+    }
+}

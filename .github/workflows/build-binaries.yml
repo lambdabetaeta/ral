@@ -149,7 +149,7 @@ jobs:
           path: target/release/ral.exe
           if-no-files-found: error
 
-  # exarch — built for Linux + macOS only (no Windows target, no
+  # exarch — built for Linux, macOS, and Windows (no
   # `coreutils,diffutils,grep,ripgrep` features — those belong to ral).  Same
   # toolchains as the ral matrix above.
   build-exarch-linux-x86_64:
@@ -199,6 +199,19 @@ jobs:
           path: target/release/exarch
           if-no-files-found: error
 
+  build-exarch-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: cargo build --release -p exarch
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: exarch-windows
+          path: target/release/exarch.exe
+          if-no-files-found: error
+
   # Two publish jobs share the matrix.  They only differ in trigger
   # and the resulting tag/prerelease flag; the rename + checksum block
   # is identical, and softprops/action-gh-release uses GITHUB_TOKEN
@@ -217,6 +230,7 @@ jobs:
       - build-exarch-linux-x86_64
       - build-exarch-linux-arm64
       - build-exarch-macos
+      - build-exarch-windows
     # Rolling `latest` prerelease: manual dispatch only.
     # Tag pushes go to release-versioned below.
     if: github.event_name == 'workflow_dispatch'
@@ -242,6 +256,7 @@ jobs:
           mv artifacts/exarch-linux-x86_64/exarch       artifacts/exarch-linux-x86_64/exarch-linux-x86_64
           mv artifacts/exarch-linux-arm64/exarch        artifacts/exarch-linux-arm64/exarch-linux-arm64
           mv artifacts/exarch-macos-arm64/exarch        artifacts/exarch-macos-arm64/exarch-macos-arm64
+          mv artifacts/exarch-windows/exarch.exe        artifacts/exarch-windows/exarch-windows.exe
 
       - name: Generate checksums
         run: |
@@ -279,6 +294,8 @@ jobs:
             artifacts/exarch-linux-arm64/exarch-linux-arm64.sha256
             artifacts/exarch-macos-arm64/exarch-macos-arm64
             artifacts/exarch-macos-arm64/exarch-macos-arm64.sha256
+            artifacts/exarch-windows/exarch-windows.exe
+            artifacts/exarch-windows/exarch-windows.exe.sha256
 
   release-versioned:
     needs: *build_jobs
@@ -306,6 +323,7 @@ jobs:
           mv artifacts/exarch-linux-x86_64/exarch       artifacts/exarch-linux-x86_64/exarch-linux-x86_64
           mv artifacts/exarch-linux-arm64/exarch        artifacts/exarch-linux-arm64/exarch-linux-arm64
           mv artifacts/exarch-macos-arm64/exarch        artifacts/exarch-macos-arm64/exarch-macos-arm64
+          mv artifacts/exarch-windows/exarch.exe        artifacts/exarch-windows/exarch-windows.exe
 
       - name: Generate checksums
         run: |

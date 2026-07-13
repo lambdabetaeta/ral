@@ -2,7 +2,7 @@
 
 A shell grounded on algebraic effects.
 
-ral is a Unix shell built on one idea: **running an external command is
+ral is a shell built on one idea: **running an external command is
 performing an algebraic effect.** A command like `git` is an *operation* — it is
 performed, it returns once, and its meaning is supplied by its *interpretation*,
 which by default is the operating system carrying out the syscall. Separating
@@ -141,6 +141,30 @@ brew install ral       # the shell, with ral-sh
 brew install exarch    # optional: the coding agent
 ```
 
+On Windows:
+
+```powershell
+irm https://lambdabetaeta.github.io/ral/scripts/install.ps1 | iex
+```
+
+Or via [Scoop](https://scoop.sh), installing the manifest directly (no bucket
+to add):
+
+```powershell
+scoop install https://raw.githubusercontent.com/lambdabetaeta/ral/main/packaging/scoop/ral.json
+```
+
+A [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/)
+manifest lives at
+[`packaging/winget/`](packaging/winget/manifests/l/lambdabetaeta/ral/0.1.0),
+ready for submission to `microsoft/winget-pkgs`; until it lands there,
+install from the local manifest:
+
+```powershell
+git clone https://github.com/lambdabetaeta/ral
+winget install --manifest ral/packaging/winget/manifests/l/lambdabetaeta/ral/0.1.0
+```
+
 Or from source:
 
 ```sh
@@ -170,6 +194,29 @@ tools — scp, rsync, git-over-ssh — never notice. Register it and switch:
 sudo sh -c "echo $(command -v ral-sh) >> /etc/shells"
 chsh -s "$(command -v ral-sh)"
 ```
+
+## Windows
+
+ral runs natively on Windows, MSVC-built: the interactive session (structural
+and rustyline frontends), pipelines, redirects, and `&` backgrounding all
+work; scripts authored with CRLF line endings parse; the bundled coreutils
+subset covers everyday use. Each external command inside a `grant` is
+confined by a per-command AppContainer (LowBox token) — the fs allow-list is
+enforced by ACEs stamped for the container's SID on the granted prefixes, and
+`net: false` is enforced by withholding the network capability SIDs, so a
+denied command cannot open a socket at all. This confinement is exercised on
+CI, not merely asserted.
+
+Documented degradations, not bugs:
+
+- No Ctrl-Z / stopped jobs — there is no SIGTSTP analogue; `fg` blocks on
+  whole-job completion and `bg` is a no-op.
+- No `ral-sh` — it is a POSIX login-shell bridge (`/bin/sh`, `/etc/shells`);
+  the concept does not exist on Windows.
+- No `--engine` mode — its wire transport is a Unix socketpair with fd
+  handoff.
+- A smaller coreutils subset: `id`, `stat`, `kill`, `test`, and `tac` are
+  Unix-only and are not built; `timeout` is a scoped follow-up.
 
 ## Around the shell
 

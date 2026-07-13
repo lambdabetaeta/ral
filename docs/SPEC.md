@@ -1501,25 +1501,45 @@ OS-level enforcement varies:
   system directories (`/bin`, `/usr`, `/lib*`, `/sys`, and
   selected `/etc` files) bound read-only alongside the granted
   prefixes.
-- **Windows / non-Unix** — in-process `exec` / `fs` checks still
-  apply (and `net` has no in-process gate), but OS-level fs/net
-  confinement is unavailable (no bubblewrap, no Seatbelt).  Consequently, when an evaluation
-  boundary observes an active `SandboxProjection` (any non-empty `fs`
-  policy, or `net: false`) and the OS backend reports itself
-  unavailable, the boundary **fails closed**: it returns
-  `Break::Error` whose message reads
-  `sandbox confinement unavailable: <reason>`, and the body never
-  runs.  A silent local fallback would weaken the user's explicit
-  restriction; the implementation refuses to run instead.  Each
-  external command inside a `grant` is still assigned to a Job
-  Object capping its process tree at 512 — that limit operates
-  through the process-spawn machinery and does not depend on the
-  fs/net sandbox backend.
+- **Windows** — a per-command AppContainer (LowBox token): one profile
+  per shell session, created lazily on first use and torn down at
+  session exit.  A spawned command is confined under it when `fs:` is
+  present or `net` is `false`; pure exec attenuation does not enter
+  the OS sandbox (AppContainer has no path-based exec filter — as on
+  Linux, the in-process exec check is the only gate).  Fs grants are
+  expressed as allow-ACEs stamped for the AppContainer's SID on the
+  projection's read and read-write prefixes, inheritable so a
+  directory's descendants are covered without a manual walk; every
+  stamp is written to a session ledger before the ACL is touched, so
+  a session that crashes mid-grant is repaired by the next session's
+  boot-time sweep rather than left with dangling ACEs on user
+  directories.  AppContainer is deny-by-default, which cuts the
+  opposite way from macOS/Linux: when the active projection has no
+  `fs:` grant (confinement triggered by `net: false` alone), the
+  child still reads only the `ALL APPLICATION PACKAGES`-readable
+  system paths, not the user's working tree — there is no "pass fs
+  through" fallback as under Seatbelt/bwrap.  Network is
+  capability-based: `net: true` grants the `internetClient` +
+  `privateNetworkClientServer` capability SIDs; `net: false` grants
+  neither, and a LowBox token holding no network capability cannot
+  open a socket at all — real kernel-enforced denial, not a
+  fail-closed refusal to run.  `deny_paths` are not expressed by this
+  backend — AppContainer grants are allow-only, so a `deny` nested
+  inside a granted prefix is not enforced at the OS layer (the
+  in-process gate still evaluates it).  Each external command inside
+  a `grant` is additionally assigned to a Job Object capping its
+  process tree at 512 — that limit operates through the process-spawn
+  machinery and does not depend on the fs/net sandbox backend.
 
 On macOS and Linux, when a sandboxed command fails after a
 kernel-level denial, the error's hint reproduces the denial lines
 the kernel attributed to the command's process tree — naming the
 denied path under Seatbelt, the blocked syscall under seccomp.
+Windows has no equivalent audit log to attribute: an AppContainer
+denial surfaces only as `ERROR_ACCESS_DENIED` on the confined child,
+so a sandboxed failure there gets a fixed, pathless hint pointing at
+the grant's `fs:`/`net:` keys instead of a scraped kernel line — it
+never fabricates a path it does not have.
 
 ### 11.9  Capability profiles (`.ral` files)
 
@@ -2121,6 +2141,12 @@ optional (developers usually have system coreutils); `exarch` enables
 it unconditionally so a sealed profile is reproducible without
 depending on the host's `cp` or `mv`.
 
+A Unix-only subset — `id`, `stat`, `kill`, `test`, `tac` — does not
+build on Windows and is dropped from the bundled set there; `which`
+and help output do not advertise them on that platform.  `timeout` is
+a scoped follow-up (its uucore implementation depends on a Unix-only
+primitive) rather than a permanent exclusion.
+
 Filesystem effects (`cp`, `mv`, `rm`, `mkdir`, `ln`, `chmod`, …) are
 the canonical way to perform mutations: there are no `copy-file` /
 `make-dir` / `remove-file` primitives.  Effects don't return
@@ -2657,6 +2683,11 @@ it `exec`s `ral`, and in every other case (`-c`, a script path,
 piped stdin, unknown flags) it `exec`s `/bin/sh`.  Registration is
 the usual `chsh -s /usr/local/bin/ral-sh` after adding the path to
 `/etc/shells`.
+
+`ral-sh` does not exist on Windows: the login-shell concept it
+bridges — a registered `/bin/sh`, `/etc/shells`, `chsh` — is POSIX,
+not Windows, machinery.  The crate compiles to a stub there and is
+excluded from Windows CI and release artifacts.
 
 ### 21.2  Login-shell semantics
 
