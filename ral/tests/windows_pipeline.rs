@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 //! Windows-only pipeline integration tests.
 //!
 //! Cover the surfaces that the Windows port had to grow from scratch:

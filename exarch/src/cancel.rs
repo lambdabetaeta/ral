@@ -189,7 +189,7 @@ impl Drop for SlotGuard {
 /// signal-handler slot: production code observes cancellation through the
 /// threaded [`Token`] directly, so the slot's boolean is read only here.
 /// False when no trunk is publishing.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn is_set() -> bool {
     let p = CURRENT.load(Ordering::Acquire);
     // SAFETY: a non-null slot points into the allocation `publish` leaks, so

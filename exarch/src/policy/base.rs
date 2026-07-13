@@ -36,7 +36,9 @@ const READ_ONLY_RAL: &str = include_str!("../../data/read-only.exarch.ral");
 const EDIT_ONLY_RAL: &str = include_str!("../../data/edit-only.exarch.ral");
 const CONFINED_RAL: &str = include_str!("../../data/confined.exarch.ral");
 const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
-#[cfg(test)]
+// Unix-gated with its only consumers: the extension-join tests below,
+// whose fixtures are Unix-shaped (`/usr/bin`, Homebrew trees).
+#[cfg(all(test, unix))]
 const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 
 /// Resolve `name` to a frozen [`Capabilities`], resolving every sigil
@@ -120,8 +122,14 @@ pub(super) fn root_fs_policy() -> FsPolicy {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use ral_core::path::sigil::{FreezeCtx, expand_path_prefix};
-    use ral_core::types::{Capabilities, ExecDir, ExecPolicy, Shell};
+    use ral_core::path::sigil::FreezeCtx;
+    // Used only by the Unix-fixture tests below; gated so the Windows
+    // build of this module stays warning-free.
+    #[cfg(unix)]
+    use ral_core::path::sigil::expand_path_prefix;
+    #[cfg(unix)]
+    use ral_core::types::ExecPolicy;
+    use ral_core::types::{Capabilities, ExecDir, Shell};
     use std::path::Path;
 
     /// Load and freeze a bake-in against `ctx`.  Freezing happens inside

@@ -168,11 +168,21 @@ mod tests {
         ));
         std::fs::write(&path, "return [exec: [ls: 'allow']]\n").unwrap();
 
+        // Per-platform fixtures, kept separate rather than genericised:
+        // the `/` ceiling freezes to the native root spelling (`\` on
+        // Windows — still a universal prefix under Windows path
+        // identity, since it folds to zero components), and the cwd is
+        // shaped for the host it runs on.
+        let (cwd, root) = if cfg!(windows) {
+            (r"C:\", r"\")
+        } else {
+            ("/", "/")
+        };
         let (caps, _) =
-            for_invocation("/", "dangerous", None, std::slice::from_ref(&path)).unwrap();
+            for_invocation(cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
         let fs = caps.fs.expect("restrict file should install fs carve-out");
-        assert_eq!(fs.read_prefixes, vec!["/"]);
-        assert_eq!(fs.write_prefixes, vec!["/"]);
+        assert_eq!(fs.read_prefixes, vec![root]);
+        assert_eq!(fs.write_prefixes, vec![root]);
         assert!(
             fs.deny_paths.iter().any(|p| *p == *path.to_string_lossy()),
             "restrict file path should be write-denied"

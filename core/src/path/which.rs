@@ -165,6 +165,10 @@ pub fn file_exists_on_path(name: &str, path: &str, cwd: Option<&Path>) -> Option
 /// `%PATHEXT%` (defaulting to `.COM;.EXE;.BAT;.CMD`).  We mirror the
 /// same fallback so `locate("python")` finds `python.exe`.
 #[cfg(windows)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir — a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
+)]
 fn windows_command_candidates(base: &Path) -> Vec<PathBuf> {
     use std::ffi::OsStr;
     let mut out = Vec::new();

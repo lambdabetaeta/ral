@@ -770,6 +770,10 @@ mod windows {
     /// until a from-scratch, tested port of that quoting exists (see the
     /// ADR at `docs/ral-wiki/decisions/260702_windows-spawn-boundary.md`,
     /// §"Treat command-line quoting as security").
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "FFI glue: the image name arrives as the `&OsStr` bound for CreateProcessW; the crate::path helpers are `&str`-shaped, and lossy-decoding a path to classify its extension would be the real hazard"
+    )]
     fn reject_batch(program: &OsStr) -> io::Result<()> {
         let Some(ext) = std::path::Path::new(program).extension() else {
             return Ok(());
@@ -1110,63 +1114,6 @@ mod windows {
         Ok(block)
     }
 
-    // ── Unicode round-trip (item W3.8) ──────────────────────────────────
-    //
-    // `wide_null` owns the program-path/cwd UTF-16 conversion and
-    // `environment_block` owns the env-block conversion; both are tested
-    // directly with non-ASCII and non-BMP (surrogate-pair) text. Only
-    // builds and runs on Windows CI (`OsStrExt::encode_wide` is
-    // Windows-only).
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn decode_wide_null(v: &[u16]) -> String {
-            let (last, body) = v.split_last().expect("non-empty");
-            assert_eq!(*last, 0, "wide_null must NUL-terminate");
-            String::from_utf16(body).expect("well-formed UTF-16")
-        }
-
-        #[test]
-        fn wide_null_round_trips_non_ascii_and_non_bmp() {
-            let s = "🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語";
-            let encoded = wide_null(OsStr::new(s)).unwrap();
-            assert_eq!(decode_wide_null(&encoded), s);
-        }
-
-        #[test]
-        fn wide_null_round_trips_a_non_ascii_program_path() {
-            let path = r"C:\Users\café\日本語プロジェクト\ral.exe";
-            let encoded = wide_null(OsStr::new(path)).unwrap();
-            assert_eq!(decode_wide_null(&encoded), path);
-        }
-
-        /// `environment_block` layers `edits` over the live process
-        /// environment; the round-trip claim under test is only about the
-        /// UTF-16 conversion of one injected non-ASCII/non-BMP entry, so
-        /// the assertion searches the decoded block for that entry's
-        /// `KEY=value\0` run rather than comparing the whole block (which
-        /// also carries whatever the test process inherited).
-        #[test]
-        fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
-            let key = super::super::env_key(OsStr::new("RAL_UNICODE_TEST_VAR"));
-            let value = OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
-            let edits = std::collections::BTreeMap::from([(key, EnvEdit::Set(value.clone()))]);
-            let block = environment_block(&edits).unwrap();
-            // The block is a flat run of NUL-terminated `KEY=value` pairs
-            // plus one extra trailing NUL marking the end of the whole
-            // block; strip that outer terminator, then decode and split
-            // on the per-entry NULs to search.
-            let (_, body) = block.split_last().expect("non-empty");
-            let text = String::from_utf16(body).expect("well-formed UTF-16");
-            let expected = format!("RAL_UNICODE_TEST_VAR={}", value.to_str().unwrap());
-            assert!(
-                text.split('\u{0}').any(|entry| entry == expected),
-                "expected entry {expected:?} not found in environment block"
-            );
-        }
-    }
-
     // ── Raw CreateProcessW child ───────────────────────────────────────────
     //
     // The owning handle to a child spawned through this module's raw
@@ -1269,6 +1216,63 @@ mod windows {
                 return Err(io::Error::last_os_error());
             }
             Ok(std::process::ExitStatus::from_raw(code))
+        }
+    }
+
+    // ── Unicode round-trip (item W3.8) ──────────────────────────────────
+    //
+    // `wide_null` owns the program-path/cwd UTF-16 conversion and
+    // `environment_block` owns the env-block conversion; both are tested
+    // directly with non-ASCII and non-BMP (surrogate-pair) text. Only
+    // builds and runs on Windows CI (`OsStrExt::encode_wide` is
+    // Windows-only).
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn decode_wide_null(v: &[u16]) -> String {
+            let (last, body) = v.split_last().expect("non-empty");
+            assert_eq!(*last, 0, "wide_null must NUL-terminate");
+            String::from_utf16(body).expect("well-formed UTF-16")
+        }
+
+        #[test]
+        fn wide_null_round_trips_non_ascii_and_non_bmp() {
+            let s = "🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語";
+            let encoded = wide_null(OsStr::new(s)).unwrap();
+            assert_eq!(decode_wide_null(&encoded), s);
+        }
+
+        #[test]
+        fn wide_null_round_trips_a_non_ascii_program_path() {
+            let path = r"C:\Users\café\日本語プロジェクト\ral.exe";
+            let encoded = wide_null(OsStr::new(path)).unwrap();
+            assert_eq!(decode_wide_null(&encoded), path);
+        }
+
+        /// `environment_block` layers `edits` over the live process
+        /// environment; the round-trip claim under test is only about the
+        /// UTF-16 conversion of one injected non-ASCII/non-BMP entry, so
+        /// the assertion searches the decoded block for that entry's
+        /// `KEY=value\0` run rather than comparing the whole block (which
+        /// also carries whatever the test process inherited).
+        #[test]
+        fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
+            let key = super::super::env_key(OsStr::new("RAL_UNICODE_TEST_VAR"));
+            let value = OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
+            let edits = std::collections::BTreeMap::from([(key, EnvEdit::Set(value.clone()))]);
+            let block = environment_block(&edits).unwrap();
+            // The block is a flat run of NUL-terminated `KEY=value` pairs
+            // plus one extra trailing NUL marking the end of the whole
+            // block; strip that outer terminator, then decode and split
+            // on the per-entry NULs to search.
+            let (_, body) = block.split_last().expect("non-empty");
+            let text = String::from_utf16(body).expect("well-formed UTF-16");
+            let expected = format!("RAL_UNICODE_TEST_VAR={}", value.to_str().unwrap());
+            assert!(
+                text.split('\u{0}').any(|entry| entry == expected),
+                "expected entry {expected:?} not found in environment block"
+            );
         }
     }
 }

@@ -285,6 +285,12 @@ pub fn terse_duration(d: Duration) -> String {
 /// Symlinks
 /// are not followed (their target may leave the probed tree); unreadable
 /// entries count zero rather than fail the fold.
+///
+/// Sizes are read per-path (`symlink_metadata`, which stats by handle)
+/// rather than from the `DirEntry` — on Windows the enumeration figure
+/// is the directory's *cached* size, which NTFS only refreshes when the
+/// last writer closes, so a live, still-open log file would probe as 0.
+/// `symlink_metadata` (not `metadata`) keeps the don't-follow rule.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"
@@ -296,11 +302,12 @@ pub fn dir_size(root: &Path) -> u64 {
     entries
         .flatten()
         .map(|entry| {
-            let Ok(meta) = entry.metadata() else {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 return 0;
             };
             if meta.is_dir() {
-                dir_size(&entry.path())
+                dir_size(&path)
             } else if meta.is_file() {
                 meta.len()
             } else {

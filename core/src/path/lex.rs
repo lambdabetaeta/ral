@@ -168,13 +168,17 @@ fn is_windows_absolute(path: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
 }
 
-/// True iff `path` is rooted under POSIX rules (a leading `/`) but not
-/// absolute under Windows rules — a Unix-absolute path (`/tmp`,
-/// `/usr/local/bin`) frozen on a build where it has a root but no
-/// drive letter, so it resolves nowhere.  Always `false` when
-/// `windows` is `false`: off Windows, "rooted" and "absolute" coincide
-/// (`NormalizedPrefix::is_absolute` already covers that case), so
-/// there is no foreign-rooted class to detect.
+/// True iff `path` has a root but is not absolute under Windows rules
+/// — a Unix-absolute path (`/tmp`, `/usr/local/bin`) frozen on a build
+/// where it has a root but no drive letter, so it resolves nowhere.
+/// Both separator spellings are recognised: the freeze pass folds the
+/// entry through `fold_dots` first, which re-renders the POSIX root as
+/// a native `\` (`/tmp` → `\tmp`), so by the time this check runs the
+/// leading slash may face either way.  A `\\`/`//` prefix is UNC and
+/// therefore absolute, excluded by the `is_windows_absolute` arm.
+/// Always `false` when `windows` is `false`: off Windows, "rooted" and
+/// "absolute" coincide (`NormalizedPrefix::is_absolute` already covers
+/// that case), so there is no foreign-rooted class to detect.
 ///
 /// `windows` is a parameter rather than a `cfg!(windows)` read so this
 /// classification has a fixed-outcome unit test on every host —
@@ -182,7 +186,7 @@ fn is_windows_absolute(path: &str) -> bool {
 /// `capability::exec::names_match`; the real platform gate lives at
 /// the one call site, `capability::decode`'s absoluteness check.
 pub(crate) fn is_foreign_rooted(path: &str, windows: bool) -> bool {
-    windows && path.starts_with('/') && !is_windows_absolute(path)
+    windows && matches!(path.as_bytes().first(), Some(b'/' | b'\\')) && !is_windows_absolute(path)
 }
 
 /// Resolve `path` against `cwd`, normalising `.` and `..`
@@ -380,6 +384,28 @@ mod tests {
     fn fold_dots_keeps_leading_dotdot_on_relative_path() {
         assert_eq!(fold_dots(Path::new("../x")), pb("../x"));
         assert_eq!(fold_dots(Path::new("a/../../x")), pb("../x"));
+    }
+
+    // Fixed-outcome on every host: `windows` is a parameter, so the
+    // full classification table is pinned without a Windows CI leg.
+    #[test]
+    fn foreign_rooted_classification() {
+        // Driveless-rooted, either separator: the freeze pass folds
+        // `/tmp` to `\tmp` on Windows before this check runs.
+        assert!(is_foreign_rooted("/tmp", true));
+        assert!(is_foreign_rooted(r"\tmp", true));
+        assert!(is_foreign_rooted("/usr/local/bin", true));
+        // Windows-absolute forms are not foreign: drive letter, UNC.
+        assert!(!is_foreign_rooted(r"C:\work", true));
+        assert!(!is_foreign_rooted("c:/work", true));
+        assert!(!is_foreign_rooted(r"\\server\share", true));
+        assert!(!is_foreign_rooted("//server/share", true));
+        // Genuinely relative paths stay in the strict-error class.
+        assert!(!is_foreign_rooted("proj", true));
+        assert!(!is_foreign_rooted("./a", true));
+        // Off Windows there is no foreign-rooted class at all.
+        assert!(!is_foreign_rooted("/tmp", false));
+        assert!(!is_foreign_rooted(r"\tmp", false));
     }
 
     #[test]

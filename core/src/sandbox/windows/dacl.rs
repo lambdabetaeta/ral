@@ -1834,10 +1834,7 @@ fn process_alive_with_image(
         return false;
     }
     let full = String::from_utf16_lossy(&buf[..sz as usize]);
-    let basename = Path::new(&full)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let basename = crate::path::basename(&full);
     if !basename.eq_ignore_ascii_case(expected_image) {
         return false;
     }

@@ -456,6 +456,10 @@ mod tests {
         assert_eq!(unrecognized_command("just a prompt"), None);
     }
 
+    // Per-platform twins rather than one genericised test: absoluteness
+    // is host-defined (`/tmp/out.txt` is not absolute on Windows), so
+    // each host pins its own native fixtures.
+    #[cfg(unix)]
     #[test]
     fn export_path_resolves_absolute_and_relative() {
         // An absolute path passes through (dots folded, cwd ignored).
@@ -467,6 +471,21 @@ mod tests {
         assert_eq!(
             resolve_export_path("notes.md", "/Users/me/proj").to_str(),
             Some("/Users/me/proj/notes.md")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn export_path_resolves_absolute_and_relative() {
+        // An absolute path passes through (dots folded, cwd ignored).
+        assert_eq!(
+            resolve_export_path(r"C:\scratch\out.txt", r"C:\Users\me\proj").to_str(),
+            Some(r"C:\scratch\out.txt")
+        );
+        // A relative path anchors at the launch cwd, not the process cwd.
+        assert_eq!(
+            resolve_export_path("notes.md", r"C:\Users\me\proj").to_str(),
+            Some(r"C:\Users\me\proj\notes.md")
         );
     }
 }

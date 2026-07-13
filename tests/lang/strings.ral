@@ -14,11 +14,12 @@ echo "hello $name"
 echo "line one\nline two"
 # Expected: line one (newline) line two
 
-# Multi-line literal
-let msg = 'first
+# Multi-line literal.  Named `stanza`, not `msg`: ral keeps value and
+# command names disjoint, and Windows ships `msg.EXE` on PATH.
+let stanza = 'first
 second
 third'
-echo $msg
+echo $stanza
 # Expected: first (newline) second (newline) third
 
 # Hash-bumped literals (embed quotes without escapes)

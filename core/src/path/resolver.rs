@@ -83,18 +83,21 @@ mod tests {
 
     /// A non-sigil relative path joins to `cwd` and normalises.
     /// The whole point of stage 2 is that grant prefix matching
-    /// always sees absolute paths.
+    /// always sees absolute paths.  The cwd fixture is per-platform
+    /// (a driveless `/work/proj` is not absolute on Windows), so the
+    /// stage-2 anchor is pinned on both hosts.
     #[test]
     fn resolve_anchors_relative_paths_to_cwd() {
-        let cwd = Path::new("/work/proj");
+        let cwd = if cfg!(windows) {
+            Path::new(r"C:\work\proj")
+        } else {
+            Path::new("/work/proj")
+        };
         let r = Resolver {
             home: "/h".into(),
             cwd: Some(cwd),
         };
-        assert_eq!(
-            r.resolve("src/lib.rs").as_path(),
-            Path::new("/work/proj/src/lib.rs")
-        );
+        assert_eq!(r.resolve("src/lib.rs").as_path(), cwd.join("src/lib.rs"));
     }
 
     /// `check` walks up to an existing ancestor when the full path is

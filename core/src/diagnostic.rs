@@ -562,7 +562,9 @@ macro_rules! dbg_trace {
 #[cfg(not(debug_assertions))]
 #[macro_export]
 macro_rules! dbg_trace {
-    ($tag:expr, $($arg:tt)*) => {};
+    ($tag:expr, $($arg:tt)*) => {
+        ()
+    };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
