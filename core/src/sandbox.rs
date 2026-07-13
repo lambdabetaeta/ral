@@ -452,7 +452,14 @@ mod tests {
             policy,
             Some(SandboxProjection {
                 fs: crate::types::FsProjection::Restricted(crate::types::FsPolicy {
-                    read_prefixes: vec!["/tmp".into()],
+                    // The wire boundary is trusted and transparent: it
+                    // deserializes the prefix verbatim without re-folding
+                    // (`.into()` would fold `/tmp` to `\tmp` on Windows and
+                    // diverge from the JSON above), so build the expected
+                    // prefix through the same non-folding deserialize path.
+                    read_prefixes: vec![
+                        serde_json::from_str::<crate::path::NormalizedPrefix>(r#""/tmp""#).unwrap(),
+                    ],
                     write_prefixes: Vec::new(),
                     deny_paths: Vec::new(),
                 }),

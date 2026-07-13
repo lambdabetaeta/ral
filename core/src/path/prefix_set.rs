@@ -174,13 +174,21 @@ mod tests {
             .map(NormalizedPrefix::into_string)
             .collect()
     }
+    /// The platform normal form of a path literal — `surface()` mints
+    /// its output through `NormalizedPrefix::from_surface`, whose
+    /// `fold_dots` kernel reconstructs each path with the host separator
+    /// (`/a/x` → `\a\x` on Windows).  Expected values pass through the
+    /// same kernel so the assertions hold on both Unix and Windows.
+    fn np(s: &str) -> String {
+        NormalizedPrefix::from_surface(s).into_string()
+    }
 
     #[test]
     fn meet_keeps_the_deeper_prefix_of_each_overlapping_pair() {
         // {/a,/b} ∩ {/a/x,/c} admits only /a/x (covered by /a on the left, itself on the right).
         assert_eq!(
             surface(&set(&["/a", "/b"]).meet(set(&["/a/x", "/c"]))),
-            vec!["/a/x".to_string()]
+            vec![np("/a/x")]
         );
     }
 
@@ -201,7 +209,7 @@ mod tests {
     fn union_accumulates_and_dedups() {
         assert_eq!(
             surface(&set(&["/a", "/b"]).union(set(&["/b", "/c"]))),
-            vec!["/a".to_string(), "/b".to_string(), "/c".to_string()]
+            vec![np("/a"), np("/b"), np("/c")]
         );
     }
 

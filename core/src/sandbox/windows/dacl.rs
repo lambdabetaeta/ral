@@ -298,6 +298,12 @@ struct AppliedAce {
     /// Every explicit ACE for our SID that existed before we applied,
     /// regardless of type.  Empty means "nothing to restore to but a bare
     /// revoke".
+    ///
+    /// `default` keeps ledgers written before this field existed parseable:
+    /// an empty vector is exactly the pre-`prior_state` recovery semantics —
+    /// restore drops our SID's explicit ACEs (bare revoke) without replaying
+    /// any captured prior ACE, which is what the old code always did.
+    #[serde(default)]
     prior_state: Vec<PriorAce>,
 }
 

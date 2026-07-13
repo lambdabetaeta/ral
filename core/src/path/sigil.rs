@@ -446,7 +446,11 @@ mod tests {
         // Sigils are opt-in; a sigil-free literal is frozen verbatim
         // (only `.`/`..` would fold, and there are none here).
         let paths = frozen(&["/tmp", "/etc/hosts"], &ctx("/h", Path::new("/cwd"))).unwrap();
-        assert_eq!(paths, vec!["/tmp".to_string(), "/etc/hosts".to_string()]);
+        // `fold_dots` reconstructs each path with the host separator, so
+        // the frozen form is `\tmp` on Windows and `/tmp` on Unix.
+        // Compare against the same kernel rather than a Unix-only literal.
+        let fold = |s: &str| fold_dots(Path::new(s)).to_string_lossy().into_owned();
+        assert_eq!(paths, vec![fold("/tmp"), fold("/etc/hosts")]);
     }
 
     /// Security regression (bug a): an `xdg:` sub-path that climbs out of

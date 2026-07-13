@@ -193,7 +193,7 @@ pub(crate) fn check_fs_op(
 /// inspector consult to short-circuit a denied head with a focused error.
 pub(crate) fn admits_head(ctx: &Context, id: &crate::runtime::command::CommandIdentity) -> bool {
     let allow = id.policy_names(ctx);
-    let deny = id.deny_names(ctx);
+    let deny = id.deny_names_from(allow.clone());
     let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
     let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
     let names = ExecNames {

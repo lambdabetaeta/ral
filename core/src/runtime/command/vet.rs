@@ -50,7 +50,7 @@ pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Se
     let arg_strs = validate_argv(id, args, shell)?;
     let policy_names = id.policy_names(&shell.mobile.context);
     let policy_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
-    let deny_names = id.deny_names(&shell.mobile.context);
+    let deny_names = id.deny_names_from(policy_names.clone());
     let deny_refs: Vec<&str> = deny_names.iter().map(String::as_str).collect();
     shell.check_exec_call(&id.shown, &deny_refs, &policy_refs, &arg_strs)?;
     let image = match &id.name {

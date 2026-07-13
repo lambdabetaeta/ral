@@ -49,11 +49,31 @@ impl CommandIdentity {
         let mut names = Vec::new();
         let mut include_rendered = true;
         if matches!(self.name, CommandName::Bare(_)) {
-            let baseline = std::env::var("PATH")
-                .ok()
-                .and_then(|path| crate::path::resolve_in_path(&self.shown, &path));
-            if baseline.as_deref() != Some(self.resolved.as_str()) && self.resolved != self.shown {
-                include_rendered = false;
+            // Anti-spoof: when a scoped `PATH` redirects a bare name to a
+            // different binary than the host `PATH` would find, drop the bare
+            // surface name so an outer grant keyed on it cannot silently
+            // admit the redirected binary.  This can only bite when the
+            // effective `PATH` diverges from the host `PATH`; when they are
+            // identical the baseline resolution equals `self.resolved` by
+            // construction (same walk, same inputs), so we skip the walk.
+            //
+            // The skip is the point: a PATH walk is cheap on Unix but costly
+            // on Windows (a filesystem probe per PATHEXT suffix in every PATH
+            // dir, each hit by Defender), and `policy_names` runs several
+            // times per command.  Avoiding the redundant baseline walk on the
+            // common (unscoped) path removes the bulk of bare-command
+            // dispatch cost there.
+            let host_path = std::env::var("PATH").ok();
+            let effective_path = ctx.env_overrides().get_or_host("PATH");
+            if host_path != effective_path {
+                let baseline = host_path
+                    .as_deref()
+                    .and_then(|path| crate::path::resolve_in_path(&self.shown, path));
+                if baseline.as_deref() != Some(self.resolved.as_str())
+                    && self.resolved != self.shown
+                {
+                    include_rendered = false;
+                }
             }
         }
         if include_rendered {
@@ -87,8 +107,13 @@ impl CommandIdentity {
     /// `policy_names`.  Basenames are added only when they differ from a
     /// name already present (a bare invocation already carries its bare
     /// name).
-    pub(crate) fn deny_names(&self, ctx: &Context) -> Vec<String> {
-        let mut names = self.policy_names(ctx);
+    ///
+    /// Callers that need only the broad set start from a freshly computed
+    /// [`policy_names`](Self::policy_names); the two live call sites
+    /// ([`admits_head`](crate::capability) and
+    /// [`vet`](crate::runtime::command)) need both and reuse one narrow set
+    /// so the (potentially PATH-walking) walk is paid for exactly once.
+    pub(crate) fn deny_names_from(&self, mut names: Vec<String>) -> Vec<String> {
         for base in [
             crate::path::basename(&self.resolved),
             crate::path::basename(&self.shown),
@@ -273,7 +298,7 @@ mod tests {
         let id = CommandIdentity::resolve(CommandName::Path("/bin/bash".into()), &ctx);
         let allow = id.policy_names(&ctx);
         let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
-        let deny = id.deny_names(&ctx);
+        let deny = id.deny_names_from(id.policy_names(&ctx));
         let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
 
         // Pre-fix shape: narrow set fed as both — the hole is open.
@@ -323,7 +348,7 @@ mod tests {
         let id = CommandIdentity::resolve(CommandName::Path("/tmp/evil/rg".into()), &ctx);
         let allow = id.policy_names(&ctx);
         let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
-        let deny = id.deny_names(&ctx);
+        let deny = id.deny_names_from(id.policy_names(&ctx));
         let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
 
         assert!(

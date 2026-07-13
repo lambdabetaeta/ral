@@ -30,6 +30,17 @@ fn strs(items: &[&str]) -> Value {
     Value::list(items.iter().map(|s| Value::String((*s).into())).collect())
 }
 
+/// The platform normal form of a path literal.  The capability
+/// composition stores dir keys and fs prefixes through
+/// `NormalizedPrefix::from_surface`, whose `fold_dots` kernel
+/// reconstructs each path with the host separator (`/usr/bin` →
+/// `\usr\bin` on Windows).  Test witnesses and expected values pass
+/// through the same kernel so the Unix-shaped literals stay meaningful
+/// on both Unix and Windows.
+fn np(s: &str) -> String {
+    crate::path::NormalizedPrefix::from_surface(s).into_string()
+}
+
 /// Unwrap a decode `Break` into its error message.
 fn break_msg(b: Break) -> String {
     match b {
@@ -73,7 +84,7 @@ fn witness_a() -> Capabilities {
                     ExecPolicy::Subcommands(BTreeSet::from(["log".into(), "status".into()])),
                 ),
             ]),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            dirs: BTreeMap::from([(np("/usr/bin"), ExecDir::Allow)]),
         }),
         fs: Some(FsPolicy {
             read_prefixes: vec!["/tmp".into()],
@@ -102,8 +113,8 @@ fn witness_b() -> Capabilities {
                 ("ls".into(), ExecPolicy::Allow),
             ]),
             dirs: BTreeMap::from([
-                ("/usr/bin".into(), ExecDir::Allow),
-                ("/usr/local/bin".into(), ExecDir::Allow),
+                (np("/usr/bin"), ExecDir::Allow),
+                (np("/usr/local/bin"), ExecDir::Allow),
             ]),
         }),
         fs: Some(FsPolicy {
@@ -222,8 +233,8 @@ fn meet_exec_intersects_and_meets_policies() {
     }
     assert!(!exec.literals.contains_key("git"));
     assert!(!exec.literals.contains_key("ls"));
-    assert!(exec.dirs.contains_key("/usr/bin"));
-    assert!(!exec.dirs.contains_key("/usr/local/bin"));
+    assert!(exec.dirs.contains_key(np("/usr/bin").as_str()));
+    assert!(!exec.dirs.contains_key(np("/usr/local/bin").as_str()));
 }
 
 /// `Deny` is sticky downward: a base ceiling that vetos `bash`
@@ -332,8 +343,8 @@ fn meet_exec_dirs_preserve_one_sided_deny() {
         ..Default::default()
     };
     let dirs = base.meet(restrict).exec.unwrap().dirs;
-    assert_eq!(dirs.get("/usr/bin"), Some(&ExecDir::Allow));
-    assert_eq!(dirs.get("/opt/danger"), Some(&ExecDir::Deny));
+    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Allow));
+    assert_eq!(dirs.get(np("/opt/danger").as_str()), Some(&ExecDir::Deny));
 }
 
 /// Security-inversion regression: an exact-key clash between an allow
@@ -356,7 +367,7 @@ fn meet_exec_dirs_deny_beats_allow() {
         ..Default::default()
     };
     let dirs = allow.meet(deny).exec.unwrap().dirs;
-    assert_eq!(dirs.get("/usr/bin"), Some(&ExecDir::Deny));
+    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Deny));
 }
 
 /// Deny-overrides on dirs too: an extend-base that re-grants the exact
@@ -379,7 +390,7 @@ fn join_exec_dirs_regrant_does_not_lift_deny() {
         ..Default::default()
     };
     let dirs = base.join(extend).exec.unwrap().dirs;
-    assert_eq!(dirs.get("/x"), Some(&ExecDir::Deny));
+    assert_eq!(dirs.get(np("/x").as_str()), Some(&ExecDir::Deny));
 }
 
 /// Dir veto is sticky under join too: a base that denies a directory
@@ -401,8 +412,8 @@ fn join_exec_dirs_keep_one_sided_deny() {
         ..Default::default()
     };
     let dirs = base.join(extend).exec.unwrap().dirs;
-    assert_eq!(dirs.get("/opt/danger"), Some(&ExecDir::Deny));
-    assert_eq!(dirs.get("/usr/bin"), Some(&ExecDir::Allow));
+    assert_eq!(dirs.get(np("/opt/danger").as_str()), Some(&ExecDir::Deny));
+    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Allow));
 }
 
 /// Meet keeps an allow-region intersection AND a covering deny carved
@@ -428,8 +439,8 @@ fn meet_exec_dirs_intersect_allow_keeps_covering_deny() {
         ..Default::default()
     };
     let dirs = broad.meet(carved).exec.unwrap().dirs;
-    assert_eq!(dirs.get("/usr"), Some(&ExecDir::Allow));
-    assert_eq!(dirs.get("/usr/bin"), Some(&ExecDir::Deny));
+    assert_eq!(dirs.get(np("/usr").as_str()), Some(&ExecDir::Allow));
+    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Deny));
 }
 
 /// IPC roundtrip: a `Capabilities` survives a JSON trip through the
@@ -447,9 +458,13 @@ fn ipc_roundtrip_preserves_frozen_capabilities() {
 fn meet_fs_unions_denies_and_intersects_prefixes() {
     let m = witness_a().meet(witness_b());
     let fs = m.fs.unwrap();
-    assert!(fs.read_prefixes.iter().any(|p| p == "/tmp/work"));
-    assert!(fs.deny_paths.iter().any(|p| p == "/tmp/secret"));
-    assert!(fs.deny_paths.iter().any(|p| p == "/tmp/work/.exarch.toml"));
+    assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp/work").as_str()));
+    assert!(fs.deny_paths.iter().any(|p| p == np("/tmp/secret").as_str()));
+    assert!(
+        fs.deny_paths
+            .iter()
+            .any(|p| p == np("/tmp/work/.exarch.toml").as_str())
+    );
 }
 
 /// Nesting an inner fs grant inside an outer one narrows authority to the
@@ -469,12 +484,12 @@ fn meet_fs_nested_grants_narrow_to_intersection() {
     };
     assert_eq!(
         surface(&fs.read_prefixes),
-        ["/tmp/work"],
+        [np("/tmp/work")],
         "read narrows to the deeper inner prefix, outer /tmp dropped"
     );
     assert_eq!(
         surface(&fs.write_prefixes),
-        ["/tmp/work"],
+        [np("/tmp/work")],
         "write narrows to the deeper inner prefix, outer /tmp dropped"
     );
 }
@@ -576,10 +591,14 @@ fn join_exec_widens_policies_and_unions_names() {
 fn join_fs_unions_prefixes_and_denies() {
     let m = witness_a().join(witness_b());
     let fs = m.fs.unwrap();
-    assert!(fs.read_prefixes.iter().any(|p| p == "/tmp"));
-    assert!(fs.read_prefixes.iter().any(|p| p == "/tmp/work"));
-    assert!(fs.deny_paths.iter().any(|p| p == "/tmp/secret"));
-    assert!(fs.deny_paths.iter().any(|p| p == "/tmp/work/.exarch.toml"));
+    assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp").as_str()));
+    assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp/work").as_str()));
+    assert!(fs.deny_paths.iter().any(|p| p == np("/tmp/secret").as_str()));
+    assert!(
+        fs.deny_paths
+            .iter()
+            .any(|p| p == np("/tmp/work/.exarch.toml").as_str())
+    );
 }
 
 /// Decode accepts known `xdg:` tokens (with and without a sub-path),
