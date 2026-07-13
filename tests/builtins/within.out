@@ -3,7 +3,7 @@ TEST_VAR correctly unset
 1
 2
 1
-/
+dir changed
 cwd restored
 handled
 got a b c
@@ -13,7 +13,6 @@ outer
 caught foo x y
 intercepted nonexistent-command
 builtin runs normally
-from external
 handler-cat
 env=scoped
 within tests done

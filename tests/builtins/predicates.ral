@@ -24,17 +24,17 @@ echo !{is-empty ''}
 echo !{is-empty 'hello'}
 
 # file-empty on filesystem paths
-mkdir -p /tmp/ral-pred-test
-echo !{file-empty /tmp/ral-pred-test}
-echo x > /tmp/ral-pred-test/file
-echo !{file-empty /tmp/ral-pred-test}
-rm -rf /tmp/ral-pred-test
+let tmpdir = temp-dir
+echo !{file-empty $tmpdir}
+echo x > "$tmpdir/file"
+echo !{file-empty $tmpdir}
 
 # Filesystem predicates
-echo !{exists /tmp}
-echo !{is-dir /tmp}
-echo !{is-file /tmp}
+echo !{exists $tmpdir}
+echo !{is-dir $tmpdir}
+echo !{is-file $tmpdir}
 echo !{exists /nonexistent_xyz}
+rm -rf $tmpdir
 
 # elem — list membership
 let assert_eq = { |name expected actual|

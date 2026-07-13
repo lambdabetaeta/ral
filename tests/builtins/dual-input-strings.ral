@@ -13,10 +13,14 @@ let lines1 = lines $text
 assert_eq 'read-lines length' 3 !{length $lines1}
 assert_eq 'read-lines second' b $lines1[1]
 
-# from-json from pipeline bytes
-let obj = /bin/echo '{"ok":true,"n":2}' | from-json
+# from-json from pipeline bytes (a real external process, not ral's own
+# `echo`, feeding the codec through an OS pipe)
+let tmpdir = temp-dir
+to-string '{"ok":true,"n":2}' > "$tmpdir/dual.json"
+let obj = !{cat "$tmpdir/dual.json" | from-json}
 assert_eq 'from-json bool' true $obj[ok]
 assert_eq 'from-json int' 2 $obj[n]
+rm -rf $tmpdir
 
 # to-json from explicit value, piped to from-json
 let round = to-json [x: 1, y: true] | from-json

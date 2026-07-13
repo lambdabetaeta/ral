@@ -2,20 +2,21 @@
 # Things you'd actually do in a deployment script
 
 # Build a config map from environment
+let tmpdir = temp-dir
 let config = [
     host: !{hostname | from-string},
     user: !{whoami | from-string},
-    tmpdir: /tmp,
+    tmpdir: $tmpdir,
 ]
 echo "host: $config[host]"
 echo "user: $config[user]"
 
 # Process a list of files with error handling
-echo test1 > /tmp/al-test-1.txt
-echo test2 > /tmp/al-test-2.txt
-echo test3 > /tmp/al-test-3.txt
+echo test1 > "$tmpdir/al-test-1.txt"
+echo test2 > "$tmpdir/al-test-2.txt"
+echo test3 > "$tmpdir/al-test-3.txt"
 
-let files = ['/tmp/al-test-1.txt', '/tmp/al-test-2.txt', '/tmp/al-test-3.txt']
+let files = ["$tmpdir/al-test-1.txt", "$tmpdir/al-test-2.txt", "$tmpdir/al-test-3.txt"]
 for $files { |f|
     let content = !{cat $f | from-string}
     echo "!{basename $f}: $content"
@@ -31,7 +32,7 @@ try {
 # Expected: caught error with status 1
 
 # Cleanup with explicit rm
-let cleanup_marker = '/tmp/al-cleanup-test'
+let cleanup_marker = "$tmpdir/al-cleanup-test"
 echo dirty > $cleanup_marker
 
 if !{is-file $cleanup_marker} {
@@ -41,11 +42,11 @@ rm $cleanup_marker
 # Expected: cleanup marker exists
 
 # Chained commands
-mkdir -p /tmp/al-chain-test
+mkdir -p "$tmpdir/al-chain-test"
     ? echo created
-    ? ls /tmp/al-chain-test > /dev/null
+    ? ls "$tmpdir/al-chain-test" > "$tmpdir/discard"
     ? echo verified
-    ? rm -r /tmp/al-chain-test
+    ? rm -r "$tmpdir/al-chain-test"
     ? echo cleaned
 # Expected: created, verified, cleaned
 
@@ -56,6 +57,7 @@ echo ...$big
 # Expected: 4 5 9 6
 
 # Cleanup test files
-rm /tmp/al-test-1.txt /tmp/al-test-2.txt /tmp/al-test-3.txt
+rm "$tmpdir/al-test-1.txt" "$tmpdir/al-test-2.txt" "$tmpdir/al-test-3.txt"
+rm -rf $tmpdir
 
 echo 'all done'

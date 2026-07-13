@@ -8,7 +8,9 @@
 // while the block is still running.  It errors only on a cancelled/forgotten
 // handle.  `is-done` is total over a finished handle (true on `` `settled ``,
 // false on `` `pending ``) and still propagates the detached error.
-#![cfg(unix)]
+//
+// Portable: every failing block here raises via the `fail` builtin rather
+// than shelling out, so there is nothing Unix-specific in this file.
 
 mod common;
 
@@ -129,7 +131,7 @@ fn pending_poll_does_not_consume_bytes_from_await() {
 fn poll_settled_err_carries_status_and_stderr() {
     let out = run_poll(
         r#"
-        let h = spawn { /bin/sh -c "echo before-fail >&2; exit 7" }
+        let h = spawn { echo before-fail 1>&2; fail [status: 7] }
         sleep 0.2
         let polled = poll $h
         case $polled [
@@ -169,7 +171,7 @@ fn poll_settled_err_carries_status_and_stderr() {
 fn poll_failed_is_consistent_across_calls() {
     let out = run_poll(
         r#"
-        let h = spawn { /bin/sh -c "echo diag >&2; exit 3" }
+        let h = spawn { echo diag 1>&2; fail [status: 3] }
         sleep 0.2
         let report = { |h|
             let p = poll $h
@@ -218,7 +220,7 @@ fn is_done_total_over_finished_handle() {
         let _ = await $ok
         echo "ok=!{is-done $ok}"
 
-        let bad = spawn { /bin/sh -c "exit 9" }
+        let bad = spawn { fail [status: 9] }
         sleep 0.2
         echo "bad=!{is-done $bad}"
         "#,
@@ -261,7 +263,7 @@ fn is_done_raises_on_cancelled_handle() {
 fn await_still_reraises_failed_block() {
     let out = run_poll(
         r#"
-        let h = spawn { /bin/sh -c "exit 5" }
+        let h = spawn { fail [status: 5] }
         let r = await $h
         echo "unreachable=$r[value]"
         "#,

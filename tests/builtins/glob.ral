@@ -1,6 +1,6 @@
 # Test: glob patterns — *, ?, [chars], **
 
-let tmpdir = '/tmp/al-glob-test'
+let tmpdir = temp-dir
 mkdir -p "$tmpdir/sub"
 
 # Create test files

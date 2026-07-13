@@ -26,9 +26,13 @@ let opts = [host: local, port: 3000]
 echo $opts[host]
 
 # Command arg spreading
-let files = [/tmp, /var]
-ls ...$files > /dev/null
+let d1 = temp-dir
+let d2 = temp-dir
+let files = [$d1, $d2]
+ls ...$files > "$d1/discard"
 echo 'spread worked'
+rm -rf $d1
+rm -rf $d2
 
 # Spread in echo
 let words = [hello, world]

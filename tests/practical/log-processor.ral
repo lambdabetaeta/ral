@@ -1,7 +1,6 @@
 # Test: generate log entries, process them, summarize.
 
-let logdir = '/tmp/al-logs'
-mkdir -p $logdir
+let logdir = temp-dir
 
 # Generate log lines into a single file
 let levels = [INFO, WARN, ERROR, INFO, INFO, ERROR, WARN, INFO, ERROR, INFO]

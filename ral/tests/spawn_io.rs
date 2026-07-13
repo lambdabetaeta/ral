@@ -5,11 +5,19 @@
 // Bytes are not auto-replayed: they only reach the caller's stdout/stderr
 // when the user reads the record fields.  A redirect inside the spawned
 // block bypasses the buffer entirely.
-#![cfg(unix)]
+//
+// Most of this is portable (ral builtins only).  Two tests stay
+// `#[cfg(unix)]`: they deliberately drive a real external process (rather
+// than a ral builtin) because their point is the external-process code
+// path specifically — an external's `>file` redirect never touching the
+// handle buffer, and an external's `2>&1` dup2 happening before ral's
+// parent observes anything.
 
 mod common;
 
-use common::{fresh_tmp_path, run};
+#[cfg(unix)]
+use common::fresh_tmp_path;
+use common::run;
 
 fn run_io(script: &str) -> common::Output {
     run("ral_spawn_io", script)
@@ -104,7 +112,10 @@ fn unawaited_spawns_do_not_leak() {
 }
 
 // A redirect inside the spawned block sends bytes to the file, bypasses the
-// handle buffer, so the awaited record's `stdout` field is empty.
+// handle buffer, so the awaited record's `stdout` field is empty.  Unix-only:
+// exercises a real external process's redirect specifically (`/bin/echo`),
+// distinct from a builtin's redirect handling.
+#[cfg(unix)]
 #[test]
 fn redirect_bypasses_record() {
     let logfile = fresh_tmp_path("ral_spawn_io_redir", "log");
@@ -137,11 +148,11 @@ fn redirect_bypasses_record() {
 #[test]
 fn record_carries_block_stderr() {
     let out = run_io(
-        r#"
-        let h = spawn { /bin/sh -c "echo diag >&2" }
+        r"
+        let h = spawn { echo diag 1>&2 }
         let r = await $h
         echo !{to-bytes $r[stderr] | from-string}
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "err: {}", out.stderr);
     assert!(out.stdout.contains("diag"), "stdout: {:?}", out.stdout);
@@ -154,7 +165,9 @@ fn record_carries_block_stderr() {
 
 // `2>&1` inside the block runs inside the child process before the shell
 // sees anything, so combined bytes land in stdout_buf and surface as
-// `r[stdout]`, with `r[stderr]` empty.
+// `r[stdout]`, with `r[stderr]` empty.  Unix-only: pins the external-process
+// dup2 ordering specifically (`/bin/sh`), not a builtin's `2>&1` handling.
+#[cfg(unix)]
 #[test]
 fn stderr_to_stdout_inside_block() {
     let out = run_io(

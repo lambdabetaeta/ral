@@ -1,43 +1,43 @@
 # Test: use and source (§8)
 
 # Create a module
-mkdir -p /tmp/ral-mod-test
-echo "let version = 1\nlet _private = 42" > /tmp/ral-mod-test/lib.ral
+let tmpdir = temp-dir
+echo "let version = 1\nlet _private = 42" > "$tmpdir/lib.ral"
 
 # use returns a map excluding _ names
-let m = use '/tmp/ral-mod-test/lib.ral'
+let m = use "$tmpdir/lib.ral"
 echo !{has $m version}
 echo !{has $m _private}
 echo $m[version]
 
 # re-using an unchanged file yields a structurally equal map
-let m2 = use '/tmp/ral-mod-test/lib.ral'
+let m2 = use "$tmpdir/lib.ral"
 echo !{equal $m $m2}
 
 # source merges into current scope (including _ names)
-source '/tmp/ral-mod-test/lib.ral'
+source "$tmpdir/lib.ral"
 echo $version
 
 # caller-file-relative module loading
-mkdir -p /tmp/ral-mod-test/sub
-echo "let x = 9" > /tmp/ral-mod-test/sub/inner.ral
+mkdir -p "$tmpdir/sub"
+echo "let x = 9" > "$tmpdir/sub/inner.ral"
 echo #'let m = !{use 'sub/inner.ral'}
 let via_use = $m[x]
 source 'sub/inner.ral'
-let via_source = $x'# > /tmp/ral-mod-test/entry.ral
-let entry = use '/tmp/ral-mod-test/entry.ral'
+let via_source = $x'# > "$tmpdir/entry.ral"
+let entry = use "$tmpdir/entry.ral"
 if $[not !{equal $entry[via_use] 9}] { fail [status: 1] }
 if $[not !{equal $entry[via_source] 9}] { fail [status: 1] }
 
 # use is cacheless: each call re-reads the file, so rewriting a module
 # between two `use` calls surfaces the new bindings.
-echo "let version = 1" > /tmp/ral-mod-test/reload.ral
-let m1 = use '/tmp/ral-mod-test/reload.ral'
-echo "let version = 2" > /tmp/ral-mod-test/reload.ral
-let mfresh = use '/tmp/ral-mod-test/reload.ral'
+echo "let version = 1" > "$tmpdir/reload.ral"
+let m1 = use "$tmpdir/reload.ral"
+echo "let version = 2" > "$tmpdir/reload.ral"
+let mfresh = use "$tmpdir/reload.ral"
 if $[not !{equal $mfresh[version] 2}] { fail [status: 1] }
 
 # Cleanup
-rm -rf /tmp/ral-mod-test
+rm -rf $tmpdir
 
 echo 'module tests done'

@@ -84,26 +84,6 @@ fn scripts() {
         base.display()
     );
 
-    #[cfg(windows)]
-    let windows_skips = [
-        "glob",
-        "json",
-        "predicates",
-        "stdin-redirect",
-        "within",
-        "capture-semantics",
-        "indexing",
-        "modules",
-        "devops",
-        "scripting",
-        // Unix-only externals / filesystem layout: `/bin/echo`, coreutils
-        // path and output assumptions that don't hold on Windows.
-        "dual-input-strings",
-        "filesystem",
-        "stdlib",
-        "log-processor",
-    ];
-
     let total = scripts.len();
     let (mut passed, mut skipped, mut blessed) = (0, 0, 0);
     let mut failures = Vec::new();
@@ -117,11 +97,6 @@ fn scripts() {
         }
         #[cfg(not(feature = "grep"))]
         if GREP_GATED.contains(&name.as_ref()) {
-            skipped += 1;
-            continue;
-        }
-        #[cfg(windows)]
-        if windows_skips.contains(&name.as_ref()) {
             skipped += 1;
             continue;
         }

@@ -14,13 +14,14 @@ let n = !{to-string '{"a": {"b": [1, 2]}}' | from-json}
 echo !{length $n[a][b]}
 
 # Write and re-read
+let tmpdir = temp-dir
 let data = [host: localhost, port: 8080]
-to-json $data > '/tmp/ral-json-test.json'
-let back = !{cat '/tmp/ral-json-test.json' | from-json}
+to-json $data > "$tmpdir/test.json"
+let back = !{cat "$tmpdir/test.json" | from-json}
 echo $back[host]
 echo $back[port]
 
-rm /tmp/ral-json-test.json
+rm -rf $tmpdir
 
 # Parse booleans and null
 let m2 = !{to-string '{"ok": true, "val": null}' | from-json}

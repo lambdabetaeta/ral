@@ -5,7 +5,6 @@
 // the handle's label (defaulting to `handle:N`).  `await` blocks until
 // both streams have been drained, so output order relative to the caller
 // is deterministic.
-#![cfg(unix)]
 
 mod common;
 
@@ -71,14 +70,13 @@ fn watch_two_handles_interleave_with_atomic_lines() {
     assert!(seen_beta, "beta missing from {:?}", out.stdout);
 }
 
-// Stderr inside a watched block is prefixed `[label:err]`.  Driven through
-// sh so the child emits directly to fd 2 without ral's error-handling path.
+// Stderr inside a watched block is prefixed `[label:err]`.
 #[test]
 fn watch_stderr_is_prefixed_err() {
     let out = run(
         "ral_spawn_watch",
         r#"
-        let h = watch "job" { sh -c "echo out; echo err 1>&2" }
+        let h = watch "job" { echo out; echo err 1>&2 }
         await $h
         "#,
     );

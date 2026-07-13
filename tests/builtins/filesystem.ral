@@ -1,66 +1,68 @@
 # Test: §16.4 filesystem builtins
 
+let tmpdir = temp-dir
+
 # read file via from-string < path
-echo hello > /tmp/ral-fs-test.txt
-let content = !{from-string < /tmp/ral-fs-test.txt}
+echo hello > "$tmpdir/test.txt"
+let content = !{from-string < "$tmpdir/test.txt"}
 echo $content
 # Expected: hello
 
 # file size via file-info
-let filesz = !{file-info /tmp/ral-fs-test.txt}[size]
+let filesz = !{file-info "$tmpdir/test.txt"}[size]
 echo $filesz
 # Expected: 6 (hello + newline)
 
 # line-count
-echo "a\nb\nc" > /tmp/ral-fs-lines.txt
-let count = line-count /tmp/ral-fs-lines.txt
+echo "a\nb\nc" > "$tmpdir/lines.txt"
+let count = line-count "$tmpdir/lines.txt"
 echo $count
 # Expected: 3
 
 # file-info returns a record; mtime is an Int
-let info = file-info /tmp/ral-fs-test.txt
+let info = file-info "$tmpdir/test.txt"
 if $[$info[mtime] > 0] { echo 'mtime ok' }
 # Expected: mtime ok
 echo $info[type]
 # Expected: file
 
 # Cleanup
-rm /tmp/ral-fs-test.txt /tmp/ral-fs-lines.txt
+rm "$tmpdir/test.txt" "$tmpdir/lines.txt"
 
 # write file via to-string > path
-to-string 'hello from write' > /tmp/ral-write-test.txt
-let written = !{from-string < /tmp/ral-write-test.txt}
+to-string 'hello from write' > "$tmpdir/write.txt"
+let written = !{from-string < "$tmpdir/write.txt"}
 echo $written
 
 # cp (bundled coreutils, sandboxed via the capability-checked dispatch)
-cp /tmp/ral-write-test.txt /tmp/ral-copy-test.txt
-let copied = !{from-string < /tmp/ral-copy-test.txt}
+cp "$tmpdir/write.txt" "$tmpdir/copy.txt"
+let copied = !{from-string < "$tmpdir/copy.txt"}
 echo $copied
 
 # mv
-mv /tmp/ral-copy-test.txt /tmp/ral-move-test.txt
-if $[not !{exists /tmp/ral-copy-test.txt}] { echo 'mv ok' }
-let moved = !{from-string < /tmp/ral-move-test.txt}
+mv "$tmpdir/copy.txt" "$tmpdir/move.txt"
+if $[not !{exists "$tmpdir/copy.txt"}] { echo 'mv ok' }
+let moved = !{from-string < "$tmpdir/move.txt"}
 echo $moved
 
 # mkdir -p
-mkdir -p /tmp/ral-mkdir-test/sub
-if !{is-dir /tmp/ral-mkdir-test/sub} { echo 'mkdir ok' }
+mkdir -p "$tmpdir/mkdir-test/sub"
+if !{is-dir "$tmpdir/mkdir-test/sub"} { echo 'mkdir ok' }
 
 # list-dir (structured query — primitive, returns a value)
-let entries = list-dir /tmp/ral-mkdir-test
+let entries = list-dir "$tmpdir/mkdir-test"
 if $[!{length $entries} == 1] { echo 'list-dir ok' }
 let entry = $entries[0]
 echo $entry[name]
 echo $entry[type]
 
 # rm (regular file)
-rm /tmp/ral-write-test.txt /tmp/ral-move-test.txt
-if $[not !{exists /tmp/ral-write-test.txt}] { echo 'rm ok' }
+rm "$tmpdir/write.txt" "$tmpdir/move.txt"
+if $[not !{exists "$tmpdir/write.txt"}] { echo 'rm ok' }
 
 # rm -rf (directory tree — the dangerous verb wears its name)
-rm -rf /tmp/ral-mkdir-test
-if $[not !{exists /tmp/ral-mkdir-test}] { echo 'rm -rf ok' }
+rm -rf "$tmpdir/mkdir-test"
+if $[not !{exists "$tmpdir/mkdir-test"}] { echo 'rm -rf ok' }
 
 # temp-dir (primitive — secure O_EXCL recipe, returns the path as a value)
 let td = temp-dir
@@ -73,7 +75,8 @@ if !{is-file $tf} { echo 'temp-file ok' }
 rm $tf
 
 # resolve-path
-let rp = resolve-path /tmp
-if !{re-match 'tmp' $rp} { echo 'resolve-path ok' }
+let rp = resolve-path $tmpdir
+if !{is-dir $rp} { echo 'resolve-path ok' }
 
+rm -rf $tmpdir
 echo 'filesystem tests done'

@@ -14,18 +14,19 @@ echo $nparts
 # Expected: 3
 
 # line-count
-echo hello > /tmp/ral-stdlib-test
-echo world >> /tmp/ral-stdlib-test
-echo foo >> /tmp/ral-stdlib-test
-echo !{line-count /tmp/ral-stdlib-test}
+let tmpdir = temp-dir
+echo hello > "$tmpdir/test"
+echo world >> "$tmpdir/test"
+echo foo >> "$tmpdir/test"
+echo !{line-count "$tmpdir/test"}
 # Expected: 3
 
 # read file via from-string < path
-let content = !{from-string < /tmp/ral-stdlib-test}
+let content = !{from-string < "$tmpdir/test"}
 echo $content
 # Expected: hello\nworld\nfoo (as one string)
 
-rm /tmp/ral-stdlib-test
+rm -rf $tmpdir
 
 # data-last fold
 echo !{fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]}

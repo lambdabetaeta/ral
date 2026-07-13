@@ -14,7 +14,8 @@ let assert_eq = { |name expected actual|
     }
 }
 
-let path = '/tmp/ral-stdin-redirect-test.json'
+let tmpdir = temp-dir
+let path = "$tmpdir/redirect.json"
 to-json [host: localhost, port: 8080] > $path
 
 # `from-json` is a primitive; `<file` flows directly through the Exec arm,
@@ -23,14 +24,12 @@ let obj = from-json < $path
 assert_eq 'from-json host' localhost $obj[host]
 assert_eq 'from-json port' 8080 $obj[port]
 
-rm $path
-
 # fold-lines also takes `<file` through the same channel.
-let lines_path = '/tmp/ral-stdin-redirect-lines.txt'
+let lines_path = "$tmpdir/lines.txt"
 to-lines [a, b, c] >~ $lines_path
 let last_line = fold-lines { |_ line| $line } '' < $lines_path
 assert_eq 'fold-lines last' c $last_line
 
-rm $lines_path
+rm -rf $tmpdir
 
 echo 'stdin-redirect tests done'

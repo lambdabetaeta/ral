@@ -13,9 +13,11 @@
 
 #![allow(dead_code)] // not every test file uses every helper
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Captured result of a one-shot `ral` invocation.
 pub struct Output {
@@ -65,5 +67,100 @@ pub fn run(prefix: &str, script: &str) -> Output {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         status: out.status.code().unwrap_or(1),
+    }
+}
+
+/// Like [`run`], but feeds `stdin_data` to the child instead of an empty
+/// stdin.
+pub fn run_with_stdin(prefix: &str, script: &str, stdin_data: &[u8]) -> Output {
+    let tmp = fresh_tmp_path(prefix, "ral");
+    std::fs::write(&tmp, script).unwrap();
+
+    let mut child = Command::new(ral_bin())
+        .arg(&tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ral");
+
+    if !stdin_data.is_empty() {
+        child.stdin.take().unwrap().write_all(stdin_data).unwrap();
+    }
+
+    let out = child.wait_with_output().unwrap();
+    std::fs::remove_file(&tmp).ok();
+
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
+/// Like [`run`], but passes `args` ahead of the script path and gives up
+/// (returning `None`) if the child hasn't exited within `timeout` —
+/// killing it first so nothing is left running.  Used by tests guarding
+/// against a hang rather than a wrong answer.
+pub fn run_with_timeout(
+    prefix: &str,
+    args: &[&str],
+    script: &str,
+    timeout: Duration,
+) -> Option<Output> {
+    use std::io::Read;
+
+    let tmp = fresh_tmp_path(prefix, "ral");
+    std::fs::write(&tmp, script).unwrap();
+
+    let mut child = Command::new(ral_bin());
+    child
+        .args(args)
+        .arg(&tmp)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = child.spawn().expect("spawn ral");
+    let stdout_reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait().unwrap() {
+            Some(status) => {
+                std::fs::remove_file(&tmp).ok();
+                return Some(Output {
+                    stdout: stdout_reader
+                        .and_then(|jh| jh.join().ok())
+                        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+                        .unwrap_or_default(),
+                    stderr: stderr_reader
+                        .and_then(|jh| jh.join().ok())
+                        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+                        .unwrap_or_default(),
+                    status: status.code().unwrap_or(1),
+                });
+            }
+            None if start.elapsed() > timeout => {
+                child.kill().ok();
+                let _ = child.wait();
+                std::fs::remove_file(&tmp).ok();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
     }
 }

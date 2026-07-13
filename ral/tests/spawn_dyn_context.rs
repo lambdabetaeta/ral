@@ -1,7 +1,6 @@
 // Integration tests: spawned threads inherit the dynamic context (`DynContext`)
 // from the parent — specifically the `handler_stack` (`within`) and
 // capabilities stack (`grant`) that was active at spawn time.
-#![cfg(unix)]
 
 mod common;
 
@@ -55,17 +54,18 @@ fn spawn_inherits_within_dir() {
     let out = run(
         "ral_spawn_dyn",
         r"
-        within [dir: /tmp] {
-            let h = spawn { pwd }
+        let target = temp-dir
+        within [dir: $target] {
+            let h = spawn { cwd }
             let r = await $h
-            echo !{to-bytes $r[stdout] | from-string}
+            if !{equal $r[value] $target} { echo 'dir inherited' } else { echo 'dir mismatch' }
         }
+        rm -rf $target
     ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    // macOS resolves /tmp -> /private/tmp; match the common suffix.
     assert!(
-        out.stdout.contains("tmp"),
+        out.stdout.contains("dir inherited"),
         "dir not inherited by spawn: stdout={:?}",
         out.stdout
     );
@@ -108,7 +108,7 @@ fn spawn_handler_does_not_leak_to_parent() {
         }
         let r = await $h
         echo !{to-bytes $r[stdout] | from-string}
-        try { localcmd 2>/dev/null } { |_| echo "parent: no handler" }
+        try { localcmd } { |_| echo "parent: no handler" }
     "#,
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);

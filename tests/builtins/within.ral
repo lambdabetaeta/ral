@@ -19,18 +19,18 @@ within [env: [A: 1]] {
 }
 
 # dir key
-# Use `/` (no symlink) so an external `pwd` prints the same path whether it
-# is the system binary or the bundled uutils one, which resolves symlinks
-# (`/tmp` → `/private/tmp` on macOS).
+# Chdir into a fresh scratch directory and prove the block observed it via
+# the `cwd` primitive, not by echoing the literal (run-specific) path.
 
 let original = !{cwd}
-within [dir: /] {
-    pwd
-}
+let target = temp-dir
+let observed = !{ within [dir: $target] { cwd } }
+if !{equal $observed $target} { echo 'dir changed' } else { echo 'dir mismatch!' }
 
 # dir doesn't leak
 let after = !{cwd}
 if !{equal $original $after} { echo 'cwd restored' } else { echo 'cwd leaked!' }
+rm -rf $target
 
 # handlers key (per-name)
 
@@ -45,7 +45,7 @@ within [handlers: [mycmd: { |args| echo 'got' ...$args }]] {
 }
 
 # Handler gone after block
-try { mycmd 2> /dev/null } { |_| echo 'mycmd gone'; return "" }
+try { mycmd } { |_| echo 'mycmd gone'; return "" }
 
 # Nesting: inner wins
 within [handlers: [mycmd: { |args| echo 'outer' }]] {
@@ -71,10 +71,6 @@ within [handler: { |name args| echo intercepted $name }] {
 within [handler: { |name args| echo caught $name }] {
     echo 'builtin runs normally'
 }
-
-# ^name bypass: skips builtins, goes to external binary
-let result = ^echo 'from external'
-echo $result
 
 # Containment: ^name does NOT escape within [handlers:]
 within [handlers: [cat: { |args| echo 'handler-cat' }]] {

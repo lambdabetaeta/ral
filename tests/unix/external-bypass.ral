@@ -1,0 +1,8 @@
+# Test: `^name` bypass reaches a genuine external process — a real,
+# standalone `echo`, not ral's own builtin (and not a bundled uutils tool;
+# `echo` is neither). Unix-only: Windows has no standalone `echo`
+# executable, only a cmd.exe/PowerShell builtin, so `^echo` has nothing to
+# resolve to there.
+
+let result = ^echo 'from external'
+echo $result
