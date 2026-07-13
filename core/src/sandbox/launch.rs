@@ -15,31 +15,27 @@
 //! cwd is threaded into the bwrap argv as `--chdir <cwd>` from `shell`.
 
 use crate::types::{Break, Error, Settled, Shell};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 
 /// What [`sandboxed_command`] should run under the OS sandbox.  A host
 /// program is its resolved path/bare name; a bundled tool is run as a
 /// child placement of ral itself (`ral --ral-bundled-tool <tool> …`).
-///
-/// Both fields are read only by the Linux/macOS backends; the Windows arm
-/// fails closed before ever matching on `target` (no sandbox backend yet —
-/// W1), so the fields are dead there until that lands.
 #[derive(Clone, Copy)]
 pub(crate) enum LaunchTarget<'a> {
-    Host {
-        #[cfg_attr(windows, allow(dead_code))]
-        program: &'a str,
-    },
-    BundledTool {
-        #[cfg_attr(windows, allow(dead_code))]
-        tool: &'a str,
-    },
+    Host { program: &'a str },
+    BundledTool { tool: &'a str },
 }
 
-/// Build a `Command` that runs `target` + `args` under the OS sandbox for
-/// `projection`.  The caller has already confirmed
+/// Build a [`Launch`](crate::process::Launch) that runs `target` + `args`
+/// under the OS sandbox for `projection`.  The caller has already confirmed
 /// [`super::projection_enforceable`].  Env/cwd and resource limits are
 /// applied by the caller afterwards, not here.
+///
+/// Linux and macOS build a `std::process::Command` (bwrap argv / a Seatbelt
+/// self re-exec) and adopt it via [`Launch::from_command`](crate::process::Launch::from_command);
+/// Windows builds the target `Launch` directly and attaches the AppContainer
+/// `SECURITY_CAPABILITIES` the parent's spawn applies (no re-exec).
 ///
 /// `shell` is taken only for the target's logical cwd, which Linux folds
 /// into the bwrap argv as `--chdir`.
@@ -55,25 +51,19 @@ pub(crate) fn sandboxed_command(
     target: LaunchTarget,
     args: &[String],
     shell: &Shell,
-) -> Settled<Command> {
+) -> Settled<crate::process::Launch> {
     #[cfg(target_os = "linux")]
     {
         linux_sandboxed_command(projection, target, args, shell)
+            .map(crate::process::Launch::from_command)
     }
     #[cfg(target_os = "macos")]
     {
-        macos_sandboxed_command(projection, target, args)
+        macos_sandboxed_command(projection, target, args).map(crate::process::Launch::from_command)
     }
     #[cfg(windows)]
     {
-        // TODO(M3 windows subagent): implement AppContainer / restricted-token
-        // per-command confinement with net fail-closed.  Until then, fail
-        // closed rather than silently run unsandboxed.
-        let _ = (projection, target, args);
-        Err(Break::Error(Error::new(
-            "per-command Windows sandbox not yet implemented",
-            1,
-        )))
+        windows_sandboxed_command(projection, target, args)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -83,6 +73,46 @@ pub(crate) fn sandboxed_command(
             1,
         )))
     }
+}
+
+/// Windows: build the target's [`Launch`](crate::process::Launch) directly
+/// and confine it under the session AppContainer.
+///
+/// There is no re-exec into the sandbox as on macOS/Linux — the parent
+/// applies the LowBox token at spawn time via
+/// [`Launch::security_capabilities`](crate::process::Launch::security_capabilities)
+/// (wired in [`super::windows::session::confine`]).  A
+/// [`LaunchTarget::BundledTool`] is therefore a plain
+/// `ral --ral-bundled-tool <tool> …` self-placement that runs confined under
+/// that token, carrying no `--sandbox-projection`: its own `early_init` has
+/// nothing to enter, matching [`super::reexec::maybe_enter_process_sandbox`].
+#[cfg(windows)]
+fn windows_sandboxed_command(
+    projection: &crate::types::SandboxProjection,
+    target: LaunchTarget,
+    args: &[String],
+) -> Settled<crate::process::Launch> {
+    let mut launch = match target {
+        LaunchTarget::Host { program } => {
+            let mut launch = crate::process::Launch::new(program);
+            launch.args(args);
+            launch
+        }
+        LaunchTarget::BundledTool { tool } => {
+            use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
+            let mut launch = self_reexec(BUNDLED_TOOL_FLAG).map_err(|e| {
+                Break::Error(Error::new(
+                    format!("sandbox: cannot resolve self exe for bundled tool '{tool}': {e}"),
+                    1,
+                ))
+            })?;
+            launch.arg(tool);
+            launch.args(args);
+            launch
+        }
+    };
+    super::windows::session::confine(&mut launch, projection)?;
+    Ok(launch)
 }
 
 /// Linux: expand the target into the bwrap argv via
@@ -379,16 +409,14 @@ mod tests {
         let work = unique_workdir("ext");
         let work_s = work.to_string_lossy().into_owned();
         let proj = write_confined_to(&work_s);
-        let shell = Shell::default();
 
         // Positive control: a write inside the granted prefix succeeds.
         let allowed = work.join("allowed.txt");
         let allowed_s = allowed.to_string_lossy().into_owned();
-        let ok = sandboxed_command(
+        let ok = macos_sandboxed_command(
             &proj,
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), format!("echo x > {allowed_s}")],
-            &shell,
         )
         .expect("build host command (inside)");
         assert!(run_confined(ok), "write into the write prefix must succeed");
@@ -399,11 +427,10 @@ mod tests {
         let denied = std::env::temp_dir().join(format!("ral_denied_ext_{}", std::process::id()));
         let _ = std::fs::remove_file(&denied);
         let denied_s = denied.to_string_lossy().into_owned();
-        let bad = sandboxed_command(
+        let bad = macos_sandboxed_command(
             &proj,
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), format!("echo x > {denied_s}")],
-            &shell,
         )
         .expect("build host command (outside)");
         assert!(
@@ -428,16 +455,14 @@ mod tests {
         let work = unique_workdir("bun");
         let work_s = work.to_string_lossy().into_owned();
         let proj = write_confined_to(&work_s);
-        let shell = Shell::default();
 
         // Positive control: mkdir inside the granted prefix succeeds.
         let allowed = work.join("sub");
         let allowed_s = allowed.to_string_lossy().into_owned();
-        let ok = sandboxed_command(
+        let ok = macos_sandboxed_command(
             &proj,
             LaunchTarget::BundledTool { tool: "mkdir" },
             &[allowed_s],
-            &shell,
         )
         .expect("build bundled command (inside)");
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
@@ -447,11 +472,10 @@ mod tests {
         let denied = std::env::temp_dir().join(format!("ral_denied_bun_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&denied);
         let denied_s = denied.to_string_lossy().into_owned();
-        let bad = sandboxed_command(
+        let bad = macos_sandboxed_command(
             &proj,
             LaunchTarget::BundledTool { tool: "mkdir" },
             std::slice::from_ref(&denied_s),
-            &shell,
         )
         .expect("build bundled command (outside)");
         assert!(
@@ -473,7 +497,7 @@ mod tests {
     #[test]
     fn linux_host_command_is_bwrap_with_chdir_and_target_tail() {
         let shell = Shell::default();
-        let cmd = sandboxed_command(
+        let cmd = linux_sandboxed_command(
             &restrictive(),
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), "echo x > /etc/ral_denied".into()],

@@ -37,8 +37,7 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::p
             ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
             ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
         };
-        let cmd = crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?;
-        crate::process::Launch::from_command(cmd)
+        crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?
     } else {
         match &plan.image {
             ExecImage::Host(path) => {

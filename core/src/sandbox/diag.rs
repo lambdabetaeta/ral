@@ -15,15 +15,22 @@
 //! Each platform's [`platform`] submodule supplies a reader for the
 //! kernel-log window plus a small parser triple: recognise a denial
 //! line, extract its attributed PID, and split it into `(operation,
-//! path)`.  Platforms without a denial source (everything except macOS
-//! and Linux) get a stub `platform` module that reports no denials.
+//! path)`.  Platforms without a denial source (everything except macOS,
+//! Linux, and Windows) get a stub `platform` module that reports no denials.
 //! macOS logs the fully-resolved path of the denied access, so the
 //! path the user must grant is exactly the path in the line; Linux's
 //! `type=1326` audit record carries no path, so the hint there names the
 //! blocked syscall operation with no path or symlink note.
+//!
+//! Windows is different in kind: an AppContainer denial surfaces only as
+//! `ERROR_ACCESS_DENIED` on the confined child, with no kernel audit log
+//! naming the path.  There is nothing to scrape, so the Windows hint is a
+//! fixed, pathless note that names the grant surfaces — it never fabricates
+//! a path it does not have.
 
 use crate::types::{Error, Shell};
 use std::collections::{HashMap, HashSet};
+#[cfg(not(windows))]
 use std::fmt::Write;
 use std::time::Instant;
 
@@ -33,7 +40,7 @@ mod platform;
 #[cfg(target_os = "linux")]
 #[path = "diag/linux.rs"]
 mod platform;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use std::time::Duration;
     pub(super) fn read_window(_: Duration) -> Option<String> {
@@ -53,6 +60,7 @@ mod platform {
 /// Cap on how many denial lines the hint reproduces verbatim.  A failed
 /// command typically trips one or two distinct denials; reproducing more
 /// would bury the actionable guidance under kernel noise.
+#[cfg(not(windows))]
 const MAX_DENIAL_LINES: usize = 3;
 
 /// Attach a kernel-denial diagnostic to `err` when an external command
@@ -76,26 +84,53 @@ pub(crate) fn augment_failure(
     pids: &HashSet<u32>,
     since: Instant,
 ) -> Error {
-    if shell.sandbox_projection().is_none() || pids.is_empty() {
+    if shell.sandbox_projection().is_none() {
         return err;
     }
-    let Some(text) = platform::read_window(since.elapsed()) else {
+    let Some(diagnostic) = collect_denial_hint(pids, since) else {
         return err;
     };
+    let hint = match err.hint.take() {
+        Some(existing) => format!("{existing}\n\n{diagnostic}"),
+        None => diagnostic,
+    };
+    err.with_hint(hint)
+}
+
+/// The platform's denial hint for a command that failed under an active
+/// sandbox, or `None` when there is nothing to say.
+#[cfg(not(windows))]
+fn collect_denial_hint(pids: &HashSet<u32>, since: Instant) -> Option<String> {
+    if pids.is_empty() {
+        return None;
+    }
+    let text = platform::read_window(since.elapsed())?;
     let denials: Vec<&str> = text
         .lines()
         .filter(|l| platform::is_denial_line(l))
         .filter(|l| platform::extract_pid(l).is_some_and(|p| pids.contains(&p)))
         .collect();
     if denials.is_empty() {
-        return err;
+        return None;
     }
-    let diagnostic = build_hint(&denials);
-    let hint = match err.hint.take() {
-        Some(existing) => format!("{existing}\n\n{diagnostic}"),
-        None => diagnostic,
-    };
-    err.with_hint(hint)
+    Some(build_hint(&denials))
+}
+
+/// Windows has no kernel denial log to scrape and no per-PID attribution,
+/// so any failure under an active sandbox yields the same fixed, pathless
+/// hint (never a fabricated path).
+#[cfg(windows)]
+fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant) -> Option<String> {
+    Some(
+        "the command failed while an OS sandbox (AppContainer) was active. On Windows a blocked \
+         filesystem access surfaces only as an access-denied error on the command, with no kernel \
+         log naming the path, so the exact path cannot be shown here. If the command needs a file \
+         or directory the active grant's fs allow-list does not admit, widen the grant's read (or \
+         write) set — the `grant [ fs: [read: […]] ] { … }` block in ral, or `--extend-base` for \
+         exarch. A `net: false` grant likewise withholds the network capability, so a command that \
+         needs a socket will fail the same way."
+            .to_string(),
+    )
 }
 
 /// Compose the denial hint from the attributed kernel lines.
@@ -104,6 +139,7 @@ pub(crate) fn augment_failure(
 /// text, so the parsing and wording are unit-testable without shelling
 /// out to the kernel log.  No ANSI codes — the diagnostic formatter
 /// colorises the `hint:` line as a whole.
+#[cfg(not(windows))]
 fn build_hint(denials: &[&str]) -> String {
     let mut out = String::from(
         "the OS sandbox blocked a filesystem access this command needs — the kernel reported:",

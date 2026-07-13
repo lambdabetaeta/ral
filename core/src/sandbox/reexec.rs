@@ -96,9 +96,12 @@ enum Pin {
     #[cfg(all(unix, not(target_os = "linux")))]
     Stat { dev: u64, ino: u64 },
     /// Windows NTFS analogue of `(dev, ino)`: volume serial + the two
-    /// halves of the file index.  Captured at boot; unconsulted until a
-    /// Windows `verify_unswapped` (parity with the macOS guard) lands
-    /// alongside the per-command Windows sandbox (W1).
+    /// halves of the file index.  Captured at boot but never consulted:
+    /// Windows confinement applies the AppContainer token to the parent's
+    /// spawn rather than re-execing ral, so there is no parent-side self
+    /// re-exec for a swap guard to protect (the bundled-tool multicall uses
+    /// the live `current_exe` and, being short-lived, does not guard swaps —
+    /// see `runtime::pipeline::helper::self_reexec`).
     #[cfg(windows)]
     NtfsStat {
         #[allow(dead_code)]
@@ -270,11 +273,11 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 /// Returns `Some(code)` when the process should exit immediately (Linux
 /// bwrap respawn path), `None` to continue normally.
 ///
-/// On Windows per-command process sandboxing is unimplemented: there is
-/// no `AppContainer` / restricted-token runner.  When a policy is supplied
-/// it cannot be enforced, so this entrypoint fails closed rather than
-/// running unconfined.  With no policy there is nothing to enforce and it
-/// returns `Ok(None)` to continue normally.
+/// On Windows there is no child re-entry: confinement is not something the
+/// child enters, it is the LowBox token the *parent* applies at spawn time
+/// via `Launch::security_capabilities` (see `sandbox::windows::session`). So
+/// `--sandbox-projection` is never passed to a Windows child, `policy` is
+/// always `None` here, and this entrypoint has nothing to do.
 #[cfg(unix)]
 pub(super) fn maybe_enter_process_sandbox(
     args_without_policy: &[String],
@@ -289,15 +292,10 @@ pub(super) fn maybe_enter_process_sandbox(
 #[cfg(windows)]
 pub(super) fn maybe_enter_process_sandbox(
     _args_without_policy: &[String],
-    policy: Option<&crate::types::SandboxProjection>,
+    _policy: Option<&crate::types::SandboxProjection>,
 ) -> Result<Option<u8>, String> {
-    if policy.is_some() {
-        return Err(
-            "per-command Windows sandbox not yet implemented: a requested \
-             sandbox policy cannot be enforced, refusing to continue"
-                .into(),
-        );
-    }
+    // The parent already confined this child's spawn with the AppContainer
+    // token; there is no sandbox to enter here.
     Ok(None)
 }
 

@@ -6,19 +6,19 @@
 //!   fork-bomb mitigation, nothing more.  There is a brief window
 //!   between `CreateProcess` and `AssignProcessToJobObject` during which
 //!   the child is unconstrained — acceptable for this use case.
-//! - [`dump_profile_for_windows`] — audit-only renderer that describes
-//!   the profile this backend would install, for
-//!   `RAL_DUMP_SANDBOX_PROFILE`.  It enforces nothing.
+//! - [`dump_profile_for_windows`] — renders what the AppContainer backend
+//!   actually enforces for a projection, for `RAL_DUMP_SANDBOX_PROFILE`.
 //!
-//! This module owns the Job Object plumbing and the profile-dump
-//! advisory.  Its submodules carry the per-command AppContainer
-//! backend: `appcontainer` (profile lifecycle + LowBox spawn
-//! capabilities) and `dacl` (grant-ACE apply/restore engine), both
-//! imitating MXC's Tier-3 processcontainer backend
-//! (github.com/microsoft/mxc @ 0e7c3dd).
+//! This module owns the Job Object plumbing and the profile dump.  Its
+//! submodules carry the per-command AppContainer backend: `appcontainer`
+//! (profile lifecycle + LowBox spawn capabilities), `dacl` (grant-ACE
+//! apply/restore engine) — both imitating MXC's Tier-3 processcontainer
+//! backend (github.com/microsoft/mxc @ 0e7c3dd) — and `session`, which owns
+//! the per-session profile/DACL lifecycle those two compose into.
 
 pub(crate) mod appcontainer;
 pub(crate) mod dacl;
+pub(crate) mod session;
 
 use crate::types::SandboxProjection;
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -49,49 +49,53 @@ pub(super) fn apply_job_limits(child: &crate::process::ChildHandle) {
     }
 }
 
-/// Render a human-readable dump of the profile this backend would
-/// install for `policy`, for `RAL_DUMP_SANDBOX_PROFILE`.  Audit only: it
-/// enforces nothing, and mirrors the Seatbelt SBPL / bwrap argv dumps
-/// for the Win32 path.
+/// Render what the AppContainer backend enforces for `policy`, for
+/// `RAL_DUMP_SANDBOX_PROFILE`.  Unlike the Seatbelt SBPL / bwrap argv dumps
+/// this describes real enforcement: the LowBox profile every confined child
+/// spawns under, the capability SIDs (network on/off), and the host prefixes
+/// stamped with an allow-ACE for the profile SID, read vs read-write.
 pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
     let mut out = String::new();
-    out.push_str("Restricted-token plan:\n");
-    out.push_str("  integrity level: Low (S-1-16-4096)\n");
-    out.push_str("  restricting SIDs: [S-1-5-12 RESTRICTED]\n");
-    out.push_str(
-        "  scratch dir: per-spawn under std::env::temp_dir() as \
-ral-sandbox-<pid>-<ns>; stamped Low via SACL\n",
-    );
-    out.push_str("  mitigation flags:\n");
-    out.push_str("    DEP_ENABLE\n");
-    out.push_str("    BOTTOM_UP_ASLR_ALWAYS_ON\n");
-    out.push_str("    HEAP_TERMINATE_ALWAYS_ON\n");
-    out.push_str("    BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON\n");
+    out.push_str("AppContainer (LowBox token) profile:\n");
+    out.push_str("  profile: one per shell session (name ral.sandbox.s<pid>)\n");
+    out.push_str("  fs: deny-by-default; the ALL APPLICATION PACKAGES group's\n");
+    out.push_str("      system-path reads plus the allow-ACEs stamped below\n");
     out.push_str(&format!(
-        "  net: {} -- this backend has no kernel network enforcement; a \
-net-restricting projection (net: false) is rejected fail-closed at command \
-dispatch (see projection_enforceable), not here, so this audit dump renders \
-whatever projection it is handed\n",
-        if policy.net { "allow" } else { "deny" }
-    ));
-    out.push_str("  ignored (advisory under this backend):\n");
-    if let Some(fs) = policy.fs.as_policy() {
-        out.push_str("    fs.read_prefixes (logged only, not enforced as allow-list):\n");
-        for p in &fs.read_prefixes {
-            out.push_str(&format!("      {}\n", p.as_str()));
+        "  net: {} -- {}\n",
+        if policy.net { "allow" } else { "deny" },
+        if policy.net {
+            "internetClient + privateNetworkClientServer capability SIDs granted"
+        } else {
+            "no network capability SID granted; the LowBox token cannot open a socket"
         }
-        out.push_str(
-            "    fs.write_prefixes (logged only, not enforced; only scratch dir writable):\n",
-        );
+    ));
+    out.push_str("  fs allow-ACEs (SID = the profile's AppContainer SID):\n");
+    if let Some(fs) = policy.fs.as_policy() {
+        out.push_str("    read-write (FILE_GENERIC_READ|WRITE|EXECUTE|DELETE):\n");
         for p in &fs.write_prefixes {
             out.push_str(&format!("      {}\n", p.as_str()));
         }
-        out.push_str("    fs.deny_paths (logged only, not enforced):\n");
-        for p in &fs.deny_paths {
+        out.push_str("    read-only (FILE_GENERIC_READ|EXECUTE):\n");
+        for p in &fs.read_prefixes {
+            if fs.write_prefixes.iter().any(|w| w == p) {
+                continue;
+            }
             out.push_str(&format!("      {}\n", p.as_str()));
         }
+        if !fs.deny_paths.is_empty() {
+            out.push_str(
+                "    deny_paths (NOT enforced by this backend: AppContainer grants are\n\
+                     \x20     allow-only, so a deny nested inside a granted prefix is not expressed):\n",
+            );
+            for p in &fs.deny_paths {
+                out.push_str(&format!("      {}\n", p.as_str()));
+            }
+        }
     } else {
-        out.push_str("    fs: unrestricted (Low IL still blocks writes to Medium+ objects)\n");
+        out.push_str(
+            "    (fs unrestricted in the projection, but AppContainer is deny-by-default:\n\
+                 \x20    no allow-ACE is stamped, so the child reads only system paths)\n",
+        );
     }
     out
 }
