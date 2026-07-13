@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -218,6 +218,18 @@ in-flight HTTP future and unwinds the in-flight eval at its next poll point;
 because the path never escalates the signal count, repeated presses cannot
 reach ral's third-signal `_exit`
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
+On Windows the same contract rides `SetConsoleCtrlHandler`: `install` registers
+exarch's routine after ral's, so it runs first in the last-registered-first
+chain, handles Ctrl-C/Ctrl-Break itself — `raise` plus ral's non-escalating
+`relay_interrupt`, which cancels the foreground scope and fans a Ctrl-Break to
+every live, non-detached pipeline group — and reports them handled, so ral's
+escalating disposition never ticks for a turn-cancel; window-close / logoff /
+shutdown pass through unhandled to that disposition, the analogue of
+SIGTERM/SIGHUP staying on the escalating path. Raw mode disables
+`ENABLE_PROCESSED_INPUT`, so Ctrl-C reaches the TUI as an ordinary key event
+and `deliver_interrupt` calls the relay in-process — never a
+`GenerateConsoleCtrlEvent` re-injection, which would broadcast to the console
+group and tick ral's escalation counter.
 A genuine external signal still routes through ral's one cause-carrying
 delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
 Exarch session shells are rebuilt only through `bootstrap::boot_shell`, which

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -25,7 +25,8 @@ widens the ceiling, then any number of commuting meets attenuate from it**:
 - adds each restrict file's path to `fs.deny_paths` (below).
 
 Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
-`tempdir:` / `gitdir:` sigil against the session's home and working directory inside
+`tempdir:` / `gitdir:` / `system:` sigil against the session's home, working
+directory, and the platform's live tool roots inside
 `ral_core::capability`'s decode pass — so composition runs entirely on
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
 An `xdg:` path escaping `$HOME` is rejected at the profile that names it, before
@@ -75,13 +76,36 @@ of `grant [...] { body }`, loaded through
 host reads the resulting authority only through core's accessors, never its
 representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).
 
+**The bake-ins name exec authority portably through the `system:` sigil** —
+[[map/core/capabilities|core]]'s spelling of the platform's live tool roots
+(`ral_core::path::sigil::system_tool_roots`): the standard binary dirs plus a
+Homebrew tree when the host has one on Unix; `%SystemRoot%\System32`, the
+PowerShell home, and Git-for-Windows' `usr\bin` on Windows. Two consequences
+ride it:
+
+- interactive shells are denied by literal override in every attenuated
+  profile — `bash`/`zsh` and their Windows analogues `cmd`/`powershell`/`pwsh`
+  (which `system:` would otherwise admit via `System32`); `sh` stays allowed
+  for `configure`/`make` shell-outs;
+- `minimal` carves the Homebrew tree back out with an explicit
+  `/opt/homebrew/` deny, so `system:` folding it in when present never widens
+  minimal's "system tools only" narrowing — brew tools stay opt-in.
+
+`resolve_base` also drops *dead grants* as a profile loads: exec literals
+naming the Unix-only bundled coreutils (`drop_dead_exec_grants`) are removed
+off Unix, and the freeze pass discards foreign-rooted Unix literals on
+Windows — a rendered profile never advertises authority the platform cannot
+back.
+
 The in-module tests pin the load-bearing per-profile properties so a future edit
 can't silently widen a jail:
 
 - `dangerous` is `Capabilities::default` (lattice top);
 - `git` admitted in `reasonable`/`read-only` (commit flows work without
   `--extend-base`); `minimal` admits only the *system* git under `/usr/bin/`
-  (a Homebrew git stays opt-in via the git extension);
+  (its Homebrew deny keeps a brew git opt-in via the git extension);
+- every exec-declaring base carries an `Allow` for each live system tool root
+  (`minimal`'s Homebrew deny the one documented exception);
 - `read-only` reads but does not write `cwd:`;
 - `confined` is net-off, exec-by-subpath-only (no bare-name admits), no
   home-reaching prefixes;

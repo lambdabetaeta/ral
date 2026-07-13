@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -23,7 +23,10 @@ system prompt is assembled.
 ## Entry and dispatch
 
 `run` (in `lib.rs`, lifted out of `main` so integration tests link the whole
-crate) is the session path; `main.rs` is the thin shell over it.
+crate) is the session path; `main.rs` is the thin shell over it. On the way out,
+`main` runs `ral_core::sandbox::teardown_session` — reverting the session's
+AppContainer grant ACEs and deleting its profile on Windows, a no-op elsewhere —
+before surrendering the exit code.
 
 - **Pre-`main` trampoline.** Before any setup, `dispatch_pre_main` short-circuits
   a re-exec child, returning `Option<u8>`: `install_child_hooks_and_serve_helpers`

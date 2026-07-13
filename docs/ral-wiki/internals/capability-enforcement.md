@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 9ec942d
-verified_at_date: 2026-07-04
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox]
+verified_at_commit: c754c6b
+verified_at_date: 2026-07-13
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -54,8 +54,8 @@ spawned process does on its own.**
 - *Exec* — gated in-process on every platform: `check_exec_args` vets the
   arguments *before* the spawn. On macOS the Seatbelt profile additionally
   renders a `process-exec` allow-list, catching re-execs the in-process check
-  never sees (`sh -c`, `find -exec`); bwrap on Linux has no path-exec filter, so
-  there the in-process gate stands alone
+  never sees (`sh -c`, `find -exec`); bwrap on Linux and the AppContainer on
+  Windows have no path-exec filter, so there the in-process gate stands alone
   ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]). That
   allow-list derives its admits from the same `evaluate_exec` verdict, per
   nameable command, so it never denies a command the in-process gate admits nor
@@ -63,12 +63,11 @@ spawned process does on its own.**
   ([[decisions/260704_exec-projection-defers-to-gate|exec-projection-defers-to-gate]]).
 - *Filesystem* — gated in-process too (`check_fs_op`, read and write), and
   backed by an OS sandbox that confines a spawned child's own reads and writes:
-  Seatbelt on macOS, bwrap on Linux. Windows is fail-closed: per-command
-  AppContainer / restricted-token confinement is not yet implemented, so an
-  fs-restricting (or offline) projection errors rather than running a child
-  unsandboxed (`projection_enforceable`, `sandboxed_command`).
+  Seatbelt on macOS, bwrap on Linux, an AppContainer LowBox token on Windows.
 - *Network* — no in-process gate at all, since ral dispatches no network
-  operation itself, so the OS sandbox is the sole enforcer.
+  operation itself, so the OS sandbox is the sole enforcer; on Windows the
+  enforcement is the withheld network capability SIDs — a LowBox token
+  without them cannot open a socket.
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
@@ -86,14 +85,24 @@ child:
   --ral-sandbox-exec <host>` for a host external, or `--ral-bundled-tool <tool>`
   for a bundled tool — that enters Seatbelt in `early_init`
   (`maybe_enter_process_sandbox`) and then runs the one target inside it;
-- *Windows* is fail-closed: `sandboxed_command` errors rather than launch
-  unsandboxed.
+- *Windows* attaches the session AppContainer's LowBox `SECURITY_CAPABILITIES`
+  to the child's own `CreateProcessW` (`windows::session::confine`), so the
+  parent's spawn is the confinement point — no re-exec child.
+
+On Windows the *token* is per-command but the *filesystem authority behind it*
+is session-scoped: grants become ACEs for one session-lived AppContainer SID
+and accumulate until session teardown, so the kernel-level check enforces the
+union of the session's projections while the in-process gate still judges each
+command against its own stack — confinement widens monotonically for allows
+and persists for denies, per-command narrowing being the price of not minting
+a fresh profile per spawn
+([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
 
 The launcher pins the *current binary* (`SANDBOX_SELF`, fixed at `early_init`) so
 an on-disk swap cannot subvert it. Because confinement is per-command, the gate
 fires only when a child is actually spawned: a `grant [net: false] { … }` with no
-external child no longer fails closed, and an unenforceable offline request fails
-closed at the spawn (`projection_enforceable`).
+external child does not fail closed, and an offline request on a backend without
+kernel network enforcement fails closed at the spawn (`projection_enforceable`).
 
 The pipeline-stage helper re-exec is unchanged and unrelated: a process-staged
 ral stage still runs through `run_child_eval` over one request/response frame

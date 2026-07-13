@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -149,7 +149,11 @@ predicate and dispatch that unify them.
 - **coreutils** — `declare_coreutils!` takes two parallel lists: `cross`
   (always on under the `coreutils` feature) and `unix` (additionally under
   `coreutils-unix-only`, `cfg(unix)`-gated). It emits one merged
-  `COREUTILS_TOOLS` slice and a `coreutils_invoke` arm.
+  `COREUTILS_TOOLS` slice, a `coreutils_invoke` arm, and the
+  platform-unconditional `COREUTILS_UNIX_ONLY_TOOLS` list — the one
+  authoritative spelling of the `unix` names, so a caller that must know a
+  bundled name does not exist off-Unix (a profile loader dropping dead exec
+  grants) reads this list rather than keeping a second copy.
 - **diffutils** — `DIFFUTILS_TOOLS` (`["cmp", "diff"]`, `diffutils` feature),
   whose `cmp_main` / `diff_main` shims faithfully translate the upstream
   `diffutilslib` entrypoints (re-audit on a version bump).

@@ -3801,3 +3801,16 @@ narratives re-verified, and `docs/SPEC.md` brought up to HEAD alongside. The
 load-bearing shift is the single turn door — `Shell::run_turn` dispatching on
 the `Program` sum over the transport-parametric seam — reflected across the
 map pages, the index one-liners, and the turn narrative.
+
+## [2026-07-13] ingest | Windows sandbox lands
+
+Drift sync at `c754c6b` over the Windows port series: the eighteen drifted
+[[map/core|core]] / [[map/repl|repl]] / [[map/exarch|exarch]] map pages
+re-ingested and re-stamped, `docs/SPEC.md` brought up to HEAD (`system:`
+sigil, Windows exec/path identity, `~user` honesty, program-image grant).
+The load-bearing shift is the Windows OS sandbox becoming real: a new
+[[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]
+decision page records the AppContainer backend and its union-of-projections
+consequence, reflected in [[map/core/capabilities|capabilities]],
+[[internals/capability-enforcement|capability-enforcement]], and
+[[design/grant|grant]] — the wiki's "Windows fail-closed" era ends here.

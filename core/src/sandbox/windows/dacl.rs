@@ -8,7 +8,7 @@
 // breadcrumb naming its upstream counterpart, for future diffing against
 // upstream (see `dev/docs/260712_windows_port.md`, W1).
 
-//! Crash-safe grant-ACE apply/restore engine for the per-command
+//! Crash-safe grant-ACE apply/restore engine for the session-scoped
 //! AppContainer sandbox.
 //!
 //! [`DaclManager`] stamps allow-ACEs for an AppContainer SID onto host
@@ -28,8 +28,13 @@
 //! can open any path command 1's grant stamped, even if command 2's own
 //! declared projection is narrower, because the OS access check at
 //! open-time sees the union of ACEs ever stamped for the session SID, not
-//! just the ones the current command's projection asked for. This is a
-//! deliberate consequence of the session-scoped-profile decision
+//! just the ones the current command's projection asked for. The same
+//! persistence cuts the other way for denies: an explicit deny-ACE stamped
+//! for command 1's `deny_path` canonically precedes any allow a later
+//! command stamps, so command 2 stays blocked on that path even where its
+//! own projection grants it — attenuation-safe, but cross-command
+//! interference all the same. Both directions are a deliberate consequence
+//! of the session-scoped-profile decision
 //! (`dev/docs/260712_windows_port.md`, W1), not an oversight — narrowing
 //! per command would require a fresh AppContainer SID (and profile
 //! create/delete round trip) on every spawn.

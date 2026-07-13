@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -43,6 +43,9 @@ between parent and child shells.
   controlling terminal's foreground at entry; it is no longer a per-handoff
   oracle but the lease's *mint condition*
   ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
+  On Windows it also owns `console_mode_snapshot` / `restore_console_mode`,
+  the termios-snapshot analogue a panic hook restores a raw-mode console
+  through.
 
 Redirect reads and writes — `< file`, `> file` and friends — open through the
 `File` source/sink here, and the runtime emits a byte-level I/O door at each:
@@ -107,13 +110,21 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
   external group, `relay_handler` fans SIGINT to active external pgids, and
   `quit_handler` is the Ctrl-`\` root abort. Platform handlers live in
-  `signal/unix.rs` and `signal/windows.rs`.
+  `signal/unix.rs` and `signal/windows.rs`; the Windows side carries the
+  console-control escalation ladder (`CTRL_BREAK_EVENT` fan-out, then
+  `TerminateJobObject`, then exit), `relay_interrupt` — `relay_handler`'s
+  non-escalating twin, whose fan-out skips a detached worker's group — and
+  `break_pipeline_group`, the SIGTERM-grade cooperative break a job teardown
+  sends before escalating to `kill_pipeline_group`.
 - `launch.rs` — the owned launch value and its platform interpreters. Unix
   lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
-  rendering, explicit helper-handle allow lists, the launch mutex, suspended
-  create → Job Object assignment → resume, and the widened `ChildHandle` raw
-  process wrapper ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
+  rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
+  attribute a confined spawn attaches (the session AppContainer's SID and
+  capability SIDs — [[map/core/capabilities|capabilities]]), the launch mutex,
+  suspended create → Job Object assignment → resume, and the widened
+  `ChildHandle` raw process wrapper
+  ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
   The whole stop-work flow — the
   `Interrupt < Explicit < Deadline < Terminate < RootAbort`
   order — is narrated in

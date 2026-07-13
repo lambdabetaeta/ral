@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/transcript.rs, exarch/src/tui/surface.rs, exarch/src/agent_builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 

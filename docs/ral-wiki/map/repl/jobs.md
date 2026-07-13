@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -23,16 +23,19 @@ a group resumed out-of-band by an external `kill -CONT` flips back to running
 (`mark_running`) rather than reading `stopped` forever. On exit a job group is
 taken down in three steps:
 
-- gracefully — SIGTERM, then SIGCONT so a stopped group can act on the
-  termination request / Ctrl-Break;
-- given a five-second grace;
+- gracefully — SIGTERM then SIGCONT on Unix (a frozen group must run to act on
+  the request); `CTRL_BREAK_EVENT` to every group on Windows;
+- given a five-second grace during which natural exits are reaped;
 - then forced — SIGKILL / `TerminateJobObject`.
 
 `Escape::Stopped` is Unix-only: a foreground job stopped by SIGTSTP escapes the
 [[map/core/evaluator|evaluator]] and `exec.rs` records it as a `Stopped` job.
-Windows has no SIGTSTP analogue, so that state cannot arise spontaneously; the
-table still compiles and operates cfg-free, with `fg` blocking on the leader's
-handle and `cleanup` routed through the Job Object's KILL_ON_JOB_CLOSE flag.
+That arm is the table's only live populator — `&` registers workers (below) on
+every platform — so on Windows, which has no SIGTSTP analogue, the table is
+empty in a live session. It still compiles and operates cfg-free: `fg` blocks
+on the leader's process handle (no console handoff, `stopped_by` always
+`None`), `bg` has no SIGCONT to send, and a reaped-away group's stragglers die
+through the Job Object's KILL_ON_JOB_CLOSE flag.
 
 On Unix, **`fg` resumes a parked group only through a held terminal lease**: the
 controlling-terminal handoff is an unforgeable [[map/core/shell-state|TerminalLease]]

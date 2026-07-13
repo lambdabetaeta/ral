@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 668499f -->
+<!-- verified_at_commit: c754c6b -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -308,7 +308,7 @@ The literals `true`, `false`, `unit`, and numeric NAME tokens (matching
 `case` are reserved: the parser rejects them as binding names in `let`
 patterns and lambda parameters.  `case` is also a stage-form keyword
 (§2 above) — the parser dispatches on the head identifier rather than
-treating `case` as an ordinary callable.
+treating `case` as an ordinary function.
 
 ## 3  Binding
 
@@ -1250,6 +1250,16 @@ A unified map keyed by one of four shapes:
   yielding no directories is a load error.  Like any subpath key it
   takes only `'allow'` or `'deny'`.  PATH is snapshotted once at
   load, so a later PATH mutation cannot widen the grant.
+- **`system:`** (or `system:/`) — like `path:`, but expands into the
+  platform's own tool roots rather than `$PATH`: on Unix, `/usr/bin`
+  and `/bin`, plus whichever Homebrew prefix is present
+  (`/opt/homebrew`, `/home/linuxbrew/.linuxbrew`); on Windows,
+  `%SystemRoot%\System32`, the bundled Windows PowerShell home under
+  it, and Git for Windows' `usr\bin` when present.  It lets a
+  portable policy admit the system's stock tools without hardcoding
+  Unix prefixes.  Takes only `'allow'` or `'deny'`; unlike `path:`
+  the expansion is never empty (the platform's own roots are
+  unconditional), so there is no empty-expansion load error.
 
 Each value is the policy.  Bare-name and literal-path keys carry the
 full lattice:
@@ -1287,6 +1297,19 @@ JSON) and never appear in user-written profiles or grant blocks.
    admits *only* what its map says; everything else is denied
    within that layer.
 
+**Platform.**  On Windows, literal keys (bare names and absolute
+paths) match under Windows path semantics: the comparison folds case
+and treats a trailing executable extension recognised by PATHEXT
+resolution (`.com`, `.exe`, `.bat`, `.cmd`) as transparent on both
+sides, so a bare `'git': 'allow'` admits a resolved `GIT.EXE`.  An
+unrelated extension (`my.tool`) is not stripped, and the stem must
+still match (`gitk.exe` is not `git`).  This mirrors the
+PATHEXT-aware lookup of §4.1: resolution chose the case and the
+extension, so the policy author spells neither.  `.bat`/`.cmd` names
+still participate in this comparison — the refusal to launch a
+resolved batch file (§4.2) is a separate, later gate at the spawn
+boundary, not part of policy matching.
+
 ### 11.2  `fs`
 
 Governs every operation that touches the filesystem — structured
@@ -1310,7 +1333,13 @@ and denies are path *regions*, not exact paths: a deny on
 `~/.local` (resolved at load) covers everything beneath it.
 Membership is alias-aware so the macOS firmlink `/tmp` ↔
 `/private/tmp` does not produce two different answers depending
-on which form the policy author chose.
+on which form the policy author chose.  On Windows membership is
+judged under Windows path identity: the comparison folds case,
+treats `/` and `\` as the same separator, and equates a
+`\\?\`-verbatim prefix (what canonicalisation produces there) with
+its plain spelling — `\\?\C:\Work` and `c:/work` name the same
+region.  Exec directory prefixes (§11.1) match under the same
+identity.
 
 Deny is symmetric: the same deny region blocks reads and writes.
 This is the simpler rule, and it has the right effect for the
@@ -1373,6 +1402,16 @@ rejected at load — for example, with `XDG_DATA_HOME=/etc` set in
 the calling environment, a policy naming `xdg:data` errors instead
 of granting `/etc` read.  Unknown names (`xdg:cofnig`) error at the
 same boundary, in the spirit of `deny_unknown_fields`.
+
+**Platform.**  A *named* user's home (`~user`, `~user/sub`) resolves
+through the user database (`getpwnam(3)`), which exists only on
+Unix.  On Windows it is unresolvable — ral never fabricates a
+`/home/<name>` — and each surface fails honestly: a policy naming
+`~user` errors at load, `cd ~user` and a `~user` interpolated into a
+value error at use, and PATH/command resolution and tab completion
+pass the literal spelling through unexpanded, to fail downstream as
+an ordinary missing path.  Bare `~` and `~/sub` are unaffected: they
+resolve against the session's home on every platform.
 
 ### 11.3  `net`
 
@@ -1519,34 +1558,56 @@ OS-level enforcement varies:
   system directories (`/bin`, `/usr`, `/lib*`, `/sys`, and
   selected `/etc` files) bound read-only alongside the granted
   prefixes.
-- **Windows** — a per-command AppContainer (LowBox token): one profile
-  per shell session, created lazily on first use and torn down at
-  session exit.  A spawned command is confined under it when `fs:` is
-  present or `net` is `false`; pure exec attenuation does not enter
-  the OS sandbox (AppContainer has no path-based exec filter — as on
-  Linux, the in-process exec check is the only gate).  Fs grants are
-  expressed as allow-ACEs stamped for the AppContainer's SID on the
-  projection's read and read-write prefixes, inheritable so a
+- **Windows** — a session-scoped AppContainer (LowBox token): one
+  profile per shell session, created lazily on first use and torn
+  down at session exit.  A spawned command is confined under it when
+  `fs:` is present or `net` is `false`; pure exec attenuation does not
+  enter the OS sandbox (AppContainer has no path-based exec filter —
+  as on Linux, the in-process exec check is the only gate).  Fs grants
+  are expressed as allow-ACEs stamped for the AppContainer's SID on
+  the projection's read and read-write prefixes, inheritable so a
   directory's descendants are covered without a manual walk; every
   stamp is written to a session ledger before the ACL is touched, so
   a session that crashes mid-grant is repaired by the next session's
   boot-time sweep rather than left with dangling ACEs on user
-  directories.  AppContainer is deny-by-default, which cuts the
+  directories.  Because every confined command runs under the same
+  session SID and stamps persist until session teardown, the OS layer
+  enforces the *union* of the projections the session has confined so
+  far, not each command's own: a later command can open any path an
+  earlier command's projection granted, even where its own projection
+  is narrower, and stays blocked on any path an earlier command's
+  `deny_path` stamped, even where its own projection grants it.  This
+  is a deliberate trade — per-command narrowing at the OS layer would
+  cost a fresh AppContainer profile per spawn — and it is unique to
+  Windows: Seatbelt and bwrap build a fresh per-command sandbox.
+  AppContainer is deny-by-default, which cuts the
   opposite way from macOS/Linux: when the active projection has no
   `fs:` grant (confinement triggered by `net: false` alone), the
   child still reads only the `ALL APPLICATION PACKAGES`-readable
   system paths, not the user's working tree — there is no "pass fs
-  through" fallback as under Seatbelt/bwrap.  Network is
+  through" fallback as under Seatbelt/bwrap.  One targeted grant
+  keeps spawning workable under that default: the resolved program
+  image itself — an absolute program path, or ral's own executable
+  for a bundled tool — is stamped read-and-execute for the container
+  SID, since a user-installed binary outside the granted prefixes
+  would otherwise be unreadable and fail before it starts (the Linux
+  backend binds the program path read-only for the same reason).  A
+  bare name resolved on `PATH` receives no such stamp; its
+  readability rests on the fs read projection or the system surface.
+  Network is
   capability-based: `net: true` grants the `internetClient` +
   `privateNetworkClientServer` capability SIDs; `net: false` grants
   neither, and a LowBox token holding no network capability cannot
   open a socket at all — real kernel-enforced denial, not a
-  fail-closed refusal to run.  A `deny_path` nested inside a granted
-  prefix is stamped as an explicit deny-ACE for the AppContainer SID,
-  which canonical ACL ordering places ahead of the inherited allow, so
-  the deny wins at the OS layer; a `deny_path` outside every grant is
-  unreachable under deny-by-default and is not stamped.  Each external
-  command inside
+  fail-closed refusal to run.  Every `deny_path` that exists on disk
+  is stamped as an explicit deny-ACE for the AppContainer SID, which
+  canonical ACL ordering places ahead of any allow — inherited or
+  explicit — so the deny wins at the OS layer.  A `deny_path` outside
+  every granted prefix is stamped too, because deny-by-default does
+  not make it unreachable: the AppContainer token retains the
+  `Everyone` SID and the system-wide `ALL APPLICATION PACKAGES`
+  grants, and the denied path may sit under one of those ambient
+  allows.  Each external command inside
   a `grant` is additionally assigned to a Job Object capping its
   process tree at 512 — that limit operates through the process-spawn
   machinery and does not depend on the fs/net sandbox backend.

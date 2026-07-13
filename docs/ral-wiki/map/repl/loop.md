@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -41,7 +41,9 @@ binding-edge / effect-verdict model the structural surface projects.
 - `eval` runs one trimmed line through `exec::step`, recording an
   `exit` code so `run` breaks cleanly.
 - Teardown — transport detach, history flush, the
-  [[map/repl/jobs|survivor warning]], and `JobTable::cleanup` — lives in
+  [[map/repl/jobs|survivor warning]], `JobTable::cleanup`, and
+  `ral_core::sandbox::teardown_session` (reverts the session's AppContainer
+  grant ACEs on Windows; a no-op elsewhere) — lives in
   `Drop for Session`, so it covers a panic unwinding through the owned
   `Session` as well as the orderly exit; a crash mid-turn neither orphans a
   stopped group nor loses history.
@@ -49,7 +51,10 @@ binding-edge / effect-verdict model the structural surface projects.
 `session/boot.rs` does the one-shot setup: `setup_signals` (the whole Unix
 disposition table in one place — SIGINT relay, SIGQUIT root-abort,
 SIGTERM/SIGHUP term handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore),
-`setup_panic_hook` (restore termios, write a crash log), `setup_terminal`
+`setup_panic_hook` (restore the pre-raw terminal state — termios on Unix,
+console mode on Windows — then write a crash log, to a state-dir path
+resolved at install time so a changed `HOME` cannot redirect it),
+`setup_terminal`
 (mark interactive, publish the probed `TERMINAL`), `load_profiles` (login
 profiles then rc), `install_default_prompt` (register the default
 `Session/"prompt"` hook, `{ return "❯ " }` — after rc sourcing, and only

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -31,10 +31,16 @@ Submodules:
   the editor/shell bool gates;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder;
 - `exec.rs` — per-layer exec verdicts; the admitted arm carries `Admit`
-  (`Any` / `Subcommands`), so a `Deny` cannot reach an allowed verdict;
+  (`Any` / `Subcommands`), so a `Deny` cannot reach an allowed verdict; the
+  literal comparison is case- and PATHEXT-insensitive under Windows path
+  semantics, so a bare `git` grant admits a resolved `GIT.EXE`;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
-  decoder per `exec` / `fs` / `net` / `editor` / `shell` / `audit` key;
+  decoder per `exec` / `fs` / `net` / `editor` / `shell` / `audit` key; its
+  exec-map freeze expands the two *exec-only* sigils `path:` (every `$PATH`
+  component) and `system:` (the platform's tool roots,
+  `sigil::system_tool_roots`), and drops bundled-tool grants for coreutils a
+  host does not ship (`COREUTILS_UNIX_ONLY_TOOLS`);
 - `load.rs` — `load_capabilities_from_path` / `_from_str` for `.ral`
   capability profiles.
 
@@ -52,10 +58,15 @@ plus `which.rs` for PATH search.
 
 - expand — `sigil.rs` (the five path-prefix sigils: `~`, `xdg:`, `cwd:`,
   `tempdir:`, `gitdir:` — the last three policy-only, expanded at freeze;
-  `git.rs` backs `gitdir:` discovery), `tilde.rs`;
+  `git.rs` backs `gitdir:` discovery), `tilde.rs` (`~user` resolves honestly
+  per platform: off-Unix `get_user_home` declines rather than fabricating a
+  home, and each call site picks its own fallback);
 - lex — `lex.rs`;
 - canonicalise — `canon.rs`;
-- match — `lex::path_within`.
+- match — `lex::path_within`, which folds `starts_with_identity` over the
+  alias pairs; under Windows path semantics that comparison unifies case,
+  `/` vs `\`, and `\\?\`-verbatim spellings, so the fs-grant, exec-dir, and
+  prefix-set matchers all inherit one notion of path identity.
 
 `resolver.rs` composes the stages — `Resolver::resolve` is the *sole*
 constructor of a `ResolvedPath` (`resolved.rs`, with its grant-side twin
@@ -88,11 +99,15 @@ declared **filesystem and network** capabilities. Exec is gated in-process on
 every platform (`capability::check_exec_args`) before the spawn; on macOS the
 Seatbelt profile additionally renders a `process-exec` allow-list, catching the
 re-execs the in-process check never sees (`sh -c`, `find -exec`), while bwrap on
-Linux has no path-exec filter so there the in-process gate stands alone.
+Linux and the AppContainer on Windows have no path-exec filter so there the
+in-process gate stands alone (on Windows the deny-by-default fs projection
+still bounds which images a child can *read*, and so load, at all).
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
-  `SANDBOX_SELF`, and on Unix enters the OS sandbox for a per-command
-  `--sandbox-projection` child (`maybe_enter_process_sandbox`). A test binary is
+  `SANDBOX_SELF`, on Unix enters the OS sandbox for a per-command
+  `--sandbox-projection` child (`maybe_enter_process_sandbox`), and on Windows
+  runs the boot-time orphan sweep (`windows::session::boot_recover`) that
+  reclaims DACL grants a crashed prior session left stamped. A test binary is
   the same [[invariants/single-binary|multicall executable]] a confined child
   re-execs, so it must serve these flags from its own pre-`main` `#[ctor]` (it
   reaches `main` only through libtest); `serve_sandbox_early_init` is the shared
@@ -107,12 +122,14 @@ Linux has no path-exec filter so there the in-process gate stands alone.
   per-platform identity check (`/proc/self/fd` on Linux, `(dev, ino)` snapshot on
   macOS, `BY_HANDLE_FILE_INFORMATION` on Windows). On Unix
   `maybe_enter_process_sandbox` enters the OS sandbox in a per-command
-  `--sandbox-projection` child; on Windows it **fails closed** — a supplied
-  policy it cannot enforce returns `Err`, never `Ok(None)` ("continue
-  unconfined"). `verify_unswapped`, the parent-side swap guard, is
-  `cfg(target_os = "macos")`: only macOS re-execs the *pinned self* parent-side
-  (Linux re-execs through the fd, where a swap is already moot; Windows has no
-  parent-side self re-exec).
+  `--sandbox-projection` child; on Windows there is no child re-entry at all —
+  confinement is the AppContainer token the *parent* attaches at
+  `CreateProcessW`, so a supplied `--sandbox-projection` is rejected as an
+  error (no legitimate caller emits it), and the pinned self serves to grant
+  the container read on the bundled-tool re-exec image. `verify_unswapped`,
+  the parent-side swap guard, is `cfg(target_os = "macos")`: only macOS
+  re-execs the *pinned self* parent-side (Linux re-execs through the fd, where
+  a swap is already moot; Windows has no parent-side self re-exec).
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
@@ -125,20 +142,38 @@ Linux has no path-exec filter so there the in-process gate stands alone.
   wraps each child in `bwrap` (`make_command_with_policy`); macOS re-execs the
   pinned self (`ral --sandbox-projection <json> --ral-sandbox-exec <host>`, or
   `--ral-bundled-tool <tool>`) so the child enters Seatbelt in `early_init`, then
-  `serve_sandbox_exec` `execve`s the host target inside it; **Windows fails
-  closed** — no per-command AppContainer / restricted-token backend exists, so a
-  requested policy errors rather than running unsandboxed. The `--ral-sandbox-exec`
-  sentinel and `serve_sandbox_exec`'s execve arm are `cfg(target_os = "macos")`,
-  the only platform that emits the host re-exec tail. The grant body itself
-  evaluates locally — `transport::dispatch` no longer re-execs it
+  `serve_sandbox_exec` `execve`s the host target inside it; Windows builds the
+  target's `Launch` directly and `windows::session::confine` attaches the
+  session AppContainer's LowBox `SECURITY_CAPABILITIES`, so the parent's own
+  spawn is the confinement point — never a re-exec child. The
+  `--ral-sandbox-exec` sentinel and `serve_sandbox_exec`'s execve arm are
+  `cfg(target_os = "macos")`, the only platform that emits the host re-exec
+  tail. The grant body itself evaluates locally — `transport::dispatch` no
+  longer re-execs it
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap), and
-  `windows.rs` (Job Objects capping the child tree at 512 processes, plus a
-  restricted token with every privilege dropped and integrity lowered to Low —
-  the Chrome-renderer model: a file unreadable to the restricting SID set is
-  unreadable to the child). The Windows backend supplies
-  resource caps and a profile dump; no path exists yet to confine a per-command
-  child through it, so the entrypoint and launcher fail closed.
+  `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
+  AppContainer backend in three submodules — `appcontainer.rs`, the session
+  profile lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`,
+  the crash-safe grant/deny ACE apply/restore engine with a durably persisted
+  ledger, per-path named mutexes, and boot-time orphan recovery; `session.rs`,
+  the session-scoped state the two compose into). The module docs of those
+  three files carry the full protocol; the shape is imitated from MXC's Tier-3
+  processcontainer backend, breadcrumbed per unit
+  ([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
+
+The Windows backend is **session-scoped, not per-spawn**: one AppContainer
+profile and one `DaclManager` per shell session, grants accumulating as ACEs
+for the session SID until `teardown_session`, so the OS layer enforces the
+*union* of the session's projections while the in-process gate still judges
+each command's own stack
+([[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]]).
+Within that shape: `deny_paths` nested inside a grant are stamped
+unconditionally as explicit deny-ACEs, which canonical ACL ordering places
+ahead of any allow; the child's program image is granted read-only so a
+user-installed binary or the bundled-tool self image can load at all; and
+`net: false` is enforced by withholding the network capability SIDs — a LowBox
+token without them cannot open a socket, so `net_enforced()` holds on Windows.
 
 `macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
 profile inherits: deny-default, libSystem/dyld startup allowances, common device
@@ -165,6 +200,10 @@ service or endpoint, not a filesystem path, so they reproduce verbatim for
 transparency but never fill the path-to-grant slot. macOS logs fully-resolved
 paths, so the hint names the exact path with the symlink caveat; the Linux audit
 record carries no path, so the hint degrades to "a sandboxed syscall was denied".
+Windows has no kernel denial log to scrape at all, so its arm gates on the exit
+code alone: only an access-denied-shaped exit (`ERROR_ACCESS_DENIED` /
+`STATUS_ACCESS_DENIED`) under an active sandbox yields the fixed, pathless hint —
+never a fabricated path.
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**
@@ -179,8 +218,9 @@ formal capability calculus.
 Every `fs`/process constructor in this layer is a closed *I/O door*: the
 workspace bans the raw constructors via clippy `disallowed_methods`, so each call
 site carries an `#[allow(… reason = "[io-door:…]")]` classifying it as a surfaced
-exec image (`make_command`), a silent infrastructure spawn (the self re-exec, the
-`ps` denial sampler, the boot-time binary pin), or test scaffolding. The door
+exec image (`make_command`), silent infrastructure (the self re-exec, the
+`ps` denial sampler, the boot-time binary pin, the DACL ledger lifecycle), or
+test scaffolding. The door
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
 the doors are only declared and accounted, with `core/tests/io_door_set.rs`
 failing CI on any unaccounted constructor.

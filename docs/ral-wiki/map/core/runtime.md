@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -118,10 +118,12 @@ guards
   RAL-owned effects are decided in process by `capability::check_*`
   ([[map/core/capabilities|capabilities]]), and child-owned effects are
   kernel-backed at *external dispatch*: when a projection is active,
-  `command::build_command` enters the per-command OS sandbox
-  (Seatbelt / bwrap / restricted token) for that one child via
-  `projection_enforceable` / `sandboxed_command`, so net/fs fail-closed fires
-  when a child is actually spawned, not at grant-body entry
+  `command::build_command` obtains a confined `process::Launch` via
+  `projection_enforceable` / `sandboxed_command` — per-command Seatbelt /
+  bwrap confinement on Unix; on Windows the LowBox token of the session's
+  one AppContainer profile, so the OS layer there enforces the union of the
+  session's projections — and net/fs fail-closed fires when a child is
+  actually spawned, not at grant-body entry
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - `core/src/child_eval.rs` (crate root, beside the wire layer it rides, *not*
   under `runtime/`) — the one re-exec'd-child eval runner the pipeline stage

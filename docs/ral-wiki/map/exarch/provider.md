@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: c754c6b
+generated_at_date: 2026-07-13
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/pricing.rs, exarch/src/models.rs, exarch/src/oauth/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -32,7 +32,12 @@ and the `/model` picker — and three arms supply it:
   over OAuth. **Each account is its own selectable identity**, so switching
   accounts *is* switching the selected provider — no second selection
   dimension. It holds only the account label and id; the live tokens live in
-  the [[map/exarch/agent|credential]] store's `OAuth` cell, not here.
+  the [[map/exarch/agent|credential]] store's `OAuth` cell, not here. On disk
+  the login store is persisted through one door, `write_private`
+  (`oauth/mod.rs`), and the file is *born* owner-private: the Unix arm opens
+  it mode `0600`; the Windows arm passes an owner-only, inheritance-protected
+  DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW` itself, so at no instant
+  does the token file wear the parent directory's inherited ACL.
 
 **The flat-rate vs OAuth split is two distinct unmetered axes.** A subscription
 turn carries no per-token price, and a provider reaches that state two ways:
