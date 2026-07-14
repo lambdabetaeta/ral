@@ -166,8 +166,12 @@ impl ProviderKind {
 pub struct CustomProvider {
     /// The provider's display label and stable identity (the config map key).
     pub label: String,
-    /// The environment variable its API key is read from.
-    pub key_env: String,
+    /// The environment variable its API key is read from, or `None` for a
+    /// no-auth endpoint — a local server (Ollama, llama.cpp, LM Studio) that
+    /// ignores the `Authorization` header. A keyless provider resolves to an
+    /// inert placeholder bearer rather than a real credential (see
+    /// [`crate::credential`]).
+    pub key_env: Option<String>,
     /// The base URL genai's [`ServiceTargetResolver`] points traffic at.
     /// Always a custom endpoint — that a custom provider has one is the
     /// whole reason it needs a config entry.
@@ -247,11 +251,13 @@ impl ProviderId {
     /// The environment variable this provider's API key is read from, or
     /// `None` for a provider that does not authenticate off an env key — a
     /// `ChatGPT` account authorises over OAuth, so it is loaded from the token
-    /// store rather than swept from the environment.
+    /// store rather than swept from the environment, and a custom provider
+    /// declared without a `key` is a no-auth local endpoint resolved to an
+    /// inert placeholder bearer (see [`crate::credential`]).
     pub fn key_env(&self) -> Option<&str> {
         match self {
             Self::Famous(kind) => Some(kind.info().2),
-            Self::Custom(c) => Some(&c.key_env),
+            Self::Custom(c) => c.key_env.as_deref(),
             Self::ChatGpt(_) => None,
         }
     }
@@ -1854,7 +1860,7 @@ mod tests {
     fn custom_provider_id_reports_declared_facts() {
         let id = ProviderId::Custom(Arc::new(CustomProvider {
             label: "local-llama".into(),
-            key_env: "LOCAL_LLAMA_KEY".into(),
+            key_env: Some("LOCAL_LLAMA_KEY".into()),
             endpoint: "https://llama.example/v1/".into(),
             adapter: AdapterKind::OpenAI,
         }));

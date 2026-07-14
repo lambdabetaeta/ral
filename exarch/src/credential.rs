@@ -14,7 +14,11 @@
 //! Custom providers declared in `config.ral` ([`crate::config`]) flow through
 //! the same sweep: each is keyed by its [`ProviderId`] and its declared key
 //! env var is read and scrubbed exactly like a famous provider's, so a custom
-//! endpoint becomes available the moment its key is in the environment.
+//! endpoint becomes available the moment its key is in the environment. A
+//! custom provider declared with *no* `key` is a no-auth local endpoint
+//! (Ollama, llama.cpp, LM Studio): it is available immediately, with no env
+//! var to read or scrub, resolving to an inert [`NO_AUTH_PLACEHOLDER`] bearer
+//! that such servers ignore.
 //!
 //! Signed-in `ChatGPT` accounts ([`crate::oauth`]) are the one source that does
 //! *not* come from the environment: each persisted login becomes its own
@@ -27,6 +31,14 @@ use crate::provider::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind};
 use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+
+/// The inert bearer bound for a custom provider declared with no `key` — a
+/// no-auth local endpoint (Ollama et al.). It is not a secret and never
+/// authenticates anything: such servers ignore the `Authorization` header
+/// entirely, but genai's OpenAI adapter always attaches one, so a placeholder
+/// stands in for a real key. Distinct, recognisable text so it is obvious in a
+/// captured request that no real credential is in play.
+pub(crate) const NO_AUTH_PLACEHOLDER: &str = "no-auth";
 
 /// A resolved credential — what a provider's requests authenticate with.
 ///
@@ -107,9 +119,16 @@ impl CredentialStore {
         let mut scrub: Vec<String> = Vec::new();
 
         for id in &all {
-            // A ChatGPT account has no key env var (`key_env()` is `None`); it
-            // is resolved from the token store below, not the environment.
+            // A provider with no key env var (`key_env()` is `None`) is one of
+            // two things: a ChatGPT account, resolved from the token store
+            // below rather than the environment — skipped here; or a keyless
+            // custom provider, a no-auth local endpoint bound to an inert
+            // placeholder bearer so it is available with no env var and nothing
+            // to scrub.
             let Some(var) = id.key_env() else {
+                if matches!(id, ProviderId::Custom(_)) {
+                    ready.insert(id.clone(), Credential::ApiKey(NO_AUTH_PLACEHOLDER.to_string()));
+                }
                 continue;
             };
             // Read the var once. A present var — valid or malformed — is
@@ -578,7 +597,7 @@ mod tests {
     fn custom_provider_resolves_and_scrubs_its_key() {
         let custom = CustomProvider {
             label: "local-llama".into(),
-            key_env: "LOCAL_LLAMA_KEY".into(),
+            key_env: Some("LOCAL_LLAMA_KEY".into()),
             endpoint: "https://llama.example/v1/".into(),
             adapter: genai::adapter::AdapterKind::OpenAI,
         };
@@ -606,6 +625,37 @@ mod tests {
                 }
                 // Famous first, then the custom provider.
                 assert_eq!(store.available(), vec![fam(ProviderKind::Anthropic), id]);
+            },
+        );
+    }
+
+    /// A custom provider declared with no `key` (a no-auth local endpoint like
+    /// Ollama) is available with no env var set at all, resolving to the inert
+    /// [`NO_AUTH_PLACEHOLDER`] bearer rather than a real credential. Nothing is
+    /// read from or scrubbed from the environment on its behalf.
+    #[test]
+    fn keyless_custom_provider_resolves_to_placeholder() {
+        let custom = CustomProvider {
+            label: "ollama".into(),
+            key_env: None,
+            endpoint: "http://localhost:11434/v1/".into(),
+            adapter: genai::adapter::AdapterKind::OpenAI,
+        };
+        with_env(
+            &[
+                ("ANTHROPIC_API_KEY", None),
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", None),
+                ("DEEPSEEK_API_KEY", None),
+            ],
+            || {
+                let store = CredentialStore::resolve_and_scrub(vec![custom.clone()]);
+                let id = ProviderId::Custom(std::sync::Arc::new(custom.clone()));
+                match store.get(&id) {
+                    Some(Credential::ApiKey(k)) => assert_eq!(k, NO_AUTH_PLACEHOLDER),
+                    _ => panic!("a keyless custom provider should resolve to the placeholder"),
+                }
+                assert_eq!(store.available(), vec![id]);
             },
         );
     }

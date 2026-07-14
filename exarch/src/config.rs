@@ -7,8 +7,12 @@
 //! Famous providers auto-populate from the environment and carry no config
 //! ([`crate::credential`]). A *custom* endpoint — self-hosted or non-famous —
 //! is the one thing exarch cannot know: it is declared here, with its base
-//! URL, its key env var, and its wire protocol. Slice 3 of the
+//! URL, its wire protocol, and — optionally — its key env var. Slice 3 of the
 //! provider-config ADR.
+//!
+//! The `key` is optional: omitting it declares a **no-auth** local endpoint
+//! (Ollama, llama.cpp, LM Studio), which [`crate::credential`] resolves to an
+//! inert placeholder bearer that such servers ignore.
 //!
 //! The config is source-code, so it is evaluated, not parsed: a hand-written
 //! `config.ral` whose terminal expression is a map
@@ -166,7 +170,9 @@ fn decode_one(name: &str, decl: &Value, display: &str) -> Result<CustomProvider,
         }
     }
     let endpoint = string_field(fields.get("endpoint"), "endpoint", &where_)?;
-    let key_env = string_field(fields.get("key"), "key", &where_)?;
+    // `key` is optional: omitting it declares a no-auth local endpoint (Ollama
+    // et al.), resolved to an inert placeholder bearer by `crate::credential`.
+    let key_env = optional_string_field(fields.get("key"), "key", &where_)?;
     let protocol = string_field(fields.get("protocol"), "protocol", &where_)?;
     Ok(CustomProvider {
         label: name.to_string(),
@@ -185,6 +191,25 @@ fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<Stri
             other.type_name()
         )),
         None => Err(format!("{where_}: missing '{field}'")),
+    }
+}
+
+/// An optional `String`-valued field: `None` when the field is absent (a
+/// legitimate omission, e.g. a no-auth endpoint's `key`), the string when
+/// present. A present-but-non-string value is still an error — an omission is
+/// deliberate, a wrong type is a mistake to surface.
+fn optional_string_field(
+    value: Option<&Value>,
+    field: &str,
+    where_: &str,
+) -> Result<Option<String>, String> {
+    match value {
+        None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "{where_}: '{field}' must be a string, got {}",
+            other.type_name()
+        )),
     }
 }
 
@@ -234,7 +259,7 @@ mod tests {
         assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].label, "a-anthropic");
         assert_eq!(providers[0].adapter, AdapterKind::Anthropic);
-        assert_eq!(providers[0].key_env, "A_KEY");
+        assert_eq!(providers[0].key_env, Some("A_KEY".to_string()));
         assert_eq!(providers[0].endpoint, "https://a.example/");
         assert_eq!(providers[1].adapter, AdapterKind::OpenAI);
         assert_eq!(providers[2].adapter, AdapterKind::OpenAIResp);
@@ -249,12 +274,36 @@ mod tests {
         assert!(err.contains("weird"), "should name the provider: {err}");
     }
 
-    /// A missing required field is a hard error.
+    /// A missing *required* field (`endpoint`) is a hard error.
     #[test]
     fn missing_field_errors() {
-        let err =
-            parse("return [x: [endpoint: 'https://x/', protocol: 'completions']]").unwrap_err();
-        assert!(err.contains("missing 'key'"), "got: {err}");
+        let err = parse("return [x: [key: 'X_KEY', protocol: 'completions']]").unwrap_err();
+        assert!(err.contains("missing 'endpoint'"), "got: {err}");
+    }
+
+    /// `key` is optional: a declaration with no `key` decodes to a no-auth
+    /// custom provider (`key_env: None`) — the Ollama shape. `endpoint` and
+    /// `protocol` are still required.
+    #[test]
+    fn missing_key_is_a_no_auth_provider() {
+        let providers = parse(
+            "return [ollama: [endpoint: 'http://localhost:11434/v1/', protocol: 'completions']]",
+        )
+        .expect("a keyless custom provider should decode");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].label, "ollama");
+        assert_eq!(providers[0].key_env, None);
+        assert_eq!(providers[0].endpoint, "http://localhost:11434/v1/");
+        assert_eq!(providers[0].adapter, AdapterKind::OpenAI);
+    }
+
+    /// A present-but-non-string `key` is still a hard error — an omission is
+    /// deliberate, a wrong type is a mistake.
+    #[test]
+    fn non_string_key_errors() {
+        let err = parse("return [x: [endpoint: 'https://x/', key: 7, protocol: 'completions']]")
+            .unwrap_err();
+        assert!(err.contains("'key' must be a string"), "got: {err}");
     }
 
     /// An unknown declaration key is rejected rather than silently dropped.

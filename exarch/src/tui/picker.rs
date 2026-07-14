@@ -1276,7 +1276,7 @@ mod tests {
     fn custom(label: &str) -> ProviderId {
         ProviderId::Custom(std::sync::Arc::new(crate::provider::CustomProvider {
             label: label.into(),
-            key_env: format!("{}_KEY", label.to_uppercase()),
+            key_env: Some(format!("{}_KEY", label.to_uppercase())),
             endpoint: format!("https://{label}.example/v1/"),
             adapter: genai::adapter::AdapterKind::OpenAI,
         }))

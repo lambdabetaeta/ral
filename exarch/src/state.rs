@@ -192,7 +192,7 @@ mod tests {
         let dir = tmp_dir();
         let custom = ProviderId::Custom(std::sync::Arc::new(crate::provider::CustomProvider {
             label: "local-llama".into(),
-            key_env: "LOCAL_LLAMA_KEY".into(),
+            key_env: Some("LOCAL_LLAMA_KEY".into()),
             endpoint: "https://llama.example/v1/".into(),
             adapter: genai::adapter::AdapterKind::OpenAI,
         }));

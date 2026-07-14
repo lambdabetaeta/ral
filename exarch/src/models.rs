@@ -578,7 +578,7 @@ mod tests {
     fn custom(label: &str) -> ProviderId {
         ProviderId::Custom(Arc::new(crate::provider::CustomProvider {
             label: label.into(),
-            key_env: format!("{}_KEY", label.to_uppercase()),
+            key_env: Some(format!("{}_KEY", label.to_uppercase())),
             endpoint: format!("https://{label}.example/v1/"),
             adapter: AdapterKind::OpenAI,
         }))
