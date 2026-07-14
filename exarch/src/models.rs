@@ -190,10 +190,13 @@ impl LiveSource {
             .map_err(|e| format!("list models for {}: {e}", id.label()))
     }
 
-    /// `GET /backend-api/codex/models?client_version=<exarch version>` is the
-    /// subscription catalog. It is authenticated with the same live OAuth cell
-    /// as a Responses request, so a refreshed token is used without rebuilding
-    /// the catalog source.
+    /// `GET /backend-api/codex/models?client_version=<codex cli version>` is
+    /// the subscription catalog. The `client_version` is the pinned real Codex
+    /// CLI version ([`oauth::CODEX_CLIENT_VERSION`]), not exarch's own — the
+    /// backend gates the returned models on it, so a low version yields an empty
+    /// list. It is authenticated with the same live OAuth cell as a Responses
+    /// request, so a refreshed token is used without rebuilding the catalog
+    /// source.
     fn list_chatgpt(
         &self,
         id: &ProviderId,
@@ -213,7 +216,7 @@ impl LiveSource {
                 .clone();
             let url = format!(
                 "{CHATGPT_MODELS_URL}?client_version={}",
-                env!("CARGO_PKG_VERSION")
+                oauth::CODEX_CLIENT_VERSION
             );
             let request = oauth::request_headers(&token, "application/json")
                 .into_iter()

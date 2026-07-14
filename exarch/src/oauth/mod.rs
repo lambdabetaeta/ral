@@ -33,6 +33,17 @@ pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
+/// The Codex CLI version exarch presents to the Codex backend — as the
+/// `client_version` on the model-list query and the `codex_cli_rs/<v>`
+/// user-agent on every request. It must be a *real, current* Codex CLI
+/// version, **not** exarch's own `CARGO_PKG_VERSION`: the backend gates model
+/// availability on `client_version` (each model carries a
+/// `minimal_client_version`), so an unrecognised low version like `0.1.0` is
+/// served an *empty* model list and rejects newer models outright. Pinned to
+/// the latest Codex CLI release; bump it as the backend raises the floor for
+/// new models (e.g. the `gpt-5.6` family requires `>= 0.144.0`).
+pub(crate) const CODEX_CLIENT_VERSION: &str = "0.144.3";
+
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
@@ -354,7 +365,7 @@ pub(crate) fn request_headers(token: &OAuthToken, accept: &str) -> Vec<(String, 
         ("originator".into(), ORIGINATOR.into()),
         (
             "user-agent".into(),
-            format!("codex_cli_rs/{}", env!("CARGO_PKG_VERSION")),
+            format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
         ),
         ("accept".into(), accept.into()),
     ]
