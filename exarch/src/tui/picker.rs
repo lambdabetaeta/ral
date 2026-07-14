@@ -58,7 +58,8 @@
 //! reads [`Picker::focused_or_model_needing_endpoints`] and fetches a model's
 //! providers only once the provider control is focused on it.
 
-use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, SLATE};
+use super::line;
+use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
 use crate::models::ProviderEndpoint;
 use crate::provider::Subscription;
 use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};
@@ -782,18 +783,23 @@ impl Picker {
     /// always-reserved serving-provider row, the three tuning rows, one note
     /// per failed provider, and the bezel.
     fn desired_size(&self, frame: Rect) -> (u16, u16) {
+        let w = OVERLAY_W.min(frame.width);
+        // Notes wrap to the inner text column: the overlay width less the two
+        // bezel border cells and the horizontal padding on each side. Counting
+        // the pre-wrapped lines reserves exactly the rows the render emits.
+        let note_width = w.saturating_sub(2 + 2 * PAD_X);
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "count of failed providers; bounded by the tiny catalog"
+            reason = "wrapped note-row count; bounded by the tiny catalog"
         )]
-        let failed = self.failures().len() as u16;
+        let failed = self.failed_lines(note_width).len() as u16;
         // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
         //          + list(VISIBLE+border) + effort(1) + temp(1) + top-p(1)
-        //          + failed notes
+        //          + failed notes (wrapped)
         // Always reserve the provider row so the overlay size is stable; the
         // row reads "OpenRouter routing only" for a non-OpenRouter model.
         let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + failed;
-        (OVERLAY_W.min(frame.width), h.min(frame.height.max(3)))
+        (w, h.min(frame.height.max(3)))
     }
 
     /// Draw the floating overlay over the centre of `frame`: a double-line
@@ -878,7 +884,7 @@ impl Picker {
             chunks[ci],
         );
         ci += 1;
-        let notes = self.failed_lines();
+        let notes = self.failed_lines(chunks[ci].width);
         if !notes.is_empty() {
             f.render_widget(Paragraph::new(notes).style(plane), chunks[ci]);
         }
@@ -1225,21 +1231,33 @@ impl Picker {
         )
     }
 
-    fn failed_lines(&self) -> Vec<Line<'static>> {
-        self.failures()
-            .into_iter()
-            .map(|(id, reason)| {
-                Line::from(Span::styled(
-                    format!(
-                        "{} — fetch failed: {reason} (type a model to enter manually)",
-                        id.label()
-                    ),
-                    Style::default()
-                        .fg(SLATE)
-                        .add_modifier(Modifier::DIM | Modifier::ITALIC),
-                ))
-            })
-            .collect()
+    /// Each failed-provider note word-wrapped to `width` columns, as a reddish
+    /// warning block. The error `reason` is included in full and wrapped (not
+    /// truncated) — a fetch failure's reason is the whole point of the note, so
+    /// it must stay readable. A `⚠ ` marker opens the first row and
+    /// continuations hang-indent under it, so a long reason reads as one block.
+    /// Reuses [`line::push_wrapped`], the shared wrap-and-emit primitive, so the
+    /// pre-wrapped lines double as the exact height [`Self::desired_size`]
+    /// reserves.
+    fn failed_lines(&self, width: u16) -> Vec<Line<'static>> {
+        const MARKER: &str = "⚠ ";
+        const HANG: &str = "  ";
+        let style = Style::default().fg(RED).add_modifier(Modifier::BOLD);
+        // Wrap to the column left of the marker/hang gutter so the marker and
+        // its indent never push a row past `width`.
+        let body_w = (width as usize).saturating_sub(MARKER.chars().count());
+        let mut out = Vec::new();
+        for (id, reason) in self.failures() {
+            let text = format!(
+                "{} — fetch failed: {reason} (type a model to enter manually)",
+                id.label()
+            );
+            line::push_wrapped(&mut out, &text, body_w, |chunk, first| {
+                let lead = if first { MARKER } else { HANG };
+                Line::from(Span::styled(format!("{lead}{chunk}"), style))
+            });
+        }
+        out
     }
 }
 
