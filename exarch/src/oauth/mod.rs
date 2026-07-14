@@ -33,7 +33,7 @@ pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-/// The Codex CLI version exarch presents to the Codex backend — as the
+/// The default Codex CLI version exarch presents to the Codex backend — as the
 /// `client_version` on the model-list query and the `codex_cli_rs/<v>`
 /// user-agent on every request. It must be a *real, current* Codex CLI
 /// version, **not** exarch's own `CARGO_PKG_VERSION`: the backend gates model
@@ -42,7 +42,26 @@ pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/re
 /// served an *empty* model list and rejects newer models outright. Pinned to
 /// the latest Codex CLI release; bump it as the backend raises the floor for
 /// new models (e.g. the `gpt-5.6` family requires `>= 0.144.0`).
-pub(crate) const CODEX_CLIENT_VERSION: &str = "0.144.3";
+///
+/// A pinned constant rots the day OpenAI raises the floor again, so
+/// [`codex_client_version`] lets an operator override it without a rebuild.
+const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.144.3";
+
+/// The Codex CLI version to present to the backend: the
+/// `EXARCH_CODEX_CLIENT_VERSION` override when set to a non-blank value, else
+/// the pinned [`DEFAULT_CODEX_CLIENT_VERSION`]. This is the unstick valve for
+/// when the backend raises its `minimal_client_version` floor before the
+/// pinned default is bumped — the model list goes empty, and the operator can
+/// set a known-good version in the environment rather than wait for a release.
+/// Read on demand (like every `EXARCH_*` knob); the value is stable after the
+/// single startup env scrub, which never touches this var.
+pub(crate) fn codex_client_version() -> String {
+    std::env::var("EXARCH_CODEX_CLIENT_VERSION")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CODEX_CLIENT_VERSION.to_string())
+}
 
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
@@ -365,7 +384,7 @@ pub(crate) fn request_headers(token: &OAuthToken, accept: &str) -> Vec<(String, 
         ("originator".into(), ORIGINATOR.into()),
         (
             "user-agent".into(),
-            format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
+            format!("codex_cli_rs/{}", codex_client_version()),
         ),
         ("accept".into(), accept.into()),
     ]
