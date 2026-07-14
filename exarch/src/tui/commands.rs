@@ -368,6 +368,20 @@ pub(super) fn route_submit(
         // submit has no mailbox, so its line is dropped rather than reviving it.
         None => {
             if focused == root {
+                // A model-less launch parks the trunk with no model bound;
+                // dispatching a prompt would reach the provider with an empty
+                // model and fail on the wire. Refuse it here with the same
+                // pointer the status bar shows, so the human opens /model
+                // first rather than seeing a network error.
+                if ctx
+                    .agents
+                    .provider(root)
+                    .is_some_and(|p| p.current().model().is_empty())
+                {
+                    tui.app
+                        .push_error(root, "no model selected — run /model to choose one");
+                    return Ok(());
+                }
                 mailbox.push_user(text);
             } else if let Some(mb) = ctx.agents.mailbox(focused) {
                 mb.push_user(text);

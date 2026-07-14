@@ -210,6 +210,26 @@ pub fn run() -> Result<(), String> {
             || format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"),
         )?);
     }
+    // An unset model (the model-less launch of a custom provider with no
+    // default) is only meaningful for the interactive frontend, which opens
+    // the `/model` picker; a headless run has no picker and nothing to fall
+    // back on, so it must be told a model explicitly.
+    if model.is_empty() && c.headless {
+        return Err(format!(
+            "custom provider '{}' has no default model — pass --model NAME for a headless run",
+            id.label()
+        ));
+    }
+    // A `--model` override is a deliberate choice, so remember it: the next
+    // launch in this project restores it as the persisted selection, exactly
+    // as the `/model` picker's choice is remembered. (The empty-model launch
+    // has nothing to persist.)
+    if c.model.is_some() && !model.is_empty() {
+        let _ = state::save(
+            &state_dir,
+            &state::State::new(&id, &model, &tuning, route.as_deref()),
+        );
+    }
     let label = id.label();
     let cred = store
         .get(&id)
@@ -381,10 +401,12 @@ fn resolve_initial_selection(
             provider::Tuning::initial(),
             None,
         )),
-        None => Err(format!(
-            "custom provider '{}' has no default model — pass --model NAME \
-             (it will be remembered) or open the /model picker",
-            id.label()
-        )),
+        // A custom provider has no built-in default model, but that is no
+        // reason to refuse to launch: open with the model *unset* (the empty
+        // sentinel) so the interactive frontend lands on the prompt with a
+        // "run /model" hint and the human picks from the live catalog. The
+        // headless frontend cannot open the picker, so `run` still rejects an
+        // unset model there — see the guard below.
+        None => Ok((id, String::new(), provider::Tuning::initial(), None)),
     }
 }

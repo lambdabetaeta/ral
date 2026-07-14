@@ -149,7 +149,14 @@ impl App {
     /// gauge — so both follow `/model` and `TAB`.  Call at startup, after
     /// every focus change, and after a model switch.
     pub fn update_live_model(&mut self, p: &Provider, status_provider: &str) {
-        self.status_model = format!("{status_provider}/{}", p.model());
+        // A model-less launch (a custom provider with no default model, no
+        // `--model`, no saved selection) shows the provider plus a nudge to
+        // the picker rather than a bare trailing slash.
+        self.status_model = if p.model().is_empty() {
+            format!("{status_provider} · no model — run /model")
+        } else {
+            format!("{status_provider}/{}", p.model())
+        };
         self.context_window = crate::pricing::caps_or_default(p.model()).context_window;
     }
 

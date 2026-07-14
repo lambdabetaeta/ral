@@ -38,17 +38,11 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     let caps = crate::pricing::caps_or_default(p.model());
     let mut rows: Vec<Field> = vec![
         meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
-        meta_field("provider", vec![meta_span(Role::Strong, p.id().label())]),
     ];
 
-    let mut model_val = vec![meta_span(Role::Strong, p.model())];
-    if let Some(slug) = &caps.canonical_slug
-        && slug != p.model()
-    {
-        model_val.push(meta_span(Role::Muted, format!(" ({slug})")));
-    }
-    rows.push(meta_field("model", model_val));
-
+    // Neither the provider nor the model is named here: the live status bar
+    // carries both (and updates them on a `/model` switch), so the one-shot
+    // banner card need not — and a model-less launch has nothing to print.
     if let Some(ctx) = caps.context_window {
         rows.push(meta_field(
             "context",
@@ -56,14 +50,6 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
         ));
     }
 
-    let max_t = match (p.max_tokens_override(), caps.max_output_tokens) {
-        (Some(n), _) => n.to_string(),
-        (None, Some(catalog)) => {
-            format!("auto (≤{})", provider::humanize_tokens(u64::from(catalog)))
-        }
-        (None, None) => "auto".into(),
-    };
-    rows.push(meta_field("max-tokens", vec![meta_plain(max_t)]));
     let base_role = if s.base == "dangerous" {
         Role::Bad
     } else {
@@ -383,9 +369,6 @@ mod tests {
             labels,
             [
                 "cwd",
-                "provider",
-                "model",
-                "max-tokens",
                 "base",
                 "extend-base",
                 "restrict",
@@ -396,9 +379,6 @@ mod tests {
         let role = |label: &str| lead_role(&rs.iter().find(|(l, _)| l == label).unwrap().1);
         assert_eq!(role("cwd"), Some(Role::Path), "cwd is a path");
         assert_eq!(role("scratch"), Some(Role::Path), "scratch is a path");
-        assert_eq!(role("provider"), Some(Role::Strong), "provider is a name");
-        assert_eq!(role("model"), Some(Role::Strong), "model is a name");
-        assert_eq!(role("max-tokens"), None, "a quantity carries no hue");
     }
 
     /// Hue is spent on `base` only when it alarms: `dangerous` → Bad (red),
@@ -412,23 +392,6 @@ mod tests {
         assert_eq!(base_role("dangerous"), Some(Role::Bad));
         assert_eq!(base_role("read-only"), Some(Role::Strong));
         assert_eq!(base_role("confined"), Some(Role::Strong));
-    }
-
-    /// A distinct canonical slug rides the model row as a muted suffix; an
-    /// absent or identical slug leaves the row a single span.
-    #[test]
-    fn model_slug_is_a_muted_suffix_only_when_distinct() {
-        // When no catalog data is available, canonical_slug is None,
-        // so the model row has exactly one span (no muted suffix).
-        let rs = rows(&sample("read-only"), &sample_provider());
-        let FieldVal::Inline(spans) = &rs.iter().find(|(l, _)| l == "model").unwrap().1 else {
-            panic!("model is an inline value");
-        };
-        assert_eq!(
-            spans.len(),
-            1,
-            "without catalog data, no slug suffix appears"
-        );
     }
 
     /// Present extend-base / restrict paths carry the Path identity; absent
