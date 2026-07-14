@@ -11,7 +11,10 @@ use crossterm::{
     },
     execute,
     style::Print,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -64,14 +67,22 @@ pub(super) fn apply_terminal_modes() -> io::Result<()> {
     )?;
     // Without the enhancement protocol the Meta/Alt chords the emacs keymap
     // binds — M-f, M-b, M-d, M-<, M-> — never reach crossterm as ALT events.
-    // Terminals that do not implement it ignore the sequence; the matching pop
-    // in `restore_terminal_modes` is gated on `KBD_ENHANCED` so it stays
-    // balanced either way.
-    execute!(
-        io::stdout(),
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    )?;
-    KBD_ENHANCED.store(true, Ordering::Release);
+    // An ANSI terminal that does not implement it merely ignores the sequence,
+    // but the *legacy Windows console API* (conhost) instead makes the push
+    // itself fail — `PushKeyboardEnhancementFlags` returns "not implemented for
+    // the legacy Windows API", which would abort terminal setup and take the
+    // whole TUI down on startup. So gate the push on a support probe: where the
+    // protocol is unsupported, skip it and degrade gracefully (losing only the
+    // Meta/Alt chords) rather than refusing to open. The matching pop in
+    // `restore_terminal_modes` is gated on `KBD_ENHANCED`, so a skipped push
+    // stays balanced.
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+        KBD_ENHANCED.store(true, Ordering::Release);
+    }
     Ok(())
 }
 
