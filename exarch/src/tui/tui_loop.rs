@@ -396,13 +396,15 @@ fn ui_loop(
                         // turn — never a cascade, never a kill.  On the trunk
                         // `raise_interrupt()` unwinds the trunk's own turn via
                         // the published slot and the ral foreground.  On any
-                        // other focused tab `interrupt(id)` unwinds that agent's
-                        // turn alone through its registered token and eval-root;
-                        // a sub-agent never publishes the slots, so the
-                        // slot/foreground path would target the trunk by
-                        // mistake.  Neither reaches descendants, and neither
-                        // ends the agent — lifecycle death stays with `/quit`,
-                        // `/clear`, the ceiling, and `agent_cancel`.
+                        // other focused tab `interrupt(id)` unwinds that
+                        // agent's turn alone by cancelling its registered
+                        // token and whatever `ForegroundScope` its turn-scope
+                        // cell currently holds, never `eval_root`; a sub-agent
+                        // never publishes the slots, so the slot/foreground
+                        // path would target the trunk by mistake.  Neither
+                        // reaches descendants, and neither ends the agent —
+                        // lifecycle death stays with `/quit`, `/clear`, the
+                        // ceiling, and `agent_cancel`.
                         KeyAction::Cancel => {
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();

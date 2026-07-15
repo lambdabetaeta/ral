@@ -50,8 +50,9 @@ family is held by every agent whose `fuel` is nonzero, and the tool view
 otherwise differs only in `reply` and optional self-scheduling
 ([[map/exarch/tools|tools]]). Depth-N works structurally — a child registers
 in the fleet's registry and `fork` snapshots the parent's shell by value at
-any depth — but each `fork` spends one unit of the parent's `fuel` on the
-child, and a `fuel == 0` agent loses the spawn tools from its view: a
+any depth — but each `fork` hands its child one less unit of `fuel` than the
+parent holds (the parent's own `fuel` is untouched, so fan-out itself is
+unbounded), and a `fuel == 0` agent loses the spawn tools from its view: a
 delegation chain terminates by tool absence a fixed number of generations
 down rather than recursing forever
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the

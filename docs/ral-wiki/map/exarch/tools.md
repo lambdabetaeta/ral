@@ -19,10 +19,11 @@ filters the static registry by a small `Gate`: `Always`, `Returns`,
 `Schedules`, or `Spawns`. Spawning is universal — every agent may spawn,
 so the tree is not capped at one level
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
-depth-1 `spawns()` axis) — but each `fork` spends one unit of the parent's
-`fuel` on the child, and `Gate::Spawns` withholds `amnemon`/`mnemon` once
-an agent's `fuel` reaches zero, so a delegation chain bottoms out rather than
-recursing forever ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
+depth-1 `spawns()` axis) — but each `fork` hands its child one less unit of
+`fuel` than the parent holds (the parent's own `fuel` is untouched, so
+fan-out itself is unbounded), and `Gate::Spawns` withholds `amnemon`/`mnemon`
+once an agent's `fuel` reaches zero, so a delegation chain bottoms out rather
+than recursing forever ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
 `reply` is present only for returning agents
 ([[decisions/260623_reply-terminates-returning-agents]]); self-wakeup tools are
 present only under schedule authority.
@@ -88,8 +89,9 @@ The tools that ship:
   top, meaning *inherit the parent's authority verbatim*. `agents` lists live
   workers (id, title, elapsed, log dir); `message` posts a marked note to a live
   agent id through its inbox; `agent_cancel` stops one by id and cascades to its
-  subtree. A child may itself spawn, each fork spending one unit of the
-  parent's `fuel` on it. The whole sub-agent model — the `parent` predicate,
+  subtree. A child may itself spawn, each fork handing its own child one less
+  unit of `fuel` than it holds — fan-out costs nothing, only depth does. The
+  whole sub-agent model — the `parent` predicate,
   spawning, marked peer messages, returning, narrowing, and memory mode — is
   [[design/agents|agents]].
 - `reply` (`tools/reply.rs`), gated by `Gate::Returns` — a returning agent's

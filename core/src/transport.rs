@@ -821,6 +821,14 @@ pub struct IdentityTransport {
     /// (§3's reentrancy law). A separate short lock, never the session
     /// lock — checking it must not touch `self.engine`.
     dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    /// Set by [`Self::observe_foreground`]: a cell this transport writes
+    /// each turn's freshly-installed foreground scope into, at the turn's
+    /// very start.  Lives outside `engine`'s own lock, so a caller holding
+    /// a clone of the cell can read (and cancel) the *current* turn's
+    /// scope from another thread without waiting on a dispatch in flight —
+    /// the extension point a forked-session host uses to interrupt one
+    /// turn without touching the session's durable root.
+    turn_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
 }
 
 pub struct EngineInner {
@@ -886,12 +894,27 @@ impl IdentityTransport {
             control,
             events_recv: EventReceiver::new(event_rx),
             dispatch_thread: std::sync::Mutex::new(None),
+            turn_scope: None,
         }
     }
 
     /// Set the session deferred sink for deferred worker batches.
     pub fn set_deferred_sink(&self, deferred: Arc<dyn DeferredSink>) {
         self.engine.lock().deferred_sink = Some(deferred);
+    }
+
+    /// Arm this transport to publish each turn's freshly-installed
+    /// foreground scope into `cell` at the start of every dispatch, before
+    /// evaluation begins.  Call once, right after construction: a forked
+    /// session (exarch's agent fleet) keeps its own clone of `cell`
+    /// alongside the session's durable root, so an interrupt can cancel
+    /// whichever scope the in-flight turn actually installed without ever
+    /// touching the root a later turn would inherit.
+    pub fn observe_foreground(
+        &mut self,
+        cell: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
+    ) {
+        self.turn_scope = Some(cell);
     }
 
     /// Install the session's enquiry desk. Per-turn hosts (e.g. exarch, once
@@ -949,6 +972,18 @@ impl IdentityTransport {
     }
 }
 
+/// [`IdentityTransport::observe_foreground`]'s engine-side half: writes the
+/// turn's freshly-installed foreground scope into the caller's cell in
+/// `pre_exec`, which core's own turn door runs after installing that scope
+/// but before evaluation starts.
+struct ForegroundCapture(Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>);
+
+impl crate::turn::TurnLifecycle for ForegroundCapture {
+    fn pre_exec(&mut self, shell: &mut crate::types::Shell, _src: &str) {
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shell.foreground().clone());
+    }
+}
+
 impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
         self.check_not_reentrant();
@@ -969,12 +1004,16 @@ impl Transport for IdentityTransport {
 
         // The live handles this dispatch lends the turn, joined with the
         // protocol `Turn` in the request the engine door runs.
+        let lifecycle: Box<dyn crate::turn::TurnLifecycle> = match &self.turn_scope {
+            Some(cell) => Box::new(ForegroundCapture(cell.clone())),
+            None => Box::new(()),
+        };
         let req = crate::driver::TurnRequest {
             turn,
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
             desk: engine.desk.clone(),
-            lifecycle: Box::new(()),
+            lifecycle,
         };
         let turn_report = engine.shell.run_turn(req);
         let report = turn_report.into_report(engine.shell.sources());

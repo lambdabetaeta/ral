@@ -62,8 +62,8 @@ pin ever becomes live. Input is `{key, description}`: you choose the key \
 (e.g. `commitment:plan-x`), the writer chooses the criteria. Once open, only \
 a passing `verify_commitment` can close it — you cannot unpin or overwrite it \
 yourself, and it is refused if that key is already a live commitment. This \
-forks a child like `amnemon`, so it spends one unit of your own spawn budget \
-and disappears once that budget is exhausted."
+forks a child like `amnemon`: the writer is handed one less unit of fuel than \
+you hold, and this tool disappears once your fuel reaches zero."
     }
 
     fn gate(&self) -> super::Gate {
@@ -115,9 +115,9 @@ impl Tool for VerifyCommitmentTool {
 commitment pin.  Input is only `{key}`; you cannot provide instructions, \
 evidence, or a verifier prompt.  The host reads the saved `commitment:*` pin, \
 builds the verifier prompt itself, and clears the pin only if the verifier \
-returns a structured pass verdict.  This forks a child like `amnemon`, so it \
-spends one unit of your own spawn budget and disappears once that budget is \
-exhausted."
+returns a structured pass verdict.  This forks a child like `amnemon`: the \
+verifier is handed one less unit of fuel than you hold, and this tool \
+disappears once your fuel reaches zero."
     }
 
     fn gate(&self) -> super::Gate {
@@ -192,7 +192,7 @@ fn commit(id: String, input: &Value, session: &mut Agent, emit: &Emitter) -> Ses
     let title = shorten(&description);
     super::agent::model_receipt(
         id,
-        &super::agent::spawn_async(
+        super::agent::spawn_async(
             session,
             child,
             super::agent::AsyncSpawn {
@@ -256,7 +256,7 @@ fn verify_commitment(
     let title = shorten(summary.lines().next().unwrap_or(&summary));
     super::agent::model_receipt(
         id,
-        &super::agent::spawn_async(
+        super::agent::spawn_async(
             session,
             child,
             super::agent::AsyncSpawn {

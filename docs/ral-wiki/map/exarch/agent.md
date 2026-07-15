@@ -32,7 +32,8 @@ never an `is_root` branch:
   returns(a)    ⟺  a's tool view holds reply       // fixed at construction; false only for a conversing node
   conversing(a) =  a.interactive ∧ ¬returns(a)
   park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /clear or /close reaped it
-                   Held           if conversing(a) ∨ focus = a.id
+                   Held           if conversing(a)                          // immune to cancellation
+                   Focused        if focus = a.id                           // parks, but a terminate cause still ends it
                    HeldByChildren if a has live descendants
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
@@ -41,11 +42,14 @@ never an `is_root` branch:
 `returns` (`agent.rs`) is **derived from the tool view** — the single source of
 truth, so the nudge layer, parking, and the advertised tools cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
-`park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `HeldByChildren` /
-`UntilCancelled` / `Quiesce`, `bus.rs`) is the `should_park` verdict: a present
-human (a conversing node, or the agent the human `TAB`bed to) holds the node
-parked — unless the registry no longer lists it, since an unlisted conversing
-node is unreachable and parking it would be a zombie; live descendants hold it
+`park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `Focused` /
+`HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus.rs`) is the `should_park`
+verdict: a present human holds the node parked — a conversing node as `Held`,
+immune to cancellation; the agent the human merely `TAB`bed to as `Focused`,
+the same wait except a terminate-class cause still ends it, since focus is not
+a conversation — unless the registry no longer lists it, since an unlisted
+conversing node is unreachable and parking it would be a zombie; live
+descendants hold it
 until their results drain; a live self-schedule holds it until cancelled;
 otherwise it terminates at quiescence — the one-shot contract a headless trunk
 and a settled sub-agent both satisfy. `--chat` builds the trunk with no system

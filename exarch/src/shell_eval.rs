@@ -249,12 +249,14 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
 /// tab of its own.
 ///
 /// The generation guard mirrors the async `agent`'s exactly: it captures the
-/// [`AgentRegistry`]'s generation at construction and, in [`Self::deliver`],
-/// re-reads the live counter.  A `/clear` between spawn and flush bumps that
-/// counter (`AgentRegistry::clear`), so a stale batch is dropped before it can
-/// reach a rebuilt context — the session epoch the ADR calls for, reusing the
-/// one counter rather than minting a parallel one.  The inbox's `clear` empties
-/// the deque, so a batch already queued when `/clear` runs is dropped for free.
+/// [`AgentRegistry`]'s generation at construction and stamps every batch
+/// [`Self::deliver`] flushes with it, rather than re-checking the live
+/// counter itself — a worker settling mid-`/clear` cannot decide its own
+/// staleness (its compose and its push are two separate steps a `/clear` can
+/// fall between), so the batch always reaches the inbox and the consuming
+/// edge (`Agent::admits`) rejects it there if the generation it carries has
+/// fallen behind, exactly as a stale [`AgentResult`](crate::bus::AgentResult)
+/// is rejected.
 ///
 /// [`Card`]: crate::card::Card
 struct InboxDeferred {
@@ -264,9 +266,8 @@ struct InboxDeferred {
     /// The root session id, stamped on every batch so a spawn worker's cards
     /// render in the root viewport.
     root: AgentId,
-    registry: AgentRegistry,
-    /// The registry generation captured at construction; a batch flushed after
-    /// a `/clear` advanced it is dropped.
+    /// The registry generation captured at construction; carried on every
+    /// batch for the consuming edge to check.
     generation: u64,
     /// Reports a rejected batch through the existing error vocabulary
     /// (`Kind::Error`, recorded straight to the durable trace) — `deliver`
@@ -284,19 +285,13 @@ struct InboxDeferred {
 
 impl DeferredSink for InboxDeferred {
     fn deliver(&self, batch: Vec<ral_core::serial::FOValue>) {
-        // A `/clear` since this worker was spawned bumped the registry
-        // generation; its batch belongs to a context that no longer exists, so
-        // drop it rather than post it into the rebuilt session — the deferred
-        // twin of the async agent's stale-result rejection.
-        if self.registry.generation() != self.generation {
-            return;
-        }
         // Decode once, totally, at this door: the deferred batch carries
         // first-order values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
         if let Err(reject) = self.mailbox.push(InboxMsg::Surface {
             id: self.root,
             values,
+            generation: self.generation,
         }) {
             self.transcript.record(
                 self.root,
@@ -310,7 +305,7 @@ impl DeferredSink for InboxDeferred {
 
 /// Build the [`Arc<dyn DeferredSink>`] a tool turn installs: an
 /// [`InboxDeferred`] over `emit`'s session inbox, stamping batches with `root`
-/// and guarding them with `registry`'s current generation.
+/// and `registry`'s generation at this moment.
 ///
 /// Cloned into the
 /// worker's turn state by core, so a nested `spawn` inherits it and flushes at
@@ -323,7 +318,6 @@ pub fn deferred_sink(
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root,
-        registry: registry.clone(),
         generation: registry.generation(),
         transcript: emit.transcript(),
     })
@@ -1299,36 +1293,46 @@ keep-bottom
         );
     }
 
-    /// The `InboxDeferred` posts a deferred worker's batch as an
-    /// `InboxMsg::Surface` stamped with the root id — *unless* a `/clear` has
-    /// advanced the registry generation since the sink was built, in which
-    /// case the batch belongs to a context that no longer exists and is dropped
-    /// (the deferred twin of the async agent's stale-result rejection).
+    /// The `InboxDeferred` always posts a deferred worker's batch as an
+    /// `InboxMsg::Surface` stamped with the root id and its own construction-time
+    /// generation — including a batch flushed after a `/clear` advanced the
+    /// registry past it. Staleness is not this sink's call: it is decided at
+    /// the consuming edge (`Agent::admits`), exactly as a stale `AgentResult`
+    /// is, so the sink itself neither checks nor withholds.
     #[test]
-    fn inbox_deferred_pushes_then_drops_after_clear() {
+    fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {
         let registry = AgentRegistry::new();
         let inbox = Inbox::new();
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
         let deferred = deferred_sink(&emit, 7, &registry);
+        let born = registry.generation();
 
-        // A fresh batch reaches the inbox, stamped with the root id (7).
+        // A fresh batch reaches the inbox, stamped with the root id (7) and
+        // the generation live at construction.
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.drain_turn() {
-            Some(crate::bus::Turn::Surface { id, .. }) => {
+            Some(crate::bus::Turn::Surface { id, generation, .. }) => {
                 assert_eq!(id, 7, "the batch is stamped with the root session id");
+                assert_eq!(generation, born, "stamped with the sink's birth generation");
             }
             other => panic!("a delivered batch surfaces as Turn::Surface, got {other:?}"),
         }
 
-        // A `/clear` bumps the registry generation; the sink captured the
-        // old one, so a later flush is dropped rather than posted.
+        // A `/clear` bumps the registry generation past the sink's captured
+        // one, but a later flush still reaches the inbox, carrying the now-stale
+        // generation for the consuming edge to reject.
         registry.clear_subtree(7);
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
-        assert!(
-            inbox.is_empty(),
-            "a batch flushed after /clear advanced the generation is dropped"
-        );
+        match inbox.drain_turn() {
+            Some(crate::bus::Turn::Surface { generation, .. }) => {
+                assert_eq!(
+                    generation, born,
+                    "the post-clear flush still carries its stale birth generation"
+                );
+            }
+            other => panic!("a post-clear flush still reaches the inbox, got {other:?}"),
+        }
     }
 
     /// Colour suppression reaches spawned commands through the

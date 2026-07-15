@@ -319,15 +319,20 @@ pub(super) fn route_submit(
             // keep flowing into the cleared viewport until the worker, parked
             // inside `apply`, hits its next poll (50 ms) and the model's turn
             // ends on its own.  Raising the interrupt cancels the trunk's
-            // published token and the ral foreground, exactly as Esc does; the
-            // subtree cascade reaps any live descendants now rather than after
-            // the worker reaches the `Turn::Command`.  Stragglers already in the
-            // unbounded bus channel are dropped in `App::handle` by the
-            // clear-drain guard `root_clear_drain` arms.  Then the `/clear`
-            // itself reaches the worker's drive loop and rebuilds the session.
+            // published token and the ral foreground, exactly as Esc does, at
+            // interrupt strength — so the next turn's boundary `reset` clears
+            // it. `cancel_descendants` reaps any live descendants now rather
+            // than after the worker reaches the `Turn::Command`, leaving the
+            // trunk's own entry, and its sticky token, untouched: `/clear`
+            // rebuilds the trunk in place rather than ending it, and a
+            // terminate-class cause on its token would be permanent.
+            // Stragglers already in the unbounded bus channel are dropped in
+            // `App::handle` by the clear-drain guard `root_clear_drain` arms.
+            // Then the `/clear` itself reaches the worker's drive loop and
+            // rebuilds the session.
             "/clear" => {
                 crate::cancel::raise_interrupt();
-                ctx.agents.cancel(root);
+                ctx.agents.cancel_descendants(root);
                 // Read the root's provider for the banner redraw, falling back
                 // to a throwaway scripted provider if the trunk has settled.
                 let provider_guard = ctx.agents.provider(root).map(|ph| ph.current());

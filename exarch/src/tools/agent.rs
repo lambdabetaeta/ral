@@ -64,10 +64,11 @@ agent loop off your critical path; its single reply is delivered to you LATER \
 as its own marked turn when it finishes.  To fan out independent work, spawn \
 several and combine their results when they land; poll live ones with `agents` \
 and stop one with `agent_cancel`.  A sub-agent may itself spawn sub-agents, but \
-delegation depth is finite: each spawn spends one unit of your own spawn budget \
-on the child, and once a descendant's budget reaches zero this tool disappears \
-from its view, so a chain cannot recurse forever — `agent_cancel` on any node \
-stops its whole live subtree regardless of depth.\n\n\
+delegation depth is finite: each child is handed one less unit of fuel than its \
+spawner holds, and once a descendant's fuel reaches zero this tool disappears \
+from its view — fuel bounds how deep a chain can recurse, not how many \
+children you may start, so spawning several at once costs nothing extra — \
+`agent_cancel` on any node stops its whole live subtree regardless of depth.\n\n\
 This is expensive: the child is a fresh model session that re-pays the entire \
 system prompt and does not share your conversation — it sees a value-snapshot \
 of your shell (your `let` bindings, cwd, env) but none of your reasoning or \
@@ -97,8 +98,9 @@ do NOT propagate back; you receive a string, not its bindings or intermediate \
 findings.  File edits it makes to the working tree are real and persist.  Use \
 mnemon when context reuse matters; use `amnemon` when isolation and a blank \
 conversation are better.  `permissions` bounds the child to at most your own \
-authority; delegation depth is likewise finite — each spawn spends one unit of \
-your own spawn budget on the child, so a chain cannot recurse forever."
+authority; delegation depth is likewise finite — each child is handed one less \
+unit of fuel than its spawner holds, so a chain cannot recurse forever (fan-out \
+itself is unbounded)."
             }
         }
     }
@@ -241,7 +243,7 @@ pub(crate) fn spawn_branch(
         prompt: prompt.map(str::to_string),
         commitment: None,
     };
-    Ok(spawn_async(session, child, spec, emit))
+    spawn_async(session, child, spec, emit)
 }
 
 fn dispatch_spawn(
@@ -282,7 +284,7 @@ fn dispatch_spawn(
         prompt: Some(prompt),
         commitment: None,
     };
-    model_receipt(id, &spawn_async(session, child, spec, emit))
+    model_receipt(id, spawn_async(session, child, spec, emit))
 }
 
 /// The tool-specific half of an async spawn: everything that varies between
@@ -300,7 +302,10 @@ pub(super) struct AsyncSpawn {
 }
 
 /// What a spawn hands back: the child's identity as the host and the
-/// model each render in their own vocabulary.
+/// model each render in their own vocabulary.  Only ever built for a child
+/// that is genuinely running — a spawn that never got a worker thread, or
+/// whose registration was refused, returns `Err(String)` instead
+/// ([`spawn_async`]).
 pub(crate) struct SpawnedChild {
     pub id: crate::bus::AgentId,
     pub title: String,
@@ -320,12 +325,23 @@ pub(crate) struct SpawnedChild {
 /// reply decides, and tags the settled [`AgentResult`] so the parent applies
 /// it to the protected pin register when the result drains
 /// ([`Agent::drive`](crate::agent::Agent::drive)).
+///
+/// If the OS refuses to spawn the worker thread, or the registration itself
+/// is refused (this agent's own entry vanished between the tool call
+/// starting and the registry lock — an `agent_cancel`/`/clear` racing the
+/// spawn), the just-created registry entry (if any) is unwound and the call
+/// returns `Err` — every caller's receipt collapses to that plain error
+/// instead of a start receipt.
+///
+/// # Errors
+/// Returns `Err(String)` if the registration is refused or the worker
+/// thread could not be spawned.
 pub(super) fn spawn_async(
     session: &Agent,
     mut child: Agent,
     spec: AsyncSpawn,
     emit: &Emitter,
-) -> SpawnedChild {
+) -> Result<SpawnedChild, String> {
     let AsyncSpawn {
         tool,
         title,
@@ -342,8 +358,11 @@ pub(super) fn spawn_async(
     let log_dir_str = log_dir.display().to_string();
     let cancel = child.cancel_token().clone();
     // The child's eval-layer cancel handle, registered so the cascade can
-    // unwind a `ral` eval already in flight when the cancel lands.
+    // unwind a `ral` eval already in flight when a terminate-class cancel
+    // lands; its turn-scope cell, registered so a per-tab interrupt can
+    // unwind just the in-flight turn without touching that root.
     let eval_root = child.eval_root();
+    let turn_scope = child.turn_scope();
     // The child's inbox sender, registered so the frontend can steer or
     // wake this tab.  Cheap-clone, taken off `child` before it moves into
     // the worker thread (alongside the one the streaming `child_emit`
@@ -356,17 +375,22 @@ pub(super) fn spawn_async(
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
     // one fact gates the reaper ceiling, the tab kind, and the settle epilogue.
     let delivers = child.returns();
-    let generation = session.agents.register(
-        agent_id,
-        Some(session.id),
-        delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
-        title.clone(),
-        log_dir.clone(),
+    let Some(generation) = session.agents.register(crate::agent_registry::Registration {
+        id: agent_id,
+        parent: Some(session.id),
+        ceiling: delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
+        title: title.clone(),
+        log_dir: log_dir.clone(),
         cancel,
-        Some(eval_root),
-        child_mailbox,
-        child_provider,
-    );
+        eval_root: Some(eval_root),
+        turn_scope: Some(turn_scope),
+        mailbox: child_mailbox,
+        provider: child_provider,
+    }) else {
+        return Err(format!(
+            "could not start agent {agent_id}: this session is no longer live"
+        ));
+    };
     let parent_mailbox = session.mailbox();
     let registry = session.agents.clone();
     // A live tab whenever the bus outlives the turn (the TUI): a real
@@ -398,7 +422,7 @@ pub(super) fn spawn_async(
         cmd: prompt.unwrap_or_else(|| "(waiting for you)".to_string()),
         summary: Some(format!("Agent {title} spawned ({tool}).")),
     });
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
@@ -466,18 +490,36 @@ pub(super) fn spawn_async(
                 }
                 registry.settle(agent_id, generation);
             }
-        })
-        .expect("spawn async agent worker");
-    SpawnedChild {
-        id: agent_id,
-        title,
-        log_dir: log_dir_str,
+        });
+    match worker {
+        Ok(_) => Ok(SpawnedChild {
+            id: agent_id,
+            title,
+            log_dir: log_dir_str,
+        }),
+        Err(e) => {
+            // The registration above ran before the OS thread ever existed —
+            // register-after-spawn would race a conversing child's own first
+            // `park_mode` read of `is_live(self.id)` against the parent's
+            // post-spawn `register` call, so the entry must be unwound here
+            // instead of never having been created.  No worker will ever call
+            // `settle`, so this is the one place that can: the registry ends
+            // up exactly as if the spawn had never been attempted.
+            session.agents.settle(agent_id, generation);
+            let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
+            emit.emit(Kind::Error(msg.clone()));
+            Err(msg)
+        }
     }
 }
 
 /// Render a spawn receipt for a model caller — the JSON tool result the
 /// spawn tools answer with.
-pub(super) fn model_receipt(id: String, child: &SpawnedChild) -> SessionToolResult {
+pub(super) fn model_receipt(id: String, spawned: Result<SpawnedChild, String>) -> SessionToolResult {
+    let child = match spawned {
+        Ok(child) => child,
+        Err(reason) => return SessionToolResult { id, content: reason },
+    };
     let receipt = json!({
         "id": child.id,
         "title": child.title,
@@ -566,11 +608,13 @@ impl Tool for MessageTool {
     }
 
     fn desc(&self) -> &'static str {
-        "Send a short message to another live agent by id.  The recipient sees \
-it as a marked turn, not as human input, at its next tool boundary.  Use ids \
-from `agents`, spawn receipts, or ids you deliberately included in a child's \
-prompt.  This is for coordination only: it does not return the recipient's \
-answer; use `reply` for a returning agent's final result."
+        "Send a short message to a live agent *you started* by id.  The \
+recipient sees it as a marked turn, not as human input, at its next tool \
+boundary.  Use ids from `agents`, spawn receipts, or ids you deliberately \
+included in a child's prompt.  Only a descendant of yours may receive a \
+message — never a sibling, an ancestor, or yourself.  This is for \
+coordination only: it does not return the recipient's answer; use `reply` \
+for a returning agent's final result."
     }
 
     fn schema(&self) -> &'static Value {
@@ -640,6 +684,11 @@ answer; use `reply` for a returning agent's final result."
             Err(MessageError::UnknownSender(n)) => {
                 format!("cannot send from agent {n}: it is no longer live")
             }
+            Err(MessageError::NotADescendant(n)) => {
+                format!(
+                    "agent {n} is not an agent you started; message may only reach a descendant of yours"
+                )
+            }
             Err(MessageError::RecipientInboxFull(n, reject)) => {
                 format!("agent {n} did not receive the message: {reject}")
             }
@@ -658,9 +707,10 @@ impl Tool for AgentCancelTool {
     }
 
     fn desc(&self) -> &'static str {
-        "Cancel a live async agent by its id (from `agents`).  The worker is \
-asked to stop at its next checkpoint; it then delivers a cancelled result.  \
-A no-op if no live agent has that id."
+        "Cancel a live async agent *you started*, by its id (from `agents`).  \
+The worker is asked to stop at its next checkpoint; it then delivers a \
+cancelled result.  A no-op if no live agent has that id.  Only a descendant \
+of yours may be cancelled — never a sibling, an ancestor, or yourself."
     }
 
     fn schema(&self) -> &'static Value {
@@ -702,10 +752,12 @@ A no-op if no live agent has that id."
             cmd: format!("cancelling agent {agent_id}"),
             summary: Some(format!("Agent {who} cancelled.")),
         });
-        let content = if session.agents.cancel(agent_id) {
-            format!("cancelling agent {who}")
-        } else {
-            format!("no live agent with id {agent_id}")
+        let content = match session.agents.cancel_scoped(session.id, agent_id) {
+            Ok(true) => format!("cancelling agent {who}"),
+            Ok(false) => format!("no live agent with id {agent_id}"),
+            Err(crate::agent_registry::NotADescendant(n)) => format!(
+                "agent {n} is not an agent you started; agent_cancel may only reach a descendant of yours"
+            ),
         };
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
@@ -726,5 +778,35 @@ mod tests {
         assert!(!valid_title(&"x".repeat(25)));
         assert!(!valid_title("has space"));
         assert!(!valid_title("non-ascii-é"));
+    }
+
+    /// A spawn that never got a worker thread must render as a plain error,
+    /// never as a start receipt the model would mistake for a live child.
+    #[test]
+    fn model_receipt_renders_a_spawn_error_as_plain_content() {
+        let result = model_receipt(
+            "call-1".to_string(),
+            Err("could not spawn a worker thread for agent 7: oom".to_string()),
+        );
+        assert_eq!(
+            result.content, "could not spawn a worker thread for agent 7: oom",
+            "the error text is the whole tool result, not wrapped in a receipt"
+        );
+        assert!(
+            !result.content.contains("\"status\""),
+            "a failed spawn never renders the started-receipt JSON"
+        );
+    }
+
+    #[test]
+    fn model_receipt_renders_the_start_receipt_when_spawn_succeeded() {
+        let child = SpawnedChild {
+            id: 7,
+            title: "sub-1".to_string(),
+            log_dir: "/tmp/sub-1".to_string(),
+        };
+        let result = model_receipt("call-1".to_string(), Ok(child));
+        assert!(result.content.contains("\"status\":\"started\""));
+        assert!(result.content.contains("\"id\":7"));
     }
 }

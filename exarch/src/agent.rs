@@ -79,11 +79,15 @@ pub struct Agent {
     /// indefinitely); every asymmetry is read from this field plus
     /// `interactive`/`focus`, never an `is_root` branch.
     parent: Option<AgentId>,
-    /// Remaining spawn budget, decremented by one at each [`Self::fork`].
-    /// Zero clears [`Gate::Spawns`](crate::tools::Gate::Spawns) from this
-    /// agent's [`tools_for`](crate::tools::tools_for) view, so a delegation
-    /// chain terminates by tool absence rather than recursing forever. The
-    /// trunk starts at [`SPAWN_FUEL`]; a fork hands its child one less.
+    /// How many more spawn generations may descend from this agent before
+    /// the chain bottoms out.  Bounds depth, not fan-out: [`Self::fork`]
+    /// never touches this field on the parent, it only computes the child's
+    /// own `fuel` as one less — an agent may start any number of children
+    /// without spending its own fuel.  Zero clears
+    /// [`Gate::Spawns`](crate::tools::Gate::Spawns) from this agent's
+    /// [`tools_for`](crate::tools::tools_for) view, so a chain terminates by
+    /// tool absence rather than recursing forever.  The trunk starts at
+    /// [`SPAWN_FUEL`].
     fuel: u32,
     /// This agent's own hot-swappable provider.  A `/model` on the focused
     /// agent swaps *its* handle alone; a `fork` seeds the child's own handle
@@ -117,6 +121,14 @@ pub struct Agent {
     /// turn boundary, so an Esc on one turn never bleeds into the next; the
     /// trunk additionally [`publish`](cancel::publish)es it for OS signals.
     cancel: cancel::Token,
+    /// This agent's current-turn foreground scope cell, armed on
+    /// [`Self::transport`] via `observe_foreground` so it holds a fresh
+    /// [`ForegroundScope`](ral_core::process::ForegroundScope) for the whole
+    /// extent of every turn.  Registered in the fleet alongside `eval_root`
+    /// so [`AgentRegistry::interrupt`](crate::agent_registry::AgentRegistry::interrupt)
+    /// can unwind exactly the in-flight turn without touching the durable
+    /// root a later turn would inherit.
+    turn_scope: crate::agent_registry::TurnScope,
     /// This agent's view into the tool registry — the single source of truth
     /// read by `provider.complete` (advertisement) and [`Self::stage`]
     /// (dispatch).  Membership is the gate: a tool absent here is neither
@@ -133,7 +145,10 @@ pub struct Agent {
     /// (a null or empty value settles as the `Empty` variant of
     /// [`AgentOutcome`](crate::bus::AgentOutcome)).  Every returning
     /// agent sets it — a peer and the headless root; `reply` is withheld only
-    /// from the interactive root.
+    /// from the interactive root.  Scoped to its own batch: [`Self::apply`]
+    /// resets it on entry, so a reply staged in a turn that then cancels,
+    /// errors, or panics before the drain that takes it never survives to
+    /// poison the next turn.
     reply: Option<serde_json::Value>,
     /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
     /// shell as of the last clean tool-call boundary.  Refreshed inside
@@ -231,12 +246,13 @@ pub enum TurnOutcome {
 /// reaches it.
 const MAX_STEPS: u32 = 250;
 
-/// Spawn budget the trunk starts with; each [`Agent::fork`] hands its child
-/// one less, and a `fuel == 0` agent loses the spawn tools from its view
-/// ([`tools_for`](crate::tools::tools_for)). Covers a short legitimate
-/// delegation chain — a couple of hops of sub-agent fan-out — while bounding a
-/// runaway spawn-calling loop to a fixed number of generations instead of the
-/// process exhausting threads.
+/// The depth budget the trunk starts with; each [`Agent::fork`] hands its
+/// child one less, and a `fuel == 0` agent loses the spawn tools from its view
+/// ([`tools_for`](crate::tools::tools_for)). Bounds how many generations deep
+/// a delegation chain may recurse — a few hops covers legitimate delegation —
+/// while stopping a runaway spawn-calling chain from exhausting threads
+/// instead of the process. Fan-out is a separate, unbounded axis: how many
+/// children any one agent starts never spends this budget.
 const SPAWN_FUEL: u32 = 3;
 
 /// How many ral calls elapse between disk-warn ceiling checks, once
@@ -375,7 +391,9 @@ impl Agent {
             large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
         });
         let durable = shell.mobile_snapshot();
-        let transport = ral_core::transport::IdentityTransport::new(shell);
+        let turn_scope: crate::agent_registry::TurnScope = Arc::new(Mutex::new(None));
+        let mut transport = ral_core::transport::IdentityTransport::new(shell);
+        transport.observe_foreground(turn_scope.clone());
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         transport.attach(
@@ -406,6 +424,7 @@ impl Agent {
             inbox: Inbox::new(),
             nudges: nudge::Registry::new(),
             cancel: cancel::Token::new(),
+            turn_scope,
             tools,
             reply: None,
             durable,
@@ -425,17 +444,18 @@ impl Agent {
     /// it from the start; a child is registered by its spawn site (which also
     /// arms the ceiling).  Idempotent enough: a re-register overwrites in place.
     fn register_self(&self) {
-        self.agents.register(
-            self.id,
-            self.parent,
-            false, // a root (trunk or headless) is never abandoned: no ceiling
-            TRUNK_TITLE.to_string(),
-            self.log.dir().to_path_buf(),
-            self.cancel.clone(),
-            self.parent.map(|_| self.eval_root()),
-            self.inbox.mailbox(),
-            self.provider.clone(),
-        );
+        self.agents.register(crate::agent_registry::Registration {
+            id: self.id,
+            parent: self.parent,
+            ceiling: false, // a root (trunk or headless) is never abandoned: no ceiling
+            title: TRUNK_TITLE.to_string(),
+            log_dir: self.log.dir().to_path_buf(),
+            cancel: self.cancel.clone(),
+            eval_root: self.parent.map(|_| self.eval_root()),
+            turn_scope: self.parent.map(|_| self.turn_scope()),
+            mailbox: self.inbox.mailbox(),
+            provider: self.provider.clone(),
+        });
     }
 
     fn replace_shell(&mut self, shell: Shell) {
@@ -450,7 +470,9 @@ impl Agent {
             large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
         });
         self.durable = shell.mobile_snapshot();
-        self.transport = ral_core::transport::IdentityTransport::new(shell);
+        let mut transport = ral_core::transport::IdentityTransport::new(shell);
+        transport.observe_foreground(self.turn_scope.clone());
+        self.transport = transport;
     }
 
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
@@ -541,24 +563,29 @@ impl Agent {
         // A rebuilt context starts empty: drop the stale pressure reading so
         // the next turn's usage sets it afresh.
         self.last_input = 0;
-        // Retire the subtree, then empty the queue — in that order.  The
-        // generation bump must precede the inbox sweep so a worker settling
-        // mid-clear either lands its result before the sweep (and is swept
-        // with the rest) or posts after the bump (and is dropped by
-        // generation admission); no interleaving lets a pre-clear result
-        // survive into the rebuilt context.  The workers themselves are
-        // already cancelled above, on the shell being retired; what the
-        // generation bump guards against is a straggler's late deferred
-        // flush (`InboxDeferred`, shell_eval.rs) reaching the rebuilt
-        // context before it notices the cancellation.  This agent itself
-        // stays registered — `/clear` rebuilds its context, it does not
-        // tear it down.
+        // Retire the subtree, then disarm schedules, then empty the queue —
+        // in that order, though no ordering among the three is actually
+        // load-bearing any more: every producer that can compose a message
+        // before this call and land it after carries its own compose-time
+        // stamp and is caught at a consuming edge, not by racing this
+        // sequence. An `AgentResult` and a deferred `spawn`'s surface batch
+        // (`InboxDeferred`, shell_eval.rs) carry this bump's new generation
+        // boundary and are rejected by `Agent::admits` if stale; a schedule
+        // fire (`ScheduleRegistry::fire`, schedule.rs) carries `inbox`'s own
+        // clear-epoch and is rejected at the inbox's pop boundary
+        // (`bus.rs`) instead, since it never holds a handle to this
+        // registry. The workers themselves are already cancelled above, on
+        // the shell being retired; this is only about a straggler that was
+        // already past cancellation's reach when it composed its message.
+        // This agent itself stays registered — `/clear` rebuilds its
+        // context, it does not tear it down.
         self.agents.clear_subtree(self.id);
-        // Schedules are producers too: disarm them before the sweep, for the
-        // same reason.  A rebuilt agent carries no pending wakeups.
+        // Schedules are producers too: disarm them so no further fire is
+        // even attempted. A rebuilt agent carries no pending wakeups.
         self.schedules.clear();
-        // Drop every queued message: a rebuilt context carries neither stale
-        // user steering nor non-human deliveries across the clear.
+        // Drop every queued message and bump the inbox's own clear-epoch:
+        // a rebuilt context carries neither stale user steering nor
+        // non-human deliveries across the clear.
         self.inbox.clear();
         // A rebuilt context wears no pinned state: the frontend wipes its
         // register on `/clear`, so the session's mirror must follow.
@@ -697,6 +724,15 @@ impl Agent {
     /// only reads its token between steps.
     pub(crate) fn eval_root(&self) -> ral_core::process::DurableRoot {
         self.transport.shell_mut().shell.cancel_handle()
+    }
+
+    /// This agent's current-turn foreground scope cell — registered
+    /// alongside [`Self::eval_root`] so
+    /// [`AgentRegistry::interrupt`](crate::agent_registry::AgentRegistry::interrupt)
+    /// can unwind exactly the in-flight turn without touching the durable
+    /// root a later turn would inherit.
+    pub(crate) fn turn_scope(&self) -> crate::agent_registry::TurnScope {
+        self.turn_scope.clone()
     }
 
     /// Seed this session's inbox with its launch prompt — the spawn site calls
@@ -1189,8 +1225,7 @@ impl Agent {
                     ControlFlow::Continue => continue,
                 }
             }
-            self.settle_commitment(&turn, emit);
-            announce(&turn, emit);
+            self.land(&turn, emit);
             // Read the provider in force for this turn; a `/model` swap on this
             // agent lands here next turn, never mid-turn.
             let active = self.provider.current();
@@ -1306,6 +1341,14 @@ impl Agent {
         token: &cancel::Token,
         emit: &Emitter,
     ) -> Result<TurnOutcome, ProviderError> {
+        // A reply only ever belongs to the batch that staged it: a cancel, a
+        // log-append error, or a panic between the `stage` call that set it
+        // and the drain that takes it (all recovered by returning from this
+        // `apply` without reaching that take) must not let it outlive this
+        // call.  Entering fresh here — every route into `apply` is a new turn
+        // — is the one place that is structurally guaranteed to run, so it is
+        // the one place this reset needs to live.
+        self.reply = None;
         // Auto-compaction runs here, at the one boundary where `can_compact()`
         // actually holds — `apply` is entered `ReadyForUser` (the
         // turn-ends-ready invariant), before the prompt is committed.  Every
@@ -1514,7 +1557,7 @@ impl Agent {
             if !injected.is_empty() {
                 let mut text = String::new();
                 for turn in &injected {
-                    announce(turn, emit);
+                    self.land(turn, emit);
                     if !text.is_empty() {
                         text.push_str("\n\n");
                     }
@@ -1661,14 +1704,24 @@ impl Agent {
     /// birth generation, and the worker posts it *before* retiring its
     /// registry entry (deliver-then-retire, so a parked parent can never
     /// observe "no live child" without the result already queued) — which
-    /// means the worker cannot check staleness itself.  The consuming edge
-    /// decides instead: a result whose generation predates the live registry
-    /// generation settled across a `/clear` and belongs to a context that no
-    /// longer exists.  Every other turn source is generation-free and
-    /// admitted.
+    /// means the worker cannot check staleness itself.  A deferred `spawn`'s
+    /// surface batch (`InboxDeferred`, `shell_eval.rs`) carries the same
+    /// birth generation for the identical reason: its compose and its push are
+    /// two separate steps a `/clear` can fall between, so it cannot decide its
+    /// own staleness either.  The consuming edge decides both: a generation
+    /// that predates the live registry generation settled across a `/clear`
+    /// and belongs to a context that no longer exists.  A `ScheduledWakeup`
+    /// is checked earlier, at the inbox's own pop boundary
+    /// (`pop_turn`/`to_turn`, `bus.rs`), against that inbox's local
+    /// clear-epoch rather than this fleet-wide registry generation — its only
+    /// producer (the schedule reaper) never has a handle to this registry, so
+    /// staleness is settled before a `Turn` is even minted; by the time one
+    /// reaches here it is already current.  Every other turn source is
+    /// generation-free and admitted unconditionally.
     fn admits(&self, turn: &Turn) -> bool {
         match turn {
             Turn::Agent(r) => r.generation == self.agents.generation(),
+            Turn::Surface { generation, .. } => *generation == self.agents.generation(),
             _ => true,
         }
     }
@@ -1683,11 +1736,14 @@ impl Agent {
     }
 
     /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
-    /// present human holds this agent parked — a *conversing* agent (interactive
-    /// and holding no `reply`, so it never returns) or the agent the human has
-    /// `TAB`bed to (`focus = id`); live children it launched hold it until they
-    /// settle ([`ParkMode::HeldByChildren`]) so a headless root waiting on its
-    /// fleet stays alive to receive their results; a live self-schedule holds it
+    /// *conversing* agent (interactive and holding no `reply`, so it never
+    /// returns) parks [`ParkMode::Held`], immune to cancellation; the agent the
+    /// human has `TAB`bed to instead (`focus = id`) but that does not itself
+    /// converse parks [`ParkMode::Focused`] — the same wait, but a
+    /// terminate-cause cancel still ends it, since mere focus is not a
+    /// conversation.  Live children it launched hold it until they settle
+    /// ([`ParkMode::HeldByChildren`]) so a headless root waiting on its fleet
+    /// stays alive to receive their results; a live self-schedule holds it
     /// until cancelled; otherwise it terminates at quiescence.
     fn park_mode(&self) -> ParkMode {
         let conversing = self.interactive && !self.returns();
@@ -1701,7 +1757,7 @@ impl Agent {
             return ParkMode::Held;
         }
         if self.focus.load(Ordering::Relaxed) == self.id {
-            return ParkMode::Held;
+            return ParkMode::Focused;
         }
         if self.has_live_children() {
             return ParkMode::HeldByChildren;
@@ -2034,13 +2090,26 @@ impl Agent {
         Ok(m.remove(key).is_some())
     }
 
+    /// The single point a turn arrives, whether at the turn boundary
+    /// ([`Self::drive`]) or mid-batch at a tool boundary
+    /// ([`Self::dispatch`]'s injected drain inside [`Self::apply`]): settle
+    /// any commitment tag it carries before rendering its chrome. Folding
+    /// both steps into one call means a `commit`/`verify_commitment` child
+    /// that settles mid-batch is pinned exactly like one that settles between
+    /// turns — there is no second call site to forget the tag at.
+    fn land(&self, turn: &Turn, emit: &Emitter) {
+        self.settle_commitment(turn, emit);
+        announce(turn, emit);
+    }
+
     /// A settled `commit`/`verify_commitment` child tags its result with
     /// what the parent should do to the pin register
     /// ([`spawn_async`](crate::tools::agent::spawn_async)), decided on the
     /// worker thread that drove it since only that thread ever holds the raw
-    /// reply.  This applies the tag on the parent's own thread, at drain, then
-    /// forwards whatever [`Self::apply_commitment_settle`] (the pinning half)
-    /// says actually changed to the viewport (the rendering half).
+    /// reply.  This applies the tag on the parent's own thread, wherever the
+    /// turn lands ([`Self::land`]), then forwards whatever
+    /// [`Self::apply_commitment_settle`] (the pinning half) says actually
+    /// changed to the viewport (the rendering half).
     fn settle_commitment(&self, turn: &Turn, emit: &Emitter) {
         let Turn::Agent(r) = turn else { return };
         if let Some(kind) = self.apply_commitment_settle(r.commitment_settle.as_ref()) {
@@ -2506,9 +2575,9 @@ mod tests {
         );
     }
 
-    /// Each fork spends one unit of the parent's spawn budget, and a `fuel ==
-    /// 0` agent loses the spawn tools from its view — the chain terminates by
-    /// tool absence rather than recursing forever.
+    /// Each generation down a fork chain gets one less fuel than the one
+    /// before it, and a `fuel == 0` agent loses the spawn tools from its view
+    /// — the chain terminates by tool absence rather than recursing forever.
     #[test]
     fn fork_chain_runs_out_of_spawn_fuel() {
         let dir = tmp("spawn-fuel");
@@ -2618,7 +2687,7 @@ mod tests {
         assert_eq!(
             child.fuel,
             parent.fuel - 1,
-            "a branch is a fork: it spends one unit of spawn fuel"
+            "a branch is a fork: its fuel is one less than the parent's"
         );
     }
 
@@ -2663,6 +2732,21 @@ mod tests {
             .fork(headless.caps().clone())
             .expect("fork child");
         assert!(child.returns(), "an ordinary fork holds `reply`");
+    }
+
+    /// The park verdict distinguishes a conversation from mere focus: a
+    /// conversing agent parks `Held`, immune to cancellation; a non-conversing
+    /// agent the human has `TAB`bed to parks `Focused`, which a terminate
+    /// cause still ends (`bus.rs` pins that half of the contract).
+    #[test]
+    fn park_mode_maps_focus_without_conversation_to_focused() {
+        let dir = tmp("park-focused");
+        let held = trunk(&dir, true);
+        assert_eq!(held.park_mode(), ParkMode::Held);
+
+        let focused = trunk(&dir, false);
+        focused.focus.store(focused.id, Ordering::Relaxed);
+        assert_eq!(focused.park_mode(), ParkMode::Focused);
     }
 
     /// A `reply` tool call carrying `result`.
@@ -2735,39 +2819,63 @@ mod tests {
         let grandchild_token = cancel::Token::new();
         let sibling_token = cancel::Token::new();
         let direct_root = ral_core::process::DurableRoot::default();
-        child.agents.register(
-            direct,
-            Some(child.id),
-            true,
-            "direct".into(),
-            dir.join("direct"),
-            direct_token.clone(),
-            Some(direct_root.clone()),
-            Inbox::new().mailbox(),
-            child.provider.clone(),
-        );
-        child.agents.register(
-            grandchild,
-            Some(direct),
-            true,
-            "grandchild".into(),
-            dir.join("grandchild"),
-            grandchild_token.clone(),
-            Some(ral_core::process::DurableRoot::default()),
-            Inbox::new().mailbox(),
-            child.provider.clone(),
-        );
-        let sibling_generation = child.agents.register(
-            sibling,
-            Some(parent.id),
-            true,
-            "sibling".into(),
-            dir.join("sibling"),
-            sibling_token.clone(),
-            Some(ral_core::process::DurableRoot::default()),
-            Inbox::new().mailbox(),
-            child.provider.clone(),
-        );
+        // `child` itself must be a live entry before `direct` can register
+        // under it as parent — `register` refuses a child whose declared
+        // parent is not, at this instant, live.
+        child
+            .agents
+            .register(crate::agent_registry::Registration {
+                id: child.id,
+                parent: Some(parent.id),
+                ceiling: true,
+                title: "child".into(),
+                log_dir: dir.join("child"),
+                cancel: child.cancel_token().clone(),
+                eval_root: Some(child.eval_root()),
+                turn_scope: Some(child.turn_scope()),
+                mailbox: child.mailbox(),
+                provider: child.provider_handle(),
+            })
+            .expect("child registration must succeed: its parent is live");
+        child.agents.register(crate::agent_registry::Registration {
+            id: direct,
+            parent: Some(child.id),
+            ceiling: true,
+            title: "direct".into(),
+            log_dir: dir.join("direct"),
+            cancel: direct_token.clone(),
+            eval_root: Some(direct_root.clone()),
+            turn_scope: None,
+            mailbox: Inbox::new().mailbox(),
+            provider: child.provider.clone(),
+        });
+        child.agents.register(crate::agent_registry::Registration {
+            id: grandchild,
+            parent: Some(direct),
+            ceiling: true,
+            title: "grandchild".into(),
+            log_dir: dir.join("grandchild"),
+            cancel: grandchild_token.clone(),
+            eval_root: Some(ral_core::process::DurableRoot::default()),
+            turn_scope: None,
+            mailbox: Inbox::new().mailbox(),
+            provider: child.provider.clone(),
+        });
+        let sibling_generation = child
+            .agents
+            .register(crate::agent_registry::Registration {
+                id: sibling,
+                parent: Some(parent.id),
+                ceiling: true,
+                title: "sibling".into(),
+                log_dir: dir.join("sibling"),
+                cancel: sibling_token.clone(),
+                eval_root: Some(ral_core::process::DurableRoot::default()),
+                turn_scope: None,
+                mailbox: Inbox::new().mailbox(),
+                provider: child.provider.clone(),
+            })
+            .expect("sibling registration must succeed: its parent is live");
 
         let provider = scripted(
             "test-model",
@@ -2914,6 +3022,148 @@ mod tests {
             }
             other => panic!("expected Failed from no-reply nudges, got {other:?}"),
         }
+    }
+
+    thread_local! {
+        /// The token this process's [`builtin_t2_cancel_now`] cancels, staged
+        /// by the test that installs it — a same-thread, test-only side
+        /// channel standing in for a cancellation racing in mid-batch, since
+        /// nothing else lets a bare builtin reach the token `apply` is
+        /// watching.
+        static T2_CANCEL_TOKEN: std::cell::RefCell<Option<cancel::Token>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// test-only: cancels whatever token is staged in [`T2_CANCEL_TOKEN`].
+    #[allow(clippy::unnecessary_wraps, reason = "fixed BuiltinBody::Static signature")]
+    fn builtin_t2_cancel_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
+        T2_CANCEL_TOKEN.with(|cell| {
+            if let Some(token) = cell.borrow().as_ref() {
+                token.cancel(ral_core::process::CancelCause::Explicit);
+            }
+        });
+        Ok(Value::Unit)
+    }
+
+    fn scheme_t2_cancel_now(_u: &mut Unifier) -> Scheme {
+        mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+    }
+
+    static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
+        name: Cow::Borrowed("t2-cancel-now"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_t2_cancel_now),
+        doc: "test-only: cancel the token staged in T2_CANCEL_TOKEN.",
+        body: BuiltinBody::Static(builtin_t2_cancel_now),
+    }];
+
+    /// T2: a `reply` staged mid-batch that is then overtaken by a
+    /// cancellation before the batch fully drains must not survive into the
+    /// next turn.  The scripted batch carries `reply` first — staging
+    /// `self.reply` — then a builtin that cancels the very token `apply` is
+    /// watching, landing the cancel exactly where dispatch already ran the
+    /// reply but the post-dispatch drain has not yet taken it.  Without the
+    /// reset at `apply`'s entry, the next turn's first tool batch would
+    /// hard-terminate on this stale payload instead of completing.
+    #[test]
+    fn cancel_between_dispatch_and_drain_does_not_leak_reply_into_next_turn() {
+        ral_core::builtins::register_builtins(T2_CANCEL_BUILTINS);
+        let dir = tmp("t2-cancel-mid-batch");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(T2_CANCEL_BUILTINS);
+
+        let token = cancel::Token::new();
+        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(token.clone()));
+
+        let provider = scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![
+                reply_call("r1", &serde_json::json!("stale")),
+                ral_call("c2", "t2-cancel-now"),
+            ])),
+        );
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        match session.apply(&provider, Some("go".into()), &token, &emit) {
+            Ok(TurnOutcome::Cancelled) => {}
+            other => panic!("expected the cancel to win before the reply drains, got {other:?}"),
+        }
+        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = None);
+
+        let token2 = cancel::Token::new();
+        // The next turn's first batch must itself dispatch a tool call and
+        // reach the reply-drain check — a leaked `self.reply` hard-terminates
+        // exactly there, on `c3`'s batch, before the second round-trip that
+        // actually completes the turn ever runs.
+        let provider2 = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call("c3", "1")]))
+                .then(Reply::text("done")),
+        );
+        match session.apply(&provider2, Some("continue".into()), &token2, &emit) {
+            Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "done"),
+            other => panic!(
+                "a reply staged in a cancelled batch must not leak into the next turn, got {other:?}"
+            ),
+        }
+    }
+
+    /// A commitment tag must land even when its child settles mid-turn, at a
+    /// tool boundary, not only when it settles between turns (T1). Queue the
+    /// `AgentResult` before driving a batch that dispatches an ordinary tool
+    /// call: `dispatch`'s own drain picks it up as `injected`, the same
+    /// `Turn::Agent` shape `drive`'s turn-boundary drain sees, and `apply`
+    /// must land it the same way — not just announce it and drop the tag.
+    #[test]
+    fn commitment_settle_lands_for_a_child_settling_mid_batch() {
+        let dir = tmp("commitment-mid-batch");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let key = "commitment:mid-batch";
+        let card = crate::card::Card(vec![crate::card::Mark::Text {
+            spans: vec![crate::card::Span {
+                role: None,
+                text: "tests pass".into(),
+            }],
+        }]);
+        session
+            .inbox
+            .push(InboxMsg::AgentResult(crate::bus::AgentResult {
+                id: fresh_id(),
+                title: "commit-abc".into(),
+                outcome: AgentOutcome::Complete,
+                text: "writer formalized the commitment".into(),
+                log_dir: dir,
+                elapsed: std::time::Duration::ZERO,
+                generation: session.agents.generation(),
+                commitment_settle: Some(CommitmentSettle::Open {
+                    key: key.to_string(),
+                    card,
+                }),
+            }))
+            .unwrap();
+        let provider = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call("c1", "1")]))
+                .then(Reply::text("done")),
+        );
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        let token = cancel::Token::new();
+        let _slot = cancel::publish(&token);
+        match session.apply(&provider, Some("go".into()), &token, &emit) {
+            Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "done"),
+            other => panic!("expected the batch to complete normally, got {other:?}"),
+        }
+        assert!(
+            session.commitment_card(key).is_ok(),
+            "a commitment settle delivered mid-batch must open the pin, exactly \
+             like one delivered at the turn boundary"
+        );
     }
 
     /// A settled `verify_commitment` child tagged with a passing verdict
@@ -3154,6 +3404,76 @@ mod tests {
         assert_eq!(payload, Some(serde_json::json!("done")));
     }
 
+    /// The same admission control's `Surface` half: a deferred `spawn`
+    /// batch's birth generation (`InboxDeferred`, `shell_eval.rs`) is checked
+    /// here exactly like an `AgentResult`'s, since neither producer can decide
+    /// its own staleness (each composes on a thread other than the drive
+    /// loop's, and its push can land arbitrarily long after). The script is
+    /// empty, so any admitted turn would consult the provider and fail the
+    /// run.
+    #[test]
+    fn stale_surface_batch_is_dropped_by_generation_admission() {
+        let dir = tmp("generation-admission-stale-surface");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let stale = session.agents.generation();
+        session.agents.clear_subtree(session.id);
+        session
+            .inbox
+            .push(InboxMsg::Surface {
+                id: session.id,
+                values: Vec::new(),
+                generation: stale,
+            })
+            .unwrap();
+        session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        assert!(
+            matches!(outcome, AgentOutcome::Empty),
+            "a stale surface batch must be dropped, not driven; got {outcome:?}"
+        );
+        assert!(payload.is_none());
+        assert!(session.is_ready());
+    }
+
+    /// The positive half: a surface batch stamped with the live generation is
+    /// delivered as a turn and drives the provider.
+    #[test]
+    fn current_generation_surface_batch_is_delivered() {
+        let dir = tmp("generation-admission-live-surface");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .inbox
+            .push(InboxMsg::Surface {
+                id: session.id,
+                values: Vec::new(),
+                generation: session.agents.generation(),
+            })
+            .unwrap();
+        // Same self-verification quirk as `current_generation_agent_result_is_delivered`.
+        session.provider = ProviderHandle::new(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![reply_call(
+                    "r1",
+                    &serde_json::json!("done"),
+                )]))
+                .then(Reply::tool_calls(vec![reply_call(
+                    "r2",
+                    &serde_json::json!("done"),
+                )])),
+        ));
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        assert!(
+            matches!(outcome, AgentOutcome::Complete),
+            "a live-generation surface batch must be delivered; got {outcome:?}"
+        );
+        assert_eq!(payload, Some(serde_json::json!("done")));
+    }
+
     // ── worker registry: `/clear` cascade, lease-reap drain ───────────────
 
     /// A worker body that blocks until cancelled, so a test can catch it
@@ -3181,11 +3501,12 @@ mod tests {
     /// `/clear` cancels every worker registered on the outgoing shell before
     /// replacing it — the durable class included: explicit destruction
     /// outranks every lease — and the rebuilt shell starts with an empty
-    /// registry.  A cancelled worker settling afterward still tries to
-    /// flush its deferred `done` batch through the deferred sink it captured
-    /// before the clear — the same `InboxDeferred` generation guard that
-    /// already protects a stale agent result drops it, so no late
-    /// `InboxMsg::Surface` reaches the rebuilt context.
+    /// registry.  A cancelled worker settling afterward still flushes its
+    /// deferred `done` batch through the deferred sink it captured before the
+    /// clear — the batch reaches the inbox regardless (`InboxDeferred` never
+    /// withholds it), stamped with its birth generation, and `Agent::admits`
+    /// is the edge that rejects it, exactly as it rejects a stale agent
+    /// result.
     #[test]
     fn clear_cancels_registered_workers_and_drops_their_late_surface() {
         let dir = tmp("clear-cancels-workers");
@@ -3256,9 +3577,17 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
+        let late = session
+            .inbox
+            .drain_turn()
+            .expect("a worker settling after /clear still posts its late surface batch");
         assert!(
-            session.inbox.is_empty(),
-            "a worker settling after /clear must not post its late surface batch"
+            matches!(late, Turn::Surface { .. }),
+            "expected the late post to surface as a Turn::Surface, got {late:?}"
+        );
+        assert!(
+            !session.admits(&late),
+            "the late batch's birth generation must be rejected by the rebuilt session"
         );
     }
 
@@ -3283,17 +3612,18 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        parent.agents.register(
-            child.id,
-            Some(parent.id),
-            true,
-            "child".into(),
-            child.log_dir().to_path_buf(),
-            child.cancel_token().clone(),
-            Some(child.eval_root()),
-            child.mailbox(),
-            child.provider_handle(),
-        );
+        parent.agents.register(crate::agent_registry::Registration {
+            id: child.id,
+            parent: Some(parent.id),
+            ceiling: true,
+            title: "child".into(),
+            log_dir: child.log_dir().to_path_buf(),
+            cancel: child.cancel_token().clone(),
+            eval_root: Some(child.eval_root()),
+            turn_scope: Some(child.turn_scope()),
+            mailbox: child.mailbox(),
+            provider: child.provider_handle(),
+        });
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, child.id, child.inbox.mailbox());
