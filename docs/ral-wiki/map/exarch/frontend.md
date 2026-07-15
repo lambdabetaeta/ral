@@ -180,11 +180,8 @@ Two `Sink` implementations:
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
  `/export`, `/model`, `/resources`) run on the UI thread; session commands
- (`/clear`, `/compact`, `/discuss`, `/branch`, `/quit`) enter the focused
- agent's inbox as `Command` turns and run in `ReplControl`. `/discuss`
- forks work instead of mutating the current context: it starts
- a `mnemon` chair agent which conducts the bounded two-agent protocol
- recorded in [[decisions/260702_discuss-command|discuss-command]]. `/branch`
+ (`/clear`, `/compact`, `/branch`, `/quit`) enter the focused
+ agent's inbox as `Command` turns and run in `ReplControl`. `/branch`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,
  the one command admitted off the trunk, kills the focused branch and its

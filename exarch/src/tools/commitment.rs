@@ -190,17 +190,19 @@ fn commit(id: String, input: &Value, session: &mut Agent, emit: &Emitter) -> Ses
 
     let prompt = writer_prompt(&key, &description);
     let title = shorten(&description);
-    super::agent::spawn_async(
-        session,
+    super::agent::model_receipt(
         id,
-        child,
-        super::agent::AsyncSpawn {
-            tool: "commit",
-            title,
-            prompt: Some(prompt),
-            commitment: Some(CommitmentIntent::Write(key)),
-        },
-        emit,
+        &super::agent::spawn_async(
+            session,
+            child,
+            super::agent::AsyncSpawn {
+                tool: "commit",
+                title,
+                prompt: Some(prompt),
+                commitment: Some(CommitmentIntent::Write(key)),
+            },
+            emit,
+        ),
     )
 }
 
@@ -252,17 +254,19 @@ fn verify_commitment(
     let summary = crate::card::summary_line(&card);
     let prompt = verifier_prompt(&key, &card, &summary);
     let title = shorten(summary.lines().next().unwrap_or(&summary));
-    super::agent::spawn_async(
-        session,
+    super::agent::model_receipt(
         id,
-        child,
-        super::agent::AsyncSpawn {
-            tool: "verify_commitment",
-            title,
-            prompt: Some(prompt),
-            commitment: Some(CommitmentIntent::Verify(key)),
-        },
-        emit,
+        &super::agent::spawn_async(
+            session,
+            child,
+            super::agent::AsyncSpawn {
+                tool: "verify_commitment",
+                title,
+                prompt: Some(prompt),
+                commitment: Some(CommitmentIntent::Verify(key)),
+            },
+            emit,
+        ),
     )
 }
 fn parse_key(input: &Value) -> Result<String, String> {

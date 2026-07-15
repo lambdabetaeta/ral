@@ -225,72 +225,23 @@ impl Tool for SpawnTool {
     }
 }
 
-/// Start a bounded two-agent discussion from a host slash command.
-///
-/// This deliberately reuses the ordinary spawn API: the discussion chair is an
-/// `mnemon` child, so it remembers the focused conversation; the chair is
-/// instructed to spawn one `amnemon` partner and consume that partner's normal
-/// `reply`.  There is no special peer channel and no pretend-human delivery.
-pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter) -> String {
-    let title = format!("discuss-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
-    let input = json!({
-        "prompt": discussion_prompt(topic),
-        "title": title,
-        "permissions": "read-only",
-    });
-    dispatch_spawn(
-        SpawnKind::Mnemon,
-        "/discuss".to_string(),
-        &input,
-        session,
-        emit,
-    )
-    .content
-}
-
-fn discussion_prompt(topic: &str) -> String {
-    format!(
-        "\
-You are the chair of a lively two-way discussion. You will debate a single discussant via `message`.
-
-Topic:
-{topic}
-
-Protocol:
-- Spawn exactly one `amnemon` partner with a title that includes the topic (e.g. `debate-<topic>`) and permissions `read-only`.
-  Give it a prompt that says: you are the discussant in a two-way debate, wait for the chair's messages, respond to each via `message` with both (a) a defense or refinement of your position and (b) a sharp critique of the chair's position, continue for at least 10 exchanges, then call `reply` with a closing statement.
-- Once spawned, send the partner a `message` with the topic and ask for an opening position.
-- When the partner responds, formulate (a) your sharpest challenge and (b) your own position on the topic. Send both back via `message`.
-- When the partner responds again, update your own position — concede where they landed a hit, sharpen where you still disagree — and send a new challenge plus your updated position via `message`.
-- Engage for at least 10 exchanges. Stop when the debate has genuinely matured: no new arguments appear or positions have converged.
-- Call `reply` exactly once with a single `result` field containing the final report.
-
-The final report should be concise and include:
-- recommendation
-- main reasoning (the strongest thread that survived the debate)
-- strongest objection or dissent (what the discussant could not answer)
-- what would change your mind
-"
-    )
-}
-
 /// Fork the trunk's conversation into a new tab.  A branch converses (parks
 /// for the human), so it registers without a ceiling and pushes no result
 /// upward; `prompt` seeds a first turn, or `None` parks and waits.
-pub(crate) fn spawn_branch(session: &Agent, prompt: Option<&str>, emit: &Emitter) -> String {
+pub(crate) fn spawn_branch(
+    session: &Agent,
+    prompt: Option<&str>,
+    emit: &Emitter,
+) -> Result<SpawnedChild, String> {
     let title = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
-    match session.branch() {
-        Ok(child) => {
-            let spec = AsyncSpawn {
-                tool: "/branch",
-                title,
-                prompt: prompt.map(str::to_string),
-                commitment: None,
-            };
-            spawn_async(session, "/branch".to_string(), child, spec, emit).content
-        }
-        Err(e) => format!("could not fork this conversation: {e}"),
-    }
+    let child = session.branch().map_err(|e| e.to_string())?;
+    let spec = AsyncSpawn {
+        tool: "/branch",
+        title,
+        prompt: prompt.map(str::to_string),
+        commitment: None,
+    };
+    Ok(spawn_async(session, child, spec, emit))
 }
 
 fn dispatch_spawn(
@@ -325,18 +276,13 @@ fn dispatch_spawn(
             return SessionToolResult { id, content: msg };
         }
     };
-    spawn_async(
-        session,
-        id,
-        child,
-        AsyncSpawn {
-            tool: kind.tool(),
-            title,
-            prompt: Some(prompt),
-            commitment: None,
-        },
-        emit,
-    )
+    let spec = AsyncSpawn {
+        tool: kind.tool(),
+        title,
+        prompt: Some(prompt),
+        commitment: None,
+    };
+    model_receipt(id, &spawn_async(session, child, spec, emit))
 }
 
 /// The tool-specific half of an async spawn: everything that varies between
@@ -353,12 +299,20 @@ pub(super) struct AsyncSpawn {
     pub commitment: Option<super::commitment::CommitmentIntent>,
 }
 
+/// What a spawn hands back: the child's identity as the host and the
+/// model each render in their own vocabulary.
+pub(crate) struct SpawnedChild {
+    pub id: crate::bus::AgentId,
+    pub title: String,
+    pub log_dir: String,
+}
+
 /// Fork-then-detach: hand an already-forked, already-capped `child` to a
 /// worker thread that drives it to completion off the parent's critical
-/// path, and return the immediate "started" receipt every spawn tool
-/// answers its dispatch with.  This is the one launch-only, always-
-/// asynchronous shape `amnemon`, `mnemon`, `commit`, and `verify_commitment`
-/// share; each caller differs only in how it built `child` and `spec`.
+/// path, and return the child's identity immediately.  This is the one
+/// launch-only, always-asynchronous shape `amnemon`, `mnemon`, `commit`,
+/// and `verify_commitment` share; each caller differs only in how it built
+/// `child` and `spec`.
 ///
 /// `spec.commitment`, when `Some`, marks this spawn as a `commit`/
 /// `verify_commitment` check: the worker computes — while it still holds the
@@ -368,11 +322,10 @@ pub(super) struct AsyncSpawn {
 /// ([`Agent::drive`](crate::agent::Agent::drive)).
 pub(super) fn spawn_async(
     session: &Agent,
-    id: String,
     mut child: Agent,
     spec: AsyncSpawn,
     emit: &Emitter,
-) -> SessionToolResult {
+) -> SpawnedChild {
     let AsyncSpawn {
         tool,
         title,
@@ -515,11 +468,21 @@ pub(super) fn spawn_async(
             }
         })
         .expect("spawn async agent worker");
+    SpawnedChild {
+        id: agent_id,
+        title,
+        log_dir: log_dir_str,
+    }
+}
+
+/// Render a spawn receipt for a model caller — the JSON tool result the
+/// spawn tools answer with.
+pub(super) fn model_receipt(id: String, child: &SpawnedChild) -> SessionToolResult {
     let receipt = json!({
-        "id": agent_id,
-        "title": title,
+        "id": child.id,
+        "title": child.title,
         "status": "started",
-        "log_dir": log_dir_str,
+        "log_dir": child.log_dir,
         "note": "If you have nothing to do before the agent returns, please yield to the user.",
     });
     SessionToolResult {

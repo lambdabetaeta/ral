@@ -92,16 +92,6 @@ The tools that ship:
   parent's `fuel` on it. The whole sub-agent model — the `parent` predicate,
   spawning, marked peer messages, returning, narrowing, and memory mode — is
   [[design/agents|agents]].
-- `spawn_discussion` (`tools.rs` → `tools/agent.rs`) — the host-only helper
-  behind `/discuss`, not a model-advertised tool. It spawns a `mnemon`
-  returning chair with the focused context and instructs that chair to spawn one
-  `amnemon` partner, consume the partner's ordinary `reply`, and return one
-  `result` to its parent ([[decisions/260702_discuss-command|discuss-command]]).
-  It calls the fork primitive directly, bypassing `Gate::Spawns`, so the
-  `/discuss` command in `tui_loop.rs` separately refuses to seat a chair when
-  the focused agent's `fuel` is below 2 — the chair needs a unit to be born and
-  a second to spawn its own partner
-  ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
 - `reply` (`tools/reply.rs`), gated by `Gate::Returns` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
   extended to the headless trunk by

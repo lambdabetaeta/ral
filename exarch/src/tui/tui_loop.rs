@@ -63,12 +63,12 @@ impl Tui {
 /// calls at the turn boundary, where the drive thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was
 /// already cleared UI-side), `/compact` summarizes the history, `/resources`
-/// surveys the agent's accumulators into one probe card, `/discuss` forks a
-/// returning chair agent, and `/quit` ends the drive loop — which sets
-/// `done`, so the UI loop's next drain returns `Stop` and exits.  Every other
-/// command is handled UI-side and never reaches here.  Only the trunk drives
-/// with this `Control` (a sub-agent uses [`NoControl`](crate::agent::NoControl)),
-/// so a slash command always targets the trunk's own context and provider.
+/// surveys the agent's accumulators into one probe card, and `/quit` ends the
+/// drive loop — which sets `done`, so the UI loop's next drain returns `Stop`
+/// and exits.  Every other command is handled UI-side and never reaches here.
+/// Only the trunk drives with this `Control` (a sub-agent uses
+/// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
+/// the trunk's own context and provider.
 pub struct ReplControl<'a> {
     scratch: &'a Scratch,
 }
@@ -77,30 +77,15 @@ impl Control for ReplControl<'_> {
     fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
         let trimmed = raw.trim();
         let (head, rest) = commands::split_head(trimmed);
-        if head == "/discuss" {
-            let topic = rest;
-            if topic.is_empty() {
-                session.note_error("usage: /discuss <prompt>".into(), emit);
-            } else if session.fuel() < 2 {
-                // The chair needs one unit to be born and a second to spawn
-                // its partner; below that the chair would seat with no
-                // `amnemon` in its view and the debate could never start.
-                session.note_error(
-                    "discuss needs a chair and a partner — this agent's spawn \
-budget is too low to seat both"
-                        .into(),
-                    emit,
-                );
-            } else {
-                let receipt = crate::tools::spawn_discussion(session, topic, emit);
-                Agent::note(format!("discussion started: {receipt}"), emit);
-            }
-            return ControlFlow::Continue;
-        }
         if head == "/branch" {
             let prompt = (!rest.is_empty()).then_some(rest);
-            let receipt = crate::tools::spawn_branch(session, prompt, emit);
-            Agent::note(format!("branch started: {receipt}"), emit);
+            match crate::tools::spawn_branch(session, prompt, emit) {
+                Ok(child) => Agent::note(
+                    format!("branch {} started (agent {})", child.title, child.id),
+                    emit,
+                ),
+                Err(e) => session.note_error(format!("could not start branch: {e}"), emit),
+            }
             return ControlFlow::Continue;
         }
         match trimmed {

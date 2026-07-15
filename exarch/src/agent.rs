@@ -234,9 +234,9 @@ const MAX_STEPS: u32 = 250;
 /// Spawn budget the trunk starts with; each [`Agent::fork`] hands its child
 /// one less, and a `fuel == 0` agent loses the spawn tools from its view
 /// ([`tools_for`](crate::tools::tools_for)). Covers a short legitimate
-/// delegation chain — `/discuss`'s chair and partner, a couple of hops of
-/// sub-agent fan-out — while bounding a runaway spawn-calling loop to a fixed
-/// number of generations instead of the process exhausting threads.
+/// delegation chain — a couple of hops of sub-agent fan-out — while bounding a
+/// runaway spawn-calling loop to a fixed number of generations instead of the
+/// process exhausting threads.
 const SPAWN_FUEL: u32 = 3;
 
 /// How many ral calls elapse between disk-warn ceiling checks, once
@@ -301,9 +301,8 @@ pub enum ControlFlow {
 /// The drive thread owns the session the command mutates, so it cannot run on
 /// the UI thread.
 /// Only the non-interactive session commands route here (`/clear`, `/compact`,
-/// `/discuss`, `/quit`); `/model` swaps the [`ProviderHandle`] directly on the
-/// UI thread, and view-only commands (`/help`, `/copy`, …) are handled
-/// frontend-side.
+/// `/quit`); `/model` swaps the [`ProviderHandle`] directly on the UI thread,
+/// and view-only commands (`/help`, `/copy`, …) are handled frontend-side.
 /// Off the TUI there are no such commands, so [`NoControl`] handles none.
 pub trait Control {
     /// Run `raw` (a slash-command line) against the session the drive loop
@@ -1884,12 +1883,6 @@ impl Agent {
     /// child's capabilities, either inherited verbatim or narrowed to a base.
     pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
         &self.caps
-    }
-
-    /// This agent's remaining spawn budget — read by `/discuss` to refuse
-    /// seating a chair that could not itself spawn a partner.
-    pub(crate) fn fuel(&self) -> u32 {
-        self.fuel
     }
 
     /// Whether this agent holds the self-wakeup family — read by [`Self::fork`]

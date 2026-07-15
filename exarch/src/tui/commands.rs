@@ -67,12 +67,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Switch the model or provider.",
     },
     SlashCommand {
-        name: "/discuss",
-        aliases: &[],
-        arg: Some("<prompt>"),
-        help: "Start a two-agent discussion and report back.",
-    },
-    SlashCommand {
         name: "/branch",
         aliases: &[],
         arg: Some("[prompt]"),
@@ -268,7 +262,7 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
 /// forks root-vs-non-root before parsing.  A view command (`/help`, `/legend`,
 /// `/copy`, `/export`, `/model`) touches only the App, clipboard, file, or
 /// picker, so it runs here on the UI thread.  A session command (`/clear`,
-/// `/compact`, `/resources`, `/discuss`, `/quit`) and a plain prompt on the
+/// `/compact`, `/resources`, `/quit`) and a plain prompt on the
 /// trunk go onto the session inbox, where the worker's drive loop drains them —
 /// `/clear` *also* clears the viewport UI-side so the screen blanks immediately,
 /// before the worker rebuilds the session.  A slash token naming no registered
@@ -346,13 +340,6 @@ pub(super) fn route_submit(
                 }
                 push_command(tui, mailbox, "/clear".into());
             }
-            "/discuss" => {
-                if arg.is_empty() {
-                    tui.app.push_error(focused, "usage: /discuss <prompt>");
-                    return Ok(());
-                }
-                push_command(tui, mailbox, text.clone());
-            }
             // The worker's `ReplControl` compacts the history / returns Quit.
             _ => push_command(tui, mailbox, text.clone()),
         },
@@ -413,15 +400,6 @@ mod tests {
         // A bare /export still matches, with the empty argument its handler
         // turns into the usage hint.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
-    }
-
-    #[test]
-    fn discuss_consumes_its_prompt_argument() {
-        assert_eq!(
-            dispatch("/discuss should we add a new channel?"),
-            Some(("/discuss", "should we add a new channel?".to_string()))
-        );
-        assert_eq!(dispatch("/discuss"), Some(("/discuss", String::new())));
     }
 
     #[test]

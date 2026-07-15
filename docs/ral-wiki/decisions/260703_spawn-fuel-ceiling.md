@@ -47,12 +47,10 @@ different axes and do not compose into a depth limit.
   manage already-live agents rather than create new ones, so a fuel-exhausted
   agent keeps the ability to coordinate with whatever peers it was told about,
   even though it cannot mint new ones.
-- **`/discuss` bypasses tool gating** — it calls the fork primitive directly
-  from a host slash command, not through the model-facing dispatch path — so
-  `tui_loop.rs` separately refuses to seat a chair when `session.fuel() < 2`:
-  the chair needs one unit to be born and a second to spawn its debate
-  partner, and seating one with less would strand it with no `amnemon` in its
-  own view.
+- **`/branch` bypasses tool gating** — it is a host command that also calls
+  the fork primitive directly rather than going through a model tool, so it is
+  not subject to `Gate::Spawns`; a branch spends one unit of fuel like any
+  fork.
 - **Tool descriptions say depth is finite.** `amnemon`/`mnemon` now state
   that each spawn spends one unit of the caller's own budget on the child, so
   a chain cannot recurse forever.
