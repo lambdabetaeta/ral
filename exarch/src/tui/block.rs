@@ -213,7 +213,10 @@ pub(super) fn queued_prompt_rows(
 /// final step for transcript flattening and the queued-prompt projection:
 /// fold rows through [`line::wrap_line`], and when `prompt` is set, insert the same
 /// full-width prompt fence immediately before the first visible prompt row.
-/// `wash` preserves the same rows while tinting queued prompts as pending.
+/// `wash` preserves the same rows while tinting a queued prompt's body as
+/// pending; the fence stays outside it, since a boundary marks the plane's
+/// edge rather than lying within it — so a prompt's rule reads the same
+/// committed or queued.
 pub(super) fn append_visual_rows(
     out: &mut Vec<Line<'static>>,
     lines: &[Line<'static>],
@@ -226,7 +229,7 @@ pub(super) fn append_visual_rows(
     for line in lines {
         for vrow in line::wrap_line(line, width as usize) {
             if prompt && !fenced && !line::is_blank(&vrow) {
-                out.push(wash_row(line::prompt_fence(width), width, wash));
+                out.push(line::prompt_fence(width));
                 fenced = true;
             }
             out.push(wash_row(vrow, width, wash));
