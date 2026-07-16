@@ -296,7 +296,7 @@ struct Snapshot {
 
 async fn fetch() -> Result<Snapshot, reqwest::Error> {
     let client = reqwest::Client::builder()
-        .use_preconfigured_tls(crate::tls::config())
+        .use_preconfigured_tls(crate::provider::tls::config())
         .timeout(Duration::from_secs(10))
         .build()?;
     let resp: ModelsResponse = client.get(MODELS_URL).send().await?.json().await?;

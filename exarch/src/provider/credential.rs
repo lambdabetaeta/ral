@@ -16,7 +16,7 @@
 //! env var is read and scrubbed exactly like a famous provider's, so a custom
 //! endpoint becomes available the moment its key is in the environment.
 //!
-//! Signed-in `ChatGPT` accounts ([`crate::oauth`]) are the one source that does
+//! Signed-in `ChatGPT` accounts ([`crate::provider::oauth`]) are the one source that does
 //! *not* come from the environment: each persisted login becomes its own
 //! [`ProviderId::ChatGpt`] bound to an [`Credential::OAuth`], loaded from the
 //! token store. Several can be available at once, and an account is a distinct
@@ -42,7 +42,7 @@ pub enum Credential {
     ApiKey(String),
     /// A signed-in `ChatGPT` account's plan login, shared so a mid-session
     /// refresh is visible to the request path.
-    OAuth(Arc<Mutex<crate::oauth::OAuthToken>>),
+    OAuth(Arc<Mutex<crate::provider::oauth::OAuthToken>>),
 }
 
 impl Credential {
@@ -82,15 +82,16 @@ impl CredentialStore {
         // Each signed-in ChatGPT account is its own provider identity, loaded
         // from the OAuth token store rather than swept from the environment.
         // Sorted by label so the picker lists accounts deterministically.
-        let mut accounts: Vec<(ProviderId, crate::oauth::OAuthToken)> = crate::oauth::load_all()
-            .into_iter()
-            .map(|tok| {
-                (
-                    ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(&tok))),
-                    tok,
-                )
-            })
-            .collect();
+        let mut accounts: Vec<(ProviderId, crate::provider::oauth::OAuthToken)> =
+            crate::provider::oauth::load_all()
+                .into_iter()
+                .map(|tok| {
+                    (
+                        ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(&tok))),
+                        tok,
+                    )
+                })
+                .collect();
         accounts.sort_by(|(a, _), (b, _)| a.label().cmp(b.label()));
 
         // Famous providers, then the signed-in ChatGPT accounts, then the
@@ -489,7 +490,7 @@ mod tests {
                 ("DEEPSEEK_API_KEY", None),
             ],
             || {
-                crate::oauth::save_one(&crate::oauth::OAuthToken {
+                crate::provider::oauth::save_one(&crate::provider::oauth::OAuthToken {
                     access_token: "at".into(),
                     refresh_token: "rt".into(),
                     account_id: "acc".into(),
@@ -542,7 +543,7 @@ mod tests {
             || {
                 // Saved out of label order; resolution sorts them.
                 for (acc, email) in [("acc_w", "alex@work"), ("acc_p", "alex@home")] {
-                    crate::oauth::save_one(&crate::oauth::OAuthToken {
+                    crate::provider::oauth::save_one(&crate::provider::oauth::OAuthToken {
                         access_token: "at".into(),
                         refresh_token: "rt".into(),
                         account_id: acc.into(),

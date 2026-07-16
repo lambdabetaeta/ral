@@ -184,8 +184,8 @@ pub fn log_run_dir(cwd: &str) -> io::Result<PathBuf> {
 
 /// The current time in whole unix seconds, or 0 if the clock is before the
 /// epoch. The one spelling shared by the run-dir stamp, the model cache's
-/// freshness check ([`crate::models`]), and the OAuth token expiry
-/// ([`crate::oauth`]).
+/// freshness check ([`crate::provider::models`]), and the OAuth token expiry
+/// ([`crate::provider::oauth`]).
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

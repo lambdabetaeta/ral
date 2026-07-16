@@ -150,7 +150,7 @@ impl App {
     /// every focus change, and after a model switch.
     pub fn update_live_model(&mut self, p: &Provider, status_provider: &str) {
         self.status_model = format!("{status_provider}/{}", p.model());
-        self.context_window = crate::pricing::caps_or_default(p.model()).context_window;
+        self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
     }
 
     /// Bind the App's inbox to the session's own queue, so the input editor,

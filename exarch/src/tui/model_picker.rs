@@ -8,10 +8,10 @@ use std::time::Duration;
 use ratatui::crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read};
 
 use crate::bus::Kind;
-use crate::credential::CredentialStore;
-use crate::models::{LiveSource, ModelCatalog, ModelSource};
+use crate::provider::credential::CredentialStore;
+use crate::provider::models::{LiveSource, ModelCatalog, ModelSource, ProviderEndpoint};
 use crate::provider::{self, Provider};
-use crate::state;
+use crate::provider::state;
 
 use super::picker::{self, Picker};
 use super::render::draw;
@@ -21,8 +21,7 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 
 /// Channel carrying `(model, fetched serving providers or failure)` from the
 /// per-model background endpoint-fetch threads back to the picker loop.
-type EndpointRx =
-    std::sync::mpsc::Receiver<(String, Result<Vec<crate::models::ProviderEndpoint>, String>)>;
+type EndpointRx = std::sync::mpsc::Receiver<(String, Result<Vec<ProviderEndpoint>, String>)>;
 
 pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     let store = ctx.store;
@@ -56,7 +55,7 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         available,
         subscription,
         &initial_tuning,
-        crate::pricing::caps_or_default,
+        crate::provider::pricing::caps_or_default,
     );
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
@@ -195,7 +194,7 @@ fn drive_picker(
             }
             picker::PickAction::Manual(query, tuning, route) => {
                 let available = store.available();
-                match crate::models::resolve_model_provider(&query, &available, catalog) {
+                match crate::provider::models::resolve_model_provider(&query, &available, catalog) {
                     Ok(id) => return Some((id, query, tuning, route)),
                     Err(e) => {
                         let root = tui.app.tabs.root();

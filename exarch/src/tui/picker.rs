@@ -59,7 +59,7 @@
 //! providers only once the provider control is focused on it.
 
 use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, SLATE};
-use crate::models::ProviderEndpoint;
+use crate::provider::models::ProviderEndpoint;
 use crate::provider::Subscription;
 use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -357,9 +357,9 @@ pub struct Picker {
     /// Capability lookup for the *highlighted* model: the tuning rows gate
     /// themselves on its `supported_parameters` so effort/temperature gray out
     /// (and stop being sent) on a model that doesn't admit them. Injected
-    /// (production passes [`crate::pricing::caps_or_default`]) so the picker stays a
+    /// (production passes [`crate::provider::pricing::caps_or_default`]) so the picker stays a
     /// pure component the tests can drive with a stub.
-    caps: fn(&str) -> crate::pricing::ModelCaps,
+    caps: fn(&str) -> crate::provider::pricing::ModelCaps,
 }
 
 impl Picker {
@@ -372,7 +372,7 @@ impl Picker {
         providers: Vec<ProviderId>,
         subscription: BTreeMap<ProviderId, Subscription>,
         initial: &Tuning,
-        caps: fn(&str) -> crate::pricing::ModelCaps,
+        caps: fn(&str) -> crate::provider::pricing::ModelCaps,
     ) -> Self {
         let models = providers
             .iter()
@@ -1267,8 +1267,8 @@ mod tests {
     /// A caps stub that knows nothing — an empty `supported_parameters` reads
     /// as "supports everything", so the tuning rows stay live (the common case
     /// these tests assume).
-    fn caps_unknown(_: &str) -> crate::pricing::ModelCaps {
-        crate::pricing::ModelCaps::default()
+    fn caps_unknown(_: &str) -> crate::provider::pricing::ModelCaps {
+        crate::provider::pricing::ModelCaps::default()
     }
 
     fn loaded_picker() -> Picker {
@@ -1637,13 +1637,13 @@ mod tests {
     /// is masked out of the tuning and its arrows do nothing, while
     /// temperature stays live — and the masked effort is restored when a
     /// reasoning-capable model is highlighted again.
-    fn caps_split(model: &str) -> crate::pricing::ModelCaps {
+    fn caps_split(model: &str) -> crate::provider::pricing::ModelCaps {
         let supported_parameters = if model == "chat-only" {
             vec!["temperature".to_string()]
         } else {
             vec!["reasoning".to_string(), "temperature".to_string()]
         };
-        crate::pricing::ModelCaps {
+        crate::provider::pricing::ModelCaps {
             supported_parameters,
             ..Default::default()
         }

@@ -5,7 +5,7 @@
 //! ## Unusual providers
 //!
 //! Famous providers auto-populate from the environment and carry no config
-//! ([`crate::credential`]). A *custom* endpoint — self-hosted or non-famous —
+//! ([`crate::provider::credential`]). A *custom* endpoint — self-hosted or non-famous —
 //! is the one thing exarch cannot know: it is declared here, with its base
 //! URL, its key env var, and its wire protocol. Slice 3 of the
 //! provider-config ADR.

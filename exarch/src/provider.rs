@@ -8,14 +8,19 @@
 //! and the genai fault classifier live in the [`error`] submodule.
 
 mod error;
+pub mod credential;
+pub mod models;
+pub mod oauth;
+pub mod pricing;
+pub mod state;
+pub mod tls;
 
 pub use error::ProviderError;
 pub(crate) use error::error_object;
 
 use crate::agent::cancel;
-use crate::credential::Credential;
-use crate::oauth;
-use crate::tls::STREAM_IDLE_TIMEOUT;
+use crate::provider::credential::Credential;
+use crate::provider::tls::STREAM_IDLE_TIMEOUT;
 use clap::ValueEnum;
 use futures_util::StreamExt;
 use genai::Headers;
@@ -47,7 +52,7 @@ pub(crate) const MAX_ATTEMPTS: u32 = 3;
 /// *has* idled out, the working hypothesis flips from "slow" to "broken",
 /// and a retry that stalls the same way should fail fast rather than
 /// re-spend the full budget: with keep-alive probes evicting dead
-/// connections (see [`crate::tls::client`]) a healthy retry produces its
+/// connections (see [`crate::provider::tls::client`]) a healthy retry produces its
 /// first event quickly, so a retry that is silent for a whole minute is
 /// almost certainly stalled again.  Cuts the worst-case per-turn idle burn
 /// from `3 × 180s` to `180s + 2 × 60s`.
@@ -187,7 +192,7 @@ pub struct CustomProvider {
 ///
 /// It holds only what selection needs: the [`label`](ProviderId::label) the
 /// account is keyed and displayed by, and the OpenAI-side account id it maps
-/// to. The live tokens live in the [`crate::credential::Credential::OAuth`]
+/// to. The live tokens live in the [`crate::provider::credential::Credential::OAuth`]
 /// cell the store binds under this id, not here; the `chatgpt-account-id` a
 /// request carries is read from that bound token, not from this struct.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -610,7 +615,7 @@ async fn retry_with_backoff<T>(
 ///
 /// Each is `None` for "auto" — the option is then
 /// *not* set on the wire and genai applies the adapter's per-model default,
-/// exactly as before tuning existed.  The overlay edits it, [`crate::state`]
+/// exactly as before tuning existed.  The overlay edits it, [`crate::provider::state`]
 /// persists it, and [`Engine::complete`] folds it into the [`ChatOptions`].
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct Tuning {
@@ -822,7 +827,7 @@ fn adapter_for_provider_model(id: &ProviderId, model: &str) -> AdapterKind {
 
 /// Build the genai [`Client`] for a provider and model, binding the
 /// resolved `cred`. This is the live *transport* client; model listing
-/// ([`crate::models::LiveSource`]) builds its own client for genai's
+/// ([`crate::provider::models::LiveSource`]) builds its own client for genai's
 /// catalog call, drawing its endpoint and key from the same [`ProviderKind`]
 /// source but using the provider's default adapter — listing has no
 /// per-model context to refine on.
@@ -863,7 +868,7 @@ fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, Ada
             })
         });
         Client::builder()
-            .with_reqwest(crate::tls::client())
+            .with_reqwest(crate::provider::tls::client())
             .with_service_target_resolver(resolver)
             .build()
     } else {
@@ -875,7 +880,7 @@ fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, Ada
             }
         });
         Client::builder()
-            .with_reqwest(crate::tls::client())
+            .with_reqwest(crate::provider::tls::client())
             .with_adapter_kind(adapter)
             .with_auth_resolver(auth)
             .build()
@@ -901,7 +906,7 @@ fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
         }
     });
     Client::builder()
-        .with_reqwest(crate::tls::client())
+        .with_reqwest(crate::provider::tls::client())
         .with_adapter_kind(AdapterKind::OpenAIResp)
         .with_auth_resolver(auth)
         .build()
@@ -982,11 +987,11 @@ impl Provider {
     /// This model's total context window in tokens, when the catalog
     /// lists it — the denominator the compaction trigger measures real
     /// context pressure against.  A live catalog lookup (a cheap `HashMap`
-    /// get), so it self-heals once [`crate::pricing::ensure_loaded`]
+    /// get), so it self-heals once [`crate::provider::pricing::ensure_loaded`]
     /// completes; `None` for a native provider or before the catalog
     /// loads, where compaction falls back to the byte heuristic.
     pub fn context_window(&self) -> Option<u64> {
-        crate::pricing::context_window(&self.model)
+        crate::provider::pricing::context_window(&self.model)
     }
 
     /// How this provider's plan reads — a flat subscription (and which
@@ -1555,12 +1560,12 @@ async fn wait_for_cancel(cancel: &cancel::Token) {
 /// Pre-fetch the pricing catalog on Provider construction so the very
 /// first turn renders a real dollar figure instead of `—`.  Every
 /// provider relies on the same catalog (see the module-level docstring
-/// in [`crate::pricing`]), so the fetch fires unconditionally.  Blocks
+/// in [`crate::provider::pricing`]), so the fetch fires unconditionally.  Blocks
 /// the constructor for one HTTP round-trip; failures are absorbed
-/// inside [`crate::pricing::ensure_loaded`] so an offline start still produces
+/// inside [`crate::provider::pricing::ensure_loaded`] so an offline start still produces
 /// a working Provider, with cost rendered as `—`.
 fn prime_pricing(runtime: &tokio::runtime::Runtime) {
-    runtime.block_on(crate::pricing::ensure_loaded());
+    runtime.block_on(crate::provider::pricing::ensure_loaded());
 }
 
 /// Extract our [`Usage`] from genai's raw usage record, applying the
@@ -1585,7 +1590,7 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: Ada
         .and_then(|d| d.cached_tokens)
         .map(|n| u64::try_from(n).unwrap_or(0));
     let dollars = if metered {
-        crate::pricing::lookup_for(model, adapter)
+        crate::provider::pricing::lookup_for(model, adapter)
             .map_or(0.0, |p| {
                 p.dollars(
                     input,

@@ -21,10 +21,12 @@ use crate::{
     agent::{Agent, Control, ControlFlow, cancel},
     bootstrap::Scratch,
     bus::{AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass},
-    credential::CredentialStore,
     fleet::{Fleet, registry::AgentRegistry},
-    models::{LiveSource, ModelCatalog},
-    provider::{self, Provider},
+    provider::{
+        self, Provider,
+        credential::CredentialStore,
+        models::{LiveSource, ModelCatalog},
+    },
 };
 
 use super::banner::SessionInfo;
@@ -133,7 +135,7 @@ pub fn run(
     vi: bool,
     engine: Arc<provider::Engine>,
 ) -> Result<(), String> {
-    let caps = crate::pricing::caps_or_default(provider.model());
+    let caps = crate::provider::pricing::caps_or_default(provider.model());
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
         session.id,
