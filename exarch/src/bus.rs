@@ -26,7 +26,7 @@ use crate::agent::cancel;
 use crate::bus::card::{Card, IoEvent};
 use crate::agent::event::ProviderErrorRecord;
 use crate::provider::{Tuning, Usage};
-use crate::schedule::ScheduleId;
+use crate::fleet::schedule::ScheduleId;
 use crate::agent::transcript::Transcript;
 use ral_core::Value;
 use std::collections::VecDeque;
@@ -374,7 +374,7 @@ fn source_name(msg: &InboxMsg) -> &'static str {
 /// four quota-checked sources, not the inbox as a whole. `nudge` is itself
 /// bounded to one outstanding entry (see [`Shared::try_push`]); `schedule`
 /// is bounded only by how many schedules are concurrently armed — a count
-/// this module does not hold and [`crate::schedule::ScheduleRegistry`] does
+/// this module does not hold and [`crate::fleet::schedule::ScheduleRegistry`] does
 /// not cap either; `user` is bounded only by how many non-slash runs a human
 /// queues between slash lines. Both are human/config scale in practice, not
 /// machine-floodable the way the quota-checked sources are.

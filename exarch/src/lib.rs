@@ -12,13 +12,11 @@
 )]
 pub mod agent;
 pub mod agent_builtins;
-pub mod agent_registry;
 pub mod bootstrap;
 pub mod bus;
 pub mod cli;
 pub mod config;
 pub mod credential;
-mod desk;
 pub mod fleet;
 pub mod headless;
 pub mod host;
@@ -28,7 +26,6 @@ pub mod policy;
 pub mod pricing;
 pub mod prompt;
 pub mod provider;
-pub mod schedule;
 pub mod shell_eval;
 pub mod skill;
 pub mod state;

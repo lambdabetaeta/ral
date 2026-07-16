@@ -17,10 +17,10 @@
 //! `` `reply ``.
 
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
-use crate::agent_registry::{AgentRegistry, MessageError, NotADescendant};
+use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
 use crate::bus::card::{Card, Field, FieldVal, Mark, Span};
-use crate::schedule::{CronSchedule, ScheduleId, ScheduleRegistry, Trigger, parse_duration};
+use crate::fleet::schedule::{CronSchedule, ScheduleId, ScheduleRegistry, Trigger, parse_duration};
 use crate::shell_eval::{self, PinDigests};
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -1358,7 +1358,7 @@ mod tests {
         // parent's own registry entry with the child's and corrupting the
         // tree — a hang downstream, not a clean failure.
         let parent_id = crate::agent::fresh_id();
-        registry.register(crate::agent_registry::Registration {
+        registry.register(crate::fleet::registry::Registration {
             id: parent_id,
             parent: None,
             ceiling: false,
@@ -1949,7 +1949,7 @@ mod tests {
         let grandchild = crate::agent::fresh_id();
         // root -> mid -> grandchild, and root -> sibling (mid's sibling).
         for (id, parent) in [(mid, root_id), (sibling, root_id), (grandchild, mid)] {
-            registry.register(crate::agent_registry::Registration {
+            registry.register(crate::fleet::registry::Registration {
                 id,
                 parent: Some(parent),
                 ceiling: true,

@@ -32,7 +32,7 @@ use crate::bus::{
     AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, NO_FOCUS, ParkMode, Turn,
     WORKER_PANIC_PREFIX,
 };
-use crate::desk;
+use crate::fleet::desk;
 use crate::agent::digest::{
     AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
@@ -195,7 +195,7 @@ pub struct Agent {
     /// own `fuel` as one less — an agent may start any number of children
     /// without spending its own fuel.  Zero makes the desk refuse
     /// `agent-start`/`commit-open`/`commit-verify` with the exhaustion text
-    /// (`crate::desk::ExarchDesk`'s spawn spine), so a chain terminates by
+    /// (`crate::fleet::desk::ExarchDesk`'s spawn spine), so a chain terminates by
     /// refusal rather than recursing forever.  The trunk starts at
     /// [`SPAWN_FUEL`].
     fuel: u32,
@@ -235,10 +235,10 @@ pub struct Agent {
     /// [`Self::transport`] via `observe_foreground` so it holds a fresh
     /// [`ForegroundScope`](ral_core::process::ForegroundScope) for the whole
     /// extent of every turn.  Registered in the fleet alongside `eval_root`
-    /// so [`AgentRegistry::interrupt`](crate::agent_registry::AgentRegistry::interrupt)
+    /// so [`AgentRegistry::interrupt`](crate::fleet::registry::AgentRegistry::interrupt)
     /// can unwind exactly the in-flight turn without touching the durable
     /// root a later turn would inherit.
-    turn_scope: crate::agent_registry::TurnScope,
+    turn_scope: crate::fleet::registry::TurnScope,
     /// Whether this agent's provider requests advertise the `ral` tool at
     /// all — read by `provider.complete` (advertisement) and [`Self::stage`]
     /// (dispatch), so the two can never disagree about whether a call was
@@ -284,15 +284,15 @@ pub struct Agent {
     /// The **fleet's** agent registry — one shared map, cloned to every node,
     /// so "all live agents" is its contents.  Every agent registers itself here
     /// and registers its own children, so the registry is the spawn tree at any
-    /// depth.  Survives `/clear`: [`clear_subtree`](crate::agent_registry::AgentRegistry::clear_subtree)
+    /// depth.  Survives `/clear`: [`clear_subtree`](crate::fleet::registry::AgentRegistry::clear_subtree)
     /// bumps the generation and reaps the focused agent's descendants, so a
     /// worker that settles after the clear drops its result.
-    pub(crate) agents: crate::agent_registry::AgentRegistry,
+    pub(crate) agents: crate::fleet::registry::AgentRegistry,
     /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
     /// posts wakeups into its own inbox), so this is no longer root-only; the
     /// self-wakeup builtins (`schedule`/`schedules`/`unschedule`) still gate
     /// on `allow_schedule`, refused at the desk without the grant.
-    pub(crate) schedules: crate::schedule::ScheduleRegistry,
+    pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
     /// Input tokens the model saw on the most recent completion — the live
     /// numerator for the context-pressure compaction trigger
     /// ([`Self::compact`]), the same signal the TUI's fidelity gauge reads.
@@ -372,7 +372,7 @@ const MAX_STEPS: u32 = 250;
 /// The depth budget the trunk starts with; each [`Agent::fork_with`] hands
 /// its child one less, and a `fuel == 0` agent's `agent-start`/
 /// `commit-open`/`commit-verify` calls are refused at the desk
-/// (`ExarchDesk::launch`, `crate::desk`). Bounds how many generations deep
+/// (`ExarchDesk::launch`, `crate::fleet::desk`). Bounds how many generations deep
 /// a delegation chain may recurse — a few hops covers legitimate delegation —
 /// while stopping a runaway spawn-calling chain from exhausting threads
 /// instead of the process. Fan-out is a separate, unbounded axis: how many
@@ -499,7 +499,7 @@ pub(crate) struct Build {
     pub(crate) tool_enabled: bool,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
-    pub(crate) agents: crate::agent_registry::AgentRegistry,
+    pub(crate) agents: crate::fleet::registry::AgentRegistry,
     /// The operator's disk-warn ceiling, threaded from `config::disk_warn_bytes`
     /// at the trunk's construction and inherited verbatim by every fork — a
     /// host setting, not a per-agent choice.
@@ -535,7 +535,7 @@ impl Agent {
             large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
         });
         let durable = shell.mobile_snapshot();
-        let turn_scope: crate::agent_registry::TurnScope = Arc::new(Mutex::new(None));
+        let turn_scope: crate::fleet::registry::TurnScope = Arc::new(Mutex::new(None));
         let mut transport = ral_core::transport::IdentityTransport::new(shell);
         transport.observe_foreground(turn_scope.clone());
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
@@ -582,7 +582,7 @@ impl Agent {
             reply: None,
             durable,
             agents,
-            schedules: crate::schedule::ScheduleRegistry::new(),
+            schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             last_input: 0,
             pins: Arc::default(),
             ral_epoch: 0,
@@ -597,7 +597,7 @@ impl Agent {
     /// it from the start; a child is registered by its spawn site (which also
     /// arms the ceiling).  Idempotent enough: a re-register overwrites in place.
     fn register_self(&self) {
-        self.agents.register(crate::agent_registry::Registration {
+        self.agents.register(crate::fleet::registry::Registration {
             id: self.id,
             parent: self.parent,
             ceiling: false, // a root (trunk or headless) is never abandoned: no ceiling
@@ -680,7 +680,7 @@ impl Agent {
             // and never returns, so it withholds `reply`; a headless trunk
             // is a returning agent.
             tool_enabled: !chat,
-            agents: crate::agent_registry::AgentRegistry::new(),
+            agents: crate::fleet::registry::AgentRegistry::new(),
             disk_warn_bytes,
         })?;
         agent.register_self();
@@ -900,10 +900,10 @@ impl Agent {
 
     /// This agent's current-turn foreground scope cell — registered
     /// alongside [`Self::eval_root`] so
-    /// [`AgentRegistry::interrupt`](crate::agent_registry::AgentRegistry::interrupt)
+    /// [`AgentRegistry::interrupt`](crate::fleet::registry::AgentRegistry::interrupt)
     /// can unwind exactly the in-flight turn without touching the durable
     /// root a later turn would inherit.
-    pub(crate) fn turn_scope(&self) -> crate::agent_registry::TurnScope {
+    pub(crate) fn turn_scope(&self) -> crate::fleet::registry::TurnScope {
         self.turn_scope.clone()
     }
 
@@ -955,7 +955,7 @@ impl Agent {
             returns: true,
             allow_schedule: false,
             tool_enabled: true,
-            agents: crate::agent_registry::AgentRegistry::new(),
+            agents: crate::fleet::registry::AgentRegistry::new(),
             // Unconfigured by default: a test that wants to exercise the
             // disk-warn check sets `session.disk_warn_bytes` directly.
             disk_warn_bytes: None,
@@ -1309,7 +1309,7 @@ impl Agent {
         // ── the sub-agent ceiling, as a lease row ────────────────────────
         rows.push(ProbeRow::new(
             "agents.ceiling",
-            crate::agent_registry::AGENT_CEILING.as_secs(),
+            crate::fleet::registry::AGENT_CEILING.as_secs(),
             None,
             "reap",
             Some("1 h fixed by design — push-delivery children renew nothing".to_string()),
@@ -3155,7 +3155,7 @@ mod tests {
         // parent is not, at this instant, live.
         child
             .agents
-            .register(crate::agent_registry::Registration {
+            .register(crate::fleet::registry::Registration {
                 id: child.id,
                 parent: Some(parent.id),
                 ceiling: true,
@@ -3168,7 +3168,7 @@ mod tests {
                 provider: child.provider_handle(),
             })
             .expect("child registration must succeed: its parent is live");
-        child.agents.register(crate::agent_registry::Registration {
+        child.agents.register(crate::fleet::registry::Registration {
             id: direct,
             parent: Some(child.id),
             ceiling: true,
@@ -3180,7 +3180,7 @@ mod tests {
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
-        child.agents.register(crate::agent_registry::Registration {
+        child.agents.register(crate::fleet::registry::Registration {
             id: grandchild,
             parent: Some(direct),
             ceiling: true,
@@ -3194,7 +3194,7 @@ mod tests {
         });
         let sibling_generation = child
             .agents
-            .register(crate::agent_registry::Registration {
+            .register(crate::fleet::registry::Registration {
                 id: sibling,
                 parent: Some(parent.id),
                 ceiling: true,
@@ -3928,7 +3928,7 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        parent.agents.register(crate::agent_registry::Registration {
+        parent.agents.register(crate::fleet::registry::Registration {
             id: child.id,
             parent: Some(parent.id),
             ceiling: true,
@@ -4011,7 +4011,7 @@ mod tests {
         let schedules = agent.schedules.clone();
         schedules
             .schedule(
-                crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
+                crate::fleet::schedule::Trigger::After(std::time::Duration::from_hours(1)),
                 "ping".into(),
                 None,
                 &agent.inbox.mailbox(),

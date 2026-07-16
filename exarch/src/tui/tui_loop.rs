@@ -19,11 +19,10 @@ use crossterm::event::{
 
 use crate::{
     agent::{Agent, Control, ControlFlow, cancel},
-    agent_registry::AgentRegistry,
     bootstrap::Scratch,
     bus::{AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass},
     credential::CredentialStore,
-    fleet::Fleet,
+    fleet::{Fleet, registry::AgentRegistry},
     models::{LiveSource, ModelCatalog},
     provider::{self, Provider},
 };

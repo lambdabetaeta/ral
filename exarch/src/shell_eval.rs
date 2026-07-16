@@ -11,7 +11,7 @@
 //! the session log in full.  Nothing streams live to the user; the rail
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
-use crate::agent_registry::AgentRegistry;
+use crate::fleet::registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::bus::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use crate::agent::transcript::Transcript;
@@ -156,7 +156,7 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 /// code cannot write this prefix through `surface`; verifier orchestration
 /// reads the saved card here and treats it as data.  Read directly off the
 /// captured `PinDigests` Arc by the `` `commit-open ``/`` `commit-verify ``
-/// desk arms ([`crate::desk::ExarchDesk`]), since a desk handler may only
+/// desk arms ([`crate::fleet::desk::ExarchDesk`]), since a desk handler may only
 /// ever hold `&PinDigests`, never `&Agent`.
 pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::bus::card::Card, String> {
     if !is_commitment_pin(key) {
@@ -421,7 +421,7 @@ pub(crate) fn run_shell(
     timeout_secs: u64,
     emit: &Emitter,
     pins: Option<&PinDigests>,
-    desk: Option<&Arc<crate::desk::ExarchDesk>>,
+    desk: Option<&Arc<crate::fleet::desk::ExarchDesk>>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -455,7 +455,7 @@ pub(crate) fn run_shell(
     // flush) renders identically but never touches the pin mirror. Shared
     // with the identity `DeskBinding` adapter (`desk.rs`) so the two paths
     // cannot diverge.
-    let applier = crate::desk::SurfaceApplier {
+    let applier = crate::fleet::desk::SurfaceApplier {
         emit: emit.clone(),
         pins: pins.cloned(),
     };

@@ -10,7 +10,7 @@
 //! the user can see what the child was asked to do.
 
 use crate::agent::Agent;
-use crate::agent_registry::AgentRegistry;
+use crate::fleet::registry::AgentRegistry;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, InboxMsg, Kind, Mailbox};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -59,7 +59,7 @@ pub(crate) struct AsyncSpawn {
     pub prompt: Option<String>,
     /// Set only for a `commit`/`verify-commitment` spawn. `None` for every
     /// ordinary spawn, which can never tag a result for the pin register.
-    pub commitment: Option<crate::desk::CommitmentIntent>,
+    pub commitment: Option<crate::fleet::desk::CommitmentIntent>,
     /// Whether this spawn was launched by a desk harness verb
     /// (`amnemon`/`mnemon` via `agent-start`, `commit`, `verify-commitment`)
     /// rather than `/branch`, a human slash command with no desk verb behind
@@ -147,7 +147,7 @@ pub(crate) fn spawn_async(
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
     // one fact gates the reaper ceiling, the tab kind, and the settle epilogue.
     let delivers = child.returns();
-    let Some(generation) = registry.register(crate::agent_registry::Registration {
+    let Some(generation) = registry.register(crate::fleet::registry::Registration {
         id: agent_id,
         parent: Some(parent),
         ceiling: delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
@@ -239,7 +239,7 @@ pub(crate) fn spawn_async(
                 // on the worker thread, while the raw payload is still in hand —
                 // the parent only ever sees the tag, never the payload itself.
                 let commitment_settle = commitment
-                    .and_then(|i| crate::desk::commitment_settle(i, &outcome, payload.as_ref()));
+                    .and_then(|i| crate::fleet::desk::commitment_settle(i, &outcome, payload.as_ref()));
                 // Deliver, then retire.  The parent's park verdict reads child
                 // liveness (the registry) and delivery (its inbox) under two
                 // different locks, and pops its queue only after the verdict —

@@ -4,7 +4,7 @@
 //! action surface onto the `` `agent-start ``/`` `agent-list ``/
 //! `` `agent-cancel ``/`` `message ``/`` `schedule ``/`` `schedule-list ``/
 //! `` `unschedule ``/`` `commit-open ``/`` `commit-verify `` enquiry classes
-//! [`crate::desk::ExarchDesk`] answers.
+//! [`crate::fleet::desk::ExarchDesk`] answers.
 //!
 //! Each body validates its own arguments at the door — arity, the title
 //! contract, the six-label permissions vocabulary, the trigger/label
@@ -14,9 +14,9 @@
 //! this shell into the turn's nursery
 //! ([`ral_core::Shell::fork_into_nursery`]) and enquires with the adopted
 //! session's id; every other body enquires directly. The desk answers class
-//! by class in `crate::desk`; this module only ever crosses that one seam.
+//! by class in `crate::fleet::desk`; this module only ever crosses that one seam.
 
-use crate::schedule::{CronSchedule, parse_duration};
+use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::builtins::util::check_arity;
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk};
@@ -136,11 +136,11 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
 /// Validate a `commit`/`verify-commitment` `key` argument against the
 /// protected pin grammar — `` `commitment:` `` followed by one or more
 /// ASCII letters, digits, `.`, `_`, or `-` — re-running
-/// [`crate::desk::valid_commitment_key`] here so a malformed key never
+/// [`crate::fleet::desk::valid_commitment_key`] here so a malformed key never
 /// reaches the host. `tool` names the caller for the door error.
 fn commitment_key(v: &Value, tool: &str) -> Settled<String> {
     let key = v.to_string();
-    if !crate::desk::valid_commitment_key(&key) {
+    if !crate::fleet::desk::valid_commitment_key(&key) {
         return Err(sig(format!(
             "{tool}: `key` must look like `{}<id>` using ASCII letters, digits, `.`, `_`, or \
              `-`, got {key:?}",
@@ -980,7 +980,7 @@ mod tests {
     /// label: `none, prompt: #'wake'#] `` — real source, parsed and
     /// type-checked, crossing the desk — answers the new schedule's id, and
     /// once it fires the marked wakeup lands in the inbox as a
-    /// [`crate::bus::Turn::Wakeup`]. Mirrors `crate::schedule`'s own
+    /// [`crate::bus::Turn::Wakeup`]. Mirrors `crate::fleet::schedule`'s own
     /// `after_fires_once_then_is_removed` for how to wait for the fire — a
     /// real second, since `parse_duration`'s smallest unit is whole
     /// seconds.
