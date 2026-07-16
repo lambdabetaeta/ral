@@ -2852,7 +2852,10 @@ mod tests {
     /// A trunk built through the production `Agent::root` path, parameterised on
     /// `interactive` — the one bit that decides whether the trunk converses.
     fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
-        let scratch = Scratch::new().expect("scratch dir");
+        // Keyed by the caller's own `tmp` dir, so two tests building trunks
+        // concurrently never share (and wipe) one pid-keyed scratch.
+        let tag = dir.file_name().expect("tmp dir has a name").to_string_lossy();
+        let scratch = Scratch::for_test(&tag).expect("scratch dir");
         Agent::root(
             "system".into(),
             ral_core::types::Capabilities::default(),
@@ -2904,7 +2907,7 @@ mod tests {
     #[test]
     fn builtin_index_resolves_per_agent_not_per_parent() {
         let dir = tmp("builtin-index-per-agent");
-        let scratch = Scratch::new().expect("scratch dir");
+        let scratch = Scratch::for_test("builtin-index-per-agent").expect("scratch dir");
         let template = format!(
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
@@ -2977,7 +2980,7 @@ mod tests {
     #[test]
     fn fork_and_branch_bookend_record_the_childs_own_resolved_length() {
         let dir = tmp("bookend-resolved-length");
-        let scratch = Scratch::new().expect("scratch dir");
+        let scratch = Scratch::for_test("bookend-resolved-length").expect("scratch dir");
         let template = format!(
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
@@ -3861,7 +3864,7 @@ mod tests {
             );
         }
 
-        let scratch = Scratch::new().expect("scratch dir");
+        let scratch = Scratch::for_test("clear-cancels-workers").expect("scratch dir");
         session.clear(&scratch).expect("clear must succeed");
 
         for entry in &entries {
@@ -4573,7 +4576,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
 
-        let scratch = Scratch::new().expect("scratch dir");
+        let scratch = Scratch::for_test("clear-reseals-baseline").expect("scratch dir");
         session.clear(&scratch).expect("clear must succeed");
 
         assert!(

@@ -712,7 +712,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("exarch-clear-interrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let scratch = Scratch::new().expect("scratch directory");
+        let scratch = Scratch::for_test("clear-interrupt").expect("scratch directory");
         let mut session = Agent::for_test(&dir, "system").expect("test session");
 
         // Seed the ladder exactly as a delivered SIGTERM would: through
