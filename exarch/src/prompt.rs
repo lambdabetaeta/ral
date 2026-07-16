@@ -5,8 +5,9 @@
 //! in `assemble`.  Headed sections get a `# heading` line; the persona
 //! section is unheaded — it sets the tone, not a topic.
 
+pub mod host;
+
 use crate::cli::EditScheme;
-use crate::host;
 use crate::shell_eval::skill;
 use ral_core::types::{Capabilities, ExecDir};
 use std::fmt::Write;

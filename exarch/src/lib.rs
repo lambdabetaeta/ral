@@ -17,7 +17,6 @@ pub mod cli;
 pub mod config;
 pub mod fleet;
 pub mod headless;
-pub mod host;
 pub mod policy;
 pub mod prompt;
 pub mod provider;

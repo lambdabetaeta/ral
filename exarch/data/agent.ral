@@ -1,7 +1,7 @@
 # exarch agent helper library — sourced into the shell at boot
 
 ## `view-text`, `grep-files`, `edit-hash`, and `edit-replace` are exarch host builtins
-## (`exarch/src/agent_builtins.rs`): each reads the whole file in Rust, below the
+## (`exarch/src/shell_eval/builtins.rs`): each reads the whole file in Rust, below the
 ## redirect frame, and is a single logical surface.  `view-text`/`edit-hash` share one
 ## witness algorithm, so the hash a read shows is exactly the handle `edit-hash`
 ## checks.  `view-text-around` is the one thin ral helper over them.
