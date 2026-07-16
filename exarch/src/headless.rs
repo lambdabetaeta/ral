@@ -231,6 +231,12 @@ impl Sink for Headless {
             }
             Kind::ToolCall {
                 tool, cmd, summary, ..
+            }
+            | Kind::HarnessCall {
+                verb: tool,
+                cmd,
+                summary,
+                ..
             } if id == self.root_id => {
                 eprintln!("[tool: {tool}]");
                 if let Some(s) = &summary {
@@ -242,8 +248,8 @@ impl Sink for Headless {
                     eprintln!("  {line}");
                 }
             }
-            Kind::ToolCall { .. } => {}
-            Kind::ToolResult(_) => {}
+            Kind::ToolCall { .. } | Kind::HarnessCall { .. } => {}
+            Kind::ToolResult(_) | Kind::HarnessResult(_) => {}
             Kind::StopReason(raw) => {
                 if id == self.root_id {
                     self.last_stop = Some(raw.clone());

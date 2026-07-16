@@ -184,7 +184,7 @@ pub struct AgentResult {
     /// rebuilt context.
     pub generation: u64,
     /// Set only when this child was a host-orchestrated `commit`/
-    /// `verify_commitment` spawn: what the parent should do to the protected
+    /// `verify-commitment` spawn: what the parent should do to the protected
     /// pin register when this result drains.  The worker thread computes
     /// this — not the parent — since only it still holds the raw reply
     /// payload the decision needs.
@@ -1172,18 +1172,35 @@ pub enum Kind {
     /// `events.json` keeps it for post-mortem.  Superseded by the next event
     /// of any kind.
     Phase(String),
+    /// A call to `ral` — the one call that genuinely crosses the provider
+    /// boundary.  See [`Kind::HarnessCall`] for a desk verb's rail-identical
+    /// twin.
     ToolCall {
         tool: &'static str,
         cmd: String,
-        /// Short, single-line label the sink shows on the rail — the
-        /// `ral` tool's mandatory `description`, the `agent` tool's
-        /// `title` — with `cmd` revealed when the user opens the call.
-        /// `None` means there is nothing to reveal, so the call renders
-        /// statically from `cmd` (e.g. `fff`, whose `query` is already
-        /// short, and the invalid-input rail header).
+        /// Short, single-line label the sink shows on the rail — `ral`'s
+        /// mandatory `description` — with `cmd` revealed when the user
+        /// opens the call. `None` means there is nothing to reveal, so the
+        /// call renders statically from `cmd` (the invalid-input rail
+        /// header).
         summary: Option<String>,
     },
     ToolResult(String),
+    /// A desk verb acted — `amnemon`/`mnemon` (via `agent-start`), `message`,
+    /// `agent-cancel`, `schedule`, `unschedule`, `commit`, `verify-commitment`,
+    /// or `reply` — rendered on the rail exactly like [`Kind::ToolCall`], but
+    /// naming the harness verb the model invoked rather than a name that
+    /// crossed the provider boundary: unlike `ral`, none of these are a
+    /// provider-facing tool at all any more, so this is the honest kind for
+    /// what the desk actually did.
+    HarnessCall {
+        verb: &'static str,
+        cmd: String,
+        summary: Option<String>,
+    },
+    /// The paired result for a [`Kind::HarnessCall`] — the desk's twin of
+    /// [`Kind::ToolResult`].
+    HarnessResult(String),
     UserPromptEcho(String),
     StopReason(String),
     Error(String),

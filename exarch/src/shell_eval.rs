@@ -154,9 +154,9 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 
 /// Read a protected commitment pin for host-owned verification.  Model
 /// code cannot write this prefix through `surface`; verifier orchestration
-/// reads the saved card here and treats it as data.  Shared by
-/// [`crate::agent::Agent::commitment_card`] and the `` `commit-verify ``
-/// desk arm ([`crate::desk::ExarchDesk`]), since a desk handler may only
+/// reads the saved card here and treats it as data.  Read directly off the
+/// captured `PinDigests` Arc by the `` `commit-open ``/`` `commit-verify ``
+/// desk arms ([`crate::desk::ExarchDesk`]), since a desk handler may only
 /// ever hold `&PinDigests`, never `&Agent`.
 pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::card::Card, String> {
     if !is_commitment_pin(key) {
@@ -183,9 +183,9 @@ pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::car
 /// viewport is the caller's separate step
 /// ([`crate::agent::Agent::settle_commitment`]).  Refused if the key is
 /// already live: a commitment, once open, can only be closed by a verifier,
-/// never silently replaced.  Shared by
-/// [`crate::agent::Agent::set_commitment_pin`] and the `` `commit-open ``
-/// desk arm ([`crate::desk::ExarchDesk`]).
+/// never silently replaced.  Called directly off the captured `PinDigests`
+/// Arc by [`crate::agent::Agent::apply_commitment_settle`] when a settled
+/// `commit` child's tag opens the pin.
 pub(crate) fn set_commitment_pin(
     pins: &PinDigests,
     key: &str,
@@ -219,9 +219,10 @@ pub(crate) fn set_commitment_pin(
 /// session mirror.  Pure state — projecting the clear to the viewport is
 /// the caller's separate step ([`crate::agent::Agent::settle_commitment`]).
 /// The model cannot reach this path; ordinary `surface` unpins for the same
-/// prefix are rejected above ([`reject_protected_pin`]).  Shared by
-/// [`crate::agent::Agent::unset_commitment_pin`] and the `` `commit-verify ``
-/// desk arm ([`crate::desk::ExarchDesk`]).
+/// prefix are rejected above ([`reject_protected_pin`]).  Called directly
+/// off the captured `PinDigests` Arc by
+/// [`crate::agent::Agent::apply_commitment_settle`] when a settled
+/// `verify-commitment` child's tag clears the pin.
 pub(crate) fn unset_commitment_pin(pins: &PinDigests, key: &str) -> Result<bool, String> {
     if !is_commitment_pin(key) {
         return Err(format!(
@@ -310,7 +311,7 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
     };
     let msg = if is_commitment_pin(key) {
         format!(
-            "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify_commitment` to check a live commitment"
+            "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify-commitment` to check a live commitment"
         )
     } else {
         format!(
@@ -589,24 +590,6 @@ pub(crate) fn run_shell(
     }
 }
 
-/// Render a JSON value as text at JSON-speaking edges.
-///
-/// A JSON **string** passes through raw, so a markdown report keeps real
-/// newlines rather than the escaped `\n` a serializer would emit; any other
-/// shape is **pretty-printed** so its structure stays legible; a JSON **null**
-/// renders to nothing (`None`).
-///
-/// The `reply` tool uses this because its argument arrives as JSON already.
-/// A `ral` tool's `VALUE` section uses [`ral_value_to_text`] instead, preserving
-/// ral's own value syntax rather than detouring through JSON.
-pub(crate) fn json_to_text(json: &serde_json::Value) -> Option<String> {
-    match json {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        other => serde_json::to_string_pretty(other).ok(),
-    }
-}
-
 /// Render a ral value as the text the `VALUE` section carries.
 ///
 /// Top-level strings and bytes are payloads, so they pass through raw: file
@@ -682,33 +665,6 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
                       exhaustiveness needs is never performed at runtime"
         )]
         FOValue::Ext(x) => match *x {},
-    }
-}
-
-/// The coexistence inverse of [`user_json`]: decode a JSON value — a
-/// `reply` *tool* call's `result` argument, still installed alongside the
-/// `reply` builtin for this migration's measurement window — into an
-/// [`FOValue`] for [`crate::agent::Agent::set_reply`].  Total: every JSON
-/// shape has a first-order home (a JSON number without a fractional part or
-/// exponent becomes an `Int`, otherwise a `Float`).  Dies with the tool at
-/// retirement.
-pub(crate) fn json_fo(v: &serde_json::Value) -> FOValue {
-    match v {
-        serde_json::Value::Null => FOValue::Unit,
-        serde_json::Value::Bool(b) => FOValue::Bool { value: *b },
-        serde_json::Value::Number(n) => n.as_i64().map_or_else(
-            || FOValue::Float {
-                value: n.as_f64().unwrap_or(0.0),
-            },
-            |value| FOValue::Int { value },
-        ),
-        serde_json::Value::String(s) => FOValue::String { value: s.clone() },
-        serde_json::Value::Array(items) => FOValue::List {
-            items: items.iter().map(json_fo).collect(),
-        },
-        serde_json::Value::Object(map) => FOValue::Map {
-            entries: map.iter().map(|(k, v)| (k.clone(), json_fo(v))).collect(),
-        },
     }
 }
 
@@ -2381,38 +2337,6 @@ return !{{length $hits}}"
         );
     }
 
-    /// A JSON string renders raw — no escaping — so a markdown report keeps
-    /// real newlines rather than literal `\n`.  This is the shape a `reply`
-    /// payload uses.
-    #[test]
-    fn json_to_text_passes_a_string_through_raw() {
-        let v = serde_json::json!("# Report\nline one\nline two");
-        assert_eq!(
-            super::json_to_text(&v).as_deref(),
-            Some("# Report\nline one\nline two"),
-        );
-    }
-
-    /// A JSON object/array is pretty-printed, so its structure stays legible —
-    /// the structured-findings case for `reply`.
-    #[test]
-    fn json_to_text_pretty_prints_structured_values() {
-        let v = serde_json::json!({ "findings": ["a", "b"] });
-        let out = super::json_to_text(&v).expect("an object renders");
-        assert!(out.contains("\"findings\""));
-        assert!(
-            out.contains('\n'),
-            "pretty-printing keeps the shape on lines"
-        );
-    }
-
-    /// A JSON null renders to nothing — the empty-reply case that settles
-    /// `AgentOutcome::Empty`.
-    #[test]
-    fn json_to_text_renders_null_to_nothing() {
-        assert_eq!(super::json_to_text(&serde_json::Value::Null), None);
-    }
-
     #[test]
     fn ral_value_to_text_passes_top_level_strings_through_raw() {
         let v = RalValue::String("# Report\nline one\nline two".into());
@@ -2452,7 +2376,7 @@ return !{{length $hits}}"
         );
     }
 
-    // ── `user_json` / `json_fo` ──────────────────────────────────────────
+    // ── `user_json` ──────────────────────────────────────────────────────
     //
     // The reply projection's policy table, one case per `FOValue` variant —
     // deliberately **not** `FOValue`'s own `serde` encoding (internally
@@ -2549,27 +2473,5 @@ return !{{length $hits}}"
     fn user_json_payload_less_variant_becomes_the_bare_label_string() {
         let v = FOValue::Variant { label: "none".into(), payload: None };
         assert_eq!(super::user_json(&v), serde_json::json!("none"));
-    }
-
-    /// `json_fo` is total and its `user_json` image reproduces the original
-    /// JSON for every shape a `reply` *tool* call's `result` can carry —
-    /// the coexistence round trip.
-    #[test]
-    fn json_fo_then_user_json_round_trips_every_json_shape() {
-        for v in [
-            serde_json::json!(null),
-            serde_json::json!(true),
-            serde_json::json!(42),
-            serde_json::json!("hi"),
-            serde_json::json!([1, 2, 3]),
-            serde_json::json!({"a": 1, "b": "x"}),
-        ] {
-            let fo = super::json_fo(&v);
-            assert_eq!(
-                super::user_json(&fo),
-                v,
-                "json_fo then user_json must round-trip {v}"
-            );
-        }
     }
 }

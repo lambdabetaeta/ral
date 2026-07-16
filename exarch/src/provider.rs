@@ -1020,7 +1020,7 @@ impl Provider {
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
-        tools: &[&'static dyn crate::tools::Tool],
+        tool_enabled: bool,
         on_text: &mut F,
         on_think: &mut G,
         cancel: &cancel::Token,
@@ -1034,7 +1034,7 @@ impl Provider {
                 self.openrouter_route(),
                 system,
                 messages,
-                tools,
+                tool_enabled,
                 on_text,
                 on_think,
                 cancel,
@@ -1170,7 +1170,7 @@ impl Engine {
         route: Option<&str>,
         system: &str,
         messages: Vec<ChatMessage>,
-        tools: &[&'static dyn crate::tools::Tool],
+        tool_enabled: bool,
         on_text: &mut F,
         on_think: &mut G,
         cancel: &cancel::Token,
@@ -1178,9 +1178,10 @@ impl Engine {
         self.refresh_if_stale(transport);
         let adapter = transport.adapter;
         let req_template = build_cached_request(adapter, system, messages);
-        // Resolved once: the tool set is identical across retry attempts, so
-        // the request closure clones this rather than rebuilding it per try.
-        let tool_defs = tool_defs(tools);
+        // Resolved once: whether the tool is offered is identical across
+        // retry attempts, so the request closure clones this rather than
+        // rebuilding it per try.
+        let tool_defs = tool_defs(tool_enabled);
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
             .with_capture_content(true)
@@ -1534,14 +1535,14 @@ fn build_cached_request(
     ChatRequest::new(all)
 }
 
-fn tool_defs(tools: &[&'static dyn crate::tools::Tool]) -> Vec<Tool> {
-    tools
-        .iter()
-        .map(|t| {
-            Tool::new(t.name())
-                .with_description(t.desc())
-                .with_schema(t.schema().clone())
-        })
+/// The wire tool set for one request: empty when the agent's tool is
+/// withheld (a `--chat` trunk), the one-entry view otherwise.  Never reaches
+/// into `crate::tools` for anything but this one seam, so provider.rs stays
+/// ignorant of which tool that is, or its shape.
+fn tool_defs(tool_enabled: bool) -> Vec<Tool> {
+    tool_enabled
+        .then(crate::tools::wire_tool)
+        .into_iter()
         .collect()
 }
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: 489d125
+generated_at_date: 2026-07-16
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs, exarch/src/config.rs]
 ---
 
@@ -11,7 +11,7 @@ canonical [[map/exarch/frontend|event log]] (`AgentLog`), the persistent
 [[map/core/shell-state|`Shell`]] behind its own `IdentityTransport` (the
 canonical turn and probe vocabulary,
 [[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
-`Capabilities`, its own inbox, tools, nudger, `cancel::Token`, an owned
+`Capabilities`, its own inbox, nudger, `cancel::Token`, an owned
 hot-swappable `ProviderHandle`, the shared focused-agent handle
 (`focus: Arc<AtomicU64>`, `NO_FOCUS` sentinel in `bus.rs`), and the inherited
 `interactive` flag. What every node *shares* — the registry, the one
@@ -29,7 +29,7 @@ parks for its human, but both behaviours fall out of construction and position,
 never an `is_root` branch:
 
 ```
-  returns(a)    ⟺  a's tool view holds reply       // fixed at construction; false only for a conversing node
+  returns(a)    // fixed at construction: fork true, branch false, trunk ¬interactive
   conversing(a) =  a.interactive ∧ ¬returns(a)
   park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /clear or /close reaped it
                    Held           if conversing(a)                          // immune to cancellation
@@ -39,8 +39,13 @@ never an `is_root` branch:
                    Quiesce        otherwise
 ```
 
-`returns` (`agent.rs`) is **derived from the tool view** — the single source of
-truth, so the nudge layer, parking, and the advertised tools cannot disagree
+`returns` (`agent.rs`) is a **construction-fixed field** — one bit read by
+`returns()`, parking's conversing predicate, the desk's `reply` refusal
+([[map/exarch/builtins|builtins]]), and the prompt's per-agent builtin index
+(resolved at `Agent::assemble` from the same bit, alongside `allow_schedule`
+for the self-wakeup family, so no agent is shown a verb the desk would
+certainly refuse) — the single source of truth, so the nudge layer, parking,
+reply availability, and the advertised vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
 `park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `Focused` /
 `HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus.rs`) is the `should_park`
@@ -53,7 +58,8 @@ descendants hold it
 until their results drain; a live self-schedule holds it until cancelled;
 otherwise it terminates at quiescence — the one-shot contract a headless trunk
 and a settled sub-agent both satisfy. `--chat` builds the trunk with no system
-prompt and an empty tool view — a bare conversation, the same drive loop.
+prompt and no tool at all (`tool_enabled: false`) — a bare conversation, the
+same drive loop.
 
 ## The drive loop
 
@@ -102,9 +108,11 @@ Three nested loops, the same for trunk and child alike:
   interactive Esc — returning `TurnOutcome::Capped`. That outcome matches no
   nudge rule, so the driver treats it as terminal; re-driving would only spend
   the ceiling again.
-- `dispatch` — runs the turn's tool-call batch in order. Every tool returns a
-  `SessionToolResult` synchronously; the spawn tools return a start receipt after
-  launching their detached child. Once every requested tool id has a result,
+- `dispatch` — runs the turn's tool-call batch in order. Every call returns a
+  `SessionToolResult` synchronously — and there is only `ral` to call
+  ([[map/exarch/tools|tools]]); a spawn verb inside it hands the script a start
+  receipt after launching the detached child. Once every requested tool id has
+  a result,
   dispatch drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
   steering. A non-slash steering prompt is appended after the complete
   tool-result batch, and the next loop asks the provider with the user's steering
@@ -192,7 +200,7 @@ The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
 quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
 `INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
 producer surfaces the rejection to its own caller: `AgentRegistry::message`
-returns `MessageError::RecipientInboxFull` (the `message` tool reports it),
+returns `MessageError::RecipientInboxFull` (the `message` builtin reports it),
 a rejected slash command reports through the UI's error line, and a
 rejected `spawn` completion or surfaced batch — which has no synchronous
 caller left to return to — records straight to the durable
@@ -219,9 +227,12 @@ children have landed. Exhausted transport and rate-limit failures are provider
 facts, so they surface as `Kind::ProviderError` and do not post a model-visible
 self-nudge.
 
-The same agent owns the protected pin mirror read/set/clear helpers used by
-`commit`/`verify_commitment`: a settled writer's formalized card, or a settled
-verifier's passing result, is tagged by the worker thread that drove it, and
+The same agent applies the protected pin settles that
+`commit`/`verify-commitment` ([[map/exarch/builtins|builtins]]) put in flight
+(the pin read/set/clear logic itself lives in
+[[map/exarch/shell-eval|shell-eval]], over the shared `PinDigests`): a settled
+writer's formalized card, or a settled verifier's passing result, is tagged by
+the worker thread that drove it, and
 `Agent::settle_commitment` projects that tag — an open (`Kind::Pin`) or a
 clear (`Kind::Unpin`) — on the parent's own thread as the result drains.
 Ordinary model-authored `surface` cannot reach either path.
@@ -257,7 +268,7 @@ disagree about what is shared.
 
 ## Cancellation cascades the subtree, across both layers
 
-The single cascade serves the deliberate teardowns — `agent_cancel`, a
+The single cascade serves the deliberate teardowns — `agent-cancel`, a
 returning agent's `reply`, and the `/clear` / `/close` subtree reaps.
 `AgentRegistry::Entry` carries a `parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
@@ -351,7 +362,7 @@ existing `resources::dir_size`) emits one `Kind::SystemNote`, latched until
 a later check finds the total back under — one warning per excursion, not
 one per boundary.
 
-`fork` builds the child `Agent` for [[design/agents|sub-agent spawning]] through
+A fork builds the child `Agent` for [[design/agents|sub-agent spawning]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than
 hand-copying fields after a bare `Shell::new`. It takes the child's
 `Capabilities` **as an argument**, so the spawn site owns the authority decision
@@ -365,26 +376,29 @@ counters and a freshly-defaulted `SessionState`, so it holds **no terminal
 authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
 foreground agent and can never seize the controlling terminal the TUI owns).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. Every
-agent may spawn, but `fork` also computes the child's `fuel` as
-`self.fuel.saturating_sub(1)` (`SPAWN_FUEL = 3` at the trunk); a `fuel == 0`
-agent's `tools_for` view drops `amnemon`/`mnemon`
-([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]), so a delegation
-chain bottoms out a fixed number of generations down. The fork mirrors on the
-bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
+agent may spawn, but each fork hands the child one less unit of `fuel` than the
+parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own fuel is never
+debited, so fuel bounds depth, not fan-out); at `fuel == 0` the desk refuses
+`agent-start`/`commit-open`/`commit-verify` with the exhaustion text — the
+spawn verbs stay advertised, the desk is the wall
+([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
+chain bottoms out by refusal a fixed number of generations down. The fork
+mirrors on the bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
 
-`fork` is `fork_with(caps, returns: true)` — the *returning*-child
-constructor; `branch` is `fork_with(self.caps, returns: false)` plus
+`fork_with(caps, returns)` is the shared fork core — a returning child passes
+`true`; `branch` is `fork_with(self.caps, returns: false)` plus
 `inherit_context`, minting a *conversing* peer tab with the parent's verbatim
-authority ([[decisions/260705_branch-minimal|branch-minimal]]).
-`fork_remembering` is the mnemon variant: the same fork plus
-`inherit_context`, which asks `AgentLog` to import the parent's model-visible
-context ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]). The
-spawn site still seeds the tool call's prompt through the child's inbox, so the
-prompt enters through the same turn path as amnemon. `AgentLog` drops a pending
-unanswered assistant tool-call frame when the parent is mid-dispatch, so the
-child inherits a request context rather than a dangling provider protocol. The
-amnemon path uses plain `fork`; both spawn modes seed the launch prompt into
-the child's inbox.
+authority ([[decisions/260705_branch-minimal|branch-minimal]]). A builtin
+spawn takes the decomposed path instead: the `amnemon`/`mnemon` body forks the
+session into the turn's nursery (`Shell::fork_into_nursery`), and the desk's
+`agent-start` arm adopts it and calls `Agent::assemble` at one less unit of
+fuel ([[map/exarch/builtins|builtins]]). The mnemon variant additionally forks
+the parent's `AgentLog` and imports its model-visible context before assembly
+([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]); `AgentLog`
+drops a pending unanswered assistant tool-call frame when the parent is
+mid-dispatch, so the child inherits a request context rather than a dangling
+provider protocol. Both memory modes seed the launch prompt through the
+child's inbox, so the prompt enters through the same turn path.
 
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `view-text`, `grep-files`,
@@ -412,8 +426,9 @@ threads to [[map/exarch/shell-eval|shell-eval]].
 [[design/agents|agents]] (the role model these nodes realise — one `parent`
 predicate, the conversing trunk vs returning agents),
 [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] (the Fleet/Agent
-split this page maps), [[map/exarch/tools|tools]] (the registry and gates the
-provider sees), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
+split this page maps), [[map/exarch/tools|tools]] (the one `ral` tool the
+provider sees) and [[map/exarch/builtins|builtins]] (the harness verbs the
+desk answers), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
 registry, and the two frontends), [[map/exarch/provider|provider]],
 [[map/exarch/policy|policy]], [[map/exarch|exarch]],
 [[design/residency|residency]] (the resident ledger this cascade and the

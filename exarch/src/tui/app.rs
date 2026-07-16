@@ -345,7 +345,10 @@ impl App {
             // elapsed-wait clock, so a consecutive Phase event simply
             // resets the bar to the new phase.
             Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
-            Kind::ToolCall { tool, cmd, summary } => {
+            // A genuine provider-boundary `ral` call and a desk verb's
+            // rail-identical [`Kind::HarnessCall`] render alike: the rail
+            // shows the acting name (`tool`/`verb`) either way.
+            Kind::ToolCall { tool, cmd, summary } | Kind::HarnessCall { verb: tool, cmd, summary } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| match summary {
@@ -357,7 +360,7 @@ impl App {
                     // boundary (`None`): present only so its result attaches there,
                     // never reaching back to clobber an earlier call's size bar.
                     None => {
-                        vp.push_plain_call(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd));
+                        vp.push_plain_call(tool, (cmd != crate::tools::ral::INVALID_INPUT).then_some(cmd));
                     }
                 });
             }
@@ -367,7 +370,9 @@ impl App {
             // its line count is the call's magnitude, attached to the
             // most-recent tool-call block as the collapsed header's
             // size-bar.
-            Kind::ToolResult(text) => self.with_viewport(id, |vp| vp.set_result_size(&text)),
+            Kind::ToolResult(text) | Kind::HarnessResult(text) => {
+                self.with_viewport(id, |vp| vp.set_result_size(&text));
+            }
             Kind::UserPromptEcho(text) => {
                 self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text));
             }

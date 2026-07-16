@@ -113,6 +113,19 @@ side, as a tool, rather than expressed in the language.
   path is a ral `Handle` / durable job with `poll` / `await` / `cancel`; async
   `agent` is a session-owned LLM worker whose result is pushed to the inbox.
 
+  > **Landed 2026-07-16 — superseded in letter, not in substance.** The
+  > launch verbs (`amnemon`, `mnemon`, and the rest of the harness family)
+  > are now `ral` builtins the model reaches by writing ral inside the one
+  > remaining tool ([[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]),
+  > so "No ral surface" no longer holds literally. The distinction this
+  > bullet protects survives the move: a builtin is exarch-side, installed
+  > above ral-core, and answered by a host desk (`shell.enquire`) — it is
+  > still not the ral-core `Handle`/`poll`/`await`/`cancel` verb this ADR
+  > and [[decisions/260617_long-running-work|long-running-work]] rejected,
+  > and the worker body is still an LLM turn that cannot live in the
+  > language. See [[map/exarch/builtins|builtins]] for the landed verb and
+  > [[map/exarch/tools|tools]] for what remains a tool.
+
 ## Why this shape
 
 - **It preserves the distinction the model needs to express.** Sync is a

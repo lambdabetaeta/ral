@@ -1,18 +1,21 @@
-//! `ral` tool — evaluate ral source against the session's live shell.
+//! `ral` — the one tool the provider is offered: evaluate ral source
+//! against the session's live shell.
 //!
 //! Runs synchronously on the dispatching thread.  Owns its own JSON
-//! parsing: a missing `cmd` or a non-object input each becomes an
-//! inline error block on the rail with no detour through the session.
+//! parsing: a missing `cmd` or a non-object input each becomes an inline
+//! error block on the rail with no detour through the session.
 
-use super::{INVALID_INPUT, Tool, invalid_input};
 use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
-use crate::provider::Provider;
 use serde_json::{Value, json};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-pub(super) struct RalTool;
+/// Stable identifier the model and the wire schema use to name this tool.
+pub(crate) const NAME: &str = "ral";
+
+/// One-paragraph description handed to the provider.
+const DESC: &str = "Run a ral shell command in the sandboxed working directory.";
 
 /// Parsed ral-tool input, split from `dispatch` so the parser stays
 /// trivially testable in isolation.
@@ -71,9 +74,9 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     if description.contains('\n') {
         return Err("`description` must be a single line (no newlines)".to_string());
     }
-    // `timeout_secs` is optional. Inspect the raw value rather than using
-    // `u64_field`: `as_u64` alone cannot tell absent (→ default) from a
-    // present-but-invalid value (→ reject). Absent or `null` takes the
+    // `timeout_secs` is optional. Inspect the raw value directly rather than
+    // a bare `as_u64` lookup: `as_u64` alone cannot tell absent (→ default)
+    // from a present-but-invalid value (→ reject). Absent or `null` takes the
     // default; anything else must parse as a `u64` (so floats like `5.0`,
     // strings, and negatives all reject) and be ≥1. No upper clamp.
     let timeout_secs = match obj.get("timeout_secs") {
@@ -95,61 +98,91 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     })
 }
 
-impl Tool for RalTool {
-    fn name(&self) -> &'static str {
-        "ral"
-    }
-
-    fn desc(&self) -> &'static str {
-        "Run a ral shell command in the sandboxed working directory."
-    }
-
-    fn schema(&self) -> &'static Value {
-        static S: OnceLock<Value> = OnceLock::new();
-        S.get_or_init(|| {
-            json!({
-                "type": "object",
-                "properties": {
-                    "cmd": { "type": "string", "description": "The ral source to evaluate." },
-                    "description": {
-                        "type": "string",
-                        "maxLength": DESCRIPTION_MAX,
-                        "description": "One line (≤60 chars) stating the script's \
-            intent — what it is for, not what it types. Present continuous, e.g. \
-            \"Counting TODOs across src/.\". Shown on the rail; no newlines. Do not echo the source, or the mechanics of ral.",
-                    },
-                    "timeout_secs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Wall-clock limit in seconds; default 60. \
-            Raise it for a command known to run long, rather than defer-then-wait. \
-            Keep defer for work you can overlap.",
-                    },
+/// JSON schema for `ral`'s input object.  Built once and cached inside the
+/// impl; cheap to call.
+fn schema() -> &'static Value {
+    static S: OnceLock<Value> = OnceLock::new();
+    S.get_or_init(|| {
+        json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string", "description": "The ral source to evaluate." },
+                "description": {
+                    "type": "string",
+                    "maxLength": DESCRIPTION_MAX,
+                    "description": "One line (≤60 chars) stating the script's \
+        intent — what it is for, not what it types. Present continuous, e.g. \
+        \"Counting TODOs across src/.\". Shown on the rail; no newlines. Do not echo the source, or the mechanics of ral.",
                 },
-                "required": ["cmd", "description"],
-            })
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Wall-clock limit in seconds; default 60. \
+        Raise it for a command known to run long, rather than defer-then-wait. \
+        Keep defer for work you can overlap.",
+                },
+            },
+            "required": ["cmd", "description"],
         })
-    }
+    })
+}
 
-    fn dispatch(
-        &self,
-        id: String,
-        input: Value,
-        session: &mut Agent,
-        _provider: &Arc<Provider>,
-        emit: &Emitter,
-    ) -> SessionToolResult {
-        let args = match parse_args(&input) {
-            Ok(a) => a,
-            Err(reason) => return invalid_input(id, "ral", INVALID_INPUT, &reason, emit),
-        };
-        emit.emit(Kind::ToolCall {
-            tool: "ral",
-            cmd: args.cmd.clone(),
-            summary: Some(args.description.clone()),
-        });
-        session.run_shell(id, &args.cmd, args.timeout_secs, emit)
-    }
+/// The wire-facing definition `provider.complete` advertises when this
+/// agent's tool is enabled — a plain data value, not a `dyn` trait object:
+/// there is exactly one tool, so no vtable or registry earns its keep.
+pub(crate) fn wire_tool() -> genai::chat::Tool {
+    genai::chat::Tool::new(NAME)
+        .with_description(DESC)
+        .with_schema(schema().clone())
+}
+
+/// The placeholder a malformed call passes for `display` when the JSON did
+/// not even parse into args — a sentinel the frontend reads to route such a
+/// call to an invisible boundary rather than render a stand-in token: there
+/// is nothing meaningful to show, only the error the model receives through
+/// the result body.  A call that *did* recover a real offending value (a bad
+/// cron string, say) passes that value instead, and it renders.
+pub(crate) const INVALID_INPUT: &str = "<invalid input>";
+
+/// Render the rail header and an error block for a malformed `ral` call,
+/// returning the [`SessionToolResult`] the dispatcher commits. `display` is
+/// the partial label the rail should show — typically the field that did
+/// parse, or [`INVALID_INPUT`] when nothing did.
+pub(crate) fn invalid_input(
+    id: String,
+    display: &str,
+    reason: &str,
+    emit: &Emitter,
+) -> SessionToolResult {
+    emit.emit(Kind::ToolCall {
+        tool: NAME,
+        cmd: display.to_string(),
+        summary: None,
+    });
+    let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
+    emit.emit(Kind::ToolResult(msg.clone()));
+    SessionToolResult { id, content: msg }
+}
+
+/// Read `input`, render the rail header, run the call, and return its
+/// result.  Malformed input is reported by [`invalid_input`], so this
+/// always produces a result.
+pub(crate) fn dispatch(
+    id: String,
+    input: &Value,
+    session: &mut Agent,
+    emit: &Emitter,
+) -> SessionToolResult {
+    let args = match parse_args(input) {
+        Ok(a) => a,
+        Err(reason) => return invalid_input(id, INVALID_INPUT, &reason, emit),
+    };
+    emit.emit(Kind::ToolCall {
+        tool: NAME,
+        cmd: args.cmd.clone(),
+        summary: Some(args.description.clone()),
+    });
+    session.run_shell(id, &args.cmd, args.timeout_secs, emit)
 }
 
 #[cfg(test)]

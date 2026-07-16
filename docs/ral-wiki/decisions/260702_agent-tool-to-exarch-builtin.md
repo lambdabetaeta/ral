@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # The async `agent` family could be an exarch host builtin, not a provider tool
@@ -21,6 +21,15 @@ that the move is possible and states what it would take.
 > the amendment at the end of this ADR. The move itself remains deferred: the
 > rail lands first (enquiry-channel Phase A), the migration follows on its
 > own bench-gated schedule.
+
+> **Landed 2026-07-16.** The migration plan below is fully implemented: all
+> eleven harness verbs — the spawn family, the schedule family, the
+> commitment pair, and `reply` — are `ral` builtins answered by the
+> `ExarchDesk`, `exarch/src/tools.rs` shrinks to `ral` alone
+> ([[map/exarch/tools|tools]]), and the `Tool`/`Gate` machinery this ADR and
+> its amendment argued around is retired. One departure from the plan as
+> amended: `reply` migrated too, superseding the "two-tool provider surface"
+> end state below — see the landed note under "Scope widens".
 
 The affordance under discussion is the one fixed by
 [[decisions/260617_async-agent-tool|async-agent-tool]]: launch-only, always
@@ -324,6 +333,22 @@ The litmus for anything future, inherited from enquiry-channel: *surface*
 says "the host may look at this"; an *enquiry* says "this script cannot take
 its next step without the host's answer"; "I want it eventually" is the
 inbox. Only promote a tool whose caller genuinely consumes the answer.
+
+> **Landed 2026-07-16 — the carve-out is superseded; `reply` migrated too.**
+> The implementation targets `ral` alone, not the `ral` + `reply` surface
+> above. Termination was never implemented inside tool dispatch — a reply
+> stages a value on the agent, and the drive loop lifts it into the
+> `Replied` terminal once the enclosing `ral` call's batch drains — so
+> relocating the verb relocates nothing about ending a run. The litmus that
+> justified the carve-out was itself too narrow: "the caller genuinely
+> consumes the answer" named a special case, not the law. The corrected
+> wording, folded into [[decisions/260706_enquiry-channel|enquiry-channel]]
+> §3: promote a verb only when the caller can observe and act on the host's
+> answer — value or refusal — within the turn. `reply` satisfies it through
+> the refusal arm: a non-returning agent must observe the refusal to
+> proceed correctly, and a non-first-order payload must fail the call, not
+> the episode. See [[map/exarch/builtins|builtins]] for the landed builtin
+> and [[map/exarch/tools|tools]] for the one-tool surface.
 
 ### The class vocabulary
 

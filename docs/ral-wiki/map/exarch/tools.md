@@ -1,117 +1,42 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: 489d125
+generated_at_date: 2026-07-16
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
 
 # Map: exarch / tools
 
-`tools.rs` is the tool registry. **A `Tool` advertises itself to the
-[[map/exarch/provider|provider]] (name, description, JSON schema) and dispatches
-one parsed JSON input against a live [[map/exarch/agent|`Agent`]], returning
-a `SessionToolResult` synchronously** — every tool returns now, so there is no
-join phase. Each tool owns its own input parsing and invalid-input UX; nothing
-in `provider.rs` or `agent.rs` knows a tool's shape. Adding a tool is a
-sibling module under `tools/` listed in `registry()`.
+**`ral` is exarch's one tool.** Every other harness affordance the model once
+reached as a provider-advertised `Tool` — spawning, messaging, cancelling,
+scheduling, the commitment pair, and `reply` — is now a ral builtin reached by
+writing ral inside `ral` itself, per the
+[[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
+migration; see [[map/exarch/builtins|builtins]] for the verbs and
+[[decisions/260706_enquiry-channel|enquiry-channel]] for the desk they speak
+through. `tools.rs` shrinks to:
 
-**Tool membership is the gate.** `tools_for(returns, schedules, can_spawn)`
-filters the static registry by a small `Gate`: `Always`, `Returns`,
-`Schedules`, or `Spawns`. Spawning is universal — every agent may spawn,
-so the tree is not capped at one level
-([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
-depth-1 `spawns()` axis) — but each `fork` hands its child one less unit of
-`fuel` than the parent holds (the parent's own `fuel` is untouched, so
-fan-out itself is unbounded), and `Gate::Spawns` withholds `amnemon`/`mnemon`
-once an agent's `fuel` reaches zero, so a delegation chain bottoms out rather
-than recursing forever ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
-`reply` is present only for returning agents
-([[decisions/260623_reply-terminates-returning-agents]]); self-wakeup tools are
-present only under schedule authority.
-
-The tools that ship:
-
-- `ral` (`tools/ral.rs`) — evaluate ral source against the session shell,
-  synchronously, through [[map/exarch/shell-eval|`run_shell`]]. Its input is a
-  required `cmd` (the ral source) and a required one-line `description` (shown on
-  the [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
+- **`ral`** (`tools/ral.rs`) — the one call that crosses the provider
+  boundary: evaluate ral source against the session shell, synchronously,
+  through [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `cmd`
+  (the ral source) and a required one-line `description` (shown on the
+  [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
   tool-call block; oversize descriptions are truncated, never rejected). An
   optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
   (60s) — a default, not a cap: raise it for known-long work, or `spawn` what
   should outlive the turn.
-- `commit` / `verify_commitment` (`tools/commitment.rs`) — the write and check
-  halves of a protected `commitment:*` pin
-  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
-  Both are launch-only and always asynchronous, like `amnemon`/`mnemon`,
-  through the shared `spawn_async` (`tools/agent.rs`): each forks a
-  read-only-narrowed `amnemon` child and returns a start receipt immediately
-  rather than blocking the turn, and shares the same `Gate::Spawns` fuel
-  ceiling since each forks a child the same way. The worker thread that drives
-  the child tags its settled result once it holds the raw reply; the parent
-  applies that tag to the pin register on its *own* thread, at drain
-  (`Agent::settle_commitment`) — first the state, then, only on success,
-  projecting the same change to the viewport.
-  - `commit` — the model supplies `{key, description}`: it chooses the key and
-    describes intent in its own words, but not the criteria. The host builds a
-    writer prompt from the description and opens the pin only when the
-    settled reply is a structured `commitment_card` whose `commitment_key`
-    matches and which carries at least one criterion; refused up front,
-    without ever forking, if that key is already a live commitment.
-  - `verify_commitment` — the model supplies only `key`. The host reads the
-    saved pin card, builds the verifier prompt itself, and clears the pin only
-    when the settled reply is a structured `commitment_verdict` whose
-    `commitment_key` matches and whose verdict is `pass`.
-  A fail, mismatch, missing criteria, or child failure leaves the pin
-  untagged — live for `commit`'s target key, unchanged for
-  `verify_commitment`'s — so the ordinary nudge path keeps the actor restless.
-- the **spawn family** — `amnemon` / `mnemon` / `agents` / `message` /
-  `agent_cancel`
-  (`tools/agent.rs`). Spawning is universal, but `amnemon`/`mnemon` are
-  gated by `Gate::Spawns` on the agent's own `fuel` (nonzero for every fresh
-  fork down to a fixed depth,
-  [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]); `agents` /
-  `message` / `agent_cancel` stay `Gate::Always` since they manage already-live
-  agents rather than mint new ones. `amnemon` and `mnemon` are launch-only
-  and always asynchronous
-  ([[decisions/260617_async-agent-tool|async-agent-tool]]): each forks a child
-  [[map/exarch/agent|agent]] from a value-snapshot of the parent shell, runs it on
-  a detached thread through the same `Agent::drive` loop, and returns a start
-  receipt at once; the child's single reply is delivered later as a marked
-  `Turn` through the parent's [[map/exarch/frontend|inbox]]. They differ only in
-  model memory: `amnemon` is tabula rasa, while `mnemon` imports the parent's
-  model-visible context and appends the tool call's prompt as the child's fresh
-  final prompt. Both take a **mandatory `permissions`** parameter — one of the
-  six [[map/exarch/policy|base]] names (`confined`, `minimal`, `read-only`,
-  `edit-only`, `reasonable`, `dangerous`) — so every spawn states the child's ceiling
-  explicitly. The child is born with `parent ⊓ resolve_base(permissions)`
-  (`policy::narrow`): a lattice *meet*, so the base can only **narrow** the child
-  below the parent, never escalate it past the parent's authority — naming a base
-  looser than the parent simply changes nothing, and `dangerous` is the lattice
-  top, meaning *inherit the parent's authority verbatim*. `agents` lists live
-  workers (id, title, elapsed, log dir); `message` posts a marked note to a live
-  agent id through its inbox; `agent_cancel` stops one by id and cascades to its
-  subtree. A child may itself spawn, each fork handing its own child one less
-  unit of `fuel` than it holds — fan-out costs nothing, only depth does. The
-  whole sub-agent model — the `parent` predicate,
-  spawning, marked peer messages, returning, narrowing, and memory mode — is
-  [[design/agents|agents]].
-- `reply` (`tools/reply.rs`), gated by `Gate::Returns` — a returning agent's
-  deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
-  extended to the headless trunk by
-  [[decisions/260623_reply-terminates-returning-agents]]). Its `result` argument
-  is stashed on the agent as the *faithful* value the model passed and lifted
-  into a `Replied` terminal once the tool-call batch drains — it hard-terminates
-  the agent regardless of focus and cancels any live descendants before the node
-  settles. Each consumer renders it at its own edge by the shared value→text rule
-  ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a string passes through
-  raw, an object/array is pretty-printed), except the headless harness, which
-  writes the structure faithfully to its json `result`.
-  `reply` is the *sole* return path — there is no prose scrape — so a returning
-  agent that never calls it returns nothing and fails (re-nudged within the
-  [[map/exarch/agent|nudge]] budget first). Withheld only from conversing
-  nodes — the interactive trunk and each `/branch` tab.
-- the **schedule family** — `schedule` / `schedules` / `unschedule`
-  (`tools/schedule.rs`) — self-armed wakeups (a cron expression or `after <dur>`)
-  posted into the agent's *own* inbox. Gated by schedule authority, so a
-  sub-agent may wake itself when the trunk was launched `--allow-schedule`.
-Editing, content search, and filename search (`fff`) are *not* tools: the model
-runs them as ral host atoms inside `ral` — see [[map/exarch/builtins|builtins]].
+- **`tools/agent.rs`** — no longer a tool module, but the fork-detach-register
+  spine every launch shares: `spawn_async`, `AsyncSpawn`, `SpawnedChild`. Both
+  `/branch`'s `spawn_branch` and the desk's `agent-start`/`commit-open`/
+  `commit-verify` handlers build on it, so `/branch` and every harness spawn
+  verb share one mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
+
+The harness verbs are answered by the `ExarchDesk` (`exarch/src/desk.rs`),
+installed per `ral` call and reached through `shell.enquire(...)` from the
+builtin's body; acting verbs keep `Kind::HarnessCall`/`HarnessResult` rail
+chrome (spawns additionally derive a child tab), listings stay silent since
+their value *is* the returned record. There is no `Gate`/`tools_for` axis any
+more — a fresh model never even sees a verb the desk would certainly refuse:
+`reply` is dropped from the per-agent builtin index when `!returns`, and the
+self-wakeup family when the agent lacks the schedule grant
+(`prompt::resolve_builtin_index`), while authority itself is still enforced
+only at the desk, never by omission.

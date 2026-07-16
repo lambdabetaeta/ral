@@ -9,58 +9,61 @@ and a `parent: Option<AgentId>` link. The thin `Fleet` holds what every node
 shares — the registry, the one event bus, the focused-agent handle, and whether a
 human is attached ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]).
 
-## One predicate, read through the tool view
+## One predicate, fixed at construction
 
 There is no `is_root`, no `spawns`/`returns` axis pair. Whether an agent returns a
-value or converses with a human is read from **its tool view**: `returns()` is
-true iff the agent holds `reply` (the `Gate::Returns` tool). The tool view is the
-single source of truth, so parking, the reply-nudge, and the advertised tools
-cannot disagree
+value or converses with a human is a **construction-fixed `returns` bit** on the
+`Agent` — `true` for a `fork`ed sub-agent, `false` for a `/branch` child,
+`!interactive` at the trunk. One bit is the single source of truth for every
+reader: `returns()`, parking's conversing predicate, the desk's `reply` refusal
+([[map/exarch/builtins|builtins]]), and the per-agent builtin index resolved from
+the same bit at `Agent::assemble` — so reply availability, parking, and the
+advertised vocabulary cannot disagree
 ([[decisions/260705_branch-minimal|branch-minimal]]). Position still does two jobs
 — it fixes the registry edge (`parent`) and the signal path (only the trunk
 publishes the process cancel slots,
-[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it no
-longer decides who returns.
+[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
+not decide who returns.
 
 - **A returning agent holds `reply`.** A peer at any depth, *and* a headless trunk
   (`parent = None`, `interactive = false`) seeded once to produce one result, both
   advertise it and terminate at quiescence. This is
   [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
-  reply gate, now read off the tools rather than off `is_root && interactive`.
+  reply gate, read off the construction-fixed bit rather than off
+  `is_root && interactive`.
 - **A conversing agent had `reply` withheld at construction** and parks for a human
-  instead of returning. The interactive trunk is one such agent — parent-less, its
-  writer ever-present — but no longer the *only* one: a **branch** is interactive,
-  `reply`-withheld, and *parented*
+  instead of returning. Its `reply` call is refused at the desk, and the verb is
+  dropped from its builtin index, both keyed on the same bit. The interactive
+  trunk is one such agent — parent-less, its writer ever-present — but not the
+  *only* one: a **branch** is interactive, `reply`-withheld, and *parented*
   ([[decisions/260705_branch-minimal|branch-minimal]]). "Parent-less trunk" and
-  "converses" are no longer the same set, which is exactly why the derivation moved
-  to the tool view.
+  "converses" are not the same set, which is exactly why the property is a bit
+  fixed at construction rather than a predicate on position.
 
 "Returns a value" and "does not park for a human" remain the *same fact*, read in
 one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
-`ParkMode` (`Held` / `HeldByChildren` / `UntilCancelled` / `Quiesce`) derived on
-every wake: a conversing agent parks `Held` while its registry entry lives, a
-focused agent parks because the human is attached to it, and everyone else
-quiesces.
+`ParkMode` (`Held` / `Focused` / `HeldByChildren` / `UntilCancelled` / `Quiesce`)
+derived on every wake: a conversing agent parks `Held` while its registry entry
+lives, a focused agent parks because the human is attached to it, and everyone
+else quiesces.
 
 ## Uniform spawning: bounded by spawn fuel
 
 Spawning is **universal** — every agent may spawn, so the spawn tree is not
-capped at one level. The old `spawns()` tool-set axis is gone; the spawn
-family is held by every agent whose `fuel` is nonzero, and the tool view
-otherwise differs only in `reply` and optional self-scheduling
-([[map/exarch/tools|tools]]). Depth-N works structurally — a child registers
-in the fleet's registry and `fork` snapshots the parent's shell by value at
-any depth — but each `fork` hands its child one less unit of `fuel` than the
-parent holds (the parent's own `fuel` is untouched, so fan-out itself is
-unbounded), and a `fuel == 0` agent loses the spawn tools from its view: a
-delegation chain terminates by tool absence a fixed number of generations
-down rather than recursing forever
+capped at one level. There is no `spawns()` axis: every agent holds the spawn
+verbs ([[map/exarch/builtins|builtins]]). Depth-N works structurally — a child
+registers in the fleet's registry and `fork` snapshots the parent's shell by
+value at any depth — but each `fork` hands its child one less unit of `fuel`
+than the parent holds (the parent's own `fuel` is untouched, so fan-out itself
+is unbounded), and a `fuel == 0` agent's spawn call is refused at the desk
+with the exhaustion text: a delegation chain terminates by refusal a fixed
+number of generations down rather than recursing forever
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
 depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
 that decision left open).
 
-The spawn tools are **launch-only and always asynchronous**
+The spawn verbs are **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). One call:
 
 - **`fork`s a child `Agent`** through `Shell::fork_session`
@@ -74,19 +77,20 @@ The spawn tools are **launch-only and always asynchronous**
   bindings. The isolation mirrors a [[design/pipelines|byte-pipeline stage]]'s
   subshell;
 - **runs it on a detached thread** through the same `drive` loop, returning a
-  start receipt `{id, title, status, log_dir}` at once. The child runs off the
+  start receipt `[id: Int, title: Str, log-dir: Str]` at once — a ral record the
+  script can bind and fan out over. The child runs off the
   parent's critical path — the one shape in-turn concurrency cannot express, the
   parent turn ending before the child does;
 - **delivers the child's single reply later** as a marked `Turn` through the
   parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
   rendered to prose at the consuming edge.
 
-Two spawn tools choose the child's **model memory**, not its shell isolation:
+Two spawn verbs choose the child's **model memory**, not its shell isolation:
 
 - **`amnemon`** is tabula rasa. The child starts with no conversation history;
   only the shell value-snapshot and the chosen prompt cross the edge.
 - **`mnemon`** remembers. The child imports the parent's model-visible context
-  and appends the tool call's `prompt` as a fresh final user prompt, while
+  and appends the call's `prompt` as a fresh final user prompt, while
   reusing the parent's current provider selection so provider prompt caches can
   hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
   not inherited; the child forks the request context, not a dangling protocol.
@@ -94,16 +98,19 @@ Two spawn tools choose the child's **model memory**, not its shell isolation:
 ## Returning: the deliberate `reply`
 
 A returning agent hands back the argument of an explicit, hard-terminating
-**`reply`** tool call — never a scrape of whatever prose ended the run
+**`reply`** call ([[map/exarch/builtins|builtins]]) — never a scrape of
+whatever prose ended the run
 ([[decisions/260622_agent-reply-tool|agent-reply-tool]]). `reply` is the *sole*
 return path: a returning agent that finishes without it is re-nudged within
 budget, then **fails honestly** rather than handing up a trailing fragment that
 masquerades as the answer. `reply` hard-terminates the agent **regardless of
 focus** — the conversation ends out from under a human who had `TAB`bed to it,
-and focus falls back to its parent. The payload is the faithful
-`serde_json::Value` the model passed, rendered at each consuming edge by the
-shared value→text rule ([[map/exarch/shell-eval|shell-eval]]) — prose for a model
-parent, the structure itself for the headless harness
+and focus falls back to its parent — though the run ends only once the
+enclosing `ral` call's batch finishes draining, never mid-batch. The payload is
+the faithful first-order ral value the model passed (`FOValue`), rendered at
+each consuming edge ([[map/exarch/shell-eval|shell-eval]]) — ral surface syntax
+for a model parent, ordinary JSON for the headless harness through the
+`user_json` projection
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
 Before the returning node disappears, `reply` cancels and reaps its proper
 descendants: a parent may choose to abandon unfinished children, but it cannot
@@ -123,19 +130,19 @@ readable transcript, not a resumable conversation.
 ## Peer messages: marked notes, not shared memory
 
 Live agents may send one another a **marked message** by `AgentId` through the
-`message` tool. The registry resolves the recipient's inbox and posts an
+`message` builtin. The registry resolves the recipient's inbox and posts an
 `AgentMessage`; the recipient sees it at the next tool boundary as
 `[EXARCH AGENT id MESSAGE: title] body [/EXARCH]`, not as human input. This is
 coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
-`reply`; the durable cancellation path remains `agent_cancel`.
+`reply`; the durable cancellation path remains `agent-cancel`.
 
 ## Cancellation: a key interrupts one turn; a terminator cascades the subtree
 
 `Esc` and `Ctrl-C` are a **per-tab turn interrupt** — they unwind only the focused
 tab's current turn, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
-but only behind the **lifecycle terminators**: the `agent_cancel` tool, the
+but only behind the **lifecycle terminators**: the `agent-cancel` builtin, the
 per-agent ceiling reaper, and `/clear`. They share one registry cascade — the
 registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link), so
 terminating a mid-tree agent reaps everything below it; `/clear` additionally bumps
@@ -150,18 +157,19 @@ terminators' alone.
 ## Self-scheduling is inherited
 
 A peer may arm its own wakeups (a cron expression or `after <dur>`) into its own
-inbox when the trunk was launched `--allow-schedule`: `schedule_authority` is
-**inherited by a fork**, so the grant flows down the spawn tree. Scheduling is
-gated by that authority, not by tool-set membership
+inbox when the trunk was launched `--allow-schedule`: the grant is
+**inherited by a fork**, so it flows down the spawn tree. Scheduling is
+gated by that authority — refused at the desk without it, and the schedule
+family is dropped from an ungranted agent's builtin index
 ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). A live self-schedule
 is one of the three reasons an agent parks (`ParkMode::UntilCancelled`).
 
 ## Permissions: the child's ceiling is `parent ⊓ base`
 
 **Every spawn states the child's ceiling explicitly**, through a *mandatory*
-`permissions` parameter naming one of the five capability bake-ins — the same
+`permissions` argument naming one of the six capability bake-ins — the same
 vocabulary as the `--base` CLI flag (`confined`, `minimal`, `read-only`,
-`reasonable`, `dangerous`; ordered loosest-to-tightest in
+`edit-only`, `reasonable`, `dangerous`; ordered loosest-to-tightest in
 [[map/exarch/policy|policy]]). The child is born with
 
 ```text
@@ -183,7 +191,7 @@ child below the parent but can **never escalate** it past the parent's reach
 The base is frozen against the child's working directory as it resolves, so the
 meet runs on already-resolved [[design/capability-freeze|capabilities]]. The
 ceiling is non-escalating by construction: the spawn site, not the child, owns
-the authority decision, because [[map/exarch/agent|`Agent::fork`]] takes the
+the authority decision, because [[map/exarch/agent|`Agent::fork_with`]] takes the
 child's `Capabilities` as an argument rather than cloning the parent's.
 
 ## See also
@@ -201,4 +209,4 @@ over one shell tool), [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes
 [[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab turn
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing parented child
-that reads `returns()` from the tool view).
+whose `returns` bit is fixed false at construction).

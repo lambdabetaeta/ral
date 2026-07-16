@@ -14,10 +14,10 @@
 //! [`InboxMsg::Nudge`].  No node is privileged by special-case code; the
 //! distinctions reduce to *position*: the parent-less **trunk** publishes its
 //! cancel token for the OS-signal path, holding `reply` falls out of the
-//! `interactive` predicate (via the agent's tool view from `tools_for`), and
-//! parking out of `interactive`/`focus` via `park_mode`.  A child's single
-//! result is delivered up its parent's mailbox by the spawn site, not
-//! here, so `drive` itself is identical for all.
+//! construction-fixed `returns` bit (`!interactive` at the trunk, `true` for
+//! every fork), and parking out of `interactive`/`focus` via `park_mode`.  A
+//! child's single result is delivered up its parent's mailbox by the spawn
+//! site, not here, so `drive` itself is identical for all.
 
 use crate::agent_builtins;
 use crate::bootstrap::Scratch;
@@ -147,7 +147,7 @@ impl LogCell {
 
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, disk_warn_latched); not a candidate for a combined enum"
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, disk_warn_latched); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
@@ -188,10 +188,10 @@ pub struct Agent {
     /// the chain bottoms out.  Bounds depth, not fan-out: [`Self::fork`]
     /// never touches this field on the parent, it only computes the child's
     /// own `fuel` as one less — an agent may start any number of children
-    /// without spending its own fuel.  Zero clears
-    /// [`Gate::Spawns`](crate::tools::Gate::Spawns) from this agent's
-    /// [`tools_for`](crate::tools::tools_for) view, so a chain terminates by
-    /// tool absence rather than recursing forever.  The trunk starts at
+    /// without spending its own fuel.  Zero makes the desk refuse
+    /// `agent-start`/`commit-open`/`commit-verify` with the exhaustion text
+    /// (`crate::desk::ExarchDesk`'s spawn spine), so a chain terminates by
+    /// refusal rather than recursing forever.  The trunk starts at
     /// [`SPAWN_FUEL`].
     fuel: u32,
     /// This agent's own hot-swappable provider.  A `/model` on the focused
@@ -234,13 +234,13 @@ pub struct Agent {
     /// can unwind exactly the in-flight turn without touching the durable
     /// root a later turn would inherit.
     turn_scope: crate::agent_registry::TurnScope,
-    /// This agent's view into the tool registry — the single source of truth
-    /// read by `provider.complete` (advertisement) and [`Self::stage`]
-    /// (dispatch).  Membership is the gate: a tool absent here is neither
-    /// advertised nor invocable.  Every agent spawns; the views differ only by
-    /// `reply` (withheld from the conversing trunk) and the self-wakeup family
-    /// (the `--allow-schedule` grant).  See [`crate::tools::tools_for`].
-    tools: Vec<&'static dyn crate::tools::Tool>,
+    /// Whether this agent's provider requests advertise the `ral` tool at
+    /// all — read by `provider.complete` (advertisement) and [`Self::stage`]
+    /// (dispatch), so the two can never disagree about whether a call was
+    /// invited.  `false` only for a `--chat` trunk, which converses with no
+    /// tool whatsoever; construction-fixed like `returns`/`allow_schedule`
+    /// below.
+    tool_enabled: bool,
     /// Whether this agent holds `reply`, fixed at construction from the same
     /// bit that shaped `tools` above, so the two cannot disagree.
     returns: bool,
@@ -251,10 +251,9 @@ pub struct Agent {
     /// grant it directly on a [`Self::for_test`] trunk, which hardcodes it
     /// `false`.
     pub(crate) allow_schedule: bool,
-    /// A returning agent's staged return value, set by the `reply` *tool*'s
-    /// dispatch directly (via [`Self::set_reply`]) or, for the `reply`
-    /// *builtin*, harvested by [`Self::run_shell`] from that call's own
-    /// [`ReplyCell`] the instant the desk retires. Lifted by [`Self::apply`]
+    /// A returning agent's staged return value, harvested by
+    /// [`Self::run_shell`] from that call's own [`ReplyCell`] the instant its
+    /// installed desk retires. Lifted by [`Self::apply`]
     /// into a [`TurnOutcome::Replied`] once the current tool-call batch
     /// finishes draining — never mid-batch, so the session reaches a clean
     /// boundary with every `call_id` answered.  Held as the faithful
@@ -285,10 +284,9 @@ pub struct Agent {
     /// worker that settles after the clear drops its result.
     pub(crate) agents: crate::agent_registry::AgentRegistry,
     /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
-    /// posts wakeups into its own inbox), so this is no longer root-only; it
-    /// is still gated by the [`Gate::Schedules`](crate::tools::Gate) axis
-    /// (`--allow-schedule`), which decides whether the self-wakeup tools are in
-    /// the agent's view at all.
+    /// posts wakeups into its own inbox), so this is no longer root-only; the
+    /// self-wakeup builtins (`schedule`/`schedules`/`unschedule`) still gate
+    /// on `allow_schedule`, refused at the desk without the grant.
     pub(crate) schedules: crate::schedule::ScheduleRegistry,
     /// Input tokens the model saw on the most recent completion — the live
     /// numerator for the context-pressure compaction trigger
@@ -366,9 +364,10 @@ pub enum TurnOutcome {
 /// reaches it.
 const MAX_STEPS: u32 = 250;
 
-/// The depth budget the trunk starts with; each [`Agent::fork`] hands its
-/// child one less, and a `fuel == 0` agent loses the spawn tools from its view
-/// ([`tools_for`](crate::tools::tools_for)). Bounds how many generations deep
+/// The depth budget the trunk starts with; each [`Agent::fork_with`] hands
+/// its child one less, and a `fuel == 0` agent's `agent-start`/
+/// `commit-open`/`commit-verify` calls are refused at the desk
+/// (`ExarchDesk::launch`, `crate::desk`). Bounds how many generations deep
 /// a delegation chain may recurse — a few hops covers legitimate delegation —
 /// while stopping a runaway spawn-calling chain from exhausting threads
 /// instead of the process. Fan-out is a separate, unbounded axis: how many
@@ -467,6 +466,10 @@ const TRUNK_TITLE: &str = "main";
 /// child's `Build` literal directly from its captured `HostServices` (the
 /// one place lawfully holding the adopted nursery shell), not through
 /// `Agent::fork`/`fork_with`, which stay the ordinary in-thread path.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, tool_enabled); not a candidate for a combined enum"
+)]
 pub(crate) struct Build {
     /// The system prompt *template*: still carrying
     /// [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`] rather than a baked-in
@@ -486,7 +489,9 @@ pub(crate) struct Build {
     pub(crate) interactive: bool,
     pub(crate) returns: bool,
     pub(crate) allow_schedule: bool,
-    pub(crate) tools: Vec<&'static dyn crate::tools::Tool>,
+    /// Whether the constructed agent's provider requests advertise the
+    /// `ral` tool at all — `false` only for a `--chat` trunk.
+    pub(crate) tool_enabled: bool,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
     pub(crate) agents: crate::agent_registry::AgentRegistry,
@@ -510,7 +515,7 @@ impl Agent {
             interactive,
             returns,
             allow_schedule,
-            tools,
+            tool_enabled,
             agents,
             disk_warn_bytes,
         } = b;
@@ -566,7 +571,7 @@ impl Agent {
             nudges: nudge::Registry::new(),
             cancel: cancel::Token::new(),
             turn_scope,
-            tools,
+            tool_enabled,
             returns,
             allow_schedule,
             reply: None,
@@ -665,15 +670,11 @@ impl Agent {
             interactive,
             returns: !interactive,
             allow_schedule,
-            // Chat mode registers no tools at all: a bare conversation, nothing
-            // to call.  Otherwise the interactive trunk converses and never
-            // returns, so it withholds `reply`; a headless trunk is a returning
-            // agent.  Either way the session's self-wakeup grant shapes the view.
-            tools: if chat {
-                Vec::new()
-            } else {
-                crate::tools::tools_for(!interactive, allow_schedule, SPAWN_FUEL > 0)
-            },
+            // Chat mode advertises no tool at all: a bare conversation,
+            // nothing to call.  Otherwise the interactive trunk converses
+            // and never returns, so it withholds `reply`; a headless trunk
+            // is a returning agent.
+            tool_enabled: !chat,
             agents: crate::agent_registry::AgentRegistry::new(),
             disk_warn_bytes,
         })?;
@@ -748,14 +749,22 @@ impl Agent {
         Ok(())
     }
 
+    /// Fork an ordinary returning child at `caps`.  Production spawns
+    /// assemble their own `Build` through the desk's spawn spine
+    /// (`ExarchDesk::launch`) or, for `/branch`, call `Self::fork_with`
+    /// directly with `returns: false`; this wrapper is exercised only by
+    /// tests that want a plain returning fork.
+    #[cfg(test)]
     pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Self> {
         self.fork_with(caps, true)
     }
 
     /// The shared fork core: an independent child of this agent capped at
-    /// `caps`, whose tool view holds `reply` iff `returns`.  [`Self::fork`]
-    /// passes `true` (an ordinary returning sub-agent); [`Self::branch`] passes
-    /// `false` (a conversing child that parks for the human, holding no `reply`).
+    /// `caps`; `returns` decides whether it holds `reply` — both the
+    /// prompt's advertised builtin index and the desk's refusal read this
+    /// same bit, so they cannot disagree.  [`Self::fork`] passes `true` (an
+    /// ordinary returning sub-agent); [`Self::branch`] passes `false` (a
+    /// conversing child that parks for the human, holding no `reply`).
     fn fork_with(
         &self,
         caps: ral_core::types::Capabilities,
@@ -811,10 +820,11 @@ impl Agent {
             returns,
             allow_schedule: self.allow_schedule,
             // Every agent spawns while its fuel lasts; `returns` decides whether
-            // this child holds `reply`.  Self-scheduling authority is inherited:
-            // a `--allow-schedule` trunk grants its descendants the same right
-            // to wake themselves.
-            tools: crate::tools::tools_for(returns, self.grants_schedule(), fuel > 0),
+            // this child holds `reply`.  Self-scheduling authority is inherited
+            // via `allow_schedule` above: a `--allow-schedule` trunk grants its
+            // descendants the same right to wake themselves.  `--chat` is
+            // trunk-only, so every fork keeps the tool.
+            tool_enabled: true,
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
@@ -826,30 +836,15 @@ impl Agent {
 
     /// Fork a conversing child: the creator's context and capabilities
     /// verbatim, but `reply` withheld so it parks for the human (a /branch tab)
-    /// instead of returning a value.  Mnemon-style context import, like
-    /// `fork_remembering`.
+    /// instead of returning a value.  Mnemon-style context import.
     pub(crate) fn branch(&self) -> io::Result<Self> {
         let child = self.fork_with(self.caps.clone(), false)?;
         self.inherit_context(&child)?;
         Ok(child)
     }
 
-    /// A child that inherits this agent's model-visible context.  The launch
-    /// prompt is seeded through the child's inbox by the spawn site, so it
-    /// enters the log through the same turn path as any other user prompt.
-    /// The shell/provider/capability fork is identical to [`Self::fork`];
-    /// only the model log is seeded differently.
-    pub(crate) fn fork_remembering(
-        &self,
-        caps: ral_core::types::Capabilities,
-    ) -> io::Result<Self> {
-        let child = self.fork(caps)?;
-        self.inherit_context(&child)?;
-        Ok(child)
-    }
-
     /// Import the creator's model-visible context into `child`, mnemon-style —
-    /// the shared step behind `fork_remembering` and `branch()`.
+    /// the shared step behind `branch()`.
     fn inherit_context(&self, child: &Self) -> io::Result<()> {
         let messages = self.log.lock().inherited_context_messages();
         child
@@ -954,7 +949,7 @@ impl Agent {
             interactive: false,
             returns: true,
             allow_schedule: false,
-            tools: crate::tools::tools_for(true, false, SPAWN_FUEL > 0),
+            tool_enabled: true,
             agents: crate::agent_registry::AgentRegistry::new(),
             // Unconfigured by default: a test that wants to exercise the
             // disk-warn check sets `session.disk_warn_bytes` directly.
@@ -1590,7 +1585,7 @@ impl Agent {
                 provider.complete(
                     &self.system,
                     messages,
-                    &self.tools,
+                    self.tool_enabled,
                     &mut |t: &str| {
                         #[cfg(debug_assertions)]
                         if first_token.is_none() {
@@ -1740,7 +1735,7 @@ impl Agent {
                     emit,
                 );
             }
-            let Dispatch { results, injected } = self.dispatch(provider, tool_calls, token, emit);
+            let Dispatch { results, injected } = self.dispatch(tool_calls, token, emit);
             self.log
                 .lock()
                 .append_tool_results(results)
@@ -1868,13 +1863,7 @@ impl Agent {
     /// result synchronously now — the spawn tools launch a detached peer and
     /// return a start receipt — so there is no join phase and no
     /// `thread::scope`.
-    fn dispatch(
-        &mut self,
-        provider: &Arc<Provider>,
-        tool_calls: Vec<ToolCall>,
-        token: &cancel::Token,
-        emit: &Emitter,
-    ) -> Dispatch {
+    fn dispatch(&mut self, tool_calls: Vec<ToolCall>, token: &cancel::Token, emit: &Emitter) -> Dispatch {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
@@ -1883,7 +1872,7 @@ impl Agent {
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
                 break;
             }
-            results.push(self.stage(provider, call, emit));
+            results.push(self.stage(call, emit));
         }
         // The tool-boundary drain: every message that arrived during the
         // batch — barged-in user steering, a settled subagent's result, a
@@ -1927,9 +1916,9 @@ impl Agent {
         }
     }
 
-    /// A returning agent holds `reply`; a conversing one had it withheld at
-    /// construction, from the same bit that built the tool view, so the two
-    /// cannot disagree.
+    /// A returning agent holds `reply`; a conversing one had it withheld —
+    /// both the desk's refusal and the prompt's builtin index read this same
+    /// construction-fixed bit, so the two cannot disagree.
     pub(crate) fn returns(&self) -> bool {
         self.returns
     }
@@ -1976,24 +1965,14 @@ impl Agent {
         self.agents.has_children(self.id)
     }
 
-    fn stage(
-        &mut self,
-        provider: &Arc<Provider>,
-        call: ToolCall,
-        emit: &Emitter,
-    ) -> SessionToolResult {
-        // Dispatch searches this agent's own view, so a tool the agent does not
-        // hold is simply not found — there is no separate permission check.  A
-        // withheld tool (`reply` on the conversing trunk, the self-wakeup family
-        // without `--allow-schedule`) is also unadvertised, so a well-behaved
-        // model never names one here.
-        if let Some(t) = self
-            .tools
-            .iter()
-            .find(|t| t.name() == call.fn_name)
-            .copied()
-        {
-            t.dispatch(call.call_id, call.fn_arguments, self, provider, emit)
+    fn stage(&mut self, call: ToolCall, emit: &Emitter) -> SessionToolResult {
+        // `ral` is the only name this agent ever recognises, and only when
+        // its provider requests actually advertised it (withheld only for a
+        // `--chat` trunk) — so a well-behaved model never names anything
+        // else here. Every harness verb (`amnemon`, `reply`, `schedule`, …)
+        // is a builtin *inside* a `ral` call, not a name `stage` matches.
+        if self.tool_enabled && call.fn_name == crate::tools::ral::NAME {
+            crate::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
         } else {
             let msg = format!("unknown tool `{}`", call.fn_name);
             self.note_error(msg.clone(), emit);
@@ -2134,17 +2113,14 @@ impl Agent {
         }
     }
 
-    /// This session's ambient authority — read by the spawn site to compute a
-    /// child's capabilities, either inherited verbatim or narrowed to a base.
+    /// This session's ambient authority.  Production spawns read the private
+    /// `caps` field directly (`Self::fork_with`, `Self::branch`) or narrow
+    /// the desk's own captured snapshot (`policy::narrow`); this accessor is
+    /// exercised only by tests building a fork off a live agent's own
+    /// capabilities.
+    #[cfg(test)]
     pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
         &self.caps
-    }
-
-    /// Whether this agent holds the self-wakeup family — read by
-    /// [`Self::fork_with`] so a child inherits the parent's
-    /// `--allow-schedule` grant.
-    fn grants_schedule(&self) -> bool {
-        self.allow_schedule
     }
 
     /// Best-effort dual-write: log the chrome line, then forward it
@@ -2307,46 +2283,11 @@ impl Agent {
         SessionToolResult { id, content }
     }
 
-    /// Read a protected commitment pin for host-owned verification.  Model
-    /// code cannot write this prefix through `surface`; verifier orchestration
-    /// reads the saved card here and treats it as data.  The desk's
-    /// `` `commit-verify `` arm reads the identical logic off the captured
-    /// `PinDigests` Arc directly ([`shell_eval::commitment_card`]), since a
-    /// handler may never hold `&Agent`.
-    pub(crate) fn commitment_card(&self, key: &str) -> Result<crate::card::Card, String> {
-        shell_eval::commitment_card(&self.pins, key)
-    }
-
-    /// Host projection for a writer's formalized commitment: set the
-    /// protected pin in the session mirror.  Pure state — projecting it to
-    /// the viewport is the caller's separate step
-    /// ([`Self::settle_commitment`]).  Refused if the key is already live: a
-    /// commitment, once open, can only be closed by a verifier, never
-    /// silently replaced.  The desk's `` `commit-open `` arm reads the
-    /// identical logic off the captured `PinDigests` Arc directly
-    /// ([`shell_eval::set_commitment_pin`]), since a handler may never hold
-    /// `&Agent`.
-    fn set_commitment_pin(&self, key: &str, card: crate::card::Card) -> Result<(), String> {
-        shell_eval::set_commitment_pin(&self.pins, key, card)
-    }
-
-    /// Host projection for a verifier pass: clear the protected pin in the
-    /// session mirror.  Pure state — projecting the clear to the viewport is
-    /// the caller's separate step ([`Self::settle_commitment`]).  The model
-    /// cannot reach this path; ordinary `surface` unpins for the same prefix
-    /// are rejected in `shell_eval`.  The desk's `` `commit-verify `` arm
-    /// reads the identical logic off the captured `PinDigests` Arc directly
-    /// ([`shell_eval::unset_commitment_pin`]), since a handler may never
-    /// hold `&Agent`.
-    fn unset_commitment_pin(&self, key: &str) -> Result<bool, String> {
-        shell_eval::unset_commitment_pin(&self.pins, key)
-    }
-
     /// The single point a turn arrives, whether at the turn boundary
     /// ([`Self::drive`]) or mid-batch at a tool boundary
     /// ([`Self::dispatch`]'s injected drain inside [`Self::apply`]): settle
     /// any commitment tag it carries before rendering its chrome. Folding
-    /// both steps into one call means a `commit`/`verify_commitment` child
+    /// both steps into one call means a `commit`/`verify-commitment` child
     /// that settles mid-batch is pinned exactly like one that settles between
     /// turns — there is no second call site to forget the tag at.
     fn land(&self, turn: &Turn, emit: &Emitter) {
@@ -2354,7 +2295,7 @@ impl Agent {
         announce(turn, emit);
     }
 
-    /// A settled `commit`/`verify_commitment` child tags its result with
+    /// A settled `commit`/`verify-commitment` child tags its result with
     /// what the parent should do to the pin register
     /// ([`spawn_async`](crate::tools::agent::spawn_async)), decided on the
     /// worker thread that drove it since only that thread ever holds the raw
@@ -2369,7 +2310,7 @@ impl Agent {
         }
     }
 
-    /// Pinning, in isolation: apply a settled `commit`/`verify_commitment`
+    /// Pinning, in isolation: apply a settled `commit`/`verify-commitment`
     /// child's tag to the pin register — `set`/`unset` — and report which
     /// [`Kind`] (if any) that change is to the caller. Pure state plus a
     /// description of it; it never touches an [`Emitter`], so it needs no bus
@@ -2381,14 +2322,14 @@ impl Agent {
     ) -> Option<Kind> {
         match settle {
             Some(CommitmentSettle::Open { key, card }) => {
-                self.set_commitment_pin(key, card.clone()).ok()?;
+                shell_eval::set_commitment_pin(&self.pins, key, card.clone()).ok()?;
                 Some(Kind::Pin {
                     key: key.clone(),
                     card: card.clone(),
                 })
             }
             Some(CommitmentSettle::Clear(key)) => {
-                self.unset_commitment_pin(key)
+                shell_eval::unset_commitment_pin(&self.pins, key)
                     .ok()
                     .filter(|&cleared| cleared)?;
                 Some(Kind::Unpin { key: key.clone() })
@@ -2432,19 +2373,6 @@ impl Agent {
                 .collect::<Vec<_>>()
                 .join("; "),
         )
-    }
-
-    /// Stash a returning agent's deliberate return value — the coexisting
-    /// `reply` *tool*'s dispatch calls this directly with its JSON `result`
-    /// argument converted through [`shell_eval::json_fo`], holding `&mut
-    /// Agent` the way an ordinary tool dispatch always does. The `reply`
-    /// *builtin* instead stages through that call's own [`ReplyCell`]
-    /// ([`crate::desk::HostServices::reply`]), which [`Self::run_shell`]
-    /// harvests into this same field once the desk retires. [`Self::apply`]
-    /// lifts whichever landed here into a [`TurnOutcome::Replied`] once the
-    /// tool-call batch drains.
-    pub(crate) fn set_reply(&mut self, payload: FOValue) {
-        self.reply = Some(payload);
     }
 
     /// Reached when the batch carried a `reply`: wind the session back to
@@ -2832,8 +2760,9 @@ mod tests {
     }
 
     /// Each generation down a fork chain gets one less fuel than the one
-    /// before it, and a `fuel == 0` agent loses the spawn tools from its view
-    /// — the chain terminates by tool absence rather than recursing forever.
+    /// before it, bottoming out at zero rather than wrapping — the desk's
+    /// own spawn spine refuses `agent-start`/`commit-open`/`commit-verify`
+    /// once an agent's fuel reads zero.
     #[test]
     fn fork_chain_runs_out_of_spawn_fuel() {
         let dir = tmp("spawn-fuel");
@@ -2842,14 +2771,6 @@ mod tests {
         for expected in (0..SPAWN_FUEL).rev() {
             agent = agent.fork(agent.caps().clone()).expect("fork child");
             assert_eq!(agent.fuel, expected);
-            assert_eq!(
-                agent.fuel > 0,
-                agent
-                    .tools
-                    .iter()
-                    .any(|t| matches!(t.gate(), crate::tools::Gate::Spawns)),
-                "the spawn tools track this agent's remaining fuel exactly"
-            );
         }
         assert_eq!(agent.fuel, 0, "the chain must bottom out at zero, not wrap");
     }
@@ -2875,44 +2796,6 @@ mod tests {
             child.provider.current().model(),
             "p-a",
             "a swap on the parent never disturbs an already-forked child"
-        );
-    }
-
-    #[test]
-    fn remembering_fork_imports_context_before_seeded_prompt() {
-        let dir = tmp("remembering-fork");
-        let parent = Agent::for_test(&dir, "system").unwrap();
-        parent
-            .log
-            .lock()
-            .append_user("what did we learn?".into())
-            .unwrap();
-        parent
-            .log
-            .lock()
-            .append_assistant(
-                genai::chat::ChatMessage::assistant("the invariant matters"),
-                vec![],
-                None,
-            )
-            .unwrap();
-
-        let child = parent
-            .fork_remembering(parent.caps().clone())
-            .expect("fork remembering child");
-        child
-            .log
-            .lock()
-            .append_user("use that invariant".into())
-            .unwrap();
-        let ms = child.log.lock().render_messages().unwrap();
-        let view = serde_json::to_string(&ms).unwrap();
-
-        assert!(view.contains("what did we learn?"));
-        assert!(view.contains("the invariant matters"));
-        assert!(
-            view.rfind("use that invariant") > view.rfind("the invariant matters"),
-            "mnemon must put the fresh prompt at the end: {view}"
         );
     }
 
@@ -2981,13 +2864,12 @@ mod tests {
         .expect("root trunk")
     }
 
-    /// `returns()` reads the field fixed at construction, not the tool view —
-    /// but both are built from the same boolean at the same [`Build`] call
-    /// site, so they cannot disagree.  Covers every node kind that fixes the
-    /// field independently: an interactive trunk converses and withholds
-    /// `reply`, a headless trunk is an ordinary returning agent, a `fork`
-    /// returns like any sub-agent, and a `/branch` child withholds `reply`
-    /// despite being a fork.
+    /// `returns()` reads the field fixed at construction — set once per node
+    /// kind at the same [`Build`] call site, never re-derived.  Covers every
+    /// node kind that fixes the field independently: an interactive trunk
+    /// converses and withholds `reply`, a headless trunk is an ordinary
+    /// returning agent, a `fork` returns like any sub-agent, and a `/branch`
+    /// child withholds `reply` despite being a fork.
     #[test]
     fn returns_field_is_fixed_at_construction_across_node_kinds() {
         let dir = tmp("returns-parity");
@@ -3203,16 +3085,6 @@ mod tests {
         );
     }
 
-    /// A `reply` tool call carrying `result`.
-    fn reply_call(id: &str, result: &serde_json::Value) -> ToolCall {
-        ToolCall {
-            call_id: id.into(),
-            fn_name: "reply".into(),
-            fn_arguments: serde_json::json!({ "result": result }),
-            thought_signatures: None,
-        }
-    }
-
     /// Drive a forked peer to quiescence through `provider`, returning the
     /// `(outcome, text)` its parent's spawn site would deliver — it renders the
     /// faithful reply payload to text exactly as the peer edge does.
@@ -3236,9 +3108,9 @@ mod tests {
         child.seed("write a report".into());
         let provider = scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![reply_call(
+            Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                &serde_json::json!("# Report\nline one\nline two"),
+                "reply #'# Report\nline one\nline two'#",
             )])),
         );
         let (outcome, text) = drive_peer(&mut child, provider);
@@ -3333,10 +3205,7 @@ mod tests {
 
         let provider = scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![reply_call(
-                "r1",
-                &serde_json::json!("done"),
-            )])),
+            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")])),
         );
         let (outcome, text) = drive_peer(&mut child, provider);
 
@@ -3375,9 +3244,9 @@ mod tests {
         child.seed("list the files".into());
         let provider = scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![reply_call(
+            Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                &serde_json::json!({ "files": ["a.rs", "b.rs"] }),
+                r#"reply [files: ["a.rs", "b.rs"]]"#,
             )])),
         );
         let (outcome, text) = drive_peer(&mut child, provider);
@@ -3535,7 +3404,7 @@ mod tests {
         let provider = scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![
-                reply_call("r1", &serde_json::json!("stale")),
+                ral_call("r1", "reply 'stale'"),
                 ral_call("c2", "t2-cancel-now"),
             ])),
         );
@@ -3614,13 +3483,13 @@ mod tests {
             other => panic!("expected the batch to complete normally, got {other:?}"),
         }
         assert!(
-            session.commitment_card(key).is_ok(),
+            shell_eval::commitment_card(&session.pins, key).is_ok(),
             "a commitment settle delivered mid-batch must open the pin, exactly \
              like one delivered at the turn boundary"
         );
     }
 
-    /// A settled `verify_commitment` child tagged with a passing verdict
+    /// A settled `verify-commitment` child tagged with a passing verdict
     /// clears the protected pin when its result drains — the host-side half
     /// of the async settle, exercised directly rather than through a real
     /// spawned thread and provider round-trip.
@@ -3652,7 +3521,7 @@ mod tests {
         });
         session.settle_commitment(&turn, &emit);
         assert!(
-            session.commitment_card(key).is_err(),
+            shell_eval::commitment_card(&session.pins, key).is_err(),
             "a tagged clear must remove the pin"
         );
     }
@@ -3687,7 +3556,7 @@ mod tests {
         });
         session.settle_commitment(&turn, &emit);
         assert!(
-            session.commitment_card(key).is_ok(),
+            shell_eval::commitment_card(&session.pins, key).is_ok(),
             "a tagged open must set the pin"
         );
     }
@@ -3722,7 +3591,7 @@ mod tests {
         });
         session.settle_commitment(&turn, &emit);
         assert!(
-            session.commitment_card(key).is_ok(),
+            shell_eval::commitment_card(&session.pins, key).is_ok(),
             "an untagged settle must leave any live commitment pin alone"
         );
     }
@@ -3752,7 +3621,7 @@ mod tests {
             None => panic!("expected a Pin event for a fresh open, got none"),
         }
         assert!(
-            session.commitment_card(&key).is_ok(),
+            shell_eval::commitment_card(&session.pins, &key).is_ok(),
             "the register must hold the opened pin"
         );
 
@@ -3773,7 +3642,7 @@ mod tests {
             None => panic!("expected an Unpin event for a live clear, got none"),
         }
         assert!(
-            session.commitment_card(&key).is_err(),
+            shell_eval::commitment_card(&session.pins, &key).is_err(),
             "the register must have dropped the cleared pin"
         );
     }
@@ -3839,14 +3708,8 @@ mod tests {
         session.provider = ProviderHandle::new(scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![reply_call(
-                    "r1",
-                    &serde_json::json!("done"),
-                )]))
-                .then(Reply::tool_calls(vec![reply_call(
-                    "r2",
-                    &serde_json::json!("done"),
-                )])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'done'")])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
@@ -3909,14 +3772,8 @@ mod tests {
         session.provider = ProviderHandle::new(scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![reply_call(
-                    "r1",
-                    &serde_json::json!("done"),
-                )]))
-                .then(Reply::tool_calls(vec![reply_call(
-                    "r2",
-                    &serde_json::json!("done"),
-                )])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'done'")])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);

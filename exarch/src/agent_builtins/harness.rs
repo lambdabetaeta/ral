@@ -136,11 +136,11 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
 /// Validate a `commit`/`verify-commitment` `key` argument against the
 /// protected pin grammar — `` `commitment:` `` followed by one or more
 /// ASCII letters, digits, `.`, `_`, or `-` — re-running
-/// [`crate::tools::commitment::valid_commitment_key`] here so a malformed
-/// key never reaches the host. `tool` names the caller for the door error.
+/// [`crate::desk::valid_commitment_key`] here so a malformed key never
+/// reaches the host. `tool` names the caller for the door error.
 fn commitment_key(v: &Value, tool: &str) -> Settled<String> {
     let key = v.to_string();
-    if !crate::tools::commitment::valid_commitment_key(&key) {
+    if !crate::desk::valid_commitment_key(&key) {
         return Err(sig(format!(
             "{tool}: `key` must look like `{}<id>` using ASCII letters, digits, `.`, `_`, or \
              `-`, got {key:?}",
@@ -166,10 +166,9 @@ fn spawn_receipt(answer: FOValue, tool: &str) -> Settled<Value> {
 
 /// The `amnemon`/`mnemon` shared body: validate the door, fork this shell
 /// into the turn's nursery, and enquire `` `agent-start `` with the
-/// adopted session's id — the builtin-body half of a spawn, mirroring
-/// `tools::agent::dispatch_spawn`'s parse-then-dispatch split. `kind` is
-/// the bare enquiry tag (`amnemon`/`mnemon`) the desk selects the log-fork
-/// behaviour from.
+/// adopted session's id — the builtin-body half of a spawn, the desk's own
+/// launch spine the other half. `kind` is the bare enquiry tag
+/// (`amnemon`/`mnemon`) the desk selects the log-fork behaviour from.
 fn spawn_body(args: &[Value], shell: &Shell, tool: &str, kind: &'static str) -> Settled<Value> {
     check_arity(args, 3, tool)?;
     let prompt = args[0].to_string();
@@ -770,7 +769,7 @@ mod tests {
     /// (`agent-start`'s `ProviderHandle::new(services.provider.current())`),
     /// so a script consumed by both a driven parent turn and its spawned
     /// child races unpredictably over which one gets which stage — the same
-    /// reason `tools::commitment`'s own scripted-child tests never drive the
+    /// reason the commitment pair's own scripted-child tests never drive the
     /// parent's `apply` either.
     #[test]
     fn amnemon_full_stack_round_trip_delivers_receipt_and_settles_into_inbox() {
@@ -779,14 +778,8 @@ mod tests {
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
-            crate::provider::scripted::Script::new().then(crate::provider::scripted::Reply::tool_calls(vec![
-                genai::chat::ToolCall {
-                    call_id: "reply-1".into(),
-                    fn_name: "reply".into(),
-                    fn_arguments: serde_json::json!({ "result": "say hi" }),
-                    thought_signatures: None,
-                },
-            ])),
+            crate::provider::scripted::Script::new()
+                .then(crate::provider::scripted::Reply::tool_calls(vec![ral_call("reply-1", "reply 'say hi'")])),
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
@@ -836,9 +829,7 @@ mod tests {
     // spec record rather than three positional arguments.
 
     /// A malformed cron expression errors engine-side, carrying the
-    /// parser's own message, before any enquiry crosses — port of
-    /// `ScheduleTool::dispatch`'s trigger-rule matrix (`tools/schedule.rs`
-    /// ~111–141) as a builtin door test.
+    /// parser's own message, before any enquiry crosses.
     #[test]
     fn bad_cron_expr_errors_before_any_enquiry_crosses() {
         let dir = tmp("bad-cron-expr");
@@ -1114,8 +1105,7 @@ mod tests {
     /// thing, tests must pass' `` — real source, parsed and type-checked,
     /// crossing the desk through a real nursery fork — and the receipt
     /// record is the turn's value, while the writer's own well-formed
-    /// criteria card settles tagged for the parent to open, mirroring
-    /// `tools::commitment::writer_settles_the_new_commitment_open_for_the_parent`.
+    /// criteria card settles tagged for the parent to open.
     /// Drives `run_shell` directly rather than `Agent::apply`'s provider
     /// loop, for the same reason `amnemon_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
     /// does: a script consumed by both a driven parent turn and its spawned
@@ -1125,24 +1115,14 @@ mod tests {
         let dir = tmp("commit-full-stack-round-trip");
         let key = "commitment:abc";
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
-        let card_json = serde_json::json!({
-            "kind": "commitment_card",
-            "commitment_key": key,
-            "summary": "ship the thing",
-            "criteria": [{ "id": "tests", "text": "tests pass" }],
-        })
-        .to_string();
+        let reply_cmd = format!(
+            "reply [kind: \"commitment_card\", commitment_key: \"{key}\", summary: \"ship the thing\", criteria: [[id: \"tests\", text: \"tests pass\"]]]"
+        );
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
-            crate::provider::scripted::Script::new().then(crate::provider::scripted::Reply::tool_calls(vec![
-                genai::chat::ToolCall {
-                    call_id: "reply-1".into(),
-                    fn_name: "reply".into(),
-                    fn_arguments: serde_json::json!({ "result": card_json }),
-                    thought_signatures: None,
-                },
-            ])),
+            crate::provider::scripted::Script::new()
+                .then(crate::provider::scripted::Reply::tool_calls(vec![ral_call("reply-1", &reply_cmd)])),
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
@@ -1167,7 +1147,7 @@ mod tests {
                     assert!(
                         matches!(
                             &r.commitment_settle,
-                            Some(crate::tools::commitment::CommitmentSettle::Open { key: k, .. }) if k == key
+                            Some(crate::tools::CommitmentSettle::Open { key: k, .. }) if k == key
                         ),
                         "a passing writer card must tag the settle for the parent to open, got: {:?}",
                         r.commitment_settle

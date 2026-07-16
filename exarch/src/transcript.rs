@@ -117,11 +117,18 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             }),
         ),
         Kind::Step { n, tuning } => ("step", json!({ "n": n, "tuning": tuning })),
-        Kind::ToolCall { tool, cmd, summary } => (
+        // A desk verb's `HarnessCall`/`HarnessResult` records identically to
+        // a `ral` `ToolCall`/`ToolResult` — the operational trace keeps
+        // showing every acting call the same way; only the live `Kind`
+        // vocabulary distinguishes a genuine provider-boundary tool call
+        // from a harness verb that never crossed it.
+        Kind::ToolCall { tool, cmd, summary } | Kind::HarnessCall { verb: tool, cmd, summary } => (
             "tool_call",
             json!({ "tool": tool, "cmd": cmd, "summary": summary }),
         ),
-        Kind::ToolResult(text) => ("tool_result", json!({ "text": text })),
+        Kind::ToolResult(text) | Kind::HarnessResult(text) => {
+            ("tool_result", json!({ "text": text }))
+        }
         Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
         Kind::Error(msg) => ("error", json!({ "msg": msg })),
         Kind::SystemNote(text) => ("system_note", json!({ "text": text })),
