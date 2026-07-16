@@ -8,7 +8,7 @@
 //! sub-agent boundary — the sibling of the model-view `events.json` the
 //! [`AgentLog`](crate::agent::event::AgentLog) keeps.
 //!
-//! Pure rendering events — a composed [`Card`](crate::card::Card), the card a
+//! Pure rendering events — a composed [`Card`](crate::bus::card::Card), the card a
 //! [`Kind::Io`] draws, a [`Kind::Phase`] progress label — are deliberately
 //! *not* recorded here; they are a presentation the TUI captures in its
 //! `user.log`, not an effect. The exhaustive match in [`event_record`] means a
@@ -162,7 +162,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // the rendering, which lives only in the TUI's `user.log`.
         Kind::Io { event, .. } => ("io", json!({ "event": event })),
         Kind::Done { outcome, .. } => {
-            use crate::card::DoneOutcome;
+            use crate::bus::card::DoneOutcome;
             match outcome {
                 DoneOutcome::Ok => ("done", json!({ "outcome": "ok" })),
                 DoneOutcome::Err { message, status } => (
@@ -175,7 +175,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             }
         }
         Kind::Notice { notice, .. } => {
-            use crate::card::Notice;
+            use crate::bus::card::Notice;
             match notice {
                 Notice::Reap { cmd, cause } => {
                     let cause = match cause {

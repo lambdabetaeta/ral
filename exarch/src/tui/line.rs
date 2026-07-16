@@ -12,7 +12,7 @@ use super::palette::{
     CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_GLYPHS, RAIL_W, READ_W, RED, RED_HOT,
     SLATE,
 };
-use crate::card::{
+use crate::bus::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
 };
 use crate::agent::event::ProviderErrorRecord;
@@ -517,7 +517,7 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
         Span::raw("  "),
         Span::styled(path.to_string(), Style::default().fg(Color::White)),
         Span::raw("  "),
-        size_bar(crate::card::hunk_magnitude(hunks)),
+        size_bar(crate::bus::card::hunk_magnitude(hunks)),
         Span::raw("  "),
         grain_run(
             count_rows(hunks, |r| matches!(r, Row::Add(_))),

@@ -13,7 +13,7 @@
 
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
-use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
+use crate::bus::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use crate::agent::transcript::Transcript;
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -103,11 +103,11 @@ pub(crate) enum PinKind {
 #[derive(Clone, Debug)]
 pub struct PinDigest {
     pub(crate) kind: PinKind,
-    pub(crate) card: crate::card::Card,
+    pub(crate) card: crate::bus::card::Card,
 }
 
 impl PinDigest {
-    pub(crate) fn new(key: &str, card: crate::card::Card) -> Self {
+    pub(crate) fn new(key: &str, card: crate::bus::card::Card) -> Self {
         Self {
             kind: if is_commitment_pin(key) {
                 PinKind::Commitment
@@ -158,7 +158,7 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 /// captured `PinDigests` Arc by the `` `commit-open ``/`` `commit-verify ``
 /// desk arms ([`crate::desk::ExarchDesk`]), since a desk handler may only
 /// ever hold `&PinDigests`, never `&Agent`.
-pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::card::Card, String> {
+pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::bus::card::Card, String> {
     if !is_commitment_pin(key) {
         return Err(format!(
             "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
@@ -189,7 +189,7 @@ pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::car
 pub(crate) fn set_commitment_pin(
     pins: &PinDigests,
     key: &str,
-    card: crate::card::Card,
+    card: crate::bus::card::Card,
 ) -> Result<(), String> {
     if !is_commitment_pin(key) {
         return Err(format!(
@@ -248,12 +248,12 @@ pub(crate) fn unset_commitment_pin(pins: &PinDigests, key: &str) -> Result<bool,
 ///     paired with the [`Card`] composed from it ([`Kind::Io`]);
 ///   * a `` `notice `` core's own ready-boundary housekeeping pushes (a
 ///     worker reap, an idle-binding prune, a large-binding warning),
-///     decoded into a [`Notice`](crate::card::Notice) and paired with its
+///     decoded into a [`Notice`](crate::bus::card::Notice) and paired with its
 ///     card ([`Kind::Notice`]);
 ///   * a render document a ral kit composed (a `` `card `` variant of Bertin
 ///     marks), decoded into a [`Card`] ([`Kind::Card`]); and
 ///   * the `` `done `` completion event a detached worker flushes at the end of
-///     its deferred batch, decoded into its [`DoneOutcome`](crate::card::DoneOutcome)
+///     its deferred batch, decoded into its [`DoneOutcome`](crate::bus::card::DoneOutcome)
 ///     and paired with its one-line outcome [`Card`] ([`Kind::Done`]).
 ///
 /// A fifth shape rides the same channel as a render *disposition*, tried
@@ -268,8 +268,8 @@ pub(crate) fn unset_commitment_pin(pins: &PinDigests, key: &str) -> Result<bool,
 /// record always reaches the bus beside its rendering.  A value that is none
 /// of these returns `None` and is dropped.
 ///
-/// [`Card`]: crate::card::Card
-/// [`IoEvent`]: crate::card::IoEvent
+/// [`Card`]: crate::bus::card::Card
+/// [`IoEvent`]: crate::bus::card::IoEvent
 pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     if let Some((key, body)) = value_to_pin(ev) {
         Some(match body {
@@ -279,8 +279,8 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     } else if let Some(event) = value_to_io(ev) {
         let card = io_card(&event);
         Some(Kind::Io { event, card })
-    } else if let Some(notice) = crate::card::value_to_notice(ev) {
-        let card = crate::card::notice_card(&notice);
+    } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
+        let card = crate::bus::card::notice_card(&notice);
         Some(Kind::Notice { notice, card })
     } else if let Some(card) = value_to_card(ev) {
         Some(Kind::Card(card))
@@ -343,7 +343,7 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
 /// fallen behind, exactly as a stale [`AgentResult`](crate::bus::AgentResult)
 /// is rejected.
 ///
-/// [`Card`]: crate::card::Card
+/// [`Card`]: crate::bus::card::Card
 struct InboxDeferred {
     /// The session's own inbox sender; a spawn worker flushes its deferred
     /// surface batch into the agent that ran the spawn.
@@ -1281,7 +1281,7 @@ keep-bottom
                 ]))),
             }),
             Some(Kind::Notice {
-                notice: crate::card::Notice::Reap { .. },
+                notice: crate::bus::card::Notice::Reap { .. },
                 ..
             })
         ));
@@ -1309,7 +1309,7 @@ keep-bottom
                 ]))),
             }),
             Some(Kind::Done {
-                outcome: crate::card::DoneOutcome::Ok,
+                outcome: crate::bus::card::DoneOutcome::Ok,
                 ..
             })
         ));
@@ -1372,7 +1372,7 @@ keep-bottom
         let (emit, rx) = dummy_emitter();
         let protected = Kind::Pin {
             key: "commitment:abc".into(),
-            card: crate::card::Card(Vec::new()),
+            card: crate::bus::card::Card(Vec::new()),
         };
         assert!(reject_protected_pin(&protected, &emit));
         let event = rx.try_recv().expect("rejection should emit an error");
@@ -1396,7 +1396,7 @@ keep-bottom
         let (emit, rx) = dummy_emitter();
         let protected = Kind::Pin {
             key: SERVICES_PIN_KEY.to_string(),
-            card: crate::card::Card(Vec::new()),
+            card: crate::bus::card::Card(Vec::new()),
         };
         assert!(reject_protected_pin(&protected, &emit));
         let event = rx.try_recv().expect("rejection should emit an error");
@@ -1840,7 +1840,7 @@ return !{{length $hits}}"
     /// target's mode/symlink/durability that a hand-rolled temp-file persist dropped.
     #[test]
     fn edit_replace_surfaces_a_write_io_event_with_diff() {
-        use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
@@ -1938,7 +1938,7 @@ return !{{length $hits}}"
     /// The `IoEvent`s carried by the captured `Kind::Io` events, in order —
     /// the structural effect records the gap tests assert on without caring
     /// about the card composed beside each.
-    fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::card::IoEvent> {
+    fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::bus::card::IoEvent> {
         kinds
             .iter()
             .filter_map(|k| match k {
@@ -1968,7 +1968,7 @@ return !{{length $hits}}"
     /// is a builtin, not an external image.
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
-        use crate::card::IoEvent;
+        use crate::bus::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-read", "a", "hello\n");
 
@@ -1999,7 +1999,7 @@ return !{{length $hits}}"
     /// `Kind::Io` carrying a committed `Write` event reaches the bus.
     #[test]
     fn bare_write_redirect_surfaces_one_committed_write_card() {
-        use crate::card::{IoEvent, WriteMode, WriteOutcome};
+        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome};
         let mut shell = fresh_shell();
         // A fresh dir with no fixture file: the write creates the target.
         let dir = std::env::temp_dir().join(format!("exarch-cov-write-{}", std::process::id()));
@@ -2048,7 +2048,7 @@ return !{{length $hits}}"
     /// for any `>` redirect with no builtin required.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
-        use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
 
@@ -2105,7 +2105,7 @@ return !{{length $hits}}"
     /// write would.
     #[test]
     fn bare_write_redirect_over_oversized_existing_file_falls_back_to_listing() {
-        use crate::card::{IoEvent, WriteOutcome, io_card};
+        use crate::bus::card::{IoEvent, WriteOutcome, io_card};
         let mut shell = fresh_shell();
         // Comfortably past core's 64KiB (65536-byte) read cap.
         let big = "x".repeat(70_000);
@@ -2151,7 +2151,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn bare_external_surfaces_one_exec_card() {
-        use crate::card::{ExecOutcome, IoEvent};
+        use crate::bus::card::{ExecOutcome, IoEvent};
         let mut shell = fresh_shell();
 
         let (r, kinds) = run_capturing(&mut shell, "/usr/bin/true");
@@ -2186,7 +2186,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
-        use crate::card::IoEvent;
+        use crate::bus::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
@@ -2222,7 +2222,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn cat_redirect_surfaces_read_then_exec_in_order() {
-        use crate::card::{ExecOutcome, IoEvent};
+        use crate::bus::card::{ExecOutcome, IoEvent};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 
@@ -2307,11 +2307,11 @@ return !{{length $hits}}"
     /// against `event_record` directly — not a TUI render.
     #[test]
     fn io_event_record_carries_structural_event_not_card() {
-        use crate::card::{IoEvent, io_card};
+        use crate::bus::card::{IoEvent, io_card};
         let event = IoEvent::Write {
             path: "b.rs".into(),
-            mode: crate::card::WriteMode::Append,
-            outcome: crate::card::WriteOutcome::Committed,
+            mode: crate::bus::card::WriteMode::Append,
+            outcome: crate::bus::card::WriteOutcome::Committed,
             new_bytes: None,
             old_bytes: None,
         };

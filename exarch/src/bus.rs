@@ -20,9 +20,10 @@
 //! `tools::agent::spawn_async`): whichever side of the retirement the
 //! verdict reads, the consumer either still parks for the child or finds
 //! the result already queued, and can never quiesce between the two facts.
+pub mod card;
 
 use crate::agent::cancel;
-use crate::card::{Card, IoEvent};
+use crate::bus::card::{Card, IoEvent};
 use crate::agent::event::ProviderErrorRecord;
 use crate::provider::{Tuning, Usage};
 use crate::schedule::ScheduleId;
@@ -422,8 +423,8 @@ impl std::fmt::Display for InboxReject {
 /// `commit_turn` decode; the value record (a return value, captured bytes) is
 /// pulled on demand with `await $h`.
 fn surface_notice(values: &[Value]) -> String {
-    use crate::card::DoneOutcome;
-    let settled = match values.iter().rev().find_map(crate::card::value_to_done) {
+    use crate::bus::card::DoneOutcome;
+    let settled = match values.iter().rev().find_map(crate::bus::card::value_to_done) {
         Some(DoneOutcome::Ok) => "finished (exit 0)".to_string(),
         Some(DoneOutcome::Err { message, status }) => {
             format!("finished (exit {status}): {message}")
@@ -1250,7 +1251,7 @@ pub enum Kind {
     /// [`shell_eval`]: crate::shell_eval
     Card(Card),
     /// A detached worker's `` `done `` completion event, decoded once by
-    /// [`shell_eval`] into its typed [`DoneOutcome`](crate::card::DoneOutcome)
+    /// [`shell_eval`] into its typed [`DoneOutcome`](crate::bus::card::DoneOutcome)
     /// and paired with the one-line [`Card`] composed from it — the
     /// [`Kind::Io`] pattern, so `transcript.jsonl` records how the worker
     /// settled (a clean return, a raised error, a panic) rather than only
@@ -1258,7 +1259,7 @@ pub enum Kind {
     ///
     /// [`shell_eval`]: crate::shell_eval
     Done {
-        outcome: crate::card::DoneOutcome,
+        outcome: crate::bus::card::DoneOutcome,
         card: Card,
     },
     /// A structural I/O event core surfaced (a read, write, exec, or grep),
@@ -1300,14 +1301,14 @@ pub enum Kind {
     /// variants this used to be: core now emits the fact itself, at the
     /// ready boundary, through the turn's surface sink, rather than a host
     /// draining an accessor and composing the event from what it read.
-    /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::card::Notice)
+    /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::bus::card::Notice)
     /// rides alongside the rendered `card` (the [`Kind::Io`] pattern) so
     /// `transcript.jsonl` keeps the structural fact the one-liner erases.
     /// Never model-facing — no `events.json` twin, no inbox message;
     /// model-visible reap delivery is deferred
     /// (`decisions/260705_leases-and-budgets`).
     Notice {
-        notice: crate::card::Notice,
+        notice: crate::bus::card::Notice,
         card: Card,
     },
     /// The `/resources` probe fold: the agent's own accumulator rows,

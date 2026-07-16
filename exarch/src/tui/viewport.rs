@@ -22,7 +22,7 @@ use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::AgentId;
-use crate::card::{Card, Hunk, ObservationKind};
+use crate::bus::card::{Card, Hunk, ObservationKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -1296,7 +1296,7 @@ mod tests {
     /// that bounds it to a session exactly as it bounds the scrollback.
     #[test]
     fn pins_overwrite_in_place_and_keep_insertion_order() {
-        use crate::card::Mark;
+        use crate::bus::card::Mark;
         let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
         let keys = |vp: &Viewport| vp.pins().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
         let mut vp = viewport();

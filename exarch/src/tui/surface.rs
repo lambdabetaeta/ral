@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::viewport::Viewport;
 use crate::bus::AgentId;
-use crate::card::{Hunk, IoEvent, ObservationKind};
+use crate::bus::card::{Hunk, IoEvent, ObservationKind};
 
 pub(super) struct SurfaceBuffer {
     patch_buf: Option<PatchBuf>,
@@ -21,7 +21,7 @@ struct PatchBuf {
 /// user does not care about interleave order); flushed as one block per
 /// non-empty bucket.  The exec/grep buckets keep the typed [`IoEvent`] rather
 /// than pre-rendered spans so flush-time rendering can reuse the exact
-/// `io_card` span idioms via [`crate::card`]'s per-kind group helpers.  Writes
+/// `io_card` span idioms via [`crate::bus::card`]'s per-kind group helpers.  Writes
 /// are not buffered — a write is a barrier landed standalone as its own card.
 struct ObservationBuf {
     id: AgentId,
@@ -139,7 +139,7 @@ impl SurfaceBuffer {
 
     /// Commit any pending [`ObservationBuf`] as one block *per non-empty kind*, in a
     /// fixed Read → Exec → Grep order, reusing the exact `io_card` span idioms
-    /// via [`crate::card`]'s per-kind group helpers.  No-op when the buffer is
+    /// via [`crate::bus::card`]'s per-kind group helpers.  No-op when the buffer is
     /// empty.  Called at every commit boundary that isn't another io surface in
     /// the same session, through the shared [`SurfaceBuffer::flush_surfaces`].
     #[allow(
@@ -151,7 +151,7 @@ impl SurfaceBuffer {
             return;
         };
         if let Some(vp) = viewports.get_mut(&buf.id) {
-            use crate::card::{execs_card, greps_card, reads_card};
+            use crate::bus::card::{execs_card, greps_card, reads_card};
             if let Some(card) = reads_card(&buf.reads) {
                 vp.push_observation_card(card, ObservationKind::Read, buf.reads.len() as u32);
             }

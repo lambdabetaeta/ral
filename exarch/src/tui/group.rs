@@ -35,7 +35,7 @@ use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
 use super::palette::{CODE_BG, RAIL_W, SLATE};
 use super::md;
-use crate::card::ObservationKind;
+use crate::bus::card::ObservationKind;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;

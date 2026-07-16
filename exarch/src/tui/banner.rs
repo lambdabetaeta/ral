@@ -6,7 +6,7 @@ use std::time::Duration;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
+use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
 use crate::provider::{self, Provider};
 
 use super::block::AgentSlot;
@@ -328,7 +328,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{SessionInfo, legend_panel, session_card};
-    use crate::card::{FieldVal, Mark, Role};
+    use crate::bus::card::{FieldVal, Mark, Role};
     use crate::provider::scripted::Script;
     use crate::provider::{Provider, ProviderKind};
     use crate::tui::{line, rail};

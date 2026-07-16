@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex};
 /// [`Agent::resource_rows`] and [`Agent::reconcile_service_pins`] actually
 /// read off the shell's worker registry, carried as data across the probe
 /// rail rather than the live core `WorkerEntry` (whose handle is not
-/// transportable). `pub(crate)` so [`crate::card::services_pin_card`] can
+/// transportable). `pub(crate)` so [`crate::bus::card::services_pin_card`] can
 /// render it without reaching back for the live core type.
 pub(crate) struct ProbedWorker {
     pub(crate) id: u64,
@@ -1024,7 +1024,7 @@ impl Agent {
             return;
         }
 
-        let card = crate::card::services_pin_card(&live);
+        let card = crate::bus::card::services_pin_card(&live);
         self.pins.lock().expect("pin register poisoned").insert(
             shell_eval::SERVICES_PIN_KEY.to_string(),
             shell_eval::PinDigest {
@@ -1064,8 +1064,8 @@ impl Agent {
         self.durable = checkpoint;
         let names: Vec<String> = notices.iter().map(|n| n.name.clone()).collect();
         let idle_calls: Vec<u64> = notices.iter().map(|n| n.idle_calls).collect();
-        let notice = crate::card::Notice::Prune { names, idle_calls };
-        let card = crate::card::notice_card(&notice);
+        let notice = crate::bus::card::Notice::Prune { names, idle_calls };
+        let card = crate::bus::card::notice_card(&notice);
         emit.emit(Kind::Notice { notice, card });
     }
 
@@ -2352,7 +2352,7 @@ impl Agent {
     }
 
     #[cfg(test)]
-    pub(crate) fn insert_commitment_pin_for_test(&self, key: &str, card: crate::card::Card) {
+    pub(crate) fn insert_commitment_pin_for_test(&self, key: &str, card: crate::bus::card::Card) {
         assert!(shell_eval::is_commitment_pin(key));
         self.pins.lock().expect("pin register poisoned").insert(
             key.to_string(),
@@ -2374,7 +2374,7 @@ impl Agent {
         }
         Some(
             m.values()
-                .map(|pin| crate::card::summary_line(&pin.card))
+                .map(|pin| crate::bus::card::summary_line(&pin.card))
                 .collect::<Vec<_>>()
                 .join("; "),
         )
@@ -3451,8 +3451,8 @@ mod tests {
         let dir = tmp("commitment-mid-batch");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:mid-batch";
-        let card = crate::card::Card(vec![crate::card::Mark::Text {
-            spans: vec![crate::card::Span {
+        let card = crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
+            spans: vec![crate::bus::card::Span {
                 role: None,
                 text: "tests pass".into(),
             }],
@@ -3505,8 +3505,8 @@ mod tests {
         let key = "commitment:abc";
         session.insert_commitment_pin_for_test(
             key,
-            crate::card::Card(vec![crate::card::Mark::Text {
-                spans: vec![crate::card::Span {
+            crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
+                spans: vec![crate::bus::card::Span {
                     role: None,
                     text: "criteria 0/1".into(),
                 }],
@@ -3538,8 +3538,8 @@ mod tests {
         let dir = tmp("settle-commitment-open");
         let session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc";
-        let card = crate::card::Card(vec![crate::card::Mark::Text {
-            spans: vec![crate::card::Span {
+        let card = crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
+            spans: vec![crate::bus::card::Span {
                 role: None,
                 text: "tests pass".into(),
             }],
@@ -3575,8 +3575,8 @@ mod tests {
         let key = "commitment:abc";
         session.insert_commitment_pin_for_test(
             key,
-            crate::card::Card(vec![crate::card::Mark::Text {
-                spans: vec![crate::card::Span {
+            crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
+                spans: vec![crate::bus::card::Span {
                     role: None,
                     text: "criteria 0/1".into(),
                 }],
@@ -3610,8 +3610,8 @@ mod tests {
         let dir = tmp("apply-commitment-settle");
         let session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc".to_string();
-        let card = crate::card::Card(vec![crate::card::Mark::Text {
-            spans: vec![crate::card::Span {
+        let card = crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
+            spans: vec![crate::bus::card::Span {
                 role: None,
                 text: "tests pass".into(),
             }],
@@ -4099,7 +4099,7 @@ mod tests {
         let mut notices = 0;
         while let Ok(event) = rx.try_recv() {
             let Kind::Notice {
-                notice: crate::card::Notice::Reap { cmd, cause },
+                notice: crate::bus::card::Notice::Reap { cmd, cause },
                 ..
             } = event.kind
             else {
@@ -4160,7 +4160,7 @@ mod tests {
                 .expect("the services pin must be born")
                 .clone();
             assert_eq!(pin.kind, shell_eval::PinKind::Service);
-            let line = crate::card::summary_line(&pin.card);
+            let line = crate::bus::card::summary_line(&pin.card);
             assert!(
                 line.contains("watch the thing"),
                 "the description must render: {line}"
@@ -4289,7 +4289,7 @@ mod tests {
             .expect("the drain must emit exactly one prune event");
         match event.kind {
             Kind::Notice {
-                notice: crate::card::Notice::Prune { names, idle_calls },
+                notice: crate::bus::card::Notice::Prune { names, idle_calls },
                 ..
             } => {
                 assert_eq!(names, vec!["reap_me".to_string()]);
@@ -4343,7 +4343,7 @@ mod tests {
         let mut notices = 0;
         while let Ok(event) = rx.try_recv() {
             let Kind::Notice {
-                notice: crate::card::Notice::LargeBinding { name, bytes },
+                notice: crate::bus::card::Notice::LargeBinding { name, bytes },
                 ..
             } = event.kind
             else {
@@ -4800,7 +4800,7 @@ mod tests {
         let mut notices = 0;
         while let Ok(event) = rx2.try_recv() {
             let Kind::Notice {
-                notice: crate::card::Notice::Reap { cmd, cause },
+                notice: crate::bus::card::Notice::Reap { cmd, cause },
                 ..
             } = event.kind
             else {

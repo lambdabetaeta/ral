@@ -19,7 +19,7 @@ use super::line::{self, is_blank};
 use super::palette::{QUEUED_PROMPT_BG, RAIL_W, READ_W, SLATE};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
-use crate::card::{Card, Hunk, Mark, ObservationKind};
+use crate::bus::card::{Card, Hunk, Mark, ObservationKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -958,7 +958,7 @@ fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::{Row, Seg};
+    use crate::bus::card::{Row, Seg};
 
     fn diff_block() -> Block {
         let hunks = vec![Hunk {

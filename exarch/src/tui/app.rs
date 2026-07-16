@@ -20,7 +20,7 @@ use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
-use crate::card::IoEvent;
+use crate::bus::card::IoEvent;
 use crate::provider::{Provider, Usage};
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{

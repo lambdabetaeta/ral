@@ -15,7 +15,6 @@ pub mod agent_builtins;
 pub mod agent_registry;
 pub mod bootstrap;
 pub mod bus;
-pub mod card;
 pub mod cli;
 pub mod config;
 pub mod credential;

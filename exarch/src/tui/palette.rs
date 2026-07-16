@@ -13,7 +13,7 @@ use ratatui::style::Color;
 /// ink in the app is the splash's `BANNER_*` pair (wordmark + eagle), kept
 /// saturated so the one-shot banner carries a neon punch without bleeding
 /// into the session below — the metadata matrix and everything else draw
-/// from this muted set through their nominal [`crate::card::Role`].
+/// from this muted set through their nominal [`crate::bus::card::Role`].
 pub(super) const PINK: Color = Color::Rgb(220, 140, 175);
 pub(super) const CYAN: Color = Color::Rgb(135, 200, 215);
 pub(super) const LIME: Color = Color::Rgb(165, 210, 155);
@@ -52,7 +52,7 @@ pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
 /// Syntax-highlight inks for ral code washed into the [`CODE_BG`] panel — one
 /// low-saturation hue per token class ([`super::highlight`]).  Kept muted so
 /// code reads calmly against the recessed panel rather than as alarm, and
-/// held distinct from each other, from the chrome [`crate::card::Role`] palette, from the
+/// held distinct from each other, from the chrome [`crate::bus::card::Role`] palette, from the
 /// human's [`PROMPT_INK`], and from the agent-rail identity set
 /// ([`AGENT_HUES`]) so a token's colour never aliases a semantic one.
 /// Punctuation reuses [`SLATE`]; every other token keeps the default code
