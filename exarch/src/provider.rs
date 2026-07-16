@@ -12,7 +12,7 @@ mod error;
 pub use error::ProviderError;
 pub(crate) use error::error_object;
 
-use crate::cancel;
+use crate::agent::cancel;
 use crate::credential::Credential;
 use crate::oauth;
 use crate::tls::STREAM_IDLE_TIMEOUT;

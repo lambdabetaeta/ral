@@ -1252,7 +1252,7 @@ impl EnquiryDesk for DeskBinding {
 mod tests {
     use super::*;
     use crate::bus::{BusReceiver, Inbox, NO_FOCUS, channel};
-    use crate::event::AgentLog;
+    use crate::agent::event::AgentLog;
     use crate::provider::{Provider, ProviderKind, scripted::{Reply, Script}};
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Transport, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
@@ -1364,7 +1364,7 @@ mod tests {
             ceiling: false,
             title: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
-            cancel: crate::cancel::Token::new(),
+            cancel: crate::agent::cancel::Token::new(),
             eval_root: None,
             turn_scope: None,
             mailbox: parent_inbox.mailbox(),
@@ -1638,13 +1638,13 @@ mod tests {
     /// `SessionStarted` bookend — the first event in its `events.json`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
         let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
-        let first: crate::event::SessionEvent = serde_json::Deserializer::from_str(&body)
+        let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
             .into_iter()
             .next()
             .expect("events.json must have at least one event")
             .expect("first event must parse");
         match first {
-            crate::event::SessionEvent::SessionStarted {
+            crate::agent::event::SessionEvent::SessionStarted {
                 system_prompt_bytes,
                 ..
             } => system_prompt_bytes,
@@ -1955,7 +1955,7 @@ mod tests {
                 ceiling: true,
                 title: format!("a{id}"),
                 log_dir: PathBuf::from(format!("/tmp/{id}")),
-                cancel: crate::cancel::Token::new(),
+                cancel: crate::agent::cancel::Token::new(),
                 eval_root: None,
                 turn_scope: None,
                 mailbox: Inbox::new().mailbox(),

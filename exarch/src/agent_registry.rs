@@ -63,7 +63,7 @@
 
 use crate::agent::ProviderHandle;
 use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
-use crate::cancel::Token;
+use crate::agent::cancel::Token;
 use ral_core::process::{self, CancelCause, Deadline, DurableRoot, ForegroundScope};
 use std::collections::HashMap;
 use std::path::PathBuf;

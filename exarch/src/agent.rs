@@ -19,26 +19,31 @@
 //! child's single result is delivered up its parent's mailbox by the spawn
 //! site, not here, so `drive` itself is identical for all.
 
+pub mod cancel;
+pub mod digest;
+pub mod event;
+pub mod nudge;
+pub mod resources;
+pub mod transcript;
+
 use crate::agent_builtins;
 use crate::bootstrap::Scratch;
 use crate::bus::{
     AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, NO_FOCUS, ParkMode, Turn,
     WORKER_PANIC_PREFIX,
 };
-use crate::cancel;
 use crate::desk;
-use crate::digest::{
+use crate::agent::digest::{
     AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
 };
-use crate::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
-use crate::nudge;
+use crate::agent::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
 use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
 };
 use crate::shell_eval;
 use crate::tools::CommitmentSettle;
-use crate::transcript::Transcript;
+use crate::agent::transcript::Transcript;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -1082,9 +1087,9 @@ impl Agent {
             return;
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
-        let mut total = crate::resources::dir_size(self.log.lock().dir());
+        let mut total = crate::agent::resources::dir_size(self.log.lock().dir());
         if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
-            total += crate::resources::dir_size(&std::path::PathBuf::from(&scratch));
+            total += crate::agent::resources::dir_size(&std::path::PathBuf::from(&scratch));
         }
         if total > ceiling {
             if !self.disk_warn_latched {
@@ -1106,7 +1111,7 @@ impl Agent {
     }
 
     /// Assemble this agent's half of the `/resources` probe fold — one
-    /// [`ProbeRow`](crate::resources::ProbeRow) per session-lived
+    /// [`ProbeRow`](crate::agent::resources::ProbeRow) per session-lived
     /// accumulator this drive thread may legally read: the shell's worker
     /// registry (running and settled counts by class, with the nearest
     /// time-to-reap), the inbox's depth per source, the event log's mirror
@@ -1118,8 +1123,8 @@ impl Agent {
     /// it exists to reveal.  The frontend appends the rows for the
     /// accumulators *it* owns (viewports, views, the bus) at render time;
     /// neither half reaches across a thread for the other's figures.
-    fn resource_rows(&self) -> Vec<crate::resources::ProbeRow> {
-        use crate::resources::{ProbeRow, terse_duration};
+    fn resource_rows(&self) -> Vec<crate::agent::resources::ProbeRow> {
+        use crate::agent::resources::{ProbeRow, terse_duration};
 
         let mut rows = Vec::new();
 
@@ -1286,7 +1291,7 @@ impl Agent {
         let log_dir = self.log.lock().dir().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
-            crate::resources::dir_size(&log_dir),
+            crate::agent::resources::dir_size(&log_dir),
             None,
             "warn",
             Some(log_dir.display().to_string()),
@@ -1294,7 +1299,7 @@ impl Agent {
         if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
             rows.push(ProbeRow::new(
                 "disk.scratch",
-                crate::resources::dir_size(&std::path::PathBuf::from(&scratch)),
+                crate::agent::resources::dir_size(&std::path::PathBuf::from(&scratch)),
                 None,
                 "warn",
                 Some(scratch),
@@ -1319,7 +1324,7 @@ impl Agent {
     /// `/clear` runs; transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, emit: &Emitter) {
         let rows = self.resource_rows();
-        let card = crate::resources::resources_card(&rows);
+        let card = crate::agent::resources::resources_card(&rows);
         emit.emit(Kind::Resources { rows, card });
     }
 
@@ -2948,13 +2953,13 @@ mod tests {
     /// `SessionStarted` bookend — the first event in its `events.json`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
         let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
-        let first: crate::event::SessionEvent = serde_json::Deserializer::from_str(&body)
+        let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
             .into_iter()
             .next()
             .expect("events.json must have at least one event")
             .expect("first event must parse");
         match first {
-            crate::event::SessionEvent::SessionStarted {
+            crate::agent::event::SessionEvent::SessionStarted {
                 system_prompt_bytes,
                 ..
             } => system_prompt_bytes,
@@ -4392,7 +4397,7 @@ mod tests {
         // The ceiling sits just above the session's own baseline footprint
         // (its freshly-written `events.json`), so the big file alone decides
         // whether the ceiling is crossed.
-        let baseline = crate::resources::dir_size(&session.log_dir());
+        let baseline = crate::agent::resources::dir_size(&session.log_dir());
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
 
@@ -4417,7 +4422,7 @@ mod tests {
     fn check_disk_warn_still_above_does_not_repeat() {
         let dir = tmp("disk-warn-still-above");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let baseline = crate::resources::dir_size(&session.log_dir());
+        let baseline = crate::agent::resources::dir_size(&session.log_dir());
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
 
@@ -4446,7 +4451,7 @@ mod tests {
         // The ceiling sits just above the session's own baseline footprint
         // (its freshly-written `events.json`), so the big file alone decides
         // whether the ceiling is crossed.
-        let baseline = crate::resources::dir_size(&session.log_dir());
+        let baseline = crate::agent::resources::dir_size(&session.log_dir());
         let big = session.log_dir().join("big.txt");
         std::fs::write(&big, vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
@@ -4816,9 +4821,9 @@ mod tests {
 
     /// The row for `name`, or a panic naming what is missing.
     fn row<'a>(
-        rows: &'a [crate::resources::ProbeRow],
+        rows: &'a [crate::agent::resources::ProbeRow],
         name: &str,
-    ) -> &'a crate::resources::ProbeRow {
+    ) -> &'a crate::agent::resources::ProbeRow {
         rows.iter()
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))

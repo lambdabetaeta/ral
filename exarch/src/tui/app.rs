@@ -22,7 +22,7 @@ use super::viewport::Viewport;
 use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
 use crate::card::IoEvent;
 use crate::provider::{Provider, Usage};
-use crate::resources::{BusFigures, ViewFigures, ViewportFigures};
+use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{
     crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -461,7 +461,7 @@ impl App {
                 let lingering = self.tabs.dying_map().len() as u64;
                 let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
                 let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
-                let frontend = crate::resources::frontend_rows(
+                let frontend = crate::agent::resources::frontend_rows(
                     ViewportFigures {
                         blocks,
                         rows,
@@ -479,8 +479,8 @@ impl App {
                         bytes: bus.bytes() as u64,
                     },
                 );
-                card.0.push(crate::resources::section_mark("frontend"));
-                card.0.push(crate::resources::rows_mark(&frontend));
+                card.0.push(crate::agent::resources::section_mark("frontend"));
+                card.0.push(crate::agent::resources::rows_mark(&frontend));
                 self.with_viewport(id, |vp| vp.push_card(card));
                 // One dim line per tombstoned view, right beside the fold —
                 // the `views.dead` row is a count; this is where each one's

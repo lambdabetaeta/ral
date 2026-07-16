@@ -18,11 +18,10 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Control, ControlFlow},
+    agent::{Agent, Control, ControlFlow, cancel},
     agent_registry::AgentRegistry,
     bootstrap::Scratch,
     bus::{AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass},
-    cancel,
     credential::CredentialStore,
     fleet::Fleet,
     models::{LiveSource, ModelCatalog},
@@ -559,7 +558,7 @@ mod tests {
                 assert_eq!(card.marks().len(), 2, "a heading and one matrix");
                 // The transcript records the rows as a `resources` line —
                 // the raw-fact half of the raw/rendering pairing.
-                let rec = crate::transcript::event_record(0, session.id, &event.kind)
+                let rec = crate::agent::transcript::event_record(0, session.id, &event.kind)
                     .expect("a resources event must reach the transcript");
                 assert_eq!(rec["kind"], "resources");
                 assert!(rec["rows"].is_array());

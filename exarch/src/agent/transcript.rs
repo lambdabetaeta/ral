@@ -6,7 +6,7 @@
 //! It is the *operational* view — what the agent did: every tool call and its
 //! result, step, usage delta, structural I/O effect, stop reason, error, and
 //! sub-agent boundary — the sibling of the model-view `events.json` the
-//! [`AgentLog`](crate::event::AgentLog) keeps.
+//! [`AgentLog`](crate::agent::event::AgentLog) keeps.
 //!
 //! Pure rendering events — a composed [`Card`](crate::card::Card), the card a
 //! [`Kind::Io`] draws, a [`Kind::Phase`] progress label — are deliberately

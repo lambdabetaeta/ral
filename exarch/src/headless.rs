@@ -12,7 +12,7 @@
 //! This frontend is a *display* — it projects the bus to stdout/stderr.
 //! The durable record is not its concern: each session writes its own
 //! `transcript.jsonl` (operational view) and `events.json` (model view)
-//! through the [`crate::transcript`] and [`crate::event`] seams, in headless
+//! through the [`crate::agent::transcript`] and [`crate::agent::event`] seams, in headless
 //! exactly as in the TUI, for the root and every forked child alike.
 
 use crate::agent::Agent;

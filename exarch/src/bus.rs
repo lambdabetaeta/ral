@@ -21,12 +21,12 @@
 //! verdict reads, the consumer either still parks for the child or finds
 //! the result already queued, and can never quiesce between the two facts.
 
-use crate::cancel;
+use crate::agent::cancel;
 use crate::card::{Card, IoEvent};
-use crate::event::ProviderErrorRecord;
+use crate::agent::event::ProviderErrorRecord;
 use crate::provider::{Tuning, Usage};
 use crate::schedule::ScheduleId;
-use crate::transcript::Transcript;
+use crate::agent::transcript::Transcript;
 use ral_core::Value;
 use std::collections::VecDeque;
 use std::io;
@@ -1321,7 +1321,7 @@ pub enum Kind {
     /// inbox reply — probing is for the operator, and it mutates and
     /// renews nothing (`decisions/260705_leases-and-budgets`).
     Resources {
-        rows: Vec<crate::resources::ProbeRow>,
+        rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
     },
 }
@@ -1676,7 +1676,7 @@ impl BusReceiver {
 
     /// Queue depth — a merged run and a reserved kind each count as one entry,
     /// pending overflow markers included. The `/resources` `bus.depth`
-    /// figure ([`crate::resources::frontend_rows`]): one pass over the lock,
+    /// figure ([`crate::agent::resources::frontend_rows`]): one pass over the lock,
     /// nothing drained or woken — enumeration is not observation.
     pub fn depth(&self) -> usize {
         let q = self.0.lock();
@@ -2096,7 +2096,7 @@ mod tests {
         InboxReject, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Sink, Transcript, Turn, channel,
         drain_pass, pump,
     };
-    use crate::cancel;
+    use crate::agent::cancel;
     use crate::provider::Tuning;
     use std::path::PathBuf;
     use std::sync::Arc;

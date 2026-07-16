@@ -15,7 +15,7 @@ use super::palette::{
 use crate::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
 };
-use crate::event::ProviderErrorRecord;
+use crate::agent::event::ProviderErrorRecord;
 use crate::provider;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -1330,7 +1330,7 @@ fn wait_field(secs: u64) -> FieldRow {
     FieldRow {
         label: "retry-after".into(),
         value: FieldValue::Inline(vec![
-            Span::raw(format!("{}  ", crate::resources::hms(secs, " "))),
+            Span::raw(format!("{}  ", crate::agent::resources::hms(secs, " "))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
         ]),
     }

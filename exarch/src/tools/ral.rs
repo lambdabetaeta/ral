@@ -7,7 +7,7 @@
 
 use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
-use crate::event::ToolResult as SessionToolResult;
+use crate::agent::event::ToolResult as SessionToolResult;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 

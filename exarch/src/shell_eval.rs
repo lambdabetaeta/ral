@@ -14,7 +14,7 @@
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
-use crate::transcript::Transcript;
+use crate::agent::transcript::Transcript;
 use base64::Engine;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -2320,7 +2320,7 @@ return !{{length $hits}}"
             event,
             card,
         };
-        let rec = crate::transcript::event_record(7, 3, &kind).expect("an io event records");
+        let rec = crate::agent::transcript::event_record(7, 3, &kind).expect("an io event records");
 
         assert_eq!(rec["kind"], "io", "the record is tagged io");
         // The raw structural event survives, tagged by its `io` field with the

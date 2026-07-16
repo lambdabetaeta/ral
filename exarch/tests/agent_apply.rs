@@ -51,8 +51,8 @@ fn drive_apply(
     let id: AgentId = session.id;
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
-    let token = exarch::cancel::Token::new();
-    let _slot = exarch::cancel::publish(&token);
+    let token = exarch::agent::cancel::Token::new();
+    let _slot = exarch::agent::cancel::publish(&token);
     let outcome = session.apply(provider, prompt.map(str::to_string), &token, &emit);
     drop(emit);
     let kinds = rx.into_iter().map(|e| e.kind).collect();

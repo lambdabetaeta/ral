@@ -4,7 +4,7 @@
 //! [`ProviderError::from_genai`] classifies a typed genai error into one by
 //! walking its variants down to the leaf that decides recovery (see
 //! [`Fault`]). The retry driver in the parent module keys its backoff on the
-//! variant, and the TUI renders the [`crate::event::ProviderErrorRecord`]
+//! variant, and the TUI renders the [`crate::agent::event::ProviderErrorRecord`]
 //! mirror.
 
 use reqwest::StatusCode;

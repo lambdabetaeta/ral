@@ -331,7 +331,7 @@ pub(super) fn route_submit(
             // Then the `/clear` itself reaches the worker's drive loop and
             // rebuilds the session.
             "/clear" => {
-                crate::cancel::raise_interrupt();
+                crate::agent::cancel::raise_interrupt();
                 ctx.agents.cancel_descendants(root);
                 // Read the root's provider for the banner redraw, falling back
                 // to a throwaway scripted provider if the trunk has settled.

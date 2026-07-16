@@ -17,7 +17,7 @@
 
 use crate::agent::TurnOutcome;
 use crate::bus::{Emitter, Kind};
-use crate::event::AgentLog;
+use crate::agent::event::AgentLog;
 use crate::provider::ProviderError;
 
 /// Outer-attempt budget per user turn.  Independent of the provider's
@@ -660,7 +660,7 @@ mod tests {
     /// verifier clears it (out of this module's scope — [`nudge`] only
     /// reports pinned state, it never clears it).
     ///
-    /// [`nudge`]: crate::nudge
+    /// [`nudge`]: crate::agent::nudge
     #[test]
     fn pinned_commitment_state_keeps_completion_restless() {
         let mut reg = Registry::new();

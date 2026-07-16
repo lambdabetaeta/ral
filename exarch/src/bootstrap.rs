@@ -4,9 +4,10 @@
 //! One-shot bootstrap pieces that live for the lifetime of the process
 //! (or, for [`Scratch`], for the lifetime of one root session).
 //! Nothing here participates in the per-turn loop.  Per-session disk
-//! state (the canonical event log) lives in [`crate::event::AgentLog`].
+//! state (the canonical event log) lives in [`crate::agent::event::AgentLog`].
 
-use crate::{agent_builtins, cancel, shell_eval};
+use crate::agent::cancel;
+use crate::{agent_builtins, shell_eval};
 use ral_core::io::TerminalState;
 use ral_core::{Shell, diagnostic};
 use std::fs;
@@ -54,7 +55,7 @@ pub fn boot_shell() -> Shell {
 /// call runs with stdout/stderr captured on a pipe — never a TTY — so
 /// conforming tools already emit no colour; these override user config
 /// and an inherited `CLICOLOR_FORCE` that *force* it.  That keeps a
-/// captured value byte-identical to the text [`crate::digest`] shows
+/// captured value byte-identical to the text [`crate::agent::digest`] shows
 /// the model; its ANSI strip remains the boundary guarantee for tools
 /// that ignore the convention.  Env-only, no ral scope binding: the
 /// agent has no reason to read these back.

@@ -1288,7 +1288,7 @@ mod tests {
         let outcome = session.apply(
             &provider_handle,
             Some("go".into()),
-            &crate::cancel::Token::new(),
+            &crate::agent::cancel::Token::new(),
             &emit,
         );
         match outcome {
