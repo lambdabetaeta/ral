@@ -360,7 +360,7 @@ impl App {
                     // boundary (`None`): present only so its result attaches there,
                     // never reaching back to clobber an earlier call's size bar.
                     None => {
-                        vp.push_plain_call(tool, (cmd != crate::tools::ral::INVALID_INPUT).then_some(cmd));
+                        vp.push_plain_call(tool, (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd));
                     }
                 });
             }

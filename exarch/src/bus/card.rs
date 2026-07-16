@@ -292,7 +292,7 @@ impl Row {
 /// hunks with ±2 lines of context.  Each hunk's `start` is the 1-indexed
 /// original line of its first row, and its rows are the unified context /
 /// deletion / insertion list `similar` yields.  Shared by every diff-card
-/// producer: `edit-hash`/`edit-replace` (`agent_builtins.rs`) feed it through a
+/// producer: `edit-hash`/`edit-replace` (`shell_eval/builtins.rs`) feed it through a
 /// `` `diff `` value the model-facing `surface` builtin forwards; a
 /// committed `>` redirect that overwrote an existing file (the write-card
 /// preview below) calls it directly, with no `Value` round-trip, since it

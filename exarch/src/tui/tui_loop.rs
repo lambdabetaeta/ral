@@ -79,7 +79,7 @@ impl Control for ReplControl<'_> {
         let (head, rest) = commands::split_head(trimmed);
         if head == "/branch" {
             let prompt = (!rest.is_empty()).then_some(rest);
-            match crate::tools::spawn_branch(session, prompt, emit) {
+            match crate::shell_eval::tools::spawn_branch(session, prompt, emit) {
                 Ok(child) => Agent::note(
                     format!("branch {} started (agent {})", child.title, child.id),
                     emit,

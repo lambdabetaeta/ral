@@ -258,7 +258,7 @@ pub(crate) enum CommitmentIntent {
 ///
 /// Decided by the worker thread that drove it while it still holds the
 /// child's raw structured reply
-/// ([`spawn_async`](crate::tools::agent::spawn_async)). Carried on
+/// ([`spawn_async`](crate::shell_eval::tools::agent::spawn_async)). Carried on
 /// [`AgentResult`](crate::bus::AgentResult) and applied only on the parent's
 /// own thread, at drain (`Agent::settle_commitment`) — the worker thread
 /// never holds `&mut Agent` on the parent.
@@ -442,7 +442,7 @@ fn writer_card(key: &str, value: &Value) -> Option<Card> {
 /// What a settled `commit-open`/`commit-verify` child's structured reply
 /// decides for the protected pin register — computed once, on the worker
 /// thread, while the raw payload is still in hand
-/// ([`crate::tools::agent::spawn_async`]). `None` for a non-`Complete`
+/// ([`crate::shell_eval::tools::agent::spawn_async`]). `None` for a non-`Complete`
 /// outcome, a missing payload, or a reply that doesn't match `intent`; an
 /// ordinary `amnemon`/`mnemon` spawn passes no intent and is never tagged.
 ///
@@ -549,7 +549,7 @@ impl ExarchDesk {
     /// forked, narrow its authority against the parent's own ceiling, fork
     /// its own session log off the parent's, assemble it into a full child
     /// at one less unit of fuel, and hand it to
-    /// [`spawn_async`](crate::tools::agent::spawn_async). The generation and
+    /// [`spawn_async`](crate::shell_eval::tools::agent::spawn_async). The generation and
     /// fuel guards run before [`Nursery::adopt`]; every refusal downstream
     /// of that point simply drops the adopted `Shell` like any other owned
     /// value, never a leak.
@@ -665,12 +665,12 @@ impl ExarchDesk {
         // mechanics every launch-only tool shares, verbatim. `spawn_async`
         // already emits the parity `Kind::HarnessCall` spawn line, so this
         // handler does not double it.
-        let spawned = crate::tools::agent::spawn_async(
+        let spawned = crate::shell_eval::tools::agent::spawn_async(
             &s.registry,
             s.parent,
             s.mailbox.clone(),
             child,
-            crate::tools::agent::AsyncSpawn {
+            crate::shell_eval::tools::agent::AsyncSpawn {
                 tool: spec.tool,
                 title: spec.title,
                 prompt: Some(spec.prompt),

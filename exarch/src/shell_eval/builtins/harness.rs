@@ -564,7 +564,7 @@ fn scheme_verify_commitment(_u: &mut Unifier) -> Scheme {
 
 /// `reply :: ∀α. α → F Unit` — fully polymorphic in its argument, exactly
 /// the shape `service-handle`'s own `∀α` scheme mints
-/// (`agent_builtins.rs`'s `scheme_service_handle`); first-orderness is a
+/// (`builtins.rs`'s `scheme_service_handle`); first-orderness is a
 /// runtime door check ([`builtin_reply`]), not a static constraint on `α`.
 fn scheme_reply(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
@@ -1147,7 +1147,7 @@ mod tests {
                     assert!(
                         matches!(
                             &r.commitment_settle,
-                            Some(crate::tools::CommitmentSettle::Open { key: k, .. }) if k == key
+                            Some(crate::shell_eval::tools::CommitmentSettle::Open { key: k, .. }) if k == key
                         ),
                         "a passing writer card must tag the settle for the parent to open, got: {:?}",
                         r.commitment_settle

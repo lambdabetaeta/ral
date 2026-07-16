@@ -11,6 +11,10 @@
 //! the session log in full.  Nothing streams live to the user; the rail
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
+pub mod builtins;
+pub mod skill;
+pub mod tools;
+
 use crate::fleet::registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::bus::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
@@ -693,7 +697,7 @@ mod tests {
     //! mobile-install contract.
 
     use super::*;
-    use crate::agent_builtins;
+    use crate::shell_eval::builtins;
     use crate::bus::{BusReceiver, Emitter, Inbox, channel};
     use ral_core::Shell;
     use ral_core::types::Capabilities;
@@ -718,8 +722,8 @@ mod tests {
     /// `cargo test`, and not under test here).
     fn fresh_shell() -> Shell {
         let mut shell = ral_core::driver::boot_shell(ral_core::io::TerminalState::default(), &PRELUDE);
-        agent_builtins::install_on(&mut shell);
-        agent_builtins::install_agent_library(&mut shell).expect("embedded agent library");
+        builtins::install_on(&mut shell);
+        builtins::install_agent_library(&mut shell).expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);
         shell
     }

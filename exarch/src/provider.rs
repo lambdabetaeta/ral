@@ -1542,11 +1542,11 @@ fn build_cached_request(
 
 /// The wire tool set for one request: empty when the agent's tool is
 /// withheld (a `--chat` trunk), the one-entry view otherwise.  Never reaches
-/// into `crate::tools` for anything but this one seam, so provider.rs stays
+/// into `crate::shell_eval::tools` for anything but this one seam, so provider.rs stays
 /// ignorant of which tool that is, or its shape.
 fn tool_defs(tool_enabled: bool) -> Vec<Tool> {
     tool_enabled
-        .then(crate::tools::wire_tool)
+        .then(crate::shell_eval::tools::wire_tool)
         .into_iter()
         .collect()
 }

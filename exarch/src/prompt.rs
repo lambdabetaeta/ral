@@ -7,7 +7,7 @@
 
 use crate::cli::EditScheme;
 use crate::host;
-use crate::skill;
+use crate::shell_eval::skill;
 use ral_core::types::{Capabilities, ExecDir};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -141,7 +141,7 @@ pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 /// proved far too long. It is assembled from the static tables, never a live
 /// shell — filtering does not change that, since `returns`/`allow_schedule`
 /// are construction-fixed bits, not runtime state. The host builtin sets
-/// ([`HOST_BUILTIN_SETS`](crate::agent_builtins::HOST_BUILTIN_SETS) —
+/// ([`HOST_BUILTIN_SETS`](crate::shell_eval::builtins::HOST_BUILTIN_SETS) —
 /// exarch's own surface and core's host-installed `service`) are chained in
 /// explicitly because they are not yet in the process registry that
 /// `builtin_names` reads when the prompt is assembled (the session shell,
@@ -151,7 +151,7 @@ fn builtin_index(returns: bool, allow_schedule: bool) -> String {
         .into_iter()
         .map(str::to_string)
         .chain(
-            crate::agent_builtins::HOST_BUILTIN_SETS
+            crate::shell_eval::builtins::HOST_BUILTIN_SETS
                 .iter()
                 .flat_map(|set| set.iter())
                 .map(|e| e.name.to_string()),
@@ -159,7 +159,7 @@ fn builtin_index(returns: bool, allow_schedule: bool) -> String {
     let prelude = ral_core::builtins::help::prelude_names()
         .into_iter()
         .map(str::to_string);
-    let library = crate::agent_builtins::agent_library_docs()
+    let library = crate::shell_eval::builtins::agent_library_docs()
         .into_iter()
         .map(|(name, _doc)| name);
     let mut names: Vec<String> = builtins

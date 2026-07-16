@@ -2,7 +2,7 @@
 //!
 //! Every other harness affordance the model reaches — spawning a sub-agent,
 //! messaging one, scheduling a wakeup, opening/verifying a commitment,
-//! replying — is an ordinary ral builtin (`agent_builtins/harness.rs`) that
+//! replying — is an ordinary ral builtin (`shell_eval/builtins/harness.rs`) that
 //! speaks to the host through the enquiry desk ([`crate::fleet::desk`]). This
 //! module holds only what remains a genuine sibling of that split: `ral`
 //! itself (the one call that crosses the provider boundary; see [`ral`])

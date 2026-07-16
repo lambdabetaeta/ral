@@ -26,7 +26,7 @@ pub mod nudge;
 pub mod resources;
 pub mod transcript;
 
-use crate::agent_builtins;
+use crate::shell_eval::builtins;
 use crate::bootstrap::Scratch;
 use crate::bus::{
     AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, NO_FOCUS, ParkMode, Turn,
@@ -42,7 +42,7 @@ use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
 };
 use crate::shell_eval;
-use crate::tools::CommitmentSettle;
+use crate::shell_eval::tools::CommitmentSettle;
 use crate::agent::transcript::Transcript;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
@@ -548,7 +548,7 @@ impl Agent {
             cwd,
             std::path::PathBuf::from(&home),
             None, // rc_path
-            agent_builtins::INSTALLER_TAG.to_string(),
+            builtins::INSTALLER_TAG.to_string(),
         );
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
@@ -1976,8 +1976,8 @@ impl Agent {
         // `--chat` trunk) — so a well-behaved model never names anything
         // else here. Every harness verb (`amnemon`, `reply`, `schedule`, …)
         // is a builtin *inside* a `ral` call, not a name `stage` matches.
-        if self.tool_enabled && call.fn_name == crate::tools::ral::NAME {
-            crate::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
+        if self.tool_enabled && call.fn_name == crate::shell_eval::tools::ral::NAME {
+            crate::shell_eval::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
         } else {
             let msg = format!("unknown tool `{}`", call.fn_name);
             self.note_error(msg.clone(), emit);
@@ -2302,7 +2302,7 @@ impl Agent {
 
     /// A settled `commit`/`verify-commitment` child tags its result with
     /// what the parent should do to the pin register
-    /// ([`spawn_async`](crate::tools::agent::spawn_async)), decided on the
+    /// ([`spawn_async`](crate::shell_eval::tools::agent::spawn_async)), decided on the
     /// worker thread that drove it since only that thread ever holds the raw
     /// reply.  This applies the tag on the parent's own thread, wherever the
     /// turn lands ([`Self::land`]), then forwards whatever
@@ -3793,7 +3793,7 @@ mod tests {
     // ── worker registry: `/clear` cascade, lease-reap drain ───────────────
 
     /// A worker body that blocks until cancelled, so a test can catch it
-    /// mid-flight. Named distinctly from `agent_builtins.rs`'s own
+    /// mid-flight. Named distinctly from `shell_eval/builtins.rs`'s own
     /// test-only blocker (`test-block-forever`) so registering both in the
     /// same test binary never collides on name.
     fn builtin_test_clear_block_forever(_args: &[Value], shell: &mut Shell) -> Settled<Value> {

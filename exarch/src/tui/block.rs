@@ -94,7 +94,7 @@ pub(super) enum BlockKind {
     },
     /// A summary-less tool call, shown standalone as `▸ tool  details`.
     /// `details` is the text to show, or `None` for a parse-failure
-    /// placeholder ([`crate::tools::ral::INVALID_INPUT`]): such a call renders
+    /// placeholder ([`crate::shell_eval::tools::ral::INVALID_INPUT`]): such a call renders
     /// nothing, present only as the boundary a stray result stops at.
     /// Inert (nothing to dial); wears the shut tool-call triangle `▸`.
     PlainTool {

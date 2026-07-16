@@ -7,7 +7,8 @@
 //! state (the canonical event log) lives in [`crate::agent::event::AgentLog`].
 
 use crate::agent::cancel;
-use crate::{agent_builtins, shell_eval};
+use crate::shell_eval;
+use crate::shell_eval::builtins;
 use ral_core::io::TerminalState;
 use ral_core::{Shell, diagnostic};
 use std::fs;
@@ -40,10 +41,10 @@ pub fn boot_shell() -> Shell {
     let terminal = probe_terminal();
     diagnostic::set_terminal(&terminal);
     let mut shell = ral_core::driver::boot_shell(terminal, &shell_eval::PRELUDE);
-    agent_builtins::install_on(&mut shell);
-    agent_builtins::install_agent_library(&mut shell)
+    builtins::install_on(&mut shell);
+    builtins::install_agent_library(&mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
-    ral_core::builtins::help::register_library_docs(agent_builtins::agent_library_docs());
+    ral_core::builtins::help::register_library_docs(builtins::agent_library_docs());
     seed_no_color(&mut shell);
     shell.set_exit_hints(ral_core::exit_hints::ExitHints::from_text(include_str!(
         "../../data/exit-hints.txt"

@@ -11,7 +11,6 @@
     reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
 )]
 pub mod agent;
-pub mod agent_builtins;
 pub mod bootstrap;
 pub mod bus;
 pub mod cli;
@@ -23,8 +22,6 @@ pub mod policy;
 pub mod prompt;
 pub mod provider;
 pub mod shell_eval;
-pub mod skill;
-pub mod tools;
 pub mod tui;
 
 use agent::Agent;
@@ -43,14 +40,14 @@ use tui::SessionInfo;
 /// calls this from `main`; test binaries call it from a `#[ctor]`.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(|shell| {
-        agent_builtins::install_on(shell);
+        shell_eval::builtins::install_on(shell);
     });
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
-            tag: agent_builtins::INSTALLER_TAG,
+            tag: shell_eval::builtins::INSTALLER_TAG,
             prelude: &shell_eval::PRELUDE,
-            install: agent_builtins::install_on,
+            install: shell_eval::builtins::install_on,
         }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {

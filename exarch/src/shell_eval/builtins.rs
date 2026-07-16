@@ -5,7 +5,7 @@
 //! plugins remain source/alias/hook loaders; this module only publishes
 //! the resident agent surface that core should not own.
 
-use crate::skill;
+use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
@@ -25,7 +25,7 @@ use std::io::Write;
 mod fff_index;
 mod harness;
 
-const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
+const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 
 /// The tag `Frame::Attach` carries to name this module's [`install_on`] as
 /// the wire engine child's builtin installer.
