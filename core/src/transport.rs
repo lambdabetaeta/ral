@@ -991,6 +991,18 @@ impl IdentityTransport {
         self.engine.lock().nursery = Some(nursery);
     }
 
+    /// Uninstall the session's nursery. `set_desk` has no symmetric
+    /// counterpart because a desk retires to the `AbsentDesk` sentinel
+    /// instead — `Desk` is a trait object, so an "answers no enquiries"
+    /// value is cheap to construct and install in `desk`'s place. A
+    /// `Nursery` has no such sentinel: an empty one would still accept a
+    /// park and answer `fork_into_nursery` successfully, which is not
+    /// absence. `None` is the only honest "no nursery installed" value, so
+    /// this is the door that reaches it between calls.
+    pub fn clear_nursery(&self) {
+        self.engine.lock().nursery = None;
+    }
+
     /// Consume the transport and recover the owned `Shell`.  The inverse of
     /// [`IdentityTransport::new`]: a caller that handed a shell in to route a
     /// turn through production can move it back out afterward.
@@ -1541,6 +1553,31 @@ mod enquiry_tests {
         assert!(
             std::sync::Arc::ptr_eq(&desk, &installed),
             "the installed desk must be the same Arc set_desk was given"
+        );
+    }
+
+    /// `IdentityTransport::clear_nursery` uninstalls the nursery
+    /// `set_nursery` installed — the symmetric teardown `set_desk`'s
+    /// retire-to-`AbsentDesk` pattern has no direct equivalent for, since a
+    /// `Nursery` has no sentinel "absent" value. `engine.nursery` reverting
+    /// to `None` is what makes a later dispatch's `fork_into_nursery`
+    /// answer the honest absence error rather than finding a stale nursery
+    /// still installed.
+    #[test]
+    fn clear_nursery_uninstalls_from_engine_inner() {
+        use crate::types::Nursery;
+
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
+        transport.set_nursery(Nursery::default());
+        assert!(
+            transport.shell_mut().nursery.is_some(),
+            "set_nursery must install onto engine.nursery"
+        );
+
+        transport.clear_nursery();
+        assert!(
+            transport.shell_mut().nursery.is_none(),
+            "clear_nursery must uninstall it, mirroring set_desk's retirement"
         );
     }
 }

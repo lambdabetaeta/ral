@@ -640,7 +640,15 @@ impl Agent {
         let shell = boot_root_shell(scratch);
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
-        let log = AgentLog::root(&sessions_root, id, model, provider_label, system.len())?;
+        // The bookend's `system_prompt_bytes` must be this agent's own
+        // resolved prompt, not `system`'s raw (still-templated) length —
+        // resolved here, ahead of `Agent::assemble`'s own resolution, from
+        // the same `returns`/`allow_schedule` bits `assemble` resolves
+        // with below, so the log exists (and can record it) before the
+        // agent it describes does.
+        let system_prompt_bytes =
+            crate::prompt::resolve_builtin_index(&system, !interactive, allow_schedule).len();
+        let log = AgentLog::root(&sessions_root, id, model, provider_label, system_prompt_bytes)?;
         let agent = Self::assemble(Build {
             system,
             caps,
@@ -765,7 +773,18 @@ impl Agent {
         // parent's narrowed to a requested base (`parent ⊓ base`).
         let shell = self.transport.shell_mut().shell.fork_session();
         let child_id = fresh_id();
-        let log = self.log.lock().fork(child_id, self.system.len())?;
+        // The bookend's `system_prompt_bytes` must be the *child's* own
+        // resolved prompt, not `self.system.len()`: `returns` may differ
+        // from this agent's own (a `/branch` child withholds `reply`
+        // however its creator's own bit reads), and `Agent::assemble`
+        // below resolves each agent's index from its own bits alone.
+        // Resolved here, ahead of `assemble`'s own resolution, from the
+        // same `returns`/`allow_schedule` bits the child's `Build` carries,
+        // so the log exists (and can record it) before the agent it
+        // describes does.
+        let system_prompt_bytes =
+            crate::prompt::resolve_builtin_index(&self.system_base, returns, self.allow_schedule).len();
+        let log = self.log.lock().fork(child_id, system_prompt_bytes)?;
         // One less than the parent's — the child's ceiling on how many more
         // generations it may itself spawn before the tools disappear.
         let fuel = self.fuel.saturating_sub(1);
@@ -907,12 +926,16 @@ impl Agent {
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
         let shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
+        // Resolved for the same `returns: true, allow_schedule: false` bits
+        // `Build` below fixes for every `for_test` trunk, so the bookend
+        // matches this agent's own `system` rather than the raw template.
+        let system_prompt_bytes = crate::prompt::resolve_builtin_index(system, true, false).len();
         let log = AgentLog::root(
             &dir.join("sessions"),
             id,
             "test-model",
             "test",
-            system.len(),
+            system_prompt_bytes,
         )?;
         let provider = ProviderHandle::new(Arc::new(Provider::scripted(
             "test-model",
@@ -2171,13 +2194,10 @@ impl Agent {
             schedules: self.schedules.clone(),
             pins: self.pins.clone(),
             log: self.log.clone(),
-            // The unresolved template, not `self.system`: a desk-spawned
-            // child (`amnemon`/`mnemon`/`commit`/`verify-commitment`) always
-            // returns, which may differ from this agent's own `returns` —
-            // `Agent::assemble` must resolve the child's index from the
-            // child's own bits, which it can only do if the placeholder is
-            // still there to resolve.
-            system: self.system_base.clone(),
+            // A desk-spawned child (`amnemon`/`mnemon`/`commit`/
+            // `verify-commitment`) always returns, which may differ from
+            // this agent's own `returns`.
+            system_template: self.system_base.clone(),
             focus: self.focus.clone(),
             interactive: self.interactive,
             nursery,
@@ -2257,6 +2277,12 @@ impl Agent {
         // makes no further calls never does. `AbsentDesk` holds nothing, so
         // replacing it here drops the capture the moment this call is done.
         self.transport.set_desk(Arc::new(desk::AbsentDesk));
+        // Retire the nursery too, the symmetric teardown of the desk above:
+        // it holds nothing once the turn guard has emptied it, so this is
+        // not about a leak, but a hypothetical `fork_into_nursery` between
+        // calls must answer the honest absence error rather than find a
+        // stale nursery still installed.
+        self.transport.clear_nursery();
         // Harvest whatever this call's `reply` handler staged, right after
         // the desk that could still write it is gone — the one legitimate
         // writer has retired, so the cell is ours by ownership now. `if let`,
@@ -3033,6 +3059,83 @@ mod tests {
             !branch.system.contains("reply"),
             "a branch withholds `reply` just like the trunk it forked from: {}",
             branch.system
+        );
+    }
+
+    /// Read the recorded `system_prompt_bytes` off a session's
+    /// `SessionStarted` bookend — the first event in its `events.json`.
+    fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
+        let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
+        let first: crate::event::SessionEvent = serde_json::Deserializer::from_str(&body)
+            .into_iter()
+            .next()
+            .expect("events.json must have at least one event")
+            .expect("first event must parse");
+        match first {
+            crate::event::SessionEvent::SessionStarted {
+                system_prompt_bytes,
+                ..
+            } => system_prompt_bytes,
+            other => panic!("first event must be SessionStarted, got {other:?}"),
+        }
+    }
+
+    /// The `SessionStarted` bookend's `system_prompt_bytes` must be the
+    /// constructed agent's own resolved `system.len()` — never a parent's
+    /// resolved length, and never the raw (still-templated) length the
+    /// unresolved `system_base` carries. `Agent::fork_with` is exercised
+    /// twice here, once for each direction a `returns` flip can take: an
+    /// ordinary fork gains `reply` its non-returning parent withheld, and a
+    /// `/branch` child withholds `reply` its returning parent held.
+    #[test]
+    fn fork_and_branch_bookend_record_the_childs_own_resolved_length() {
+        let dir = tmp("bookend-resolved-length");
+        let scratch = Scratch::new().expect("scratch dir");
+        let template = format!(
+            "persona\n\n# Builtins\n\n{}",
+            crate::prompt::BUILTIN_INDEX_PLACEHOLDER
+        );
+        let root = Agent::root(
+            template,
+            ral_core::types::Capabilities::default(),
+            &scratch,
+            &dir,
+            "test-model",
+            "test",
+            false, // allow_schedule
+            true,  // interactive: withholds `reply`
+            false, // chat
+            scripted("test-model", Script::new()),
+            None,
+        )
+        .expect("root trunk");
+
+        let child = root.fork(root.caps().clone()).expect("fork child");
+        assert_ne!(
+            child.system.len(),
+            root.system.len(),
+            "the fork's bits must actually differ from its parent's for \
+             this test to be meaningful"
+        );
+        assert_eq!(
+            recorded_system_prompt_bytes(&child.log_dir()),
+            child.system.len(),
+            "an ordinary fork's bookend must record its own resolved \
+             system, not its non-returning parent's"
+        );
+
+        let grandchild = child.branch().expect("branch grandchild");
+        assert_ne!(
+            grandchild.system.len(),
+            child.system.len(),
+            "the branch's bits must actually differ from its parent's for \
+             this test to be meaningful"
+        );
+        assert_eq!(
+            recorded_system_prompt_bytes(&grandchild.log_dir()),
+            grandchild.system.len(),
+            "a /branch child's bookend must record its own resolved \
+             system, not its returning parent's"
         );
     }
 

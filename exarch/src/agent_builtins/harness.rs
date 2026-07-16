@@ -150,6 +150,20 @@ fn commitment_key(v: &Value, tool: &str) -> Settled<String> {
     Ok(key)
 }
 
+/// Decode a spawn enquiry's `` `started `` receipt into the record the
+/// builtin returns, or a didactic error naming the shape violation or the
+/// refusal — shared by [`spawn_body`] (`amnemon`/`mnemon`), `commit`, and
+/// `verify-commitment`. `tool` names the caller in the error text.
+fn spawn_receipt(answer: FOValue, tool: &str) -> Settled<Value> {
+    let FOValue::Variant { label, payload: Some(payload) } = answer else {
+        return Err(sig(format!("{tool}: host answered an unexpected shape for its receipt")));
+    };
+    if label != "started" {
+        return Err(sig(format!("{tool}: host refused: {label}")));
+    }
+    Ok(Value::from(*payload))
+}
+
 /// The `amnemon`/`mnemon` shared body: validate the door, fork this shell
 /// into the turn's nursery, and enquire `` `agent-start `` with the
 /// adopted session's id — the builtin-body half of a spawn, mirroring
@@ -185,81 +199,25 @@ fn spawn_body(args: &[Value], shell: &Shell, tool: &str, kind: &'static str) -> 
             ],
         })),
     })?;
-
-    let FOValue::Variant { label, payload: Some(payload) } = answer else {
-        return Err(sig(format!("{tool}: host answered an unexpected shape for its receipt")));
-    };
-    if label != "started" {
-        return Err(sig(format!("{tool}: host refused: {label}")));
-    }
-    Ok(Value::from(*payload))
+    spawn_receipt(answer, tool)
 }
 
-/// `amnemon <prompt> <title> <permissions>` — launch an independent,
-/// blank-context sub-agent. This is launch-only and always asynchronous:
-/// the call returns immediately with a receipt `[id: Int, title: Str,
-/// log-dir: Str]`; the child's own reply is NOT this call's result — it
-/// arrives later, as its own marked turn in your inbox, once the child
-/// finishes. `prompt` is the child's whole instruction: it starts a fresh
-/// conversation with no shared history, only a value-snapshot of your
-/// shell's bindings, cwd, and env; if it carries `$`, `!`, or quotes, write
-/// it as a raw string `#'…'#` so it reaches the child literally. `title`
-/// names its tab and must fit the tab-bar contract — non-empty, at most 24
-/// characters, ASCII letters/digits/`-`/`_` only — or the call is refused.
-/// `permissions` bounds the child's authority to at most your own and must
-/// be exactly one of the six variants `` `confined `` (offline, no home
-/// reads), `` `minimal `` (working tree + /tmp + network), `` `read-only ``
-/// (writes only to scratch), `` `edit-only `` (edits the working tree, no
-/// build tooling), `` `reasonable `` (everyday tooling), `` `dangerous ``
-/// (no narrowing); any other label is refused, naming all six. Delegation
-/// depth is finite: each descendant is handed one less unit of fuel than
-/// its spawner holds, and once fuel reaches zero this call is refused —
-/// fuel bounds how deep a chain may recurse, never how many children you
-/// may start at any one depth, so starting several at once costs nothing
-/// extra. Answered only on the turn that calls it: inside `spawn { … }`
-/// this errors, since a detached worker outlives the turn whose desk could
-/// answer it.
+/// `amnemon` — the blank-context spawn; see [`spawn_body`] for the door and
+/// enquiry it shares with `mnemon`, and the `doc:` field below for the
+/// model-facing contract.
 fn builtin_amnemon(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     spawn_body(args, shell, "amnemon", "amnemon")
 }
 
-/// `mnemon <prompt> <title> <permissions>` — launch a sub-agent that
-/// inherits your current model-visible conversation (every message you and
-/// the model have exchanged so far) and reuses your current provider
-/// selection, appending `prompt` as its fresh final prompt — useful when
-/// the child needs the context you already built and the provider can
-/// reuse its prompt cache. It also gets a value-snapshot of your shell's
-/// bindings, cwd, and env, exactly as `amnemon` would. This is launch-only
-/// and always asynchronous: the call returns immediately with a receipt
-/// `[id: Int, title: Str, log-dir: Str]`; the child's own reply is NOT this
-/// call's result — it arrives later, as its own marked turn in your inbox,
-/// once the child finishes. `prompt` should ride a raw string `#'…'#` if it
-/// carries `$`, `!`, or quotes, so it reaches the child literally. `title`
-/// names its tab and must fit the tab-bar contract — non-empty, at most 24
-/// characters, ASCII letters/digits/`-`/`_` only — or the call is refused.
-/// `permissions` bounds the child's authority to at most your own and must
-/// be exactly one of the six variants `` `confined `` (offline, no home
-/// reads), `` `minimal `` (working tree + /tmp + network), `` `read-only ``
-/// (writes only to scratch), `` `edit-only `` (edits the working tree, no
-/// build tooling), `` `reasonable `` (everyday tooling), `` `dangerous ``
-/// (no narrowing); any other label is refused, naming all six. Delegation
-/// depth is finite: each descendant is handed one less unit of fuel than
-/// its spawner holds, and once fuel reaches zero this call is refused —
-/// fuel bounds how deep a chain may recurse, never how many children you
-/// may start at any one depth, so starting several at once costs nothing
-/// extra. Answered only on the turn that calls it: inside `spawn { … }`
-/// this errors, since a detached worker outlives the turn whose desk could
-/// answer it.
+/// `mnemon` — the context-inheriting spawn; see [`spawn_body`] for the door
+/// and enquiry it shares with `amnemon`, and the `doc:` field below for the
+/// model-facing contract.
 fn builtin_mnemon(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     spawn_body(args, shell, "mnemon", "mnemon")
 }
 
-/// `agents` — list the live descendants you started that are still
-/// running, each as `[id: Int, title: Str, elapsed-s: Int, log-dir: Str]`.
-/// Use it to recover ids after a context compaction, then `agent-cancel` to
-/// stop a straggler. Settled agents are not listed: their replies arrive on
-/// their own as marked turns in your inbox. Answered only on the turn that
-/// calls it: inside `spawn { … }` this errors.
+/// `agents` — thin wrapper around the `` `agent-list `` enquiry: silent, no
+/// chrome; the answer's listing is the return value directly.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body"
@@ -275,14 +233,8 @@ fn builtin_agents(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `message <id> <text>` — send `text` as a marked turn to the live
-/// descendant named by `id` (from `agents`, a spawn receipt, or an id you
-/// deliberately included in a child's prompt); it lands at its next turn
-/// boundary, not as human input. Only a descendant of yours may receive
-/// it — never a sibling, an ancestor, or yourself — and the call is refused
-/// otherwise. This does not return the recipient's answer: it is for
-/// coordination only. Answered only on the turn that calls it: inside
-/// `spawn { … }` this errors.
+/// `message <id> <text>` — validates `id` is non-negative, then enquires
+/// `` `message ``; descendant-scoping and delivery errors are the desk's.
 fn builtin_message(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "message")?;
     let id = match args[0].as_int() {
@@ -304,12 +256,8 @@ fn builtin_message(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Unit)
 }
 
-/// `agent-cancel <id>` — cancel the live descendant named by `id` (from
-/// `agents`). It is asked to stop at its next checkpoint and then delivers
-/// a cancelled result to your inbox; a no-op if no live agent has that id.
-/// Only a descendant of yours may be cancelled — never a sibling, an
-/// ancestor, or yourself — and the call is refused otherwise. Answered only
-/// on the turn that calls it: inside `spawn { … }` this errors.
+/// `agent-cancel <id>` — validates `id` is non-negative, then enquires
+/// `` `agent-cancel ``; descendant-scoping is the desk's.
 fn builtin_agent_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent-cancel")?;
     let id = match args[0].as_int() {
@@ -330,25 +278,10 @@ fn builtin_agent_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Unit)
 }
 
-/// `schedule <spec>` — arm a self-wakeup: at the chosen time a marked turn
-/// carrying the spec's `prompt` is delivered to your inbox and re-engages
-/// you at your next turn boundary, with no human present. `spec` is a record
-/// with exactly three fields: `trigger`, `label`, and `prompt`. `trigger` is
-/// exactly one of `` `cron '<expr>' `` — a five-field cron expression
-/// (minute hour day-of-month month day-of-week) in the host's local
-/// timezone, e.g. `` `cron '0 9 * * 1-5' `` for weekdays at 09:00; recurring
-/// — or `` `after '<n><unit>' `` — a one-shot relative delay, unit one of
-/// s/m/h/d, e.g. `` `after '30m' ``, `` `after '2h' ``; any other shape is
-/// refused, naming both. `label` is `` `some '<name>' `` to give the
-/// schedule a human-readable name shown by `schedules`, or `` `none `` to
-/// take the default `sched-{id}`; any other shape is refused, naming both.
-/// `prompt` is the natural-language instruction you act on when woken, not
-/// code — e.g. `` schedule [trigger: `after '30m', label: `none, prompt:
-/// 'check the build'] ``. Returns the new schedule's id. Requires the
-/// self-wakeup grant (`--allow-schedule`) — an agent that can wake itself
-/// indefinitely holds real authority, so without the grant this call is
-/// refused. Answered only on the turn that calls it: inside `spawn { … }`
-/// this errors.
+/// `schedule <spec>` — decodes the spec record's `trigger`/`label` fields
+/// through [`schedule_trigger`]/[`schedule_label`] (re-running the real
+/// parsers so a malformed expression fails here, not at the desk), then
+/// enquires `` `schedule ``. The grant refusal is the desk's.
 fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "schedule")?;
     let Value::Map(spec) = &args[0] else {
@@ -388,13 +321,8 @@ fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Int(value))
 }
 
-/// `schedules` — list your live scheduled wakeups, each as `[id: Int, label:
-/// Str, trigger: Str, next-s: Int, fires: Int]` — `next-s` the seconds until
-/// the next fire, `fires` how many times it has fired so far. Use it to
-/// recover schedule ids after a context compaction, then `unschedule` to
-/// remove one. Requires the self-wakeup grant (`--allow-schedule`) and is
-/// refused without it. Answered only on the turn that calls it: inside
-/// `spawn { … }` this errors.
+/// `schedules` — thin wrapper around the `` `schedule-list `` enquiry:
+/// silent, no chrome; the grant refusal is the desk's.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body"
@@ -410,11 +338,8 @@ fn builtin_schedules(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `unschedule <id>` — remove a scheduled wakeup by its id (from
-/// `schedules`). A no-op if no schedule has that id. Requires the
-/// self-wakeup grant (`--allow-schedule`) and is refused without it.
-/// Answered only on the turn that calls it: inside `spawn { … }` this
-/// errors.
+/// `unschedule <id>` — validates `id` is non-negative, then enquires
+/// `` `unschedule ``; the grant refusal is the desk's.
 fn builtin_unschedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "unschedule")?;
     let id = match args[0].as_int() {
@@ -435,27 +360,10 @@ fn builtin_unschedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Unit)
 }
 
-/// `commit <key> <description>` — open a new protected commitment. `key` is
-/// yours to choose: `` `commitment:` `` followed by one or more ASCII
-/// letters, digits, `.`, `_`, or `-` (e.g. `commitment:plan-x`); any other
-/// shape is refused, naming the grammar. `description` is what you are
-/// committing to, in your own words, and must not be empty — it is not
-/// saved verbatim. This is launch-only and always asynchronous: the call
-/// forks a host-owned, read-only writer child that formalizes your
-/// description into concrete, falsifiable criteria, and returns
-/// immediately with a receipt `[id: Int, title: Str, log-dir: Str]`; the
-/// writer's own reply is NOT this call's result — it arrives later, as its
-/// own marked turn in your inbox, and only a well-formed criteria card
-/// opens the pin. You choose the key and the description; the host alone
-/// builds the writer's prompt and bounds it to read-only, so you can never
-/// steer its criteria or its authority. The call is refused if `key` is
-/// already a live commitment — verify or clear it first. Once open, only a
-/// passing `verify-commitment` can close it; you cannot unpin or overwrite
-/// it yourself. Delegation depth is finite: the writer is handed one less
-/// unit of fuel than you hold, and once your fuel reaches zero this call is
-/// refused. Answered only on the turn that calls it: inside `spawn { … }`
-/// this errors, since a detached worker outlives the turn whose desk could
-/// answer it.
+/// `commit <key> <description>` — validates the key grammar and that
+/// `description` is non-empty, forks this shell into the turn's nursery,
+/// and enquires `` `commit-open `` with the adopted session's id. The
+/// live-key refusal and the writer's own prompt are the desk's.
 fn builtin_commit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "commit")?;
     let key = commitment_key(&args[0], "commit")?;
@@ -479,33 +387,13 @@ fn builtin_commit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             ],
         })),
     })?;
-
-    let FOValue::Variant { label, payload: Some(payload) } = answer else {
-        return Err(sig("commit: host answered an unexpected shape for its receipt"));
-    };
-    if label != "started" {
-        return Err(sig(format!("commit: host refused: {label}")));
-    }
-    Ok(Value::from(*payload))
+    spawn_receipt(answer, "commit")
 }
 
-/// `verify-commitment <key>` — ask a host-owned, read-only verifier child
-/// to check one live protected commitment pin. `key` must be the full
-/// `` `commitment:` ``-prefixed key of a currently live commitment (from a
-/// `commit` receipt or your own record); any other shape is refused, naming
-/// the grammar. You supply only the key — no instructions, evidence, or
-/// verifier prompt of your own reach it. This is launch-only and always
-/// asynchronous: the call forks the verifier and returns immediately with a
-/// receipt `[id: Int, title: Str, log-dir: Str]`; the verifier's own reply
-/// is NOT this call's result — it arrives later, as its own marked turn in
-/// your inbox. The host alone reads the saved commitment card, builds the
-/// verifier's prompt, and bounds it to read-only; the pin clears only if
-/// the verifier returns a structured pass verdict, and stays live on a fail
-/// or on any other reply shape. Delegation depth is finite: the verifier is
-/// handed one less unit of fuel than you hold, and once your fuel reaches
-/// zero this call is refused. Answered only on the turn that calls it:
-/// inside `spawn { … }` this errors, since a detached worker outlives the
-/// turn whose desk could answer it.
+/// `verify-commitment <key>` — validates the key grammar, forks this shell
+/// into the turn's nursery, and enquires `` `commit-verify `` with the
+/// adopted session's id. Reading the live pin and building the verifier's
+/// own prompt are the desk's.
 fn builtin_verify_commitment(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "verify-commitment")?;
     let key = commitment_key(&args[0], "verify-commitment")?;
@@ -521,22 +409,12 @@ fn builtin_verify_commitment(args: &[Value], shell: &mut Shell) -> Settled<Value
             items: vec![FOValue::Int { value: session_id }, FOValue::String { value: key }],
         })),
     })?;
-
-    let FOValue::Variant { label, payload: Some(payload) } = answer else {
-        return Err(sig("verify-commitment: host answered an unexpected shape for its receipt"));
-    };
-    if label != "started" {
-        return Err(sig(format!("verify-commitment: host refused: {label}")));
-    }
-    Ok(Value::from(*payload))
+    spawn_receipt(answer, "verify-commitment")
 }
 
-/// `reply <value>` — hand `value` back to whoever spawned you: the sole
-/// return path for a returning agent. `value` must be first-order data (no
-/// closures, handles, or environments); a door check runs
-/// [`FOValue::try_from`] before any enquiry crosses, so a violation fails
-/// only this call, engine-side, with a didactic error — the run does not
-/// end, and you may call `reply` again with a value that qualifies.
+/// `reply <value>` — the first-orderness door runs [`FOValue::try_from`]
+/// before any enquiry crosses, so a violation fails only this call,
+/// engine-side; the non-returning refusal is the desk's.
 fn builtin_reply(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "reply")?;
     let payload = FOValue::try_from(&args[0]).map_err(|_| {

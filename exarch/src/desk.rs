@@ -85,8 +85,13 @@ pub(crate) struct HostServices {
     /// This session's canonical event log — `mnemon`'s context-inheriting
     /// fork reads it.
     pub log: LogCell,
-    /// The system prompt, for a spawned child's own log.
-    pub system: String,
+    /// The system prompt *template* a spawned child's own `Build::system`
+    /// is fed from — still carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`]
+    /// rather than a baked-in builtin index, since the index is filtered
+    /// per agent and this template is agent-invariant. [`Agent::assemble`]
+    /// resolves it into the child's own [`Agent::system`] from the child's
+    /// own `returns`/`allow_schedule`.
+    pub system_template: String,
     /// The fleet's focused-agent handle, for a spawned child to become
     /// parkable the instant the human `TAB`s to it.
     pub focus: Arc<AtomicU64>,
@@ -236,6 +241,41 @@ fn payload_label(v: FOValue, class: &str) -> Result<Option<String>, Error> {
     }
 }
 
+/// The parameters that vary across the spawn spine's three callers —
+/// `agent-start`, `commit-open`, and `commit-verify`. Every other step of
+/// that spine (the generation guard, the fuel guard, `nursery.adopt`,
+/// `policy::narrow`, the parent-log fork, `Agent::assemble`'s `Build`
+/// literal, `spawn_async`'s register/detach/settle mechanics, and the
+/// `` `started `` receipt) is identical for all three and lives once in
+/// [`ExarchDesk::launch`].
+struct Launch<'a> {
+    /// The nursery id the builtin body parked its fork under.
+    session_id: u64,
+    /// The class name named in every refusal this launch raises
+    /// (`"agent-start"`, `"commit-open"`, `"commit-verify"`).
+    verb: &'a str,
+    /// The retry verb the /clear refusal names (`"amnemon/mnemon"`,
+    /// `"commit"`, `"verify-commitment"`).
+    retry: &'a str,
+    /// The plural noun the fuel-exhaustion refusal names (`"agents"`,
+    /// `"commitments"`, `"verifications"`).
+    fuel_noun: &'a str,
+    /// The permission base to narrow the child's authority against — the
+    /// caller-chosen label for `agent-start`, hard-coded `"read-only"` for
+    /// the commitment pair, which never lets the actor choose a writer's or
+    /// verifier's authority.
+    permissions: &'a str,
+    /// Whether the child imports the parent's model-visible conversation —
+    /// true only for a `mnemon` spawn.
+    inherit_context: bool,
+    /// The tool name `spawn_async` records on the child, and the chrome its
+    /// `Kind::ToolCall` spawn line already carries.
+    tool: &'static str,
+    title: String,
+    prompt: String,
+    commitment: Option<crate::tools::commitment::CommitmentIntent>,
+}
+
 impl ExarchDesk {
     /// Decode one enquiry class and answer it.
     ///
@@ -273,49 +313,30 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `agent-start `` — the desk half of `amnemon`/`mnemon`: adopt the
-    /// nursery-parked fork the builtin body forked, narrow its permissions,
-    /// assemble it into a full child, and hand it to [`spawn_async`] exactly
-    /// as `tools::agent::dispatch_spawn` does today. A relocation of that
-    /// function's post-parse logic, not a rewrite.
-    fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+    /// The spawn spine shared by `agent-start`, `commit-open`, and
+    /// `commit-verify`: adopt the nursery-parked fork the builtin body
+    /// forked, narrow its authority against the parent's own ceiling, fork
+    /// its own session log off the parent's, assemble it into a full child
+    /// at one less unit of fuel, and hand it to
+    /// [`spawn_async`](crate::tools::agent::spawn_async) exactly as
+    /// `tools::agent::dispatch_spawn`/`tools::commitment::commit`/
+    /// `tools::commitment::verify_commitment` do today. The generation and
+    /// fuel guards run before [`Nursery::adopt`]; every refusal downstream
+    /// of that point simply drops the adopted `Shell` like any other owned
+    /// value, never a leak.
+    fn launch(&self, spec: Launch) -> Result<FOValue, Error> {
         let s = &self.services;
-
-        let items = payload_list(
-            payload,
-            "agent-start",
-            "[session, kind, prompt, title, permissions]",
-            5,
-        )?;
-        let [session, kind, prompt, title, permissions]: [FOValue; 5] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
-        let session_id = payload_int(session, "agent-start", "session")?;
-        if session_id < 0 {
-            return Err(Error::new("`agent-start`: `session` must be a non-negative Int", 1));
-        }
-        let kind = payload_tag(kind, "agent-start", "kind")?;
-        let mnemon = match kind.as_str() {
-            "amnemon" => false,
-            "mnemon" => true,
-            other => {
-                return Err(Error::new(
-                    format!("`agent-start`: `kind` must be `amnemon` or `mnemon`, got `{other}`"),
-                    1,
-                ));
-            }
-        };
-        let prompt = payload_string(prompt, "agent-start", "prompt")?;
-        let title = payload_string(title, "agent-start", "title")?;
-        let permissions = payload_tag(permissions, "agent-start", "permissions")?;
 
         // 1. The /clear guard: this call's captured fuel, caps, and grant
         // are only as fresh as the generation they were snapshotted under.
         if s.generation != s.registry.generation() {
             return Err(Error::new(
-                "agent-start refused: the agent tree was cleared while this call was still in \
-                 flight, so the fuel and permissions snapshot it captured are now stale — issue \
-                 amnemon/mnemon again on your next turn",
+                format!(
+                    "{} refused: the agent tree was cleared while this call was still in \
+                     flight, so the fuel and permissions snapshot it captured are now stale — \
+                     issue {} again on your next turn",
+                    spec.verb, spec.retry
+                ),
                 1,
             ));
         }
@@ -326,11 +347,14 @@ impl ExarchDesk {
         // generations deep bottoms out.
         if s.fuel == 0 {
             return Err(Error::new(
-                "agent-start refused: no spawn fuel remains at this depth, so amnemon/mnemon \
-                 cannot delegate any further here. Fuel bounds how deep a chain of spawns may \
-                 recurse, never how many children you may start at any one depth — starting \
-                 several agents here costs nothing extra. agent-cancel on any node stops its \
-                 whole live subtree regardless of depth.",
+                format!(
+                    "{} refused: no spawn fuel remains at this depth, so {} cannot delegate \
+                     any further here. Fuel bounds how deep a chain of spawns may recurse, \
+                     never how many children you may start at any one depth — starting several \
+                     {} here costs nothing extra. agent-cancel on any node stops its whole live \
+                     subtree regardless of depth.",
+                    spec.verb, spec.retry, spec.fuel_noun
+                ),
                 1,
             ));
         }
@@ -338,11 +362,13 @@ impl ExarchDesk {
         // 3. Adopt the parked fork the builtin body forked. Once past this
         // point every remaining refusal simply drops the adopted `Shell` —
         // never a leak, since it is an ordinary owned value.
-        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
-        let Some(shell) = s.nursery.adopt(NurseryId(session_id as u64)) else {
+        let Some(shell) = s.nursery.adopt(NurseryId(spec.session_id)) else {
             return Err(Error::new(
-                "`agent-start`: no forked session parked under this id — it may already have \
-                 started, or the turn that forked it has ended",
+                format!(
+                    "`{}`: no forked session parked under this id — it may already have \
+                     started, or the turn that forked it has ended",
+                    spec.verb
+                ),
                 1,
             ));
         };
@@ -351,21 +377,29 @@ impl ExarchDesk {
         // `policy::narrow` names all six legal bases in its own diagnostic
         // when `permissions` is not one of them.
         let cwd = s.cwd.to_string_lossy();
-        let child_caps = crate::policy::narrow(&s.caps, &permissions, &cwd)
+        let child_caps = crate::policy::narrow(&s.caps, spec.permissions, &cwd)
             .map_err(|reason| Error::new(reason, 1))?;
 
         // 5. Fork the child's own log off the parent's; a mnemon spawn
         // additionally imports the parent's model-visible context, exactly
         // as `Agent::inherit_context` does for `fork_remembering`/`branch`
         // — done here, on the raw `AgentLog`, since the child is not yet an
-        // `Agent` for `inherit_context` to take a `&Self` of.
+        // `Agent` for `inherit_context` to take a `&Self` of. The bookend's
+        // `system_prompt_bytes` must be the child's own resolved prompt,
+        // never the unresolved template's raw length — every spawn through
+        // this spine fixes the child's bits at `returns: true,
+        // allow_schedule: s.allow_schedule` below, so that same resolution
+        // is run here, ahead of `Agent::assemble`'s own, to size the
+        // bookend the log records at construction.
         let child_id = crate::agent::fresh_id();
+        let system_prompt_bytes =
+            crate::prompt::resolve_builtin_index(&s.system_template, true, s.allow_schedule).len();
         let child_log = {
             let parent_log = s.log.lock();
             let mut child_log = parent_log
-                .fork(child_id, s.system.len())
+                .fork(child_id, system_prompt_bytes)
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
-            let inherited = mnemon.then(|| parent_log.inherited_context_messages());
+            let inherited = spec.inherit_context.then(|| parent_log.inherited_context_messages());
             drop(parent_log);
             if let Some(messages) = inherited {
                 child_log
@@ -381,7 +415,7 @@ impl ExarchDesk {
         // `fork_session`'s fresh ones.
         let fuel = s.fuel - 1;
         let child = Agent::assemble(Build {
-            system: s.system.clone(),
+            system: s.system_template.clone(),
             caps: child_caps,
             shell,
             log: child_log,
@@ -408,10 +442,10 @@ impl ExarchDesk {
             s.mailbox.clone(),
             child,
             crate::tools::agent::AsyncSpawn {
-                tool: if mnemon { "mnemon" } else { "amnemon" },
-                title,
-                prompt: Some(prompt),
-                commitment: None,
+                tool: spec.tool,
+                title: spec.title,
+                prompt: Some(spec.prompt),
+                commitment: spec.commitment,
             },
             &s.emit,
         );
@@ -428,6 +462,55 @@ impl ExarchDesk {
             }),
             Err(reason) => Err(Error::new(reason, 1)),
         }
+    }
+
+    /// `` `agent-start `` — the desk half of `amnemon`/`mnemon`: decode the
+    /// door (the `kind` tag, the permissions label the launch narrows
+    /// against) and hand off to [`Self::launch`] for the spawn spine shared
+    /// with the commitment pair.
+    fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let items = payload_list(
+            payload,
+            "agent-start",
+            "[session, kind, prompt, title, permissions]",
+            5,
+        )?;
+        let [session, kind, prompt, title, permissions]: [FOValue; 5] = items
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let session_id = payload_int(session, "agent-start", "session")?;
+        if session_id < 0 {
+            return Err(Error::new("`agent-start`: `session` must be a non-negative Int", 1));
+        }
+        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
+        let session_id = session_id as u64;
+        let kind = payload_tag(kind, "agent-start", "kind")?;
+        let mnemon = match kind.as_str() {
+            "amnemon" => false,
+            "mnemon" => true,
+            other => {
+                return Err(Error::new(
+                    format!("`agent-start`: `kind` must be `amnemon` or `mnemon`, got `{other}`"),
+                    1,
+                ));
+            }
+        };
+        let prompt = payload_string(prompt, "agent-start", "prompt")?;
+        let title = payload_string(title, "agent-start", "title")?;
+        let permissions = payload_tag(permissions, "agent-start", "permissions")?;
+
+        self.launch(Launch {
+            session_id,
+            verb: "agent-start",
+            retry: "amnemon/mnemon",
+            fuel_noun: "agents",
+            permissions: &permissions,
+            inherit_context: mnemon,
+            tool: if mnemon { "mnemon" } else { "amnemon" },
+            title,
+            prompt,
+            commitment: None,
+        })
     }
 
     /// `` `agent-list `` — the desk half of `agents`: a registry listing
@@ -554,6 +637,24 @@ impl ExarchDesk {
         }
     }
 
+    /// The self-wakeup grant guard `schedule`, `schedule-list`, and
+    /// `unschedule` each refuse without, differing only in the leading verb
+    /// name. `verb` names the caller in the refusal text.
+    fn require_schedule_grant(&self, verb: &str) -> Result<(), Error> {
+        if self.services.allow_schedule {
+            return Ok(());
+        }
+        Err(Error::new(
+            format!(
+                "`{verb}` refused: this agent does not hold the self-wakeup grant. An agent \
+                 that can wake itself indefinitely holds real authority, so the grant is off \
+                 by default; relaunch with `--allow-schedule` if this session genuinely needs \
+                 to schedule its own wakeups."
+            ),
+            1,
+        ))
+    }
+
     /// `` `schedule `` — the desk half of `schedule`: arm a self-wakeup,
     /// wrapping [`ScheduleRegistry::schedule`] exactly as
     /// `tools::schedule::ScheduleTool::dispatch` does today. `trigger` and
@@ -561,16 +662,8 @@ impl ExarchDesk {
     /// builtin's own door already ran — the both-ends validation law: a
     /// builtin's door check is never this desk's only line of defence.
     fn schedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        self.require_schedule_grant("schedule")?;
         let s = &self.services;
-        if !s.allow_schedule {
-            return Err(Error::new(
-                "`schedule` refused: this agent does not hold the self-wakeup grant. An \
-                 agent that can wake itself indefinitely holds real authority, so the grant \
-                 is off by default; relaunch with `--allow-schedule` if this session \
-                 genuinely needs to schedule its own wakeups.",
-                1,
-            ));
-        }
 
         let items = payload_list(payload, "schedule", "[trigger, label, prompt]", 3)?;
         let [trigger, label, prompt]: [FOValue; 3] = items
@@ -601,16 +694,8 @@ impl ExarchDesk {
     /// this agent's own live scheduled wakeups. Silent, like today's
     /// `SchedulesTool` — no chrome, the answer carries the whole listing.
     fn schedule_list(&self) -> Result<FOValue, Error> {
+        self.require_schedule_grant("schedule-list")?;
         let s = &self.services;
-        if !s.allow_schedule {
-            return Err(Error::new(
-                "`schedule-list` refused: this agent does not hold the self-wakeup grant. An \
-                 agent that can wake itself indefinitely holds real authority, so the grant \
-                 is off by default; relaunch with `--allow-schedule` if this session \
-                 genuinely needs to schedule its own wakeups.",
-                1,
-            ));
-        }
         Ok(FOValue::List {
             items: s
                 .schedules
@@ -646,16 +731,8 @@ impl ExarchDesk {
     /// scheduled wakeup by id. Error texts and chrome kept verbatim from
     /// today's `UnscheduleTool`.
     fn unschedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        self.require_schedule_grant("unschedule")?;
         let s = &self.services;
-        if !s.allow_schedule {
-            return Err(Error::new(
-                "`unschedule` refused: this agent does not hold the self-wakeup grant. An \
-                 agent that can wake itself indefinitely holds real authority, so the grant \
-                 is off by default; relaunch with `--allow-schedule` if this session \
-                 genuinely needs to schedule its own wakeups.",
-                1,
-            ));
-        }
         let items = payload_list(payload, "unschedule", "[id]", 1)?;
         let [id]: [FOValue; 1] = items
             .try_into()
@@ -683,15 +760,13 @@ impl ExarchDesk {
         Ok(FOValue::Unit)
     }
 
-    /// `` `commit-open `` — the desk half of `commit`: adopt the
-    /// nursery-parked fork the builtin body forked, narrow it to
-    /// `read-only` itself (the actor never chooses the writer's authority),
-    /// and hand it to [`spawn_async`](crate::tools::agent::spawn_async)
-    /// tagged [`CommitmentIntent::Write`](crate::tools::commitment::CommitmentIntent::Write)
-    /// exactly as `tools::commitment::commit` does today. A relocation of
-    /// that function's post-parse logic, not a rewrite; the pin-liveness
-    /// refusal reads `services.pins` through
-    /// [`shell_eval::commitment_card`] rather than `&Agent`.
+    /// `` `commit-open `` — the desk half of `commit`: check the key
+    /// grammar and the live-key refusal (chrome kept verbatim from today's
+    /// `CommitTool::dispatch`, reading `services.pins` through
+    /// [`shell_eval::commitment_card`] rather than `&Agent`), then hand off
+    /// to [`Self::launch`], narrowed to `read-only` and tagged
+    /// [`CommitmentIntent::Write`](crate::tools::commitment::CommitmentIntent::Write)
+    /// so the actor never chooses the writer's prompt or authority.
     fn commit_open(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
 
@@ -703,6 +778,8 @@ impl ExarchDesk {
         if session_id < 0 {
             return Err(Error::new("`commit-open`: `session` must be a non-negative Int", 1));
         }
+        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
+        let session_id = session_id as u64;
         let key = payload_string(key, "commit-open", "key")?;
         if !crate::tools::commitment::valid_commitment_key(&key) {
             return Err(Error::new(
@@ -716,29 +793,7 @@ impl ExarchDesk {
         }
         let description = payload_string(description, "commit-open", "description")?;
 
-        // 1. The /clear guard, exactly as `agent-start`'s.
-        if s.generation != s.registry.generation() {
-            return Err(Error::new(
-                "commit-open refused: the agent tree was cleared while this call was still in \
-                 flight, so the fuel and permissions snapshot it captured are now stale — issue \
-                 commit again on your next turn",
-                1,
-            ));
-        }
-
-        // 2. Fuel bounds depth, not fan-out, exactly as `agent-start`'s.
-        if s.fuel == 0 {
-            return Err(Error::new(
-                "commit-open refused: no spawn fuel remains at this depth, so commit cannot \
-                 delegate any further here. Fuel bounds how deep a chain of spawns may recurse, \
-                 never how many children you may start at any one depth — starting several \
-                 commitments here costs nothing extra. agent-cancel on any node stops its whole \
-                 live subtree regardless of depth.",
-                1,
-            ));
-        }
-
-        // 3. Refuse a key that is already live before ever adopting the
+        // Refuse a key that is already live before ever adopting the parked
         // fork, so a refused call never spawns a writer — chrome kept
         // verbatim from today's `CommitTool::dispatch`.
         if shell_eval::commitment_card(&s.pins, &key).is_ok() {
@@ -754,94 +809,31 @@ impl ExarchDesk {
             return Err(Error::new(msg, 1));
         }
 
-        // 4. Adopt the parked fork the builtin body forked.
-        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
-        let Some(shell) = s.nursery.adopt(NurseryId(session_id as u64)) else {
-            return Err(Error::new(
-                "`commit-open`: no forked session parked under this id — it may already have \
-                 started, or the turn that forked it has ended",
-                1,
-            ));
-        };
-
-        // 5. Narrow to `read-only` here, in the handler: the actor never
-        // chooses the writer's prompt or authority.
-        let cwd = s.cwd.to_string_lossy();
-        let child_caps = crate::policy::narrow(&s.caps, "read-only", &cwd)
-            .map_err(|reason| Error::new(reason, 1))?;
-
-        // 6. Fork the writer's own log off the parent's, blank like an
-        // `amnemon` child — a writer never inherits model-visible context.
-        let child_id = crate::agent::fresh_id();
-        let child_log = {
-            let parent_log = s.log.lock();
-            parent_log
-                .fork(child_id, s.system.len())
-                .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?
-        };
-
-        // 7. Assemble the child at one less unit of fuel than this agent
-        // holds, mirroring `agent-start`'s `Build` literal verbatim.
-        let fuel = s.fuel - 1;
-        let child = Agent::assemble(Build {
-            system: s.system.clone(),
-            caps: child_caps,
-            shell,
-            log: child_log,
-            parent: Some(s.parent),
-            fuel,
-            provider: ProviderHandle::new(s.provider.current()),
-            focus: s.focus.clone(),
-            interactive: s.interactive,
-            returns: true,
-            allow_schedule: s.allow_schedule,
-            tools: crate::tools::tools_for(true, s.allow_schedule, fuel > 0),
-            agents: s.registry.clone(),
-            disk_warn_bytes: s.disk_warn_bytes,
-        })
-        .map_err(|e| Error::new(format!("could not assemble child session: {e}"), 1))?;
-
-        // 8. Register, detach, and spawn — the host-owned writer prompt,
-        // untouched from `tools::commitment::writer_prompt`.
+        // The host-owned writer prompt, untouched from
+        // `tools::commitment::writer_prompt`.
         let prompt = crate::tools::commitment::writer_prompt(&key, &description);
         let title = crate::tools::commitment::shorten(&description);
-        let spawned = crate::tools::agent::spawn_async(
-            &s.registry,
-            s.parent,
-            s.mailbox.clone(),
-            child,
-            crate::tools::agent::AsyncSpawn {
-                tool: "commit",
-                title,
-                prompt: Some(prompt),
-                commitment: Some(crate::tools::commitment::CommitmentIntent::Write(key)),
-            },
-            &s.emit,
-        );
-        match spawned {
-            Ok(child) => Ok(FOValue::Variant {
-                label: "started".to_string(),
-                payload: Some(Box::new(FOValue::Map {
-                    entries: vec![
-                        ("id".to_string(), agent_id_to_fo(child.id)),
-                        ("title".to_string(), FOValue::String { value: child.title }),
-                        ("log-dir".to_string(), FOValue::String { value: child.log_dir }),
-                    ],
-                })),
-            }),
-            Err(reason) => Err(Error::new(reason, 1)),
-        }
+        self.launch(Launch {
+            session_id,
+            verb: "commit-open",
+            retry: "commit",
+            fuel_noun: "commitments",
+            permissions: "read-only",
+            inherit_context: false,
+            tool: "commit",
+            title,
+            prompt,
+            commitment: Some(crate::tools::commitment::CommitmentIntent::Write(key)),
+        })
     }
 
-    /// `` `commit-verify `` — the desk half of `verify-commitment`: adopt
-    /// the nursery-parked fork the builtin body forked, narrow it to
-    /// `read-only` itself, and hand it to
-    /// [`spawn_async`](crate::tools::agent::spawn_async) tagged
+    /// `` `commit-verify `` — the desk half of `verify-commitment`: check
+    /// the key grammar and read the live pin (chrome kept verbatim from
+    /// today's `VerifyCommitmentTool::dispatch`, through
+    /// [`shell_eval::commitment_card`] rather than `&Agent`), then hand off
+    /// to [`Self::launch`], narrowed to `read-only` and tagged
     /// [`CommitmentIntent::Verify`](crate::tools::commitment::CommitmentIntent::Verify)
-    /// exactly as `tools::commitment::verify_commitment` does today. A
-    /// relocation of that function's post-parse logic, not a rewrite; the
-    /// pin-liveness read goes through [`shell_eval::commitment_card`]
-    /// rather than `&Agent`.
+    /// so the actor never chooses the verifier's prompt or authority.
     fn commit_verify(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
 
@@ -853,6 +845,8 @@ impl ExarchDesk {
         if session_id < 0 {
             return Err(Error::new("`commit-verify`: `session` must be a non-negative Int", 1));
         }
+        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
+        let session_id = session_id as u64;
         let key = payload_string(key, "commit-verify", "key")?;
         if !crate::tools::commitment::valid_commitment_key(&key) {
             return Err(Error::new(
@@ -865,29 +859,7 @@ impl ExarchDesk {
             ));
         }
 
-        // 1. The /clear guard, exactly as `agent-start`'s.
-        if s.generation != s.registry.generation() {
-            return Err(Error::new(
-                "commit-verify refused: the agent tree was cleared while this call was still in \
-                 flight, so the fuel and permissions snapshot it captured are now stale — issue \
-                 verify-commitment again on your next turn",
-                1,
-            ));
-        }
-
-        // 2. Fuel bounds depth, not fan-out, exactly as `agent-start`'s.
-        if s.fuel == 0 {
-            return Err(Error::new(
-                "commit-verify refused: no spawn fuel remains at this depth, so \
-                 verify-commitment cannot delegate any further here. Fuel bounds how deep a \
-                 chain of spawns may recurse, never how many children you may start at any one \
-                 depth — starting several verifications here costs nothing extra. agent-cancel \
-                 on any node stops its whole live subtree regardless of depth.",
-                1,
-            ));
-        }
-
-        // 3. The key must be live — chrome kept verbatim from today's
+        // The key must be live — chrome kept verbatim from today's
         // `VerifyCommitmentTool::dispatch`.
         let card = match shell_eval::commitment_card(&s.pins, &key) {
             Ok(card) => card,
@@ -902,84 +874,23 @@ impl ExarchDesk {
             }
         };
 
-        // 4. Adopt the parked fork the builtin body forked.
-        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
-        let Some(shell) = s.nursery.adopt(NurseryId(session_id as u64)) else {
-            return Err(Error::new(
-                "`commit-verify`: no forked session parked under this id — it may already have \
-                 started, or the turn that forked it has ended",
-                1,
-            ));
-        };
-
-        // 5. Narrow to `read-only` here, in the handler: the actor never
-        // chooses the verifier's prompt or authority.
-        let cwd = s.cwd.to_string_lossy();
-        let child_caps = crate::policy::narrow(&s.caps, "read-only", &cwd)
-            .map_err(|reason| Error::new(reason, 1))?;
-
-        // 6. Fork the verifier's own log off the parent's, blank like an
-        // `amnemon` child.
-        let child_id = crate::agent::fresh_id();
-        let child_log = {
-            let parent_log = s.log.lock();
-            parent_log
-                .fork(child_id, s.system.len())
-                .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?
-        };
-
-        // 7. Assemble the child at one less unit of fuel than this agent
-        // holds, mirroring `agent-start`'s `Build` literal verbatim.
-        let fuel = s.fuel - 1;
-        let child = Agent::assemble(Build {
-            system: s.system.clone(),
-            caps: child_caps,
-            shell,
-            log: child_log,
-            parent: Some(s.parent),
-            fuel,
-            provider: ProviderHandle::new(s.provider.current()),
-            focus: s.focus.clone(),
-            interactive: s.interactive,
-            returns: true,
-            allow_schedule: s.allow_schedule,
-            tools: crate::tools::tools_for(true, s.allow_schedule, fuel > 0),
-            agents: s.registry.clone(),
-            disk_warn_bytes: s.disk_warn_bytes,
-        })
-        .map_err(|e| Error::new(format!("could not assemble child session: {e}"), 1))?;
-
-        // 8. Register, detach, and spawn — the host-owned verifier prompt,
-        // untouched from `tools::commitment::verifier_prompt`.
+        // The host-owned verifier prompt, untouched from
+        // `tools::commitment::verifier_prompt`.
         let summary = crate::card::summary_line(&card);
         let prompt = crate::tools::commitment::verifier_prompt(&key, &card, &summary);
         let title = crate::tools::commitment::shorten(summary.lines().next().unwrap_or(&summary));
-        let spawned = crate::tools::agent::spawn_async(
-            &s.registry,
-            s.parent,
-            s.mailbox.clone(),
-            child,
-            crate::tools::agent::AsyncSpawn {
-                tool: "verify_commitment",
-                title,
-                prompt: Some(prompt),
-                commitment: Some(crate::tools::commitment::CommitmentIntent::Verify(key)),
-            },
-            &s.emit,
-        );
-        match spawned {
-            Ok(child) => Ok(FOValue::Variant {
-                label: "started".to_string(),
-                payload: Some(Box::new(FOValue::Map {
-                    entries: vec![
-                        ("id".to_string(), agent_id_to_fo(child.id)),
-                        ("title".to_string(), FOValue::String { value: child.title }),
-                        ("log-dir".to_string(), FOValue::String { value: child.log_dir }),
-                    ],
-                })),
-            }),
-            Err(reason) => Err(Error::new(reason, 1)),
-        }
+        self.launch(Launch {
+            session_id,
+            verb: "commit-verify",
+            retry: "verify-commitment",
+            fuel_noun: "verifications",
+            permissions: "read-only",
+            inherit_context: false,
+            tool: "verify_commitment",
+            title,
+            prompt,
+            commitment: Some(crate::tools::commitment::CommitmentIntent::Verify(key)),
+        })
     }
 
     /// `` `reply `` — the desk half of the `reply` builtin: stage the
@@ -1170,7 +1081,7 @@ mod tests {
                 schedules: ScheduleRegistry::new(),
                 pins: Arc::default(),
                 log: LogCell::new(fresh_log()),
-                system: String::new(),
+                system_template: String::new(),
                 focus: Arc::new(AtomicU64::new(NO_FOCUS)),
                 interactive: false,
                 nursery: Nursery::default(),
@@ -1201,7 +1112,7 @@ mod tests {
                 schedules: ScheduleRegistry::new(),
                 pins: Arc::default(),
                 log: LogCell::new(fresh_log()),
-                system: String::new(),
+                system_template: String::new(),
                 focus: Arc::new(AtomicU64::new(NO_FOCUS)),
                 interactive: false,
                 nursery: Nursery::default(),
@@ -1258,7 +1169,7 @@ mod tests {
                 schedules: ScheduleRegistry::new(),
                 pins: Arc::default(),
                 log: LogCell::new(fresh_log()),
-                system: String::new(),
+                system_template: String::new(),
                 focus: Arc::new(AtomicU64::new(NO_FOCUS)),
                 interactive: false,
                 nursery: Nursery::default(),
@@ -1507,6 +1418,104 @@ mod tests {
             }
             other => panic!("expected an Agent result turn, got {other:?}"),
         }
+    }
+
+    /// Read the recorded `system_prompt_bytes` off a session's
+    /// `SessionStarted` bookend — the first event in its `events.json`.
+    fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
+        let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
+        let first: crate::event::SessionEvent = serde_json::Deserializer::from_str(&body)
+            .into_iter()
+            .next()
+            .expect("events.json must have at least one event")
+            .expect("first event must parse");
+        match first {
+            crate::event::SessionEvent::SessionStarted {
+                system_prompt_bytes,
+                ..
+            } => system_prompt_bytes,
+            other => panic!("first event must be SessionStarted, got {other:?}"),
+        }
+    }
+
+    /// A desk-spawned child's `SessionStarted` bookend must record its own
+    /// resolved system prompt length — `ExarchDesk::launch` fixes every
+    /// spawn's bits at `returns: true, allow_schedule: services.allow_schedule`,
+    /// never the raw `HostServices.system_template` `Self::launch` forks
+    /// the child's log from.
+    #[test]
+    fn agent_start_bookend_records_the_childs_resolved_length() {
+        let (mut desk, _registry, parent_inbox) = spawnable_desk(3);
+        let template = format!(
+            "persona\n\n# Builtins\n\n{}",
+            crate::prompt::BUILTIN_INDEX_PLACEHOLDER
+        );
+        desk.services.system_template = template.clone();
+        let provider = Arc::new(Provider::scripted(
+            "test-model",
+            ProviderKind::Openai,
+            Script::new().then(Reply::tool_calls(vec![reply_call("hi from child")])),
+        ));
+        desk.services.provider.swap(provider);
+
+        let root = root_shell();
+        let shell = forkable_child_shell(&root);
+        let session = desk.services.nursery.park(shell);
+
+        let answer = desk
+            .handle(FOValue::Variant {
+                label: "agent-start".into(),
+                payload: Some(Box::new(FOValue::List {
+                    items: vec![
+                        FOValue::Int {
+                            value: i64::try_from(session.0).expect("small test id"),
+                        },
+                        FOValue::Variant {
+                            label: "amnemon".into(),
+                            payload: None,
+                        },
+                        FOValue::String {
+                            value: "say hi".into(),
+                        },
+                        FOValue::String {
+                            value: "helper".into(),
+                        },
+                        FOValue::Variant {
+                            label: "confined".into(),
+                            payload: None,
+                        },
+                    ],
+                })),
+            })
+            .expect("a valid agent-start must succeed");
+
+        let FOValue::Variant { payload: Some(payload), .. } = answer else {
+            panic!("expected a `started` variant");
+        };
+        let FOValue::Map { entries } = *payload else {
+            panic!("expected a record payload");
+        };
+        let log_dir = entries
+            .iter()
+            .find_map(|(k, v)| match (k.as_str(), v) {
+                ("log-dir", FOValue::String { value }) => Some(value.clone()),
+                _ => None,
+            })
+            .expect("the receipt must carry the child's log directory");
+
+        let expected =
+            crate::prompt::resolve_builtin_index(&template, true, desk.services.allow_schedule)
+                .len();
+        assert_eq!(
+            recorded_system_prompt_bytes(std::path::Path::new(&log_dir)),
+            expected,
+            "the bookend must record the spawned child's own resolved \
+             system, not the unresolved template HostServices captured"
+        );
+
+        // Drain the child's settle so this test does not leave a background
+        // thread racing the process past this test's own teardown.
+        let _ = wait_for_settle(&parent_inbox);
     }
 
     /// A spawner with no fuel left is refused with the exhaustion text —
