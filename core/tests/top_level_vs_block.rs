@@ -71,6 +71,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
         surface: None,
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }) {
         TurnReport::Ran { result, .. } => result,

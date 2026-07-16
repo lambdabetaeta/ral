@@ -10,8 +10,8 @@
 
 use super::{INVALID_INPUT, Tool, invalid_input, u64_field};
 use crate::agent::Agent;
-use crate::agent_registry::MessageError;
-use crate::bus::{AgentOutcome, AgentResult, Emitter, InboxMsg, Kind};
+use crate::agent_registry::{AgentRegistry, MessageError};
+use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, InboxMsg, Kind, Mailbox};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use serde_json::{Value, json};
@@ -243,14 +243,21 @@ pub(crate) fn spawn_branch(
         prompt: prompt.map(str::to_string),
         commitment: None,
     };
-    spawn_async(session, child, spec, emit)
+    spawn_async(
+        &session.agents,
+        session.id,
+        session.mailbox(),
+        child,
+        spec,
+        emit,
+    )
 }
 
 fn dispatch_spawn(
     kind: SpawnKind,
     id: String,
     input: &Value,
-    session: &mut Agent,
+    session: &Agent,
     emit: &Emitter,
 ) -> SessionToolResult {
     let Args {
@@ -284,13 +291,23 @@ fn dispatch_spawn(
         prompt: Some(prompt),
         commitment: None,
     };
-    model_receipt(id, spawn_async(session, child, spec, emit))
+    model_receipt(
+        id,
+        spawn_async(
+            &session.agents,
+            session.id,
+            session.mailbox(),
+            child,
+            spec,
+            emit,
+        ),
+    )
 }
 
 /// The tool-specific half of an async spawn: everything that varies between
 /// `amnemon`/`mnemon` and `commit`/`verify_commitment`, as opposed to the
 /// fork-detach-register mechanics every one of them shares ([`spawn_async`]).
-pub(super) struct AsyncSpawn {
+pub(crate) struct AsyncSpawn {
     pub tool: &'static str,
     pub title: String,
     /// The child's launch prompt, or `None` to park and wait — a branch, which
@@ -336,8 +353,10 @@ pub(crate) struct SpawnedChild {
 /// # Errors
 /// Returns `Err(String)` if the registration is refused or the worker
 /// thread could not be spawned.
-pub(super) fn spawn_async(
-    session: &Agent,
+pub(crate) fn spawn_async(
+    registry: &AgentRegistry,
+    parent: AgentId,
+    parent_mailbox: Mailbox,
     mut child: Agent,
     spec: AsyncSpawn,
     emit: &Emitter,
@@ -354,7 +373,7 @@ pub(super) fn spawn_async(
     // mailbox (the child's upward result edge).  The child is registered
     // under *this* agent as its parent, so the subtree cascade reaches it.
     let agent_id = child.id;
-    let log_dir = child.log_dir().to_path_buf();
+    let log_dir = child.log_dir();
     let log_dir_str = log_dir.display().to_string();
     let cancel = child.cancel_token().clone();
     // The child's eval-layer cancel handle, registered so the cascade can
@@ -375,9 +394,9 @@ pub(super) fn spawn_async(
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
     // one fact gates the reaper ceiling, the tab kind, and the settle epilogue.
     let delivers = child.returns();
-    let Some(generation) = session.agents.register(crate::agent_registry::Registration {
+    let Some(generation) = registry.register(crate::agent_registry::Registration {
         id: agent_id,
-        parent: Some(session.id),
+        parent: Some(parent),
         ceiling: delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
         title: title.clone(),
         log_dir: log_dir.clone(),
@@ -391,8 +410,9 @@ pub(super) fn spawn_async(
             "could not start agent {agent_id}: this session is no longer live"
         ));
     };
-    let parent_mailbox = session.mailbox();
-    let registry = session.agents.clone();
+    // An owned, `'static` clone for the worker thread; `registry` itself
+    // stays free for the unwind path below if the thread never spawns.
+    let worker_registry = AgentRegistry::clone(registry);
     // A live tab whenever the bus outlives the turn (the TUI): a real
     // emitter cloned off the session sender, stamped with the child's id
     // and carrying the child's own mailbox.  Off a per-turn bus (headless)
@@ -408,7 +428,7 @@ pub(super) fn spawn_async(
     };
     let started = Instant::now();
     let born_title = title.clone();
-    let born_parent = session.id;
+    let born_parent = parent;
     let worker_title = title.clone();
     // Seed the launch turn into the child's own inbox: the only downward
     // edge is this one write.  A branch has no prompt — it parks for the human.
@@ -488,7 +508,7 @@ pub(super) fn spawn_async(
                         "the parent's inbox rejected this result: {reject}"
                     )));
                 }
-                registry.settle(agent_id, generation);
+                worker_registry.settle(agent_id, generation);
             }
         });
     match worker {
@@ -505,7 +525,7 @@ pub(super) fn spawn_async(
             // instead of never having been created.  No worker will ever call
             // `settle`, so this is the one place that can: the registry ends
             // up exactly as if the spawn had never been attempted.
-            session.agents.settle(agent_id, generation);
+            registry.settle(agent_id, generation);
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
             emit.emit(Kind::Error(msg.clone()));
             Err(msg)

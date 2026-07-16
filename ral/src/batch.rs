@@ -202,6 +202,7 @@ pub(crate) fn run_batch(
         surface: None,
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }) {
         TurnReport::Ran { result, .. } => result,

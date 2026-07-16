@@ -73,6 +73,7 @@ fn prompt_turn(name: &str) -> TurnRequest<'static> {
         surface: None,
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }
 }

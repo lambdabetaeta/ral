@@ -22,8 +22,10 @@ use crate::provider::Provider;
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
-mod agent;
-mod commitment;
+// `pub(crate)`: `spawn_async` and friends need to reach outside `tools/`
+// for the desk a later step adds.
+pub(crate) mod agent;
+pub(crate) mod commitment;
 mod ral;
 mod reply;
 mod schedule;
@@ -36,7 +38,7 @@ mod schedule;
 /// advertised to the provider nor dispatchable, so there is no separate
 /// permission predicate to keep in sync.
 pub(crate) enum Gate {
-    /// Unconditionally present: `ral`, `agents`/`message`/`agent_cancel`, `fff`.
+    /// Unconditionally present: `ral`, `agents`/`message`/`agent_cancel`.
     Always,
     /// Present only on a **returning** agent — `reply`, the way an agent hands
     /// a value back.  Withheld from the interactive trunk, which converses with

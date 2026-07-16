@@ -23,6 +23,7 @@ use std::fs;
 use std::io::Write;
 
 mod fff_index;
+mod harness;
 
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
@@ -43,8 +44,11 @@ pub const INSTALLER_TAG: &str = "exarch-agent";
 /// anything, gains it). This is the one source of truth: [`install_on`]
 /// installs these sets and the prompt's builtin index names them, so the two
 /// cannot drift.
-pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] =
-    &[EXARCH_BUILTINS, ral_core::builtins::SERVICE_BUILTIN];
+pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] = &[
+    EXARCH_BUILTINS,
+    harness::HARNESS_BUILTINS,
+    ral_core::builtins::SERVICE_BUILTIN,
+];
 
 /// Register the exarch host builtins process-wide and install them into
 /// `shell`. Idempotent. The REPL and batch hosts never call this, so they
@@ -1251,6 +1255,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         };
         match shell.run_turn(req) {

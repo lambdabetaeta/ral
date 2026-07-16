@@ -26,6 +26,7 @@ use crate::bus::{
     WORKER_PANIC_PREFIX,
 };
 use crate::cancel;
+use crate::desk;
 use crate::digest::{
     AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
@@ -39,6 +40,7 @@ use crate::shell_eval;
 use crate::tools::CommitmentSettle;
 use crate::transcript::Transcript;
 use ral_core::Shell;
+use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use ral_core::transport::Transport;
 use std::io;
@@ -61,10 +63,50 @@ pub(crate) struct ProbedWorker {
     pub(crate) settled_epoch: Option<u64>,
 }
 
+/// A returning agent's staged return value: a shared slot the `reply` desk
+/// handler writes into ([`Self::set`]) and [`Agent::apply`]'s drain reads
+/// out of ([`Self::take`]) once the tool-call batch has fully drained.
+/// `Arc`-shared, not a plain field, so [`desk::HostServices`] can hold its
+/// own clone and stage a reply without ever reaching back through
+/// `&mut Agent` — the reentrancy law a desk handler is bound by
+/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3).
+#[derive(Clone, Default)]
+pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
+
+impl ReplyCell {
+    /// Stage `value` as the return payload. Last write wins within a turn:
+    /// an earlier stage in the same batch is silently overwritten, matching
+    /// today's `set_reply` overwrite.
+    pub(crate) fn set(&self, value: FOValue) {
+        *self.0.lock().expect("reply cell poisoned") = Some(value);
+    }
+
+    /// Take the staged payload, leaving the cell empty — the drain-site
+    /// read once the tool-call batch has fully drained.
+    pub(crate) fn take(&self) -> Option<FOValue> {
+        self.0.lock().expect("reply cell poisoned").take()
+    }
+
+    /// Clear any staged payload without reading it — the entry-reset
+    /// invariant `Agent::apply` runs on every entry, so a reply staged in a
+    /// turn that then cancels, errors, or panics before the drain that
+    /// takes it never survives to poison the next turn.
+    pub(crate) fn clear(&self) {
+        *self.0.lock().expect("reply cell poisoned") = None;
+    }
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, disk_warn_latched); not a candidate for a combined enum"
+)]
 pub struct Agent {
     pub id: AgentId,
     pub(crate) system: String,
-    log: AgentLog,
+    /// This session's canonical event log.  Its own lock, never the session
+    /// lock, so a per-turn desk can capture it off `&mut Agent`; uncontended
+    /// in practice, since the desk runs while the drive thread is elsewhere.
+    log: Arc<Mutex<AgentLog>>,
     /// This session's operational trace (`transcript.jsonl`), written at the
     /// emit seam through the [`Emitter`](crate::bus::Emitter) the frontend
     /// builds from [`Self::transcript`].  The sibling of [`Self::log`]: the
@@ -136,20 +178,30 @@ pub struct Agent {
     /// `reply` (withheld from the conversing trunk) and the self-wakeup family
     /// (the `--allow-schedule` grant).  See [`crate::tools::tools_for`].
     tools: Vec<&'static dyn crate::tools::Tool>,
-    /// A returning agent's staged return value, set by the `reply` tool's
-    /// dispatch (via [`Self::set_reply`]) and lifted by [`Self::apply`] into a
-    /// [`TurnOutcome::Replied`] once the current tool-call batch finishes
-    /// draining — never mid-batch, so the session reaches a clean boundary
-    /// with every `call_id` answered.  Held as the faithful
-    /// [`serde_json::Value`] the model passed, so the consuming edge renders it
-    /// (a null or empty value settles as the `Empty` variant of
+    /// Whether this agent holds `reply`, fixed at construction from the same
+    /// bit that shaped `tools` above, so the two cannot disagree.
+    returns: bool,
+    /// Whether this agent holds the self-wakeup family, likewise fixed at
+    /// construction and inherited verbatim by every fork. `pub(crate)` like
+    /// [`Self::agents`]/[`Self::schedules`] above, so a test in another
+    /// module (the schedule-family harness builtins' full-stack test) can
+    /// grant it directly on a [`Self::for_test`] trunk, which hardcodes it
+    /// `false`.
+    pub(crate) allow_schedule: bool,
+    /// A returning agent's staged return value, set by the `reply` desk
+    /// handler (via [`Self::set_reply`] for the coexisting `reply` tool) and
+    /// lifted by [`Self::apply`] into a [`TurnOutcome::Replied`] once the
+    /// current tool-call batch finishes draining — never mid-batch, so the
+    /// session reaches a clean boundary with every `call_id` answered.  Held
+    /// as the faithful [`FOValue`] the model passed, so the consuming edge
+    /// renders it (a null or empty value settles as the `Empty` variant of
     /// [`AgentOutcome`](crate::bus::AgentOutcome)).  Every returning
     /// agent sets it — a peer and the headless root; `reply` is withheld only
     /// from the interactive root.  Scoped to its own batch: [`Self::apply`]
     /// resets it on entry, so a reply staged in a turn that then cancels,
     /// errors, or panics before the drain that takes it never survives to
     /// poison the next turn.
-    reply: Option<serde_json::Value>,
+    reply: ReplyCell,
     /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
     /// shell as of the last clean tool-call boundary.  Refreshed inside
     /// `run_shell` right before each dispatch, so it always holds the dynamic
@@ -218,14 +270,15 @@ pub struct Agent {
 pub enum TurnOutcome {
     Complete(String),
     /// A returning agent called `reply`: the carried payload is its deliberate
-    /// return value, a faithful [`serde_json::Value`] (a JSON null when the
-    /// argument was absent or null).  Carried as a value, not pre-rendered
+    /// return value, a faithful [`FOValue`] (`FOValue::Unit` when the
+    /// argument was absent or unit).  Carried as a value, not pre-rendered
     /// text, so each consumer renders it at its own edge — prose for a model
-    /// parent, the structure itself for the headless harness.  Distinct from
-    /// [`Self::Complete`] precisely so the nudge layer can tell "already
-    /// returned" from "stopped without returning" and not re-nudge an agent
-    /// that replied.  Terminal: it ends the drive loop.
-    Replied(serde_json::Value),
+    /// parent, the structure itself for the headless harness (via
+    /// [`shell_eval::user_json`]).  Distinct from [`Self::Complete`]
+    /// precisely so the nudge layer can tell "already returned" from
+    /// "stopped without returning" and not re-nudge an agent that replied.
+    /// Terminal: it ends the drive loop.
+    Replied(FOValue),
     Empty,
     Stopped {
         reason: String,
@@ -343,29 +396,34 @@ const TRUNK_TITLE: &str = "main";
 
 /// The launch configuration threaded into [`Agent::assemble`] — bundled so
 /// the one constructor reads at the call site rather than as a wall of bare
-/// fields.
-struct Build {
-    system: String,
-    caps: ral_core::types::Capabilities,
-    shell: Shell,
-    log: AgentLog,
-    parent: Option<AgentId>,
-    fuel: u32,
-    provider: ProviderHandle,
-    focus: Arc<AtomicU64>,
-    interactive: bool,
-    tools: Vec<&'static dyn crate::tools::Tool>,
+/// fields.  Fields are `pub(crate)`: a desk handler assembles a spawned
+/// child's `Build` literal directly from its captured `HostServices` (the
+/// one place lawfully holding the adopted nursery shell), not through
+/// `Agent::fork`/`fork_with`, which stay the ordinary in-thread path.
+pub(crate) struct Build {
+    pub(crate) system: String,
+    pub(crate) caps: ral_core::types::Capabilities,
+    pub(crate) shell: Shell,
+    pub(crate) log: AgentLog,
+    pub(crate) parent: Option<AgentId>,
+    pub(crate) fuel: u32,
+    pub(crate) provider: ProviderHandle,
+    pub(crate) focus: Arc<AtomicU64>,
+    pub(crate) interactive: bool,
+    pub(crate) returns: bool,
+    pub(crate) allow_schedule: bool,
+    pub(crate) tools: Vec<&'static dyn crate::tools::Tool>,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
-    agents: crate::agent_registry::AgentRegistry,
+    pub(crate) agents: crate::agent_registry::AgentRegistry,
     /// The operator's disk-warn ceiling, threaded from `config::disk_warn_bytes`
     /// at the trunk's construction and inherited verbatim by every fork — a
     /// host setting, not a per-agent choice.
-    disk_warn_bytes: Option<u64>,
+    pub(crate) disk_warn_bytes: Option<u64>,
 }
 
 impl Agent {
-    fn assemble(b: Build) -> io::Result<Self> {
+    pub(crate) fn assemble(b: Build) -> io::Result<Self> {
         let Build {
             system,
             caps,
@@ -376,6 +434,8 @@ impl Agent {
             provider,
             focus,
             interactive,
+            returns,
+            allow_schedule,
             tools,
             agents,
             disk_warn_bytes,
@@ -412,7 +472,7 @@ impl Agent {
         Ok(Self {
             id: log.id(),
             system,
-            log,
+            log: Arc::new(Mutex::new(log)),
             transcript,
             transport,
             caps,
@@ -426,7 +486,9 @@ impl Agent {
             cancel: cancel::Token::new(),
             turn_scope,
             tools,
-            reply: None,
+            returns,
+            allow_schedule,
+            reply: ReplyCell::default(),
             durable,
             agents,
             schedules: crate::schedule::ScheduleRegistry::new(),
@@ -449,7 +511,7 @@ impl Agent {
             parent: self.parent,
             ceiling: false, // a root (trunk or headless) is never abandoned: no ceiling
             title: TRUNK_TITLE.to_string(),
-            log_dir: self.log.dir().to_path_buf(),
+            log_dir: self.log.lock().expect("log poisoned").dir().to_path_buf(),
             cancel: self.cancel.clone(),
             eval_root: self.parent.map(|_| self.eval_root()),
             turn_scope: self.parent.map(|_| self.turn_scope()),
@@ -460,7 +522,7 @@ impl Agent {
 
     fn replace_shell(&mut self, shell: Shell) {
         let mut shell = shell;
-        seed_session_dir(&mut shell, &self.log);
+        seed_session_dir(&mut shell, &self.log.lock().expect("log poisoned"));
         // Re-arm and re-seal the rebuilt shell's binding-lease ledger — the
         // `/clear` half of "arming happens where the shell is installed"
         // (`decisions/260629_agent-binding-reaping`). The old ledger died
@@ -512,6 +574,8 @@ impl Agent {
             // itself here.
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive,
+            returns: !interactive,
+            allow_schedule,
             // Chat mode registers no tools at all: a bare conversation, nothing
             // to call.  Otherwise the interactive trunk converses and never
             // returns, so it withholds `reply`; a headless trunk is a returning
@@ -552,7 +616,10 @@ impl Agent {
         // are discarded before embedded library evaluation, and the exarch
         // cancel chain is restored over ral's freshly installed handlers.
         let shell = boot_root_shell(scratch);
-        self.log.clear(self.system.len())?;
+        self.log
+            .lock()
+            .expect("log poisoned")
+            .clear(self.system.len())?;
         // Cancel the outgoing shell's registered workers before it is
         // replaced — `/clear` outranks every lease, the durable class
         // included — while it is still unambiguously *this* shell reachable
@@ -620,7 +687,11 @@ impl Agent {
         // parent's narrowed to a requested base (`parent ⊓ base`).
         let shell = self.transport.shell_mut().shell.fork_session();
         let child_id = fresh_id();
-        let log = self.log.fork(child_id, self.system.len())?;
+        let log = self
+            .log
+            .lock()
+            .expect("log poisoned")
+            .fork(child_id, self.system.len())?;
         // One less than the parent's — the child's ceiling on how many more
         // generations it may itself spawn before the tools disappear.
         let fuel = self.fuel.saturating_sub(1);
@@ -640,6 +711,8 @@ impl Agent {
             // a child becomes parkable the instant the human `TAB`s to it.
             focus: self.focus.clone(),
             interactive: self.interactive,
+            returns,
+            allow_schedule: self.allow_schedule,
             // Every agent spawns while its fuel lasts; `returns` decides whether
             // this child holds `reply`.  Self-scheduling authority is inherited:
             // a `--allow-schedule` trunk grants its descendants the same right
@@ -659,8 +732,8 @@ impl Agent {
     /// instead of returning a value.  Mnemon-style context import, like
     /// `fork_remembering`.
     pub(crate) fn branch(&self) -> io::Result<Self> {
-        let mut child = self.fork_with(self.caps.clone(), false)?;
-        self.inherit_context(&mut child)?;
+        let child = self.fork_with(self.caps.clone(), false)?;
+        self.inherit_context(&child)?;
         Ok(child)
     }
 
@@ -673,22 +746,29 @@ impl Agent {
         &self,
         caps: ral_core::types::Capabilities,
     ) -> io::Result<Self> {
-        let mut child = self.fork(caps)?;
-        self.inherit_context(&mut child)?;
+        let child = self.fork(caps)?;
+        self.inherit_context(&child)?;
         Ok(child)
     }
 
     /// Import the creator's model-visible context into `child`, mnemon-style —
     /// the shared step behind `fork_remembering` and `branch()`.
-    fn inherit_context(&self, child: &mut Self) -> io::Result<()> {
+    fn inherit_context(&self, child: &Self) -> io::Result<()> {
+        let messages = self
+            .log
+            .lock()
+            .expect("log poisoned")
+            .inherited_context_messages();
         child
             .log
-            .import_context(self.log.inherited_context_messages())
+            .lock()
+            .expect("log poisoned")
+            .import_context(messages)
             .map_err(io::Error::other)
     }
 
-    pub(crate) fn log_dir(&self) -> &std::path::Path {
-        self.log.dir()
+    pub(crate) fn log_dir(&self) -> std::path::PathBuf {
+        self.log.lock().expect("log poisoned").dir().to_path_buf()
     }
 
     /// A handle to this session's [`Transcript`] — for the frontend to attach
@@ -776,6 +856,8 @@ impl Agent {
             provider,
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive: false,
+            returns: true,
+            allow_schedule: false,
             tools: crate::tools::tools_for(true, false, SPAWN_FUEL > 0),
             agents: crate::agent_registry::AgentRegistry::new(),
             // Unconfigured by default: a test that wants to exercise the
@@ -789,21 +871,30 @@ impl Agent {
     /// Whether the session is at a settled turn boundary — every turn
     /// must hand it back here.  Exposed for the harness to assert the
     /// transcript-admission invariant after a turn.
+    ///
+    /// # Panics
+    /// Panics if the log mutex is poisoned.
     pub fn is_ready(&self) -> bool {
-        self.log.is_ready()
+        self.log.lock().expect("log poisoned").is_ready()
     }
 
     /// The model-view messages the next request would carry.  Exposed
     /// for the harness to assert no malformed / empty message survives
     /// into the committed transcript.
+    ///
+    /// # Panics
+    /// Panics if the log mutex is poisoned.
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log.history_messages()
+        self.log.lock().expect("log poisoned").history_messages()
     }
 
     /// Serialised model-view byte count — the compaction-threshold
     /// input.  Exposed so the harness can assert compaction fired.
+    ///
+    /// # Panics
+    /// Panics if the log mutex is poisoned.
     pub fn history_bytes(&self) -> usize {
-        self.log.history_bytes()
+        self.log.lock().expect("log poisoned").history_bytes()
     }
 
     /// Reconcile the host-owned `services` pin against the shell's live
@@ -900,7 +991,7 @@ impl Agent {
             return;
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
-        let mut total = crate::resources::dir_size(self.log.dir());
+        let mut total = crate::resources::dir_size(self.log.lock().expect("log poisoned").dir());
         if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
             total += crate::resources::dir_size(&std::path::PathBuf::from(&scratch));
         }
@@ -1041,14 +1132,14 @@ impl Agent {
         // ── the event log ────────────────────────────────────────────────
         rows.push(ProbeRow::new(
             "log.events",
-            self.log.event_count() as u64,
+            self.log.lock().expect("log poisoned").event_count() as u64,
             None,
             "evict",
             Some("prefix drops with compaction".to_string()),
         ));
         rows.push(ProbeRow::new(
             "log.bytes",
-            self.log.history_bytes() as u64,
+            self.log.lock().expect("log poisoned").history_bytes() as u64,
             Some(COMPACT_THRESHOLD as u64),
             "evict",
             Some("auto-compaction threshold".to_string()),
@@ -1101,7 +1192,7 @@ impl Agent {
         ));
 
         // ── disk, walked at invocation ───────────────────────────────────
-        let log_dir = self.log.dir().to_path_buf();
+        let log_dir = self.log.lock().expect("log poisoned").dir().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
             crate::resources::dir_size(&log_dir),
@@ -1152,9 +1243,9 @@ impl Agent {
     /// dynamic context back to the last clean tool-call boundary and continues
     /// the loop, so one crashing turn never sinks the agent.  Returns the
     /// final turn's `(outcome, payload)` digest, where `payload` is the
-    /// faithful [`serde_json::Value`] a `reply` carried (else `None`); the
+    /// faithful [`FOValue`] a `reply` carried (else `None`); the
     /// interactive trunk ignores it, a child's spawn site renders it to text,
-    /// and the headless sink writes it faithfully.
+    /// and the headless sink projects it through [`shell_eval::user_json`].
     ///
     /// The provider is the agent's own [`ProviderHandle`], read once per turn,
     /// so a `/model` swap on this agent takes effect next turn; `control`
@@ -1167,7 +1258,7 @@ impl Agent {
         &mut self,
         control: &mut dyn Control,
         emit: &Emitter,
-    ) -> (AgentOutcome, Option<serde_json::Value>) {
+    ) -> (AgentOutcome, Option<FOValue>) {
         // The trunk publishes its sticky token for the OS-signal path, held for
         // the whole drive; a sub-agent's token is reached through the registry
         // cascade, never the slot, so it publishes nothing.
@@ -1253,8 +1344,11 @@ impl Agent {
                         AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
                         None,
                     );
-                    if !self.log.is_ready() {
-                        self.log.quiesce(QuiesceReason::Aborted);
+                    if !self.log.lock().expect("log poisoned").is_ready() {
+                        self.log
+                            .lock()
+                            .expect("log poisoned")
+                            .quiesce(QuiesceReason::Aborted);
                     }
                     continue;
                 }
@@ -1264,8 +1358,11 @@ impl Agent {
             // The post-loop guard does the same but only on loop exit;
             // quiesce per-iteration so the next prompt — nudge or user —
             // is admissible (turn-ends-ready invariant, X12).
-            if !self.log.is_ready() {
-                self.log.quiesce(QuiesceReason::Aborted);
+            if !self.log.lock().expect("log poisoned").is_ready() {
+                self.log
+                    .lock()
+                    .expect("log poisoned")
+                    .quiesce(QuiesceReason::Aborted);
             }
             digest = agent_digest(&outcome);
             let waiting_on_children = self.has_live_children();
@@ -1286,7 +1383,12 @@ impl Agent {
                 is_headless_root: self.parent.is_none() && !self.interactive,
             };
             let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
-            let nudge_msg = self.nudges.react(&outcome, &ctx, emit, &mut self.log);
+            let nudge_msg = self.nudges.react(
+                &outcome,
+                &ctx,
+                emit,
+                &mut self.log.lock().expect("log poisoned"),
+            );
             if let Some(msg) = &nudge_msg {
                 self.inbox
                     .push(InboxMsg::Nudge(msg.clone()))
@@ -1306,11 +1408,14 @@ impl Agent {
         // errors, but a `break` from `Replied` or a future exit path could
         // still bypass it.  This catch-all ensures the turn-ends-ready
         // invariant holds regardless of how the loop exits.
-        if !self.log.is_ready() {
-            self.log.quiesce(QuiesceReason::Aborted);
+        if !self.log.lock().expect("log poisoned").is_ready() {
+            self.log
+                .lock()
+                .expect("log poisoned")
+                .quiesce(QuiesceReason::Aborted);
         }
         debug_assert!(
-            self.log.is_ready(),
+            self.log.lock().expect("log poisoned").is_ready(),
             "drive must leave the agent ReadyForUser"
         );
         // The trunk removes itself at termination (a child is removed by its
@@ -1348,7 +1453,7 @@ impl Agent {
         // call.  Entering fresh here — every route into `apply` is a new turn
         // — is the one place that is structurally guaranteed to run, so it is
         // the one place this reset needs to live.
-        self.reply = None;
+        self.reply.clear();
         // Auto-compaction runs here, at the one boundary where `can_compact()`
         // actually holds — `apply` is entered `ReadyForUser` (the
         // turn-ends-ready invariant), before the prompt is committed.  Every
@@ -1358,6 +1463,8 @@ impl Agent {
         let mut last_text = String::new();
         if let Some(p) = prompt {
             self.log
+                .lock()
+                .expect("log poisoned")
                 .append_user(p)
                 .map_err(ProviderError::Other)?;
         }
@@ -1368,6 +1475,8 @@ impl Agent {
                 return Ok(self.capped(emit));
             }
             self.log
+                .lock()
+                .expect("log poisoned")
                 .record_step(n, provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             emit.emit(Kind::Step {
@@ -1379,6 +1488,8 @@ impl Agent {
             let t_render = std::time::Instant::now();
             let messages = self
                 .log
+                .lock()
+                .expect("log poisoned")
                 .render_messages()
                 .map_err(ProviderError::Other)?;
             ral_core::dbg_trace!(
@@ -1459,6 +1570,8 @@ impl Agent {
             // context-pressure compaction trigger at this turn's boundary.
             self.last_input = usage.input;
             self.log
+                .lock()
+                .expect("log poisoned")
                 .record_usage(usage.into())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             emit.emit(Kind::Usage(usage));
@@ -1478,6 +1591,8 @@ impl Agent {
             admit_assistant(&mut assistant_message);
             let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
             self.log
+                .lock()
+                .expect("log poisoned")
                 .append_assistant(
                     assistant_message,
                     tool_ids,
@@ -1548,6 +1663,8 @@ impl Agent {
             }
             let Dispatch { results, injected } = self.dispatch(provider, tool_calls, token, emit);
             self.log
+                .lock()
+                .expect("log poisoned")
                 .append_tool_results(results)
                 .map_err(ProviderError::Other)?;
             // Everything that arrived during the batch lands now, mid-turn:
@@ -1564,6 +1681,8 @@ impl Agent {
                     text.push_str(&turn.text());
                 }
                 self.log
+                    .lock()
+                    .expect("log poisoned")
                     .append_steering(text)
                     .map_err(ProviderError::Other)?;
             }
@@ -1580,13 +1699,13 @@ impl Agent {
     }
 
     pub(crate) fn compact(
-        &mut self,
+        &self,
         provider: &Arc<Provider>,
         emit: &Emitter,
         requested: bool,
         token: &cancel::Token,
     ) {
-        if !self.log.can_compact() {
+        if !self.log.lock().expect("log poisoned").can_compact() {
             if requested {
                 self.note_error("cannot compact while tool results are pending".into(), emit);
             }
@@ -1610,7 +1729,7 @@ impl Agent {
                 summary_cap_tokens(w),
             ),
             _ => {
-                let bytes = self.log.history_bytes();
+                let bytes = self.log.lock().expect("log poisoned").history_bytes();
                 (
                     bytes >= COMPACT_THRESHOLD,
                     format!("{} KB", bytes / 1024),
@@ -1628,8 +1747,8 @@ impl Agent {
             return;
         }
         // Keep the recent half verbatim; summarise the older prefix.
-        let keep = suffix_keep_budget(self.log.history_bytes());
-        let Some(plan) = self.log.plan_compaction(keep) else {
+        let keep = suffix_keep_budget(self.log.lock().expect("log poisoned").history_bytes());
+        let Some(plan) = self.log.lock().expect("log poisoned").plan_compaction(keep) else {
             // No turn old enough to summarise.  This is a no-op, not an event:
             // the absence of a `compacted` note already says nothing happened,
             // and the worker has no honest way to draw view-only chrome.
@@ -1639,20 +1758,30 @@ impl Agent {
         emit.emit(Kind::Phase("compacting".into()));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
-                if let Err(e) = self.log.record_usage(summary.usage.into()) {
+                let recorded = self
+                    .log
+                    .lock()
+                    .expect("log poisoned")
+                    .record_usage(summary.usage.into());
+                if let Err(e) = recorded {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
                 emit.emit(Kind::Usage(summary.usage));
-                if let Err(e) = self
+                let compacted = self
                     .log
-                    .apply_compaction(summary.summary, plan.suffix_start)
-                {
+                    .lock()
+                    .expect("log poisoned")
+                    .apply_compaction(summary.summary, plan.suffix_start);
+                if let Err(e) = compacted {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
                 Self::note(
-                    format!("[Compacted: now {} KB]", self.log.history_bytes() / 1024),
+                    format!(
+                        "[Compacted: now {} KB]",
+                        self.log.lock().expect("log poisoned").history_bytes() / 1024
+                    ),
                     emit,
                 );
             }
@@ -1727,12 +1856,10 @@ impl Agent {
     }
 
     /// A returning agent holds `reply`; a conversing one had it withheld at
-    /// construction.  The tool view is the single source of truth, so the nudge
-    /// layer, parking, and the advertised tools cannot disagree.
+    /// construction, from the same bit that built the tool view, so the two
+    /// cannot disagree.
     pub(crate) fn returns(&self) -> bool {
-        self.tools
-            .iter()
-            .any(|t| matches!(t.gate(), crate::tools::Gate::Returns))
+        self.returns
     }
 
     /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
@@ -1941,19 +2068,17 @@ impl Agent {
         &self.caps
     }
 
-    /// Whether this agent holds the self-wakeup family — read by [`Self::fork`]
-    /// so a child inherits the parent's `--allow-schedule` grant.  Derived from
-    /// the tool view itself, keeping it the one source of truth.
+    /// Whether this agent holds the self-wakeup family — read by
+    /// [`Self::fork_with`] so a child inherits the parent's
+    /// `--allow-schedule` grant.
     fn grants_schedule(&self) -> bool {
-        self.tools
-            .iter()
-            .any(|t| matches!(t.gate(), crate::tools::Gate::Schedules))
+        self.allow_schedule
     }
 
     /// Best-effort dual-write: log the chrome line, then forward it
     /// through `emit`.  A log write-failure must not block the user line.
-    pub(crate) fn note_error(&mut self, msg: String, emit: &Emitter) {
-        let _ = self.log.record_error(msg.clone());
+    pub(crate) fn note_error(&self, msg: String, emit: &Emitter) {
+        let _ = self.log.lock().expect("log poisoned").record_error(msg.clone());
         emit.emit(Kind::Error(msg));
     }
 
@@ -1963,6 +2088,43 @@ impl Agent {
     /// is not a message the model saw.
     pub(crate) fn note(text: String, emit: &Emitter) {
         emit.emit(Kind::SystemNote(text));
+    }
+
+    /// Capture this agent's [`desk::HostServices`] snapshot for a fresh
+    /// desk: everything a handler may read off `&Agent`, since the
+    /// reentrancy law (`docs/ral-wiki/decisions/260706_enquiry-channel.md`
+    /// §3) bars a handler from ever reaching back through
+    /// `&mut Agent`/`&mut Shell` to get it. Built fresh at every
+    /// [`Self::run_shell`] install, beside the deferred sink, so the
+    /// generation, fuel, caps, and grant a handler captures can never go
+    /// stale — the same reasoning `set_deferred_sink` documents.
+    pub(crate) fn host_services(
+        &self,
+        emit: &Emitter,
+        nursery: ral_core::types::Nursery,
+    ) -> desk::HostServices {
+        desk::HostServices {
+            registry: self.agents.clone(),
+            parent: self.id,
+            mailbox: self.mailbox(),
+            emit: emit.clone(),
+            provider: self.provider.clone(),
+            caps: self.caps.clone(),
+            cwd: self.cwd(),
+            fuel: self.fuel,
+            returns: self.returns,
+            allow_schedule: self.allow_schedule,
+            reply: self.reply.clone(),
+            schedules: self.schedules.clone(),
+            pins: self.pins.clone(),
+            log: self.log.clone(),
+            system: self.system.clone(),
+            focus: self.focus.clone(),
+            interactive: self.interactive,
+            nursery,
+            generation: self.agents.generation(),
+            disk_warn_bytes: self.disk_warn_bytes,
+        }
     }
 
     pub(crate) fn run_shell(
@@ -1987,6 +2149,28 @@ impl Agent {
         // generation (so a `/clear` drops a stale batch).
         self.transport
             .set_deferred_sink(shell_eval::deferred_sink(emit, self.id, &self.agents));
+        // The enquiry desk and its nursery: fresh for every ral call, for the
+        // same reason as the deferred sink above — a handler's captured
+        // generation, fuel, caps, and grant must never go stale. The nursery
+        // is the adoption end of a desk handler's body-side session fork
+        // (`Shell::fork_into_nursery`); `set_desk` wraps the desk in the
+        // identity drain-then-handle adapter so a handler's own chrome can
+        // never jump ahead of the turn's own surface output still queued on
+        // the transport (`docs/ral-wiki/decisions/260706_enquiry-channel.md`,
+        // "Identity binding").
+        let nursery = ral_core::types::Nursery::default();
+        self.transport.set_nursery(nursery.clone());
+        let desk = Arc::new(desk::ExarchDesk {
+            services: self.host_services(emit, nursery),
+        });
+        self.transport.set_desk(Arc::new(desk::DeskBinding {
+            desk: desk.clone(),
+            events: self.transport.events_shared(),
+            apply: desk::SurfaceApplier {
+                emit: emit.clone(),
+                pins: Some(self.pins.clone()),
+            },
+        }));
         let content = match shell_eval::run_shell(
             &self.transport,
             &self.caps,
@@ -1994,10 +2178,20 @@ impl Agent {
             timeout_secs,
             emit,
             Some(&self.pins),
+            Some(&desk),
         ) {
             shell_eval::Outcome::Ran(r) => render(&r),
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
         };
+        // Retire the desk immediately: `engine.desk` is unobservable between
+        // calls (nothing dispatches without `run_shell` installing a fresh
+        // one first, above), but the installed `DeskBinding` holds this
+        // call's `Emitter` clone — leaving the real desk in place would keep
+        // that clone (and the rest of its `HostServices` capture) alive
+        // until the *next* `ral` call ever replaces it, which a session that
+        // makes no further calls never does. `AbsentDesk` holds nothing, so
+        // replacing it here drops the capture the moment this call is done.
+        self.transport.set_desk(Arc::new(desk::AbsentDesk));
         // Advance the settled-retention sweep to this call's epoch: stamp
         // entries first observed settled, expire those whose unclaimed
         // result has sat a full retention of calls.  Expiry notices ride
@@ -2015,27 +2209,12 @@ impl Agent {
 
     /// Read a protected commitment pin for host-owned verification.  Model
     /// code cannot write this prefix through `surface`; verifier orchestration
-    /// reads the saved card here and treats it as data.
+    /// reads the saved card here and treats it as data.  The desk's
+    /// `` `commit-verify `` arm reads the identical logic off the captured
+    /// `PinDigests` Arc directly ([`shell_eval::commitment_card`]), since a
+    /// handler may never hold `&Agent`.
     pub(crate) fn commitment_card(&self, key: &str) -> Result<crate::card::Card, String> {
-        if !shell_eval::is_commitment_pin(key) {
-            return Err(format!(
-                "`{key}` is not a protected commitment pin; expected `{}<id>`",
-                shell_eval::COMMITMENT_PIN_PREFIX
-            ));
-        }
-        let m = self
-            .pins
-            .lock()
-            .map_err(|_| "commitment pin register is unavailable".to_string())?;
-        match m.get(key) {
-            Some(pin) if pin.kind == shell_eval::PinKind::Commitment => Ok(pin.card.clone()),
-            Some(_) => Err(format!(
-                "`{key}` is pinned, but not as protected commitment state"
-            )),
-            None => Err(format!(
-                "no live commitment pin named `{key}`; did the verifier already pass, or was the session cleared?"
-            )),
-        }
+        shell_eval::commitment_card(&self.pins, key)
     }
 
     /// Host projection for a writer's formalized commitment: set the
@@ -2043,51 +2222,24 @@ impl Agent {
     /// the viewport is the caller's separate step
     /// ([`Self::settle_commitment`]).  Refused if the key is already live: a
     /// commitment, once open, can only be closed by a verifier, never
-    /// silently replaced.
+    /// silently replaced.  The desk's `` `commit-open `` arm reads the
+    /// identical logic off the captured `PinDigests` Arc directly
+    /// ([`shell_eval::set_commitment_pin`]), since a handler may never hold
+    /// `&Agent`.
     fn set_commitment_pin(&self, key: &str, card: crate::card::Card) -> Result<(), String> {
-        if !shell_eval::is_commitment_pin(key) {
-            return Err(format!(
-                "`{key}` is not a protected commitment pin; expected `{}<id>`",
-                shell_eval::COMMITMENT_PIN_PREFIX
-            ));
-        }
-        let mut m = self
-            .pins
-            .lock()
-            .map_err(|_| "commitment pin register is unavailable".to_string())?;
-        if m.contains_key(key) {
-            return Err(format!(
-                "`{key}` is already a live commitment; verify or clear it before opening a new one"
-            ));
-        }
-        m.insert(
-            key.to_string(),
-            shell_eval::PinDigest {
-                kind: shell_eval::PinKind::Commitment,
-                card,
-            },
-        );
-        drop(m);
-        Ok(())
+        shell_eval::set_commitment_pin(&self.pins, key, card)
     }
 
     /// Host projection for a verifier pass: clear the protected pin in the
     /// session mirror.  Pure state — projecting the clear to the viewport is
     /// the caller's separate step ([`Self::settle_commitment`]).  The model
     /// cannot reach this path; ordinary `surface` unpins for the same prefix
-    /// are rejected in `shell_eval`.
+    /// are rejected in `shell_eval`.  The desk's `` `commit-verify `` arm
+    /// reads the identical logic off the captured `PinDigests` Arc directly
+    /// ([`shell_eval::unset_commitment_pin`]), since a handler may never
+    /// hold `&Agent`.
     fn unset_commitment_pin(&self, key: &str) -> Result<bool, String> {
-        if !shell_eval::is_commitment_pin(key) {
-            return Err(format!(
-                "`{key}` is not a protected commitment pin; expected `{}<id>`",
-                shell_eval::COMMITMENT_PIN_PREFIX
-            ));
-        }
-        let mut m = self
-            .pins
-            .lock()
-            .map_err(|_| "commitment pin register is unavailable".to_string())?;
-        Ok(m.remove(key).is_some())
+        shell_eval::unset_commitment_pin(&self.pins, key)
     }
 
     /// The single point a turn arrives, whether at the turn boundary
@@ -2182,12 +2334,15 @@ impl Agent {
         )
     }
 
-    /// Stash a returning agent's deliberate return value — called from the
-    /// `reply` tool's dispatch with the faithful [`serde_json::Value`] the
-    /// model passed.  [`Self::apply`] lifts it into a [`TurnOutcome::Replied`]
-    /// once the tool-call batch drains.
-    pub(crate) fn set_reply(&mut self, payload: serde_json::Value) {
-        self.reply = Some(payload);
+    /// Stash a returning agent's deliberate return value — the coexisting
+    /// `reply` *tool*'s dispatch calls this with its JSON `result` argument
+    /// converted through [`shell_eval::json_fo`]; the `reply` *builtin*
+    /// instead stages through the desk's own captured [`ReplyCell`] clone
+    /// ([`crate::desk::HostServices::reply`]). [`Self::apply`] lifts
+    /// whichever staged it into a [`TurnOutcome::Replied`] once the
+    /// tool-call batch drains.
+    pub(crate) fn set_reply(&self, payload: FOValue) {
+        self.reply.set(payload);
     }
 
     /// Reached when the batch carried a `reply`: wind the session back to
@@ -2196,14 +2351,14 @@ impl Agent {
     /// the protocol sits in `AwaitingAssistantAfterToolResults`), cancel any
     /// live descendants, and return the payload.  `drive` then breaks the loop
     /// — `reply` hard-terminates.
-    fn replied(&mut self, payload: serde_json::Value) -> TurnOutcome {
+    fn replied(&self, payload: FOValue) -> TurnOutcome {
         self.agents.cancel_descendants(self.id);
-        self.log.quiesce(QuiesceReason::Replied);
+        self.log.lock().expect("log poisoned").quiesce(QuiesceReason::Replied);
         TurnOutcome::Replied(payload)
     }
 
-    fn cancelled(&mut self, emit: &Emitter) -> TurnOutcome {
-        self.log.quiesce(QuiesceReason::Cancelled);
+    fn cancelled(&self, emit: &Emitter) -> TurnOutcome {
+        self.log.lock().expect("log poisoned").quiesce(QuiesceReason::Cancelled);
         // The canonical log already carries `Cancelled` from quiesce;
         // this is the user-facing companion only.
         emit.emit(Kind::Error("cancelled".into()));
@@ -2217,7 +2372,7 @@ impl Agent {
     /// the forensic breadcrumb; the `StopReason` surfaces in the headless
     /// JSON result so a benchmark harness can tell a capped run from a
     /// completed one.
-    fn capped(&mut self, emit: &Emitter) -> TurnOutcome {
+    fn capped(&self, emit: &Emitter) -> TurnOutcome {
         self.note_error(
             format!("step cap reached ({MAX_STEPS} provider round-trips); ending turn"),
             emit,
@@ -2247,7 +2402,7 @@ impl Drop for Agent {
     fn drop(&mut self) {
         self.transport.shell_mut().shell.cancel_workers();
         self.schedules.clear();
-        let _ = self.log.record_session_ended();
+        let _ = self.log.lock().expect("log poisoned").record_session_ended();
     }
 }
 
@@ -2293,23 +2448,21 @@ fn announce(turn: &Turn, emit: &Emitter) {
 /// Reduce a finished turn's outcome to the `(tag, payload)` digest a returning
 /// agent's result carries — the one place the reduction happens.  Only a
 /// deliberate `reply` carries a value up, and it travels as the faithful
-/// [`serde_json::Value`] the model passed; the consuming edge renders it (a
-/// null or empty-string value settles `Empty`).  A tool-call-free prose finish
+/// [`FOValue`] the model passed; the consuming edge renders it (a unit or
+/// empty-string value settles `Empty`).  A tool-call-free prose finish
 /// is **not** harvested — there is no scrape — and because `reply` is the sole
 /// return path, a returning agent that never replied did not complete its
 /// contract: it (like a genuinely empty turn) settles `Failed`.  Every other
 /// shape carries only its tag.
-fn agent_digest(
-    r: &Result<TurnOutcome, ProviderError>,
-) -> (AgentOutcome, Option<serde_json::Value>) {
+fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option<FOValue>) {
     match r {
-        Ok(TurnOutcome::Replied(v)) => match shell_eval::json_to_text(v) {
-            // Any value that renders to text carries content; a null or
-            // empty-string reply (renders to nothing) is a deliberate empty
-            // return.
-            Some(s) if !s.is_empty() => (AgentOutcome::Complete, Some(v.clone())),
-            _ => (AgentOutcome::Empty, None),
-        },
+        // Any value that renders to text carries content; a unit or
+        // empty-string reply (renders to nothing) is a deliberate empty
+        // return.
+        Ok(TurnOutcome::Replied(v)) if !render_reply(v).is_empty() => {
+            (AgentOutcome::Complete, Some(v.clone()))
+        }
+        Ok(TurnOutcome::Replied(_)) => (AgentOutcome::Empty, None),
         // A finish without `reply`.  There is no scrape: a returning agent that
         // never replied did not complete its contract, so it fails honestly
         // rather than handing up a trailing fragment that masquerades as the
@@ -2326,12 +2479,13 @@ fn agent_digest(
 }
 
 /// Render a reply payload to the text a model parent reads: the shared
-/// value→text rule ([`shell_eval::json_to_text`]), clipped to the reply cap.
-/// The peer edge (the spawn tool settle site) and the `drive_peer` test
-/// helper share it; the headless edge instead writes the value faithfully.
-pub(crate) fn render_reply(v: &serde_json::Value) -> String {
+/// value→text rule ([`FOValue`] → [`RalValue`] → [`shell_eval::ral_value_to_text`]),
+/// clipped to the reply cap.  The peer edge (the spawn tool settle site) and
+/// the `drive_peer` test helper share it; the headless edge instead projects
+/// the value faithfully through [`shell_eval::user_json`].
+pub(crate) fn render_reply(v: &FOValue) -> String {
     clip(
-        &shell_eval::json_to_text(v).unwrap_or_default(),
+        &shell_eval::ral_value_to_text(&RalValue::from(v.clone())).unwrap_or_default(),
         AGENT_REPLY_CAP,
     )
 }
@@ -2625,10 +2779,17 @@ mod tests {
     #[test]
     fn remembering_fork_imports_context_before_seeded_prompt() {
         let dir = tmp("remembering-fork");
-        let mut parent = Agent::for_test(&dir, "system").unwrap();
-        parent.log.append_user("what did we learn?".into()).unwrap();
+        let parent = Agent::for_test(&dir, "system").unwrap();
         parent
             .log
+            .lock()
+            .unwrap()
+            .append_user("what did we learn?".into())
+            .unwrap();
+        parent
+            .log
+            .lock()
+            .unwrap()
             .append_assistant(
                 genai::chat::ChatMessage::assistant("the invariant matters"),
                 vec![],
@@ -2636,11 +2797,16 @@ mod tests {
             )
             .unwrap();
 
-        let mut child = parent
+        let child = parent
             .fork_remembering(parent.caps().clone())
             .expect("fork remembering child");
-        child.log.append_user("use that invariant".into()).unwrap();
-        let ms = child.log.render_messages().unwrap();
+        child
+            .log
+            .lock()
+            .unwrap()
+            .append_user("use that invariant".into())
+            .unwrap();
+        let ms = child.log.lock().unwrap().render_messages().unwrap();
         let view = serde_json::to_string(&ms).unwrap();
 
         assert!(view.contains("what did we learn?"));
@@ -2657,10 +2823,17 @@ mod tests {
     #[test]
     fn branch_imports_context_and_withholds_reply() {
         let dir = tmp("branch-child");
-        let mut parent = Agent::for_test(&dir, "system").unwrap();
-        parent.log.append_user("what did we learn?".into()).unwrap();
+        let parent = Agent::for_test(&dir, "system").unwrap();
         parent
             .log
+            .lock()
+            .unwrap()
+            .append_user("what did we learn?".into())
+            .unwrap();
+        parent
+            .log
+            .lock()
+            .unwrap()
             .append_assistant(
                 genai::chat::ChatMessage::assistant("the invariant matters"),
                 vec![],
@@ -2670,7 +2843,7 @@ mod tests {
 
         let child = parent.branch().expect("branch child");
 
-        let view = serde_json::to_string(&child.log.history_messages()).unwrap();
+        let view = serde_json::to_string(&child.log.lock().unwrap().history_messages()).unwrap();
         assert!(view.contains("what did we learn?"));
         assert!(view.contains("the invariant matters"));
         assert!(
@@ -2711,16 +2884,15 @@ mod tests {
         .expect("root trunk")
     }
 
-    /// `returns()` reads the tool view — true iff the agent holds `reply`
-    /// (`Gate::Returns`) — the single source of truth the nudge layer, parking,
-    /// and the advertised tools all consult, so they cannot disagree.  The crux
-    /// of the trunk refactor is the interactive/headless contrast: an
-    /// interactive trunk converses and withholds `reply`, a headless trunk is an
-    /// ordinary returning agent, and a `fork` returns like any sub-agent.  (The
-    /// `branch()` case — a returning-withheld child — is pinned in
-    /// `branch_imports_context_and_withholds_reply`, so it is not repeated here.)
+    /// `returns()` reads the field fixed at construction, not the tool view —
+    /// but both are built from the same boolean at the same [`Build`] call
+    /// site, so they cannot disagree.  Covers every node kind that fixes the
+    /// field independently: an interactive trunk converses and withholds
+    /// `reply`, a headless trunk is an ordinary returning agent, a `fork`
+    /// returns like any sub-agent, and a `/branch` child withholds `reply`
+    /// despite being a fork.
     #[test]
-    fn returns_tracks_the_tool_view_across_node_kinds() {
+    fn returns_field_is_fixed_at_construction_across_node_kinds() {
         let dir = tmp("returns-parity");
         assert!(
             !trunk(&dir, true).returns(),
@@ -2732,6 +2904,11 @@ mod tests {
             .fork(headless.caps().clone())
             .expect("fork child");
         assert!(child.returns(), "an ordinary fork holds `reply`");
+        let branch = headless.branch().expect("branch child");
+        assert!(
+            !branch.returns(),
+            "a branch withholds `reply` and never returns"
+        );
     }
 
     /// The park verdict distinguishes a conversation from mere focus: a
@@ -2747,6 +2924,55 @@ mod tests {
         let focused = trunk(&dir, false);
         focused.focus.store(focused.id, Ordering::Relaxed);
         assert_eq!(focused.park_mode(), ParkMode::Focused);
+    }
+
+    #[test]
+    fn reply_cell_last_write_wins_and_clear_drops_without_reading() {
+        let cell = ReplyCell::default();
+        assert_eq!(cell.take(), None, "an unset cell takes None");
+
+        cell.set(FOValue::String { value: "first".into() });
+        cell.set(FOValue::String { value: "second".into() });
+        assert_eq!(
+            cell.take(),
+            Some(FOValue::String { value: "second".into() }),
+            "the last write wins"
+        );
+        assert_eq!(cell.take(), None, "take leaves the cell empty");
+
+        cell.set(FOValue::Int { value: 1 });
+        cell.clear();
+        assert_eq!(cell.take(), None, "clear drops the staged value unread");
+    }
+
+    /// The `reply` builtin's refusal on a non-returning agent is keyed on
+    /// the captured `returns` bit, never on trunk-ness: the interactive
+    /// trunk and a `/branch` child of it get the identical text, and the
+    /// branch still parks `Held` afterward — the refusal is an ordinary
+    /// call error, not a termination.
+    #[test]
+    fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
+        let dir = tmp("reply-refused-conversing");
+        let mut root = trunk(&dir, true);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, root.id);
+        let root_result = root.run_shell("c1".into(), "reply 1", 5, &emit);
+        let refusal = "you converse with the user; you do not return";
+        assert!(root_result.content.contains(refusal), "got: {}", root_result.content);
+
+        let mut branch = root.branch().expect("branch a conversing child");
+        branch.register_self();
+        let branch_result = branch.run_shell("c2".into(), "reply 1", 5, &emit);
+        assert!(
+            branch_result.content.contains(refusal),
+            "a /branch child must be refused with the same text, got: {}",
+            branch_result.content
+        );
+        assert_eq!(
+            branch.park_mode(),
+            ParkMode::Held,
+            "a /branch child still parks Held after a refused reply"
+        );
     }
 
     /// A `reply` tool call carrying `result`.
@@ -2929,8 +3155,8 @@ mod tests {
         let (outcome, text) = drive_peer(&mut child, provider);
         assert!(matches!(outcome, AgentOutcome::Complete));
         assert!(
-            text.contains("\"files\""),
-            "a structured reply is pretty-printed: {text}"
+            text.contains("files:") && text.contains("a.rs") && text.contains("b.rs"),
+            "a structured reply is rendered in ral surface syntax, not JSON: {text}"
         );
     }
 
@@ -3401,7 +3627,7 @@ mod tests {
             matches!(outcome, AgentOutcome::Complete),
             "a live-generation result must be delivered; got {outcome:?}"
         );
-        assert_eq!(payload, Some(serde_json::json!("done")));
+        assert_eq!(payload, Some(FOValue::String { value: "done".into() }));
     }
 
     /// The same admission control's `Surface` half: a deferred `spawn`
@@ -3471,7 +3697,7 @@ mod tests {
             matches!(outcome, AgentOutcome::Complete),
             "a live-generation surface batch must be delivered; got {outcome:?}"
         );
-        assert_eq!(payload, Some(serde_json::json!("done")));
+        assert_eq!(payload, Some(FOValue::String { value: "done".into() }));
     }
 
     // ── worker registry: `/clear` cascade, lease-reap drain ───────────────
@@ -3617,7 +3843,7 @@ mod tests {
             parent: Some(parent.id),
             ceiling: true,
             title: "child".into(),
-            log_dir: child.log_dir().to_path_buf(),
+            log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),
             eval_root: Some(child.eval_root()),
             turn_scope: Some(child.turn_scope()),
@@ -4081,7 +4307,7 @@ mod tests {
         // The ceiling sits just above the session's own baseline footprint
         // (its freshly-written `events.json`), so the big file alone decides
         // whether the ceiling is crossed.
-        let baseline = crate::resources::dir_size(session.log_dir());
+        let baseline = crate::resources::dir_size(&session.log_dir());
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
 
@@ -4106,7 +4332,7 @@ mod tests {
     fn check_disk_warn_still_above_does_not_repeat() {
         let dir = tmp("disk-warn-still-above");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let baseline = crate::resources::dir_size(session.log_dir());
+        let baseline = crate::resources::dir_size(&session.log_dir());
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
 
@@ -4135,7 +4361,7 @@ mod tests {
         // The ceiling sits just above the session's own baseline footprint
         // (its freshly-written `events.json`), so the big file alone decides
         // whether the ceiling is crossed.
-        let baseline = crate::resources::dir_size(session.log_dir());
+        let baseline = crate::resources::dir_size(&session.log_dir());
         let big = session.log_dir().join("big.txt");
         std::fs::write(&big, vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
@@ -4404,10 +4630,10 @@ mod tests {
         session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
         session.run_shell("c1".into(), "let _spin = 0", 5, &emit);
 
-        let before = session.log.event_count();
+        let before = session.log.lock().unwrap().event_count();
         session.reap_bindings(&emit);
         assert_eq!(
-            session.log.event_count(),
+            session.log.lock().unwrap().event_count(),
             before,
             "a binding prune must never write a model-view events.json entry"
         );

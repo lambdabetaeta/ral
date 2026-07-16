@@ -732,6 +732,51 @@ impl EventReceiver {
         }
         self.rx.lock().unwrap().recv().ok()
     }
+
+    /// Non-blocking drain: a stashed frame first (arrival order, per §6.5's
+    /// ordering law), then the channel. `None` when both are empty right now
+    /// — never blocks.
+    ///
+    /// # Panics
+    /// Panics if the stash or receiver mutex is poisoned.
+    pub fn try_recv(&self) -> Option<Frame> {
+        let stashed = self.stash.lock().unwrap().pop_front();
+        if let Some(frame) = stashed {
+            return Some(frame);
+        }
+        self.rx.lock().unwrap().try_recv().ok()
+    }
+}
+
+#[cfg(test)]
+mod event_receiver_tests {
+    use super::*;
+
+    fn receiver() -> (EventReceiver, mpsc::Sender<Frame>) {
+        let (tx, rx) = mpsc::channel();
+        (EventReceiver::new(rx), tx)
+    }
+
+    /// A stashed frame is returned before whatever the channel holds, and
+    /// without blocking — the same arrival-order precedence `recv` gives the
+    /// stash, proven here on the non-blocking door.
+    #[test]
+    fn try_recv_drains_the_stash_before_the_channel() {
+        let (receiver, tx) = receiver();
+        tx.send(Frame::Detach).unwrap();
+        receiver.stash.lock().unwrap().push_back(Frame::Control(Control::Resume));
+
+        assert_eq!(receiver.try_recv(), Some(Frame::Control(Control::Resume)));
+        assert_eq!(receiver.try_recv(), Some(Frame::Detach));
+    }
+
+    /// With neither a stashed frame nor a channel send pending, `try_recv`
+    /// returns `None` immediately rather than blocking.
+    #[test]
+    fn try_recv_returns_none_when_empty() {
+        let (receiver, _tx) = receiver();
+        assert_eq!(receiver.try_recv(), None);
+    }
 }
 
 // ── Transport sink ────────────────────────────────────────────────────
@@ -813,8 +858,10 @@ pub struct IdentityTransport {
     engine: SessionLock,
     /// Control sender (wired to the foreground cancel scope).
     control: ControlSender,
-    /// Event receiver for the front-end.
-    events_recv: EventReceiver,
+    /// Event receiver for the front-end. `Arc`-wrapped so a later drain-then-
+    /// handle adapter can hold its own clone alongside the transport, rather
+    /// than borrowing one tied to `&self`.
+    events_recv: Arc<EventReceiver>,
     /// Stamped with the dispatching thread's id for the duration of
     /// `dispatch`, so a desk handler that reenters the session lock
     /// (`dispatch`/`shell_mut`/`with_shell`) panics instead of deadlocking
@@ -845,6 +892,10 @@ pub struct EngineInner {
     /// Phase A: no desk installed by any host, so `enquire` answers its
     /// honest absence error.
     desk: Option<crate::types::Desk>,
+    /// The installed nursery for engine-side session forks, if any host has
+    /// set one. `None` until a host calls `set_nursery`, so `fork_into_nursery`
+    /// answers its honest absence error.
+    nursery: Option<crate::types::Nursery>,
     /// The session terminal lease (set by Attach).
     terminal_lease: Option<crate::process::TerminalLease>,
     /// Shared dispatch id for deferred-sink correlation.
@@ -885,6 +936,7 @@ impl IdentityTransport {
             surface_sink: sink.clone(),
             deferred_sink: Some(sink),
             desk: None,
+            nursery: None,
             terminal_lease: None,
             current_dispatch,
         };
@@ -892,10 +944,17 @@ impl IdentityTransport {
         Self {
             engine: SessionLock::new(engine),
             control,
-            events_recv: EventReceiver::new(event_rx),
+            events_recv: Arc::new(EventReceiver::new(event_rx)),
             dispatch_thread: std::sync::Mutex::new(None),
             turn_scope: None,
         }
+    }
+
+    /// Return a shared handle to the front-end's event receiver, for a
+    /// caller that wants to drain it alongside the transport rather than
+    /// through a borrow tied to `&self`.
+    pub fn events_shared(&self) -> Arc<EventReceiver> {
+        self.events_recv.clone()
     }
 
     /// Set the session deferred sink for deferred worker batches.
@@ -923,6 +982,13 @@ impl IdentityTransport {
     /// follows.
     pub fn set_desk(&self, desk: crate::types::Desk) {
         self.engine.lock().desk = Some(desk);
+    }
+
+    /// Install the session's nursery for engine-side session forks. Per-turn
+    /// hosts call this before each dispatch so a stale fork from an earlier
+    /// generation is never adoptable, the same reasoning `set_desk` follows.
+    pub fn set_nursery(&self, nursery: crate::types::Nursery) {
+        self.engine.lock().nursery = Some(nursery);
     }
 
     /// Consume the transport and recover the owned `Shell`.  The inverse of
@@ -1013,6 +1079,7 @@ impl Transport for IdentityTransport {
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
             desk: engine.desk.clone(),
+            nursery: engine.nursery.clone(),
             lifecycle,
         };
         let turn_report = engine.shell.run_turn(req);
@@ -1327,6 +1394,7 @@ mod enquiry_tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         }
     }

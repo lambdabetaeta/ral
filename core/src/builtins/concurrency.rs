@@ -1398,6 +1398,42 @@ mod tests {
         }
     }
 
+    /// Containment (§3 of the enquiry-channel ADR), the nursery's twin of
+    /// `spawned_worker_never_receives_the_enquiry_desk`: a detached worker
+    /// never receives the spawning turn's nursery, even though one is
+    /// installed on the spawning turn. The worker's own `fork_into_nursery`
+    /// call must answer the honest absence error, never reach the parent's
+    /// `Nursery`, and never park.
+    #[test]
+    fn spawned_worker_never_receives_the_nursery() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.turn.nursery = Some(crate::types::Nursery::default());
+        let snap = Arc::new(shell.mobile().scope);
+        let (tx, rx) = mpsc::channel::<crate::types::Settled<crate::types::NurseryId>>();
+        let handle = spawn_child(
+            snap,
+            &shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<test>",
+            move |child| {
+                let outcome = child.fork_into_nursery();
+                let _ = tx.send(outcome);
+                Ok(Value::Unit)
+            },
+        )
+        .expect("spawn must succeed");
+        wait_settled(&handle);
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("worker must send its fork_into_nursery outcome before settling");
+        match outcome {
+            Err(Break::Error(e)) => assert_eq!(e.message, "this host adopts no forked sessions"),
+            Err(other) => panic!("expected Break::Error, got {other:?}"),
+            Ok(_) => panic!("a detached worker must never reach the spawning turn's nursery"),
+        }
+    }
+
     /// Observation renews the idle lease: a worker polled every ~20 ms
     /// under a 200 ms idle bound survives to ~3× that bound — each `poll`
     /// touches `last_observed`, so the chain keeps re-arming instead of
@@ -1687,6 +1723,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         };
         match shell.run_turn(req) {

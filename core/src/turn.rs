@@ -30,8 +30,8 @@ use crate::process::{CancelSlot, ForegroundScope};
 use crate::syntax::parser::ParseError;
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Escape, LocationCursor, Settled, Shell, SurfaceSink,
-    TurnState, Value,
+    Break, Capabilities, DeferredSink, Desk, Escape, LocationCursor, Nursery, Settled, Shell,
+    SurfaceSink, TurnState, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use std::sync::Arc;
@@ -133,6 +133,12 @@ impl Drop for TurnGuard<'_> {
         // Swap the saved frame back in; the displaced frame moves into `saved`
         // and drops with the guard.
         std::mem::swap(&mut self.shell.turn, &mut self.saved);
+        // Empty the displaced frame's nursery: a fork parked during the turn
+        // and never adopted (a refused enquiry, or a turn that ended before
+        // its handler ran) must not survive the turn that parked it.
+        if let Some(nursery) = self.saved.nursery.as_ref() {
+            nursery.clear();
+        }
     }
 }
 
@@ -149,7 +155,9 @@ impl Drop for TurnGuard<'_> {
 /// on the persistent session, so it has no liveness role.  `deferred` is the
 /// session-lived destination a deferred worker delivers its surface batch to
 /// when it settles.  `desk` is the request's turn-local enquiry desk; `None`
-/// outside a host that answers enquiries.
+/// outside a host that answers enquiries.  `nursery` is the request's
+/// turn-local nursery for engine-side session forks; `None` outside a host
+/// that installs one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_turn(
     shell: &Shell,
@@ -162,6 +170,7 @@ pub(crate) fn build_turn(
     surface: Option<SurfaceSink>,
     deferred: Option<Arc<dyn DeferredSink>>,
     desk: Option<Desk>,
+    nursery: Option<Nursery>,
 ) -> TurnState {
     let mut turn_io = shell.turn.io.try_clone().unwrap_or_else(|_| Io {
         terminal: shell.turn.io.terminal,
@@ -179,6 +188,7 @@ pub(crate) fn build_turn(
         surface,
         deferred,
         desk,
+        nursery,
         cancel: foreground,
         loc: LocationCursor::default(),
         deferred_lease,
@@ -311,6 +321,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         }
     }
@@ -464,6 +475,54 @@ mod tests {
         assert!(
             shell.turn.desk.is_none(),
             "turn-local desk must be restored to its pre-turn value"
+        );
+    }
+
+    /// A `TurnLifecycle` that parks a fork into the turn's nursery during
+    /// `pre_exec` (mirroring how a desk handler's builtin body would) and
+    /// records the minted id for the test to redeem afterward.
+    struct ParkDuringTurn(std::sync::Arc<Mutex<Option<crate::types::NurseryId>>>);
+    impl crate::turn::TurnLifecycle for ParkDuringTurn {
+        fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
+            let id = shell
+                .fork_into_nursery()
+                .expect("a nursery is installed on this turn");
+            *self.0.lock().unwrap() = Some(id);
+        }
+    }
+
+    /// The nursery twin of `desk_is_restored_to_its_pre_turn_value`: the
+    /// turn-local nursery is torn down before `run_turn` returns, restored to
+    /// its pre-turn value (`None`) exactly as `desk` is — and, beyond mere
+    /// restoration, a fork parked during the turn and never adopted is gone
+    /// from the host's own `Nursery` clone afterward, proving the turn guard
+    /// empties it rather than merely swapping it out.
+    #[test]
+    fn nursery_is_restored_and_emptied_at_turn_teardown() {
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        assert!(shell.turn.nursery.is_none(), "no nursery before the turn");
+
+        let nursery = crate::types::Nursery::default();
+        let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
+
+        let _ = shell.run_turn(TurnRequest {
+            nursery: Some(nursery.clone()),
+            lifecycle: Box::new(ParkDuringTurn(parked_id.clone())),
+            ..capture_req("$[1 + 1]")
+        });
+
+        assert!(
+            shell.turn.nursery.is_none(),
+            "turn-local nursery must be restored to its pre-turn value"
+        );
+        let id = parked_id
+            .lock()
+            .unwrap()
+            .expect("pre_exec must fork into the nursery");
+        assert!(
+            nursery.adopt(id).is_none(),
+            "a fork parked during the turn and never adopted must not survive the turn's teardown"
         );
     }
 

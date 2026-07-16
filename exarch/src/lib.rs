@@ -20,6 +20,7 @@ pub mod card;
 pub mod cli;
 pub mod config;
 pub mod credential;
+mod desk;
 pub mod digest;
 pub mod event;
 pub mod fleet;

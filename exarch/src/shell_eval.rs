@@ -15,7 +15,9 @@ use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use crate::transcript::Transcript;
+use base64::Engine;
 use ral_core::Value as RalValue;
+use ral_core::serial::FOValue;
 use ral_core::types::DeferredSink;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -105,7 +107,7 @@ pub struct PinDigest {
 }
 
 impl PinDigest {
-    fn new(key: &str, card: crate::card::Card) -> Self {
+    pub(crate) fn new(key: &str, card: crate::card::Card) -> Self {
         Self {
             kind: if is_commitment_pin(key) {
                 PinKind::Commitment
@@ -148,6 +150,88 @@ pub(crate) const SERVICES_PIN_KEY: &str = "services";
 
 pub(crate) fn is_service_pin(key: &str) -> bool {
     key == SERVICES_PIN_KEY
+}
+
+/// Read a protected commitment pin for host-owned verification.  Model
+/// code cannot write this prefix through `surface`; verifier orchestration
+/// reads the saved card here and treats it as data.  Shared by
+/// [`crate::agent::Agent::commitment_card`] and the `` `commit-verify ``
+/// desk arm ([`crate::desk::ExarchDesk`]), since a desk handler may only
+/// ever hold `&PinDigests`, never `&Agent`.
+pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::card::Card, String> {
+    if !is_commitment_pin(key) {
+        return Err(format!(
+            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
+        ));
+    }
+    let m = pins
+        .lock()
+        .map_err(|_| "commitment pin register is unavailable".to_string())?;
+    match m.get(key) {
+        Some(pin) if pin.kind == PinKind::Commitment => Ok(pin.card.clone()),
+        Some(_) => Err(format!(
+            "`{key}` is pinned, but not as protected commitment state"
+        )),
+        None => Err(format!(
+            "no live commitment pin named `{key}`; did the verifier already pass, or was the session cleared?"
+        )),
+    }
+}
+
+/// Host projection for a writer's formalized commitment: set the
+/// protected pin in the session mirror.  Pure state — projecting it to the
+/// viewport is the caller's separate step
+/// ([`crate::agent::Agent::settle_commitment`]).  Refused if the key is
+/// already live: a commitment, once open, can only be closed by a verifier,
+/// never silently replaced.  Shared by
+/// [`crate::agent::Agent::set_commitment_pin`] and the `` `commit-open ``
+/// desk arm ([`crate::desk::ExarchDesk`]).
+pub(crate) fn set_commitment_pin(
+    pins: &PinDigests,
+    key: &str,
+    card: crate::card::Card,
+) -> Result<(), String> {
+    if !is_commitment_pin(key) {
+        return Err(format!(
+            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
+        ));
+    }
+    let mut m = pins
+        .lock()
+        .map_err(|_| "commitment pin register is unavailable".to_string())?;
+    if m.contains_key(key) {
+        return Err(format!(
+            "`{key}` is already a live commitment; verify or clear it before opening a new one"
+        ));
+    }
+    m.insert(
+        key.to_string(),
+        PinDigest {
+            kind: PinKind::Commitment,
+            card,
+        },
+    );
+    drop(m);
+    Ok(())
+}
+
+/// Host projection for a verifier pass: clear the protected pin in the
+/// session mirror.  Pure state — projecting the clear to the viewport is
+/// the caller's separate step ([`crate::agent::Agent::settle_commitment`]).
+/// The model cannot reach this path; ordinary `surface` unpins for the same
+/// prefix are rejected above ([`reject_protected_pin`]).  Shared by
+/// [`crate::agent::Agent::unset_commitment_pin`] and the `` `commit-verify ``
+/// desk arm ([`crate::desk::ExarchDesk`]).
+pub(crate) fn unset_commitment_pin(pins: &PinDigests, key: &str) -> Result<bool, String> {
+    if !is_commitment_pin(key) {
+        return Err(format!(
+            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
+        ));
+    }
+    let mut m = pins
+        .lock()
+        .map_err(|_| "commitment pin register is unavailable".to_string())?;
+    Ok(m.remove(key).is_some())
 }
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
@@ -210,7 +294,7 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
 /// Decode one surfaced value and apply the protected-pin guard: the [`Kind`]
 /// to emit, or `None` when the value decodes to nothing or is a rejected
 /// protected-pin write.  Shared by the live and deferred-batch surface sinks.
-fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
+pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
     let kind = decode_surface(val)?;
     (!reject_protected_pin(&kind, emit)).then_some(kind)
 }
@@ -329,13 +413,14 @@ pub fn deferred_sink(
 /// Routes through the transport seam: builds a `Source` [`Turn`], dispatches
 /// it, drains surface events to the bus, and converts the terminal
 /// [`Report`] into the structured result.
-pub fn run_shell(
+pub(crate) fn run_shell(
     transport: &dyn ral_core::transport::Transport,
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
     emit: &Emitter,
     pins: Option<&PinDigests>,
+    desk: Option<&Arc<crate::desk::ExarchDesk>>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -366,43 +451,33 @@ pub fn run_shell(
 
     // Dispatch and drain to the Report, rendering surface classes to the bus.
     // The live sink tracks pins; the deferred batch (a deferred worker's
-    // flush) renders identically but never touches the pin mirror.
+    // flush) renders identically but never touches the pin mirror. Shared
+    // with the identity `DeskBinding` adapter (`desk.rs`) so the two paths
+    // cannot diverge.
+    let applier = crate::desk::SurfaceApplier {
+        emit: emit.clone(),
+        pins: pins.cloned(),
+    };
     let report = ral_core::transport::dispatch_to_report(
         transport,
         turn,
-        |val| {
-            if let Some(kind) = accepted_surface(&RalValue::from(val), emit) {
-                if let Some(pins) = pins
-                    && let Ok(mut m) = pins.lock()
-                {
-                    match &kind {
-                        Kind::Pin { key, card } => {
-                            m.insert(key.clone(), PinDigest::new(key, card.clone()));
-                        }
-                        Kind::Unpin { key } => {
-                            m.remove(key);
-                        }
-                        _ => {}
-                    }
-                }
-                emit.emit(kind);
-            }
-        },
-        |batch| {
-            for val in batch {
-                if let Some(kind) = accepted_surface(&RalValue::from(val), emit) {
-                    emit.emit(kind);
-                }
-            }
-        },
-        // No desk until the migration ADR lands: a wire engine's enquiry gets
-        // the same honest absence the identity path's missing
-        // `TurnRequest.desk` answers with.
-        |_req| {
-            Err(ral_core::transport::EnquiryError {
+        |val| applier.live(val),
+        |batch| applier.deferred(batch),
+        // Dead under the identity transport (`transport.set_desk` answers a
+        // mid-dispatch `Shell::enquire` directly); live only for a wire
+        // engine's `Event::Enquiry`, per `dispatch_to_report`'s own doc.
+        // "One handler, two bindings": the identical `ExarchDesk::handle`
+        // this closure calls is the one `DeskBinding` wraps for the
+        // identity path (`docs/ral-wiki/decisions/260706_enquiry-channel.md`).
+        |req| match desk {
+            Some(desk) => desk.handle(req).map_err(|e| ral_core::transport::EnquiryError {
+                status: e.exit_code(),
+                message: e.message,
+            }),
+            None => Err(ral_core::transport::EnquiryError {
                 message: "this host answers no enquiries".into(),
                 status: 1,
-            })
+            }),
         },
     );
 
@@ -546,12 +621,94 @@ const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::
     quote_bytes: true,
 };
 
-fn ral_value_to_text(value: &RalValue) -> Option<String> {
+pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
     match value {
         RalValue::Unit => None,
         RalValue::String(s) => Some(s.clone()),
         RalValue::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
         other => Some(ral_core::builtins::pretty_print(other, 0, &VALUE_PRINT_PARAMS)),
+    }
+}
+
+/// Project a `reply`'s first-order payload to the JSON a user-facing edge
+/// (the headless `result`, a commitment writer/verifier's structured
+/// decision) reads — **not** [`FOValue`]'s own `serde`/[`Serialize`] impl,
+/// which is the transport encoding: internally tagged by `kind`, floats
+/// carried by IEEE-754 bits (`core/src/serial.rs:31–84`).  That encoding
+/// would break the promise this projection keeps: a string reply stays a
+/// bare JSON string, and a structured one stays ordinary JSON, not a
+/// `{"kind":"string","value":"…"}` wrapper.
+///
+/// The policy, one arm per [`FOValue`] variant:
+/// - `Unit` → `null`; `Bool`/`Int` → the JSON scalar.
+/// - `Float` → a JSON number for a finite value; JSON has no representation
+///   for NaN or ±∞, so a non-finite float crosses as the string `"NaN"`,
+///   `"Infinity"`, or `"-Infinity"`.
+/// - `String` → the string, raw.
+/// - `Bytes` → a base64-encoded string (JSON has no byte-string type).
+/// - `List` → an array; `Map` → an object, key order preserved.
+/// - `Variant` with a payload → a single-key object `{label: payload}`;
+///   a payload-less variant → the bare label as a string.
+///
+/// [`Serialize`]: serde::Serialize
+pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
+    match v {
+        FOValue::Unit => serde_json::Value::Null,
+        FOValue::Bool { value } => serde_json::Value::Bool(*value),
+        FOValue::Int { value } => serde_json::Value::Number((*value).into()),
+        FOValue::Float { value } if value.is_nan() => serde_json::Value::String("NaN".into()),
+        FOValue::Float { value } if value.is_infinite() => serde_json::Value::String(
+            if *value > 0.0 { "Infinity" } else { "-Infinity" }.into(),
+        ),
+        FOValue::Float { value } => serde_json::Number::from_f64(*value)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        FOValue::String { value } => serde_json::Value::String(value.clone()),
+        FOValue::Bytes { value } => {
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(value))
+        }
+        FOValue::List { items } => serde_json::Value::Array(items.iter().map(user_json).collect()),
+        FOValue::Map { entries } => serde_json::Value::Object(
+            entries.iter().map(|(k, v)| (k.clone(), user_json(v))).collect(),
+        ),
+        FOValue::Variant { label, payload: Some(p) } => {
+            let mut m = serde_json::Map::new();
+            m.insert(label.clone(), user_json(p));
+            serde_json::Value::Object(m)
+        }
+        FOValue::Variant { label, payload: None } => serde_json::Value::String(label.clone()),
+        #[allow(
+            clippy::uninhabited_references,
+            reason = "NoExt is uninhabited, so this arm never actually runs; the dereference \
+                      exhaustiveness needs is never performed at runtime"
+        )]
+        FOValue::Ext(x) => match *x {},
+    }
+}
+
+/// The coexistence inverse of [`user_json`]: decode a JSON value — a
+/// `reply` *tool* call's `result` argument, still installed alongside the
+/// `reply` builtin for this migration's measurement window — into an
+/// [`FOValue`] for [`crate::agent::Agent::set_reply`].  Total: every JSON
+/// shape has a first-order home (a JSON number without a fractional part or
+/// exponent becomes an `Int`, otherwise a `Float`).  Dies with the tool at
+/// retirement.
+pub(crate) fn json_fo(v: &serde_json::Value) -> FOValue {
+    match v {
+        serde_json::Value::Null => FOValue::Unit,
+        serde_json::Value::Bool(b) => FOValue::Bool { value: *b },
+        serde_json::Value::Number(n) => n.as_i64().map_or_else(
+            || FOValue::Float {
+                value: n.as_f64().unwrap_or(0.0),
+            },
+            |value| FOValue::Int { value },
+        ),
+        serde_json::Value::String(s) => FOValue::String { value: s.clone() },
+        serde_json::Value::Array(items) => FOValue::List {
+            items: items.iter().map(json_fo).collect(),
+        },
+        serde_json::Value::Object(map) => FOValue::Map {
+            entries: map.iter().map(|(k, v)| (k.clone(), json_fo(v))).collect(),
+        },
     }
 }
 
@@ -647,7 +804,7 @@ mod tests {
             ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
         );
         let transport = ral_core::transport::IdentityTransport::new(taken);
-        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None);
+        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None, None);
         // Recover the (now-mutated) shell so `let`/`cd`/binding state persists
         // into the caller's next turn — the across-calls contract these tests pin.
         *shell = transport.into_shell();
@@ -2293,5 +2450,126 @@ return !{{length $hits}}"
             out.contains('\n'),
             "wide structures should clip on useful lines"
         );
+    }
+
+    // ── `user_json` / `json_fo` ──────────────────────────────────────────
+    //
+    // The reply projection's policy table, one case per `FOValue` variant —
+    // deliberately **not** `FOValue`'s own `serde` encoding (internally
+    // tagged, floats by bits), which would break the promise that a string
+    // reply stays a raw JSON string and a structured one stays ordinary
+    // JSON.
+
+    #[test]
+    fn user_json_unit_is_null() {
+        assert_eq!(super::user_json(&FOValue::Unit), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn user_json_bool_and_int_are_scalars() {
+        assert_eq!(
+            super::user_json(&FOValue::Bool { value: true }),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            super::user_json(&FOValue::Int { value: -7 }),
+            serde_json::json!(-7)
+        );
+    }
+
+    #[test]
+    fn user_json_finite_float_is_a_json_number() {
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: 1.5 }),
+            serde_json::json!(1.5)
+        );
+    }
+
+    /// JSON has no representation for NaN or ±∞; each crosses as its own
+    /// named string rather than silently becoming `null`.
+    #[test]
+    fn user_json_non_finite_floats_become_named_strings() {
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: f64::NAN }),
+            serde_json::json!("NaN")
+        );
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: f64::INFINITY }),
+            serde_json::json!("Infinity")
+        );
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: f64::NEG_INFINITY }),
+            serde_json::json!("-Infinity")
+        );
+    }
+
+    #[test]
+    fn user_json_string_passes_through_raw() {
+        assert_eq!(
+            super::user_json(&FOValue::String { value: "hi".into() }),
+            serde_json::json!("hi")
+        );
+    }
+
+    #[test]
+    fn user_json_bytes_become_a_base64_string() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hi");
+        assert_eq!(
+            super::user_json(&FOValue::Bytes { value: b"hi".to_vec() }),
+            serde_json::Value::String(encoded)
+        );
+    }
+
+    #[test]
+    fn user_json_list_becomes_an_array() {
+        let v = FOValue::List {
+            items: vec![FOValue::Int { value: 1 }, FOValue::Int { value: 2 }],
+        };
+        assert_eq!(super::user_json(&v), serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn user_json_map_becomes_an_object() {
+        let v = FOValue::Map {
+            entries: vec![("a".into(), FOValue::Int { value: 1 })],
+        };
+        assert_eq!(super::user_json(&v), serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn user_json_variant_with_payload_becomes_a_label_keyed_object() {
+        let v = FOValue::Variant {
+            label: "some".into(),
+            payload: Some(Box::new(FOValue::Int { value: 3 })),
+        };
+        assert_eq!(super::user_json(&v), serde_json::json!({"some": 3}));
+    }
+
+    #[test]
+    fn user_json_payload_less_variant_becomes_the_bare_label_string() {
+        let v = FOValue::Variant { label: "none".into(), payload: None };
+        assert_eq!(super::user_json(&v), serde_json::json!("none"));
+    }
+
+    /// `json_fo` is total and its `user_json` image reproduces the original
+    /// JSON for every shape a `reply` *tool* call's `result` can carry —
+    /// the coexistence round trip.
+    #[test]
+    fn json_fo_then_user_json_round_trips_every_json_shape() {
+        for v in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(42),
+            serde_json::json!("hi"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({"a": 1, "b": "x"}),
+        ] {
+            let fo = super::json_fo(&v);
+            assert_eq!(
+                super::user_json(&fo),
+                v,
+                "json_fo then user_json must round-trip {v}"
+            );
+        }
     }
 }

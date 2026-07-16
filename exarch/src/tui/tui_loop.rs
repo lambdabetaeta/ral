@@ -139,7 +139,7 @@ pub fn run(
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
         session.id,
-        session.log_dir(),
+        &session.log_dir(),
         caps.context_window,
         &stderr_log,
         vi,

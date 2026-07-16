@@ -15,14 +15,15 @@ use crate::bus::{AgentOutcome, Emitter, Kind};
 use crate::card::{Card, Field, FieldVal, Mark, Span};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::shell_eval::COMMITMENT_PIN_PREFIX;
+use crate::shell_eval::{COMMITMENT_PIN_PREFIX, user_json};
+use ral_core::serial::FOValue;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 
 /// Which commitment-register operation, if any, a settled spawn's structured
 /// reply should be checked against — computed by [`commitment_settle`] on the
 /// worker thread while it still holds the raw payload.
-pub(super) enum CommitmentIntent {
+pub(crate) enum CommitmentIntent {
     /// A `commit` writer: on a matching, well-formed card, open this key.
     Write(String),
     /// A `verify_commitment` verifier: on a matching pass, clear this key.
@@ -153,7 +154,7 @@ disappears once your fuel reaches zero."
     }
 }
 
-fn commit(id: String, input: &Value, session: &mut Agent, emit: &Emitter) -> SessionToolResult {
+fn commit(id: String, input: &Value, session: &Agent, emit: &Emitter) -> SessionToolResult {
     let (key, description) = match parse_commit_args(input) {
         Ok(v) => v,
         Err(reason) => return invalid_input(id, "commit", INVALID_INPUT, &reason, emit),
@@ -193,7 +194,9 @@ fn commit(id: String, input: &Value, session: &mut Agent, emit: &Emitter) -> Ses
     super::agent::model_receipt(
         id,
         super::agent::spawn_async(
-            session,
+            &session.agents,
+            session.id,
+            session.mailbox(),
             child,
             super::agent::AsyncSpawn {
                 tool: "commit",
@@ -209,7 +212,7 @@ fn commit(id: String, input: &Value, session: &mut Agent, emit: &Emitter) -> Ses
 fn verify_commitment(
     id: String,
     input: &Value,
-    session: &mut Agent,
+    session: &Agent,
     emit: &Emitter,
 ) -> SessionToolResult {
     let key = match parse_key(input) {
@@ -257,7 +260,9 @@ fn verify_commitment(
     super::agent::model_receipt(
         id,
         super::agent::spawn_async(
-            session,
+            &session.agents,
+            session.id,
+            session.mailbox(),
             child,
             super::agent::AsyncSpawn {
                 tool: "verify_commitment",
@@ -298,7 +303,7 @@ fn parse_commit_args(input: &Value) -> Result<(String, String), String> {
     Ok((key, description.to_string()))
 }
 
-fn valid_commitment_key(key: &str) -> bool {
+pub(crate) fn valid_commitment_key(key: &str) -> bool {
     let Some(rest) = key.strip_prefix(COMMITMENT_PIN_PREFIX) else {
         return false;
     };
@@ -309,8 +314,10 @@ fn valid_commitment_key(key: &str) -> bool {
 }
 
 /// Truncate a spawn title to 48 characters with an ellipsis, on char
-/// boundaries.
-fn shorten(s: &str) -> String {
+/// boundaries.  Shared by the `commit-open`/`commit-verify` desk arms
+/// ([`crate::desk::ExarchDesk`]), which title a writer/verifier spawn
+/// exactly as this tool does.
+pub(crate) fn shorten(s: &str) -> String {
     if s.chars().count() > 48 {
         let head: String = s.chars().take(47).collect();
         format!("{head}…")
@@ -319,7 +326,7 @@ fn shorten(s: &str) -> String {
     }
 }
 
-fn writer_prompt(key: &str, description: &str) -> String {
+pub(crate) fn writer_prompt(key: &str, description: &str) -> String {
     format!(
         "\
 You are an amnemon commitment writer. You are formalizing a commitment before any work against it begins; you do not perform or judge the work itself.
@@ -351,7 +358,7 @@ Return exactly once by calling `reply` with a JSON object:
     )
 }
 
-fn verifier_prompt(key: &str, card: &Card, summary: &str) -> String {
+pub(crate) fn verifier_prompt(key: &str, card: &Card, summary: &str) -> String {
     let card_json =
         serde_json::to_string_pretty(card).unwrap_or_else(|_| "<unserializable>".into());
     format!(
@@ -469,22 +476,29 @@ fn writer_card(key: &str, value: &Value) -> Option<Card> {
 /// ([`super::agent::spawn_async`]).  `None` for a non-`Complete` outcome, a
 /// missing payload, or a reply that doesn't match `intent`; an ordinary
 /// `amnemon`/`mnemon` spawn passes no intent and is never tagged.
-pub(super) fn commitment_settle(
+///
+/// `payload` arrives as the first-order value the child's `reply` carried
+/// — the desk's `` `commit-open ``/`` `commit-verify `` answer is `FOValue`
+/// end to end — and is projected through [`user_json`] into the plain JSON
+/// [`as_structured`]/[`writer_card`]/[`verifier_passed`] still parse; their
+/// string-encoded-JSON leniency arm (a well-formed reply handed back as its
+/// own JSON encoding) survives unchanged.
+pub(crate) fn commitment_settle(
     intent: CommitmentIntent,
     outcome: &AgentOutcome,
-    payload: Option<&Value>,
+    payload: Option<&FOValue>,
 ) -> Option<CommitmentSettle> {
     if !matches!(outcome, AgentOutcome::Complete) {
         return None;
     }
-    let payload = payload?;
+    let payload = user_json(payload?);
     match intent {
         CommitmentIntent::Write(key) => {
-            let card = writer_card(&key, payload)?;
+            let card = writer_card(&key, &payload)?;
             Some(CommitmentSettle::Open { key, card })
         }
         CommitmentIntent::Verify(key) => {
-            verifier_passed(&key, payload).then_some(CommitmentSettle::Clear(key))
+            verifier_passed(&key, &payload).then_some(CommitmentSettle::Clear(key))
         }
     }
 }
@@ -690,20 +704,23 @@ mod tests {
     }
 
     /// `commitment_settle` is the pure decision `spawn_async`'s worker thread
-    /// calls after the child settles.
+    /// calls after the child settles.  `payload` now arrives as `FOValue` —
+    /// the desk's own answer type — built here from the same JSON fixtures
+    /// via `json_fo`, the coexistence inverse of the `user_json` projection
+    /// `commitment_settle` runs internally.
     #[test]
     fn settle_verify_tags_only_a_complete_matching_pass() {
         let key = "commitment:abc".to_string();
-        let pass = json!({
+        let pass = crate::shell_eval::json_fo(&json!({
             "kind": "commitment_verdict",
             "commitment_key": key,
             "verdict": "pass",
-        });
-        let fail = json!({
+        }));
+        let fail = crate::shell_eval::json_fo(&json!({
             "kind": "commitment_verdict",
             "commitment_key": key,
             "verdict": "fail",
-        });
+        }));
         assert!(matches!(
             commitment_settle(
                 CommitmentIntent::Verify(key.clone()),
@@ -735,17 +752,17 @@ mod tests {
     #[test]
     fn settle_write_tags_only_a_complete_matching_card() {
         let key = "commitment:abc".to_string();
-        let good = json!({
+        let good = crate::shell_eval::json_fo(&json!({
             "kind": "commitment_card",
             "commitment_key": key,
             "summary": "ship it",
             "criteria": [{ "id": "tests", "text": "tests pass" }],
-        });
-        let empty = json!({
+        }));
+        let empty = crate::shell_eval::json_fo(&json!({
             "kind": "commitment_card",
             "commitment_key": key,
             "criteria": [],
-        });
+        }));
         match commitment_settle(
             CommitmentIntent::Write(key.clone()),
             &AgentOutcome::Complete,
