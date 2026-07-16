@@ -16,10 +16,9 @@
 //! commitment pair (`` `commit-open ``, `` `commit-verify ``), and Step 4,
 //! `` `reply ``.
 
-use crate::agent::{Agent, Build, ProviderHandle, ReplyCell};
+use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::agent_registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
-use crate::event::AgentLog;
 use crate::schedule::{CronSchedule, ScheduleId, ScheduleRegistry, Trigger, parse_duration};
 use crate::shell_eval::{self, PinDigests};
 use ral_core::Value as RalValue;
@@ -27,8 +26,8 @@ use ral_core::serial::FOValue;
 use ral_core::transport::{Event, EventReceiver, Frame};
 use ral_core::types::{Capabilities, EnquiryDesk, Error, Nursery, NurseryId};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
 
 /// Everything a desk handler may read off `&Agent`, snapshotted fresh at
 /// every [`crate::agent::Agent::run_shell`] install
@@ -73,10 +72,10 @@ pub(crate) struct HostServices {
     /// family's handlers refuse without it.
     pub allow_schedule: bool,
     /// The shared slot the `reply` handler stages a returning agent's
-    /// return value into — `agent.reply.clone()`.  `Agent::apply`'s drain
-    /// lifts whatever is staged into a `TurnOutcome::Replied` once the
-    /// batch drains; the handler never holds `&mut Agent` to write it any
-    /// other way.
+    /// return value into — a fresh cell `Agent::run_shell` mints for this
+    /// one call and harvests back into `Agent::reply` once the desk
+    /// retires; the handler never holds `&mut Agent` to write it any other
+    /// way.
     pub reply: ReplyCell,
     /// This agent's live scheduled wakeups.
     pub schedules: ScheduleRegistry,
@@ -85,7 +84,7 @@ pub(crate) struct HostServices {
     pub pins: PinDigests,
     /// This session's canonical event log — `mnemon`'s context-inheriting
     /// fork reads it.
-    pub log: Arc<Mutex<AgentLog>>,
+    pub log: LogCell,
     /// The system prompt, for a spawned child's own log.
     pub system: String,
     /// The fleet's focused-agent handle, for a spawned child to become
@@ -362,7 +361,7 @@ impl ExarchDesk {
         // `Agent` for `inherit_context` to take a `&Self` of.
         let child_id = crate::agent::fresh_id();
         let child_log = {
-            let parent_log = s.log.lock().expect("log poisoned");
+            let parent_log = s.log.lock();
             let mut child_log = parent_log
                 .fork(child_id, s.system.len())
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
@@ -775,7 +774,7 @@ impl ExarchDesk {
         // `amnemon` child — a writer never inherits model-visible context.
         let child_id = crate::agent::fresh_id();
         let child_log = {
-            let parent_log = s.log.lock().expect("log poisoned");
+            let parent_log = s.log.lock();
             parent_log
                 .fork(child_id, s.system.len())
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?
@@ -923,7 +922,7 @@ impl ExarchDesk {
         // `amnemon` child.
         let child_id = crate::agent::fresh_id();
         let child_log = {
-            let parent_log = s.log.lock().expect("log poisoned");
+            let parent_log = s.log.lock();
             parent_log
                 .fork(child_id, s.system.len())
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?
@@ -1124,6 +1123,7 @@ impl EnquiryDesk for DeskBinding {
 mod tests {
     use super::*;
     use crate::bus::{BusReceiver, Inbox, NO_FOCUS, channel};
+    use crate::event::AgentLog;
     use crate::provider::{Provider, ProviderKind, scripted::{Reply, Script}};
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Transport, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
@@ -1169,7 +1169,7 @@ mod tests {
                 reply: ReplyCell::default(),
                 schedules: ScheduleRegistry::new(),
                 pins: Arc::default(),
-                log: Arc::new(Mutex::new(fresh_log())),
+                log: LogCell::new(fresh_log()),
                 system: String::new(),
                 focus: Arc::new(AtomicU64::new(NO_FOCUS)),
                 interactive: false,
@@ -1200,7 +1200,7 @@ mod tests {
                 reply: ReplyCell::default(),
                 schedules: ScheduleRegistry::new(),
                 pins: Arc::default(),
-                log: Arc::new(Mutex::new(fresh_log())),
+                log: LogCell::new(fresh_log()),
                 system: String::new(),
                 focus: Arc::new(AtomicU64::new(NO_FOCUS)),
                 interactive: false,
@@ -1257,7 +1257,7 @@ mod tests {
                 reply: ReplyCell::default(),
                 schedules: ScheduleRegistry::new(),
                 pins: Arc::default(),
-                log: Arc::new(Mutex::new(fresh_log())),
+                log: LogCell::new(fresh_log()),
                 system: String::new(),
                 focus: Arc::new(AtomicU64::new(NO_FOCUS)),
                 interactive: false,

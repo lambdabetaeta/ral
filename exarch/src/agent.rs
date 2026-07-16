@@ -63,36 +63,85 @@ pub(crate) struct ProbedWorker {
     pub(crate) settled_epoch: Option<u64>,
 }
 
-/// A returning agent's staged return value: a shared slot the `reply` desk
-/// handler writes into ([`Self::set`]) and [`Agent::apply`]'s drain reads
-/// out of ([`Self::take`]) once the tool-call batch has fully drained.
-/// `Arc`-shared, not a plain field, so [`desk::HostServices`] can hold its
-/// own clone and stage a reply without ever reaching back through
-/// `&mut Agent` — the reentrancy law a desk handler is bound by
-/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3).
+/// One `ral` call's shared reply slot.  [`Agent::run_shell`] mints a fresh
+/// cell for each call and hands a clone into [`Agent::host_services`]; the
+/// desk's `reply` handler ([`Self::set`]) is the cell's only writer, running
+/// on the handler thread while the drive thread sits parked inside
+/// `run_shell`'s `shell_eval::run_shell` — the very window
+/// [`desk::HostServices`] as a whole depends on
+/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3).  The instant the
+/// desk is retired, `run_shell` harvests the cell by ownership
+/// ([`Self::take`]) into [`Agent::reply`], the plain field that then carries
+/// last-wins across the rest of the batch. `Arc`-shared for that one call's
+/// extent only, so the desk handler thread can write without ever reaching
+/// back through `&mut Agent`.  Because within-call contention is now
+/// structurally a bug — the cell exists for exactly one call, touched by
+/// exactly one handler while the drive thread is elsewhere — every accessor
+/// `try_lock`s and panics didactically rather than blocking.
 #[derive(Clone, Default)]
 pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
 
+/// The panic message [`ReplyCell`]'s accessors share: contention means a
+/// desk handler ran outside the one window it is ever entitled to.
+const REPLY_CELL_CONTENDED: &str = "reply cell contended: a desk handler may only run while the drive thread is parked in \
+     run_shell";
+
 impl ReplyCell {
-    /// Stage `value` as the return payload. Last write wins within a turn:
-    /// an earlier stage in the same batch is silently overwritten, matching
-    /// today's `set_reply` overwrite.
+    /// Stage `value` as the return payload. Last write wins within a call:
+    /// an earlier stage in the same call is silently overwritten.
     pub(crate) fn set(&self, value: FOValue) {
-        *self.0.lock().expect("reply cell poisoned") = Some(value);
+        *self.0.try_lock().expect(REPLY_CELL_CONTENDED) = Some(value);
     }
 
-    /// Take the staged payload, leaving the cell empty — the drain-site
-    /// read once the tool-call batch has fully drained.
+    /// Take the staged payload, leaving the cell empty — `run_shell`'s
+    /// post-retire harvest.
     pub(crate) fn take(&self) -> Option<FOValue> {
-        self.0.lock().expect("reply cell poisoned").take()
+        self.0.try_lock().expect(REPLY_CELL_CONTENDED).take()
     }
 
-    /// Clear any staged payload without reading it — the entry-reset
-    /// invariant `Agent::apply` runs on every entry, so a reply staged in a
-    /// turn that then cancels, errors, or panics before the drain that
-    /// takes it never survives to poison the next turn.
+    /// Clear any staged payload without reading it.  No production caller:
+    /// each call's cell starts unset ([`Default`]) and is read at most once
+    /// by [`Agent::run_shell`]'s post-retire harvest, so nothing outside a
+    /// test ever needs to blank one mid-life.
+    #[cfg(test)]
     pub(crate) fn clear(&self) {
-        *self.0.lock().expect("reply cell poisoned") = None;
+        *self.0.try_lock().expect(REPLY_CELL_CONTENDED) = None;
+    }
+}
+
+/// [`Agent::log`]'s lock: taken only by the drive thread between calls or by
+/// a desk handler while the drive thread sits parked inside
+/// [`Agent::run_shell`]'s `shell_eval::run_shell` — the same window
+/// [`ReplyCell`] and [`desk::HostServices`] as a whole depend on
+/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3).  Concurrent
+/// access from both threads at once is a scheduling bug, not a legitimate
+/// wait, so [`Self::lock`] `try_lock`s and panics didactically rather than
+/// blocking — this codebase's standing law that a violation panics, never
+/// hangs, the same discipline the enquiry reentrancy check applies to a
+/// handler that reaches back through `&mut Agent`.
+#[derive(Clone)]
+pub(crate) struct LogCell(Arc<Mutex<AgentLog>>);
+
+impl LogCell {
+    pub(crate) fn new(log: AgentLog) -> Self {
+        Self(Arc::new(Mutex::new(log)))
+    }
+
+    /// Lock the log — the sole accessor, every call site in the crate goes
+    /// through this.  `WouldBlock` means the drive thread and a desk handler
+    /// touched the log at once; `Poisoned` means a prior holder panicked
+    /// while holding it.  Both are fatal, but only the first names the
+    /// scheduling law being violated.
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, AgentLog> {
+        match self.0.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => panic!(
+                "log cell contended: the log may only be locked by the drive thread between \
+                 calls or by a desk handler while the drive thread is parked in run_shell — \
+                 concurrent access is a scheduling bug, not a wait"
+            ),
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("log poisoned"),
+        }
     }
 }
 
@@ -102,11 +151,25 @@ impl ReplyCell {
 )]
 pub struct Agent {
     pub id: AgentId,
+    /// This agent's own system prompt, resolved for its own `returns`/
+    /// `allow_schedule` — what actually reaches the model on every turn
+    /// ([`Self::apply`], [`Self::compact`]).
     pub(crate) system: String,
+    /// The system prompt template [`Self::system`] was resolved from — still
+    /// carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`] rather than a
+    /// baked-in builtin index, since the index is filtered per agent and
+    /// this template is agent-invariant. Read only by [`Self::fork_with`]
+    /// and [`Self::host_services`], which pass it on as a child's own
+    /// `Build::system` (in-thread and desk-spawned alike) so that child
+    /// resolves its own index from its own `returns`/`allow_schedule`,
+    /// never its parent's.
+    system_base: String,
     /// This session's canonical event log.  Its own lock, never the session
-    /// lock, so a per-turn desk can capture it off `&mut Agent`; uncontended
-    /// in practice, since the desk runs while the drive thread is elsewhere.
-    log: Arc<Mutex<AgentLog>>,
+    /// lock, so a per-turn desk can capture it off `&mut Agent` — but
+    /// [`LogCell::lock`] enforces the non-contention this buys as a checked
+    /// law, not a hope: the desk only ever runs while the drive thread sits
+    /// parked in `run_shell`, so a collision panics rather than blocking.
+    log: LogCell,
     /// This session's operational trace (`transcript.jsonl`), written at the
     /// emit seam through the [`Emitter`](crate::bus::Emitter) the frontend
     /// builds from [`Self::transcript`].  The sibling of [`Self::log`]: the
@@ -188,20 +251,24 @@ pub struct Agent {
     /// grant it directly on a [`Self::for_test`] trunk, which hardcodes it
     /// `false`.
     pub(crate) allow_schedule: bool,
-    /// A returning agent's staged return value, set by the `reply` desk
-    /// handler (via [`Self::set_reply`] for the coexisting `reply` tool) and
-    /// lifted by [`Self::apply`] into a [`TurnOutcome::Replied`] once the
-    /// current tool-call batch finishes draining — never mid-batch, so the
-    /// session reaches a clean boundary with every `call_id` answered.  Held
-    /// as the faithful [`FOValue`] the model passed, so the consuming edge
-    /// renders it (a null or empty value settles as the `Empty` variant of
+    /// A returning agent's staged return value, set by the `reply` *tool*'s
+    /// dispatch directly (via [`Self::set_reply`]) or, for the `reply`
+    /// *builtin*, harvested by [`Self::run_shell`] from that call's own
+    /// [`ReplyCell`] the instant the desk retires. Lifted by [`Self::apply`]
+    /// into a [`TurnOutcome::Replied`] once the current tool-call batch
+    /// finishes draining — never mid-batch, so the session reaches a clean
+    /// boundary with every `call_id` answered.  Held as the faithful
+    /// [`FOValue`] the model passed, so the consuming edge renders it (a null
+    /// or empty value settles as the `Empty` variant of
     /// [`AgentOutcome`](crate::bus::AgentOutcome)).  Every returning
     /// agent sets it — a peer and the headless root; `reply` is withheld only
     /// from the interactive root.  Scoped to its own batch: [`Self::apply`]
     /// resets it on entry, so a reply staged in a turn that then cancels,
     /// errors, or panics before the drain that takes it never survives to
-    /// poison the next turn.
-    reply: ReplyCell,
+    /// poison the next turn.  A plain field, not a `ReplyCell`: outside the
+    /// one call's extent a fresh cell is harvested into, this is touched only
+    /// by the drive thread under `&mut Agent`.
+    reply: Option<FOValue>,
     /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
     /// shell as of the last clean tool-call boundary.  Refreshed inside
     /// `run_shell` right before each dispatch, so it always holds the dynamic
@@ -401,6 +468,13 @@ const TRUNK_TITLE: &str = "main";
 /// one place lawfully holding the adopted nursery shell), not through
 /// `Agent::fork`/`fork_with`, which stay the ordinary in-thread path.
 pub(crate) struct Build {
+    /// The system prompt *template*: still carrying
+    /// [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`] rather than a baked-in
+    /// builtin index. [`Agent::assemble`] resolves it into the constructed
+    /// agent's own [`Agent::system`] using this same `Build`'s `returns`/
+    /// `allow_schedule`, and keeps the template itself as
+    /// [`Agent::system_base`] for that agent's own children to resolve
+    /// from in turn.
     pub(crate) system: String,
     pub(crate) caps: ral_core::types::Capabilities,
     pub(crate) shell: Shell,
@@ -469,10 +543,17 @@ impl Agent {
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
         let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
+        // Resolve *this* agent's own builtin index from *its own* `returns`/
+        // `allow_schedule` — never the parent's, so a fork whose bits differ
+        // from its creator's (an ordinary sub-agent under a conversing
+        // trunk, say) sees `reply` where the trunk's own prompt would not
+        // have shown it.
+        let system_prompt = crate::prompt::resolve_builtin_index(&system, returns, allow_schedule);
         Ok(Self {
             id: log.id(),
-            system,
-            log: Arc::new(Mutex::new(log)),
+            system: system_prompt,
+            system_base: system,
+            log: LogCell::new(log),
             transcript,
             transport,
             caps,
@@ -488,7 +569,7 @@ impl Agent {
             tools,
             returns,
             allow_schedule,
-            reply: ReplyCell::default(),
+            reply: None,
             durable,
             agents,
             schedules: crate::schedule::ScheduleRegistry::new(),
@@ -511,7 +592,7 @@ impl Agent {
             parent: self.parent,
             ceiling: false, // a root (trunk or headless) is never abandoned: no ceiling
             title: TRUNK_TITLE.to_string(),
-            log_dir: self.log.lock().expect("log poisoned").dir().to_path_buf(),
+            log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
             eval_root: self.parent.map(|_| self.eval_root()),
             turn_scope: self.parent.map(|_| self.turn_scope()),
@@ -522,7 +603,7 @@ impl Agent {
 
     fn replace_shell(&mut self, shell: Shell) {
         let mut shell = shell;
-        seed_session_dir(&mut shell, &self.log.lock().expect("log poisoned"));
+        seed_session_dir(&mut shell, &self.log.lock());
         // Re-arm and re-seal the rebuilt shell's binding-lease ledger — the
         // `/clear` half of "arming happens where the shell is installed"
         // (`decisions/260629_agent-binding-reaping`). The old ledger died
@@ -616,10 +697,7 @@ impl Agent {
         // are discarded before embedded library evaluation, and the exarch
         // cancel chain is restored over ral's freshly installed handlers.
         let shell = boot_root_shell(scratch);
-        self.log
-            .lock()
-            .expect("log poisoned")
-            .clear(self.system.len())?;
+        self.log.lock().clear(self.system.len())?;
         // Cancel the outgoing shell's registered workers before it is
         // replaced — `/clear` outranks every lease, the durable class
         // included — while it is still unambiguously *this* shell reachable
@@ -687,16 +765,16 @@ impl Agent {
         // parent's narrowed to a requested base (`parent ⊓ base`).
         let shell = self.transport.shell_mut().shell.fork_session();
         let child_id = fresh_id();
-        let log = self
-            .log
-            .lock()
-            .expect("log poisoned")
-            .fork(child_id, self.system.len())?;
+        let log = self.log.lock().fork(child_id, self.system.len())?;
         // One less than the parent's — the child's ceiling on how many more
         // generations it may itself spawn before the tools disappear.
         let fuel = self.fuel.saturating_sub(1);
         Self::assemble(Build {
-            system: self.system.clone(),
+            // The unresolved template, not `self.system`: `returns` may
+            // differ from the parent's own, and `Agent::assemble` resolves
+            // the child's builtin index from the child's own bits, which it
+            // can only do if the placeholder is still there to resolve.
+            system: self.system_base.clone(),
             caps,
             shell,
             log,
@@ -754,21 +832,16 @@ impl Agent {
     /// Import the creator's model-visible context into `child`, mnemon-style —
     /// the shared step behind `fork_remembering` and `branch()`.
     fn inherit_context(&self, child: &Self) -> io::Result<()> {
-        let messages = self
-            .log
-            .lock()
-            .expect("log poisoned")
-            .inherited_context_messages();
+        let messages = self.log.lock().inherited_context_messages();
         child
             .log
             .lock()
-            .expect("log poisoned")
             .import_context(messages)
             .map_err(io::Error::other)
     }
 
     pub(crate) fn log_dir(&self) -> std::path::PathBuf {
-        self.log.lock().expect("log poisoned").dir().to_path_buf()
+        self.log.lock().dir().to_path_buf()
     }
 
     /// A handle to this session's [`Transcript`] — for the frontend to attach
@@ -875,7 +948,7 @@ impl Agent {
     /// # Panics
     /// Panics if the log mutex is poisoned.
     pub fn is_ready(&self) -> bool {
-        self.log.lock().expect("log poisoned").is_ready()
+        self.log.lock().is_ready()
     }
 
     /// The model-view messages the next request would carry.  Exposed
@@ -885,7 +958,7 @@ impl Agent {
     /// # Panics
     /// Panics if the log mutex is poisoned.
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log.lock().expect("log poisoned").history_messages()
+        self.log.lock().history_messages()
     }
 
     /// Serialised model-view byte count — the compaction-threshold
@@ -894,7 +967,7 @@ impl Agent {
     /// # Panics
     /// Panics if the log mutex is poisoned.
     pub fn history_bytes(&self) -> usize {
-        self.log.lock().expect("log poisoned").history_bytes()
+        self.log.lock().history_bytes()
     }
 
     /// Reconcile the host-owned `services` pin against the shell's live
@@ -991,7 +1064,7 @@ impl Agent {
             return;
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
-        let mut total = crate::resources::dir_size(self.log.lock().expect("log poisoned").dir());
+        let mut total = crate::resources::dir_size(self.log.lock().dir());
         if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
             total += crate::resources::dir_size(&std::path::PathBuf::from(&scratch));
         }
@@ -1132,14 +1205,14 @@ impl Agent {
         // ── the event log ────────────────────────────────────────────────
         rows.push(ProbeRow::new(
             "log.events",
-            self.log.lock().expect("log poisoned").event_count() as u64,
+            self.log.lock().event_count() as u64,
             None,
             "evict",
             Some("prefix drops with compaction".to_string()),
         ));
         rows.push(ProbeRow::new(
             "log.bytes",
-            self.log.lock().expect("log poisoned").history_bytes() as u64,
+            self.log.lock().history_bytes() as u64,
             Some(COMPACT_THRESHOLD as u64),
             "evict",
             Some("auto-compaction threshold".to_string()),
@@ -1192,7 +1265,7 @@ impl Agent {
         ));
 
         // ── disk, walked at invocation ───────────────────────────────────
-        let log_dir = self.log.lock().expect("log poisoned").dir().to_path_buf();
+        let log_dir = self.log.lock().dir().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
             crate::resources::dir_size(&log_dir),
@@ -1344,11 +1417,8 @@ impl Agent {
                         AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
                         None,
                     );
-                    if !self.log.lock().expect("log poisoned").is_ready() {
-                        self.log
-                            .lock()
-                            .expect("log poisoned")
-                            .quiesce(QuiesceReason::Aborted);
+                    if !self.log.lock().is_ready() {
+                        self.log.lock().quiesce(QuiesceReason::Aborted);
                     }
                     continue;
                 }
@@ -1358,11 +1428,8 @@ impl Agent {
             // The post-loop guard does the same but only on loop exit;
             // quiesce per-iteration so the next prompt — nudge or user —
             // is admissible (turn-ends-ready invariant, X12).
-            if !self.log.lock().expect("log poisoned").is_ready() {
-                self.log
-                    .lock()
-                    .expect("log poisoned")
-                    .quiesce(QuiesceReason::Aborted);
+            if !self.log.lock().is_ready() {
+                self.log.lock().quiesce(QuiesceReason::Aborted);
             }
             digest = agent_digest(&outcome);
             let waiting_on_children = self.has_live_children();
@@ -1383,12 +1450,9 @@ impl Agent {
                 is_headless_root: self.parent.is_none() && !self.interactive,
             };
             let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
-            let nudge_msg = self.nudges.react(
-                &outcome,
-                &ctx,
-                emit,
-                &mut self.log.lock().expect("log poisoned"),
-            );
+            let nudge_msg = self
+                .nudges
+                .react(&outcome, &ctx, emit, &mut self.log.lock());
             if let Some(msg) = &nudge_msg {
                 self.inbox
                     .push(InboxMsg::Nudge(msg.clone()))
@@ -1408,14 +1472,11 @@ impl Agent {
         // errors, but a `break` from `Replied` or a future exit path could
         // still bypass it.  This catch-all ensures the turn-ends-ready
         // invariant holds regardless of how the loop exits.
-        if !self.log.lock().expect("log poisoned").is_ready() {
-            self.log
-                .lock()
-                .expect("log poisoned")
-                .quiesce(QuiesceReason::Aborted);
+        if !self.log.lock().is_ready() {
+            self.log.lock().quiesce(QuiesceReason::Aborted);
         }
         debug_assert!(
-            self.log.lock().expect("log poisoned").is_ready(),
+            self.log.lock().is_ready(),
             "drive must leave the agent ReadyForUser"
         );
         // The trunk removes itself at termination (a child is removed by its
@@ -1453,7 +1514,7 @@ impl Agent {
         // call.  Entering fresh here — every route into `apply` is a new turn
         // — is the one place that is structurally guaranteed to run, so it is
         // the one place this reset needs to live.
-        self.reply.clear();
+        self.reply = None;
         // Auto-compaction runs here, at the one boundary where `can_compact()`
         // actually holds — `apply` is entered `ReadyForUser` (the
         // turn-ends-ready invariant), before the prompt is committed.  Every
@@ -1464,7 +1525,6 @@ impl Agent {
         if let Some(p) = prompt {
             self.log
                 .lock()
-                .expect("log poisoned")
                 .append_user(p)
                 .map_err(ProviderError::Other)?;
         }
@@ -1476,7 +1536,6 @@ impl Agent {
             }
             self.log
                 .lock()
-                .expect("log poisoned")
                 .record_step(n, provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             emit.emit(Kind::Step {
@@ -1489,7 +1548,6 @@ impl Agent {
             let messages = self
                 .log
                 .lock()
-                .expect("log poisoned")
                 .render_messages()
                 .map_err(ProviderError::Other)?;
             ral_core::dbg_trace!(
@@ -1571,7 +1629,6 @@ impl Agent {
             self.last_input = usage.input;
             self.log
                 .lock()
-                .expect("log poisoned")
                 .record_usage(usage.into())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             emit.emit(Kind::Usage(usage));
@@ -1592,7 +1649,6 @@ impl Agent {
             let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
             self.log
                 .lock()
-                .expect("log poisoned")
                 .append_assistant(
                     assistant_message,
                     tool_ids,
@@ -1664,7 +1720,6 @@ impl Agent {
             let Dispatch { results, injected } = self.dispatch(provider, tool_calls, token, emit);
             self.log
                 .lock()
-                .expect("log poisoned")
                 .append_tool_results(results)
                 .map_err(ProviderError::Other)?;
             // Everything that arrived during the batch lands now, mid-turn:
@@ -1682,7 +1737,6 @@ impl Agent {
                 }
                 self.log
                     .lock()
-                    .expect("log poisoned")
                     .append_steering(text)
                     .map_err(ProviderError::Other)?;
             }
@@ -1705,7 +1759,7 @@ impl Agent {
         requested: bool,
         token: &cancel::Token,
     ) {
-        if !self.log.lock().expect("log poisoned").can_compact() {
+        if !self.log.lock().can_compact() {
             if requested {
                 self.note_error("cannot compact while tool results are pending".into(), emit);
             }
@@ -1729,7 +1783,7 @@ impl Agent {
                 summary_cap_tokens(w),
             ),
             _ => {
-                let bytes = self.log.lock().expect("log poisoned").history_bytes();
+                let bytes = self.log.lock().history_bytes();
                 (
                     bytes >= COMPACT_THRESHOLD,
                     format!("{} KB", bytes / 1024),
@@ -1747,8 +1801,8 @@ impl Agent {
             return;
         }
         // Keep the recent half verbatim; summarise the older prefix.
-        let keep = suffix_keep_budget(self.log.lock().expect("log poisoned").history_bytes());
-        let Some(plan) = self.log.lock().expect("log poisoned").plan_compaction(keep) else {
+        let keep = suffix_keep_budget(self.log.lock().history_bytes());
+        let Some(plan) = self.log.lock().plan_compaction(keep) else {
             // No turn old enough to summarise.  This is a no-op, not an event:
             // the absence of a `compacted` note already says nothing happened,
             // and the worker has no honest way to draw view-only chrome.
@@ -1758,11 +1812,7 @@ impl Agent {
         emit.emit(Kind::Phase("compacting".into()));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
-                let recorded = self
-                    .log
-                    .lock()
-                    .expect("log poisoned")
-                    .record_usage(summary.usage.into());
+                let recorded = self.log.lock().record_usage(summary.usage.into());
                 if let Err(e) = recorded {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
@@ -1771,7 +1821,6 @@ impl Agent {
                 let compacted = self
                     .log
                     .lock()
-                    .expect("log poisoned")
                     .apply_compaction(summary.summary, plan.suffix_start);
                 if let Err(e) = compacted {
                     self.note_error(format!("compact failed: {e}"), emit);
@@ -1780,7 +1829,7 @@ impl Agent {
                 Self::note(
                     format!(
                         "[Compacted: now {} KB]",
-                        self.log.lock().expect("log poisoned").history_bytes() / 1024
+                        self.log.lock().history_bytes() / 1024
                     ),
                     emit,
                 );
@@ -2078,7 +2127,7 @@ impl Agent {
     /// Best-effort dual-write: log the chrome line, then forward it
     /// through `emit`.  A log write-failure must not block the user line.
     pub(crate) fn note_error(&self, msg: String, emit: &Emitter) {
-        let _ = self.log.lock().expect("log poisoned").record_error(msg.clone());
+        let _ = self.log.lock().record_error(msg.clone());
         emit.emit(Kind::Error(msg));
     }
 
@@ -2097,11 +2146,15 @@ impl Agent {
     /// `&mut Agent`/`&mut Shell` to get it. Built fresh at every
     /// [`Self::run_shell`] install, beside the deferred sink, so the
     /// generation, fuel, caps, and grant a handler captures can never go
-    /// stale — the same reasoning `set_deferred_sink` documents.
+    /// stale — the same reasoning `set_deferred_sink` documents. `reply` is
+    /// `run_shell`'s own fresh [`ReplyCell`] for this one call, not a clone
+    /// of [`Self::reply`] — `run_shell` keeps its own handle to harvest back
+    /// once the desk retires.
     pub(crate) fn host_services(
         &self,
         emit: &Emitter,
         nursery: ral_core::types::Nursery,
+        reply: ReplyCell,
     ) -> desk::HostServices {
         desk::HostServices {
             registry: self.agents.clone(),
@@ -2114,11 +2167,17 @@ impl Agent {
             fuel: self.fuel,
             returns: self.returns,
             allow_schedule: self.allow_schedule,
-            reply: self.reply.clone(),
+            reply,
             schedules: self.schedules.clone(),
             pins: self.pins.clone(),
             log: self.log.clone(),
-            system: self.system.clone(),
+            // The unresolved template, not `self.system`: a desk-spawned
+            // child (`amnemon`/`mnemon`/`commit`/`verify-commitment`) always
+            // returns, which may differ from this agent's own `returns` —
+            // `Agent::assemble` must resolve the child's index from the
+            // child's own bits, which it can only do if the placeholder is
+            // still there to resolve.
+            system: self.system_base.clone(),
             focus: self.focus.clone(),
             interactive: self.interactive,
             nursery,
@@ -2160,8 +2219,14 @@ impl Agent {
         // "Identity binding").
         let nursery = ral_core::types::Nursery::default();
         self.transport.set_nursery(nursery.clone());
+        // This call's own reply slot: fresh, never a clone of `self.reply`,
+        // so a staged-then-abandoned reply from an earlier call can never
+        // resurface here.  Held on to below so it can be harvested back once
+        // the desk retires, the instant this call's one legitimate writer
+        // (the `reply` desk handler) is gone.
+        let reply_cell = ReplyCell::default();
         let desk = Arc::new(desk::ExarchDesk {
-            services: self.host_services(emit, nursery),
+            services: self.host_services(emit, nursery, reply_cell.clone()),
         });
         self.transport.set_desk(Arc::new(desk::DeskBinding {
             desk: desk.clone(),
@@ -2192,6 +2257,15 @@ impl Agent {
         // makes no further calls never does. `AbsentDesk` holds nothing, so
         // replacing it here drops the capture the moment this call is done.
         self.transport.set_desk(Arc::new(desk::AbsentDesk));
+        // Harvest whatever this call's `reply` handler staged, right after
+        // the desk that could still write it is gone — the one legitimate
+        // writer has retired, so the cell is ours by ownership now. `if let`,
+        // not an unconditional overwrite: a later call in the same batch that
+        // stages nothing must not erase an earlier call's staged reply —
+        // last-wins is a property of the batch, not of any one call.
+        if let Some(payload) = reply_cell.take() {
+            self.reply = Some(payload);
+        }
         // Advance the settled-retention sweep to this call's epoch: stamp
         // entries first observed settled, expire those whose unclaimed
         // result has sat a full retention of calls.  Expiry notices ride
@@ -2335,14 +2409,16 @@ impl Agent {
     }
 
     /// Stash a returning agent's deliberate return value — the coexisting
-    /// `reply` *tool*'s dispatch calls this with its JSON `result` argument
-    /// converted through [`shell_eval::json_fo`]; the `reply` *builtin*
-    /// instead stages through the desk's own captured [`ReplyCell`] clone
-    /// ([`crate::desk::HostServices::reply`]). [`Self::apply`] lifts
-    /// whichever staged it into a [`TurnOutcome::Replied`] once the
+    /// `reply` *tool*'s dispatch calls this directly with its JSON `result`
+    /// argument converted through [`shell_eval::json_fo`], holding `&mut
+    /// Agent` the way an ordinary tool dispatch always does. The `reply`
+    /// *builtin* instead stages through that call's own [`ReplyCell`]
+    /// ([`crate::desk::HostServices::reply`]), which [`Self::run_shell`]
+    /// harvests into this same field once the desk retires. [`Self::apply`]
+    /// lifts whichever landed here into a [`TurnOutcome::Replied`] once the
     /// tool-call batch drains.
-    pub(crate) fn set_reply(&self, payload: FOValue) {
-        self.reply.set(payload);
+    pub(crate) fn set_reply(&mut self, payload: FOValue) {
+        self.reply = Some(payload);
     }
 
     /// Reached when the batch carried a `reply`: wind the session back to
@@ -2353,12 +2429,12 @@ impl Agent {
     /// — `reply` hard-terminates.
     fn replied(&self, payload: FOValue) -> TurnOutcome {
         self.agents.cancel_descendants(self.id);
-        self.log.lock().expect("log poisoned").quiesce(QuiesceReason::Replied);
+        self.log.lock().quiesce(QuiesceReason::Replied);
         TurnOutcome::Replied(payload)
     }
 
     fn cancelled(&self, emit: &Emitter) -> TurnOutcome {
-        self.log.lock().expect("log poisoned").quiesce(QuiesceReason::Cancelled);
+        self.log.lock().quiesce(QuiesceReason::Cancelled);
         // The canonical log already carries `Cancelled` from quiesce;
         // this is the user-facing companion only.
         emit.emit(Kind::Error("cancelled".into()));
@@ -2402,7 +2478,7 @@ impl Drop for Agent {
     fn drop(&mut self) {
         self.transport.shell_mut().shell.cancel_workers();
         self.schedules.clear();
-        let _ = self.log.lock().expect("log poisoned").record_session_ended();
+        let _ = self.log.lock().record_session_ended();
     }
 }
 
@@ -2783,13 +2859,11 @@ mod tests {
         parent
             .log
             .lock()
-            .unwrap()
             .append_user("what did we learn?".into())
             .unwrap();
         parent
             .log
             .lock()
-            .unwrap()
             .append_assistant(
                 genai::chat::ChatMessage::assistant("the invariant matters"),
                 vec![],
@@ -2803,10 +2877,9 @@ mod tests {
         child
             .log
             .lock()
-            .unwrap()
             .append_user("use that invariant".into())
             .unwrap();
-        let ms = child.log.lock().unwrap().render_messages().unwrap();
+        let ms = child.log.lock().render_messages().unwrap();
         let view = serde_json::to_string(&ms).unwrap();
 
         assert!(view.contains("what did we learn?"));
@@ -2827,13 +2900,11 @@ mod tests {
         parent
             .log
             .lock()
-            .unwrap()
             .append_user("what did we learn?".into())
             .unwrap();
         parent
             .log
             .lock()
-            .unwrap()
             .append_assistant(
                 genai::chat::ChatMessage::assistant("the invariant matters"),
                 vec![],
@@ -2843,7 +2914,7 @@ mod tests {
 
         let child = parent.branch().expect("branch child");
 
-        let view = serde_json::to_string(&child.log.lock().unwrap().history_messages()).unwrap();
+        let view = serde_json::to_string(&child.log.lock().history_messages()).unwrap();
         assert!(view.contains("what did we learn?"));
         assert!(view.contains("the invariant matters"));
         assert!(
@@ -2908,6 +2979,60 @@ mod tests {
         assert!(
             !branch.returns(),
             "a branch withholds `reply` and never returns"
+        );
+    }
+
+    /// The builtin index resolves per agent, from that agent's own
+    /// construction-fixed `returns`, not the parent's it forked from: a
+    /// template carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`] is
+    /// resolved once per node, and each node keeps the unresolved template
+    /// (`system_base`) so its own children resolve from it in turn rather
+    /// than inheriting an already-filtered list.
+    #[test]
+    fn builtin_index_resolves_per_agent_not_per_parent() {
+        let dir = tmp("builtin-index-per-agent");
+        let scratch = Scratch::new().expect("scratch dir");
+        let template = format!(
+            "persona\n\n# Builtins\n\n{}",
+            crate::prompt::BUILTIN_INDEX_PLACEHOLDER
+        );
+        let root = Agent::root(
+            template,
+            ral_core::types::Capabilities::default(),
+            &scratch,
+            &dir,
+            "test-model",
+            "test",
+            false, // allow_schedule
+            true,  // interactive: the conversing trunk withholds `reply`
+            false, // chat
+            scripted("test-model", Script::new()),
+            None,
+        )
+        .expect("root trunk");
+        assert!(
+            !root.system.contains("reply"),
+            "an interactive trunk's own index must not advertise `reply`: {}",
+            root.system
+        );
+        assert!(
+            root.system_base
+                .contains(crate::prompt::BUILTIN_INDEX_PLACEHOLDER),
+            "the base template stays unresolved so a child can resolve its own index"
+        );
+
+        let child = root.fork(root.caps().clone()).expect("fork child");
+        assert!(
+            child.system.contains("reply"),
+            "an ordinary fork returns and must see `reply`, unlike its conversing parent: {}",
+            child.system
+        );
+
+        let branch = root.branch().expect("branch child");
+        assert!(
+            !branch.system.contains("reply"),
+            "a branch withholds `reply` just like the trunk it forked from: {}",
+            branch.system
         );
     }
 
@@ -4630,10 +4755,10 @@ mod tests {
         session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
         session.run_shell("c1".into(), "let _spin = 0", 5, &emit);
 
-        let before = session.log.lock().unwrap().event_count();
+        let before = session.log.lock().event_count();
         session.reap_bindings(&emit);
         assert_eq!(
-            session.log.lock().unwrap().event_count(),
+            session.log.lock().event_count(),
             before,
             "a binding prune must never write a model-view events.json entry"
         );
