@@ -12,6 +12,11 @@ serde      = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 csv        = "1"
 libc       = "0.2"
+# Unix-only syscall wrappers.  Pinned to 0.31 — the version the rest of the
+# graph already resolves — so every member rides one nix.  (0.29 also lingers
+# transitively via mac_address/termwiz, which pin it; nix majors are breaking,
+# so that one is not ours to move.)
+nix        = "0.31"
 clap       = { version = "4", features = ["derive"] }
 base64     = "0.22"
 shlex      = "2.0"

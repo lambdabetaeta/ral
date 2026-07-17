@@ -127,10 +127,8 @@ impl StdioSpec {
     pub fn from_pipe_reader(reader: os_pipe::PipeReader) -> Self {
         #[cfg(windows)]
         {
-            use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
-            let raw = reader.into_raw_handle();
-            // SAFETY: `into_raw_handle` transfers ownership to this OwnedHandle.
-            Self::from_owned_handle(unsafe { OwnedHandle::from_raw_handle(raw) })
+            use std::os::windows::io::OwnedHandle;
+            Self::from_owned_handle(OwnedHandle::from(reader))
         }
         #[cfg(not(windows))]
         {
@@ -141,10 +139,8 @@ impl StdioSpec {
     pub fn from_pipe_writer(writer: os_pipe::PipeWriter) -> Self {
         #[cfg(windows)]
         {
-            use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
-            let raw = writer.into_raw_handle();
-            // SAFETY: `into_raw_handle` transfers ownership to this OwnedHandle.
-            Self::from_owned_handle(unsafe { OwnedHandle::from_raw_handle(raw) })
+            use std::os::windows::io::OwnedHandle;
+            Self::from_owned_handle(OwnedHandle::from(writer))
         }
         #[cfg(not(windows))]
         {
@@ -155,10 +151,8 @@ impl StdioSpec {
     pub fn from_file(file: std::fs::File) -> Self {
         #[cfg(windows)]
         {
-            use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
-            let raw = file.into_raw_handle();
-            // SAFETY: `into_raw_handle` transfers ownership to this OwnedHandle.
-            Self::from_owned_handle(unsafe { OwnedHandle::from_raw_handle(raw) })
+            use std::os::windows::io::OwnedHandle;
+            Self::from_owned_handle(OwnedHandle::from(file))
         }
         #[cfg(not(windows))]
         {
@@ -928,21 +922,15 @@ mod windows {
     }
 
     fn pipe_reader_to_owned(reader: os_pipe::PipeReader) -> OwnedHandle {
-        use std::os::windows::io::IntoRawHandle;
-        // SAFETY: `into_raw_handle` transfers ownership.
-        unsafe { OwnedHandle::from_raw_handle(reader.into_raw_handle()) }
+        OwnedHandle::from(reader)
     }
 
     fn pipe_writer_to_owned(writer: os_pipe::PipeWriter) -> OwnedHandle {
-        use std::os::windows::io::IntoRawHandle;
-        // SAFETY: `into_raw_handle` transfers ownership.
-        unsafe { OwnedHandle::from_raw_handle(writer.into_raw_handle()) }
+        OwnedHandle::from(writer)
     }
 
     fn pipe_reader_to_file(reader: os_pipe::PipeReader) -> std::fs::File {
-        use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-        // SAFETY: `into_raw_handle` transfers ownership to File.
-        unsafe { std::fs::File::from_raw_handle(reader.into_raw_handle()) }
+        std::fs::File::from(OwnedHandle::from(reader))
     }
 
     struct AttributeList {

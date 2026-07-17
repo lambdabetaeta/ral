@@ -53,7 +53,7 @@ pub fn try_run_test_helper() -> Option<u8> {
     #[cfg(unix)]
     {
         use std::fmt::Write as _;
-        use std::io::Write;
+        use std::io::{IsTerminal, Write};
 
         let mut args = std::env::args_os();
         let _argv0 = args.next();
@@ -76,7 +76,7 @@ pub fn try_run_test_helper() -> Option<u8> {
         // pipes and ttys.
         let mut buf = String::new();
         let _ = writeln!(&mut buf, "pgid:{tag}={pgid}");
-        if unsafe { libc::isatty(stderr_fd) } == 1 {
+        if std::io::stderr().is_terminal() {
             let fg = unsafe { libc::tcgetpgrp(stderr_fd) };
             if fg >= 0 {
                 let _ = writeln!(&mut buf, "tcpgrp:{tag}={fg}");
