@@ -9,9 +9,9 @@
 //!
 //!   * a **listing** so an orchestrator can recover the ids of the agents it
 //!     started after context compaction (`agents`) and stop stragglers
-//!     (`agent_cancel`);
+//!     (`agent-cancel`);
 //!   * the **subtree cascade**: [`AgentRegistry::cancel`] cancels an agent
-//!     *and every descendant*, behind `agent_cancel` and the per-agent
+//!     *and every descendant*, behind `agent-cancel` and the per-agent
 //!     ceiling; `/clear` and `/close` reap a subtree through `clear_subtree`
 //!     and `remove_subtree`, and `terminate_entry` is the per-entry primitive
 //!     all of them share.  Each
@@ -245,7 +245,7 @@ impl AgentRegistry {
     /// reach its running eval.
     ///
     /// Refuses (`None`) when `parent` is `Some` and is not, at this instant,
-    /// a live and un-terminated entry — a spawn racing an `agent_cancel`/
+    /// a live and un-terminated entry — a spawn racing an `agent-cancel`/
     /// `/clear` on its own parent, closed by checking under the very lock the
     /// cascade holds for its whole walk, so the check can never observe a
     /// parent mid-teardown: either the cascade has not reached the lock yet
@@ -389,7 +389,7 @@ impl AgentRegistry {
     /// [`CancelCause::Deadline`]); `/clear` and `/close` reap through
     /// [`Self::clear_subtree`]/[`Self::remove_subtree`] instead. `pub(crate)`
     /// because it trusts its caller to already have decided `id` is a
-    /// legitimate target — the model-facing `agent_cancel` tool goes through
+    /// legitimate target — the model-facing `agent-cancel` tool goes through
     /// [`Self::cancel_scoped`], which checks that before ever reaching here.
     pub(crate) fn cancel(&self, id: AgentId) -> bool {
         self.cancel_cause(id, CancelCause::Explicit)
@@ -409,7 +409,7 @@ impl AgentRegistry {
         existed
     }
 
-    /// `agent_cancel`'s model-facing entry point: cancel `target`'s whole
+    /// `agent-cancel`'s model-facing entry point: cancel `target`'s whole
     /// subtree, but only if `target` is a proper descendant of `caller` — an
     /// agent may stop what it started, never a sibling, an ancestor, or
     /// itself. `Ok(false)` for an unknown `target` (the tool's existing
@@ -509,7 +509,7 @@ pub enum MessageError {
     RecipientInboxFull(AgentId, InboxReject),
 }
 
-/// A model-facing scoping violation shared by `agent_cancel` and `message`.
+/// A model-facing scoping violation shared by `agent-cancel` and `message`.
 ///
 /// Each takes a target id but may only reach a proper descendant of the
 /// caller — an ancestor, a sibling, or the caller's own id is refused.
@@ -1166,7 +1166,7 @@ mod tests {
         );
     }
 
-    /// A1: `agent_cancel`'s scoped entry point may only reach a proper
+    /// A1: `agent-cancel`'s scoped entry point may only reach a proper
     /// descendant of the caller.  A leaf cannot cancel the trunk (an
     /// ancestor), a sibling, or itself; a parent can cancel its own
     /// subtree at any depth; an unknown id is reported, not an error.
@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     /// L3: a registration whose `parent` has already vanished from the map —
-    /// the tail of a spawn racing a `/clear`/`agent_cancel` on that parent —
+    /// the tail of a spawn racing a `/clear`/`agent-cancel` on that parent —
     /// is refused outright rather than landing orphaned and uncancellable.
     #[test]
     fn register_refuses_when_the_parent_is_gone() {
@@ -1318,7 +1318,7 @@ mod tests {
     }
 
     /// The ceiling reaper's cascade must report `Deadline` ("timed out"), not
-    /// `Explicit` ("cancelled") — a reaped worker and an `agent_cancel`ed one
+    /// `Explicit` ("cancelled") — a reaped worker and an `agent-cancel`ed one
     /// hit the same shared cascade (`cancel_cause`), distinguished only by
     /// which cause each caller passes.
     #[test]

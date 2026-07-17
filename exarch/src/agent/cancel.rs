@@ -10,7 +10,7 @@
 //! genuine turn boundary so a prior turn's Esc never bleeds into the next.
 //! The token is threaded down through `apply` → dispatch → tools, cancelled
 //! by the chained signal handler, by a per-tab turn interrupt
-//! (`AgentRegistry::interrupt`), by the registry cascade (`agent_cancel`, the
+//! (`AgentRegistry::interrupt`), by the registry cascade (`agent-cancel`, the
 //! ceiling, `/clear`), and raced by the HTTP request future, so one
 //! cancellation stops the turn and returns to the prompt.  The cause a token
 //! carries decides how far it reaches: an
@@ -133,7 +133,7 @@ impl Token {
     /// the flag to the maximum of its current value and `cause` — the same
     /// monotone escalation `CancelScope::cancel` gives ral's own scopes — so
     /// a later, weaker cause (an Esc `Interrupt` arriving after an
-    /// `agent_cancel` `Explicit`) can never mask a stronger one already in
+    /// `agent-cancel` `Explicit`) can never mask a stronger one already in
     /// force.
     pub fn cancel(&self, cause: CancelCause) {
         self.0.fetch_max(cause as u8, Ordering::Relaxed);

@@ -404,7 +404,7 @@ fn ui_loop(
                         // path would target the trunk by mistake.  Neither
                         // reaches descendants, and neither ends the agent —
                         // lifecycle death stays with `/quit`, `/clear`, the
-                        // ceiling, and `agent_cancel`.
+                        // ceiling, and `agent-cancel`.
                         KeyAction::Cancel => {
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();

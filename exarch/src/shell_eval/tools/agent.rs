@@ -97,7 +97,7 @@ pub(crate) struct SpawnedChild {
 ///
 /// If the OS refuses to spawn the worker thread, or the registration itself
 /// is refused (this agent's own entry vanished between the tool call
-/// starting and the registry lock — an `agent_cancel`/`/clear` racing the
+/// starting and the registry lock — an `agent-cancel`/`/clear` racing the
 /// spawn), the just-created registry entry (if any) is unwound and the call
 /// returns `Err` — every caller's receipt collapses to that plain error
 /// instead of a start receipt.

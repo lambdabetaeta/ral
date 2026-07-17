@@ -123,8 +123,7 @@ pub(crate) struct ExarchDesk {
 }
 
 /// An agent's display label: its title when known, else its numeric id —
-/// the desk twin of `tools::agent`'s own copy, shared by [`ExarchDesk::message`]
-/// and [`ExarchDesk::agent_cancel`].
+/// shared by [`ExarchDesk::message`] and [`ExarchDesk::agent-cancel`].
 fn label(title: Option<&str>, id: AgentId) -> String {
     title.map_or_else(|| id.to_string(), str::to_string)
 }
@@ -613,25 +612,23 @@ impl ExarchDesk {
         // additionally imports the parent's model-visible context, exactly
         // as `Agent::inherit_context` does for `fork_remembering`/`branch`
         // — done here, on the raw `AgentLog`, since the child is not yet an
-        // `Agent` for `inherit_context` to take a `&Self` of. The bookend's
-        // `system_prompt_bytes` must be the child's own resolved prompt,
-        // never the unresolved template's raw length — every spawn through
-        // this spine fixes the child's bits at `returns: true,
-        // allow_schedule: s.allow_schedule` below, so that same resolution
-        // is run here, ahead of `Agent::assemble`'s own, to size the
-        // bookend the log records at construction.
+        // `Agent` for `inherit_context` to take a `&Self` of. The child's
+        // builtin index is resolved once, here, from the bits every spawn
+        // through this spine fixes below (`returns: true, allow_schedule:
+        // s.allow_schedule`): the bookend records its length — never the
+        // unresolved template's raw length — and `Build` carries the same
+        // string on to become the child's own `Agent::system`.
         let child_id = crate::agent::fresh_id();
-        let system_prompt_bytes = crate::prompt::resolve_builtin_index(
+        let system_prompt = crate::prompt::resolve_builtin_index(
             &s.system_template,
             &shell,
             true,
             s.allow_schedule,
-        )
-        .len();
+        );
         let child_log = {
             let parent_log = s.log.lock();
             let mut child_log = parent_log
-                .fork(child_id, system_prompt_bytes)
+                .fork(child_id, system_prompt.len())
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
             let inherited = spec.inherit_context.then(|| parent_log.inherited_context_messages());
             drop(parent_log);
@@ -650,6 +647,7 @@ impl ExarchDesk {
         let fuel = s.fuel - 1;
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
+            system_prompt,
             caps: child_caps,
             shell,
             log: child_log,
@@ -798,20 +796,33 @@ impl ExarchDesk {
         #[allow(clippy::cast_sign_loss, reason = "id checked non-negative above")]
         let id = id as u64;
 
-        let who = label(s.registry.title_for(id).as_deref(), id);
+        // Run the cancel first, then derive the chrome from what actually
+        // happened — a summary claiming "cancelled" ahead of the call would
+        // stand contradicted by its own result line on a no-op or a scope
+        // refusal, and the target's title is only ever shown once the scope
+        // check has let this caller reach it.
+        let result = s.registry.cancel_scoped(s.parent, id);
+        let (summary, content) = match &result {
+            Ok(true) => {
+                let who = label(s.registry.title_for(id).as_deref(), id);
+                (format!("Agent {who} cancelled."), format!("cancelling agent {who}"))
+            }
+            Ok(false) => (
+                format!("No live agent {id}."),
+                format!("no live agent with id {id}"),
+            ),
+            Err(NotADescendant(n)) => (
+                format!("Agent {n} refused: not a descendant."),
+                format!(
+                    "agent {n} is not an agent you started; agent-cancel may only reach a descendant of yours"
+                ),
+            ),
+        };
         s.emit.emit(Kind::HarnessCall {
             verb: "agent-cancel",
             cmd: format!("cancelling agent {id}"),
-            summary: Some(format!("Agent {who} cancelled.")),
+            summary: Some(summary),
         });
-        let result = s.registry.cancel_scoped(s.parent, id);
-        let content = match &result {
-            Ok(true) => format!("cancelling agent {who}"),
-            Ok(false) => format!("no live agent with id {id}"),
-            Err(NotADescendant(n)) => format!(
-                "agent {n} is not an agent you started; agent_cancel may only reach a descendant of yours"
-            ),
-        };
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Both `Ok(true)` (cancelled) and `Ok(false)` (no live agent with
         // that id — a no-op) are a successful call; only a scope violation
@@ -838,28 +849,42 @@ impl ExarchDesk {
         let id = id as u64;
         let text = payload_string(text, "message", "text")?;
 
-        let who = label(s.registry.title_for(id).as_deref(), id);
+        // Run the send first, then derive the chrome from what actually
+        // happened — a summary claiming "messaged" ahead of the call would
+        // stand contradicted by its own result line on a delivery failure or
+        // a scope refusal, and the target's title is only ever shown once
+        // the scope check has let this caller reach it.
+        let cmd = text.clone();
+        let result = s.registry.message(s.parent, id, text);
+        let (summary, content) = match &result {
+            Ok(()) => {
+                let who = label(s.registry.title_for(id).as_deref(), id);
+                (format!("Messaged agent {who}."), format!("sent message to agent {who}"))
+            }
+            Err(MessageError::UnknownRecipient(n)) => (
+                format!("No live agent {n}."),
+                format!("no live agent with id {n}; did it finish already?"),
+            ),
+            Err(MessageError::UnknownSender(n)) => (
+                format!("Message from agent {n} refused: no longer live."),
+                format!("cannot send from agent {n}: it is no longer live"),
+            ),
+            Err(MessageError::NotADescendant(n)) => (
+                format!("Message to agent {n} refused: not a descendant."),
+                format!(
+                    "agent {n} is not an agent you started; message may only reach a descendant of yours"
+                ),
+            ),
+            Err(MessageError::RecipientInboxFull(n, reject)) => (
+                format!("Message to agent {n} rejected."),
+                format!("agent {n} did not receive the message: {reject}"),
+            ),
+        };
         s.emit.emit(Kind::HarnessCall {
             verb: "message",
-            cmd: text.clone(),
-            summary: Some(format!("Messaged agent {who}.")),
+            cmd,
+            summary: Some(summary),
         });
-        let result = s.registry.message(s.parent, id, text);
-        let content = match &result {
-            Ok(()) => format!("sent message to agent {who}"),
-            Err(MessageError::UnknownRecipient(n)) => {
-                format!("no live agent with id {n}; did it finish already?")
-            }
-            Err(MessageError::UnknownSender(n)) => {
-                format!("cannot send from agent {n}: it is no longer live")
-            }
-            Err(MessageError::NotADescendant(n)) => format!(
-                "agent {n} is not an agent you started; message may only reach a descendant of yours"
-            ),
-            Err(MessageError::RecipientInboxFull(n, reject)) => {
-                format!("agent {n} did not receive the message: {reject}")
-            }
-        };
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Success of the command is the confirmation; a refusal raises,
         // carrying the same text the chrome already rendered — the desk
@@ -1171,9 +1196,11 @@ impl SurfaceApplier {
     /// Apply one live [`Event::Surface`] value.
     pub(crate) fn live(&self, val: FOValue) {
         if let Some(kind) = shell_eval::accepted_surface(&RalValue::from(val), &self.emit) {
-            if let Some(pins) = &self.pins
-                && let Ok(mut m) = pins.lock()
-            {
+            if let Some(pins) = &self.pins {
+                // A poisoned register is fatal, never skipped: silently
+                // dropping a `pin`/`unpin` here would desync the mirror
+                // from the stream with no signal at all.
+                let mut m = pins.lock().expect("pin register poisoned");
                 match &kind {
                     Kind::Pin { key, card } => {
                         m.insert(key.clone(), shell_eval::PinDigest::new(key, card.clone()));
@@ -1213,6 +1240,31 @@ pub(crate) struct AbsentDesk;
 impl EnquiryDesk for AbsentDesk {
     fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
         Err(Error::new("this host answers no enquiries", 1))
+    }
+}
+
+/// Retires the installed desk when dropped: [`AbsentDesk`] back onto the
+/// transport, nursery cleared. `Agent::run_shell` holds one across its eval
+/// so the teardown runs on *every* exit — including a panic `drive`'s
+/// `catch_unwind` recovers from, where straight-line teardown would leave
+/// the real desk installed for the rest of the session.
+///
+/// Why the teardown matters at all: `engine.desk` is unobservable between
+/// calls (nothing dispatches without `run_shell` installing a fresh real
+/// desk first), but the installed [`DeskBinding`] holds its call's
+/// `Emitter` clone — leaving it in place would keep that clone (and the
+/// rest of its `HostServices` capture) alive until the *next* `ral` call
+/// ever replaces it, which a session that makes no further calls never
+/// does. The nursery clear is the symmetric half: it holds nothing once
+/// the turn guard has emptied it, but a hypothetical `fork_into_nursery`
+/// between calls must answer the honest absence error rather than find a
+/// stale nursery still installed.
+pub(crate) struct RetireDeskOnDrop<'t>(pub(crate) &'t ral_core::transport::IdentityTransport);
+
+impl Drop for RetireDeskOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.set_desk(Arc::new(AbsentDesk));
+        self.0.clear_nursery();
     }
 }
 
@@ -1286,61 +1338,49 @@ mod tests {
         Arc::new(Provider::scripted("test-model", ProviderKind::Openai, Script::new()))
     }
 
-    fn desk() -> ExarchDesk {
+    /// The base capture every desk in this module builds on: a fresh
+    /// registry, a throwaway parent id `0`, fuel 3, `returns: true`, no
+    /// self-wakeup grant. Each helper below adjusts only the fields its
+    /// tests are about, so growing [`HostServices`] means touching one
+    /// literal, not three.
+    fn base_services() -> HostServices {
         let (emit, _rx) = dummy_emitter();
-        ExarchDesk {
-            services: HostServices {
-                registry: AgentRegistry::new(),
-                parent: 0,
-                mailbox: Inbox::new().mailbox(),
-                emit,
-                provider: ProviderHandle::new(scripted_provider()),
-                caps: Capabilities::root(),
-                cwd: PathBuf::from("/"),
-                fuel: 3,
-                returns: true,
-                allow_schedule: false,
-                reply: ReplyCell::default(),
-                schedules: ScheduleRegistry::new(),
-                pins: Arc::default(),
-                log: LogCell::new(fresh_log()),
-                system_template: String::new(),
-                focus: Arc::new(AtomicU64::new(NO_FOCUS)),
-                interactive: false,
-                nursery: Nursery::default(),
-                generation: 0,
-                disk_warn_bytes: None,
-            },
+        HostServices {
+            registry: AgentRegistry::new(),
+            parent: 0,
+            mailbox: Inbox::new().mailbox(),
+            emit,
+            provider: ProviderHandle::new(scripted_provider()),
+            caps: Capabilities::root(),
+            cwd: PathBuf::from("/"),
+            fuel: 3,
+            returns: true,
+            allow_schedule: false,
+            reply: ReplyCell::default(),
+            schedules: ScheduleRegistry::new(),
+            pins: Arc::default(),
+            log: LogCell::new(fresh_log()),
+            system_template: String::new(),
+            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
+            interactive: false,
+            nursery: Nursery::default(),
+            generation: 0,
+            disk_warn_bytes: None,
         }
+    }
+
+    fn desk() -> ExarchDesk {
+        ExarchDesk { services: base_services() }
     }
 
     /// [`desk`] with the self-wakeup grant held, so the schedule family's
     /// desk-level tests can exercise `` `schedule ``/`` `schedule-list ``/
     /// `` `unschedule `` past their grant check.
     fn granted_desk() -> ExarchDesk {
-        let (emit, _rx) = dummy_emitter();
         ExarchDesk {
             services: HostServices {
-                registry: AgentRegistry::new(),
-                parent: 0,
-                mailbox: Inbox::new().mailbox(),
-                emit,
-                provider: ProviderHandle::new(scripted_provider()),
-                caps: Capabilities::root(),
-                cwd: PathBuf::from("/"),
-                fuel: 3,
-                returns: true,
                 allow_schedule: true,
-                reply: ReplyCell::default(),
-                schedules: ScheduleRegistry::new(),
-                pins: Arc::default(),
-                log: LogCell::new(fresh_log()),
-                system_template: String::new(),
-                focus: Arc::new(AtomicU64::new(NO_FOCUS)),
-                interactive: false,
-                nursery: Nursery::default(),
-                generation: 0,
-                disk_warn_bytes: None,
+                ..base_services()
             },
         }
     }
@@ -1375,29 +1415,14 @@ mod tests {
             mailbox: parent_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
         });
-        let (emit, _rx) = dummy_emitter();
         let desk = ExarchDesk {
             services: HostServices {
                 registry: registry.clone(),
                 parent: parent_id,
                 mailbox: parent_inbox.mailbox(),
-                emit,
-                provider: ProviderHandle::new(scripted_provider()),
-                caps: Capabilities::root(),
-                cwd: PathBuf::from("/"),
                 fuel,
-                returns: true,
-                allow_schedule: false,
-                reply: ReplyCell::default(),
-                schedules: ScheduleRegistry::new(),
-                pins: Arc::default(),
-                log: LogCell::new(fresh_log()),
-                system_template: String::new(),
-                focus: Arc::new(AtomicU64::new(NO_FOCUS)),
-                interactive: false,
-                nursery: Nursery::default(),
                 generation: registry.generation(),
-                disk_warn_bytes: None,
+                ..base_services()
             },
         };
         (desk, registry, parent_inbox)
@@ -2027,7 +2052,7 @@ mod tests {
         assert_eq!(
             cancel_err.message,
             format!(
-                "agent {root_id} is not an agent you started; agent_cancel may only reach a descendant of yours"
+                "agent {root_id} is not an agent you started; agent-cancel may only reach a descendant of yours"
             )
         );
 

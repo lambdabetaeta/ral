@@ -86,22 +86,34 @@ pub(crate) struct ProbedWorker {
 #[derive(Clone, Default)]
 pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
 
-/// The panic message [`ReplyCell`]'s accessors share: contention means a
-/// desk handler ran outside the one window it is ever entitled to.
-const REPLY_CELL_CONTENDED: &str = "reply cell contended: a desk handler may only run while the drive thread is parked in \
-     run_shell";
-
 impl ReplyCell {
+    /// Lock the cell — the sole accessor, every method below goes through
+    /// this.  `WouldBlock` means a desk handler ran outside the one window
+    /// it is ever entitled to; `Poisoned` means a prior holder panicked
+    /// while holding it.  Both are fatal, but only the first names the
+    /// scheduling law being violated — the same discipline [`LogCell::lock`]
+    /// applies to its own lock.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<FOValue>> {
+        match self.0.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => panic!(
+                "reply cell contended: a desk handler may only run while the drive thread is \
+                 parked in run_shell"
+            ),
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("reply cell poisoned"),
+        }
+    }
+
     /// Stage `value` as the return payload. Last write wins within a call:
     /// an earlier stage in the same call is silently overwritten.
     pub(crate) fn set(&self, value: FOValue) {
-        *self.0.try_lock().expect(REPLY_CELL_CONTENDED) = Some(value);
+        *self.lock() = Some(value);
     }
 
     /// Take the staged payload, leaving the cell empty — `run_shell`'s
     /// post-retire harvest.
     pub(crate) fn take(&self) -> Option<FOValue> {
-        self.0.try_lock().expect(REPLY_CELL_CONTENDED).take()
+        self.lock().take()
     }
 
     /// Clear any staged payload without reading it.  No production caller:
@@ -110,7 +122,7 @@ impl ReplyCell {
     /// test ever needs to blank one mid-life.
     #[cfg(test)]
     pub(crate) fn clear(&self) {
-        *self.0.try_lock().expect(REPLY_CELL_CONTENDED) = None;
+        *self.lock() = None;
     }
 }
 
@@ -225,7 +237,7 @@ pub struct Agent {
     /// completion within one turn.
     nudges: nudge::Registry,
     /// This agent's cancellation token — one sticky token for its life,
-    /// registered in the fleet so the subtree cascade (`agent_cancel`, the
+    /// registered in the fleet so the subtree cascade (`agent-cancel`, the
     /// ceiling, and `/clear`) always reaches the live turn.
     /// The drive loop [`reset`](cancel::Token::reset)s its flag at each genuine
     /// turn boundary, so an Esc on one turn never bleeds into the next; the
@@ -478,12 +490,18 @@ const TRUNK_TITLE: &str = "main";
 pub(crate) struct Build {
     /// The system prompt *template*: still carrying
     /// [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`] rather than a baked-in
-    /// builtin index. [`Agent::assemble`] resolves it into the constructed
-    /// agent's own [`Agent::system`] using this same `Build`'s `returns`/
-    /// `allow_schedule`, and keeps the template itself as
-    /// [`Agent::system_base`] for that agent's own children to resolve
-    /// from in turn.
+    /// builtin index — kept as [`Agent::system_base`] for the constructed
+    /// agent's own children to resolve from in turn.
     pub(crate) system: String,
+    /// `system` resolved by [`crate::prompt::resolve_builtin_index`] against
+    /// this same `Build`'s shell, `returns`, and `allow_schedule` — what
+    /// actually reaches the model as [`Agent::system`]. The caller resolves
+    /// it because it needs the resolved length anyway, before this `Build`
+    /// even exists: the log's `SessionStarted` bookend records it, and the
+    /// log must exist before the agent it describes does. Resolving once at
+    /// the construction site keeps the bookend and the prompt the model
+    /// sees structurally the same string.
+    pub(crate) system_prompt: String,
     pub(crate) caps: ral_core::types::Capabilities,
     pub(crate) shell: Shell,
     pub(crate) log: AgentLog,
@@ -510,6 +528,7 @@ impl Agent {
     pub(crate) fn assemble(b: Build) -> io::Result<Self> {
         let Build {
             system,
+            system_prompt,
             caps,
             mut shell,
             log,
@@ -536,14 +555,6 @@ impl Agent {
         });
         let durable = shell.mobile_snapshot();
         let turn_scope: crate::fleet::registry::TurnScope = Arc::new(Mutex::new(None));
-        // Resolve *this* agent's own builtin index from *its own* `returns`/
-        // `allow_schedule` — never the parent's, so a fork whose bits differ
-        // from its creator's (an ordinary sub-agent under a conversing
-        // trunk, say) sees `reply` where the trunk's own prompt would not
-        // have shown it. Read off `shell` here, before it moves into the
-        // transport below.
-        let system_prompt =
-            crate::prompt::resolve_builtin_index(&system, &shell, returns, allow_schedule);
         let mut transport = ral_core::transport::IdentityTransport::new(shell);
         transport.observe_foreground(turn_scope.clone());
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
@@ -652,18 +663,16 @@ impl Agent {
         let shell = boot_root_shell(scratch);
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
-        // The bookend's `system_prompt_bytes` must be this agent's own
-        // resolved prompt, not `system`'s raw (still-templated) length —
-        // resolved here, ahead of `Agent::assemble`'s own resolution, from
-        // the same `returns`/`allow_schedule` bits `assemble` resolves
-        // with below, so the log exists (and can record it) before the
-        // agent it describes does.
-        let system_prompt_bytes =
-            crate::prompt::resolve_builtin_index(&system, &shell, !interactive, allow_schedule)
-                .len();
-        let log = AgentLog::root(&sessions_root, id, model, provider_label, system_prompt_bytes)?;
+        // This agent's own builtin index, resolved from its own `returns`/
+        // `allow_schedule` bits — once, here: the bookend records its
+        // length (the log must exist before the agent it describes does)
+        // and `Build` carries the same string on to become `Agent::system`.
+        let system_prompt =
+            crate::prompt::resolve_builtin_index(&system, &shell, !interactive, allow_schedule);
+        let log = AgentLog::root(&sessions_root, id, model, provider_label, system_prompt.len())?;
         let agent = Self::assemble(Build {
             system,
+            system_prompt,
             caps,
             shell,
             log,
@@ -751,9 +760,7 @@ impl Agent {
         self.inbox.clear();
         // A rebuilt context wears no pinned state: the frontend wipes its
         // register on `/clear`, so the session's mirror must follow.
-        if let Ok(mut m) = self.pins.lock() {
-            m.clear();
-        }
+        self.pins.lock().expect("pin register poisoned").clear();
         Ok(())
     }
 
@@ -790,32 +797,29 @@ impl Agent {
         // parent's narrowed to a requested base (`parent ⊓ base`).
         let shell = self.transport.shell_mut().shell.fork_session();
         let child_id = fresh_id();
-        // The bookend's `system_prompt_bytes` must be the *child's* own
-        // resolved prompt, not `self.system.len()`: `returns` may differ
-        // from this agent's own (a `/branch` child withholds `reply`
-        // however its creator's own bit reads), and `Agent::assemble`
-        // below resolves each agent's index from its own bits alone.
-        // Resolved here, ahead of `assemble`'s own resolution, from the
-        // same `returns`/`allow_schedule` bits the child's `Build` carries,
-        // so the log exists (and can record it) before the agent it
-        // describes does.
-        let system_prompt_bytes = crate::prompt::resolve_builtin_index(
+        // The *child's* own builtin index, never `self.system`: `returns`
+        // may differ from this agent's own (a `/branch` child withholds
+        // `reply` however its creator's own bit reads), so the index is
+        // resolved from the template against the child's bits — once, here:
+        // the bookend records its length (the log must exist before the
+        // agent it describes does) and `Build` carries the same string on
+        // to become the child's `Agent::system`.
+        let system_prompt = crate::prompt::resolve_builtin_index(
             &self.system_base,
             &shell,
             returns,
             self.allow_schedule,
-        )
-        .len();
-        let log = self.log.lock().fork(child_id, system_prompt_bytes)?;
+        );
+        let log = self.log.lock().fork(child_id, system_prompt.len())?;
         // One less than the parent's — the child's ceiling on how many more
-        // generations it may itself spawn before the tools disappear.
+        // generations of delegation may descend from it before the depth
+        // budget bottoms out.
         let fuel = self.fuel.saturating_sub(1);
         Self::assemble(Build {
-            // The unresolved template, not `self.system`: `returns` may
-            // differ from the parent's own, and `Agent::assemble` resolves
-            // the child's builtin index from the child's own bits, which it
-            // can only do if the placeholder is still there to resolve.
+            // The unresolved template: the child's own children resolve
+            // their indices from it in turn.
             system: self.system_base.clone(),
+            system_prompt,
             caps,
             shell,
             log,
@@ -937,14 +941,13 @@ impl Agent {
         // Resolved for the same `returns: true, allow_schedule: false` bits
         // `Build` below fixes for every `for_test` trunk, so the bookend
         // matches this agent's own `system` rather than the raw template.
-        let system_prompt_bytes =
-            crate::prompt::resolve_builtin_index(system, &shell, true, false).len();
+        let system_prompt = crate::prompt::resolve_builtin_index(system, &shell, true, false);
         let log = AgentLog::root(
             &dir.join("sessions"),
             id,
             "test-model",
             "test",
-            system_prompt_bytes,
+            system_prompt.len(),
         )?;
         let provider = ProviderHandle::new(Arc::new(Provider::scripted(
             "test-model",
@@ -953,6 +956,7 @@ impl Agent {
         )));
         let agent = Self::assemble(Build {
             system: system.to_string(),
+            system_prompt,
             caps: ral_core::types::Capabilities::default(),
             shell,
             log,
@@ -1873,10 +1877,10 @@ impl Agent {
     // --- private helpers ---
 
     /// Dispatch a batch of tool calls in order, short-circuiting the rest to
-    /// cancelled results the instant the token trips.  Every tool returns its
-    /// result synchronously now — the spawn tools launch a detached peer and
-    /// return a start receipt — so there is no join phase and no
-    /// `thread::scope`.
+    /// cancelled results the instant the token trips.  Every call returns its
+    /// result synchronously — a spawn inside the `ral` eval launches a
+    /// detached peer and answers with a start receipt — so there is no join
+    /// phase and no `thread::scope`.
     fn dispatch(&mut self, tool_calls: Vec<ToolCall>, token: &cancel::Token, emit: &Emitter) -> Dispatch {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
@@ -2246,33 +2250,27 @@ impl Agent {
                 pins: Some(self.pins.clone()),
             },
         }));
-        let content = match shell_eval::run_shell(
-            &self.transport,
-            &self.caps,
-            cmd,
-            timeout_secs,
-            emit,
-            Some(&self.pins),
-            Some(&desk),
-        ) {
-            shell_eval::Outcome::Ran(r) => render(&r),
-            shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
+        // Retire the desk and nursery the moment the eval is done, on every
+        // exit — the guard's `Drop` covers a panic `drive`'s `catch_unwind`
+        // recovers from, where straight-line teardown would never run and
+        // the real desk (with this call's whole capture) would stay
+        // installed for the rest of the session. See `RetireDeskOnDrop`'s
+        // doc for why the capture must not outlive the call.
+        let content = {
+            let _retire = desk::RetireDeskOnDrop(&self.transport);
+            match shell_eval::run_shell(
+                &self.transport,
+                &self.caps,
+                cmd,
+                timeout_secs,
+                emit,
+                Some(&self.pins),
+                Some(&desk),
+            ) {
+                shell_eval::Outcome::Ran(r) => render(&r),
+                shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
+            }
         };
-        // Retire the desk immediately: `engine.desk` is unobservable between
-        // calls (nothing dispatches without `run_shell` installing a fresh
-        // one first, above), but the installed `DeskBinding` holds this
-        // call's `Emitter` clone — leaving the real desk in place would keep
-        // that clone (and the rest of its `HostServices` capture) alive
-        // until the *next* `ral` call ever replaces it, which a session that
-        // makes no further calls never does. `AbsentDesk` holds nothing, so
-        // replacing it here drops the capture the moment this call is done.
-        self.transport.set_desk(Arc::new(desk::AbsentDesk));
-        // Retire the nursery too, the symmetric teardown of the desk above:
-        // it holds nothing once the turn guard has emptied it, so this is
-        // not about a leak, but a hypothetical `fork_into_nursery` between
-        // calls must answer the honest absence error rather than find a
-        // stale nursery still installed.
-        self.transport.clear_nursery();
         // Harvest whatever this call's `reply` handler staged, right after
         // the desk that could still write it is gone — the one legitimate
         // writer has retired, so the cell is ours by ownership now. `if let`,
@@ -2377,7 +2375,7 @@ impl Agent {
     /// digest (`tasks 3/8`) — the model's labels already name them — so the
     /// reminder reads as the user sees the rail.
     fn pinned_digest(&self) -> Option<String> {
-        let m = self.pins.lock().ok()?;
+        let m = self.pins.lock().expect("pin register poisoned");
         if m.is_empty() {
             return None;
         }
@@ -4017,7 +4015,7 @@ mod tests {
     }
 
     /// The generation-and-cascade audit's cascade edge: `AgentRegistry::cancel`
-    /// (the primitive behind `agent_cancel` and the subtree cascade) never
+    /// (the primitive behind `agent-cancel` and the subtree cascade) never
     /// touches a shell's worker registry directly — it only cancels the
     /// entry's `eval_root`. That is already enough: a worker's own cancel
     /// scope is a child of that same root, and every

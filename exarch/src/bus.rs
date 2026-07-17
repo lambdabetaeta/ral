@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 ///
 /// Every agent — the trunk and every forked
 /// child alike — has one; a child's id *is* its `AgentId`, so the `agents`
-/// listing and `agent_cancel` reuse the node identity rather than minting a
+/// listing and `agent-cancel` reuse the node identity rather than minting a
 /// parallel one.  Opaque: a capability for status and cancellation, not a
 /// content hash.
 pub type AgentId = u64;
@@ -88,7 +88,7 @@ pub enum ParkMode {
     /// This agent does not converse — it returns to a parent, or runs
     /// headless — but the human has `TAB`bed focus to it to watch it work.
     /// Parks on an empty queue exactly like [`Self::Held`], but a
-    /// *terminate*-cause cancellation (`agent_cancel`, the ceiling) still
+    /// *terminate*-cause cancellation (`agent-cancel`, the ceiling) still
     /// ends it at once: mere focus is not immunity, or a `HeldByChildren`
     /// parent waiting on this very agent would never receive the cancelled
     /// result it is owed.
@@ -98,12 +98,12 @@ pub enum ParkMode {
     /// own inbox when it settles, so park — a headless root waiting on its
     /// fleet has a legal "keep still" move rather than being killed at
     /// quiescence.  Like [`Self::UntilCancelled`], a cancellation
-    /// (`agent_cancel`, the ceiling) terminates at once, and the wait ends on
+    /// (`agent-cancel`, the ceiling) terminates at once, and the wait ends on
     /// its own the moment the last child settles (the next re-evaluation sees
     /// no children and falls through to [`Self::Quiesce`]).
     HeldByChildren,
     /// No human, but a self-schedule is armed and may fire a wakeup.  Park,
-    /// but a cancellation (`agent_cancel`, the ceiling) terminates at once —
+    /// but a cancellation (`agent-cancel`, the ceiling) terminates at once —
     /// stop now rather than wait for the schedule.
     UntilCancelled,
     /// Nothing will ever feed this agent again: terminate at quiescence.
@@ -121,7 +121,7 @@ pub enum AgentOutcome {
     Empty,
     /// Stopped for a non-routine reason (content filter, step cap, …).
     Stopped(String),
-    /// Cancelled — by `agent_cancel`, `/clear`, or the worker ceiling.
+    /// Cancelled — by `agent-cancel`, `/clear`, or the worker ceiling.
     Cancelled,
     /// The run errored (provider error, panic).
     Failed(String),
@@ -968,7 +968,7 @@ impl Inbox {
         loop {
             let mode = park();
             // Every park but a genuinely conversing `Held` terminates the
-            // instant a *terminate*-cause cancel trips — `agent_cancel`, the
+            // instant a *terminate*-cause cancel trips — `agent-cancel`, the
             // ceiling, or `/clear` means stop now, dropping any queued
             // messages; `Focused` gets no immunity from mere TAB focus.  An
             // *interrupt*-cause cancel is not a terminate: it drops the
@@ -2278,7 +2278,7 @@ mod tests {
     }
 
     /// `ParkMode::Focused` — a non-conversing agent the human has merely
-    /// `TAB`bed to — grants no cancellation immunity: `agent_cancel`/the
+    /// `TAB`bed to — grants no cancellation immunity: `agent-cancel`/the
     /// ceiling firing while the human happens to be looking at an idle child
     /// must still kill it, or its `HeldByChildren` parent would sit waiting
     /// on a cancelled-result delivery that never comes.  Contrast

@@ -1018,7 +1018,7 @@ impl Provider {
     /// `on_text`.  `cancel` is the *request-local* cancellation handle: the
     /// foreground turn passes its root token (linked to the signal slot, so
     /// Esc cancels it), and an async agent passes its registry token (so
-    /// `agent_cancel` / `/clear` / the worker ceiling cancel it without
+    /// `agent-cancel` / `/clear` / the worker ceiling cancel it without
     /// touching the foreground request).  Two concurrent requests no longer
     /// share the one process-global slot.
     pub(crate) fn complete<F: FnMut(&str), G: FnMut(&str)>(
