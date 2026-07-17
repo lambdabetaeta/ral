@@ -555,7 +555,16 @@ pub fn shell_warning(msg: &str) {
 #[macro_export]
 macro_rules! dbg_trace {
     ($tag:expr, $($arg:tt)*) => {
-        eprintln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
+        // Honor the same color gate as the diagnostics ([`use_color`]): a trace
+        // must not emit ANSI when NO_COLOR / TERM=dumb / a non-tty stderr says
+        // otherwise. `use_color()` is false until `set_terminal` runs, so any
+        // trace before terminal setup (e.g. the sandbox `boot_recover` sweep at
+        // `early_init`) renders plain.
+        if $crate::diagnostic::use_color() {
+            eprintln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
+        } else {
+            eprintln!("[[DEBUG] {}] {}", $tag, format!($($arg)*))
+        }
     };
 }
 
