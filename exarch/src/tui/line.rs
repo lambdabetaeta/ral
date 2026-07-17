@@ -190,17 +190,11 @@ pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
 /// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
 /// reasoning's own magnitude — "how dearly bought" and "how much thinking".
 /// The reasoning prose itself stays folded until the block is dialed.
-pub(super) fn thinking_header(reasoning: &str, say_chars: u32) -> Vec<Line<'static>> {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-    )]
-    let think_chars = reasoning.chars().count() as u32;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-    )]
-    let think_lines = reasoning.lines().count() as u32;
+pub(super) fn thinking_header(
+    think_chars: u32,
+    think_lines: u32,
+    say_chars: u32,
+) -> Vec<Line<'static>> {
     vec![
         Line::default(),
         Line::from(vec![

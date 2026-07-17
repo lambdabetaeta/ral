@@ -74,10 +74,15 @@ pub(super) enum CardOrigin {
 /// The reasoning a turn produced. It is its own dialable block: the
 /// collapsed form gives only a grain and size; higher rungs reveal the
 /// drained trace. `answer_chars` is the whole turn's answer mass, the
-/// deliberation grain's denominator.
+/// deliberation grain's denominator.  `provisional` holds the live phase's
+/// streamed deltas: they tick the header's magnitude in place — the block
+/// never moves — and are superseded wholesale when the phase's authoritative
+/// reasoning commits via [`Block::append_thinking`].  Only `text` is ever
+/// revealed by the dial or teed to the log.
 pub(super) struct Thinking {
     pub(super) text: String,
     pub(super) answer_chars: u32,
+    pub(super) provisional: String,
 }
 
 /// What a block carries.  Each variant renders as a pure function of its
@@ -330,7 +335,11 @@ impl Block {
     /// dialable block; answer prose remains a separate markdown run.
     pub(super) fn thinking(text: String, answer_chars: u32) -> Self {
         Self::new(
-            BlockKind::Thinking(Thinking { text, answer_chars }),
+            BlockKind::Thinking(Thinking {
+                text,
+                answer_chars,
+                provisional: String::new(),
+            }),
             Fidelity::default(),
         )
     }
@@ -408,7 +417,9 @@ impl Block {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
-            BlockKind::Thinking(t) => Some(t.text.lines().count() as u32),
+            BlockKind::Thinking(t) => {
+                Some((t.text.lines().count() + t.provisional.lines().count()) as u32)
+            }
             BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
@@ -558,15 +569,27 @@ impl Block {
     }
 
     /// Append `more` to an existing thinking block's trace, accumulating
-    /// `answer_chars` into its deliberation-grain denominator.  A no-op on
-    /// any non-`Thinking` block.
+    /// `answer_chars` into its deliberation-grain denominator.  The phase's
+    /// authoritative text supersedes whatever provisional deltas streamed in
+    /// ahead of it.  A no-op on any non-`Thinking` block.
     pub(super) fn append_thinking(&mut self, more: &str, answer_chars: u32) {
         if let BlockKind::Thinking(t) = &mut self.kind {
+            t.provisional.clear();
             if !t.text.is_empty() && !more.is_empty() {
                 t.text.push('\n');
             }
             t.text.push_str(more);
             t.answer_chars = t.answer_chars.saturating_add(answer_chars);
+            self.cache = None;
+        }
+    }
+
+    /// Stream a live reasoning delta into the block's provisional buffer:
+    /// the header's magnitude ticks in place while the block itself never
+    /// moves.  A no-op on any non-`Thinking` block.
+    pub(super) fn push_provisional_thinking(&mut self, more: &str) {
+        if let BlockKind::Thinking(t) = &mut self.kind {
+            t.provisional.push_str(more);
             self.cache = None;
         }
     }
@@ -779,7 +802,19 @@ impl Block {
             },
             BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
             BlockKind::Thinking(t) => {
-                let mut ls = line::thinking_header(&t.text, t.answer_chars);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+                )]
+                let think_chars =
+                    (t.text.chars().count() + t.provisional.chars().count()) as u32;
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+                )]
+                let think_lines =
+                    (t.text.lines().count() + t.provisional.lines().count()) as u32;
+                let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
                 if level >= Reveal::Context {
                     ls.push(Line::default());
                     let shadow = md::render_reasoning(&t.text, width, MD_INDENT);

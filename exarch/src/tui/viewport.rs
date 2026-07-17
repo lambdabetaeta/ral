@@ -551,12 +551,12 @@ impl Viewport {
         }
     }
 
-    /// Commit the turn's reasoning.  If the latest thinking block is still
-    /// adjacent to the tail (only answer prose after it), append to it so one
-    /// deliberation phase coalesces into one `∴` block.  Otherwise — a tool
-    /// call or other barrier intervened — insert a new thinking block before
-    /// the trailing markdown run, keeping each phase in arrival order rather
-    /// than yanking its text up above the barrier.
+    /// Commit a reasoning phase.  If the turn has a coalescing `∴` block
+    /// ([`Self::thinking_target`] — only prose or a prompt breaks the run,
+    /// tool calls do not), append to it: its provisional deltas are
+    /// superseded by this authoritative text and its header ticks in place.
+    /// Otherwise insert a new thinking block before the trailing markdown
+    /// run.
     /// `answer_chars` is the current turn's answer mass — the deliberation
     /// grain's say-side, so the committed `∴` block's think/say ratio
     /// reflects how dearly the answer was bought.
@@ -580,13 +580,32 @@ impl Viewport {
             && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len
     }
 
-    /// Append a live reasoning chunk from the model's thinking phase.
-    /// Grows the provisional thinking buffer; `thinking_seat` renders it above
-    /// the streaming answer seat until `commit_thinking` supersedes it with a
+    /// Append a live reasoning chunk from the model's thinking phase.  When
+    /// the turn already has a coalescing `∴` block ([`Self::thinking_target`])
+    /// the delta streams into that block's provisional buffer — its magnitude
+    /// ticks in place, nothing appears or moves.  Otherwise it grows the
+    /// provisional thinking buffer; `thinking_seat` renders it above the
+    /// streaming answer seat until `commit_thinking` supersedes it with a
     /// real block.
     pub(super) fn push_thinking(&mut self, text: &str) {
-        self.thinking.push_str(text);
+        if let Some(idx) = self.thinking_target() {
+            self.blocks[idx].push_provisional_thinking(text);
+        } else {
+            self.thinking.push_str(text);
+        }
         self.flat.dirty = true;
+    }
+
+    /// The block index the turn's reasoning coalesces into: the most recent
+    /// `∴` block with no prose or prompt after it.  Tool calls and other
+    /// chrome do not break the run — only an answer paragraph (the reader has
+    /// been spoken to since) or a new human turn seeds a fresh block.
+    fn thinking_target(&self) -> Option<usize> {
+        let idx = self.blocks.iter().rposition(Block::is_thinking)?;
+        let unbroken = !self.blocks[idx + 1..]
+            .iter()
+            .any(|b| b.is_markdown() || b.is_prompt());
+        unbroken.then_some(idx)
     }
 
     /// Push streamed assistant text; commit any fence-safe paragraphs at
@@ -707,20 +726,11 @@ impl Viewport {
         if text.trim().is_empty() {
             return;
         }
-        // Append to the most recent Thinking block only while it is still
-        // adjacent to the tail — nothing but answer prose after it, exactly
-        // where the live seat was rendering.  Any other block in between
-        // (a tool call, a prompt) is a barrier: appending across it would
-        // teleport the text above the barrier and make the screen jump.
-        let existing = self.blocks.iter().rposition(Block::is_thinking);
-        if let Some(idx) = existing {
-            let adjacent = self.blocks[idx + 1..].iter().all(Block::is_markdown);
-            if adjacent {
-                self.blocks[idx].append_thinking(&text, answer_chars);
-                self.rewrite_log();
-                self.flat.dirty = true;
-                return;
-            }
+        if let Some(idx) = self.thinking_target() {
+            self.blocks[idx].append_thinking(&text, answer_chars);
+            self.rewrite_log();
+            self.flat.dirty = true;
+            return;
         }
         // No existing thinking block for this turn: insert before the trailing
         // markdown run, or push to the end if none.
