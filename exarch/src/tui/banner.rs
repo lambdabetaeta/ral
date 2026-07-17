@@ -6,7 +6,7 @@ use std::time::Duration;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
+use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
 use crate::provider::{self, Provider};
 
 use super::block::AgentSlot;
@@ -35,7 +35,7 @@ pub struct SessionInfo<'a> {
 /// names something: a path carries the Path identity, a `dangerous` base
 /// alarms; names and quantities stay plain ink.
 pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
-    let caps = crate::pricing::caps_or_default(p.model());
+    let caps = crate::provider::pricing::caps_or_default(p.model());
     let mut rows: Vec<Field> = vec![
         meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
     ];
@@ -314,7 +314,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{SessionInfo, legend_panel, session_card};
-    use crate::card::{FieldVal, Mark, Role};
+    use crate::bus::card::{FieldVal, Mark, Role};
     use crate::provider::scripted::Script;
     use crate::provider::{Provider, ProviderKind};
     use crate::tui::{line, rail};

@@ -70,7 +70,7 @@ use crate::source::FileId;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Default cap on non-tail closure-call depth.
 ///
@@ -218,6 +218,69 @@ pub trait EnquiryDesk: Send + Sync {
 /// no liveness role. `None` outside a host that answers enquiries.
 pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
+/// Identifier for a shell session parked in a [`Nursery`] by
+/// [`Shell::fork_into_nursery`], and redeemed once by [`Nursery::adopt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NurseryId(pub u64);
+
+/// [`Nursery`]'s locked interior: the parked forks plus the monotonic
+/// counter [`Nursery::park`] mints ids from — a length-derived id would
+/// repeat once `adopt`/`clear` free a slot, so the counter must outlive
+/// individual entries rather than be read off the map.
+#[derive(Default)]
+struct NurseryState {
+    next: u64,
+    parked: HashMap<u64, Shell>,
+}
+
+/// Turn-local holding pen for engine-side session forks.
+///
+/// A desk handler is forbidden from taking the session lock (§3's
+/// reentrancy law), so it cannot itself hold `&mut Shell` to fork one; the
+/// fork happens in the builtin body — the one place lawfully holding
+/// `&mut Shell` — via [`Shell::fork_into_nursery`], and crosses to the
+/// handler as a [`NurseryId`] the handler later [`adopt`](Self::adopt)s.
+/// Turn-scoped like [`Desk`]: cloned into same-thread bodies via
+/// [`TurnState::inherit_from`], left `None` on a spawned worker, and
+/// emptied by the turn guard at teardown so a fork nobody adopted — an
+/// enquiry that was refused, or a turn that ended before the handler ran —
+/// never survives past its turn.
+#[derive(Clone, Default)]
+pub struct Nursery(Arc<Mutex<NurseryState>>);
+
+impl Nursery {
+    /// Park `shell` under a freshly minted id.
+    ///
+    /// # Panics
+    /// Panics if the lock is poisoned.
+    pub fn park(&self, shell: Shell) -> NurseryId {
+        let id = {
+            let mut state = self.0.lock().unwrap();
+            let id = state.next;
+            state.next += 1;
+            state.parked.insert(id, shell);
+            id
+        };
+        NurseryId(id)
+    }
+
+    /// Remove and return the shell parked under `id`, if one is still there.
+    ///
+    /// # Panics
+    /// Panics if the lock is poisoned.
+    pub fn adopt(&self, id: NurseryId) -> Option<Shell> {
+        self.0.lock().unwrap().parked.remove(&id.0)
+    }
+
+    /// Drop every still-parked shell.
+    ///
+    /// # Panics
+    /// Panics if the lock is poisoned.
+    pub fn clear(&self) {
+        self.0.lock().unwrap().parked.clear();
+    }
+}
+
 /// Host-installed destination for a deferred worker's surface batch,
 /// delivered when the worker settles and rendered by the host at the next
 /// turn boundary.
@@ -293,6 +356,15 @@ pub struct TurnState {
     /// that could enquire would break the ordering law and the deferred
     /// rail's attenuation.  Never folds back, like `surface`.
     pub(crate) desk: Option<Desk>,
+    /// The turn-local nursery for engine-side session forks, crossing the
+    /// reentrancy boundary the same way `desk` does (§"Core additions: the
+    /// nursery" of the tools-to-builtins migration). Turn-local like `desk`:
+    /// cloned into same-thread bodies, `None` outside a host that installs
+    /// one, and left `None` on a deferred worker. Unlike `desk` it is not
+    /// merely restored at turn teardown — the turn guard also empties it
+    /// ([`Nursery::clear`]), so a fork parked and never adopted before the
+    /// turn ends leaks nothing. Never folds back, like `surface`.
+    pub(crate) nursery: Option<Nursery>,
     /// The turn's foreground work scope.  `signal::check` consults it between
     /// effectful steps; a foreground cancel (turn timeout, Ctrl-C) unwinds
     /// the same-thread work that shares it.  Always a descendant of
@@ -338,6 +410,7 @@ impl TurnState {
         self.surface = parent.surface.clone();
         self.deferred = parent.deferred.clone();
         self.desk = parent.desk.clone();
+        self.nursery = parent.nursery.clone();
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
         self.deferred_lease = parent.deferred_lease;
@@ -387,6 +460,10 @@ pub struct SessionState {
     /// serialised ral values, so the receiver of a wire mobile supplies its
     /// own rather than shipping it in a `WireMobile`.
     pub(crate) builtins: BuiltinTable,
+    /// Host-installed `name -> doc` entries for a sourced closure library
+    /// (exarch's agent helpers) that `help`/`explain` cannot otherwise see —
+    /// see [`Shell::install_library_docs`](super::Shell::install_library_docs).
+    pub(crate) library_docs: std::collections::HashMap<String, String>,
     /// The session's terminal-foreground witness, minted once at construction
     /// from the startup `tcgetpgrp == getpgrp` predicate. `Some` when ral owns
     /// the controlling terminal's foreground (interactive REPL, terminal-
@@ -500,6 +577,24 @@ impl Shell {
         match self.turn.desk.as_ref() {
             Some(desk) => desk.enquire(req),
             None => Err(self.err("this host answers no enquiries", 1)),
+        }
+    }
+
+    /// Fork this shell ([`Self::fork_session`]) and park the fork in this
+    /// turn's nursery, returning the [`NurseryId`] a desk handler — barred
+    /// by the reentrancy law from holding `&mut Shell` itself — later
+    /// redeems with [`Nursery::adopt`]. The absent-nursery error is the
+    /// honest answer of a host that adopts no forked sessions (the bare
+    /// REPL, and any host before it installs a nursery).
+    ///
+    /// # Errors
+    /// Returns `Err` if no nursery is installed on this turn.
+    pub fn fork_into_nursery(&self) -> crate::types::Settled<NurseryId> {
+        match self.turn.nursery.as_ref() {
+            Some(nursery) => Ok(nursery.park(self.fork_session())),
+            None => Err(crate::types::Break::Error(
+                self.err("this host adopts no forked sessions", 1),
+            )),
         }
     }
 
@@ -749,5 +844,51 @@ mod tests {
         assert!(shell.lookup_value_name("CWD").is_some());
         assert!(shell.lookup_value_name("STATUS").is_some());
         assert!(shell.lookup_value_name("USER").is_some());
+    }
+
+    /// The nursery twin of `enquire`'s absent-desk contract: a `Shell` with
+    /// no nursery installed answers `fork_into_nursery` with the honest
+    /// absence error, verbatim.
+    #[test]
+    fn fork_into_nursery_errors_honestly_without_a_nursery() {
+        let shell = Shell::new(crate::io::TerminalState::default());
+        match shell
+            .fork_into_nursery()
+            .expect_err("no nursery is installed")
+        {
+            crate::types::Break::Error(e) => {
+                assert_eq!(e.message, "this host adopts no forked sessions");
+            }
+            other @ crate::types::Break::Escape(_) => {
+                panic!("expected Break::Error, got {other:?}")
+            }
+        }
+    }
+
+    /// A nursery installed on the turn round-trips a session fork:
+    /// `fork_into_nursery` parks a [`Nursery::park`] entry and hands back its
+    /// id, and `Nursery::adopt` redeems that id for a live child `Shell` —
+    /// one that still carries the parent's whole lexical scope, exactly as
+    /// `fork_session` promises (mirrors
+    /// `fork_session_holds_no_terminal_authority`'s style in `inherit.rs`).
+    #[test]
+    fn nursery_round_trips_a_forked_session() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.mobile.scope.set("parent_binding".to_string(), Value::Int(42));
+        let nursery = Nursery::default();
+        shell.turn.nursery = Some(nursery.clone());
+
+        let id = shell
+            .fork_into_nursery()
+            .expect("a nursery is installed");
+        let child = nursery
+            .adopt(id)
+            .expect("the parked fork must be adoptable");
+
+        assert_eq!(
+            child.mobile.scope.get("parent_binding"),
+            Some(&Value::Int(42)),
+            "the fork must carry the parent's lexical scope"
+        );
     }
 }

@@ -44,7 +44,10 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
     let comp = elaborate(&ast, std::collections::HashSet::default());
     let comp = match typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            builtins::core_builtin_table(),
+        ),
     ) {
         Ok(annotated) => std::sync::Arc::new(annotated),
         Err(errors) => {

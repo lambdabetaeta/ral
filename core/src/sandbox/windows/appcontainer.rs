@@ -7,8 +7,7 @@
 // github.com/microsoft/mxc @ 0e7c3dd, adapted to ral's `windows-sys` binding
 // and single-spawn-boundary design. Each ported unit carries a
 // `// after mxc <file>::<fn>` breadcrumb naming its upstream counterpart,
-// for future diffing against upstream (see `dev/docs/260712_windows_port.md`,
-// W1).
+// for future diffing against upstream.
 
 //! AppContainer profile lifecycle and LowBox spawn capabilities.
 //!

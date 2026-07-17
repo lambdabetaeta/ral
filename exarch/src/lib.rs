@@ -11,35 +11,16 @@
     reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
 )]
 pub mod agent;
-pub mod agent_builtins;
-pub mod agent_registry;
 pub mod bootstrap;
 pub mod bus;
-pub mod cancel;
-pub mod card;
 pub mod cli;
 pub mod config;
-pub mod credential;
-pub mod digest;
-pub mod event;
 pub mod fleet;
 pub mod headless;
-pub mod host;
-pub mod models;
-pub mod nudge;
-pub mod oauth;
 pub mod policy;
-pub mod pricing;
 pub mod prompt;
 pub mod provider;
-pub mod resources;
-pub mod schedule;
 pub mod shell_eval;
-pub mod skill;
-pub mod state;
-pub mod tls;
-pub mod tools;
-pub mod transcript;
 pub mod tui;
 
 use agent::Agent;
@@ -58,14 +39,14 @@ use tui::SessionInfo;
 /// calls this from `main`; test binaries call it from a `#[ctor]`.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(|shell| {
-        agent_builtins::install_on(shell);
+        shell_eval::builtins::install_on(shell);
     });
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
-            tag: agent_builtins::INSTALLER_TAG,
+            tag: shell_eval::builtins::INSTALLER_TAG,
             prelude: &shell_eval::PRELUDE,
-            install: agent_builtins::install_on,
+            install: shell_eval::builtins::install_on,
         }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
@@ -136,10 +117,10 @@ pub fn run() -> Result<(), String> {
     // how the OpenAI provider becomes available.
     if let Some(command) = c.command {
         return match command {
-            cli::Command::Login { device_auth } => oauth::login(device_auth),
-            cli::Command::Logout { account, all } => oauth::logout(account, all),
+            cli::Command::Login { device_auth } => provider::oauth::login(device_auth),
+            cli::Command::Logout { account, all } => provider::oauth::logout(account, all),
             cli::Command::Accounts => {
-                let accounts = oauth::load_all();
+                let accounts = provider::oauth::load_all();
                 if accounts.is_empty() {
                     eprintln!("No ChatGPT accounts signed in. Run `exarch login` to add one.");
                 } else {
@@ -179,7 +160,7 @@ pub fn run() -> Result<(), String> {
     // and the session's worker threads are created below — so no other
     // thread can race this env mutation. This is the only credential scrub;
     // every spawned child therefore inherits an environment free of keys.
-    let store = credential::CredentialStore::resolve_and_scrub(custom);
+    let store = provider::credential::CredentialStore::resolve_and_scrub(custom);
     let available = store.available();
     if available.is_empty() {
         return Err(
@@ -196,7 +177,8 @@ pub fn run() -> Result<(), String> {
     // Resolve the initial selection: an explicit `--provider` pin, else an
     // explicit `--model` override, else the persisted selection (when its
     // provider is available), else the first available provider's default model.
-    let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
+    let mut catalog =
+        provider::models::ModelCatalog::new(provider::models::LiveSource::new(&store));
     let (id, model, mut tuning, route) =
         resolve_initial_selection(
             c.provider.as_deref(),
@@ -225,9 +207,9 @@ pub fn run() -> Result<(), String> {
     // as the `/model` picker's choice is remembered. (The empty-model launch
     // has nothing to persist.)
     if c.model.is_some() && !model.is_empty() {
-        let _ = state::save(
+        let _ = provider::state::save(
             &state_dir,
-            &state::State::new(&id, &model, &tuning, route.as_deref()),
+            &provider::state::State::new(&id, &model, &tuning, route.as_deref()),
         );
     }
     let label = id.label();
@@ -338,7 +320,7 @@ pub fn run() -> Result<(), String> {
 
 /// Resolve the initial provider+model from, in priority order: an explicit
 /// `--provider` pin; an explicit `--model` override (its provider resolved by
-/// [`models::resolve_model_provider`]); the persisted selection, when its
+/// [`provider::models::resolve_model_provider`]); the persisted selection, when its
 /// provider is still available; else the first available provider's default
 /// model. The selection always names an *available* provider — a saved
 /// selection naming a provider whose key is no longer set falls through to the
@@ -358,7 +340,7 @@ fn resolve_initial_selection(
     model_override: Option<&str>,
     state_dir: &std::path::Path,
     available: &[provider::ProviderId],
-    catalog: &mut models::ModelCatalog<models::LiveSource>,
+    catalog: &mut provider::models::ModelCatalog<provider::models::LiveSource>,
 ) -> Result<
     (
         provider::ProviderId,
@@ -369,7 +351,7 @@ fn resolve_initial_selection(
     String,
 > {
     if let Some(pname) = provider_override {
-        let id = models::resolve_pinned_provider(pname, available)?;
+        let id = provider::models::resolve_pinned_provider(pname, available)?;
         let model = match model_override {
             Some(m) => m.to_string(),
             None => match id.famous() {
@@ -384,10 +366,10 @@ fn resolve_initial_selection(
         return Ok((id, model, provider::Tuning::initial(), None));
     }
     if let Some(name) = model_override {
-        let id = models::resolve_model_provider(name, available, catalog)?;
+        let id = provider::models::resolve_model_provider(name, available, catalog)?;
         return Ok((id, name.to_string(), provider::Tuning::initial(), None));
     }
-    if let Some(saved) = state::load(state_dir)
+    if let Some(saved) = provider::state::load(state_dir)
         && let Some(id) = saved.provider_id(available)
     {
         let tuning = saved.tuning();

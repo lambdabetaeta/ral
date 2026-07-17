@@ -20,27 +20,28 @@
 //! `tools::agent::spawn_async`): whichever side of the retirement the
 //! verdict reads, the consumer either still parks for the child or finds
 //! the result already queued, and can never quiesce between the two facts.
+pub mod card;
 
-use crate::cancel;
-use crate::card::{Card, IoEvent};
-use crate::event::ProviderErrorRecord;
+use crate::agent::cancel;
+use crate::bus::card::{Card, IoEvent};
+use crate::agent::event::ProviderErrorRecord;
 use crate::provider::{Tuning, Usage};
-use crate::schedule::ScheduleId;
-use crate::transcript::Transcript;
+use crate::fleet::schedule::ScheduleId;
+use crate::agent::transcript::Transcript;
 use ral_core::Value;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The identity of an agent node.
 ///
 /// Every agent — the trunk and every forked
 /// child alike — has one; a child's id *is* its `AgentId`, so the `agents`
-/// listing and `agent_cancel` reuse the node identity rather than minting a
+/// listing and `agent-cancel` reuse the node identity rather than minting a
 /// parallel one.  Opaque: a capability for status and cancellation, not a
 /// content hash.
 pub type AgentId = u64;
@@ -58,10 +59,13 @@ pub const NO_FOCUS: AgentId = AgentId::MAX;
 /// drains at the next tool-call boundary — user steering, a finished agent's
 /// result, a scheduled wakeup, a settled `spawn`'s surface batch, a self-nudge
 /// — so it reaches the model as soon as the current tool batch settles rather
-/// than waiting out the whole turn.  The sole exception is a slash command:
-/// it is interpreted against the session (a `/model` swap, a `/clear`) by the
-/// drive loop's `Control`, never shown to the model, so it waits for the turn
-/// boundary where the session is `ReadyForUser`.
+/// than waiting out the whole turn.  The sole exception is
+/// [`InboxMsg::Command`]: it is handed to the drive loop's `Control` (a
+/// `/model` swap, a `/clear`), never shown to the model, so it waits for the
+/// turn boundary where the session is `ReadyForUser`.  A slash-prefixed
+/// [`InboxMsg::UserSteering`] waits there too, purely to keep its place
+/// relative to whatever else is queued around it — it is still delivered as
+/// ordinary prompt text, never interpreted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Boundary {
     /// May drain mid-turn, at a tool-call boundary — everything but a command.
@@ -75,21 +79,31 @@ pub enum Boundary {
 /// parked agent, and a schedule can arm or disarm).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParkMode {
-    /// A present human is attached — the conversing trunk, or the focused
-    /// agent.  Park *and ignore cancellation*: an Esc cancels the current
-    /// *turn*, not the agent, which keeps waiting for the next human line.
+    /// A human is having a live conversation with this agent — the
+    /// interactive trunk, or a `/branch` tab, neither of which ever returns
+    /// to a parent.  Park *and ignore cancellation* entirely: an Esc cancels
+    /// the current *turn*, not the agent, which keeps waiting for the next
+    /// human line.
     Held,
+    /// This agent does not converse — it returns to a parent, or runs
+    /// headless — but the human has `TAB`bed focus to it to watch it work.
+    /// Parks on an empty queue exactly like [`Self::Held`], but a
+    /// *terminate*-cause cancellation (`agent-cancel`, the ceiling) still
+    /// ends it at once: mere focus is not immunity, or a `HeldByChildren`
+    /// parent waiting on this very agent would never receive the cancelled
+    /// result it is owed.
+    Focused,
     /// No human, but this agent has live children still running (async
     /// `agent`s it launched).  Each will deliver its result up this agent's
     /// own inbox when it settles, so park — a headless root waiting on its
     /// fleet has a legal "keep still" move rather than being killed at
     /// quiescence.  Like [`Self::UntilCancelled`], a cancellation
-    /// (`agent_cancel`, the ceiling) terminates at once, and the wait ends on
+    /// (`agent-cancel`, the ceiling) terminates at once, and the wait ends on
     /// its own the moment the last child settles (the next re-evaluation sees
     /// no children and falls through to [`Self::Quiesce`]).
     HeldByChildren,
     /// No human, but a self-schedule is armed and may fire a wakeup.  Park,
-    /// but a cancellation (`agent_cancel`, the ceiling) terminates at once —
+    /// but a cancellation (`agent-cancel`, the ceiling) terminates at once —
     /// stop now rather than wait for the schedule.
     UntilCancelled,
     /// Nothing will ever feed this agent again: terminate at quiescence.
@@ -107,7 +121,7 @@ pub enum AgentOutcome {
     Empty,
     /// Stopped for a non-routine reason (content filter, step cap, …).
     Stopped(String),
-    /// Cancelled — by `agent_cancel`, `/clear`, or the worker ceiling.
+    /// Cancelled — by `agent-cancel`, `/clear`, or the worker ceiling.
     Cancelled,
     /// The run errored (provider error, panic).
     Failed(String),
@@ -171,11 +185,11 @@ pub struct AgentResult {
     /// rebuilt context.
     pub generation: u64,
     /// Set only when this child was a host-orchestrated `commit`/
-    /// `verify_commitment` spawn: what the parent should do to the protected
+    /// `verify-commitment` spawn: what the parent should do to the protected
     /// pin register when this result drains.  The worker thread computes
     /// this — not the parent — since only it still holds the raw reply
     /// payload the decision needs.
-    pub commitment_settle: Option<crate::tools::CommitmentSettle>,
+    pub commitment_settle: Option<crate::shell_eval::tools::CommitmentSettle>,
 }
 
 impl AgentResult {
@@ -216,8 +230,10 @@ impl AgentMessage {
 #[derive(Clone, Debug)]
 pub enum InboxMsg {
     /// The user typed a prompt while a turn was running.  Drains at the
-    /// tool boundary, except a slash command, which waits for the turn
-    /// boundary so the REPL command path interprets it.
+    /// tool boundary, except a slash-prefixed line, which waits for the turn
+    /// boundary alongside [`Self::Command`] — but is still delivered as
+    /// ordinary prompt text ([`Turn::Human`]), never interpreted: only
+    /// [`Self::Command`] reaches [`Control`](crate::agent::Control).
     UserSteering(String),
     /// A scheduled wakeup fired (cron / after).  Drains at the tool boundary
     /// as a *marked* injection, so it reaches the model as soon as the current
@@ -244,6 +260,17 @@ pub enum InboxMsg {
         /// per schedule), so a tick arriving while the previous wakeup still
         /// waits is dropped rather than stacked.
         pending: Arc<AtomicBool>,
+        /// This inbox's own clear-epoch ([`Mailbox::epoch`]) at the moment
+        /// the reaper thread composed this message (`ScheduleRegistry::fire`,
+        /// `schedule.rs`) — read and stamped before the registry lock that
+        /// guards the entry is dropped, so a fire that then straddles a
+        /// `/clear` before it reaches `push` still carries the epoch as it
+        /// stood at composition.  Checked against the live epoch at the pop
+        /// boundary ([`pop_turn`]), which shares its queue mutex with
+        /// [`Inbox::clear`]'s own epoch bump: the two operations can never
+        /// interleave, so a fire that lands after the bump is refused,
+        /// while one that lands before is swept with the rest of the queue.
+        epoch: u64,
     },
     /// An async agent settled.  Drains at the tool boundary as a dialable `↘`
     /// subagent block, so its result reaches the model as soon as the current
@@ -275,7 +302,17 @@ pub enum InboxMsg {
     /// like a wakeup or an agent result.  Already once-only when posted:
     /// core's completion path wins the worker's deliver-once latch before
     /// the sink ever sees the batch.
-    Surface { id: AgentId, values: Vec<Value> },
+    Surface {
+        id: AgentId,
+        values: Vec<Value>,
+        /// The fleet `AgentRegistry` generation the deferred sink captured at
+        /// construction (`InboxDeferred`, `shell_eval.rs`) — the same birth
+        /// generation an [`AgentResult`] carries. Checked at the same
+        /// consuming edge ([`Agent::admits`](crate::agent::Agent)) against the
+        /// live generation, so a batch flushed after a `/clear` is dropped
+        /// there rather than posted-or-withheld by the worker thread itself.
+        generation: u64,
+    },
 }
 
 impl InboxMsg {
@@ -330,15 +367,23 @@ fn source_name(msg: &InboxMsg) -> &'static str {
 /// (`AgentResult`, `AgentMessage`, `Command`, `Surface`).
 ///
 /// Generous, so an ordinary burst never rejects, but a runaway producer
-/// cannot grow one source without bound.
-/// The idempotent sources (`user`, `schedule`,
-/// `nudge`) coalesce instead of counting toward this and never reject
-/// (`decisions/260705_leases-and-budgets`, "Inboxes get quotas without
-/// silent loss").
+/// cannot grow one source without bound. The idempotent sources (`user`,
+/// `schedule`, `nudge`) never count toward this cap at all — they coalesce
+/// instead (`decisions/260705_leases-and-budgets`, "Inboxes get quotas
+/// without silent loss") — so this and [`INBOX_TOTAL_CAP`] bound only the
+/// four quota-checked sources, not the inbox as a whole. `nudge` is itself
+/// bounded to one outstanding entry (see [`Shared::try_push`]); `schedule`
+/// is bounded only by how many schedules are concurrently armed — a count
+/// this module does not hold and [`crate::fleet::schedule::ScheduleRegistry`] does
+/// not cap either; `user` is bounded only by how many non-slash runs a human
+/// queues between slash lines. Both are human/config scale in practice, not
+/// machine-floodable the way the quota-checked sources are.
 pub const INBOX_SOURCE_CAP: usize = 64;
-/// Per-agent total cap across every source, alongside [`INBOX_SOURCE_CAP`]:
-/// several sources sitting near their own cap at once must not add up past
-/// one shared ceiling.
+/// Total cap across the four quota-checked sources.
+///
+/// Alongside [`INBOX_SOURCE_CAP`]: several sources sitting near their own cap
+/// at once must not add up past one shared ceiling. Like [`INBOX_SOURCE_CAP`],
+/// this does not bound the idempotent sources — see its doc for what does.
 pub const INBOX_TOTAL_CAP: usize = 256;
 
 /// Why a non-idempotent [`InboxMsg`] push was rejected.
@@ -378,8 +423,8 @@ impl std::fmt::Display for InboxReject {
 /// `commit_turn` decode; the value record (a return value, captured bytes) is
 /// pulled on demand with `await $h`.
 fn surface_notice(values: &[Value]) -> String {
-    use crate::card::DoneOutcome;
-    let settled = match values.iter().rev().find_map(crate::card::value_to_done) {
+    use crate::bus::card::DoneOutcome;
+    let settled = match values.iter().rev().find_map(crate::bus::card::value_to_done) {
         Some(DoneOutcome::Ok) => "finished (exit 0)".to_string(),
         Some(DoneOutcome::Err { message, status }) => {
             format!("finished (exit {status}): {message}")
@@ -402,12 +447,13 @@ fn surface_notice(values: &[Value]) -> String {
 /// still receives [`Self::text`] unchanged.
 #[derive(Clone, Debug)]
 pub enum Turn {
-    /// A coalesced run of human prompts (the old whole-queue join, so a lone
-    /// `/clear` still reaches the command path).  Verbatim model text.
+    /// A coalesced run of human prompts (the old whole-queue join).  A
+    /// slash-prefixed line is never part of the run — it is always its own
+    /// `Human` turn, per the never-merge rule.  Verbatim model text.
     Human(String),
-    /// A scheduled wakeup fired — a fresh, marked turn.  Its prompt may
-    /// itself be a slash command, so it still flows through the command
-    /// path; when it is not, it renders as marked chrome, not a prompt-echo.
+    /// A scheduled wakeup fired — a fresh, marked turn, rendered as marked
+    /// chrome rather than a prompt-echo.  Its text is never interpreted as a
+    /// command, even if it happens to start with `/`.
     Wakeup(String),
     /// An async agent settled — rendered as a dialable `↘` subagent block.
     Agent(AgentResult),
@@ -427,7 +473,14 @@ pub enum Turn {
     /// surface decoder and feeds the resulting cards/io into the *root*
     /// viewport (the carried `id`) exactly as a live tool turn would; the
     /// model is woken with [`Self::text`]'s notice.
-    Surface { id: AgentId, values: Vec<Value> },
+    Surface {
+        id: AgentId,
+        values: Vec<Value>,
+        /// The batch's birth generation, carried through unchanged from
+        /// [`InboxMsg::Surface`] for [`Agent::admits`](crate::agent::Agent) to
+        /// check.
+        generation: u64,
+    },
 }
 
 impl Turn {
@@ -460,11 +513,25 @@ impl Turn {
 struct Shared {
     queue: Mutex<VecDeque<InboxMsg>>,
     signal: Condvar,
-    /// True while the consumer is parked in [`ParkMode::Held`] on an empty
-    /// queue: the human-facing yield point.  A producer clears it before
-    /// waking the consumer, so frontends can distinguish "prompt is editable"
-    /// from "the root is still working" without minting a presentation event.
+    /// True while the consumer is parked in [`ParkMode::Held`] or
+    /// [`ParkMode::Focused`] on an empty queue: the human-facing yield point.
+    /// A producer clears it before waking the consumer, so frontends can
+    /// distinguish "prompt is editable" from "the root is still working"
+    /// without minting a presentation event.
     waiting_for_input: AtomicBool,
+    /// This inbox's clear-epoch, bumped by [`Inbox::clear`] under the same
+    /// queue mutex as the drain it runs alongside. A [`ScheduledWakeup`]
+    /// composed on the reaper thread (`ScheduleRegistry::fire`, `schedule.rs`)
+    /// cannot check staleness itself — its compose and its push are two
+    /// separate steps that a `/clear` can fall between — so it stamps
+    /// [`Mailbox::epoch`]'s value at compose time instead, and the pop-time
+    /// admission check ([`pop_turn`]) reads this counter fresh, under the same
+    /// lock `clear` uses, to tell the two orderings apart: a push that lands
+    /// before `clear`'s bump is swept with the rest of the queue, one that
+    /// lands after is stamped stale and refused at the pop.
+    ///
+    /// [`ScheduledWakeup`]: InboxMsg::ScheduledWakeup
+    epoch: AtomicU64,
 }
 
 impl Shared {
@@ -473,7 +540,20 @@ impl Shared {
             queue: Mutex::new(VecDeque::new()),
             signal: Condvar::new(),
             waiting_for_input: AtomicBool::new(true),
+            epoch: AtomicU64::new(0),
         })
+    }
+
+    /// Lock the queue, recovering from a poisoned mutex rather than
+    /// panicking.  No operation ever run under this lock can leave the
+    /// `VecDeque` itself torn — each is a total push/pop/clear — so a
+    /// panicked holder leaves the queue in a perfectly usable state; the
+    /// alternative (propagating the poison to every subsequent producer)
+    /// would turn one unrelated panic into a permanently dead inbox for the
+    /// whole fleet.  The same policy as `ScheduleRegistry::lock`
+    /// (`schedule.rs`).
+    fn lock(&self) -> MutexGuard<'_, VecDeque<InboxMsg>> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Apply the inbox's push rule for one message, waking a parked consumer
@@ -486,15 +566,19 @@ impl Shared {
     ///   a blank line, preserving arrival order; a slash line is never
     ///   merged either direction, so its turn-boundary classification
     ///   ([`InboxMsg::boundary`]) always survives intact.
-    /// - `Nudge` is dropped as a no-op when an identical one is already
-    ///   queued.
+    /// - `Nudge` replaces a still-queued nudge outright (newest wins,
+    ///   mirroring `ScheduledWakeup`) rather than adding a second: it is
+    ///   always self-pushed by the agent's own drive loop reacting to one
+    ///   turn's outcome, so at most one is ever meaningfully outstanding —
+    ///   a second one queuing means a fresher continuation superseded the
+    ///   first, not that both are owed to the model.
     ///
     /// Every other source (`AgentResult`, `AgentMessage`, `Command`,
     /// `Surface`) is quota-checked: rejected, never silently dropped, once
     /// its own [`INBOX_SOURCE_CAP`] or the shared [`INBOX_TOTAL_CAP`] is
     /// reached.
     fn try_push(&self, msg: InboxMsg) -> Result<(), InboxReject> {
-        let mut q = self.queue.lock().expect("inbox lock poisoned");
+        let mut q = self.lock();
         match msg {
             InboxMsg::ScheduledWakeup { id, .. } => {
                 let existing = q.iter().position(
@@ -518,11 +602,10 @@ impl Shared {
                 }
             }
             InboxMsg::Nudge(text) => {
-                let dup = q
-                    .iter()
-                    .any(|m| matches!(m, InboxMsg::Nudge(t) if *t == text));
-                if !dup {
-                    q.push_back(InboxMsg::Nudge(text));
+                let existing = q.iter().position(|m| matches!(m, InboxMsg::Nudge(_)));
+                match existing {
+                    Some(pos) => q[pos] = InboxMsg::Nudge(text),
+                    None => q.push_back(InboxMsg::Nudge(text)),
                 }
             }
             other => {
@@ -546,6 +629,19 @@ impl Shared {
         self.waiting_for_input.store(false, Ordering::Release);
         self.signal.notify_all();
         Ok(())
+    }
+
+    /// Wake a parked consumer without enqueuing a message, so it re-evaluates
+    /// its park verdict.  Takes the queue lock first (dropping it before the
+    /// notify): [`Self::try_push`] gets its lost-wakeup safety for free by
+    /// pushing under the lock before it notifies, but a bare wake has no
+    /// message to push, so it must take the lock itself to get the same
+    /// guarantee — otherwise the notify can land in the gap between a parked
+    /// consumer checking its verdict and actually starting to wait on the
+    /// condvar, and go unheard until the next [`PARK_POLL`].
+    fn wake(&self) {
+        drop(self.lock());
+        self.signal.notify_all();
     }
 }
 
@@ -604,7 +700,7 @@ impl Mailbox {
     /// its park verdict — the `TAB` focus-change signal the frontend sends
     /// through the registry's mailboxes.
     pub fn wake(&self) {
-        self.shared.signal.notify_all();
+        self.shared.wake();
     }
 
     /// Whether this queue's consumer is parked at a human-input boundary. The
@@ -612,6 +708,16 @@ impl Mailbox {
     /// the prompt chrome and tab-title spinner.
     pub fn waiting_for_input(&self) -> bool {
         self.shared.waiting_for_input.load(Ordering::Acquire)
+    }
+
+    /// This inbox's current clear-epoch. A producer that composes a message
+    /// on a thread other than the inbox's own consumer — the schedule
+    /// reaper firing a wakeup — reads this at compose time and stamps it
+    /// into the message, so the pop-time admission check can tell a fire
+    /// that lands after an intervening [`Inbox::clear`] from one that
+    /// doesn't.
+    pub fn epoch(&self) -> u64 {
+        self.shared.epoch.load(Ordering::Acquire)
     }
 }
 
@@ -671,14 +777,8 @@ impl Inbox {
             .expect("UserSteering is idempotent and never rejects");
     }
 
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
     pub fn is_empty(&self) -> bool {
-        self.shared
-            .queue
-            .lock()
-            .expect("inbox lock poisoned")
-            .is_empty()
+        self.shared.lock().is_empty()
     }
 
     /// Whether the consumer is parked at a human-input boundary — true once it
@@ -694,11 +794,8 @@ impl Inbox {
     /// variant, zeros included so the row set is stable.  Counts only,
     /// taken in one pass under the queue lock: nothing is drained,
     /// reordered, or woken — enumeration is not observation.
-    ///
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
     pub fn source_depths(&self) -> Vec<(&'static str, u64)> {
-        let q = self.shared.queue.lock().expect("inbox lock poisoned");
+        let q = self.shared.lock();
         let mut user = 0;
         let mut schedule = 0;
         let mut agent = 0;
@@ -732,14 +829,9 @@ impl Inbox {
     /// Pending user-authored steering prompts, oldest first, for the TUI's
     /// queue strip.  Non-human deliveries and slash-command control turns stay
     /// invisible here: they are work for the drive loop, not queued user text.
-    ///
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
     pub fn queued_user_messages(&self) -> Vec<String> {
         self.shared
-            .queue
             .lock()
-            .expect("inbox lock poisoned")
             .iter()
             .filter_map(|msg| match msg {
                 InboxMsg::UserSteering(s) => Some(s.clone()),
@@ -756,11 +848,8 @@ impl Inbox {
     /// not the user's draft and stays queued.
     ///
     /// Returns oldest-first, or `None` if no user prompts are queued.
-    ///
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
     pub fn pop_back_user_all(&self) -> Option<Vec<String>> {
-        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
+        let mut q = self.shared.lock();
         let mut prompts: Vec<String> = Vec::new();
         let mut kept: VecDeque<InboxMsg> = VecDeque::with_capacity(q.len());
         while let Some(msg) = q.pop_front() {
@@ -789,9 +878,12 @@ impl Inbox {
     /// since steering queued behind the command is left with it.
     ///
     /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
+    /// Panics only on an internal invariant violation (a bug): every
+    /// `pop_front` here follows a `front` check made in the same loop
+    /// iteration, under the same lock.
     pub fn drain_tool(&self) -> Vec<Turn> {
-        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
+        let mut q = self.shared.lock();
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
         let mut turns = Vec::new();
         while q.front().is_some_and(|m| m.boundary() == Boundary::Tool) {
             if matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
@@ -813,7 +905,9 @@ impl Inbox {
                 turns.push(Turn::Human(text));
             } else {
                 let msg = q.pop_front().expect("front present and tool-boundary");
-                turns.push(to_turn(msg));
+                if let Some(turn) = to_turn(msg, epoch) {
+                    turns.push(turn);
+                }
             }
         }
         drop(q);
@@ -823,21 +917,23 @@ impl Inbox {
     /// Turn-boundary drain: the next deliverable, tagged with its source, or
     /// `None` if the queue is empty.  Never blocks — see [`Self::next_or_idle`]
     /// for the parking variant the drive loop uses.
-    ///
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
     pub fn drain_turn(&self) -> Option<Turn> {
-        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
-        pop_turn(&mut q)
+        let mut q = self.shared.lock();
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
+        pop_turn(&mut q, epoch)
     }
 
     /// The drive loop's turn-boundary pull.  Returns the next deliverable; on
     /// an empty queue the `park` verdict — recomputed on every wake — decides
     /// whether to park or terminate ([`ParkMode`]):
     ///
-    /// - [`ParkMode::Held`] — a human is attached (the conversing trunk or the
-    ///   focused agent).  Parks, ignoring cancellation: an Esc cancels the
+    /// - [`ParkMode::Held`] — a human is having a live conversation with this
+    ///   agent.  Parks, ignoring cancellation entirely: an Esc cancels the
     ///   current *turn*, not the agent.
+    /// - [`ParkMode::Focused`] — this agent does not converse, but the human
+    ///   has `TAB`bed to it.  Parks on an empty queue exactly like `Held`
+    ///   above, but a *terminate*-cause cancellation still ends it at once —
+    ///   mere focus grants no immunity.
     /// - [`ParkMode::HeldByChildren`] — live children may still deliver a
     ///   result up this inbox.  Parks like [`ParkMode::UntilCancelled`]; a
     ///   cancellation terminates at once, and it falls through to `Quiesce`
@@ -849,41 +945,41 @@ impl Inbox {
     ///   terminates at quiescence.
     ///
     /// `park` is re-evaluated each iteration, so a `TAB` that de-focuses a
-    /// parked agent (which [`wake`](Self::wake)s its inbox) flips `Held` to
-    /// `Quiesce` and the agent terminates.  A push wakes the park at once
-    /// through the condvar; a cancellation does not notify, so a non-`Held`
-    /// park re-checks `cancel` every [`PARK_POLL`].
+    /// parked agent (which [`wake`](Self::wake)s its inbox) flips `Held` or
+    /// `Focused` to `Quiesce` and the agent terminates.  A push wakes the park
+    /// at once through the condvar; a cancellation does not notify, so a
+    /// non-`Held` park re-checks `cancel` every [`PARK_POLL`].
     ///
     /// Two orderings carry the loop's correctness.  The verdict runs *under
-    /// the queue mutex*, so a push can never interleave between the verdict
-    /// and the wait (the condvar releases the lock atomically) — a lost
-    /// wakeup is impossible.  And the verdict is computed *before* the pop,
-    /// so a producer that both changes a verdict input and delivers a
-    /// message need only deliver first (deliver-then-retire, the module's
-    /// [lock order](self)): a `Quiesce` verdict can then never win a race
-    /// against a delivery it was supposed to wait for.
-    ///
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
+    /// the queue mutex*, so a push or a bare [`wake`](Self::wake) can never
+    /// interleave between the verdict and the wait (the condvar releases the
+    /// lock atomically) — a lost wakeup is impossible.  And the verdict is
+    /// computed *before* the pop, so a producer that both changes a verdict
+    /// input and delivers a message need only deliver first
+    /// (deliver-then-retire, the module's [lock order](self)): a `Quiesce`
+    /// verdict can then never win a race against a delivery it was supposed
+    /// to wait for.
     pub fn next_or_idle(
         &self,
         park: impl Fn() -> ParkMode,
         cancel: &cancel::Token,
     ) -> Option<Turn> {
-        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
+        let mut q = self.shared.lock();
         loop {
             let mode = park();
-            // A non-`Held` park (schedule-only, or quiescent) terminates the
-            // instant a *terminate*-cause cancel trips — `agent_cancel`, the
+            // Every park but a genuinely conversing `Held` terminates the
+            // instant a *terminate*-cause cancel trips — `agent-cancel`, the
             // ceiling, or `/clear` means stop now, dropping any queued
-            // messages.  An *interrupt*-cause cancel is not a terminate: it
-            // drops the in-flight turn but the agent re-parks.  A `Held` park
-            // ignores cancellation entirely: the human is present, and an Esc
+            // messages; `Focused` gets no immunity from mere TAB focus.  An
+            // *interrupt*-cause cancel is not a terminate: it drops the
+            // in-flight turn but the agent re-parks.  Only a live human
+            // conversation (`Held`) ignores cancellation entirely: an Esc
             // interrupts a turn, not the agent.
             if mode != ParkMode::Held && cancel.terminated() {
                 return None;
             }
-            if let Some(turn) = pop_turn(&mut q) {
+            let epoch = self.shared.epoch.load(Ordering::Acquire);
+            if let Some(turn) = pop_turn(&mut q, epoch) {
                 self.shared
                     .waiting_for_input
                     .store(false, Ordering::Release);
@@ -895,14 +991,15 @@ impl Inbox {
                     .store(false, Ordering::Release);
                 return None;
             }
-            self.shared
-                .waiting_for_input
-                .store(mode == ParkMode::Held, Ordering::Release);
+            self.shared.waiting_for_input.store(
+                matches!(mode, ParkMode::Held | ParkMode::Focused),
+                Ordering::Release,
+            );
             let (guard, _timeout) = self
                 .shared
                 .signal
                 .wait_timeout(q, PARK_POLL)
-                .expect("inbox lock poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             q = guard;
         }
     }
@@ -912,53 +1009,89 @@ impl Inbox {
     /// on a `TAB` focus change, on both the de-focused and newly-focused
     /// agents, so a de-focused idle agent observes the change and reaps.
     pub fn wake(&self) {
-        self.shared.signal.notify_all();
+        self.shared.wake();
     }
 
     /// Drop every pending message — `/clear` rebuilds the agent, so neither
     /// queued user prompts nor stale non-human deliveries carry across.
-    ///
-    /// # Panics
-    /// Panics if the inbox queue mutex is poisoned.
+    /// Runs each dropped message's drain side effect
+    /// ([`InboxMsg::on_drain`]) first, so a queued-but-unconsumed
+    /// `ScheduledWakeup`'s `pending` flag clears here too — `clear` does not
+    /// depend on its callers also clearing the schedule registry to avoid
+    /// stranding a schedule that can never fire again. Bumps the clear-epoch
+    /// ([`Mailbox::epoch`]) under the same queue lock as the drain, so a
+    /// schedule fire racing this call is unambiguously on one side or the
+    /// other of it: swept here if its push already landed, refused at the
+    /// pop if it lands only after this returns.
     pub fn clear(&self) {
-        self.shared
-            .queue
-            .lock()
-            .expect("inbox lock poisoned")
-            .clear();
+        let mut q = self.shared.lock();
+        for msg in q.drain(..) {
+            msg.on_drain();
+        }
+        self.shared.epoch.fetch_add(1, Ordering::Release);
+        drop(q);
     }
 }
 
 /// Pop the next turn-boundary deliverable from a locked queue, tagged with its
-/// source.  A leading run of *user* steering coalesces into one [`Turn::Human`]
-/// (preserving the whole-queue join, so a lone `/clear` still reaches the
-/// command path); every other source is delivered on its own so the drive loop
-/// can render each in its honest medium.
-fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
-    if let InboxMsg::UserSteering(_) = q.front()? {
-        let mut text = String::new();
-        while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
-            let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
-                unreachable!("front just checked to be user steering")
-            };
-            if !text.is_empty() {
-                text.push_str("\n\n");
+/// source.  A leading run of *non-slash* user steering coalesces into one
+/// [`Turn::Human`], matching the push-time never-merge rule
+/// ([`Shared::try_push`]): a slash line neither absorbs the run ahead of it
+/// nor merges with the steering behind it, so it is always delivered alone,
+/// as ordinary prompt text — the same rule [`Inbox::drain_tool`] already
+/// applies at the tool boundary.  Every other source is delivered on its own
+/// so the drive loop can render each in its honest medium.
+///
+/// `epoch` is this inbox's *current* clear-epoch, read by the caller under
+/// the same lock this function runs under.  A `ScheduledWakeup` whose stamped
+/// epoch has fallen behind it settled across an intervening [`Inbox::clear`]
+/// and is dropped rather than converted — so the loop below keeps trying the
+/// next queued message instead of surfacing a stale one.
+fn pop_turn(q: &mut VecDeque<InboxMsg>, epoch: u64) -> Option<Turn> {
+    loop {
+        if let InboxMsg::UserSteering(front) = q.front()? {
+            if is_slash(front) {
+                let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
+                    unreachable!("front just checked to be a slash UserSteering")
+                };
+                return Some(Turn::Human(s));
             }
-            text.push_str(&s);
+            let mut text = String::new();
+            while let Some(InboxMsg::UserSteering(s)) = q.front() {
+                if is_slash(s) {
+                    break;
+                }
+                let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
+                    unreachable!("front just checked to be user steering")
+                };
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&s);
+            }
+            return Some(Turn::Human(text));
         }
-        return Some(Turn::Human(text));
+        let msg = q.pop_front().expect("front checked present");
+        if let Some(turn) = to_turn(msg, epoch) {
+            return Some(turn);
+        }
     }
-    let msg = q.pop_front().expect("front checked present");
-    Some(to_turn(msg))
 }
 
 /// Convert one non-user-steering message into the [`Turn`] it delivers,
-/// running its drain side effect ([`InboxMsg::on_drain`]).  Shared by the
+/// running its drain side effect ([`InboxMsg::on_drain`]) — or `None` for a
+/// [`ScheduledWakeup`](InboxMsg::ScheduledWakeup) whose stamped epoch has
+/// fallen behind `epoch`, refused rather than converted.  Shared by the
 /// tool-boundary drain ([`Inbox::drain_tool`]) and the turn-boundary drain
 /// ([`pop_turn`]).
-fn to_turn(msg: InboxMsg) -> Turn {
+fn to_turn(msg: InboxMsg, epoch: u64) -> Option<Turn> {
     msg.on_drain();
-    match msg {
+    if let InboxMsg::ScheduledWakeup { epoch: fired, .. } = &msg
+        && *fired != epoch
+    {
+        return None;
+    }
+    Some(match msg {
         InboxMsg::ScheduledWakeup {
             label,
             trigger,
@@ -969,11 +1102,19 @@ fn to_turn(msg: InboxMsg) -> Turn {
         InboxMsg::AgentMessage(m) => Turn::Message(m),
         InboxMsg::Nudge(s) => Turn::Nudge(s),
         InboxMsg::Command(s) => Turn::Command(s),
-        InboxMsg::Surface { id, values } => Turn::Surface { id, values },
+        InboxMsg::Surface {
+            id,
+            values,
+            generation,
+        } => Turn::Surface {
+            id,
+            values,
+            generation,
+        },
         InboxMsg::UserSteering(_) => {
             unreachable!("user steering coalesced by the caller")
         }
-    }
+    })
 }
 
 pub struct Event {
@@ -1032,18 +1173,35 @@ pub enum Kind {
     /// `events.json` keeps it for post-mortem.  Superseded by the next event
     /// of any kind.
     Phase(String),
+    /// A call to `ral` — the one call that genuinely crosses the provider
+    /// boundary.  See [`Kind::HarnessCall`] for a desk verb's rail-identical
+    /// twin.
     ToolCall {
         tool: &'static str,
         cmd: String,
-        /// Short, single-line label the sink shows on the rail — the
-        /// `ral` tool's mandatory `description`, the `agent` tool's
-        /// `title` — with `cmd` revealed when the user opens the call.
-        /// `None` means there is nothing to reveal, so the call renders
-        /// statically from `cmd` (e.g. `fff`, whose `query` is already
-        /// short, and the invalid-input rail header).
+        /// Short, single-line label the sink shows on the rail — `ral`'s
+        /// mandatory `description` — with `cmd` revealed when the user
+        /// opens the call. `None` means there is nothing to reveal, so the
+        /// call renders statically from `cmd` (the invalid-input rail
+        /// header).
         summary: Option<String>,
     },
     ToolResult(String),
+    /// A desk verb acted — `amnemon`/`mnemon` (via `agent-start`), `message`,
+    /// `agent-cancel`, `schedule`, `unschedule`, `commit`, `verify-commitment`,
+    /// or `reply` — rendered on the rail exactly like [`Kind::ToolCall`], but
+    /// naming the harness verb the model invoked rather than a name that
+    /// crossed the provider boundary: unlike `ral`, none of these are a
+    /// provider-facing tool at all any more, so this is the honest kind for
+    /// what the desk actually did.
+    HarnessCall {
+        verb: &'static str,
+        cmd: String,
+        summary: Option<String>,
+    },
+    /// The paired result for a [`Kind::HarnessCall`] — the desk's twin of
+    /// [`Kind::ToolResult`].
+    HarnessResult(String),
     UserPromptEcho(String),
     StopReason(String),
     Error(String),
@@ -1093,7 +1251,7 @@ pub enum Kind {
     /// [`shell_eval`]: crate::shell_eval
     Card(Card),
     /// A detached worker's `` `done `` completion event, decoded once by
-    /// [`shell_eval`] into its typed [`DoneOutcome`](crate::card::DoneOutcome)
+    /// [`shell_eval`] into its typed [`DoneOutcome`](crate::bus::card::DoneOutcome)
     /// and paired with the one-line [`Card`] composed from it — the
     /// [`Kind::Io`] pattern, so `transcript.jsonl` records how the worker
     /// settled (a clean return, a raised error, a panic) rather than only
@@ -1101,7 +1259,7 @@ pub enum Kind {
     ///
     /// [`shell_eval`]: crate::shell_eval
     Done {
-        outcome: crate::card::DoneOutcome,
+        outcome: crate::bus::card::DoneOutcome,
         card: Card,
     },
     /// A structural I/O event core surfaced (a read, write, exec, or grep),
@@ -1143,14 +1301,14 @@ pub enum Kind {
     /// variants this used to be: core now emits the fact itself, at the
     /// ready boundary, through the turn's surface sink, rather than a host
     /// draining an accessor and composing the event from what it read.
-    /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::card::Notice)
+    /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::bus::card::Notice)
     /// rides alongside the rendered `card` (the [`Kind::Io`] pattern) so
     /// `transcript.jsonl` keeps the structural fact the one-liner erases.
     /// Never model-facing — no `events.json` twin, no inbox message;
     /// model-visible reap delivery is deferred
     /// (`decisions/260705_leases-and-budgets`).
     Notice {
-        notice: crate::card::Notice,
+        notice: crate::bus::card::Notice,
         card: Card,
     },
     /// The `/resources` probe fold: the agent's own accumulator rows,
@@ -1164,7 +1322,7 @@ pub enum Kind {
     /// inbox reply — probing is for the operator, and it mutates and
     /// renews nothing (`decisions/260705_leases-and-budgets`).
     Resources {
-        rows: Vec<crate::resources::ProbeRow>,
+        rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
     },
 }
@@ -1183,19 +1341,13 @@ pub struct UsageMeter(Arc<Mutex<Usage>>);
 
 impl UsageMeter {
     /// Fold one usage delta into the run total.
-    ///
-    /// # Panics
-    /// Panics if the usage-meter mutex is poisoned.
     pub fn add(&self, u: Usage) {
-        *self.0.lock().expect("usage meter poisoned") += u;
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) += u;
     }
 
     /// The run total so far.
-    ///
-    /// # Panics
-    /// Panics if the usage-meter mutex is poisoned.
     pub fn total(&self) -> Usage {
-        *self.0.lock().expect("usage meter poisoned")
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -1389,6 +1541,18 @@ struct BusShared {
     senders: AtomicUsize,
 }
 
+impl BusShared {
+    /// Lock the queue, recovering from a poisoned mutex rather than
+    /// panicking — the same policy as [`Shared::lock`], for the same reason:
+    /// every operation under this lock ([`BusQueue::push`], [`pop_one`]) is a
+    /// total mutation, so a panicked holder cannot leave it torn, and
+    /// propagating the poison would deafen every future sender and receiver
+    /// over one unrelated panic.
+    fn lock(&self) -> MutexGuard<'_, BusQueue> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// The cloneable sender side of the bus's bounded, coalescing queue — the
 /// `mpsc::Sender<Event>` replacement threaded through [`Emitter`]/[`FleetBus`].
 ///
@@ -1407,7 +1571,13 @@ impl Drop for BusSender {
     fn drop(&mut self) {
         if self.0.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
             // The last sender is gone: wake a parked receiver so it observes
-            // the disconnect instead of waiting out its timeout.
+            // the disconnect instead of waiting out its timeout.  Taking the
+            // queue lock first — even though there is nothing left to push —
+            // is what makes the notify reliable: it cannot land in the gap
+            // between a receiver checking `senders` and actually starting to
+            // wait on the condvar, the same lost-wakeup gap `Shared::wake`
+            // closes for the inbox's own bare wake.
+            drop(self.0.lock());
             self.0.signal.notify_all();
         }
     }
@@ -1422,18 +1592,11 @@ impl BusSender {
     ///
     /// # Errors
     /// Returns `Err(SendError(ev))` when the receiver has been dropped.
-    ///
-    /// # Panics
-    /// Panics if the bus queue mutex is poisoned.
     pub fn send(&self, ev: Event) -> Result<(), SendError<Event>> {
         if !self.0.receiver_alive.load(Ordering::Acquire) {
             return Err(SendError(ev));
         }
-        self.0
-            .state
-            .lock()
-            .expect("bus queue poisoned")
-            .push(ev.id, ev.kind);
+        self.0.lock().push(ev.id, ev.kind);
         self.0.signal.notify_all();
         Ok(())
     }
@@ -1451,11 +1614,8 @@ impl BusReceiver {
     /// # Errors
     /// Returns `Err(RecvError)` once the queue is empty and every sender has
     /// dropped.
-    ///
-    /// # Panics
-    /// Panics if the bus queue mutex is poisoned.
     pub fn recv(&self) -> Result<Event, std::sync::mpsc::RecvError> {
-        let mut q = self.0.state.lock().expect("bus queue poisoned");
+        let mut q = self.0.lock();
         loop {
             if let Some(ev) = pop_one(&mut q) {
                 return Ok(ev);
@@ -1463,7 +1623,11 @@ impl BusReceiver {
             if self.0.senders.load(Ordering::Acquire) == 0 {
                 return Err(std::sync::mpsc::RecvError);
             }
-            q = self.0.signal.wait(q).expect("bus queue poisoned");
+            q = self
+                .0
+                .signal
+                .wait(q)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
@@ -1473,11 +1637,8 @@ impl BusReceiver {
     /// Returns `Err(TryRecvError::Empty)` when no event is queued but senders
     /// remain, or `Err(TryRecvError::Disconnected)` when the queue is empty
     /// and every sender has dropped.
-    ///
-    /// # Panics
-    /// Panics if the bus queue mutex is poisoned.
     pub fn try_recv(&self) -> Result<Event, TryRecvError> {
-        let mut q = self.0.state.lock().expect("bus queue poisoned");
+        let mut q = self.0.lock();
         match pop_one(&mut q) {
             Some(ev) => Ok(ev),
             None if self.0.senders.load(Ordering::Acquire) == 0 => Err(TryRecvError::Disconnected),
@@ -1491,12 +1652,9 @@ impl BusReceiver {
     /// Returns `Err(RecvTimeoutError::Timeout)` when `timeout` elapses before
     /// an event arrives, or `Err(RecvTimeoutError::Disconnected)` when the
     /// queue is empty and every sender has dropped.
-    ///
-    /// # Panics
-    /// Panics if the bus queue mutex is poisoned.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
         let deadline = Instant::now() + timeout;
-        let mut q = self.0.state.lock().expect("bus queue poisoned");
+        let mut q = self.0.lock();
         loop {
             if let Some(ev) = pop_one(&mut q) {
                 return Ok(ev);
@@ -1512,30 +1670,24 @@ impl BusReceiver {
                 .0
                 .signal
                 .wait_timeout(q, deadline - now)
-                .expect("bus queue poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             q = guard;
         }
     }
 
     /// Queue depth — a merged run and a reserved kind each count as one entry,
     /// pending overflow markers included. The `/resources` `bus.depth`
-    /// figure ([`crate::resources::frontend_rows`]): one pass over the lock,
+    /// figure ([`crate::agent::resources::frontend_rows`]): one pass over the lock,
     /// nothing drained or woken — enumeration is not observation.
-    ///
-    /// # Panics
-    /// Panics if the bus queue mutex is poisoned.
     pub fn depth(&self) -> usize {
-        let q = self.0.state.lock().expect("bus queue poisoned");
+        let q = self.0.lock();
         q.items.len() + q.markers.len()
     }
 
     /// Resident bytes across every merged `Token`/`Thinking`/`Phase` entry —
     /// the `/resources` `bus.bytes` figure, a running total rather than a walk.
-    ///
-    /// # Panics
-    /// Panics if the bus queue mutex is poisoned.
     pub fn bytes(&self) -> usize {
-        self.0.state.lock().expect("bus queue poisoned").bytes
+        self.0.lock().bytes
     }
 }
 
@@ -1945,22 +2097,30 @@ mod tests {
         InboxReject, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Sink, Transcript, Turn, channel,
         drain_pass, pump,
     };
-    use crate::cancel;
+    use crate::agent::cancel;
     use crate::provider::Tuning;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::mpsc::TryRecvError;
 
-    /// A scheduled-wakeup message with a fresh pending flag, for the inbox
-    /// drain tests. `id` matters only to the dedupe tests below; the
-    /// drain-order tests all use the same arbitrary id.
+    /// A scheduled-wakeup message with a fresh pending flag, stamped with
+    /// epoch 0 (a fresh [`Inbox`]'s own starting epoch), for the inbox drain
+    /// tests. `id` matters only to the dedupe tests below; the drain-order
+    /// tests all use the same arbitrary id.
     fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> InboxMsg {
+        wakeup_at(id, label, trigger, prompt, 0)
+    }
+
+    /// [`wakeup`], stamped with an explicit epoch — for the admission tests
+    /// below, which need a wakeup composed under a *stale* epoch.
+    fn wakeup_at(id: u64, label: &str, trigger: &str, prompt: &str, epoch: u64) -> InboxMsg {
         InboxMsg::ScheduledWakeup {
             id,
             label: label.into(),
             trigger: trigger.into(),
             prompt: prompt.into(),
             pending: Arc::new(AtomicBool::new(true)),
+            epoch,
         }
     }
 
@@ -2114,6 +2274,86 @@ mod tests {
                 Some(Turn::Human(s)) if s == "resume"
             ),
             "the interrupt was ignored; the pushed turn released the park"
+        );
+    }
+
+    /// `ParkMode::Focused` — a non-conversing agent the human has merely
+    /// `TAB`bed to — grants no cancellation immunity: `agent-cancel`/the
+    /// ceiling firing while the human happens to be looking at an idle child
+    /// must still kill it, or its `HeldByChildren` parent would sit waiting
+    /// on a cancelled-result delivery that never comes.  Contrast
+    /// [`held_park_survives_a_terminate_cause`], where a *genuine*
+    /// conversation stays immune.
+    #[test]
+    fn focused_park_dies_on_a_terminate_cause_despite_human_focus() {
+        let inbox = Inbox::new();
+        let observed = Arc::new(AtomicBool::new(false));
+        let worker_observed = observed.clone();
+        let token = cancel::Token::new();
+        let worker_token = token.clone();
+        let handle = std::thread::spawn(move || {
+            inbox.next_or_idle(
+                || {
+                    worker_observed.store(true, Ordering::Release);
+                    ParkMode::Focused
+                },
+                &worker_token,
+            )
+        });
+
+        assert!(
+            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            "the worker reached the park predicate"
+        );
+
+        token.cancel(ral_core::process::CancelCause::Explicit);
+        assert!(
+            handle.join().expect("cancelled worker joins").is_none(),
+            "a terminate cause ends a Focused park despite human focus"
+        );
+    }
+
+    /// The complement: a genuinely conversing [`ParkMode::Held`] stays immune
+    /// even to a terminate cause — the split introduced for `Focused` must not
+    /// weaken `Held`'s existing immunity for a live human conversation.  Proved
+    /// the same way [`non_human_park_survives_an_interrupt`] proves an
+    /// interrupt is ignored: the only remaining exit is a pushed turn, so
+    /// getting it back shows the terminate cancel did not end the park.
+    #[test]
+    fn held_park_survives_a_terminate_cause() {
+        let inbox = Inbox::new();
+        inbox.push_user("work".into());
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(_))));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let worker_observed = observed.clone();
+        let worker_inbox = inbox.clone();
+        let token = cancel::Token::new();
+        let worker_token = token.clone();
+        let handle = std::thread::spawn(move || {
+            worker_inbox.next_or_idle(
+                || {
+                    worker_observed.store(true, Ordering::Release);
+                    ParkMode::Held
+                },
+                &worker_token,
+            )
+        });
+
+        assert!(
+            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            "the worker reached the park predicate"
+        );
+
+        token.cancel(ral_core::process::CancelCause::Explicit);
+
+        inbox.mailbox().push_user("resume".into());
+        assert!(
+            matches!(
+                handle.join().expect("parked worker joins"),
+                Some(Turn::Human(s)) if s == "resume"
+            ),
+            "a live conversation ignores even a terminate cause"
         );
     }
 
@@ -2294,11 +2534,11 @@ mod tests {
         assert!(holder.lock().unwrap().is_some());
     }
 
-    /// Tool-boundary drain stops at the first slash command.  Slash prompts
-    /// wait for the turn boundary, where `/clear`, `/model`, and friends are
-    /// interpreted by `handle_slash` instead of shown to the model; the whole
-    /// leading user run then coalesces there, preserving the old prompt-queue
-    /// join.  The non-slash steering ahead of the command drains mid-turn.
+    /// Tool-boundary drain stops at the first slash-prefixed steering line.
+    /// It waits for the turn boundary like a real [`InboxMsg::Command`], but
+    /// is delivered as ordinary prompt text, never interpreted — and, per the
+    /// never-merge rule, it neither absorbs the non-slash run ahead of it nor
+    /// merges with the plain steering queued behind it.
     #[test]
     fn inbox_tool_drain_stops_before_slash_command() {
         let inbox = Inbox::new();
@@ -2308,12 +2548,16 @@ mod tests {
 
         assert!(
             matches!(inbox.drain_tool().as_slice(), [Turn::Human(s)] if s == "steer first"),
-            "the non-slash steering drains; the command stops the run",
+            "the non-slash steering drains; the slash line stops the run",
         );
         assert!(inbox.drain_tool().is_empty());
         assert!(
-            matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "/clear\n\nafter clear"),
-            "the leading user run coalesces into one human turn",
+            matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "/clear"),
+            "the slash line is delivered alone, never merged with what follows",
+        );
+        assert!(
+            matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "after clear"),
+            "the plain steering behind it is its own turn",
         );
         assert!(inbox.is_empty());
     }
@@ -2492,6 +2736,7 @@ mod tests {
         InboxMsg::Surface {
             id: 0,
             values: vec![done],
+            generation: 0,
         }
     }
 
@@ -2571,6 +2816,7 @@ mod tests {
                 trigger: "* * * * *".into(),
                 prompt: "go".into(),
                 pending: pending.clone(),
+                epoch: 0,
             })
             .unwrap();
         assert!(pending.load(std::sync::atomic::Ordering::Acquire));
@@ -2579,6 +2825,60 @@ mod tests {
             !pending.load(std::sync::atomic::Ordering::Acquire),
             "draining the wakeup re-opens its schedule"
         );
+    }
+
+    /// `clear` runs the same drain side effect a real drain would, so a
+    /// queued-but-unconsumed wakeup's `pending` flag is cleared rather than
+    /// stranded `true` forever.  Production never observes this today only
+    /// because both call sites also clear the schedule registry outright
+    /// (`agent.rs`'s `/clear`); `clear` must not depend on that coupling to
+    /// be correct on its own.
+    #[test]
+    fn inbox_clear_runs_the_drain_side_effect_on_a_stranded_wakeup() {
+        let pending = Arc::new(AtomicBool::new(true));
+        let inbox = Inbox::new();
+        inbox
+            .push(InboxMsg::ScheduledWakeup {
+                id: 1,
+                label: "n".into(),
+                trigger: "* * * * *".into(),
+                prompt: "go".into(),
+                pending: pending.clone(),
+                epoch: 0,
+            })
+            .unwrap();
+        inbox.clear();
+        assert!(
+            !pending.load(std::sync::atomic::Ordering::Acquire),
+            "clear must not strand a wakeup's pending flag at true"
+        );
+        assert!(inbox.is_empty());
+    }
+
+    /// The schedule race (`ScheduleRegistry::fire`, `schedule.rs`): a wakeup
+    /// composed while a stale epoch was still current, then pushed after an
+    /// intervening `/clear` already bumped it, is refused at the pop rather
+    /// than surfacing into the rebuilt context.
+    #[test]
+    fn stale_epoch_wakeup_is_refused_at_pop() {
+        let inbox = Inbox::new();
+        let stale = inbox.mailbox().epoch();
+        inbox.clear();
+        inbox.push(wakeup_at(1, "n", "@", "go", stale)).unwrap();
+        assert!(
+            inbox.drain_turn().is_none(),
+            "a wakeup stamped with an epoch older than the inbox's own is dropped"
+        );
+    }
+
+    /// The positive half: a wakeup stamped with the live epoch is delivered
+    /// exactly like any other.
+    #[test]
+    fn current_epoch_wakeup_is_delivered() {
+        let inbox = Inbox::new();
+        let live = inbox.mailbox().epoch();
+        inbox.push(wakeup_at(1, "n", "@", "go", live)).unwrap();
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
     }
 
     // ── the bounded, coalescing bus transport (7a) ─────────────────────────
@@ -2913,18 +3213,25 @@ mod tests {
         );
     }
 
-    /// An identical `Nudge` already queued is a no-op; a differently-worded
-    /// one is not deduped away.
+    /// A newer `Nudge` replaces a still-queued one outright (newest wins,
+    /// mirroring `ScheduledWakeup`'s own dedupe-by-id) rather than adding a
+    /// second: it is always self-pushed by the agent reacting to one turn's
+    /// outcome, so at most one is ever meaningfully outstanding — a second
+    /// arriving means a fresher continuation superseded the first.
     #[test]
-    fn inbox_nudge_dedupes_identical_text_only() {
+    fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
         let inbox = Inbox::new();
         inbox.push(InboxMsg::Nudge("retry".into())).unwrap();
         inbox.push(InboxMsg::Nudge("retry".into())).unwrap();
         inbox.push(InboxMsg::Nudge("different".into())).unwrap();
         assert_eq!(
             depth_of(&inbox, "nudge"),
-            2,
-            "the identical duplicate deduped; the differently-worded one did not"
+            1,
+            "a nudge never grows past one outstanding entry"
+        );
+        assert!(
+            matches!(inbox.drain_turn(), Some(Turn::Nudge(s)) if s == "different"),
+            "the newest nudge is the one delivered"
         );
     }
 
@@ -2967,8 +3274,12 @@ mod tests {
     }
 
     /// The idempotent sources (`user`, `schedule`, `nudge`) never reject,
-    /// however far past `INBOX_SOURCE_CAP` they are pushed — they coalesce
-    /// instead of counting toward a cap.
+    /// however far past `INBOX_SOURCE_CAP` they are pushed.  `nudge` also
+    /// stays bounded to its one outstanding entry (the dedupe above);
+    /// `schedule` and `user` are not bounded by this cap at all — a distinct
+    /// schedule id or a slash-interleaved run of steering each mint their own
+    /// entry — which is accepted, human/config-scale risk this module does
+    /// not itself enforce (see [`INBOX_SOURCE_CAP`]'s doc).
     #[test]
     fn inbox_idempotent_sources_never_reject_past_the_source_cap() {
         let inbox = Inbox::new();
@@ -2981,5 +3292,10 @@ mod tests {
                 .expect("wakeup never rejects");
             inbox.push_user(format!("line {i}"));
         }
+        assert_eq!(
+            depth_of(&inbox, "nudge"),
+            1,
+            "nudge alone stays bounded, however many distinct texts are pushed"
+        );
     }
 }

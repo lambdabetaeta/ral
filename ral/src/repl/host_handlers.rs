@@ -404,4 +404,38 @@ mod tests {
         assert!(NOT_A_PGID_JOB.contains("`await`"), "fg's analogue");
         assert!(NOT_A_PGID_JOB.contains("`cancel`"), "the kill analogue");
     }
+
+    /// Vet refusal: `alias jobs …` on a REPL-dressed table is rejected, not
+    /// silently installed to shadow `jobs` at dispatch.  [`build`] installs
+    /// the six captured entries the same way `Session::boot` does
+    /// (`repl/session.rs`), so `jobs` sits on the table exactly as it would
+    /// in a booted REPL session; `install_alias` reads that same table via
+    /// `HandlerEntry::vet`.
+    #[test]
+    fn alias_over_a_captured_builtin_is_rejected() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        shell.install_captured_builtins(build(
+            Arc::new(Mutex::new(crate::jobs::JobTable::new())),
+            Arc::new(Mutex::new(PluginRuntime::default())),
+        ));
+
+        let ast = ral_core::syntax::parser::parse("{ |args| return 1 }").unwrap();
+        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(
+            &ast,
+            std::collections::HashSet::default(),
+        ));
+        let thunk = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
+
+        let err = shell
+            .install_alias("jobs".to_string(), thunk)
+            .expect_err("aliasing a captured builtin must be refused");
+        let ral_core::types::Break::Error(e) = err else {
+            panic!("expected a catchable Error, got an Escape: {err:?}");
+        };
+        assert!(
+            e.message.contains("builtin"),
+            "expected the vet's builtin-collision message, got: {}",
+            e.message
+        );
+    }
 }

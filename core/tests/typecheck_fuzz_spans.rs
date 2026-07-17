@@ -25,7 +25,10 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     let comp = elaborate(&ast, HashSet::default());
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .err()
     .unwrap_or_default()

@@ -67,12 +67,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Switch the model or provider.",
     },
     SlashCommand {
-        name: "/discuss",
-        aliases: &[],
-        arg: Some("<prompt>"),
-        help: "Start a two-agent discussion and report back.",
-    },
-    SlashCommand {
         name: "/branch",
         aliases: &[],
         arg: Some("[prompt]"),
@@ -268,7 +262,7 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
 /// forks root-vs-non-root before parsing.  A view command (`/help`, `/legend`,
 /// `/copy`, `/export`, `/model`) touches only the App, clipboard, file, or
 /// picker, so it runs here on the UI thread.  A session command (`/clear`,
-/// `/compact`, `/resources`, `/discuss`, `/quit`) and a plain prompt on the
+/// `/compact`, `/resources`, `/quit`) and a plain prompt on the
 /// trunk go onto the session inbox, where the worker's drive loop drains them —
 /// `/clear` *also* clears the viewport UI-side so the screen blanks immediately,
 /// before the worker rebuilds the session.  A slash token naming no registered
@@ -325,15 +319,20 @@ pub(super) fn route_submit(
             // keep flowing into the cleared viewport until the worker, parked
             // inside `apply`, hits its next poll (50 ms) and the model's turn
             // ends on its own.  Raising the interrupt cancels the trunk's
-            // published token and the ral foreground, exactly as Esc does; the
-            // subtree cascade reaps any live descendants now rather than after
-            // the worker reaches the `Turn::Command`.  Stragglers already in the
-            // unbounded bus channel are dropped in `App::handle` by the
-            // clear-drain guard `root_clear_drain` arms.  Then the `/clear`
-            // itself reaches the worker's drive loop and rebuilds the session.
+            // published token and the ral foreground, exactly as Esc does, at
+            // interrupt strength — so the next turn's boundary `reset` clears
+            // it. `cancel_descendants` reaps any live descendants now rather
+            // than after the worker reaches the `Turn::Command`, leaving the
+            // trunk's own entry, and its sticky token, untouched: `/clear`
+            // rebuilds the trunk in place rather than ending it, and a
+            // terminate-class cause on its token would be permanent.
+            // Stragglers already in the unbounded bus channel are dropped in
+            // `App::handle` by the clear-drain guard `root_clear_drain` arms.
+            // Then the `/clear` itself reaches the worker's drive loop and
+            // rebuilds the session.
             "/clear" => {
-                crate::cancel::raise_interrupt();
-                ctx.agents.cancel(root);
+                crate::agent::cancel::raise_interrupt();
+                ctx.agents.cancel_descendants(root);
                 // Read the root's provider for the banner redraw, falling back
                 // to a throwaway scripted provider if the trunk has settled.
                 let provider_guard = ctx.agents.provider(root).map(|ph| ph.current());
@@ -345,13 +344,6 @@ pub(super) fn route_submit(
                     tui.app.clear(info, &fallback, tui.guard.term())?;
                 }
                 push_command(tui, mailbox, "/clear".into());
-            }
-            "/discuss" => {
-                if arg.is_empty() {
-                    tui.app.push_error(focused, "usage: /discuss <prompt>");
-                    return Ok(());
-                }
-                push_command(tui, mailbox, text.clone());
             }
             // The worker's `ReplControl` compacts the history / returns Quit.
             _ => push_command(tui, mailbox, text.clone()),
@@ -427,15 +419,6 @@ mod tests {
         // A bare /export still matches, with the empty argument its handler
         // turns into the usage hint.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
-    }
-
-    #[test]
-    fn discuss_consumes_its_prompt_argument() {
-        assert_eq!(
-            dispatch("/discuss should we add a new channel?"),
-            Some(("/discuss", "should we add a new channel?".to_string()))
-        );
-        assert_eq!(dispatch("/discuss"), Some(("/discuss", String::new())));
     }
 
     #[test]

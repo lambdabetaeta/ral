@@ -27,6 +27,11 @@ struct NameScope {
 #[derive(Clone)]
 pub struct TyEnv {
     scopes: Vec<NameScope>,
+    /// The checked session's builtin table — names a `Bind`/`Exec`/`Val`
+    /// site resolves against before falling through to a lexical binding
+    /// or handler.  Set once by `seed_env`; unchanged for the rest of the
+    /// turn's inference.
+    pub builtins: crate::types::BuiltinTable,
 }
 
 impl Default for TyEnv {
@@ -39,6 +44,7 @@ impl TyEnv {
     pub fn new() -> Self {
         Self {
             scopes: vec![NameScope::default()],
+            builtins: crate::types::BuiltinTable::default(),
         }
     }
 

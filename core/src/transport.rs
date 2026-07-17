@@ -732,6 +732,51 @@ impl EventReceiver {
         }
         self.rx.lock().unwrap().recv().ok()
     }
+
+    /// Non-blocking drain: a stashed frame first (arrival order, per §6.5's
+    /// ordering law), then the channel. `None` when both are empty right now
+    /// — never blocks.
+    ///
+    /// # Panics
+    /// Panics if the stash or receiver mutex is poisoned.
+    pub fn try_recv(&self) -> Option<Frame> {
+        let stashed = self.stash.lock().unwrap().pop_front();
+        if let Some(frame) = stashed {
+            return Some(frame);
+        }
+        self.rx.lock().unwrap().try_recv().ok()
+    }
+}
+
+#[cfg(test)]
+mod event_receiver_tests {
+    use super::*;
+
+    fn receiver() -> (EventReceiver, mpsc::Sender<Frame>) {
+        let (tx, rx) = mpsc::channel();
+        (EventReceiver::new(rx), tx)
+    }
+
+    /// A stashed frame is returned before whatever the channel holds, and
+    /// without blocking — the same arrival-order precedence `recv` gives the
+    /// stash, proven here on the non-blocking door.
+    #[test]
+    fn try_recv_drains_the_stash_before_the_channel() {
+        let (receiver, tx) = receiver();
+        tx.send(Frame::Detach).unwrap();
+        receiver.stash.lock().unwrap().push_back(Frame::Control(Control::Resume));
+
+        assert_eq!(receiver.try_recv(), Some(Frame::Control(Control::Resume)));
+        assert_eq!(receiver.try_recv(), Some(Frame::Detach));
+    }
+
+    /// With neither a stashed frame nor a channel send pending, `try_recv`
+    /// returns `None` immediately rather than blocking.
+    #[test]
+    fn try_recv_returns_none_when_empty() {
+        let (receiver, _tx) = receiver();
+        assert_eq!(receiver.try_recv(), None);
+    }
 }
 
 // ── Transport sink ────────────────────────────────────────────────────
@@ -813,14 +858,24 @@ pub struct IdentityTransport {
     engine: SessionLock,
     /// Control sender (wired to the foreground cancel scope).
     control: ControlSender,
-    /// Event receiver for the front-end.
-    events_recv: EventReceiver,
+    /// Event receiver for the front-end. `Arc`-wrapped so a later drain-then-
+    /// handle adapter can hold its own clone alongside the transport, rather
+    /// than borrowing one tied to `&self`.
+    events_recv: Arc<EventReceiver>,
     /// Stamped with the dispatching thread's id for the duration of
     /// `dispatch`, so a desk handler that reenters the session lock
     /// (`dispatch`/`shell_mut`/`with_shell`) panics instead of deadlocking
     /// (§3's reentrancy law). A separate short lock, never the session
     /// lock — checking it must not touch `self.engine`.
     dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    /// Set by [`Self::observe_foreground`]: a cell this transport writes
+    /// each turn's freshly-installed foreground scope into, at the turn's
+    /// very start.  Lives outside `engine`'s own lock, so a caller holding
+    /// a clone of the cell can read (and cancel) the *current* turn's
+    /// scope from another thread without waiting on a dispatch in flight —
+    /// the extension point a forked-session host uses to interrupt one
+    /// turn without touching the session's durable root.
+    turn_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
 }
 
 pub struct EngineInner {
@@ -837,6 +892,10 @@ pub struct EngineInner {
     /// Phase A: no desk installed by any host, so `enquire` answers its
     /// honest absence error.
     desk: Option<crate::types::Desk>,
+    /// The installed nursery for engine-side session forks, if any host has
+    /// set one. `None` until a host calls `set_nursery`, so `fork_into_nursery`
+    /// answers its honest absence error.
+    nursery: Option<crate::types::Nursery>,
     /// The session terminal lease (set by Attach).
     terminal_lease: Option<crate::process::TerminalLease>,
     /// Shared dispatch id for deferred-sink correlation.
@@ -877,6 +936,7 @@ impl IdentityTransport {
             surface_sink: sink.clone(),
             deferred_sink: Some(sink),
             desk: None,
+            nursery: None,
             terminal_lease: None,
             current_dispatch,
         };
@@ -884,14 +944,36 @@ impl IdentityTransport {
         Self {
             engine: SessionLock::new(engine),
             control,
-            events_recv: EventReceiver::new(event_rx),
+            events_recv: Arc::new(EventReceiver::new(event_rx)),
             dispatch_thread: std::sync::Mutex::new(None),
+            turn_scope: None,
         }
+    }
+
+    /// Return a shared handle to the front-end's event receiver, for a
+    /// caller that wants to drain it alongside the transport rather than
+    /// through a borrow tied to `&self`.
+    pub fn events_shared(&self) -> Arc<EventReceiver> {
+        self.events_recv.clone()
     }
 
     /// Set the session deferred sink for deferred worker batches.
     pub fn set_deferred_sink(&self, deferred: Arc<dyn DeferredSink>) {
         self.engine.lock().deferred_sink = Some(deferred);
+    }
+
+    /// Arm this transport to publish each turn's freshly-installed
+    /// foreground scope into `cell` at the start of every dispatch, before
+    /// evaluation begins.  Call once, right after construction: a forked
+    /// session (exarch's agent fleet) keeps its own clone of `cell`
+    /// alongside the session's durable root, so an interrupt can cancel
+    /// whichever scope the in-flight turn actually installed without ever
+    /// touching the root a later turn would inherit.
+    pub fn observe_foreground(
+        &mut self,
+        cell: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
+    ) {
+        self.turn_scope = Some(cell);
     }
 
     /// Install the session's enquiry desk. Per-turn hosts (e.g. exarch, once
@@ -900,6 +982,25 @@ impl IdentityTransport {
     /// follows.
     pub fn set_desk(&self, desk: crate::types::Desk) {
         self.engine.lock().desk = Some(desk);
+    }
+
+    /// Install the session's nursery for engine-side session forks. Per-turn
+    /// hosts call this before each dispatch so a stale fork from an earlier
+    /// generation is never adoptable, the same reasoning `set_desk` follows.
+    pub fn set_nursery(&self, nursery: crate::types::Nursery) {
+        self.engine.lock().nursery = Some(nursery);
+    }
+
+    /// Uninstall the session's nursery. `set_desk` has no symmetric
+    /// counterpart because a desk retires to the `AbsentDesk` sentinel
+    /// instead — `Desk` is a trait object, so an "answers no enquiries"
+    /// value is cheap to construct and install in `desk`'s place. A
+    /// `Nursery` has no such sentinel: an empty one would still accept a
+    /// park and answer `fork_into_nursery` successfully, which is not
+    /// absence. `None` is the only honest "no nursery installed" value, so
+    /// this is the door that reaches it between calls.
+    pub fn clear_nursery(&self) {
+        self.engine.lock().nursery = None;
     }
 
     /// Consume the transport and recover the owned `Shell`.  The inverse of
@@ -949,6 +1050,18 @@ impl IdentityTransport {
     }
 }
 
+/// [`IdentityTransport::observe_foreground`]'s engine-side half: writes the
+/// turn's freshly-installed foreground scope into the caller's cell in
+/// `pre_exec`, which core's own turn door runs after installing that scope
+/// but before evaluation starts.
+struct ForegroundCapture(Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>);
+
+impl crate::turn::TurnLifecycle for ForegroundCapture {
+    fn pre_exec(&mut self, shell: &mut crate::types::Shell, _src: &str) {
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shell.foreground().clone());
+    }
+}
+
 impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
         self.check_not_reentrant();
@@ -969,12 +1082,17 @@ impl Transport for IdentityTransport {
 
         // The live handles this dispatch lends the turn, joined with the
         // protocol `Turn` in the request the engine door runs.
+        let lifecycle: Box<dyn crate::turn::TurnLifecycle> = match &self.turn_scope {
+            Some(cell) => Box::new(ForegroundCapture(cell.clone())),
+            None => Box::new(()),
+        };
         let req = crate::driver::TurnRequest {
             turn,
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
             desk: engine.desk.clone(),
-            lifecycle: Box::new(()),
+            nursery: engine.nursery.clone(),
+            lifecycle,
         };
         let turn_report = engine.shell.run_turn(req);
         let report = turn_report.into_report(engine.shell.sources());
@@ -1288,6 +1406,7 @@ mod enquiry_tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         }
     }
@@ -1434,6 +1553,31 @@ mod enquiry_tests {
         assert!(
             std::sync::Arc::ptr_eq(&desk, &installed),
             "the installed desk must be the same Arc set_desk was given"
+        );
+    }
+
+    /// `IdentityTransport::clear_nursery` uninstalls the nursery
+    /// `set_nursery` installed — the symmetric teardown `set_desk`'s
+    /// retire-to-`AbsentDesk` pattern has no direct equivalent for, since a
+    /// `Nursery` has no sentinel "absent" value. `engine.nursery` reverting
+    /// to `None` is what makes a later dispatch's `fork_into_nursery`
+    /// answer the honest absence error rather than finding a stale nursery
+    /// still installed.
+    #[test]
+    fn clear_nursery_uninstalls_from_engine_inner() {
+        use crate::types::Nursery;
+
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
+        transport.set_nursery(Nursery::default());
+        assert!(
+            transport.shell_mut().nursery.is_some(),
+            "set_nursery must install onto engine.nursery"
+        );
+
+        transport.clear_nursery();
+        assert!(
+            transport.shell_mut().nursery.is_none(),
+            "clear_nursery must uninstall it, mirroring set_desk's retirement"
         );
     }
 }

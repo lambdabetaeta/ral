@@ -18,8 +18,8 @@
 //! - [`plugin`]   -- Plugin runtime state and hook machinery.
 //! - [`plugin_editor`] -- Plugin context / editor state types (host of
 //!   the type-erased `Box<dyn Any>` core stores in `ReplScratch`).
-//! - [`plugin_ed_builtins`] -- The `_ed-*` builtin family, registered
-//!   into core's static host-builtin table.
+//! - [`plugin_ed_builtins`] -- The `_ed-*` builtin family, installed
+//!   into the session builtin table at boot.
 //! - [`host_handlers`] -- Captured builtins for job-control and
 //!   plugin-lifecycle commands; installed into the session builtin table
 //!   at boot.
@@ -53,17 +53,6 @@ mod worksheet;
 pub(crate) use frontend::Surface;
 use session::Session;
 use std::process::ExitCode;
-
-/// Register the `ral` host's builtins with core: the `_ed-*` editor
-/// family and `watch`.  Must run before the type checker consults
-/// `builtin_names()` and before either is invoked.  `watch` lives in core
-/// but is the host's to install — the ral binary has a durable stdout sink
-/// a detached watcher can outlive the turn writing to, where an agent host
-/// does not.  Idempotent.
-pub(crate) fn register_host_surface() {
-    ral_core::builtins::register_builtins(plugin_ed_builtins::ED_BUILTINS);
-    ral_core::builtins::register_builtins(ral_core::builtins::WATCH_BUILTIN);
-}
 
 /// Enter the interactive REPL.
 ///

@@ -18,15 +18,15 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Control, ControlFlow},
-    agent_registry::AgentRegistry,
+    agent::{Agent, Control, ControlFlow, cancel},
     bootstrap::Scratch,
     bus::{AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass},
-    cancel,
-    credential::CredentialStore,
-    fleet::Fleet,
-    models::{LiveSource, ModelCatalog},
-    provider::{self, Provider},
+    fleet::{Fleet, registry::AgentRegistry},
+    provider::{
+        self, Provider,
+        credential::CredentialStore,
+        models::{LiveSource, ModelCatalog},
+    },
 };
 
 use super::banner::SessionInfo;
@@ -63,12 +63,12 @@ impl Tui {
 /// calls at the turn boundary, where the drive thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was
 /// already cleared UI-side), `/compact` summarizes the history, `/resources`
-/// surveys the agent's accumulators into one probe card, `/discuss` forks a
-/// returning chair agent, and `/quit` ends the drive loop — which sets
-/// `done`, so the UI loop's next drain returns `Stop` and exits.  Every other
-/// command is handled UI-side and never reaches here.  Only the trunk drives
-/// with this `Control` (a sub-agent uses [`NoControl`](crate::agent::NoControl)),
-/// so a slash command always targets the trunk's own context and provider.
+/// surveys the agent's accumulators into one probe card, and `/quit` ends the
+/// drive loop — which sets `done`, so the UI loop's next drain returns `Stop`
+/// and exits.  Every other command is handled UI-side and never reaches here.
+/// Only the trunk drives with this `Control` (a sub-agent uses
+/// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
+/// the trunk's own context and provider.
 pub struct ReplControl<'a> {
     scratch: &'a Scratch,
 }
@@ -77,30 +77,15 @@ impl Control for ReplControl<'_> {
     fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
         let trimmed = raw.trim();
         let (head, rest) = commands::split_head(trimmed);
-        if head == "/discuss" {
-            let topic = rest;
-            if topic.is_empty() {
-                session.note_error("usage: /discuss <prompt>".into(), emit);
-            } else if session.fuel() < 2 {
-                // The chair needs one unit to be born and a second to spawn
-                // its partner; below that the chair would seat with no
-                // `amnemon` in its view and the debate could never start.
-                session.note_error(
-                    "discuss needs a chair and a partner — this agent's spawn \
-budget is too low to seat both"
-                        .into(),
-                    emit,
-                );
-            } else {
-                let receipt = crate::tools::spawn_discussion(session, topic, emit);
-                Agent::note(format!("discussion started: {receipt}"), emit);
-            }
-            return ControlFlow::Continue;
-        }
         if head == "/branch" {
             let prompt = (!rest.is_empty()).then_some(rest);
-            let receipt = crate::tools::spawn_branch(session, prompt, emit);
-            Agent::note(format!("branch started: {receipt}"), emit);
+            match crate::shell_eval::tools::spawn_branch(session, prompt, emit) {
+                Ok(child) => Agent::note(
+                    format!("branch {} started (agent {})", child.title, child.id),
+                    emit,
+                ),
+                Err(e) => session.note_error(format!("could not start branch: {e}"), emit),
+            }
             return ControlFlow::Continue;
         }
         match trimmed {
@@ -150,11 +135,11 @@ pub fn run(
     vi: bool,
     engine: Arc<provider::Engine>,
 ) -> Result<(), String> {
-    let caps = crate::pricing::caps_or_default(provider.model());
+    let caps = crate::provider::pricing::caps_or_default(provider.model());
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
         session.id,
-        session.log_dir(),
+        &session.log_dir(),
         caps.context_window,
         &stderr_log,
         vi,
@@ -411,13 +396,15 @@ fn ui_loop(
                         // turn — never a cascade, never a kill.  On the trunk
                         // `raise_interrupt()` unwinds the trunk's own turn via
                         // the published slot and the ral foreground.  On any
-                        // other focused tab `interrupt(id)` unwinds that agent's
-                        // turn alone through its registered token and eval-root;
-                        // a sub-agent never publishes the slots, so the
-                        // slot/foreground path would target the trunk by
-                        // mistake.  Neither reaches descendants, and neither
-                        // ends the agent — lifecycle death stays with `/quit`,
-                        // `/clear`, the ceiling, and `agent_cancel`.
+                        // other focused tab `interrupt(id)` unwinds that
+                        // agent's turn alone by cancelling its registered
+                        // token and whatever `ForegroundScope` its turn-scope
+                        // cell currently holds, never `eval_root`; a sub-agent
+                        // never publishes the slots, so the slot/foreground
+                        // path would target the trunk by mistake.  Neither
+                        // reaches descendants, and neither ends the agent —
+                        // lifecycle death stays with `/quit`, `/clear`, the
+                        // ceiling, and `agent-cancel`.
                         KeyAction::Cancel => {
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();
@@ -572,7 +559,7 @@ mod tests {
                 assert_eq!(card.marks().len(), 2, "a heading and one matrix");
                 // The transcript records the rows as a `resources` line —
                 // the raw-fact half of the raw/rendering pairing.
-                let rec = crate::transcript::event_record(0, session.id, &event.kind)
+                let rec = crate::agent::transcript::event_record(0, session.id, &event.kind)
                     .expect("a resources event must reach the transcript");
                 assert_eq!(rec["kind"], "resources");
                 assert!(rec["rows"].is_array());

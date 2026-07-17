@@ -5,7 +5,7 @@
 //! plugins remain source/alias/hook loaders; this module only publishes
 //! the resident agent surface that core should not own.
 
-use crate::skill;
+use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
@@ -23,8 +23,9 @@ use std::fs;
 use std::io::Write;
 
 mod fff_index;
+mod harness;
 
-const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
+const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 
 /// The tag `Frame::Attach` carries to name this module's [`install_on`] as
 /// the wire engine child's builtin installer.
@@ -41,40 +42,47 @@ pub const INSTALLER_TAG: &str = "exarch-agent";
 /// `watch` mechanism with the hosts swapped, kept out of `CORE_BUILTINS` so
 /// that only the agent host, under whose worker lease a durable birth means
 /// anything, gains it). This is the one source of truth: [`install_on`]
-/// installs these sets and the prompt's builtin index names them, so the two
-/// cannot drift.
-pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] =
-    &[EXARCH_BUILTINS, ral_core::builtins::SERVICE_BUILTIN];
+/// installs these sets into the shell, and the prompt's builtin index
+/// ([`crate::prompt`]) reads that same shell's builtin names back off it —
+/// the two cannot drift, by construction rather than by convention.
+pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] = &[
+    EXARCH_BUILTINS,
+    harness::HARNESS_BUILTINS,
+    ral_core::builtins::SERVICE_BUILTIN,
+];
 
-/// Register the exarch host builtins process-wide and install them into
-/// `shell`. Idempotent. The REPL and batch hosts never call this, so they
-/// never gain `service`.
+/// Install the exarch host builtins into `shell`. Idempotent. The REPL and
+/// batch hosts never call this, so they never gain `service`.
 pub fn install_on(shell: &mut ral_core::Shell) {
     for &set in HOST_BUILTIN_SETS {
-        ral_core::builtins::register_builtins(set);
         shell.install_builtins(set);
     }
 }
 
 /// Source the embedded agent helper library into the live shell.
 ///
+/// Also installs its one-line docs ([`agent_library_docs`]) into that same
+/// shell, so a shell that sources the library always gains its
+/// `help`/`explain` entries in the same act — the two can never drift apart.
+///
 /// # Errors
 /// Returns `Err` if sourcing the embedded library raises a ral error
 /// (re-surfaced as a signal) or propagates a non-error escape.
 pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
-    ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>").map_err(
-        |e| match e {
+    let result = ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>")
+        .map_err(|e| match e {
             Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
             other @ Break::Escape(_) => other,
-        },
-    )
+        })?;
+    shell.install_library_docs(agent_library_docs());
+    Ok(result)
 }
 
 /// One-line docs for the helper-library functions sourced from
 /// `agent.ral`.  These are ral closures, not registered builtins, so
-/// `help` cannot find them on its own; the host hands them to
-/// [`ral_core::builtins::help::register_library_docs`] at boot so the
-/// agent library is as discoverable as the prelude.
+/// `help` cannot find them on its own; [`install_agent_library`] installs
+/// them into the sourcing shell's own session so the agent library is as
+/// discoverable as the prelude.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
@@ -1251,6 +1259,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         };
         match shell.run_turn(req) {
@@ -1261,6 +1270,34 @@ mod tests {
         }
     }
 
+    /// Typecheck honesty, positive half: once a shell installs
+    /// `SERVICE_BUILTIN` (here via [`install_on`]), `service` resolves to
+    /// its own `Handle`-returning scheme rather than falling through to an
+    /// external command, so binding its result straight into a `Handle`
+    /// consumer (`cancel`) typechecks clean.  The negative half — the same
+    /// source on a bare core-only table, where `service` is external and
+    /// the bind is a static mismatch — lives in `ral_core`'s own suite
+    /// (`service_is_external_on_a_bare_core_table`, `core/tests/typecheck.rs`).
+    #[test]
+    fn service_typechecks_on_an_exarch_dressed_shell() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        install_on(&mut shell);
+        match ral_core::compile_and_typecheck(
+            r#"let h = service "birth" { return 1 }; cancel $h"#,
+            shell.session_schemes(),
+            ral_core::source::FileId::DUMMY,
+        ) {
+            ral_core::CompileOutcome::Compiled(_) => {}
+            ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),
+            ral_core::CompileOutcome::Types(errs) => panic!(
+                "expected `service`'s Handle to satisfy `cancel` on an exarch-dressed shell, got: {:?}",
+                errs.iter()
+                    .map(|e| e.kind.render_message())
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
+
     /// A `service`-born worker registers under the durable class with its
     /// birth description standing in for the old generic placeholder —
     /// `class: Durable`, `cmd` the description verbatim.
@@ -1268,7 +1305,6 @@ mod tests {
     fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
-        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(
             &mut shell,
@@ -1392,7 +1428,6 @@ mod tests {
     fn service_handle_refuses_an_ephemeral_worker_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
-        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(&mut shell, "spawn { test-block-forever }");
 
@@ -1471,6 +1506,68 @@ mod tests {
         assert!(
             shell.lookup_builtin("service").is_some(),
             "exarch's install_on must install service"
+        );
+    }
+
+    /// `install_agent_library` sources the closures *and* installs their
+    /// docs into the same shell in one act (no process-global registry
+    /// left to reinstall) — so `help`'s output on an exarch-dressed shell
+    /// carries a `Library:` section naming the sourced helpers, while a
+    /// bare core shell that never sourced the library carries none.
+    #[test]
+    fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
+        use ral_core::transport::{Program, Turn};
+        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+
+        let run_help = |shell: &mut Shell| -> String {
+            let req = TurnRequest {
+                turn: Turn {
+                    program: Program::Source("help".to_string()),
+                    script_name: "<test>".to_string(),
+                    caps: ral_core::types::Capabilities::root(),
+                    turn_limit: None,
+                    deferred_lease: None,
+                    worker_cap: None,
+                    io: TurnIo::Capture,
+                    terminal: RequestedTerminalAccess::Denied,
+                    stdin: TurnStdin::Empty,
+                },
+                surface: None,
+                deferred: None,
+                desk: None,
+                nursery: None,
+                lifecycle: Box::new(()),
+            };
+            match shell.run_turn(req) {
+                TurnReport::Ran {
+                    result, captured, ..
+                } => {
+                    result.expect("`help` must run cleanly");
+                    String::from_utf8(captured.expect("Capture io yields captured bytes").stdout)
+                        .expect("help output is UTF-8")
+                }
+                TurnReport::Static { .. } => panic!("`help` must compile"),
+            }
+        };
+
+        let mut bare = Shell::new(ral_core::io::TerminalState::default());
+        let bare_out = run_help(&mut bare);
+        assert!(
+            !bare_out.contains("Library:"),
+            "a shell that never sourced the agent library must list no Library section, got:\n{bare_out}"
+        );
+
+        let mut dressed = Shell::new(ral_core::io::TerminalState::default());
+        install_on(&mut dressed);
+        install_agent_library(&mut dressed).expect("embedded agent library");
+        let dressed_out = run_help(&mut dressed);
+        assert!(
+            dressed_out.contains("Library:"),
+            "an exarch-dressed shell must list a Library section, got:\n{dressed_out}"
+        );
+        assert!(
+            dressed_out.contains("view-text-around"),
+            "the Library section must name the sourced helpers, got:\n{dressed_out}"
         );
     }
 }

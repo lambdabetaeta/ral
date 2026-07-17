@@ -44,6 +44,7 @@ fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
         surface: None,
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }) {
         TurnReport::Ran { result, .. } => result,

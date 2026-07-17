@@ -6,7 +6,7 @@
 // engine), adapted to ral's naming, error types, and `windows-sys` binding.
 // Each ported unit carries a `// after mxc filesystem_dacl.rs::<fn>`
 // breadcrumb naming its upstream counterpart, for future diffing against
-// upstream (see `dev/docs/260712_windows_port.md`, W1).
+// upstream.
 
 //! Crash-safe grant-ACE apply/restore engine for the AppContainer sandbox
 //! backend.

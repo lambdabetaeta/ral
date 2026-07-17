@@ -491,6 +491,12 @@ impl ScheduleRegistry {
     /// drops: a park verdict reads `armed()` under the consumer's inbox
     /// mutex, so the process-wide lock order is inbox → registry (see
     /// `bus`'s module docs) and a push must never run under this lock.
+    ///
+    /// Composing the message and posting it are two separate steps astride
+    /// that drop, so a `/clear` can fall between them; the message is
+    /// stamped with [`Mailbox::epoch`] here, at composition, so the inbox's
+    /// own pop-time admission check can tell whether this fire lands before
+    /// or after the clear that may have run in between.
     fn fire(&self, id: ScheduleId, mailbox: &Mailbox) {
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
@@ -508,6 +514,7 @@ impl ScheduleRegistry {
                 trigger: entry.trigger.describe(),
                 prompt: entry.prompt.clone(),
                 pending: entry.pending.clone(),
+                epoch: mailbox.epoch(),
             })
         };
         if recurring {

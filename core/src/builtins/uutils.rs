@@ -274,7 +274,7 @@ declare_coreutils! {
         // `uu_timeout` needs `uucore`'s Unix-only `process`/`signals`
         // features and does not build on Windows.  A native Windows
         // `timeout` (`WaitForSingleObject` racing the deadline, Job-Object
-        // kill on expiry) is deferred — W3.9, dev/docs/260712_windows_port.md.
+        // kill on expiry) is deferred.
         "timeout" => uu_timeout,
     }
 }

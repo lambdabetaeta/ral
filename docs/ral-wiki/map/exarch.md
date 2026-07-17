@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 489d125
+generated_at_date: 2026-07-16
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -172,12 +172,13 @@ every other section stands.
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family
-  (`amnemon`/`mnemon`, fuel-gated), `reply`, the schedule family; the `Returns`
-  gate separates the conversing trunk from every returning agent. The sub-agent
-  model is [[design/agents|agents]].
-- [[map/exarch/builtins|builtins]] — the resident host atoms: the hash-addressed edit
-  primitives and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
+- [[map/exarch/tools|tools]] — the tool registry: `ral` alone. Every other
+  harness verb — spawning (`amnemon`/`mnemon`, fuel-gated), `reply`, the
+  schedule family, the commitment pair — is a builtin reached through it,
+  answered by the desk. The sub-agent model is [[design/agents|agents]].
+- [[map/exarch/builtins|builtins]] — the resident host atoms and the harness
+  verbs: the hash-addressed edit primitives, the spawn/schedule/commitment/
+  reply family, and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and
   the two frontends, the inline TUI and headless.
 - [[map/exarch/cards|cards]] — the render document `surface` carries: a `card` of closed

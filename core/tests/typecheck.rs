@@ -15,7 +15,10 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     let comp = elaborate(&ast, std::collections::HashSet::default());
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .err()
     .unwrap_or_default()
@@ -395,6 +398,21 @@ fn builtin_equal() {
 #[test]
 fn builtin_exit_without_status() {
     ok("exit");
+}
+
+#[test]
+fn service_is_external_on_a_bare_core_table() {
+    // `service` is exarch's own surface (`SERVICE_BUILTIN`), never installed
+    // into a core-only table.  The call resolves as an external command —
+    // `String`, not the builtin's `Handle` return — so binding its result
+    // where a `Handle` is expected is a static mismatch: the checker is
+    // honest about what this session can actually run, not hard-coding the
+    // name.  The positive half — the same call typechecking once a shell
+    // installs `SERVICE_BUILTIN` — lives in exarch's suite.
+    has_error(
+        r#"let h = service "birth" { return 1 }; cancel $h"#,
+        "couldn't match",
+    );
 }
 
 #[test]
@@ -1139,7 +1157,10 @@ fn annotated(src: &str) -> Comp {
     let comp = elaborate(&ast, std::collections::HashSet::default());
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
 }
@@ -1318,11 +1339,15 @@ fn nested_binds_carry_no_scheme_while_spine_does() {
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────
 //
-// These pin the three row-subsystem repairs from dev/docs/260611_deep-review.md
-// (T1, T2, T3).  Before the fix, the first two overflowed the host stack during
+// These pin three row-subsystem repairs: row unification must terminate with
+// an infinite-row error, rather than looping forever, when a row cycle has no
+// finite or rational solution — whether the cycle sits at the row spine or is
+// reached through a field type — and duplicate keys in a record or case
+// literal must resolve last-wins, matching the runtime, rather than
+// first-wins.  Before the fix, the first two overflowed the host stack during
 // `--check`; the third disagreed with the runtime on duplicate keys.
 
-/// T1.  Both branches spread the *same* parameter row, so `merge_branches`
+/// Both branches spread the *same* parameter row, so `merge_branches`
 /// unifies `{x: Int | ρ}` against `{y: Int | ρ}` over one shared tail ρ.  The
 /// Rémy rewrite has no finite or rational solution for mismatched heads over a
 /// shared tail; the unifier must report the infinite-row error rather than
@@ -1337,7 +1362,7 @@ fn row_shared_tail_mismatched_heads_is_recursive_row_error() {
     );
 }
 
-/// T2.  The else branch builds a record whose field type is itself a record
+/// The else branch builds a record whose field type is itself a record
 /// spreading the parameter row, so unification would install a row binding
 /// `ρ = {x: {n: Int, ...ρ}}` — a cycle that passes *through a field type*, not
 /// the spine.  The occurs check descends into field types and rejects it.
@@ -1351,7 +1376,7 @@ fn row_cycle_through_field_type_is_recursive_row_error() {
     );
 }
 
-/// T3.  A duplicate explicit key resolves last-wins, matching the runtime
+/// A duplicate explicit key resolves last-wins, matching the runtime
 /// `Value::map`.  Here the last `x` is a String, so reading `$m[x]` in Int
 /// arithmetic is a static type error — the same shape the runtime rejects.
 #[test]
@@ -1362,7 +1387,7 @@ fn duplicate_key_last_wins_string_then_arith_is_error() {
     );
 }
 
-/// T3, the complementary direction: the last `x` is an Int, so reading it in
+/// The complementary direction: the last `x` is an Int, so reading it in
 /// Int arithmetic typechecks.  Under the old first-wins checker this was a
 /// String-vs-Int error; last-wins makes it well-typed, consistent with the
 /// runtime which would compute `2`.
@@ -1371,10 +1396,10 @@ fn duplicate_key_last_wins_int_then_arith_ok() {
     ok("let m = [x: \"two\", x: 1]\nreturn $[$m[x] + 1]");
 }
 
-/// T3 for `case`: a duplicated tag arm resolves to the last arm.  The first
-/// `` `ok `` arm would treat the payload as a String (via `upper`), but the
-/// last arm uses it as the Int the scrutinee carries; last-wins keeps the Int
-/// arm, so the program typechecks.
+/// The same last-wins rule applies to `case` arms: a duplicated tag arm
+/// resolves to the last arm.  The first `` `ok `` arm would treat the payload
+/// as a String (via `upper`), but the last arm uses it as the Int the
+/// scrutinee carries; last-wins keeps the Int arm, so the program typechecks.
 #[test]
 fn duplicate_case_arm_last_wins() {
     ok("let r = `ok 5\n\
@@ -1414,7 +1439,10 @@ fn letrec_slot0(body: CompKind) -> Comp {
 fn typecheck_comp(comp: &Comp) -> Vec<String> {
     typecheck(
         comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .err()
     .unwrap_or_default()

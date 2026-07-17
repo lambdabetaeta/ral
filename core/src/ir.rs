@@ -111,8 +111,7 @@ impl Val {
     /// a numeric-looking bare word meant as argv data is read as a number
     /// and stringified back losslessly only when its canonical form matches
     /// its source (`007` ⇒ `7`, `1.50` ⇒ `1.5`). The planned fix moves
-    /// classification into type-directed inference; see
-    /// `dev/docs/260611_overloaded-literals.md`.
+    /// classification into type-directed inference.
     pub fn from_word(s: &str) -> Self {
         use crate::syntax::ast::WordLiteral;
         match WordLiteral::classify(s) {

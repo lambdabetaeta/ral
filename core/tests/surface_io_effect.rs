@@ -63,6 +63,7 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
         surface: Some(sink),
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }) {
         TurnReport::Ran { result, .. } => result,

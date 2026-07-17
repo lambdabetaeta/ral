@@ -425,6 +425,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         }) {
             TurnReport::Ran { result, .. } => result,
@@ -614,6 +615,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         }) {
             TurnReport::Static { .. } => {}
@@ -680,6 +682,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         });
         match report {
@@ -858,6 +861,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
+            nursery: None,
             lifecycle: Box::new(()),
         }) {
             TurnReport::Ran { result, .. } => {

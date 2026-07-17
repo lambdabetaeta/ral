@@ -10,8 +10,7 @@
 # GitHub Actions on windows-latest (see .github/workflows/build-binaries.yml),
 # the one MSVC ABI that ships — a Linux docker host cannot link MSVC binaries
 # (no Windows SDK/CRT import libraries), and the MinGW cross target this
-# script used to build was dropped along with x86_64-pc-windows-gnu
-# (dev/docs/260712_windows_port.md, W6.1).
+# script used to build was dropped along with x86_64-pc-windows-gnu.
 #
 # Flags:
 #   --linux          include the Linux musl matrix

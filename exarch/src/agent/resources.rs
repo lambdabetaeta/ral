@@ -24,7 +24,7 @@
 //! views, the bus — [`frontend_rows`]) when the card reaches it. Neither
 //! half reaches across a thread for the other's figures.
 
-use crate::card::{Card, Field, FieldVal, Mark, Role, Span};
+use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;

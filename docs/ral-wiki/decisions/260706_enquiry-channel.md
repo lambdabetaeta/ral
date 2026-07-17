@@ -15,23 +15,22 @@ presentation, and classes not yet invented), retiring the claim of
 documents are what the channel carries. The channel set is then closed by
 symmetry: each direction has one answered channel and one one-way channel,
 and every future host facility is a new *class* on an existing channel, never
-a new channel. This is the seam shape that makes it *possible* for the
-remaining provider-side tools (`amnemon`/`mnemon`, `agents`, `message`,
-`agent_cancel`, the `schedule` family, `commit`/`verify_commitment`) to
-migrate into shell builtins later — the migration itself is deliberately
-deferred, and its plan lives in
-[[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]'s
-amendment, not here — and it is designed against the real target: the
-front-end (REPL or exarch) on a host machine, the engine and its shell in a
-VM, with two-way communication robust across that boundary.
+a new channel. This is the seam shape that made it *possible* for the
+provider-side tools this ADR found stateful (`amnemon`/`mnemon`, `agents`,
+`message`, `agent_cancel`, the `schedule` family, `commit`/`verify_commitment`,
+and — per the corrected litmus below — `reply`) to migrate into shell
+builtins; that migration has since landed in full
+([[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]),
+and it is designed against the real target: the front-end (REPL or exarch) on
+a host machine, the engine and its shell in a VM, with two-way communication
+robust across that boundary.
 
 Builds directly on
 [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]
 (the frame algebra and its two transports, both landed in `core/src/transport.rs`
 and `core/src/engine.rs`) and
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
-(the migration this makes possible — deferred, and amended alongside this ADR
-to carry the migration plan itself).
+(the migration this makes possible — landed, riding this rail).
 
 **Phases A and B are implemented.** Phase A and its folded simplifications
 landed as `4cb867f`–`4751ae8`; Phase B landed as `a5db7a8` (the wire
@@ -46,7 +45,13 @@ regime landed as `Event::DeferredSurface`/`DeferredSink`, and the probe
 landed as `Frame::Probe`, not `Turn::Probe` (§5 records why). Phase C, the
 coherence gate (Phase B item 6 as originally planned), and §4.3's
 register re-typing remain open; §"What remains, and in what order" carries
-their dependency structure.
+their dependency structure. Riding the rail is a separate track from
+building it: the tool migration this rail exists for has landed in full
+under the identity transport — `exarch/src/tools.rs` shrinks to `ral` alone
+([[map/exarch/tools|tools]]) and the desk (`exarch/src/desk.rs`) answers
+every harness class — independently of whether Phase C or the coherence
+gate ever land; the wire dependency is named in that ADR's "Wire mode"
+section.
 
 ## The setting: the seam as built, and its empty cell
 
@@ -76,8 +81,10 @@ the policy narrower — front-end state the engine cannot and must not hold —
 and every one of them hands a value back (a start receipt, a listing, a
 confirmation, a verdict). A builtin that consumes an answer needs a rail on
 which an answer can arrive. That rail does not exist. Building the rail is
-this ADR's business; riding it is not — the tools stay provider-side until
-the migration ADR's own bench-gated schedule moves them.
+this ADR's business; riding it is not — the tools stayed provider-side until
+the migration ADR's own bench-gated schedule moved them (landed 2026-07-16;
+[[map/exarch/tools|tools]] and [[map/exarch/builtins|builtins]] carry the
+current split).
 
 The dual shape — mutating `surface` into a request-response channel instead —
 is rejected outright, for two load-bearing reasons visible in the code.
@@ -395,6 +402,18 @@ thread and answers with the receipt immediately, the same shape
 cannot take its next step without the host's answer"; "I want it eventually"
 is the inbox.
 
+> **Corrected 2026-07-16.** The enquiry half of this litmus was first glossed
+> as "the caller genuinely consumes the answer" — a special case of the real
+> law, not the law itself, and too narrow to justify promoting `reply`. The
+> fixed wording: **promote a verb only when the caller can observe and act on
+> the host's answer — value or refusal — within the turn.** `reply`
+> ([[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]])
+> is the case that exposed the gap: nothing downstream computes with a
+> reply's *value*, so the narrower gloss would have kept it a tool — but a
+> non-returning agent must observe the *refusal* to proceed correctly, and a
+> non-first-order payload must fail the call, not the episode, so the
+> refusal arm alone satisfies the corrected law.
+
 **At-most-once, no seam-level retries.** A dispatch, an enquiry, an answer
 each cross once. Idempotency is not assumed anywhere; a broken transport
 fails the turn (identity: impossible; wire: death flag), never replays it.
@@ -409,15 +428,17 @@ the enquiry; see the amendment) — the child's eventual reply still arriving
 through the inbox at a turn boundary, exactly as `spawn_async` delivers it
 today. The full class
 vocabulary — the spawn, message, schedule, and commitment families, the
-handler refactorings, and the `reply` carve-out — is the migration's to own:
+handler refactorings, and `reply` (folded in, not carved out, once the
+litmus above was corrected) — was the migration's to own, and has landed:
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]'s
 amendment.
 
 **Authority is enforced at the desk.** Whichever classes eventually arrive,
 the wall is host code holding the real state (the spawn-fuel gate, the
 `--allow-schedule` grant, the protected keyspace): a visibility filter —
-today's `tools_for` gating — is not an authority check once the engine is a
-different machine. The desk refuses, with the tools' own didactic texts.
+the `tools_for` gating this replaced — is not an authority check once the
+engine is a different machine. The desk refuses, with the tools' own
+didactic texts.
 
 ### 4 — Surface carries classes: facts, state, presentation — and more
 

@@ -1,7 +1,7 @@
 //! Live model lists, cached with a TTL, behind a network seam.
 //!
 //! A provider's model list is the provider's to know, not exarch's: API-key
-//! providers list through genai and ChatGPT subscriptions list through the
+//! providers list through genai and `ChatGPT` subscriptions list through the
 //! Codex backend. Fetching is **lazy** (the picker pulls a provider's list
 //! when it is shown), **cached** to the XDG cache dir with a TTL, and **manual
 //! entry** is always the fallback — a list that fails to fetch, or that omits
@@ -12,8 +12,8 @@
 //! never touches the network. The tests run `in_memory` (no `cache_path`),
 //! so the disk cache and the TTL-staleness path are not exercised by them.
 
-use crate::credential::{Credential, CredentialStore};
-use crate::oauth;
+use crate::provider::credential::{Credential, CredentialStore};
+use crate::provider::oauth;
 use crate::provider::{ProviderId, ProviderKind};
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
@@ -108,7 +108,9 @@ impl LiveSource {
             .collect();
         Self {
             credentials,
-            client: Client::builder().with_reqwest(crate::tls::client()).build(),
+            client: Client::builder()
+                .with_reqwest(crate::provider::tls::client())
+                .build(),
         }
     }
 }
@@ -121,7 +123,7 @@ impl ModelSource for LiveSource {
             .ok_or_else(|| format!("{} has no resolved credential", id.label()))?;
         match credential {
             Credential::ApiKey(key) => self.list_api_key(id, key),
-            Credential::OAuth(cell) => self.list_chatgpt(id, cell),
+            Credential::OAuth(cell) => Self::list_chatgpt(id, cell),
         }
     }
 
@@ -140,7 +142,7 @@ impl ModelSource for LiveSource {
             .build()
             .map_err(|e| format!("build endpoints runtime: {e}"))?;
         runtime.block_on(async {
-            let mut request = crate::tls::client().get(&url);
+            let mut request = crate::provider::tls::client().get(&url);
             if let Some(key) = key {
                 request = request.bearer_auth(key);
             }
@@ -198,7 +200,6 @@ impl LiveSource {
     /// request, so a refreshed token is used without rebuilding the catalog
     /// source.
     fn list_chatgpt(
-        &self,
         id: &ProviderId,
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
     ) -> Result<Vec<String>, String> {
@@ -220,8 +221,11 @@ impl LiveSource {
             );
             let request = oauth::request_headers(&token, "application/json")
                 .into_iter()
-                .fold(crate::tls::client().get(url), |r, (k, v)| r.header(k, v));
-            let response = request.send()
+                .fold(crate::provider::tls::client().get(url), |r, (k, v)| {
+                    r.header(k, v)
+                });
+            let response = request
+                .send()
                 .await
                 .map_err(|e| format!("list models for {}: {e}", id.label()))?;
             let status = response.status();

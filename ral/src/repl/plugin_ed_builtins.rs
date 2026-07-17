@@ -9,9 +9,9 @@
 //!
 //! These builtins live in the `ral` crate rather than in `ral-core`
 //! because the editor surface is purely a host concern: core has no
-//! knowledge of editor state or plugin handlers.  They register with
-//! core via [`ED_BUILTINS`] at REPL startup
-//! (see [`super::register_host_surface`]).
+//! knowledge of editor state or plugin handlers.  [`ED_BUILTINS`] is
+//! installed into the REPL's own shell at startup
+//! (see [`super::session::Session::boot`]).
 
 use ral_core::builtins::util::{arg0_str, check_arity};
 use ral_core::types::as_list;
@@ -719,8 +719,8 @@ fn scheme_state(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// Builtins published into core's builtin registry at REPL startup
-/// (see [`super::register_host_surface`]).
+/// Builtins installed into the REPL's own shell at startup
+/// (see [`super::session::Session::boot`]).
 pub static ED_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("_ed-get"),

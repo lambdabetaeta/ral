@@ -204,9 +204,16 @@ pub fn load_all() -> Vec<OAuthToken> {
     load_all_at(&token_path())
 }
 
-/// Persist `token`, replacing any existing login for the same account id and
-/// appending it otherwise. Returns whether an existing account was replaced.
-pub(crate) fn save_one(token: &OAuthToken) -> Result<bool, String> {
+/// Persist `token`, replacing any existing login for the same account id
+/// and appending it otherwise.
+///
+/// Returns whether an existing account was replaced. `pub` like
+/// [`load_all`]: the credential-store scenarios in
+/// `tests/credential_env.rs` seed logins through this same door.
+///
+/// # Errors
+/// Returns `Err` when the token store cannot be written.
+pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
     save_one_at(&token_path(), token)
 }
 
@@ -397,7 +404,7 @@ fn token_endpoint() -> String {
 /// The HTTP client shared by the login flows and refresh.
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .use_preconfigured_tls(crate::tls::config())
+        .use_preconfigured_tls(crate::provider::tls::config())
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("could not build HTTP client: {e}"))

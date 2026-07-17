@@ -566,9 +566,10 @@ Every open question on this page was settled before implementation began.
   [[decisions/260628_host-seam-transport-parametric|transport-parametric frontend]]
   exists.
 - **Parent-extendable `AGENT_CEILING`: deferred** until a concrete long child
-  appears. Ceiling-less branch children (`dev/docs/260705_branch_minimal.md`)
-  already prove the lease-class move at the agent layer, so the shape is
-  known when the need arrives.
+  appears. Ceiling-less branch children
+  ([[decisions/260705_branch-minimal|branch-minimal]]) already prove the
+  lease-class move at the agent layer, so the shape is known when the need
+  arrives.
 - **No host gets a `workers` verb, as of 2026-07-06** — not the REPL, and no
   longer exarch either: the `jobs` fold and the survivor warning
   ([[decisions/260705_session-ledger|session-ledger]]) are the REPL's whole

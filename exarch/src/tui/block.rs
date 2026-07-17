@@ -19,7 +19,7 @@ use super::line::{self, is_blank};
 use super::palette::{QUEUED_PROMPT_BG, RAIL_W, READ_W, SLATE};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
-use crate::card::{Card, Hunk, Mark, ObservationKind};
+use crate::bus::card::{Card, Hunk, Mark, ObservationKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -74,10 +74,15 @@ pub(super) enum CardOrigin {
 /// The reasoning a turn produced. It is its own dialable block: the
 /// collapsed form gives only a grain and size; higher rungs reveal the
 /// drained trace. `answer_chars` is the whole turn's answer mass, the
-/// deliberation grain's denominator.
+/// deliberation grain's denominator.  `provisional` holds the live phase's
+/// streamed deltas: they tick the header's magnitude in place — the block
+/// never moves — and are superseded wholesale when the phase's authoritative
+/// reasoning commits via [`Block::append_thinking`].  Only `text` is ever
+/// revealed by the dial or teed to the log.
 pub(super) struct Thinking {
     pub(super) text: String,
     pub(super) answer_chars: u32,
+    pub(super) provisional: String,
 }
 
 /// What a block carries.  Each variant renders as a pure function of its
@@ -94,7 +99,7 @@ pub(super) enum BlockKind {
     },
     /// A summary-less tool call, shown standalone as `▸ tool  details`.
     /// `details` is the text to show, or `None` for a parse-failure
-    /// placeholder ([`crate::tools::INVALID_INPUT`]): such a call renders
+    /// placeholder ([`crate::shell_eval::tools::ral::INVALID_INPUT`]): such a call renders
     /// nothing, present only as the boundary a stray result stops at.
     /// Inert (nothing to dial); wears the shut tool-call triangle `▸`.
     PlainTool {
@@ -213,7 +218,10 @@ pub(super) fn queued_prompt_rows(
 /// final step for transcript flattening and the queued-prompt projection:
 /// fold rows through [`line::wrap_line`], and when `prompt` is set, insert the same
 /// full-width prompt fence immediately before the first visible prompt row.
-/// `wash` preserves the same rows while tinting queued prompts as pending.
+/// `wash` preserves the same rows while tinting a queued prompt's body as
+/// pending; the fence stays outside it, since a boundary marks the plane's
+/// edge rather than lying within it — so a prompt's rule reads the same
+/// committed or queued.
 pub(super) fn append_visual_rows(
     out: &mut Vec<Line<'static>>,
     lines: &[Line<'static>],
@@ -226,7 +234,7 @@ pub(super) fn append_visual_rows(
     for line in lines {
         for vrow in line::wrap_line(line, width as usize) {
             if prompt && !fenced && !line::is_blank(&vrow) {
-                out.push(wash_row(line::prompt_fence(width), width, wash));
+                out.push(line::prompt_fence(width));
                 fenced = true;
             }
             out.push(wash_row(vrow, width, wash));
@@ -276,7 +284,7 @@ pub(super) struct Block {
     /// other kind, so only assistant prose degrades its medium.
     fidelity: Fidelity,
     /// A tool call's result magnitude — `text.lines().count()` of its
-    /// [`crate::bus::Event::ToolResult`], attached after the fact by
+    /// [`crate::bus::Kind::ToolResult`], attached after the fact by
     /// [`super::viewport::Viewport::set_result_size`].  Feeds the
     /// collapsed header's size-bar; `None` until the result lands (and
     /// always, on non-`DiallableTool` blocks).
@@ -327,7 +335,11 @@ impl Block {
     /// dialable block; answer prose remains a separate markdown run.
     pub(super) fn thinking(text: String, answer_chars: u32) -> Self {
         Self::new(
-            BlockKind::Thinking(Thinking { text, answer_chars }),
+            BlockKind::Thinking(Thinking {
+                text,
+                answer_chars,
+                provisional: String::new(),
+            }),
             Fidelity::default(),
         )
     }
@@ -405,7 +417,9 @@ impl Block {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
-            BlockKind::Thinking(t) => Some(t.text.lines().count() as u32),
+            BlockKind::Thinking(t) => {
+                Some((t.text.lines().count() + t.provisional.lines().count()) as u32)
+            }
             BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
@@ -555,15 +569,27 @@ impl Block {
     }
 
     /// Append `more` to an existing thinking block's trace, accumulating
-    /// `answer_chars` into its deliberation-grain denominator.  A no-op on
-    /// any non-`Thinking` block.
+    /// `answer_chars` into its deliberation-grain denominator.  The phase's
+    /// authoritative text supersedes whatever provisional deltas streamed in
+    /// ahead of it.  A no-op on any non-`Thinking` block.
     pub(super) fn append_thinking(&mut self, more: &str, answer_chars: u32) {
         if let BlockKind::Thinking(t) = &mut self.kind {
+            t.provisional.clear();
             if !t.text.is_empty() && !more.is_empty() {
                 t.text.push('\n');
             }
             t.text.push_str(more);
             t.answer_chars = t.answer_chars.saturating_add(answer_chars);
+            self.cache = None;
+        }
+    }
+
+    /// Stream a live reasoning delta into the block's provisional buffer:
+    /// the header's magnitude ticks in place while the block itself never
+    /// moves.  A no-op on any non-`Thinking` block.
+    pub(super) fn push_provisional_thinking(&mut self, more: &str) {
+        if let BlockKind::Thinking(t) = &mut self.kind {
+            t.provisional.push_str(more);
             self.cache = None;
         }
     }
@@ -776,7 +802,19 @@ impl Block {
             },
             BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
             BlockKind::Thinking(t) => {
-                let mut ls = line::thinking_header(&t.text, t.answer_chars);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+                )]
+                let think_chars =
+                    (t.text.chars().count() + t.provisional.chars().count()) as u32;
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
+                )]
+                let think_lines =
+                    (t.text.lines().count() + t.provisional.lines().count()) as u32;
+                let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
                 if level >= Reveal::Context {
                     ls.push(Line::default());
                     let shadow = md::render_reasoning(&t.text, width, MD_INDENT);
@@ -955,7 +993,7 @@ fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::{Row, Seg};
+    use crate::bus::card::{Row, Seg};
 
     fn diff_block() -> Block {
         let hunks = vec![Hunk {

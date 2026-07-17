@@ -9,9 +9,8 @@ status: active
 > registry retains the handle itself, so pruning a top-level name never
 > strands a job. This page was itself rewritten, 2026-07-05, around a
 > clean-room single-writer ledger design worked out after
-> `260705_leases-and-budgets` landed (`dev/docs/260705_leases_ledger_plan.md`
-> parcel 8); the mechanism below supersedes the generation-cohort design this
-> page originally proposed, moved to Alternatives.
+> `260705_leases-and-budgets` landed; the mechanism below supersedes the
+> generation-cohort design this page originally proposed, moved to Alternatives.
 
 **A ral binding is lexical state; a lease is agent-host state.** A binding lives
 until ral removes or shadows it. Exarch may lease an agent's top-level scratch

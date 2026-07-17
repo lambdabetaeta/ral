@@ -17,7 +17,7 @@
 
 use crate::agent::TurnOutcome;
 use crate::bus::{Emitter, Kind};
-use crate::event::AgentLog;
+use crate::agent::event::AgentLog;
 use crate::provider::ProviderError;
 
 /// Outer-attempt budget per user turn.  Independent of the provider's
@@ -256,7 +256,8 @@ fn surface_provider_error(
 /// The headless root's one-shot reply-verification nudge
 /// ([`NudgeCtx::is_headless_root`]) — see [`Registry::react`].
 const VERIFY_REPLY_MESSAGE: &str = "Recall the original prompt, and ensure that you \
-    have correctly responded to it, completing any tasks. Then call `reply` again.";
+    have correctly responded to it, completing any tasks. Then call `reply` again, with \
+    `ral { reply <value> }`.";
 
 // ── Rules ────────────────────────────────────────────────────────────
 
@@ -267,9 +268,10 @@ const VERIFY_REPLY_MESSAGE: &str = "Recall the original prompt, and ensure that 
 /// It is *budgeted*: re-issued each un-replied finish until the [`BUDGET`] is
 /// spent, then the run fails.
 const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so your parent will \
-    receive nothing. Return your result now by calling `reply` — pass a markdown report as \
-    `result`, or a JSON object/array for structured findings. This is the only way to hand \
-    your work back; a final message on its own is not delivered.";
+    receive nothing. Return your result now with `ral { reply <value> }` — a string for a \
+    markdown report, or a record/list for structured findings; if the value carries `$`, `!`, \
+    or a quote, write it as a raw string `#'…'#`. This is the only way to hand your work back; \
+    a final message on its own is not delivered.";
 
 fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
@@ -312,6 +314,7 @@ fn on_truncated(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'sta
 mod tests {
     use super::*;
     use crate::bus::channel;
+    use ral_core::serial::FOValue;
     use std::time::Duration;
 
     /// An emitter onto a dropped receiver — `react` records to the log and
@@ -579,7 +582,7 @@ mod tests {
         };
         let msg = reg
             .react(
-                &Ok(TurnOutcome::Replied(serde_json::json!("done"))),
+                &Ok(TurnOutcome::Replied(FOValue::String { value: "done".into() })),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -604,7 +607,7 @@ mod tests {
         };
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(serde_json::json!("first"))),
+                &Ok(TurnOutcome::Replied(FOValue::String { value: "first".into() })),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -614,7 +617,9 @@ mod tests {
         );
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(serde_json::json!("second, verified"))),
+                &Ok(TurnOutcome::Replied(FOValue::String {
+                    value: "second, verified".into(),
+                })),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -634,7 +639,7 @@ mod tests {
         let mut log = fresh_log("verify-peer");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(serde_json::json!("findings"))),
+                &Ok(TurnOutcome::Replied(FOValue::String { value: "findings".into() })),
                 &NudgeCtx {
                     must_reply: true,
                     is_headless_root: false,
@@ -655,7 +660,7 @@ mod tests {
     /// verifier clears it (out of this module's scope — [`nudge`] only
     /// reports pinned state, it never clears it).
     ///
-    /// [`nudge`]: crate::nudge
+    /// [`nudge`]: crate::agent::nudge
     #[test]
     fn pinned_commitment_state_keeps_completion_restless() {
         let mut reg = Registry::new();

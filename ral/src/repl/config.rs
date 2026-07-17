@@ -379,7 +379,10 @@ mod tests {
     fn typecheck_src(src: &str) -> Vec<ral_core::TypeError> {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
         let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default());
-        let schemes = ral_core::SessionSchemes::from_schemes(crate::PRELUDE.schemes());
+        let schemes = ral_core::SessionSchemes::from_schemes(
+            crate::PRELUDE.schemes(),
+            ral_core::builtins::core_builtin_table(),
+        );
         ral_core::typecheck(&comp, schemes)
             .err()
             .unwrap_or_default()

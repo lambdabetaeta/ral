@@ -33,8 +33,9 @@
 //!
 //! **Flow rule.** The registry is `Arc`-shared into a spawned worker's own
 //! `Shell` by [`Shell::spawn_thread`](super::Shell::spawn_thread), alongside
-//! `session.root` and `session.builtins`: a `spawn` nested inside a
-//! worker's body therefore registers into the *owning* shell's registry —
+//! `session.root`, `session.builtins`, and `session.library_docs`: a
+//! `spawn` nested inside a worker's body therefore registers into the
+//! *owning* shell's registry —
 //! the one a top-level `spawn` first registered into — rather than a fresh
 //! one of its own. It does **not** flow through `fork_session` /
 //! `child_from` / `child_of` / `inherit_from`: a sub-agent fork or a

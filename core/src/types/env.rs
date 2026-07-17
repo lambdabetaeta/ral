@@ -99,10 +99,15 @@ impl Env {
 
     /// Look up in the prelude scope only (`scopes[0]`).
     pub fn get_prelude(&self, name: &str) -> Option<&Value> {
-        self.scopes
-            .front()
-            .and_then(|s| s.get(name))
-            .map(|b| &b.value)
+        self.get_prelude_binding(name).map(|b| &b.value)
+    }
+
+    /// Look up the [`Binding`] for `name` in the prelude scope only
+    /// (`scopes[0]`).  The baked prelude's `Bind` nodes carry the
+    /// checker's harvested schemes, so this is where a caller reaches
+    /// for a prelude function's type without a separate registry.
+    pub fn get_prelude_binding(&self, name: &str) -> Option<&Binding> {
+        self.scopes.front().and_then(|s| s.get(name))
     }
 
     /// Bind `name` → `value` in the innermost scope.  A plain set is a

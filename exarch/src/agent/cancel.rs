@@ -10,7 +10,7 @@
 //! genuine turn boundary so a prior turn's Esc never bleeds into the next.
 //! The token is threaded down through `apply` → dispatch → tools, cancelled
 //! by the chained signal handler, by a per-tab turn interrupt
-//! (`AgentRegistry::interrupt`), by the registry cascade (`agent_cancel`, the
+//! (`AgentRegistry::interrupt`), by the registry cascade (`agent-cancel`, the
 //! ceiling, `/clear`), and raced by the HTTP request future, so one
 //! cancellation stops the turn and returns to the prompt.  The cause a token
 //! carries decides how far it reaches: an
@@ -37,13 +37,13 @@
 //! share of that `Arc` so the pointee outlives every guard and every other
 //! share, making the published pointer safe for a handler to dereference
 //! at any time, including one that loaded it just before the slot was
-//! nulled.  A signal-driven cancellation is observed through the threaded
+//! restored.  A signal-driven cancellation is observed through the threaded
 //! [`Token`] every cancel check already holds (`is_set` reads the slot
 //! directly, but only in tests).  The slot is published by [`publish`]'s
-//! RAII guard and cleared on its drop, which only stops the slot from
-//! tracking a retired trunk's token; only the trunk publishes (a
-//! sub-agent's token is reached through the fleet registry, never the
-//! slot).
+//! RAII guard and restored to its prior publication on drop, which only
+//! stops the slot from tracking a retired trunk's token; only the trunk
+//! publishes (a sub-agent's token is reached through the fleet registry,
+//! never the slot).
 //!
 //! Install order matters: ral's handlers must be set first; then `install`
 //! replaces the disposition with a handler that sets the current root token
@@ -55,7 +55,9 @@
 //! turn, never force-exit exarch.  SIGTERM/SIGHUP keep ral's `term_handler`,
 //! since those are deliberate termination requests: it cancels the durable
 //! root with `Terminate` — reaching the foreground turn and every detached
-//! worker — and force-exits on the third delivery.
+//! worker — and force-exits on the third delivery; the chained handler
+//! stamps the trunk's own token with the same `Terminate` cause, so a park
+//! reading the token agrees with ral's root about why the agent is ending.
 //! [`crate::bootstrap::boot_shell`] owns that ceremony for exarch session
 //! shells, including `/clear` rebuilds.
 //!
@@ -127,18 +129,32 @@ impl Token {
         flag != 0 && flag != CancelCause::Interrupt as u8
     }
 
-    /// Cancel this token and every share of it, recording `cause`.
+    /// Cancel this token and every share of it, recording `cause`.  Raises
+    /// the flag to the maximum of its current value and `cause` — the same
+    /// monotone escalation `CancelScope::cancel` gives ral's own scopes — so
+    /// a later, weaker cause (an Esc `Interrupt` arriving after an
+    /// `agent-cancel` `Explicit`) can never mask a stronger one already in
+    /// force.
     pub fn cancel(&self, cause: CancelCause) {
-        self.0.store(cause as u8, Ordering::Relaxed);
+        self.0.fetch_max(cause as u8, Ordering::Relaxed);
     }
 
-    /// Clear the cancellation flag — the per-turn reset the drive loop runs
-    /// at a genuine turn boundary, so a prior turn's Esc never bleeds into
-    /// the next.  Each agent holds one sticky token (registered once, so the
-    /// subtree cascade always reaches the live turn); the boundary clears its
-    /// flag rather than swapping the `Arc`.
+    /// Clear a bare interrupt — the per-turn reset the drive loop runs at a
+    /// genuine turn boundary, so a prior turn's Esc never bleeds into the
+    /// next.  A compare-exchange from exactly [`Interrupt`](CancelCause::Interrupt)
+    /// to `0`: any terminate-class cause already recorded (`Explicit`,
+    /// `Deadline`, ...) is left in force, since a turn boundary must never
+    /// erase a cascade cancellation that landed between the drive loop's
+    /// pop and this reset.  Each agent holds one sticky token (registered
+    /// once, so the subtree cascade always reaches the live turn); the
+    /// boundary clears its flag rather than swapping the `Arc`.
     pub fn reset(&self) {
-        self.0.store(0, Ordering::Relaxed);
+        let _ = self.0.compare_exchange(
+            CancelCause::Interrupt as u8,
+            0,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -157,7 +173,7 @@ static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 /// per-turn-mint dance, because the boundary [`reset`](Token::reset)s the same
 /// sticky token instead of swapping it.  A signal handler that has already
 /// loaded the slot's pointer may dereference it at any later instant,
-/// including after the guard has dropped and nulled the slot, so the
+/// including after the guard has dropped and restored the slot, so the
 /// published allocation must outlive the guard rather than merely the
 /// publishing interval: this leaks one strong share of the token's `Arc`,
 /// making the pointee live for the rest of the process.  That leak is
@@ -167,21 +183,24 @@ static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 pub fn publish(token: &Token) -> SlotGuard {
     std::mem::forget(token.0.clone());
     let flag: *const AtomicU8 = Arc::as_ptr(&token.0);
-    CURRENT.store(flag.cast_mut(), Ordering::Release);
-    SlotGuard
+    let prev = CURRENT.swap(flag.cast_mut(), Ordering::Release);
+    SlotGuard { prev }
 }
 
-/// RAII handle for the published slot: nulls [`CURRENT`] on drop so the slot
-/// stops tracking a retired trunk's token.
+/// RAII handle for the published slot: restores the prior publication on drop.
 ///
-/// The pointee is immortal (leaked
-/// by [`publish`]), so the guard bounds only *when* the slot fires, not how
-/// long the allocation behind it lives.
-pub struct SlotGuard;
+/// A swap, not a clear, so an inner publication nested inside an outer one —
+/// an overlapping `publish` — reveals the outer token again rather than
+/// leaving the slot null underneath it.  The pointee is immortal (leaked by
+/// [`publish`]), so the guard bounds only *when* the slot fires, not how long
+/// the allocation behind it lives.
+pub struct SlotGuard {
+    prev: *mut AtomicU8,
+}
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        CURRENT.store(std::ptr::null_mut(), Ordering::Release);
+        CURRENT.store(self.prev, Ordering::Release);
     }
 }
 
@@ -197,21 +216,21 @@ pub(crate) fn is_set() -> bool {
     !p.is_null() && unsafe { (*p).load(Ordering::Relaxed) } != 0
 }
 
-/// Raise an [`Interrupt`](CancelCause) on the trunk's published token
-/// (signal-handler safe: a single atomic load of the slot plus an atomic
-/// store) — the frontend interrupt is always an interrupt, never a terminate.
-/// A no-op when no trunk is publishing.
-fn raise() {
+/// Raise `cause` on the trunk's published token (signal-handler safe: a
+/// single atomic load of the slot plus a `fetch_max`, so a weaker cause can
+/// never mask a stronger one already recorded).  A no-op when no trunk is
+/// publishing.
+fn raise(cause: CancelCause) {
     let p = CURRENT.load(Ordering::Acquire);
     if !p.is_null() {
         // SAFETY: a non-null slot points into the allocation `publish` leaks,
         // so the pointee is live for the rest of the process (see `publish`).
-        unsafe { (*p).store(CancelCause::Interrupt as u8, Ordering::Relaxed) };
+        unsafe { (*p).fetch_max(cause as u8, Ordering::Relaxed) };
     }
 }
 
 pub fn raise_interrupt() {
-    raise();
+    raise(CancelCause::Interrupt);
     deliver_interrupt();
 }
 
@@ -266,12 +285,12 @@ static RAL_TERM_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(unix)]
 extern "C" fn chained(sig: libc::c_int) {
-    raise();
-    let slot = if sig == libc::SIGINT {
-        &RAL_SIGINT_HANDLER
+    let (cause, slot) = if sig == libc::SIGINT {
+        (CancelCause::Interrupt, &RAL_SIGINT_HANDLER)
     } else {
-        &RAL_TERM_HANDLER
+        (CancelCause::Terminate, &RAL_TERM_HANDLER)
     };
+    raise(cause);
     forward_into_ral(slot, sig);
 }
 
@@ -406,7 +425,7 @@ pub fn install() {
 #[cfg(windows)]
 extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BOOL {
     if cancels_turn(ctrl_type) {
-        raise();
+        raise(CancelCause::Interrupt);
         ral_core::process::relay_interrupt();
         return windows_sys::Win32::Foundation::TRUE;
     }
@@ -436,6 +455,60 @@ mod cancels_turn_tests {
                  escalating disposition must still see it"
             );
         }
+    }
+}
+
+/// [`Token::cancel`]/[`Token::reset`] are plain atomics over a
+/// [`CancelCause`] encoding, so their escalation and reset semantics are
+/// exercised natively on every platform this crate builds for — no signal
+/// handler, no slot, required.
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn cancel_is_monotone_and_never_downgrades() {
+        let token = Token::new();
+        token.cancel(CancelCause::Explicit);
+        token.cancel(CancelCause::Interrupt);
+        assert!(
+            token.terminated(),
+            "a later Interrupt must not downgrade an already-recorded Explicit"
+        );
+        token.cancel(CancelCause::Deadline);
+        assert_eq!(
+            token.0.load(Ordering::Relaxed),
+            CancelCause::Deadline as u8,
+            "a stronger later cause still escalates"
+        );
+    }
+
+    #[test]
+    fn reset_clears_only_a_bare_interrupt() {
+        let token = Token::new();
+        token.cancel(CancelCause::Interrupt);
+        token.reset();
+        assert!(!token.is_cancelled(), "reset clears a bare interrupt");
+
+        let token = Token::new();
+        token.cancel(CancelCause::Explicit);
+        token.reset();
+        assert!(
+            token.terminated(),
+            "reset must never erase a terminate-class cause"
+        );
+        assert_eq!(
+            token.0.load(Ordering::Relaxed),
+            CancelCause::Explicit as u8,
+            "the recorded cause survives the reset unchanged"
+        );
+    }
+
+    #[test]
+    fn reset_is_a_no_op_on_an_uncancelled_token() {
+        let token = Token::new();
+        token.reset();
+        assert!(!token.is_cancelled());
     }
 }
 
@@ -601,6 +674,7 @@ mod tests {
     /// signatures (token set, ladder un-ticked) together prove the chain
     /// is installed and a delivered SIGINT can only cancel, never force-exit.
     #[test]
+    #[ignore = "delivers a real process-wide SIGINT — driven in its own process by signal_delivery_tests_own_their_process"]
     fn boot_shell_restores_the_chain_after_handler_clobber() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
@@ -632,6 +706,7 @@ mod tests {
     /// exarch shell constructor resets the ladder before loading the
     /// library.
     #[test]
+    #[ignore = "invokes the SIGTERM handler, root-cancelling every published slot — driven in its own process by signal_delivery_tests_own_their_process"]
     fn clear_resets_the_escalation_ladder_on_reboot() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
@@ -639,7 +714,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("exarch-clear-interrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let scratch = Scratch::new().expect("scratch directory");
+        let scratch = Scratch::for_test("clear-interrupt").expect("scratch directory");
         let mut session = Agent::for_test(&dir, "system").expect("test session");
 
         // Seed the ladder exactly as a delivered SIGTERM would: through
@@ -670,5 +745,110 @@ mod tests {
         ral_core::process::clear();
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(scratch.path());
+    }
+
+    /// Drive the two `#[ignore]`d signal-delivery tests above in a child
+    /// process they own outright.  Delivered signals are process-wide — a
+    /// raised SIGINT cancels the process's published foreground turn, and
+    /// the SIGTERM handler root-cancels every published slot — so inside
+    /// the parallel test binary they terminate whatever *other* test
+    /// happens to be mid-turn.  The `SERIAL` lock cannot help: the victims
+    /// are readers that never know to take it.  Re-execing the test binary
+    /// filtered to exactly these tests gives them the singleton process the
+    /// signal machinery is designed around.
+    #[test]
+    fn signal_delivery_tests_own_their_process() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "agent::cancel::tests::boot_shell_restores_the_chain_after_handler_clobber",
+                "agent::cancel::tests::clear_resets_the_escalation_ladder_on_reboot",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("spawn the child test process");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // The pass-count check guards the filters: a renamed test would
+        // otherwise make the child silently run nothing and still exit 0.
+        assert!(
+            out.status.success() && stdout.contains("2 passed"),
+            "child signal tests failed or did not both run:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// An inner `publish` nested inside an outer one restores the outer
+    /// publication on drop, rather than leaving the slot null underneath
+    /// it — the same nesting discipline `ral_core`'s own `CancelSlot`
+    /// gives its scope publications.
+    #[test]
+    fn inner_publish_restores_the_outer_token_on_drop() {
+        let _g = SERIAL.lock().unwrap();
+        ral_core::process::clear();
+        install();
+        let outer = Token::new();
+        let _outer_slot = publish(&outer);
+        {
+            let inner = Token::new();
+            let _inner_slot = publish(&inner);
+            raise_interrupt();
+            assert!(
+                inner.is_cancelled(),
+                "the inner publication must shadow the outer"
+            );
+            assert!(
+                !outer.is_cancelled(),
+                "the outer token is untouched while shadowed"
+            );
+        }
+        raise_interrupt();
+        assert!(
+            outer.is_cancelled(),
+            "the inner guard's drop must restore the outer publication, \
+             not null the slot"
+        );
+        ral_core::process::clear();
+    }
+
+    /// The chained handler maps each signal to its own cause: SIGINT is a
+    /// per-tab interrupt, SIGTERM/SIGHUP a genuine termination request —
+    /// stamping every signal `Interrupt` would misreport the cause during
+    /// a real termination and let a park `UntilCancelled` on the trunk
+    /// token survive its own SIGTERM.
+    #[test]
+    fn chained_maps_each_signal_to_its_own_cause() {
+        let _g = SERIAL.lock().unwrap();
+        ral_core::process::clear();
+        install();
+
+        let token = Token::new();
+        let _slot = publish(&token);
+        chained(libc::SIGINT);
+        assert_eq!(
+            token.0.load(Ordering::Relaxed),
+            CancelCause::Interrupt as u8,
+            "SIGINT stamps Interrupt"
+        );
+        assert!(
+            !token.terminated(),
+            "a SIGINT-driven Interrupt never terminates the agent"
+        );
+        ral_core::process::clear();
+
+        let token = Token::new();
+        let _slot = publish(&token);
+        chained(libc::SIGTERM);
+        assert_eq!(
+            token.0.load(Ordering::Relaxed),
+            CancelCause::Terminate as u8,
+            "SIGTERM stamps Terminate, not Interrupt"
+        );
+        assert!(
+            token.terminated(),
+            "a SIGTERM-driven Terminate ends the agent"
+        );
+        ral_core::process::clear();
     }
 }

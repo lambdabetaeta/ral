@@ -19,6 +19,7 @@ use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
 use super::ty::{CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
+use crate::types::BuiltinTable;
 
 /// How the type checker handles a call to a registered builtin.
 ///
@@ -1057,25 +1058,25 @@ pub mod scheme {
 
 /// Return a polymorphic type scheme for a builtin executable by name.
 ///
-/// Delegates to [`crate::builtins::builtin_type_rule`], which consults the
-/// unified process-level registry covering both core and any installed host
-/// layers.  Returns `None` when the name is unknown to the registry or its
-/// signature has no first-class value form.
+/// Consults `table`, the checked session's own builtin surface, so a name
+/// resolves exactly against what that session can evaluate.  Returns `None`
+/// when the name is unknown to `table` or its signature has no first-class
+/// value form.
 ///
 /// Fresh type/mode/row variables are allocated directly from `u`, so the
 /// returned scheme can be stored in the environment or used at a call site
 /// without any post-processing renaming step.
-pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
-    match crate::builtins::builtin_type_rule(name)? {
+pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
+    match table.get(name)?.type_rule {
         BuiltinTypeRule::Scheme(_, factory) => Some(factory(u)),
         BuiltinTypeRule::Sig(sig) => sig.value.map(|f| f(u)),
     }
 }
 
 /// Return the formatted type string for a builtin, or `None` if unknown.
-pub fn builtin_type_hint(name: &str) -> Option<String> {
+pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     let mut u = Unifier::new();
-    let scheme = builtin_scheme(name, &mut u)?;
+    let scheme = builtin_scheme(table, name, &mut u)?;
     Some(fmt_scheme(&scheme))
 }
 
@@ -1087,32 +1088,35 @@ pub fn builtin_type_hint(name: &str) -> Option<String> {
 /// builtins without an arity — typically variadic ones like `echo` or
 /// command-only dispatchers.
 ///
-/// Delegates to the registry's [`crate::builtins::builtin_arity`] which is
-/// the single source of truth.  In debug builds, asserts that this matches
-/// the arity derived from the entry's first-class scheme, when present —
-/// the arity and the scheme factory are co-defined in the same
-/// `builtin_registry!` entry, so the assert catches a typo where the two
-/// drift apart.
-pub fn builtin_arity(name: &str) -> Option<usize> {
-    let registry_arity = crate::builtins::builtin_arity(name);
+/// Delegates to the entry's own `fixed_arity`, off `table`.  In debug
+/// builds, asserts that this matches the arity derived from the entry's
+/// first-class scheme, when present — the arity and the scheme factory are
+/// co-defined in the same `builtin_registry!` entry, so the assert catches
+/// a typo where the two drift apart.
+pub fn builtin_arity(table: &BuiltinTable, name: &str) -> Option<usize> {
+    let arity = table.get(name).and_then(|e| e.fixed_arity());
     debug_assert!(
-        check_arity_consistency(name, registry_arity),
-        "builtin '{name}': registry arity ({registry_arity:?}) ≠ scheme-derived arity",
+        check_arity_consistency(table, name, arity),
+        "builtin '{name}': table arity ({arity:?}) ≠ scheme-derived arity",
     );
-    registry_arity
+    arity
 }
 
-/// Cross-check the registry's declared `arity:` against the `Fun`-nesting
-/// depth derived from the entry's scheme factory (when there is one).
-/// Returns `true` when consistent — including command-only signatures
-/// where there is no first-class scheme to check.
+/// Cross-check `table`'s declared `arity:` against the `Fun`-nesting depth
+/// derived from the entry's scheme factory (when there is one).  Returns
+/// `true` when consistent — including command-only signatures where there
+/// is no first-class scheme to check.
 #[doc(hidden)]
-pub fn check_arity_consistency(name: &str, registry_arity: Option<usize>) -> bool {
+pub fn check_arity_consistency(
+    table: &BuiltinTable,
+    name: &str,
+    table_arity: Option<usize>,
+) -> bool {
     let mut u = Unifier::new();
-    let Some(scheme) = builtin_scheme(name, &mut u) else {
+    let Some(scheme) = builtin_scheme(table, name, &mut u) else {
         return true;
     };
-    let Some(_) = registry_arity else {
+    let Some(_) = table_arity else {
         return true;
     };
     fn count(ct: &CompTy) -> usize {
@@ -1125,7 +1129,7 @@ pub fn check_arity_consistency(name: &str, registry_arity: Option<usize>) -> boo
         Ty::Thunk(inner) => Some(count(inner)),
         _ => Some(0),
     };
-    scheme_arity == registry_arity
+    scheme_arity == table_arity
 }
 
 /// A per-key type schema — `fn(key, unifier) -> Option<Ty>`.
@@ -1327,9 +1331,10 @@ impl Inferencer<'_> {
 mod tests {
     #[test]
     fn registry_and_scheme_arity_agree() {
-        for name in crate::builtins::builtin_names() {
-            let _ = super::builtin_arity(name);
+        let table = crate::builtins::core_builtin_table();
+        for name in table.names().collect::<Vec<_>>() {
+            let _ = super::builtin_arity(&table, name);
         }
-        assert_eq!(super::builtin_arity("values"), None);
+        assert_eq!(super::builtin_arity(&table, "values"), None);
     }
 }

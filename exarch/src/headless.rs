@@ -12,14 +12,15 @@
 //! This frontend is a *display* — it projects the bus to stdout/stderr.
 //! The durable record is not its concern: each session writes its own
 //! `transcript.jsonl` (operational view) and `events.json` (model view)
-//! through the [`crate::transcript`] and [`crate::event`] seams, in headless
+//! through the [`crate::agent::transcript`] and [`crate::agent::event`] seams, in headless
 //! exactly as in the TUI, for the root and every forked child alike.
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
-use crate::card::{Card, Mark, Row};
+use crate::bus::card::{Card, Mark, Row};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
+use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -59,12 +60,13 @@ pub struct Headless {
     turns: u32,
     /// Last non-routine stop reason surfaced by the root, if any.
     last_stop: Option<String>,
-    /// The root's deliberate return value — the faithful payload it passed to
-    /// `reply`, captured from the drive digest after the run
-    /// ([[decisions/260623_reply-terminates-returning-agents]]).  It is the
-    /// `result` field of the JSON output: a string stays a string, an
-    /// object/array stays structured (no double-encoding into a JSON string).
-    /// `None` when the root finished without replying, which renders as a JSON
+    /// The root's deliberate return value — the drive digest's faithful
+    /// [`FOValue`](ral_core::serial::FOValue) payload, projected through
+    /// [`user_json`] (not `FOValue`'s own transport `serde`, which is
+    /// internally tagged and carries floats by bits).  It is the `result`
+    /// field of the JSON output: a string stays a string, an object/array
+    /// stays structured (no double-encoding into a JSON string).  `None`
+    /// when the root finished without replying, which renders as a JSON
     /// null and pairs with `is_error`.
     result: Option<serde_json::Value>,
     /// Set when a worker thread unwound this run.  `pump` recovers from the
@@ -229,6 +231,12 @@ impl Sink for Headless {
             }
             Kind::ToolCall {
                 tool, cmd, summary, ..
+            }
+            | Kind::HarnessCall {
+                verb: tool,
+                cmd,
+                summary,
+                ..
             } if id == self.root_id => {
                 eprintln!("[tool: {tool}]");
                 if let Some(s) = &summary {
@@ -240,8 +248,8 @@ impl Sink for Headless {
                     eprintln!("  {line}");
                 }
             }
-            Kind::ToolCall { .. } => {}
-            Kind::ToolResult(_) => {}
+            Kind::ToolCall { .. } | Kind::HarnessCall { .. } => {}
+            Kind::ToolResult(_) | Kind::HarnessResult(_) => {}
             Kind::StopReason(raw) => {
                 if id == self.root_id {
                     self.last_stop = Some(raw.clone());
@@ -374,13 +382,14 @@ pub fn run(
         |emit| session.drive(&mut control, emit),
     );
     // `pump` returns the drive digest — the outcome and the root's faithful
-    // `reply` payload.  The payload is the json `result` (a string stays a
-    // string, an object/array stays structured); the outcome drives the
-    // top-level `is_error`/`error` fields.  The sink already latched `panicked`
-    // from the WORKER_PANIC_PREFIX error a worker unwind emits.
+    // `reply` payload, an `FOValue`.  Projected through `user_json` (not
+    // `FOValue`'s own transport encoding) into the json `result` (a string
+    // stays a string, an object/array stays structured); the outcome drives
+    // the top-level `is_error`/`error` fields.  The sink already latched
+    // `panicked` from the WORKER_PANIC_PREFIX error a worker unwind emits.
     let r: Result<(), String> = match outcome {
         Ok(Some((agent_outcome, payload))) => {
-            headless.result = payload;
+            headless.result = payload.as_ref().map(user_json);
             match agent_outcome {
                 // A reply (or a deliberate empty reply) completed the contract.
                 AgentOutcome::Complete | AgentOutcome::Empty => Ok(()),
@@ -510,5 +519,46 @@ mod tests {
         assert_eq!(v["is_error"], serde_json::json!(true), "{out}");
         assert_eq!(v["result"], serde_json::Value::Null, "{out}");
         assert_eq!(v["stop_reason"], serde_json::json!("no_reply"), "{out}");
+    }
+
+    /// `run`'s promise holds through the actual `FOValue -> user_json`
+    /// projection, not just `result_json`'s own JSON-in, JSON-out shape: a
+    /// string `reply` stays a raw JSON string — no quoting-inside-quoting.
+    #[test]
+    fn user_json_projected_result_keeps_a_string_reply_raw() {
+        let root: AgentId = 1;
+        let mut h = Headless::new(true, root);
+        let payload = ral_core::serial::FOValue::String {
+            value: "plain text reply".into(),
+        };
+        h.result = Some(user_json(&payload));
+        let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
+        assert_eq!(v["result"], serde_json::json!("plain text reply"), "{out}");
+    }
+
+    /// The structured half of the same projection: a record `reply` reaches
+    /// `result` as ordinary JSON, not `FOValue`'s own internally-tagged
+    /// transport encoding.
+    #[test]
+    fn user_json_projected_result_keeps_structure_ordinary_json() {
+        let root: AgentId = 1;
+        let mut h = Headless::new(true, root);
+        let payload = ral_core::serial::FOValue::Map {
+            entries: vec![(
+                "files".to_string(),
+                ral_core::serial::FOValue::List {
+                    items: vec![
+                        ral_core::serial::FOValue::String { value: "a.rs".into() },
+                        ral_core::serial::FOValue::String { value: "b.rs".into() },
+                    ],
+                },
+            )],
+        };
+        h.result = Some(user_json(&payload));
+        let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
+        assert!(v["result"].is_object(), "{out}");
+        assert_eq!(v["result"]["files"][0], serde_json::json!("a.rs"), "{out}");
     }
 }

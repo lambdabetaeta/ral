@@ -312,6 +312,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                             writer: worker_writer.clone(),
                         }) as Arc<dyn DeferredSink>),
                         desk: Some(worker_desk.clone() as crate::types::Desk),
+                        nursery: None,
                         lifecycle: Box::new(()),
                     };
                     // The workspace pins `panic = "unwind"` so hosts can

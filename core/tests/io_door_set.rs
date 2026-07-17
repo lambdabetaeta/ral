@@ -170,13 +170,19 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/types/shell/cwd.rs", "io-door:silent:cwd-stat"),
     // ── exarch ────────────────────────────────────────────────────────────
     (
-        "exarch/src/agent_builtins.rs",
+        "exarch/src/shell_eval/builtins.rs",
         "io-door:surface:witness-read",
     ),
-    ("exarch/src/agent_builtins.rs", "io-door:surface:grep-read"),
-    ("exarch/src/agent_builtins.rs", "io-door:surface:grep-walk"),
     (
-        "exarch/src/agent_builtins/fff_index.rs",
+        "exarch/src/shell_eval/builtins.rs",
+        "io-door:surface:grep-read",
+    ),
+    (
+        "exarch/src/shell_eval/builtins.rs",
+        "io-door:surface:grep-walk",
+    ),
+    (
+        "exarch/src/shell_eval/builtins/fff_index.rs",
         "io-door:silent:fff-db-dir",
     ),
     ("exarch/src/bootstrap.rs", "io-door:silent:log-run-dir"),
@@ -186,40 +192,76 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     ("exarch/src/cli.rs", "io-door:silent:seed-file"),
     ("exarch/src/config.rs", "io-door:silent:provider-config"),
-    ("exarch/src/event.rs", "io-door:silent:events-file"),
-    ("exarch/src/event.rs", "io-door:silent:session-dir"),
-    ("exarch/src/models.rs", "io-door:silent:models-cache-read"),
-    ("exarch/src/models.rs", "io-door:silent:models-cache-write"),
+    ("exarch/src/agent/event.rs", "io-door:silent:events-file"),
+    ("exarch/src/agent/event.rs", "io-door:silent:session-dir"),
     (
-        "exarch/src/oauth/browser.rs",
+        "exarch/src/provider/models.rs",
+        "io-door:silent:models-cache-read",
+    ),
+    (
+        "exarch/src/provider/models.rs",
+        "io-door:silent:models-cache-write",
+    ),
+    (
+        "exarch/src/provider/oauth/browser.rs",
         "io-door:silent:browser-launch",
     ),
     (
-        "exarch/src/oauth/browser.rs",
+        "exarch/src/provider/oauth/browser.rs",
         "io-door:silent:browser-launch-linux",
     ),
-    ("exarch/src/oauth/mod.rs", "io-door:silent:token-dir"),
-    ("exarch/src/oauth/mod.rs", "io-door:silent:token-read"),
-    ("exarch/src/oauth/mod.rs", "io-door:silent:token-remove"),
-    ("exarch/src/oauth/mod.rs", "io-door:silent:token-write"),
     (
-        "exarch/src/oauth/mod.rs",
+        "exarch/src/provider/oauth/mod.rs",
+        "io-door:silent:token-dir",
+    ),
+    (
+        "exarch/src/provider/oauth/mod.rs",
+        "io-door:silent:token-read",
+    ),
+    (
+        "exarch/src/provider/oauth/mod.rs",
+        "io-door:silent:token-remove",
+    ),
+    (
+        "exarch/src/provider/oauth/mod.rs",
+        "io-door:silent:token-write",
+    ),
+    (
+        "exarch/src/provider/oauth/mod.rs",
         "io-door:silent:token-write-nonunix",
     ),
     (
-        "exarch/src/oauth/mod.rs",
+        "exarch/src/provider/oauth/mod.rs",
         "io-door:silent:token-write-windows",
     ),
     ("core/src/path/git.rs", "io-door:silent:git-dir-discovery"),
     ("exarch/src/prompt.rs", "io-door:silent:system-prompt-files"),
-    ("exarch/src/skill.rs", "io-door:silent:skill-list-dir"),
-    ("exarch/src/skill.rs", "io-door:silent:skill-metadata"),
-    ("exarch/src/skill.rs", "io-door:surface:skill-body"),
-    ("exarch/src/skill.rs", "io-door:surface:skill-list"),
-    ("exarch/src/state.rs", "io-door:silent:state-read"),
-    ("exarch/src/state.rs", "io-door:silent:state-write"),
-    ("exarch/src/resources.rs", "io-door:silent:resources-disk-probe"),
-    ("exarch/src/transcript.rs", "io-door:silent:transcript-file"),
+    (
+        "exarch/src/shell_eval/skill.rs",
+        "io-door:silent:skill-list-dir",
+    ),
+    (
+        "exarch/src/shell_eval/skill.rs",
+        "io-door:silent:skill-metadata",
+    ),
+    (
+        "exarch/src/shell_eval/skill.rs",
+        "io-door:surface:skill-body",
+    ),
+    (
+        "exarch/src/shell_eval/skill.rs",
+        "io-door:surface:skill-list",
+    ),
+    ("exarch/src/provider/state.rs", "io-door:silent:state-read"),
+    ("exarch/src/provider/state.rs", "io-door:silent:state-write"),
+    (
+        "exarch/src/agent/resources.rs",
+        "io-door:silent:resources-disk-probe",
+    ),
+    (
+        "exarch/src/agent/transcript.rs",
+        "io-door:silent:transcript-file",
+    ),
     (
         "exarch/src/tui/terminal.rs",
         "io-door:silent:editor-compose",

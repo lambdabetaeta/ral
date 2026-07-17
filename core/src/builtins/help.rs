@@ -11,49 +11,13 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::OnceLock;
 
-/// Register prelude type hints from the baked schemes so that `builtin_help`
-/// can display them without needing access to the baked binary.
-///
-/// # Panics
-/// Panics if the prelude type hints have already been registered.
-pub fn register_prelude_type_hints(schemes: &[(String, crate::typecheck::Scheme)]) {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let map: HashMap<String, String> = schemes
-            .iter()
-            .map(|(name, scheme)| (name.clone(), fmt_scheme(scheme)))
-            .collect();
-        PRELUDE_TYPE_HINTS
-            .set(map)
-            .expect("prelude type hints already set");
-    });
-}
-
-static PRELUDE_TYPE_HINTS: OnceLock<HashMap<String, String>> = OnceLock::new();
-
-fn prelude_type_hint(name: &str) -> Option<String> {
-    PRELUDE_TYPE_HINTS.get()?.get(name).cloned()
-}
-
-/// Register extra `name -> doc` entries from an embedding host so that
-/// `builtin_help` can list and look them up alongside the builtins and
-/// prelude.
-///
-/// # Panics
-/// Panics if the host library docs have already been registered.
-pub fn register_library_docs(entries: Vec<(String, String)>) {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        LIBRARY_DOCS
-            .set(entries.into_iter().collect())
-            .expect("library docs already set");
-    });
-}
-
-static LIBRARY_DOCS: OnceLock<HashMap<String, String>> = OnceLock::new();
-
-fn library_doc(name: &str) -> Option<String> {
-    LIBRARY_DOCS.get()?.get(name).cloned()
+/// Return the formatted scheme of a prelude function, read from the
+/// shell's own prelude scope — the baked `Bind` nodes carry the
+/// checker's harvested schemes, so there is nothing to look up beyond
+/// the shell's environment.
+fn prelude_type_hint(name: &str, shell: &Shell) -> Option<String> {
+    let scheme = shell.mobile.scope.get_prelude_binding(name)?.scheme.as_ref()?;
+    Some(fmt_scheme(scheme))
 }
 
 /// Collect a `name → doc` map into a vector of pairs sorted by name.
@@ -65,8 +29,8 @@ fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(String, String)> {
 
 /// Return all host-registered library names with their doc strings, sorted
 /// alphabetically.
-fn library_all_docs() -> Vec<(String, String)> {
-    LIBRARY_DOCS.get().map_or_else(Vec::new, sorted_pairs)
+fn library_all_docs(shell: &Shell) -> Vec<(String, String)> {
+    sorted_pairs(&shell.session.library_docs)
 }
 
 /// Scan the embedded prelude source for `## doc` / `let name` pairs and return
@@ -171,22 +135,21 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
 
     let out = {
         let mut s = format!("{bold}Builtins:{reset}\n");
-        let mut builtin_names: Vec<&str> = super::builtin_names()
-            .iter()
-            .copied()
+        let mut builtin_names: Vec<&str> = shell
+            .builtin_names()
             .filter(|n| !n.starts_with('_'))
             .collect();
         builtin_names.sort_unstable();
         for name in builtin_names {
-            if let Some(doc) = super::builtin_doc(name) {
-                s.push_str(&fmt_line(name, doc, line_colors));
+            if let Some(entry) = shell.lookup_builtin(name) {
+                s.push_str(&fmt_line(name, entry.doc, line_colors));
             }
         }
         let _ = writeln!(s, "{bold}Prelude:{reset}");
         for (name, doc) in prelude_all_docs() {
             s.push_str(&fmt_line(&name, &doc, line_colors));
         }
-        let library = library_all_docs();
+        let library = library_all_docs(shell);
         if !library.is_empty() {
             let _ = writeln!(s, "{bold}Library:{reset}");
             for (name, doc) in library {
@@ -217,25 +180,25 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
 
     let name = args[0].to_string();
     let source = which_line(&name, shell);
-    let type_str = type_for(&name);
+    let type_str = type_for(&name, &shell.session.builtins);
 
-    let out = if let Some(doc) = super::builtin_doc(&name) {
-        fmt_entry(&name, doc, &type_str, source.as_deref(), colors)
+    let out = if let Some(entry) = shell.lookup_builtin(&name) {
+        fmt_entry(&name, entry.doc, &type_str, source.as_deref(), colors)
     } else if let Some(doc) = prelude_doc(&name) {
-        let pt = prelude_type_hint(&name).unwrap_or(type_str);
+        let pt = prelude_type_hint(&name, shell).unwrap_or(type_str);
         fmt_entry(&name, &doc, &pt, source.as_deref(), colors)
-    } else if let Some(doc) = library_doc(&name) {
+    } else if let Some(doc) = shell.session.library_docs.get(&name).cloned() {
         fmt_entry(&name, &doc, &type_str, source.as_deref(), colors)
     } else if let Some(src) = source {
         format!("explain: {src}\n")
     } else {
         let mut hits: Vec<(String, String)> = Vec::new();
-        for n in super::builtin_names() {
+        for n in shell.builtin_names() {
             if !n.starts_with('_')
                 && name_matches(&name, n)
-                && let Some(doc) = super::builtin_doc(n)
+                && let Some(entry) = shell.lookup_builtin(n)
             {
-                hits.push((n.to_string(), doc.to_string()));
+                hits.push((n.to_string(), entry.doc.to_string()));
             }
         }
         for (n, doc) in prelude_all_docs() {
@@ -243,7 +206,7 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
                 hits.push((n, doc));
             }
         }
-        for (n, doc) in library_all_docs() {
+        for (n, doc) in library_all_docs(shell) {
             if name_matches(&name, &n) {
                 hits.push((n, doc));
             }
@@ -282,10 +245,10 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 }
 
 /// Return a type string for a builtin, falling back to its type rule.
-fn type_for(name: &str) -> String {
-    builtin_type_hint(name).unwrap_or_else(|| {
+fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
+    builtin_type_hint(table, name).unwrap_or_else(|| {
         use crate::typecheck::builtins::{BuiltinTypeRule, CompTemplate, ModeTemplate};
-        match crate::builtins::builtin_type_rule(name) {
+        match table.get(name).map(|e| e.type_rule) {
             Some(BuiltinTypeRule::Sig(sig)) => match sig.result {
                 CompTemplate::Return {
                     input: ModeTemplate::None,
@@ -334,7 +297,7 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
     if shell.lookup_handler(name).is_some() {
         return Some(format!("{name}: handler"));
     }
-    if crate::builtins::is_builtin(name) {
+    if shell.lookup_builtin(name).is_some() {
         return Some(format!("{name}: builtin"));
     }
     let path = shell.locate_command(name)?;
@@ -379,6 +342,51 @@ mod tests {
         assert_eq!(
             par_doc, "Parallel map over `items` with at most `jobs` concurrent blocks.",
             "only the lead paragraph is the summary, got {par_doc:?}"
+        );
+    }
+
+    /// A shell no host has installed library docs into carries no
+    /// `Library:` section — the honesty gain of moving the docs off a
+    /// process-global registry and onto the session that actually holds
+    /// them.
+    #[test]
+    fn bare_shell_help_has_no_library_section() {
+        let mut shell = Shell::default();
+        let (sink, buf) = crate::io::new_buffer();
+        shell.set_stdout(sink);
+        builtin_help(&[], &mut shell);
+        let out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        assert!(
+            !out.contains("Library:"),
+            "a bare shell must list no Library section, got:\n{out}"
+        );
+    }
+
+    /// [`Shell::install_library_docs`] is the one door onto
+    /// `session.library_docs`: once a host installs an entry through it,
+    /// `help` lists it under `Library:` and `explain` resolves its doc.
+    #[test]
+    fn installed_library_docs_surface_in_help_and_explain() {
+        let mut shell = Shell::default();
+        shell.install_library_docs(vec![("frob".to_string(), "frob the widget".to_string())]);
+
+        let (sink, buf) = crate::io::new_buffer();
+        shell.set_stdout(sink);
+        builtin_help(&[], &mut shell);
+        let help_out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        assert!(
+            help_out.contains("Library:") && help_out.contains("frob"),
+            "help must list the installed library entry, got:\n{help_out}"
+        );
+
+        let (sink, buf) = crate::io::new_buffer();
+        shell.set_stdout(sink);
+        builtin_explain(&[Value::String("frob".into())], &mut shell);
+        let explain_out =
+            String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
+        assert!(
+            explain_out.contains("frob the widget"),
+            "explain must resolve the installed library doc, got:\n{explain_out}"
         );
     }
 }

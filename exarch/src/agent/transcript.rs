@@ -6,9 +6,9 @@
 //! It is the *operational* view — what the agent did: every tool call and its
 //! result, step, usage delta, structural I/O effect, stop reason, error, and
 //! sub-agent boundary — the sibling of the model-view `events.json` the
-//! [`AgentLog`](crate::event::AgentLog) keeps.
+//! [`AgentLog`](crate::agent::event::AgentLog) keeps.
 //!
-//! Pure rendering events — a composed [`Card`](crate::card::Card), the card a
+//! Pure rendering events — a composed [`Card`](crate::bus::card::Card), the card a
 //! [`Kind::Io`] draws, a [`Kind::Phase`] progress label — are deliberately
 //! *not* recorded here; they are a presentation the TUI captures in its
 //! `user.log`, not an effect. The exhaustive match in [`event_record`] means a
@@ -117,11 +117,18 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             }),
         ),
         Kind::Step { n, tuning } => ("step", json!({ "n": n, "tuning": tuning })),
-        Kind::ToolCall { tool, cmd, summary } => (
+        // A desk verb's `HarnessCall`/`HarnessResult` records identically to
+        // a `ral` `ToolCall`/`ToolResult` — the operational trace keeps
+        // showing every acting call the same way; only the live `Kind`
+        // vocabulary distinguishes a genuine provider-boundary tool call
+        // from a harness verb that never crossed it.
+        Kind::ToolCall { tool, cmd, summary } | Kind::HarnessCall { verb: tool, cmd, summary } => (
             "tool_call",
             json!({ "tool": tool, "cmd": cmd, "summary": summary }),
         ),
-        Kind::ToolResult(text) => ("tool_result", json!({ "text": text })),
+        Kind::ToolResult(text) | Kind::HarnessResult(text) => {
+            ("tool_result", json!({ "text": text }))
+        }
         Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
         Kind::Error(msg) => ("error", json!({ "msg": msg })),
         Kind::SystemNote(text) => ("system_note", json!({ "text": text })),
@@ -155,7 +162,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // the rendering, which lives only in the TUI's `user.log`.
         Kind::Io { event, .. } => ("io", json!({ "event": event })),
         Kind::Done { outcome, .. } => {
-            use crate::card::DoneOutcome;
+            use crate::bus::card::DoneOutcome;
             match outcome {
                 DoneOutcome::Ok => ("done", json!({ "outcome": "ok" })),
                 DoneOutcome::Err { message, status } => (
@@ -168,7 +175,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             }
         }
         Kind::Notice { notice, .. } => {
-            use crate::card::Notice;
+            use crate::bus::card::Notice;
             match notice {
                 Notice::Reap { cmd, cause } => {
                     let cause = match cause {

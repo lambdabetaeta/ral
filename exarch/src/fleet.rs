@@ -12,9 +12,13 @@
 //! and engine the trunk and every fork hold — so the fleet and its nodes never
 //! disagree about what is shared.
 
-use crate::agent_registry::AgentRegistry;
+pub(crate) mod desk;
+pub mod registry;
+pub mod schedule;
+
 use crate::bus::FleetBus;
 use crate::provider;
+use registry::AgentRegistry;
 use std::sync::Arc;
 
 /// The shared spine of a run: the registry, the bus, and the transport engine.

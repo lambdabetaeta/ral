@@ -29,11 +29,16 @@ fn rebake() -> (ral_core::ir::Comp, Vec<(String, ral_core::Scheme)>) {
 /// `rest`).  Builtin names are filtered exactly as `bake_prelude` does.
 fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    fn walk(comp: &ral_core::ir::Comp, out: &mut Vec<(String, String)>) {
+    let table = ral_core::builtins::core_builtin_table();
+    fn walk(
+        comp: &ral_core::ir::Comp,
+        table: &ral_core::types::BuiltinTable,
+        out: &mut Vec<(String, String)>,
+    ) {
         match &comp.item {
             CompKind::Seq(parts) => {
                 for part in parts {
-                    walk(part, out);
+                    walk(part, table, out);
                 }
             }
             CompKind::Bind {
@@ -42,16 +47,16 @@ fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
                 scheme: Some(scheme),
                 ..
             } => {
-                if !ral_core::builtins::is_builtin(name) {
+                if table.get(name).is_none() {
                     out.push((name.clone(), fmt_scheme(scheme)));
                 }
-                walk(rest, out);
+                walk(rest, table, out);
             }
-            CompKind::Bind { rest, .. } => walk(rest, out),
+            CompKind::Bind { rest, .. } => walk(rest, table, out),
             _ => {}
         }
     }
-    walk(comp, &mut out);
+    walk(comp, &table, &mut out);
     out
 }
 
@@ -74,9 +79,10 @@ fn bake_returns_top_level_let_bindings() {
 #[test]
 fn bake_filters_builtins() {
     let (_, schemes) = rebake();
+    let table = ral_core::builtins::core_builtin_table();
     for (name, _) in &schemes {
         assert!(
-            !ral_core::builtins::is_builtin(name),
+            table.get(name).is_none(),
             "baked prelude schemes must not shadow builtin {name:?}"
         );
     }

@@ -48,6 +48,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         surface: None,
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }) {
         TurnReport::Ran { result, .. } => result,
@@ -548,7 +549,6 @@ static PANIC_BUILTIN: &[ral_core::types::BuiltinEntry] = &[ral_core::types::Buil
 #[test]
 fn handler_self_mask_survives_panic_mid_body() {
     let mut shell = fresh_shell();
-    builtins::register_builtins(PANIC_BUILTIN);
     shell.install_builtins(PANIC_BUILTIN);
     let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
         .expect("installing the alias must succeed");

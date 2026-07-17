@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
-covers_paths: [exarch/src/agent_builtins.rs, exarch/src/agent_builtins/, exarch/data/agent.ral]
+generated_at_commit: 489d125
+generated_at_date: 2026-07-16
+covers_paths: [exarch/src/agent_builtins.rs, exarch/src/agent_builtins/, exarch/src/desk.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
@@ -135,11 +135,81 @@ Sourced into the shell at boot:
 - `set-goal` / `clear-goal` — pin or drop a session goal under the `goal`
   register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
 
+## Harness verbs — spawn, schedule, commitment, reply
+
+Every verb below is a `BuiltinEntry` in `exarch/src/agent_builtins/harness.rs`
+(`HARNESS_BUILTINS`, chained into `HOST_BUILTIN_SETS` beside the atoms above —
+one registration site for `install_on` and the prompt's `builtin_index`
+alike), landed by
+[[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
+over the rail [[decisions/260706_enquiry-channel|enquiry-channel]] built. A
+verb's body validates its arguments engine-side and calls
+`shell.enquire(class)`; `exarch/src/desk.rs`'s `ExarchDesk` decodes the class
+label and answers from shared handles (`HostServices`) captured at
+install — never `&mut Agent` — installed per `ral` call in `Agent::run_shell`
+and swapped back to an absent desk immediately after. A closed label set the
+retiring JSON tools validated as a schema enum is an open row checked at the
+door instead of a closed variant type: an unknown label errors before any
+enquiry crosses, naming the legal set, rather than a static row-unification
+error with no room for a didactic message.
+
+- **`amnemon <prompt> <title> <permissions>` / `mnemon <prompt> <title>
+  <permissions>`** → `F [id: Int, title: Str, log-dir: Str]`. Launch-only and
+  always asynchronous, like the tool they replace: the receipt is the
+  answer, the reply comes later through the inbox. `permissions` is one of
+  the six [[map/exarch/policy|base]] names; `mnemon` additionally imports the
+  parent's model-visible context before the child's fresh final prompt. Fuel
+  bounds delegation depth, not fan-out — refused only once the caller's own
+  `fuel` reaches zero.
+- **`agents`** → `F [[id: Int, title: Str, elapsed-s: Int, log-dir: Str]]`.
+  Silent; a recovery poll over live descendants.
+- **`message <id> <text>`** / **`agent-cancel <id>`** → `F Unit`.
+  Descendant-only, enforced at the desk; a pure confirmation, so success is
+  the return and failure raises.
+- **`schedule <spec>`** → `F Int`, taking a single closed **record** argument
+  (`[trigger: …, label: …, prompt: …]`) rather than three positional
+  arguments — a record literal infers an exact row, so a missing or surplus
+  field is a static error naming it, which also sidesteps ral's grammar
+  footgun where a nullary tag would otherwise absorb the following
+  positional atom. `trigger` is `` `cron '<expr>' `` or `` `after '<dur>' ``;
+  `label` is `` `some '<name>' `` or `` `none `` (the `sched-{id}` default).
+  Gated on the `--allow-schedule` grant, refused with a didactic text
+  otherwise.
+- **`schedules`** → `F [[id: Int, label: Str, trigger: Str, next-s: Int,
+  fires: Int]]`. Silent; `next-s` saturates to `i64::MAX` for a cron with no
+  next occurrence.
+- **`unschedule <id>`** → `F Unit`.
+- **`commit <key> <description>`** / **`verify-commitment <key>`** →
+  `F [id: Int, title: Str, log-dir: Str]`. The write and check halves of a
+  protected `commitment:*` pin
+  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]):
+  each forks a host-owned, read-only-narrowed child through the same spawn
+  spine as `amnemon`, and the pin opens or clears only once the child's
+  settled reply is the right structured shape.
+- **`reply <value>`** — `∀α. α → F Unit`, first-orderness checked at the
+  door. The sole return path for a returning agent; last write wins within a
+  turn. Refused on every non-returning agent — the interactive trunk and
+  each `/branch` child alike, keyed on a `returns` bit fixed at
+  construction — with the desk's own didactic text. The run ends only once
+  the enclosing `ral` call's whole batch of statements drains, not at this
+  call.
+
+Receipts and listings are ral records the model can bind, filter, and fan out
+over, rather than stringly-typed JSON it re-parses — the composability the
+retired tool form lacked. Acting verbs keep `Kind::HarnessCall`/
+`HarnessResult` rail chrome (a spawn additionally derives a child tab);
+listings stay silent, since their value *is* the returned record.
+[[map/exarch/tools|tools]] is what remains a tool.
+
 ## Where to look
 
 - `exarch/src/agent_builtins.rs` (+ `agent_builtins/fff_index.rs`) — the Rust
   atoms, their type schemes, and `EXARCH_BUILTINS`.
+- `exarch/src/agent_builtins/harness.rs` — the harness verbs above,
+  `HARNESS_BUILTINS`.
+- `exarch/src/desk.rs` — `HostServices`, `ExarchDesk`, and the handler for
+  each enquiry class.
 - `exarch/data/agent.ral` — the helper library; seeded by `boot_shell`
   ([[map/exarch|exarch]] hub).
-- The model-facing tool that carries these calls is
+- The model-facing tool that carries every one of these calls is
   [[map/exarch/tools|`ral`]].

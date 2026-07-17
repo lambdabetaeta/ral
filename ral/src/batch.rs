@@ -101,11 +101,19 @@ pub(crate) fn run_batch(
         };
     }
 
+    // The batch surface: core plus `watch` (`WATCH_BUILTIN`'s doc explains
+    // why it's host-installed) — exactly what the shell below installs, so
+    // `--check` and a real run agree on what typechecks.
+    let check_table = {
+        let mut t = ral_core::builtins::core_builtin_table();
+        t.install_static(ral_core::builtins::WATCH_BUILTIN);
+        t
+    };
     let run_check =
         |comp: &ral_core::ir::Comp| -> Result<ral_core::ir::Comp, Vec<ral_core::TypeError>> {
             ral_core::typecheck(
                 comp,
-                ral_core::SessionSchemes::from_schemes(PRELUDE.schemes()),
+                ral_core::SessionSchemes::from_schemes(PRELUDE.schemes(), check_table.clone()),
             )
         };
 
@@ -202,6 +210,7 @@ pub(crate) fn run_batch(
         surface: None,
         deferred: None,
         desk: None,
+        nursery: None,
         lifecycle: Box::new(()),
     }) {
         TurnReport::Ran { result, .. } => result,

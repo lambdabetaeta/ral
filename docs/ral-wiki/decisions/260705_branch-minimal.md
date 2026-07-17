@@ -59,10 +59,10 @@ drift from the child's actual tools.
 - **`/branch [prompt]`** forks the trunk's conversation: mnemon context
   inheritance, the trunk's capabilities **verbatim** (user-seated — no `permissions`
   argument, no narrowing), an own provider handle seeded from the trunk's current
-  model (cache hits), and fuel = creator − 1 so a branch may itself `/discuss` and
-  spawn. A bare `/branch` parks and waits on its tab; `/branch <prompt>` seeds the
-  prompt as the fresh final turn. It is handled on the trunk at the turn boundary,
-  like [[decisions/260702_discuss-command|`/discuss`]], and carries **no fuel gate**
+  model (cache hits), and fuel = creator − 1 so a branch may itself spawn. A bare
+  `/branch` parks and waits on its tab; `/branch <prompt>` seeds the prompt as the
+  fresh final turn. It is handled on the trunk at the turn boundary, host-side
+  like the rest of the slash-command surface, and carries **no fuel gate**
   (human-typed).
 - **`/close`** on a branch tab is the *one* command admitted off the trunk — a pure
   frontend registry op (`remove_subtree`: `cancel_entry` then remove `{focused} ∪
@@ -93,8 +93,6 @@ Named here so nobody rediscovers them as bugs:
 [[decisions/260705_cancel-per-tab|cancel-per-tab]] (per-tab cancellation, which
 ships first and is why Ctrl-C no longer reaches a branch),
 [[design/agents|agents]] (the tool-view derivation and the uniform node),
-[[decisions/260702_discuss-command|discuss-command]] (the sibling turn-boundary
-command),
 [[decisions/260702_subagent-memory-modes|subagent-memory-modes]] (the mnemon
 inheritance a branch reuses). Maps: [[map/exarch/agent|agent]],
 [[map/exarch/tools|tools]], [[map/exarch/frontend|frontend]].

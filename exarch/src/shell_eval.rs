@@ -11,11 +11,17 @@
 //! the session log in full.  Nothing streams live to the user; the rail
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
-use crate::agent_registry::AgentRegistry;
+pub mod builtins;
+pub mod skill;
+pub mod tools;
+
+use crate::fleet::registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
-use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
-use crate::transcript::Transcript;
+use crate::bus::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
+use crate::agent::transcript::Transcript;
+use base64::Engine;
 use ral_core::Value as RalValue;
+use ral_core::serial::FOValue;
 use ral_core::types::DeferredSink;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -101,11 +107,11 @@ pub(crate) enum PinKind {
 #[derive(Clone, Debug)]
 pub struct PinDigest {
     pub(crate) kind: PinKind,
-    pub(crate) card: crate::card::Card,
+    pub(crate) card: crate::bus::card::Card,
 }
 
 impl PinDigest {
-    fn new(key: &str, card: crate::card::Card) -> Self {
+    pub(crate) fn new(key: &str, card: crate::bus::card::Card) -> Self {
         Self {
             kind: if is_commitment_pin(key) {
                 PinKind::Commitment
@@ -150,6 +156,89 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
     key == SERVICES_PIN_KEY
 }
 
+/// Read a protected commitment pin for host-owned verification.  Model
+/// code cannot write this prefix through `surface`; verifier orchestration
+/// reads the saved card here and treats it as data.  Read directly off the
+/// captured `PinDigests` Arc by the `` `commit-open ``/`` `commit-verify ``
+/// desk arms ([`crate::fleet::desk::ExarchDesk`]), since a desk handler may only
+/// ever hold `&PinDigests`, never `&Agent`.
+pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::bus::card::Card, String> {
+    if !is_commitment_pin(key) {
+        return Err(format!(
+            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
+        ));
+    }
+    let m = pins
+        .lock()
+        .map_err(|_| "commitment pin register is unavailable".to_string())?;
+    match m.get(key) {
+        Some(pin) if pin.kind == PinKind::Commitment => Ok(pin.card.clone()),
+        Some(_) => Err(format!(
+            "`{key}` is pinned, but not as protected commitment state"
+        )),
+        None => Err(format!(
+            "no live commitment pin named `{key}`; did the verifier already pass, or was the session cleared?"
+        )),
+    }
+}
+
+/// Host projection for a writer's formalized commitment: set the
+/// protected pin in the session mirror.  Pure state — projecting it to the
+/// viewport is the caller's separate step
+/// ([`crate::agent::Agent::settle_commitment`]).  Refused if the key is
+/// already live: a commitment, once open, can only be closed by a verifier,
+/// never silently replaced.  Called directly off the captured `PinDigests`
+/// Arc by [`crate::agent::Agent::apply_commitment_settle`] when a settled
+/// `commit` child's tag opens the pin.
+pub(crate) fn set_commitment_pin(
+    pins: &PinDigests,
+    key: &str,
+    card: crate::bus::card::Card,
+) -> Result<(), String> {
+    if !is_commitment_pin(key) {
+        return Err(format!(
+            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
+        ));
+    }
+    let mut m = pins
+        .lock()
+        .map_err(|_| "commitment pin register is unavailable".to_string())?;
+    if m.contains_key(key) {
+        return Err(format!(
+            "`{key}` is already a live commitment; verify or clear it before opening a new one"
+        ));
+    }
+    m.insert(
+        key.to_string(),
+        PinDigest {
+            kind: PinKind::Commitment,
+            card,
+        },
+    );
+    drop(m);
+    Ok(())
+}
+
+/// Host projection for a verifier pass: clear the protected pin in the
+/// session mirror.  Pure state — projecting the clear to the viewport is
+/// the caller's separate step ([`crate::agent::Agent::settle_commitment`]).
+/// The model cannot reach this path; ordinary `surface` unpins for the same
+/// prefix are rejected above ([`reject_protected_pin`]).  Called directly
+/// off the captured `PinDigests` Arc by
+/// [`crate::agent::Agent::apply_commitment_settle`] when a settled
+/// `verify-commitment` child's tag clears the pin.
+pub(crate) fn unset_commitment_pin(pins: &PinDigests, key: &str) -> Result<bool, String> {
+    if !is_commitment_pin(key) {
+        return Err(format!(
+            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
+        ));
+    }
+    let mut m = pins
+        .lock()
+        .map_err(|_| "commitment pin register is unavailable".to_string())?;
+    Ok(m.remove(key).is_some())
+}
+
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share.
 ///
@@ -163,12 +252,12 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 ///     paired with the [`Card`] composed from it ([`Kind::Io`]);
 ///   * a `` `notice `` core's own ready-boundary housekeeping pushes (a
 ///     worker reap, an idle-binding prune, a large-binding warning),
-///     decoded into a [`Notice`](crate::card::Notice) and paired with its
+///     decoded into a [`Notice`](crate::bus::card::Notice) and paired with its
 ///     card ([`Kind::Notice`]);
 ///   * a render document a ral kit composed (a `` `card `` variant of Bertin
 ///     marks), decoded into a [`Card`] ([`Kind::Card`]); and
 ///   * the `` `done `` completion event a detached worker flushes at the end of
-///     its deferred batch, decoded into its [`DoneOutcome`](crate::card::DoneOutcome)
+///     its deferred batch, decoded into its [`DoneOutcome`](crate::bus::card::DoneOutcome)
 ///     and paired with its one-line outcome [`Card`] ([`Kind::Done`]).
 ///
 /// A fifth shape rides the same channel as a render *disposition*, tried
@@ -183,8 +272,8 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 /// record always reaches the bus beside its rendering.  A value that is none
 /// of these returns `None` and is dropped.
 ///
-/// [`Card`]: crate::card::Card
-/// [`IoEvent`]: crate::card::IoEvent
+/// [`Card`]: crate::bus::card::Card
+/// [`IoEvent`]: crate::bus::card::IoEvent
 pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     if let Some((key, body)) = value_to_pin(ev) {
         Some(match body {
@@ -194,8 +283,8 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     } else if let Some(event) = value_to_io(ev) {
         let card = io_card(&event);
         Some(Kind::Io { event, card })
-    } else if let Some(notice) = crate::card::value_to_notice(ev) {
-        let card = crate::card::notice_card(&notice);
+    } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
+        let card = crate::bus::card::notice_card(&notice);
         Some(Kind::Notice { notice, card })
     } else if let Some(card) = value_to_card(ev) {
         Some(Kind::Card(card))
@@ -210,7 +299,7 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
 /// Decode one surfaced value and apply the protected-pin guard: the [`Kind`]
 /// to emit, or `None` when the value decodes to nothing or is a rejected
 /// protected-pin write.  Shared by the live and deferred-batch surface sinks.
-fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
+pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
     let kind = decode_surface(val)?;
     (!reject_protected_pin(&kind, emit)).then_some(kind)
 }
@@ -226,7 +315,7 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
     };
     let msg = if is_commitment_pin(key) {
         format!(
-            "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify_commitment` to check a live commitment"
+            "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify-commitment` to check a live commitment"
         )
     } else {
         format!(
@@ -249,14 +338,16 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
 /// tab of its own.
 ///
 /// The generation guard mirrors the async `agent`'s exactly: it captures the
-/// [`AgentRegistry`]'s generation at construction and, in [`Self::deliver`],
-/// re-reads the live counter.  A `/clear` between spawn and flush bumps that
-/// counter (`AgentRegistry::clear`), so a stale batch is dropped before it can
-/// reach a rebuilt context — the session epoch the ADR calls for, reusing the
-/// one counter rather than minting a parallel one.  The inbox's `clear` empties
-/// the deque, so a batch already queued when `/clear` runs is dropped for free.
+/// [`AgentRegistry`]'s generation at construction and stamps every batch
+/// [`Self::deliver`] flushes with it, rather than re-checking the live
+/// counter itself — a worker settling mid-`/clear` cannot decide its own
+/// staleness (its compose and its push are two separate steps a `/clear` can
+/// fall between), so the batch always reaches the inbox and the consuming
+/// edge (`Agent::admits`) rejects it there if the generation it carries has
+/// fallen behind, exactly as a stale [`AgentResult`](crate::bus::AgentResult)
+/// is rejected.
 ///
-/// [`Card`]: crate::card::Card
+/// [`Card`]: crate::bus::card::Card
 struct InboxDeferred {
     /// The session's own inbox sender; a spawn worker flushes its deferred
     /// surface batch into the agent that ran the spawn.
@@ -264,9 +355,8 @@ struct InboxDeferred {
     /// The root session id, stamped on every batch so a spawn worker's cards
     /// render in the root viewport.
     root: AgentId,
-    registry: AgentRegistry,
-    /// The registry generation captured at construction; a batch flushed after
-    /// a `/clear` advanced it is dropped.
+    /// The registry generation captured at construction; carried on every
+    /// batch for the consuming edge to check.
     generation: u64,
     /// Reports a rejected batch through the existing error vocabulary
     /// (`Kind::Error`, recorded straight to the durable trace) — `deliver`
@@ -284,19 +374,13 @@ struct InboxDeferred {
 
 impl DeferredSink for InboxDeferred {
     fn deliver(&self, batch: Vec<ral_core::serial::FOValue>) {
-        // A `/clear` since this worker was spawned bumped the registry
-        // generation; its batch belongs to a context that no longer exists, so
-        // drop it rather than post it into the rebuilt session — the deferred
-        // twin of the async agent's stale-result rejection.
-        if self.registry.generation() != self.generation {
-            return;
-        }
         // Decode once, totally, at this door: the deferred batch carries
         // first-order values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
         if let Err(reject) = self.mailbox.push(InboxMsg::Surface {
             id: self.root,
             values,
+            generation: self.generation,
         }) {
             self.transcript.record(
                 self.root,
@@ -310,7 +394,7 @@ impl DeferredSink for InboxDeferred {
 
 /// Build the [`Arc<dyn DeferredSink>`] a tool turn installs: an
 /// [`InboxDeferred`] over `emit`'s session inbox, stamping batches with `root`
-/// and guarding them with `registry`'s current generation.
+/// and `registry`'s generation at this moment.
 ///
 /// Cloned into the
 /// worker's turn state by core, so a nested `spawn` inherits it and flushes at
@@ -323,7 +407,6 @@ pub fn deferred_sink(
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root,
-        registry: registry.clone(),
         generation: registry.generation(),
         transcript: emit.transcript(),
     })
@@ -335,13 +418,14 @@ pub fn deferred_sink(
 /// Routes through the transport seam: builds a `Source` [`Turn`], dispatches
 /// it, drains surface events to the bus, and converts the terminal
 /// [`Report`] into the structured result.
-pub fn run_shell(
+pub(crate) fn run_shell(
     transport: &dyn ral_core::transport::Transport,
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
     emit: &Emitter,
     pins: Option<&PinDigests>,
+    desk: Option<&Arc<crate::fleet::desk::ExarchDesk>>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -372,43 +456,33 @@ pub fn run_shell(
 
     // Dispatch and drain to the Report, rendering surface classes to the bus.
     // The live sink tracks pins; the deferred batch (a deferred worker's
-    // flush) renders identically but never touches the pin mirror.
+    // flush) renders identically but never touches the pin mirror. Shared
+    // with the identity `DeskBinding` adapter (`desk.rs`) so the two paths
+    // cannot diverge.
+    let applier = crate::fleet::desk::SurfaceApplier {
+        emit: emit.clone(),
+        pins: pins.cloned(),
+    };
     let report = ral_core::transport::dispatch_to_report(
         transport,
         turn,
-        |val| {
-            if let Some(kind) = accepted_surface(&RalValue::from(val), emit) {
-                if let Some(pins) = pins
-                    && let Ok(mut m) = pins.lock()
-                {
-                    match &kind {
-                        Kind::Pin { key, card } => {
-                            m.insert(key.clone(), PinDigest::new(key, card.clone()));
-                        }
-                        Kind::Unpin { key } => {
-                            m.remove(key);
-                        }
-                        _ => {}
-                    }
-                }
-                emit.emit(kind);
-            }
-        },
-        |batch| {
-            for val in batch {
-                if let Some(kind) = accepted_surface(&RalValue::from(val), emit) {
-                    emit.emit(kind);
-                }
-            }
-        },
-        // No desk until the migration ADR lands: a wire engine's enquiry gets
-        // the same honest absence the identity path's missing
-        // `TurnRequest.desk` answers with.
-        |_req| {
-            Err(ral_core::transport::EnquiryError {
+        |val| applier.live(val),
+        |batch| applier.deferred(batch),
+        // Dead under the identity transport (`transport.set_desk` answers a
+        // mid-dispatch `Shell::enquire` directly); live only for a wire
+        // engine's `Event::Enquiry`, per `dispatch_to_report`'s own doc.
+        // "One handler, two bindings": the identical `ExarchDesk::handle`
+        // this closure calls is the one `DeskBinding` wraps for the
+        // identity path (`docs/ral-wiki/decisions/260706_enquiry-channel.md`).
+        |req| match desk {
+            Some(desk) => desk.handle(req).map_err(|e| ral_core::transport::EnquiryError {
+                status: e.exit_code(),
+                message: e.message,
+            }),
+            None => Err(ral_core::transport::EnquiryError {
                 message: "this host answers no enquiries".into(),
                 status: 1,
-            })
+            }),
         },
     );
 
@@ -520,24 +594,6 @@ pub fn run_shell(
     }
 }
 
-/// Render a JSON value as text at JSON-speaking edges.
-///
-/// A JSON **string** passes through raw, so a markdown report keeps real
-/// newlines rather than the escaped `\n` a serializer would emit; any other
-/// shape is **pretty-printed** so its structure stays legible; a JSON **null**
-/// renders to nothing (`None`).
-///
-/// The `reply` tool uses this because its argument arrives as JSON already.
-/// A `ral` tool's `VALUE` section uses [`ral_value_to_text`] instead, preserving
-/// ral's own value syntax rather than detouring through JSON.
-pub(crate) fn json_to_text(json: &serde_json::Value) -> Option<String> {
-    match json {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        other => serde_json::to_string_pretty(other).ok(),
-    }
-}
-
 /// Render a ral value as the text the `VALUE` section carries.
 ///
 /// Top-level strings and bytes are payloads, so they pass through raw: file
@@ -552,12 +608,67 @@ const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::
     quote_bytes: true,
 };
 
-fn ral_value_to_text(value: &RalValue) -> Option<String> {
+pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
     match value {
         RalValue::Unit => None,
         RalValue::String(s) => Some(s.clone()),
         RalValue::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
         other => Some(ral_core::builtins::pretty_print(other, 0, &VALUE_PRINT_PARAMS)),
+    }
+}
+
+/// Project a `reply`'s first-order payload to the JSON a user-facing edge
+/// (the headless `result`, a commitment writer/verifier's structured
+/// decision) reads — **not** [`FOValue`]'s own `serde`/[`Serialize`] impl,
+/// which is the transport encoding: internally tagged by `kind`, floats
+/// carried by IEEE-754 bits (`core/src/serial.rs:31–84`).  That encoding
+/// would break the promise this projection keeps: a string reply stays a
+/// bare JSON string, and a structured one stays ordinary JSON, not a
+/// `{"kind":"string","value":"…"}` wrapper.
+///
+/// The policy, one arm per [`FOValue`] variant:
+/// - `Unit` → `null`; `Bool`/`Int` → the JSON scalar.
+/// - `Float` → a JSON number for a finite value; JSON has no representation
+///   for NaN or ±∞, so a non-finite float crosses as the string `"NaN"`,
+///   `"Infinity"`, or `"-Infinity"`.
+/// - `String` → the string, raw.
+/// - `Bytes` → a base64-encoded string (JSON has no byte-string type).
+/// - `List` → an array; `Map` → an object, key order preserved.
+/// - `Variant` with a payload → a single-key object `{label: payload}`;
+///   a payload-less variant → the bare label as a string.
+///
+/// [`Serialize`]: serde::Serialize
+pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
+    match v {
+        FOValue::Unit => serde_json::Value::Null,
+        FOValue::Bool { value } => serde_json::Value::Bool(*value),
+        FOValue::Int { value } => serde_json::Value::Number((*value).into()),
+        FOValue::Float { value } if value.is_nan() => serde_json::Value::String("NaN".into()),
+        FOValue::Float { value } if value.is_infinite() => serde_json::Value::String(
+            if *value > 0.0 { "Infinity" } else { "-Infinity" }.into(),
+        ),
+        FOValue::Float { value } => serde_json::Number::from_f64(*value)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        FOValue::String { value } => serde_json::Value::String(value.clone()),
+        FOValue::Bytes { value } => {
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(value))
+        }
+        FOValue::List { items } => serde_json::Value::Array(items.iter().map(user_json).collect()),
+        FOValue::Map { entries } => serde_json::Value::Object(
+            entries.iter().map(|(k, v)| (k.clone(), user_json(v))).collect(),
+        ),
+        FOValue::Variant { label, payload: Some(p) } => {
+            let mut m = serde_json::Map::new();
+            m.insert(label.clone(), user_json(p));
+            serde_json::Value::Object(m)
+        }
+        FOValue::Variant { label, payload: None } => serde_json::Value::String(label.clone()),
+        #[allow(
+            clippy::uninhabited_references,
+            reason = "NoExt is uninhabited, so this arm never actually runs; the dereference \
+                      exhaustiveness needs is never performed at runtime"
+        )]
+        FOValue::Ext(x) => match *x {},
     }
 }
 
@@ -586,7 +697,7 @@ mod tests {
     //! mobile-install contract.
 
     use super::*;
-    use crate::agent_builtins;
+    use crate::shell_eval::builtins;
     use crate::bus::{BusReceiver, Emitter, Inbox, channel};
     use ral_core::Shell;
     use ral_core::types::Capabilities;
@@ -611,8 +722,8 @@ mod tests {
     /// `cargo test`, and not under test here).
     fn fresh_shell() -> Shell {
         let mut shell = ral_core::driver::boot_shell(ral_core::io::TerminalState::default(), &PRELUDE);
-        agent_builtins::install_on(&mut shell);
-        agent_builtins::install_agent_library(&mut shell).expect("embedded agent library");
+        builtins::install_on(&mut shell);
+        builtins::install_agent_library(&mut shell).expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);
         shell
     }
@@ -653,7 +764,7 @@ mod tests {
             ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
         );
         let transport = ral_core::transport::IdentityTransport::new(taken);
-        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None);
+        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None, None);
         // Recover the (now-mutated) shell so `let`/`cd`/binding state persists
         // into the caller's next turn — the across-calls contract these tests pin.
         *shell = transport.into_shell();
@@ -1174,7 +1285,7 @@ keep-bottom
                 ]))),
             }),
             Some(Kind::Notice {
-                notice: crate::card::Notice::Reap { .. },
+                notice: crate::bus::card::Notice::Reap { .. },
                 ..
             })
         ));
@@ -1202,7 +1313,7 @@ keep-bottom
                 ]))),
             }),
             Some(Kind::Done {
-                outcome: crate::card::DoneOutcome::Ok,
+                outcome: crate::bus::card::DoneOutcome::Ok,
                 ..
             })
         ));
@@ -1265,7 +1376,7 @@ keep-bottom
         let (emit, rx) = dummy_emitter();
         let protected = Kind::Pin {
             key: "commitment:abc".into(),
-            card: crate::card::Card(Vec::new()),
+            card: crate::bus::card::Card(Vec::new()),
         };
         assert!(reject_protected_pin(&protected, &emit));
         let event = rx.try_recv().expect("rejection should emit an error");
@@ -1289,7 +1400,7 @@ keep-bottom
         let (emit, rx) = dummy_emitter();
         let protected = Kind::Pin {
             key: SERVICES_PIN_KEY.to_string(),
-            card: crate::card::Card(Vec::new()),
+            card: crate::bus::card::Card(Vec::new()),
         };
         assert!(reject_protected_pin(&protected, &emit));
         let event = rx.try_recv().expect("rejection should emit an error");
@@ -1299,36 +1410,46 @@ keep-bottom
         );
     }
 
-    /// The `InboxDeferred` posts a deferred worker's batch as an
-    /// `InboxMsg::Surface` stamped with the root id — *unless* a `/clear` has
-    /// advanced the registry generation since the sink was built, in which
-    /// case the batch belongs to a context that no longer exists and is dropped
-    /// (the deferred twin of the async agent's stale-result rejection).
+    /// The `InboxDeferred` always posts a deferred worker's batch as an
+    /// `InboxMsg::Surface` stamped with the root id and its own construction-time
+    /// generation — including a batch flushed after a `/clear` advanced the
+    /// registry past it. Staleness is not this sink's call: it is decided at
+    /// the consuming edge (`Agent::admits`), exactly as a stale `AgentResult`
+    /// is, so the sink itself neither checks nor withholds.
     #[test]
-    fn inbox_deferred_pushes_then_drops_after_clear() {
+    fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {
         let registry = AgentRegistry::new();
         let inbox = Inbox::new();
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
         let deferred = deferred_sink(&emit, 7, &registry);
+        let born = registry.generation();
 
-        // A fresh batch reaches the inbox, stamped with the root id (7).
+        // A fresh batch reaches the inbox, stamped with the root id (7) and
+        // the generation live at construction.
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.drain_turn() {
-            Some(crate::bus::Turn::Surface { id, .. }) => {
+            Some(crate::bus::Turn::Surface { id, generation, .. }) => {
                 assert_eq!(id, 7, "the batch is stamped with the root session id");
+                assert_eq!(generation, born, "stamped with the sink's birth generation");
             }
             other => panic!("a delivered batch surfaces as Turn::Surface, got {other:?}"),
         }
 
-        // A `/clear` bumps the registry generation; the sink captured the
-        // old one, so a later flush is dropped rather than posted.
+        // A `/clear` bumps the registry generation past the sink's captured
+        // one, but a later flush still reaches the inbox, carrying the now-stale
+        // generation for the consuming edge to reject.
         registry.clear_subtree(7);
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
-        assert!(
-            inbox.is_empty(),
-            "a batch flushed after /clear advanced the generation is dropped"
-        );
+        match inbox.drain_turn() {
+            Some(crate::bus::Turn::Surface { generation, .. }) => {
+                assert_eq!(
+                    generation, born,
+                    "the post-clear flush still carries its stale birth generation"
+                );
+            }
+            other => panic!("a post-clear flush still reaches the inbox, got {other:?}"),
+        }
     }
 
     /// Colour suppression reaches spawned commands through the
@@ -1723,7 +1844,7 @@ return !{{length $hits}}"
     /// target's mode/symlink/durability that a hand-rolled temp-file persist dropped.
     #[test]
     fn edit_replace_surfaces_a_write_io_event_with_diff() {
-        use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
@@ -1821,7 +1942,7 @@ return !{{length $hits}}"
     /// The `IoEvent`s carried by the captured `Kind::Io` events, in order —
     /// the structural effect records the gap tests assert on without caring
     /// about the card composed beside each.
-    fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::card::IoEvent> {
+    fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::bus::card::IoEvent> {
         kinds
             .iter()
             .filter_map(|k| match k {
@@ -1851,7 +1972,7 @@ return !{{length $hits}}"
     /// is a builtin, not an external image.
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
-        use crate::card::IoEvent;
+        use crate::bus::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-read", "a", "hello\n");
 
@@ -1882,7 +2003,7 @@ return !{{length $hits}}"
     /// `Kind::Io` carrying a committed `Write` event reaches the bus.
     #[test]
     fn bare_write_redirect_surfaces_one_committed_write_card() {
-        use crate::card::{IoEvent, WriteMode, WriteOutcome};
+        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome};
         let mut shell = fresh_shell();
         // A fresh dir with no fixture file: the write creates the target.
         let dir = std::env::temp_dir().join(format!("exarch-cov-write-{}", std::process::id()));
@@ -1931,7 +2052,7 @@ return !{{length $hits}}"
     /// for any `>` redirect with no builtin required.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
-        use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
 
@@ -1988,7 +2109,7 @@ return !{{length $hits}}"
     /// write would.
     #[test]
     fn bare_write_redirect_over_oversized_existing_file_falls_back_to_listing() {
-        use crate::card::{IoEvent, WriteOutcome, io_card};
+        use crate::bus::card::{IoEvent, WriteOutcome, io_card};
         let mut shell = fresh_shell();
         // Comfortably past core's 64KiB (65536-byte) read cap.
         let big = "x".repeat(70_000);
@@ -2034,7 +2155,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn bare_external_surfaces_one_exec_card() {
-        use crate::card::{ExecOutcome, IoEvent};
+        use crate::bus::card::{ExecOutcome, IoEvent};
         let mut shell = fresh_shell();
 
         let (r, kinds) = run_capturing(&mut shell, "/usr/bin/true");
@@ -2069,7 +2190,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
-        use crate::card::IoEvent;
+        use crate::bus::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
@@ -2105,7 +2226,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn cat_redirect_surfaces_read_then_exec_in_order() {
-        use crate::card::{ExecOutcome, IoEvent};
+        use crate::bus::card::{ExecOutcome, IoEvent};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 
@@ -2190,11 +2311,11 @@ return !{{length $hits}}"
     /// against `event_record` directly — not a TUI render.
     #[test]
     fn io_event_record_carries_structural_event_not_card() {
-        use crate::card::{IoEvent, io_card};
+        use crate::bus::card::{IoEvent, io_card};
         let event = IoEvent::Write {
             path: "b.rs".into(),
-            mode: crate::card::WriteMode::Append,
-            outcome: crate::card::WriteOutcome::Committed,
+            mode: crate::bus::card::WriteMode::Append,
+            outcome: crate::bus::card::WriteOutcome::Committed,
             new_bytes: None,
             old_bytes: None,
         };
@@ -2203,7 +2324,7 @@ return !{{length $hits}}"
             event,
             card,
         };
-        let rec = crate::transcript::event_record(7, 3, &kind).expect("an io event records");
+        let rec = crate::agent::transcript::event_record(7, 3, &kind).expect("an io event records");
 
         assert_eq!(rec["kind"], "io", "the record is tagged io");
         // The raw structural event survives, tagged by its `io` field with the
@@ -2218,38 +2339,6 @@ return !{{length $hits}}"
             rec.get("card").is_none(),
             "the operational trace drops the rendered card, got {rec:?}"
         );
-    }
-
-    /// A JSON string renders raw — no escaping — so a markdown report keeps
-    /// real newlines rather than literal `\n`.  This is the shape a `reply`
-    /// payload uses.
-    #[test]
-    fn json_to_text_passes_a_string_through_raw() {
-        let v = serde_json::json!("# Report\nline one\nline two");
-        assert_eq!(
-            super::json_to_text(&v).as_deref(),
-            Some("# Report\nline one\nline two"),
-        );
-    }
-
-    /// A JSON object/array is pretty-printed, so its structure stays legible —
-    /// the structured-findings case for `reply`.
-    #[test]
-    fn json_to_text_pretty_prints_structured_values() {
-        let v = serde_json::json!({ "findings": ["a", "b"] });
-        let out = super::json_to_text(&v).expect("an object renders");
-        assert!(out.contains("\"findings\""));
-        assert!(
-            out.contains('\n'),
-            "pretty-printing keeps the shape on lines"
-        );
-    }
-
-    /// A JSON null renders to nothing — the empty-reply case that settles
-    /// `AgentOutcome::Empty`.
-    #[test]
-    fn json_to_text_renders_null_to_nothing() {
-        assert_eq!(super::json_to_text(&serde_json::Value::Null), None);
     }
 
     #[test]
@@ -2289,5 +2378,104 @@ return !{{length $hits}}"
             out.contains('\n'),
             "wide structures should clip on useful lines"
         );
+    }
+
+    // ── `user_json` ──────────────────────────────────────────────────────
+    //
+    // The reply projection's policy table, one case per `FOValue` variant —
+    // deliberately **not** `FOValue`'s own `serde` encoding (internally
+    // tagged, floats by bits), which would break the promise that a string
+    // reply stays a raw JSON string and a structured one stays ordinary
+    // JSON.
+
+    #[test]
+    fn user_json_unit_is_null() {
+        assert_eq!(super::user_json(&FOValue::Unit), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn user_json_bool_and_int_are_scalars() {
+        assert_eq!(
+            super::user_json(&FOValue::Bool { value: true }),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            super::user_json(&FOValue::Int { value: -7 }),
+            serde_json::json!(-7)
+        );
+    }
+
+    #[test]
+    fn user_json_finite_float_is_a_json_number() {
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: 1.5 }),
+            serde_json::json!(1.5)
+        );
+    }
+
+    /// JSON has no representation for NaN or ±∞; each crosses as its own
+    /// named string rather than silently becoming `null`.
+    #[test]
+    fn user_json_non_finite_floats_become_named_strings() {
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: f64::NAN }),
+            serde_json::json!("NaN")
+        );
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: f64::INFINITY }),
+            serde_json::json!("Infinity")
+        );
+        assert_eq!(
+            super::user_json(&FOValue::Float { value: f64::NEG_INFINITY }),
+            serde_json::json!("-Infinity")
+        );
+    }
+
+    #[test]
+    fn user_json_string_passes_through_raw() {
+        assert_eq!(
+            super::user_json(&FOValue::String { value: "hi".into() }),
+            serde_json::json!("hi")
+        );
+    }
+
+    #[test]
+    fn user_json_bytes_become_a_base64_string() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hi");
+        assert_eq!(
+            super::user_json(&FOValue::Bytes { value: b"hi".to_vec() }),
+            serde_json::Value::String(encoded)
+        );
+    }
+
+    #[test]
+    fn user_json_list_becomes_an_array() {
+        let v = FOValue::List {
+            items: vec![FOValue::Int { value: 1 }, FOValue::Int { value: 2 }],
+        };
+        assert_eq!(super::user_json(&v), serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn user_json_map_becomes_an_object() {
+        let v = FOValue::Map {
+            entries: vec![("a".into(), FOValue::Int { value: 1 })],
+        };
+        assert_eq!(super::user_json(&v), serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn user_json_variant_with_payload_becomes_a_label_keyed_object() {
+        let v = FOValue::Variant {
+            label: "some".into(),
+            payload: Some(Box::new(FOValue::Int { value: 3 })),
+        };
+        assert_eq!(super::user_json(&v), serde_json::json!({"some": 3}));
+    }
+
+    #[test]
+    fn user_json_payload_less_variant_becomes_the_bare_label_string() {
+        let v = FOValue::Variant { label: "none".into(), payload: None };
+        assert_eq!(super::user_json(&v), serde_json::json!("none"));
     }
 }

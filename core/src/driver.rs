@@ -39,7 +39,7 @@ use crate::source::Span;
 use crate::transport::{Program, Turn};
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
-use crate::types::{DeferredSink, Desk, Settled, Shell, SurfaceSink, Value};
+use crate::types::{DeferredSink, Desk, Nursery, Settled, Shell, SurfaceSink, Value};
 use crate::types::{DefaultPolicy, Hook, HookName, HookSig, RegisterError, TerminalPolicy};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -136,7 +136,6 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude) -> Shell {
     let mut shell = Shell::new(terminal);
     shell.seed_default_env_vars();
     crate::builtins::register(&mut shell, prelude.comp());
-    crate::builtins::help::register_prelude_type_hints(prelude.schemes());
     shell
 }
 
@@ -278,6 +277,10 @@ pub struct TurnRequest<'a> {
     /// REPL, and exarch until the migration installs its desk). Same-thread
     /// children inherit it; deferred workers never receive it.
     pub desk: Option<Desk>,
+    /// The turn-local nursery for engine-side session forks, installed only
+    /// for this turn. `None` outside a host that installs one. Same-thread
+    /// children inherit it; deferred workers never receive it.
+    pub nursery: Option<Nursery>,
     /// Per-turn lifecycle hooks; `Box::new(())` for a host with none.
     pub lifecycle: Box<dyn TurnLifecycle + 'a>,
 }
@@ -523,6 +526,7 @@ impl Shell {
             surface,
             deferred,
             desk,
+            nursery,
             lifecycle,
         } = req;
 
@@ -571,6 +575,7 @@ impl Shell {
             surface,
             deferred,
             desk,
+            nursery,
         );
         let (result, status) = crate::turn::run_framed(
             self,

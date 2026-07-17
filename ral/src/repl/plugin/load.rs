@@ -181,7 +181,7 @@ fn check_no_binding_conflicts(
                 "alias '{name}' from plugin '{plugin_name}' conflicts with an existing alias"
             )));
         }
-        if shell.scope_lookup(name).is_some() || ral_core::builtins::is_builtin(name) {
+        if shell.scope_lookup(name).is_some() || shell.lookup_builtin(name).is_some() {
             return Err(load_err(format!(
                 "alias '{name}' from plugin '{plugin_name}' conflicts with a lexical or builtin binding"
             )));

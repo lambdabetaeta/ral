@@ -24,7 +24,6 @@ impl Shell {
     /// the language's built-in surface is reachable from the first
     /// command.
     pub fn new(terminal: crate::io::TerminalState) -> Self {
-        crate::builtins::ensure_core_builtins_registered();
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
             mobile: Mobile {
@@ -43,6 +42,7 @@ impl Shell {
                 surface: None,
                 deferred: None,
                 desk: None,
+                nursery: None,
                 cancel: root.child(),
                 loc: LocationCursor::default(),
                 deferred_lease: None,
@@ -58,6 +58,7 @@ impl Shell {
                 sources: crate::source::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),
+                library_docs: std::collections::HashMap::new(),
                 // Mint the session's lease from the same predicate that
                 // populates `startup_foreground`. `None` off Unix and whenever
                 // ral did not own the terminal foreground at startup.

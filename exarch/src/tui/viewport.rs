@@ -22,7 +22,7 @@ use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::AgentId;
-use crate::card::{Card, Hunk, ObservationKind};
+use crate::bus::card::{Card, Hunk, ObservationKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -551,10 +551,12 @@ impl Viewport {
         }
     }
 
-    /// Commit the turn's reasoning.  If a thinking block already exists for
-    /// this turn (no prompt separates it from the end), append to it so all
-    /// deliberation in one turn coalesces into one `∴` block.  Otherwise
-    /// insert a new thinking block before the trailing markdown run.
+    /// Commit a reasoning phase.  If the turn has a coalescing `∴` block
+    /// ([`Self::thinking_target`] — only prose or a prompt breaks the run,
+    /// tool calls do not), append to it: its provisional deltas are
+    /// superseded by this authoritative text and its header ticks in place.
+    /// Otherwise insert a new thinking block before the trailing markdown
+    /// run.
     /// `answer_chars` is the current turn's answer mass — the deliberation
     /// grain's say-side, so the committed `∴` block's think/say ratio
     /// reflects how dearly the answer was bought.
@@ -578,13 +580,32 @@ impl Viewport {
             && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len
     }
 
-    /// Append a live reasoning chunk from the model's thinking phase.
-    /// Grows the provisional thinking buffer; `thinking_seat` renders it above
-    /// the streaming answer seat until `commit_thinking` supersedes it with a
+    /// Append a live reasoning chunk from the model's thinking phase.  When
+    /// the turn already has a coalescing `∴` block ([`Self::thinking_target`])
+    /// the delta streams into that block's provisional buffer — its magnitude
+    /// ticks in place, nothing appears or moves.  Otherwise it grows the
+    /// provisional thinking buffer; `thinking_seat` renders it above the
+    /// streaming answer seat until `commit_thinking` supersedes it with a
     /// real block.
     pub(super) fn push_thinking(&mut self, text: &str) {
-        self.thinking.push_str(text);
+        if let Some(idx) = self.thinking_target() {
+            self.blocks[idx].push_provisional_thinking(text);
+        } else {
+            self.thinking.push_str(text);
+        }
         self.flat.dirty = true;
+    }
+
+    /// The block index the turn's reasoning coalesces into: the most recent
+    /// `∴` block with no prose or prompt after it.  Tool calls and other
+    /// chrome do not break the run — only an answer paragraph (the reader has
+    /// been spoken to since) or a new human turn seeds a fresh block.
+    fn thinking_target(&self) -> Option<usize> {
+        let idx = self.blocks.iter().rposition(Block::is_thinking)?;
+        let unbroken = !self.blocks[idx + 1..]
+            .iter()
+            .any(|b| b.is_markdown() || b.is_prompt());
+        unbroken.then_some(idx)
     }
 
     /// Push streamed assistant text; commit any fence-safe paragraphs at
@@ -705,18 +726,11 @@ impl Viewport {
         if text.trim().is_empty() {
             return;
         }
-        // Find the most recent Thinking block. If found and no Prompt
-        // separates it from the end (i.e. it belongs to the current turn),
-        // append to it. Otherwise insert before the trailing markdown run.
-        let existing = self.blocks.iter().rposition(Block::is_thinking);
-        if let Some(idx) = existing {
-            let blocked = self.blocks[idx..].iter().any(Block::is_prompt);
-            if !blocked {
-                self.blocks[idx].append_thinking(&text, answer_chars);
-                self.rewrite_log();
-                self.flat.dirty = true;
-                return;
-            }
+        if let Some(idx) = self.thinking_target() {
+            self.blocks[idx].append_thinking(&text, answer_chars);
+            self.rewrite_log();
+            self.flat.dirty = true;
+            return;
         }
         // No existing thinking block for this turn: insert before the trailing
         // markdown run, or push to the end if none.
@@ -1030,8 +1044,18 @@ impl Viewport {
                 );
             }
         }
-        let seat = self.streaming_seat();
+        let mut seat: Vec<Line<'static>> = self.streaming_seat().into_iter().collect();
         let committed = self.flat.rows.len();
+        // The seat continues the trailing answer run when there is one; when
+        // it instead follows a thinking seat or a non-markdown block, it opens
+        // a fresh run and wears the same blank separator a committing lead
+        // paragraph would.
+        if !seat.is_empty()
+            && self.trailing_markdown_start().is_none()
+            && committed + think.len() > 0
+        {
+            seat.insert(0, Line::default());
+        }
         let think_at = if think.is_empty() {
             committed
         } else {
@@ -1040,7 +1064,7 @@ impl Viewport {
         self.flat.virtual_think_at = think_at;
         self.flat.virtual_think_len = think.len();
         self.flat.virtual_think_widths = think.iter().map(Line::width).collect();
-        let total = committed + think.len() + usize::from(seat.is_some());
+        let total = committed + think.len() + seat.len();
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = max_off;
@@ -1075,12 +1099,7 @@ impl Viewport {
             think_at + think.len(),
             &self.flat.rows[think_at.min(committed)..],
         );
-        if let Some(s) = seat
-            && end > committed + think.len()
-            && self.offset <= committed + think.len()
-        {
-            lines.push(s);
-        }
+        extend_visible_lines(&mut lines, self.offset, end, committed + think.len(), &seat);
         RenderWindow {
             lines,
             offset: self.offset,
@@ -1296,7 +1315,7 @@ mod tests {
     /// that bounds it to a session exactly as it bounds the scrollback.
     #[test]
     fn pins_overwrite_in_place_and_keep_insertion_order() {
-        use crate::card::Mark;
+        use crate::bus::card::Mark;
         let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
         let keys = |vp: &Viewport| vp.pins().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
         let mut vp = viewport();

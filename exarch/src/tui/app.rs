@@ -20,9 +20,9 @@ use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
-use crate::card::IoEvent;
+use crate::bus::card::IoEvent;
 use crate::provider::{Provider, Usage};
-use crate::resources::{BusFigures, ViewFigures, ViewportFigures};
+use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{
     crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -157,7 +157,7 @@ impl App {
         } else {
             format!("{status_provider}/{}", p.model())
         };
-        self.context_window = crate::pricing::caps_or_default(p.model()).context_window;
+        self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
     }
 
     /// Bind the App's inbox to the session's own queue, so the input editor,
@@ -352,7 +352,10 @@ impl App {
             // elapsed-wait clock, so a consecutive Phase event simply
             // resets the bar to the new phase.
             Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
-            Kind::ToolCall { tool, cmd, summary } => {
+            // A genuine provider-boundary `ral` call and a desk verb's
+            // rail-identical [`Kind::HarnessCall`] render alike: the rail
+            // shows the acting name (`tool`/`verb`) either way.
+            Kind::ToolCall { tool, cmd, summary } | Kind::HarnessCall { verb: tool, cmd, summary } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| match summary {
@@ -364,7 +367,7 @@ impl App {
                     // boundary (`None`): present only so its result attaches there,
                     // never reaching back to clobber an earlier call's size bar.
                     None => {
-                        vp.push_plain_call(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd));
+                        vp.push_plain_call(tool, (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd));
                     }
                 });
             }
@@ -374,7 +377,9 @@ impl App {
             // its line count is the call's magnitude, attached to the
             // most-recent tool-call block as the collapsed header's
             // size-bar.
-            Kind::ToolResult(text) => self.with_viewport(id, |vp| vp.set_result_size(&text)),
+            Kind::ToolResult(text) | Kind::HarnessResult(text) => {
+                self.with_viewport(id, |vp| vp.set_result_size(&text));
+            }
             Kind::UserPromptEcho(text) => {
                 self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text));
             }
@@ -463,7 +468,7 @@ impl App {
                 let lingering = self.tabs.dying_map().len() as u64;
                 let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
                 let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
-                let frontend = crate::resources::frontend_rows(
+                let frontend = crate::agent::resources::frontend_rows(
                     ViewportFigures {
                         blocks,
                         rows,
@@ -481,8 +486,8 @@ impl App {
                         bytes: bus.bytes() as u64,
                     },
                 );
-                card.0.push(crate::resources::section_mark("frontend"));
-                card.0.push(crate::resources::rows_mark(&frontend));
+                card.0.push(crate::agent::resources::section_mark("frontend"));
+                card.0.push(crate::agent::resources::rows_mark(&frontend));
                 self.with_viewport(id, |vp| vp.push_card(card));
                 // One dim line per tombstoned view, right beside the fold —
                 // the `views.dead` row is a count; this is where each one's

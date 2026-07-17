@@ -29,4 +29,4 @@ Ratatui + Crossterm stack the long-term workbench would build on is now exercise
 in-repo by [[design/exarch-architecture|exarch]]'s full-screen TUI, though
 `ral`'s REPL has not adopted it.
 
-Full study: `dev/docs/260522_repl_design.md`. See also [[map/core|core]].
+See also [[map/core|core]].

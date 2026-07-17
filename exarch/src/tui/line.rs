@@ -12,10 +12,10 @@ use super::palette::{
     CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_GLYPHS, RAIL_W, READ_W, RED, RED_HOT,
     SLATE,
 };
-use crate::card::{
+use crate::bus::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
 };
-use crate::event::ProviderErrorRecord;
+use crate::agent::event::ProviderErrorRecord;
 use crate::provider;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -190,17 +190,11 @@ pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
 /// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
 /// reasoning's own magnitude — "how dearly bought" and "how much thinking".
 /// The reasoning prose itself stays folded until the block is dialed.
-pub(super) fn thinking_header(reasoning: &str, say_chars: u32) -> Vec<Line<'static>> {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-    )]
-    let think_chars = reasoning.chars().count() as u32;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-    )]
-    let think_lines = reasoning.lines().count() as u32;
+pub(super) fn thinking_header(
+    think_chars: u32,
+    think_lines: u32,
+    say_chars: u32,
+) -> Vec<Line<'static>> {
     vec![
         Line::default(),
         Line::from(vec![
@@ -517,7 +511,7 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
         Span::raw("  "),
         Span::styled(path.to_string(), Style::default().fg(Color::White)),
         Span::raw("  "),
-        size_bar(crate::card::hunk_magnitude(hunks)),
+        size_bar(crate::bus::card::hunk_magnitude(hunks)),
         Span::raw("  "),
         grain_run(
             count_rows(hunks, |r| matches!(r, Row::Add(_))),
@@ -1330,7 +1324,7 @@ fn wait_field(secs: u64) -> FieldRow {
     FieldRow {
         label: "retry-after".into(),
         value: FieldValue::Inline(vec![
-            Span::raw(format!("{}  ", crate::resources::hms(secs, " "))),
+            Span::raw(format!("{}  ", crate::agent::resources::hms(secs, " "))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
         ]),
     }

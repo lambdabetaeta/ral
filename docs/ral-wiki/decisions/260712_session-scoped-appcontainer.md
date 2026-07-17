@@ -14,8 +14,7 @@ status: superseded
 **The Windows OS sandbox is one AppContainer profile per shell session, with
 filesystem authority expressed as grant/deny ACEs stamped for the session's
 container SID — a close, attributed imitation of MXC's Tier-3 processcontainer
-backend rather than a vendored dependency.** Recorded in
-`dev/docs/260712_windows_port.md` §W1; realised in
+backend rather than a vendored dependency.** Realised in
 `core/src/sandbox/windows/{appcontainer,dacl,session}.rs`.
 
 ## Context

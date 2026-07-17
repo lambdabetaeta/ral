@@ -26,8 +26,7 @@ use crate::typecheck::builtins::BuiltinTypeRule::{Scheme, Sig};
 use crate::typecheck::builtins::{scheme, sig};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::sync::{Arc, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock};
 
 mod codecs;
 mod collections;
@@ -130,8 +129,8 @@ macro_rules! builtin_registry {
         /// with, expanded from the registry into a single static slice.
         ///
         /// Installed into every fresh [`Shell`] by [`Shell::new`] (via
-        /// [`Shell::install_builtins`]) and registered globally for
-        /// typecheck-time lookups by [`ensure_core_builtins_registered`].
+        /// [`Shell::install_builtins`]), whose builtin table the
+        /// typechecker reads directly — no separate lookup path.
         pub static CORE_BUILTINS: &[BuiltinEntry] = &[
             $(
                 $(#[$meta])*
@@ -408,12 +407,23 @@ builtin_registry! {
     Explain { names: ["explain"], arity: 1, ty: Sig(sig::EXPLAIN),
         doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
         call: |args, shell| Ok(help::builtin_explain(args, shell)), },
-    // `_ed-*` builtins (16 entries) are registered by the `ral` crate's
-    // host-builtins table at REPL startup; see
-    // `ral::repl::plugin_ed_builtins::HOST_BUILTINS`.
+    // `_ed-*` builtins (16 entries) are installed into the REPL's own
+    // shell at startup; see
+    // `ral::repl::plugin_ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], arity: 0, ty: Scheme(None, scheme::pure_bool),
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
         call: |_args, _shell| Ok(Value::Bool(crate::ansi::use_ui_color())), },
+}
+
+/// A [`BuiltinTable`](crate::types::BuiltinTable) seeded with [`CORE_BUILTINS`].
+///
+/// The host-less surface a shell-free checker (e.g.
+/// [`SessionSchemes`](crate::typecheck::SessionSchemes)'s manual
+/// `Default`) type-checks against, absent any host dressing.
+pub fn core_builtin_table() -> crate::types::BuiltinTable {
+    let mut table = crate::types::BuiltinTable::default();
+    table.install_static(CORE_BUILTINS);
+    table
 }
 
 /// `watch` — the detached-streaming concurrency builtin, kept out of
@@ -467,195 +477,6 @@ pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     doc: "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit.",
     body: BuiltinBody::Static(concurrency::builtin_service),
 }];
-
-// ─── Process-level builtin registry ────────────────────────────────────────
-//
-// Typecheck-time helpers ([`is_builtin`], [`builtin_doc`], scheme
-// lookup) resolve names without a `Shell`, so builtin sets register
-// here in addition to being installed into each shell's builtin table.
-// Identity is by storage: a static-slice address (idempotent for repeat
-// calls from the same boot path) or an `Arc<[…]>` pointer.
-
-/// One registered builtin set — either a process-static slice (the macro
-/// emission for [`CORE_BUILTINS`], or a host crate's static array) or a
-/// runtime-owned `Arc` whose closures capture host state.
-enum BuiltinSet {
-    Static(&'static [BuiltinEntry]),
-    Captured(Arc<[BuiltinEntry]>),
-}
-
-impl BuiltinSet {
-    fn entries(&self) -> &[BuiltinEntry] {
-        match self {
-            Self::Static(s) => s,
-            Self::Captured(a) => a,
-        }
-    }
-}
-
-static REGISTERED_BUILTINS: RwLock<Vec<BuiltinSet>> = RwLock::new(Vec::new());
-static CORE_BUILTINS_REGISTER: std::sync::Once = std::sync::Once::new();
-
-/// Register [`CORE_BUILTINS`] into the process-level registry the first
-/// time this is called.
-///
-/// Invoked from [`Shell::new`] and from every
-/// helper that consults the registry, so consumers don't need to
-/// remember a separate init step.
-pub fn ensure_core_builtins_registered() {
-    CORE_BUILTINS_REGISTER.call_once(|| {
-        REGISTERED_BUILTINS
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(BuiltinSet::Static(CORE_BUILTINS));
-    });
-}
-
-/// Register static host builtins.
-///
-/// Idempotent: re-registering the same
-/// `&'static` slice (by pointer identity) is a no-op.  Name collisions
-/// with already-registered builtins panic — host crates must own
-/// disjoint surfaces.
-///
-/// # Panics
-/// Panics if a name in `entries` collides with an already-registered
-/// builtin, or if a name appears twice within `entries`.
-pub fn register_builtins(entries: &'static [BuiltinEntry]) {
-    register_builtins_checked(entries).expect("builtin registration failed");
-}
-
-/// Fallible form of [`register_builtins`].
-///
-/// # Errors
-/// Returns `Err` if a name appears twice within `entries`, or if a name in
-/// `entries` collides with an already-registered builtin.
-pub fn register_builtins_checked(entries: &'static [BuiltinEntry]) -> Result<(), String> {
-    ensure_core_builtins_registered();
-    let mut sets = REGISTERED_BUILTINS
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
-    if sets.iter().any(|h| match h {
-        BuiltinSet::Static(s) => std::ptr::eq(*s, entries),
-        BuiltinSet::Captured(_) => false,
-    }) {
-        return Ok(());
-    }
-    check_builtin_collisions(entries, &sets)?;
-    sets.push(BuiltinSet::Static(entries));
-    drop(sets);
-    Ok(())
-}
-
-/// Register captured builtins (ones whose bodies hold runtime state).
-///
-/// # Panics
-/// Panics if a name in `entries` collides with an already-registered
-/// builtin, or if a name appears twice within `entries`.
-pub fn register_captured_builtins(entries: Arc<[BuiltinEntry]>) {
-    ensure_core_builtins_registered();
-    let mut sets = REGISTERED_BUILTINS
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
-    if sets.iter().any(|h| match h {
-        BuiltinSet::Captured(a) => Arc::ptr_eq(a, &entries) || same_builtin_names(a, &entries),
-        BuiltinSet::Static(_) => false,
-    }) {
-        return;
-    }
-    if let Err(e) = check_builtin_collisions(&entries, &sets) {
-        panic!("captured builtin registration failed: {e}");
-    }
-    sets.push(BuiltinSet::Captured(entries));
-}
-
-fn same_builtin_names(a: &[BuiltinEntry], b: &[BuiltinEntry]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .map(|entry| entry.name.as_ref())
-            .all(|name| b.iter().any(|entry| entry.name == name))
-}
-
-fn check_builtin_collisions(
-    new_entries: &[BuiltinEntry],
-    registered: &[BuiltinSet],
-) -> Result<(), String> {
-    let mut local = HashSet::new();
-    for entry in new_entries {
-        let name = entry.name.as_ref();
-        if !local.insert(name) {
-            return Err(format!(
-                "builtin `{name}` is registered twice in one builtin set"
-            ));
-        }
-        if registered
-            .iter()
-            .flat_map(|h| h.entries().iter())
-            .any(|existing| existing.name == name)
-        {
-            return Err(format!(
-                "builtin `{name}` conflicts with a registered builtin"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Walk registered builtins newest-first for a per-name entry.  The
-/// callback projects out a value that survives the lock release.
-fn with_entry<R>(name: &str, f: impl FnOnce(&BuiltinEntry) -> R) -> Option<R> {
-    ensure_core_builtins_registered();
-    let sets = REGISTERED_BUILTINS
-        .read()
-        .unwrap_or_else(PoisonError::into_inner);
-    sets.iter()
-        .rev()
-        .flat_map(|h| h.entries().iter())
-        .find(|e| e.name == name)
-        .map(f)
-}
-
-/// True if `name` is registered as a builtin.
-pub fn is_builtin(name: &str) -> bool {
-    with_entry(name, |_| ()).is_some()
-}
-
-/// Doc string for a registered name, or `None` if not installed.
-pub fn builtin_doc(name: &str) -> Option<&'static str> {
-    with_entry(name, |e| e.doc)
-}
-
-/// Fixed value-arg count; `None` for variadic / command-only entries
-/// and for unknown names.
-pub fn builtin_arity(name: &str) -> Option<usize> {
-    with_entry(name, BuiltinEntry::fixed_arity)?
-}
-
-/// Type-checker rule for a registered name.
-pub fn builtin_type_rule(name: &str) -> Option<BuiltinTypeRule> {
-    with_entry(name, |e| e.type_rule)
-}
-
-/// All registered builtin names, in registration order.  Captured
-/// entries must use `Cow::Borrowed` names so this returns
-/// `&'static str`.
-pub fn builtin_names() -> Vec<&'static str> {
-    ensure_core_builtins_registered();
-    let sets = REGISTERED_BUILTINS
-        .read()
-        .unwrap_or_else(PoisonError::into_inner);
-    let mut names: Vec<&'static str> = Vec::new();
-    let mut seen: HashSet<&'static str> = HashSet::new();
-    for entry in sets.iter().flat_map(|h| h.entries().iter()) {
-        if let Cow::Borrowed(s) = &entry.name
-            && seen.insert(*s)
-        {
-            names.push(*s);
-        }
-    }
-    drop(sets);
-    names
-}
 
 /// Synthesise a first-class thunk for a [`BuiltinEntry`] so a
 /// `$name` reference resolves to a function value.

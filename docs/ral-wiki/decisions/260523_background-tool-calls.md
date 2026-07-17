@@ -11,8 +11,7 @@ background while the parent turn proceeds, in the spirit of Claude Code's
 `run_in_background`. It maps the constraints — Provider lifetime, the bus
 channel, scope vs `spawn`, lifecycle and cancellation — and lays out a phased
 plan: two-pass staging, `Arc` the Provider, a backgroundable shell, auto-notify,
-a backgroundable agent, cleanup. Full study:
-`dev/docs/260523_background_tool_calls.md`.
+a backgroundable agent, cleanup.
 
 
 ## Landed

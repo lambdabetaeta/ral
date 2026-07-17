@@ -4,9 +4,11 @@
 //! One-shot bootstrap pieces that live for the lifetime of the process
 //! (or, for [`Scratch`], for the lifetime of one root session).
 //! Nothing here participates in the per-turn loop.  Per-session disk
-//! state (the canonical event log) lives in [`crate::event::AgentLog`].
+//! state (the canonical event log) lives in [`crate::agent::event::AgentLog`].
 
-use crate::{agent_builtins, cancel, shell_eval};
+use crate::agent::cancel;
+use crate::shell_eval;
+use crate::shell_eval::builtins;
 use ral_core::io::TerminalState;
 use ral_core::{Shell, diagnostic};
 use std::fs;
@@ -39,10 +41,9 @@ pub fn boot_shell() -> Shell {
     let terminal = probe_terminal();
     diagnostic::set_terminal(&terminal);
     let mut shell = ral_core::driver::boot_shell(terminal, &shell_eval::PRELUDE);
-    agent_builtins::install_on(&mut shell);
-    agent_builtins::install_agent_library(&mut shell)
+    builtins::install_on(&mut shell);
+    builtins::install_agent_library(&mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
-    ral_core::builtins::help::register_library_docs(agent_builtins::agent_library_docs());
     seed_no_color(&mut shell);
     shell.set_exit_hints(ral_core::exit_hints::ExitHints::from_text(include_str!(
         "../../data/exit-hints.txt"
@@ -54,7 +55,7 @@ pub fn boot_shell() -> Shell {
 /// call runs with stdout/stderr captured on a pipe — never a TTY — so
 /// conforming tools already emit no colour; these override user config
 /// and an inherited `CLICOLOR_FORCE` that *force* it.  That keeps a
-/// captured value byte-identical to the text [`crate::digest`] shows
+/// captured value byte-identical to the text [`crate::agent::digest`] shows
 /// the model; its ANSI strip remains the boundary guarantee for tools
 /// that ignore the convention.  Env-only, no ral scope binding: the
 /// agent has no reason to read these back.
@@ -183,8 +184,8 @@ pub fn log_run_dir(cwd: &str) -> io::Result<PathBuf> {
 
 /// The current time in whole unix seconds, or 0 if the clock is before the
 /// epoch. The one spelling shared by the run-dir stamp, the model cache's
-/// freshness check ([`crate::models`]), and the OAuth token expiry
-/// ([`crate::oauth`]).
+/// freshness check ([`crate::provider::models`]), and the OAuth token expiry
+/// ([`crate::provider::oauth`]).
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
