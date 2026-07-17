@@ -674,6 +674,7 @@ mod tests {
     /// signatures (token set, ladder un-ticked) together prove the chain
     /// is installed and a delivered SIGINT can only cancel, never force-exit.
     #[test]
+    #[ignore = "delivers a real process-wide SIGINT — driven in its own process by signal_delivery_tests_own_their_process"]
     fn boot_shell_restores_the_chain_after_handler_clobber() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
@@ -705,6 +706,7 @@ mod tests {
     /// exarch shell constructor resets the ladder before loading the
     /// library.
     #[test]
+    #[ignore = "invokes the SIGTERM handler, root-cancelling every published slot — driven in its own process by signal_delivery_tests_own_their_process"]
     fn clear_resets_the_escalation_ladder_on_reboot() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
@@ -743,6 +745,38 @@ mod tests {
         ral_core::process::clear();
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(scratch.path());
+    }
+
+    /// Drive the two `#[ignore]`d signal-delivery tests above in a child
+    /// process they own outright.  Delivered signals are process-wide — a
+    /// raised SIGINT cancels the process's published foreground turn, and
+    /// the SIGTERM handler root-cancels every published slot — so inside
+    /// the parallel test binary they terminate whatever *other* test
+    /// happens to be mid-turn.  The `SERIAL` lock cannot help: the victims
+    /// are readers that never know to take it.  Re-execing the test binary
+    /// filtered to exactly these tests gives them the singleton process the
+    /// signal machinery is designed around.
+    #[test]
+    fn signal_delivery_tests_own_their_process() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "agent::cancel::tests::boot_shell_restores_the_chain_after_handler_clobber",
+                "agent::cancel::tests::clear_resets_the_escalation_ladder_on_reboot",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("spawn the child test process");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // The pass-count check guards the filters: a renamed test would
+        // otherwise make the child silently run nothing and still exit 0.
+        assert!(
+            out.status.success() && stdout.contains("2 passed"),
+            "child signal tests failed or did not both run:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// An inner `publish` nested inside an outer one restores the outer

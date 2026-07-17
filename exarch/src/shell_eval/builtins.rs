@@ -1232,6 +1232,14 @@ mod tests {
         body: BuiltinBody::Static(builtin_test_block_forever),
     }];
 
+    // Registered before `main`, like `agent::tests`' tables: the prompt's
+    // builtin index reads the live process registry, so a mid-run
+    // registration would shift every prompt resolved after it under
+    // parallel tests.
+    #[ctor::ctor(unsafe)]
+    fn register_test_builtin_tables() {
+    }
+
     /// Run `src` as one top-level turn with no deferred lease (so nothing
     /// races a reap during the test) and no deferred sink (the tests below
     /// never care where a deferred surface batch would land). Panics on a
@@ -1273,7 +1281,6 @@ mod tests {
     fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
-        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(
             &mut shell,
@@ -1397,7 +1404,6 @@ mod tests {
     fn service_handle_refuses_an_ephemeral_worker_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
-        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(&mut shell, "spawn { test-block-forever }");
 

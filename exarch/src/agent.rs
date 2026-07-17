@@ -2624,6 +2624,20 @@ mod tests {
         Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
     }
 
+    // The prompt's builtin index enumerates the live process registry
+    // (`ral_core::builtins::builtin_names`), so a table registered mid-run
+    // shifts every prompt resolved after it — under parallel tests, a
+    // bookend test racing another test's first registration observes two
+    // different index lengths in one assertion. Registering this module's
+    // tables before `main` keeps the registry constant for the whole run;
+    // each test still `install_builtins` on its own shell.
+    #[ctor::ctor(unsafe)]
+    fn register_test_builtin_tables() {
+        ral_core::builtins::register_builtins(PANIC_BUILTINS);
+        ral_core::builtins::register_builtins(T2_CANCEL_BUILTINS);
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+    }
+
     /// A nullary builtin whose body panics — stands in for any Rust panic
     /// the evaluator can raise mid-tool-eval.
     fn builtin_panic_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
@@ -2662,7 +2676,6 @@ mod tests {
 
     #[test]
     fn worker_panic_preserves_completed_bindings_and_clean_context() {
-        ral_core::builtins::register_builtins(PANIC_BUILTINS);
         let dir = tmp("panic-recovery");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -3397,7 +3410,6 @@ mod tests {
     /// hard-terminate on this stale payload instead of completing.
     #[test]
     fn cancel_between_dispatch_and_drain_does_not_leak_reply_into_next_turn() {
-        ral_core::builtins::register_builtins(T2_CANCEL_BUILTINS);
         let dir = tmp("t2-cancel-mid-batch");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -3810,27 +3822,62 @@ mod tests {
         mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
     }
 
-    static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
-        name: Cow::Borrowed("test-clear-block-forever"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_test_clear_block_forever),
-        doc: "test-only: block until cancelled.",
-        body: BuiltinBody::Static(builtin_test_clear_block_forever),
-    }];
+    /// Gate for `test-clear-block-until-released`: until the owning test
+    /// stores `true`, the body never polls `process::check`, so it cannot
+    /// observe a cancellation. `/clear` cancels workers *before* it drops
+    /// the queued inbox, so a fast-settling worker can land its deferred
+    /// batch inside the clear and have it legitimately dropped there — the
+    /// latch holds the worker un-settleable until `/clear` has returned,
+    /// pinning the settled-*across*-the-clear interleaving the late-surface
+    /// test exists to exercise.
+    static CLEAR_RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// A worker body deaf to cancellation until [`CLEAR_RELEASE`] is set,
+    /// settling on it at the next poll after that.
+    fn builtin_test_clear_block_until_released(
+        _args: &[Value],
+        shell: &mut Shell,
+    ) -> Settled<Value> {
+        loop {
+            if CLEAR_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
+                ral_core::process::check(shell)?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] = &[
+        BuiltinEntry {
+            name: Cow::Borrowed("test-clear-block-forever"),
+            type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_test_clear_block_forever),
+            doc: "test-only: block until cancelled.",
+            body: BuiltinBody::Static(builtin_test_clear_block_forever),
+        },
+        BuiltinEntry {
+            name: Cow::Borrowed("test-clear-block-until-released"),
+            type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_test_clear_block_forever),
+            doc: "test-only: ignore cancellation until released, then settle on it.",
+            body: BuiltinBody::Static(builtin_test_clear_block_until_released),
+        },
+    ];
 
     /// `/clear` cancels every worker registered on the outgoing shell before
     /// replacing it — the durable class included: explicit destruction
     /// outranks every lease — and the rebuilt shell starts with an empty
-    /// registry.  A cancelled worker settling afterward still flushes its
-    /// deferred `done` batch through the deferred sink it captured before the
-    /// clear — the batch reaches the inbox regardless (`InboxDeferred` never
-    /// withholds it), stamped with its birth generation, and `Agent::admits`
-    /// is the edge that rejects it, exactly as it rejects a stale agent
-    /// result.
+    /// registry.  A cancelled worker settling *after the clear has finished*
+    /// still flushes its deferred `done` batch through the deferred sink it
+    /// captured before the clear — the batch reaches the inbox regardless
+    /// (`InboxDeferred` never withholds it), stamped with its birth
+    /// generation, and `Agent::admits` is the edge that rejects it, exactly
+    /// as it rejects a stale agent result.  The workers run deaf to
+    /// cancellation until [`CLEAR_RELEASE`] — without the latch, a worker
+    /// settling *inside* the clear (between the worker cancel and the inbox
+    /// drop) has its batch legitimately eaten by `Inbox::clear` instead,
+    /// and the straggler path this test pins goes unexercised.
     #[test]
     fn clear_cancels_registered_workers_and_drops_their_late_surface() {
         let dir = tmp("clear-cancels-workers");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         session
             .transport
             .shell_mut()
@@ -3842,10 +3889,15 @@ mod tests {
         // assertion below to mean anything.
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        let _ = session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        let _ = session.run_shell(
+            "c1".into(),
+            "spawn { test-clear-block-until-released }",
+            30,
+            &emit,
+        );
         let _ = session.run_shell(
             "c2".into(),
-            r#"service "clear-test" { test-clear-block-forever }"#,
+            r#"service "clear-test" { test-clear-block-until-released }"#,
             30,
             &emit,
         );
@@ -3880,10 +3932,13 @@ mod tests {
             "the rebuilt shell's registry must start empty"
         );
 
-        // Let the cancelled workers actually settle: each `process::check`
-        // loop observes the cancellation at its next poll, then flushes its
-        // deferred batch through the deferred sink captured before the clear.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // The clear has fully returned — its inbox drop is behind us — so
+        // release the workers: each observes the cancellation at its next
+        // poll and flushes its deferred batch through the sink it captured
+        // before the clear.  Generous budget: the suite runs oversubscribed
+        // in a VM.
+        CLEAR_RELEASE.store(true, std::sync::atomic::Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         for entry in &entries {
             loop {
                 if *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Running {
@@ -3923,7 +3978,6 @@ mod tests {
     fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
         let dir = tmp("cascade-cancels-sub-agent-workers");
         let parent = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .transport
@@ -3975,7 +4029,6 @@ mod tests {
     fn agent_drop_cancels_its_own_unclosed_workers() {
         let dir = tmp("drop-cancels-own-workers");
         let mut agent = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         agent
             .transport
             .shell_mut()
@@ -4068,7 +4121,6 @@ mod tests {
     fn ready_boundary_reap_notice_surfaces_at_the_next_turn() {
         let dir = tmp("drain-worker-reaps");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         session
             .transport
             .shell_mut()
@@ -4085,7 +4137,7 @@ mod tests {
         );
 
         // Past the idle bound, unpolled: the lease chain reaps it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while session.transport.shell_mut().shell.worker_count() > 0 {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -4137,7 +4189,6 @@ mod tests {
     fn reconcile_service_pins_births_and_retires_the_services_pin() {
         let dir = tmp("reconcile-service-pins");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         session
             .transport
             .shell_mut()
@@ -4492,7 +4543,6 @@ mod tests {
     /// `worker_panic_preserves_completed_bindings_and_clean_context` pins.
     #[test]
     fn panic_after_prune_does_not_resurrect_binding() {
-        ral_core::builtins::register_builtins(PANIC_BUILTINS);
         let dir = tmp("panic-after-prune");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -4761,7 +4811,7 @@ mod tests {
             .workers()
             .pop()
             .expect("the spawn registered its worker");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Completed {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -4841,7 +4891,6 @@ mod tests {
     fn resource_rows_survey_the_agents_accumulators() {
         let dir = tmp("resource-rows");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         session
             .transport
             .shell_mut()
@@ -4861,7 +4910,7 @@ mod tests {
             .into_iter()
             .find(|e| e.cmd == "<block>" && e.class == ral_core::types::LeaseClass::Worker)
             .expect("both spawns registered");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             let any_settled = session
                 .transport
@@ -4972,7 +5021,6 @@ mod tests {
     fn resource_rows_renew_no_lease() {
         let dir = tmp("resource-rows-no-renew");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         session
             .transport
             .shell_mut()
