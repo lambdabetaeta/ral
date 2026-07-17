@@ -551,10 +551,12 @@ impl Viewport {
         }
     }
 
-    /// Commit the turn's reasoning.  If a thinking block already exists for
-    /// this turn (no prompt separates it from the end), append to it so all
-    /// deliberation in one turn coalesces into one `∴` block.  Otherwise
-    /// insert a new thinking block before the trailing markdown run.
+    /// Commit the turn's reasoning.  If the latest thinking block is still
+    /// adjacent to the tail (only answer prose after it), append to it so one
+    /// deliberation phase coalesces into one `∴` block.  Otherwise — a tool
+    /// call or other barrier intervened — insert a new thinking block before
+    /// the trailing markdown run, keeping each phase in arrival order rather
+    /// than yanking its text up above the barrier.
     /// `answer_chars` is the current turn's answer mass — the deliberation
     /// grain's say-side, so the committed `∴` block's think/say ratio
     /// reflects how dearly the answer was bought.
@@ -705,13 +707,15 @@ impl Viewport {
         if text.trim().is_empty() {
             return;
         }
-        // Find the most recent Thinking block. If found and no Prompt
-        // separates it from the end (i.e. it belongs to the current turn),
-        // append to it. Otherwise insert before the trailing markdown run.
+        // Append to the most recent Thinking block only while it is still
+        // adjacent to the tail — nothing but answer prose after it, exactly
+        // where the live seat was rendering.  Any other block in between
+        // (a tool call, a prompt) is a barrier: appending across it would
+        // teleport the text above the barrier and make the screen jump.
         let existing = self.blocks.iter().rposition(Block::is_thinking);
         if let Some(idx) = existing {
-            let blocked = self.blocks[idx..].iter().any(Block::is_prompt);
-            if !blocked {
+            let adjacent = self.blocks[idx + 1..].iter().all(Block::is_markdown);
+            if adjacent {
                 self.blocks[idx].append_thinking(&text, answer_chars);
                 self.rewrite_log();
                 self.flat.dirty = true;
@@ -1030,8 +1034,18 @@ impl Viewport {
                 );
             }
         }
-        let seat = self.streaming_seat();
+        let mut seat: Vec<Line<'static>> = self.streaming_seat().into_iter().collect();
         let committed = self.flat.rows.len();
+        // The seat continues the trailing answer run when there is one; when
+        // it instead follows a thinking seat or a non-markdown block, it opens
+        // a fresh run and wears the same blank separator a committing lead
+        // paragraph would.
+        if !seat.is_empty()
+            && self.trailing_markdown_start().is_none()
+            && committed + think.len() > 0
+        {
+            seat.insert(0, Line::default());
+        }
         let think_at = if think.is_empty() {
             committed
         } else {
@@ -1040,7 +1054,7 @@ impl Viewport {
         self.flat.virtual_think_at = think_at;
         self.flat.virtual_think_len = think.len();
         self.flat.virtual_think_widths = think.iter().map(Line::width).collect();
-        let total = committed + think.len() + usize::from(seat.is_some());
+        let total = committed + think.len() + seat.len();
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = max_off;
@@ -1075,12 +1089,7 @@ impl Viewport {
             think_at + think.len(),
             &self.flat.rows[think_at.min(committed)..],
         );
-        if let Some(s) = seat
-            && end > committed + think.len()
-            && self.offset <= committed + think.len()
-        {
-            lines.push(s);
-        }
+        extend_visible_lines(&mut lines, self.offset, end, committed + think.len(), &seat);
         RenderWindow {
             lines,
             offset: self.offset,
