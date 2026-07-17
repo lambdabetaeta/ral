@@ -621,8 +621,13 @@ impl ExarchDesk {
         // is run here, ahead of `Agent::assemble`'s own, to size the
         // bookend the log records at construction.
         let child_id = crate::agent::fresh_id();
-        let system_prompt_bytes =
-            crate::prompt::resolve_builtin_index(&s.system_template, true, s.allow_schedule).len();
+        let system_prompt_bytes = crate::prompt::resolve_builtin_index(
+            &s.system_template,
+            &shell,
+            true,
+            s.allow_schedule,
+        )
+        .len();
         let child_log = {
             let parent_log = s.log.lock();
             let mut child_log = parent_log
@@ -1717,9 +1722,17 @@ mod tests {
             })
             .expect("the receipt must carry the child's log directory");
 
-        let expected =
-            crate::prompt::resolve_builtin_index(&template, true, desk.services.allow_schedule)
-                .len();
+        // The parked `shell` was already adopted into the spawned child by
+        // this point; a fresh fork off the same `root` carries an identical
+        // builtin table to stand in for it here.
+        let expected_shell = forkable_child_shell(&root);
+        let expected = crate::prompt::resolve_builtin_index(
+            &template,
+            &expected_shell,
+            true,
+            desk.services.allow_schedule,
+        )
+        .len();
         assert_eq!(
             recorded_system_prompt_bytes(std::path::Path::new(&log_dir)),
             expected,

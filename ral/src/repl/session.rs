@@ -119,9 +119,8 @@ impl Session {
         boot::install_default_prompt(&mut shell);
 
         // Install the host surface — the editor (`_ed-*`) builtins and
-        // `watch` — into this shell's builtin table.  The process registry
-        // already learned about both through `register_host_surface()` at
-        // process start, so the typechecker can see their schemes.
+        // `watch` — into this shell's builtin table, so the typechecker
+        // (which reads this same table) sees their schemes.
         shell.install_builtins(super::plugin_ed_builtins::ED_BUILTINS);
         shell.install_builtins(ral_core::builtins::WATCH_BUILTIN);
 

@@ -24,7 +24,6 @@ impl Shell {
     /// the language's built-in surface is reachable from the first
     /// command.
     pub fn new(terminal: crate::io::TerminalState) -> Self {
-        crate::builtins::ensure_core_builtins_registered();
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
             mobile: Mobile {

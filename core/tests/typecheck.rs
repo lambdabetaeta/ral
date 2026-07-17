@@ -15,7 +15,10 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     let comp = elaborate(&ast, std::collections::HashSet::default());
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .err()
     .unwrap_or_default()
@@ -395,6 +398,21 @@ fn builtin_equal() {
 #[test]
 fn builtin_exit_without_status() {
     ok("exit");
+}
+
+#[test]
+fn service_is_external_on_a_bare_core_table() {
+    // `service` is exarch's own surface (`SERVICE_BUILTIN`), never installed
+    // into a core-only table.  The call resolves as an external command —
+    // `String`, not the builtin's `Handle` return — so binding its result
+    // where a `Handle` is expected is a static mismatch: the checker is
+    // honest about what this session can actually run, not hard-coding the
+    // name.  The positive half — the same call typechecking once a shell
+    // installs `SERVICE_BUILTIN` — lives in exarch's suite.
+    has_error(
+        r#"let h = service "birth" { return 1 }; cancel $h"#,
+        "couldn't match",
+    );
 }
 
 #[test]
@@ -1139,7 +1157,10 @@ fn annotated(src: &str) -> Comp {
     let comp = elaborate(&ast, std::collections::HashSet::default());
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
 }
@@ -1418,7 +1439,10 @@ fn letrec_slot0(body: CompKind) -> Comp {
 fn typecheck_comp(comp: &Comp) -> Vec<String> {
     typecheck(
         comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::builtins::core_builtin_table(),
+        ),
     )
     .err()
     .unwrap_or_default()

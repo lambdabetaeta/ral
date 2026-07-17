@@ -814,14 +814,14 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn binding_claims_name(&self, name: &str) -> bool {
-        self.env.lookup_binding(name).is_some() || crate::builtins::is_builtin(name)
+        self.env.lookup_binding(name).is_some() || self.env.builtins.get(name).is_some()
     }
 
     pub(super) fn reject_handler_for_binding(&mut self, name: &str, verb: &'static str) -> bool {
         if !self.binding_claims_name(name) {
             return false;
         }
-        let kind = if crate::builtins::is_builtin(name) {
+        let kind = if self.env.builtins.get(name).is_some() {
             TypeErrorKind::CannotRedefineBuiltin {
                 name: name.to_string(),
                 verb,
@@ -862,9 +862,9 @@ impl Inferencer<'_> {
 
         // Builtin binding.  These are language names, not user handlers,
         // so they are consulted before aliases and `within [handlers:]`.
-        if !external_only && let Some(rule) = crate::builtins::builtin_type_rule(name) {
+        if !external_only && let Some(entry) = self.env.builtins.get(name) {
             use super::builtins::BuiltinTypeRule;
-            match rule {
+            match entry.type_rule {
                 BuiltinTypeRule::Scheme(_, factory) => {
                     let scheme = factory(&mut self.ctx.unifier);
                     return self.apply_scheme(&scheme, args);
@@ -1158,7 +1158,11 @@ impl Inferencer<'_> {
                     match self.env.lookup_binding(name).cloned() {
                         Some(scheme) => instantiate(&mut self.ctx.unifier, &scheme),
                         None => {
-                            match super::builtins::builtin_scheme(name, &mut self.ctx.unifier) {
+                            match super::builtins::builtin_scheme(
+                                &self.env.builtins,
+                                name,
+                                &mut self.ctx.unifier,
+                            ) {
                                 Some(scheme) => instantiate(&mut self.ctx.unifier, &scheme),
                                 None if self.env.lookup_handler(name).is_some() => {
                                     self.ctx.diagnose(TypeErrorKind::HandlerNotFirstClass {
@@ -1166,7 +1170,7 @@ impl Inferencer<'_> {
                                     });
                                     self.ctx.unifier.fresh_ty()
                                 }
-                                None if crate::builtins::is_builtin(name) => {
+                                None if self.env.builtins.get(name).is_some() => {
                                     self.ctx.diagnose(TypeErrorKind::BuiltinNotFirstClass {
                                         name: name.clone(),
                                     });

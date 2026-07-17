@@ -8,6 +8,7 @@ use super::flow::Settled;
 use super::value::Value;
 use crate::typecheck::builtins::BuiltinTypeRule;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -83,12 +84,35 @@ pub struct BuiltinTable {
 
 impl BuiltinTable {
     /// Install a group of builtin entries for this shell.
+    ///
+    /// # Panics
+    /// Panics if a name in `entries` collides with an already-installed
+    /// builtin, or if a name appears twice within `entries`.
     pub fn install_static(&mut self, entries: &'static [BuiltinEntry]) {
         self.install_arc(Arc::from(entries));
     }
 
     /// Install runtime-owned builtin entries for this shell.
+    ///
+    /// Idempotent: re-installing a set already installed here — by `Arc`
+    /// pointer identity, or by carrying the same names as a set already
+    /// installed — is a no-op. Name collisions against a *different*
+    /// installed set panic: host crates must own disjoint surfaces.
+    ///
+    /// # Panics
+    /// Panics if a name in `entries` collides with an already-installed
+    /// builtin, or if a name appears twice within `entries`.
     pub fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) {
+        if self
+            .sets
+            .iter()
+            .any(|set| Arc::ptr_eq(set, &entries) || same_builtin_names(set, &entries))
+        {
+            return;
+        }
+        if let Err(e) = check_builtin_collisions(&entries, &self.sets) {
+            panic!("builtin installation failed: {e}");
+        }
         self.sets.push_back(entries);
     }
 
@@ -109,4 +133,36 @@ impl BuiltinTable {
             .rev()
             .flat_map(|set| set.iter().map(|entry| entry.name.as_ref()))
     }
+}
+
+fn same_builtin_names(a: &[BuiltinEntry], b: &[BuiltinEntry]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .map(|entry| entry.name.as_ref())
+            .all(|name| b.iter().any(|entry| entry.name == name))
+}
+
+fn check_builtin_collisions(
+    new_entries: &[BuiltinEntry],
+    installed: &imbl::Vector<Arc<[BuiltinEntry]>>,
+) -> Result<(), String> {
+    let mut local = HashSet::new();
+    for entry in new_entries {
+        let name = entry.name.as_ref();
+        if !local.insert(name) {
+            return Err(format!(
+                "builtin `{name}` is installed twice in one builtin set"
+            ));
+        }
+        if installed
+            .iter()
+            .flat_map(|set| set.iter())
+            .any(|existing| existing.name == name)
+        {
+            return Err(format!(
+                "builtin `{name}` conflicts with an installed builtin"
+            ));
+        }
+    }
+    Ok(())
 }

@@ -9,6 +9,7 @@ pub mod host;
 
 use crate::cli::EditScheme;
 use crate::shell_eval::skill;
+use ral_core::Shell;
 use ral_core::types::{Capabilities, ExecDir};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -120,13 +121,14 @@ pub fn assemble(
 pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 
 /// Every command *this* agent can name, as one comma-separated line of
-/// **names**: the registered builtins (core's plus exarch's own surface —
-/// `view-text`, `grep-files`, `edit-hash`, …), the documented prelude
-/// functions, and the agent library (`view-text-around`, which rides in as
-/// part of the prelude). Sorted and deduped, with `_`-prefixed internals
-/// filtered out — note `ral_core::builtins::builtin_names` does *not* drop
-/// the `_` names itself, only its callers do, so the filter lives here and
-/// covers all three sources.
+/// **names**: `shell`'s own installed builtins (core's plus exarch's own
+/// surface — `view-text`, `grep-files`, `edit-hash`, … — everything
+/// [`bootstrap::boot_shell`](crate::bootstrap::boot_shell) dresses the shell
+/// with before any agent is assembled), the documented prelude functions,
+/// and the agent library (`view-text-around`, which rides in as part of the
+/// prelude). Sorted and deduped, with `_`-prefixed internals filtered out —
+/// note [`Shell::builtin_names`] does *not* drop the `_` names itself, only
+/// its callers do, so the filter lives here and covers all three sources.
 ///
 /// Also filtered here: `reply` when `!returns` (the interactive trunk, every
 /// `/branch` child — the desk refuses it unconditionally for them), and the
@@ -139,31 +141,23 @@ pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 /// This is a *progressive-disclosure* index, not a reference: the agent reads
 /// the whole surface at a glance, then `explain <name>`s any one for its
 /// signature and docs on demand — baking every help string into the prompt
-/// proved far too long. It is assembled from the static tables, never a live
-/// shell — filtering does not change that, since `returns`/`allow_schedule`
-/// are construction-fixed bits, not runtime state. The host builtin sets
-/// ([`HOST_BUILTIN_SETS`](crate::shell_eval::builtins::HOST_BUILTIN_SETS) —
-/// exarch's own surface and core's host-installed `service`) are chained in
-/// explicitly because they are not yet in the process registry that
-/// `builtin_names` reads when the prompt is assembled (the session shell,
-/// which installs them, is booted afterwards).
-fn builtin_index(returns: bool, allow_schedule: bool) -> String {
-    let builtins = ral_core::builtins::builtin_names()
-        .into_iter()
-        .map(str::to_string)
-        .chain(
-            crate::shell_eval::builtins::HOST_BUILTIN_SETS
-                .iter()
-                .flat_map(|set| set.iter())
-                .map(|e| e.name.to_string()),
-        );
+/// proved far too long. Reading `shell.builtin_names()` directly, rather
+/// than naming
+/// [`HOST_BUILTIN_SETS`](crate::shell_eval::builtins::HOST_BUILTIN_SETS)
+/// here too, means the index is exactly what that agent's shell can
+/// dispatch, true by construction: every resolution site calls this only
+/// after its shell has run `install_on`, so there is no ordering to get
+/// wrong.
+fn builtin_index(shell: &Shell, returns: bool, allow_schedule: bool) -> String {
     let prelude = ral_core::builtins::help::prelude_names()
         .into_iter()
         .map(str::to_string);
     let library = crate::shell_eval::builtins::agent_library_docs()
         .into_iter()
         .map(|(name, _doc)| name);
-    let mut names: Vec<String> = builtins
+    let mut names: Vec<String> = shell
+        .builtin_names()
+        .map(str::to_string)
         .chain(prelude)
         .chain(library)
         .filter(|n| !n.starts_with('_'))
@@ -182,17 +176,22 @@ fn builtin_index(returns: bool, allow_schedule: bool) -> String {
 
 /// Resolve [`assemble`]'s [`BUILTIN_INDEX_PLACEHOLDER`] into the real,
 /// per-agent [`builtin_index`] — the one substitution every constructed
-/// [`Agent`](crate::agent::Agent) performs on its own `system` text,
-/// keyed on the same construction-fixed bits the desk reads for the
-/// refusal itself (`returns` for `reply`, `allow_schedule` for the
-/// self-wakeup family), so a fresh model never sees a verb the desk will
-/// certainly refuse. A no-op on text that never held the placeholder (a
-/// `--system` override, a test fixture), so it is safe to run
-/// unconditionally.
-pub(crate) fn resolve_builtin_index(template: &str, returns: bool, allow_schedule: bool) -> String {
+/// [`Agent`](crate::agent::Agent) performs on its own `system` text, reading
+/// `shell`'s own installed builtins and keyed on the same construction-fixed
+/// bits the desk reads for the refusal itself (`returns` for `reply`,
+/// `allow_schedule` for the self-wakeup family), so a fresh model never sees
+/// a verb the desk will certainly refuse. A no-op on text that never held
+/// the placeholder (a `--system` override, a test fixture), so it is safe
+/// to run unconditionally.
+pub(crate) fn resolve_builtin_index(
+    template: &str,
+    shell: &Shell,
+    returns: bool,
+    allow_schedule: bool,
+) -> String {
     template.replace(
         BUILTIN_INDEX_PLACEHOLDER,
-        &builtin_index(returns, allow_schedule),
+        &builtin_index(shell, returns, allow_schedule),
     )
 }
 
@@ -439,7 +438,8 @@ mod tests {
     /// — the common, most-privileged case advertises the full surface.
     #[test]
     fn builtin_index_lists_reply_and_schedule_family_when_both_bits_hold() {
-        let index = builtin_index(true, true);
+        let shell = crate::bootstrap::boot_shell();
+        let index = builtin_index(&shell, true, true);
         let n = names(&index);
         assert!(n.contains("reply"));
         assert!(n.contains("schedule"));
@@ -452,7 +452,8 @@ mod tests {
     /// unconditionally, so the index does not advertise it.
     #[test]
     fn builtin_index_omits_reply_for_a_non_returning_agent() {
-        let index = builtin_index(false, true);
+        let shell = crate::bootstrap::boot_shell();
+        let index = builtin_index(&shell, false, true);
         let n = names(&index);
         assert!(
             !n.contains("reply"),
@@ -469,7 +470,8 @@ mod tests {
     /// grant.
     #[test]
     fn builtin_index_omits_schedule_family_for_an_ungranted_agent() {
-        let index = builtin_index(true, false);
+        let shell = crate::bootstrap::boot_shell();
+        let index = builtin_index(&shell, true, false);
         let n = names(&index);
         assert!(!n.contains("schedule"));
         assert!(!n.contains("schedules"));
@@ -481,7 +483,8 @@ mod tests {
     /// sees neither family at all.
     #[test]
     fn builtin_index_omits_both_families_when_neither_bit_holds() {
-        let index = builtin_index(false, false);
+        let shell = crate::bootstrap::boot_shell();
+        let index = builtin_index(&shell, false, false);
         let n = names(&index);
         assert!(!n.contains("reply"));
         assert!(!n.contains("schedule"));
@@ -493,11 +496,12 @@ mod tests {
     /// [`builtin_index`]'s own output for the given bits.
     #[test]
     fn resolve_builtin_index_substitutes_the_placeholder() {
+        let shell = crate::bootstrap::boot_shell();
         let template = format!("before\n\n{BUILTIN_INDEX_PLACEHOLDER}\n\nafter");
-        let resolved = resolve_builtin_index(&template, false, true);
+        let resolved = resolve_builtin_index(&template, &shell, false, true);
         assert_eq!(
             resolved,
-            format!("before\n\n{}\n\nafter", builtin_index(false, true))
+            format!("before\n\n{}\n\nafter", builtin_index(&shell, false, true))
         );
         assert!(!resolved.contains(BUILTIN_INDEX_PLACEHOLDER));
     }
@@ -507,8 +511,9 @@ mod tests {
     /// a `--system` override or a bare test fixture.
     #[test]
     fn resolve_builtin_index_is_a_noop_without_the_placeholder() {
+        let shell = crate::bootstrap::boot_shell();
         assert_eq!(
-            resolve_builtin_index("plain text", true, true),
+            resolve_builtin_index("plain text", &shell, true, true),
             "plain text"
         );
     }

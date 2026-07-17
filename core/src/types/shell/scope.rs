@@ -269,6 +269,7 @@ impl Shell {
         crate::typecheck::SessionSchemes {
             bindings: self.mobile.scope.binding_schemes(),
             aliases: self.mobile.context.handlers.alias_schemes(),
+            builtins: self.session.builtins.clone(),
         }
     }
 

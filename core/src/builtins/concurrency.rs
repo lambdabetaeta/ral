@@ -1736,7 +1736,6 @@ mod tests {
 
     fn service_test_shell() -> Shell {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        crate::builtins::register_builtins(crate::builtins::SERVICE_BUILTIN);
         shell.install_builtins(crate::builtins::SERVICE_BUILTIN);
         shell
     }

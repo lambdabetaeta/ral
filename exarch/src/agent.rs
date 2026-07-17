@@ -536,6 +536,14 @@ impl Agent {
         });
         let durable = shell.mobile_snapshot();
         let turn_scope: crate::fleet::registry::TurnScope = Arc::new(Mutex::new(None));
+        // Resolve *this* agent's own builtin index from *its own* `returns`/
+        // `allow_schedule` — never the parent's, so a fork whose bits differ
+        // from its creator's (an ordinary sub-agent under a conversing
+        // trunk, say) sees `reply` where the trunk's own prompt would not
+        // have shown it. Read off `shell` here, before it moves into the
+        // transport below.
+        let system_prompt =
+            crate::prompt::resolve_builtin_index(&system, &shell, returns, allow_schedule);
         let mut transport = ral_core::transport::IdentityTransport::new(shell);
         transport.observe_foreground(turn_scope.clone());
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
@@ -553,12 +561,6 @@ impl Agent {
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
         let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
-        // Resolve *this* agent's own builtin index from *its own* `returns`/
-        // `allow_schedule` — never the parent's, so a fork whose bits differ
-        // from its creator's (an ordinary sub-agent under a conversing
-        // trunk, say) sees `reply` where the trunk's own prompt would not
-        // have shown it.
-        let system_prompt = crate::prompt::resolve_builtin_index(&system, returns, allow_schedule);
         Ok(Self {
             id: log.id(),
             system: system_prompt,
@@ -657,7 +659,8 @@ impl Agent {
         // with below, so the log exists (and can record it) before the
         // agent it describes does.
         let system_prompt_bytes =
-            crate::prompt::resolve_builtin_index(&system, !interactive, allow_schedule).len();
+            crate::prompt::resolve_builtin_index(&system, &shell, !interactive, allow_schedule)
+                .len();
         let log = AgentLog::root(&sessions_root, id, model, provider_label, system_prompt_bytes)?;
         let agent = Self::assemble(Build {
             system,
@@ -796,8 +799,13 @@ impl Agent {
         // same `returns`/`allow_schedule` bits the child's `Build` carries,
         // so the log exists (and can record it) before the agent it
         // describes does.
-        let system_prompt_bytes =
-            crate::prompt::resolve_builtin_index(&self.system_base, returns, self.allow_schedule).len();
+        let system_prompt_bytes = crate::prompt::resolve_builtin_index(
+            &self.system_base,
+            &shell,
+            returns,
+            self.allow_schedule,
+        )
+        .len();
         let log = self.log.lock().fork(child_id, system_prompt_bytes)?;
         // One less than the parent's — the child's ceiling on how many more
         // generations it may itself spawn before the tools disappear.
@@ -929,7 +937,8 @@ impl Agent {
         // Resolved for the same `returns: true, allow_schedule: false` bits
         // `Build` below fixes for every `for_test` trunk, so the bookend
         // matches this agent's own `system` rather than the raw template.
-        let system_prompt_bytes = crate::prompt::resolve_builtin_index(system, true, false).len();
+        let system_prompt_bytes =
+            crate::prompt::resolve_builtin_index(system, &shell, true, false).len();
         let log = AgentLog::root(
             &dir.join("sessions"),
             id,
@@ -2624,20 +2633,6 @@ mod tests {
         Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
     }
 
-    // The prompt's builtin index enumerates the live process registry
-    // (`ral_core::builtins::builtin_names`), so a table registered mid-run
-    // shifts every prompt resolved after it — under parallel tests, a
-    // bookend test racing another test's first registration observes two
-    // different index lengths in one assertion. Registering this module's
-    // tables before `main` keeps the registry constant for the whole run;
-    // each test still `install_builtins` on its own shell.
-    #[ctor::ctor(unsafe)]
-    fn register_test_builtin_tables() {
-        ral_core::builtins::register_builtins(PANIC_BUILTINS);
-        ral_core::builtins::register_builtins(T2_CANCEL_BUILTINS);
-        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
-    }
-
     /// A nullary builtin whose body panics — stands in for any Rust panic
     /// the evaluator can raise mid-tool-eval.
     fn builtin_panic_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
@@ -2962,6 +2957,62 @@ mod tests {
             !branch.system.contains("reply"),
             "a branch withholds `reply` just like the trunk it forked from: {}",
             branch.system
+        );
+    }
+
+    /// The resolved index is exactly the live shell's own surface — the
+    /// drift the old `HOST_BUILTIN_SETS` chain in `prompt.rs` needed a
+    /// comment to promise is now true by construction, since
+    /// [`crate::prompt::builtin_index`] reads `shell.builtin_names()`
+    /// directly rather than naming any static set. Recomputes the expected
+    /// name set independently of that function — `shell.builtin_names()`
+    /// plus the prelude and library sources, filtered exactly as
+    /// `builtin_index` filters them for a `for_test` agent's fixed
+    /// `returns: true, allow_schedule: false` — and compares it against the
+    /// names actually resolved into the assembled agent's own `system`.
+    #[test]
+    fn builtin_index_equals_the_live_shells_own_surface() {
+        let dir = tmp("builtin-index-equals-live-shell");
+        let template = format!(
+            "persona\n\n# Builtins\n\n{}",
+            crate::prompt::BUILTIN_INDEX_PLACEHOLDER
+        );
+        let agent = Agent::for_test(&dir, &template).expect("test agent");
+
+        let guard = agent.transport.shell_mut();
+        let prelude = ral_core::builtins::help::prelude_names()
+            .into_iter()
+            .map(str::to_string);
+        let library = crate::shell_eval::builtins::agent_library_docs()
+            .into_iter()
+            .map(|(name, _doc)| name);
+        let mut expected: Vec<String> = guard
+            .shell
+            .builtin_names()
+            .map(str::to_string)
+            .chain(prelude)
+            .chain(library)
+            .filter(|n| !n.starts_with('_'))
+            // `for_test` fixes allow_schedule: false; returns: true keeps `reply`.
+            .filter(|n| !matches!(n.as_str(), "schedule" | "schedules" | "unschedule"))
+            .collect();
+        drop(guard);
+        expected.sort_unstable();
+        expected.dedup();
+
+        let marker = "docs:\n\n";
+        let names_blob = agent
+            .system
+            .split(marker)
+            .nth(1)
+            .expect("the resolved system must carry the builtin index preamble");
+        let mut resolved: Vec<String> = names_blob.split(", ").map(str::to_string).collect();
+        resolved.sort_unstable();
+        resolved.dedup();
+
+        assert_eq!(
+            resolved, expected,
+            "the resolved index must be exactly shell.builtin_names() ∪ prelude ∪ library, filtered"
         );
     }
 

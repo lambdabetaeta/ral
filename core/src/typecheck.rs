@@ -33,7 +33,7 @@ mod unify;
 
 // Public re-exports: preserve the existing `typecheck::Ty`, `typecheck::CompTy`,
 // etc. paths consumed by main.rs and the test suite.
-pub use self::builtins::{builtin_arity, builtin_type_hint};
+pub use self::builtins::builtin_type_hint;
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{CompDiff, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{FmtCtx, fmt_mode, fmt_mode_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx};
@@ -54,22 +54,41 @@ use crate::ir::{Comp, CompKind, IrPattern};
 /// This is the single seed of a turn's check.  A name with a scheme is
 /// bound to it; a name without one is a bare name that elaborates as a
 /// variable and infers at a fresh type variable per use site.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SessionSchemes {
     pub bindings: Vec<(String, Option<Scheme>)>,
     pub aliases: Vec<(String, Scheme)>,
+    pub builtins: crate::types::BuiltinTable,
+}
+
+impl Default for SessionSchemes {
+    /// A core-only table, absent any host dressing — serves `bake_prelude`
+    /// (build-time: core builtins only, correct by definition) and the
+    /// structural-frontend tests, which check with no live shell.
+    fn default() -> Self {
+        Self {
+            bindings: Vec::new(),
+            aliases: Vec::new(),
+            builtins: crate::builtins::core_builtin_table(),
+        }
+    }
 }
 
 impl SessionSchemes {
     /// Seed of checked bindings alone — the baked prelude list, for
-    /// callers with no live shell (`--check`, batch scripts, tests).
-    pub fn from_schemes(schemes: &[(String, Scheme)]) -> Self {
+    /// callers with no live shell (`--check`, batch scripts, tests) —
+    /// against the given host surface's builtin table.
+    pub fn from_schemes(
+        schemes: &[(String, Scheme)],
+        builtins: crate::types::BuiltinTable,
+    ) -> Self {
         Self {
             bindings: schemes
                 .iter()
                 .map(|(name, scheme)| (name.clone(), Some(scheme.clone())))
                 .collect(),
             aliases: Vec::new(),
+            builtins,
         }
     }
 }
@@ -80,8 +99,9 @@ impl SessionSchemes {
 /// removable handler frames so a turn-level `unalias` unbinds them
 /// statically.  Builtins own their names and are never overwritten.
 fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
+    env.builtins = schemes.builtins;
     for (name, scheme) in schemes.bindings {
-        if crate::builtins::is_builtin(&name) {
+        if env.builtins.get(&name).is_some() {
             continue;
         }
         if let Some(scheme) = scheme {
@@ -89,7 +109,7 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
         }
     }
     for (name, scheme) in schemes.aliases {
-        if crate::builtins::is_builtin(&name) {
+        if env.builtins.get(&name).is_some() {
             continue;
         }
         env.bind_handler(name, scheme, true);
@@ -172,7 +192,9 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
 /// # Panics
 /// Panics if the prelude fails to type-check, reporting the errors.
 pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
-    let annotated = match typecheck(comp, SessionSchemes::default()) {
+    let seed = SessionSchemes::default();
+    let table = seed.builtins.clone();
+    let annotated = match typecheck(comp, seed) {
         Ok(a) => a,
         Err(errs) => {
             let msgs: Vec<String> = errs.iter().map(ToString::to_string).collect();
@@ -181,7 +203,7 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     };
     let schemes = harvest_schemes(&annotated)
         .into_iter()
-        .filter(|(name, _)| !crate::builtins::is_builtin(name))
+        .filter(|(name, _)| table.get(name).is_none())
         .collect();
     (annotated, schemes)
 }

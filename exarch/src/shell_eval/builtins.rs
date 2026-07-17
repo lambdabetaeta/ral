@@ -42,20 +42,19 @@ pub const INSTALLER_TAG: &str = "exarch-agent";
 /// `watch` mechanism with the hosts swapped, kept out of `CORE_BUILTINS` so
 /// that only the agent host, under whose worker lease a durable birth means
 /// anything, gains it). This is the one source of truth: [`install_on`]
-/// installs these sets and the prompt's builtin index names them, so the two
-/// cannot drift.
+/// installs these sets into the shell, and the prompt's builtin index
+/// ([`crate::prompt`]) reads that same shell's builtin names back off it —
+/// the two cannot drift, by construction rather than by convention.
 pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] = &[
     EXARCH_BUILTINS,
     harness::HARNESS_BUILTINS,
     ral_core::builtins::SERVICE_BUILTIN,
 ];
 
-/// Register the exarch host builtins process-wide and install them into
-/// `shell`. Idempotent. The REPL and batch hosts never call this, so they
-/// never gain `service`.
+/// Install the exarch host builtins into `shell`. Idempotent. The REPL and
+/// batch hosts never call this, so they never gain `service`.
 pub fn install_on(shell: &mut ral_core::Shell) {
     for &set in HOST_BUILTIN_SETS {
-        ral_core::builtins::register_builtins(set);
         shell.install_builtins(set);
     }
 }
@@ -1232,14 +1231,6 @@ mod tests {
         body: BuiltinBody::Static(builtin_test_block_forever),
     }];
 
-    // Registered before `main`, like `agent::tests`' tables: the prompt's
-    // builtin index reads the live process registry, so a mid-run
-    // registration would shift every prompt resolved after it under
-    // parallel tests.
-    #[ctor::ctor(unsafe)]
-    fn register_test_builtin_tables() {
-    }
-
     /// Run `src` as one top-level turn with no deferred lease (so nothing
     /// races a reap during the test) and no deferred sink (the tests below
     /// never care where a deferred surface batch would land). Panics on a
@@ -1271,6 +1262,34 @@ mod tests {
                 result.expect("worker-registry fixture source must run cleanly");
             }
             TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+        }
+    }
+
+    /// Typecheck honesty, positive half: once a shell installs
+    /// `SERVICE_BUILTIN` (here via [`install_on`]), `service` resolves to
+    /// its own `Handle`-returning scheme rather than falling through to an
+    /// external command, so binding its result straight into a `Handle`
+    /// consumer (`cancel`) typechecks clean.  The negative half — the same
+    /// source on a bare core-only table, where `service` is external and
+    /// the bind is a static mismatch — lives in `ral_core`'s own suite
+    /// (`service_is_external_on_a_bare_core_table`, `core/tests/typecheck.rs`).
+    #[test]
+    fn service_typechecks_on_an_exarch_dressed_shell() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        install_on(&mut shell);
+        match ral_core::compile_and_typecheck(
+            r#"let h = service "birth" { return 1 }; cancel $h"#,
+            shell.session_schemes(),
+            ral_core::source::FileId::DUMMY,
+        ) {
+            ral_core::CompileOutcome::Compiled(_) => {}
+            ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),
+            ral_core::CompileOutcome::Types(errs) => panic!(
+                "expected `service`'s Handle to satisfy `cancel` on an exarch-dressed shell, got: {:?}",
+                errs.iter()
+                    .map(|e| e.kind.render_message())
+                    .collect::<Vec<_>>()
+            ),
         }
     }
 

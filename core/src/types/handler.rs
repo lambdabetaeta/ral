@@ -111,7 +111,7 @@ impl HandlerEntry {
                  be free of lexical bindings and builtins"
             )));
         }
-        if crate::builtins::is_builtin(&name) {
+        if session_schemes.builtins.get(&name).is_some() {
             return Err(super::coerce::sig(format!(
                 "{label}: `{name}` is a builtin; handler names must be free of lexical \
                  bindings and builtins"
