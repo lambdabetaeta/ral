@@ -58,6 +58,7 @@ impl Shell {
                 sources: crate::source::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),
+                library_docs: std::collections::HashMap::new(),
                 // Mint the session's lease from the same predicate that
                 // populates `startup_foreground`. `None` off Unix and whenever
                 // ral did not own the terminal foreground at startup.

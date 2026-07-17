@@ -44,11 +44,12 @@
 //! whole; `mobile.control`, the [`TurnState`](super::TurnState) substates
 //! (via [`TurnState::inherit_from`](super::TurnState::inherit_from)
 //! / [`return_to`](super::TurnState::return_to)), `local.audit`, and
-//! `local.repl` each carry their own inherit / return rule; `session.builtins`
-//! and `session.root` are shared so dispatch and the cancel root reach the
-//! child.  The asymmetry between the two manifests is the flow matrix — the
-//! source cursor (`turn.loc`) and the `within`-attenuable bits do not flow
-//! back, but `context.cwd` does.
+//! `local.repl` each carry their own inherit / return rule; `session.builtins`,
+//! `session.library_docs`, and `session.root` are shared so dispatch, the
+//! `help`/`explain` index, and the cancel root reach the child.  The
+//! asymmetry between the two manifests is the flow matrix — the source
+//! cursor (`turn.loc`) and the `within`-attenuable bits do not flow back,
+//! but `context.cwd` does.
 
 use super::{Mobile, Shell};
 use crate::types::{ControlState, Env};
@@ -247,15 +248,20 @@ impl Shell {
     /// REPL aside (prompt, hook shell): clone context state from
     /// `parent` without touching its IO / audit / REPL editor
     /// context.  The child is an independent sibling; no flow-back is
-    /// needed.  The source cursor (`turn.loc`) and the builtin table
-    /// (`session.builtins`) are copied alongside the context clone so the
-    /// aside resolves names and renders positions exactly as the parent
-    /// would.
+    /// needed.  The source cursor (`turn.loc`), the builtin table
+    /// (`session.builtins`), and the library doc index
+    /// (`session.library_docs`) are copied alongside the context clone so the
+    /// aside resolves names, renders positions, and describes itself exactly
+    /// as the parent would.
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();
         child.turn.loc = parent.turn.loc.clone();
         child.session.builtins = parent.session.builtins.clone();
+        child
+            .session
+            .library_docs
+            .clone_from(&parent.session.library_docs);
         child
     }
 
@@ -302,10 +308,10 @@ impl Shell {
     /// handle so `cancel` / `race` can stop just this worker.
     ///
     /// `local.workers` — the worker registry — is shared into the new
-    /// thread's `Shell` by `Arc` clone, alongside `session.root` and
-    /// `session.builtins`: a `spawn` inside `f`'s body registers into the
-    /// same registry this shell's own workers do, rather than a private
-    /// one of its own.
+    /// thread's `Shell` by `Arc` clone, alongside `session.root`,
+    /// `session.builtins`, and `session.library_docs`: a `spawn` inside
+    /// `f`'s body registers into the same registry this shell's own workers
+    /// do, rather than a private one of its own.
     pub fn spawn_thread<F, R>(
         &self,
         scopes: Arc<Env>,
@@ -320,6 +326,7 @@ impl Shell {
         let worker_cap = self.turn.worker_cap;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
+        let library_docs = self.session.library_docs.clone();
         let workers = self.local.workers.clone();
         let cancel = root.child();
         let worker_cancel = cancel.as_scope().clone();
@@ -331,6 +338,7 @@ impl Shell {
             child.turn.cancel = cancel;
             child.session.root = root;
             child.session.builtins = builtins;
+            child.session.library_docs = library_docs;
             child.local.workers = workers;
             f(&mut child)
         });
@@ -347,6 +355,7 @@ impl Shell {
         self.local.audit.inherit_from(&mut parent.local.audit);
         self.local.repl.inherit_from(&mut parent.local.repl);
         self.session.builtins = parent.session.builtins.clone();
+        self.session.library_docs = parent.session.library_docs.clone();
         self.session.root = parent.session.root.clone();
     }
 

@@ -61,23 +61,28 @@ pub fn install_on(shell: &mut ral_core::Shell) {
 
 /// Source the embedded agent helper library into the live shell.
 ///
+/// Also installs its one-line docs ([`agent_library_docs`]) into that same
+/// shell, so a shell that sources the library always gains its
+/// `help`/`explain` entries in the same act — the two can never drift apart.
+///
 /// # Errors
 /// Returns `Err` if sourcing the embedded library raises a ral error
 /// (re-surfaced as a signal) or propagates a non-error escape.
 pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
-    ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>").map_err(
-        |e| match e {
+    let result = ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>")
+        .map_err(|e| match e {
             Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
             other @ Break::Escape(_) => other,
-        },
-    )
+        })?;
+    shell.install_library_docs(agent_library_docs());
+    Ok(result)
 }
 
 /// One-line docs for the helper-library functions sourced from
 /// `agent.ral`.  These are ral closures, not registered builtins, so
-/// `help` cannot find them on its own; the host hands them to
-/// [`ral_core::builtins::help::register_library_docs`] at boot so the
-/// agent library is as discoverable as the prelude.
+/// `help` cannot find them on its own; [`install_agent_library`] installs
+/// them into the sourcing shell's own session so the agent library is as
+/// discoverable as the prelude.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
@@ -1501,6 +1506,68 @@ mod tests {
         assert!(
             shell.lookup_builtin("service").is_some(),
             "exarch's install_on must install service"
+        );
+    }
+
+    /// `install_agent_library` sources the closures *and* installs their
+    /// docs into the same shell in one act (no process-global registry
+    /// left to reinstall) — so `help`'s output on an exarch-dressed shell
+    /// carries a `Library:` section naming the sourced helpers, while a
+    /// bare core shell that never sourced the library carries none.
+    #[test]
+    fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
+        use ral_core::transport::{Program, Turn};
+        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+
+        let run_help = |shell: &mut Shell| -> String {
+            let req = TurnRequest {
+                turn: Turn {
+                    program: Program::Source("help".to_string()),
+                    script_name: "<test>".to_string(),
+                    caps: ral_core::types::Capabilities::root(),
+                    turn_limit: None,
+                    deferred_lease: None,
+                    worker_cap: None,
+                    io: TurnIo::Capture,
+                    terminal: RequestedTerminalAccess::Denied,
+                    stdin: TurnStdin::Empty,
+                },
+                surface: None,
+                deferred: None,
+                desk: None,
+                nursery: None,
+                lifecycle: Box::new(()),
+            };
+            match shell.run_turn(req) {
+                TurnReport::Ran {
+                    result, captured, ..
+                } => {
+                    result.expect("`help` must run cleanly");
+                    String::from_utf8(captured.expect("Capture io yields captured bytes").stdout)
+                        .expect("help output is UTF-8")
+                }
+                TurnReport::Static { .. } => panic!("`help` must compile"),
+            }
+        };
+
+        let mut bare = Shell::new(ral_core::io::TerminalState::default());
+        let bare_out = run_help(&mut bare);
+        assert!(
+            !bare_out.contains("Library:"),
+            "a shell that never sourced the agent library must list no Library section, got:\n{bare_out}"
+        );
+
+        let mut dressed = Shell::new(ral_core::io::TerminalState::default());
+        install_on(&mut dressed);
+        install_agent_library(&mut dressed).expect("embedded agent library");
+        let dressed_out = run_help(&mut dressed);
+        assert!(
+            dressed_out.contains("Library:"),
+            "an exarch-dressed shell must list a Library section, got:\n{dressed_out}"
+        );
+        assert!(
+            dressed_out.contains("view-text-around"),
+            "the Library section must name the sourced helpers, got:\n{dressed_out}"
         );
     }
 }

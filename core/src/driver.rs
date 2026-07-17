@@ -136,7 +136,6 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude) -> Shell {
     let mut shell = Shell::new(terminal);
     shell.seed_default_env_vars();
     crate::builtins::register(&mut shell, prelude.comp());
-    crate::builtins::help::register_prelude_type_hints(prelude.schemes());
     shell
 }
 

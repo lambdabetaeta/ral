@@ -1,8 +1,7 @@
 //! Entry point for the `ral` interactive shell binary.
 //!
-//! This crate root handles process-level setup, bakes the prelude, seeds the
-//! prelude's type hints, and dispatches into either the REPL or the batch
-//! runner.
+//! This crate root handles process-level setup, bakes the prelude, and
+//! dispatches into either the REPL or the batch runner.
 
 use clap::Parser as _;
 use ral_core::diagnostic;
@@ -86,8 +85,6 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     }
-
-    ral_core::builtins::help::register_prelude_type_hints(PRELUDE.schemes());
 
     run_mode(mode)
 }

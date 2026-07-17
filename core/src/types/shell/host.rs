@@ -135,6 +135,14 @@ impl Shell {
         self.session.builtins.get(name)
     }
 
+    /// Install extra `name -> doc` entries from an embedding host so that
+    /// `help`/`explain` can list and look them up alongside the builtins and
+    /// prelude — the door a host uses to document a sourced closure library
+    /// its own builtin table never sees.
+    pub fn install_library_docs(&mut self, entries: Vec<(String, String)>) {
+        self.session.library_docs.extend(entries);
+    }
+
     /// Read-only access to REPL/editor scratch (plugin context, TUI flag,
     /// queued chpwd notification).
     pub fn repl(&self) -> &ReplScratch {

@@ -460,6 +460,10 @@ pub struct SessionState {
     /// serialised ral values, so the receiver of a wire mobile supplies its
     /// own rather than shipping it in a `WireMobile`.
     pub(crate) builtins: BuiltinTable,
+    /// Host-installed `name -> doc` entries for a sourced closure library
+    /// (exarch's agent helpers) that `help`/`explain` cannot otherwise see —
+    /// see [`Shell::install_library_docs`](super::Shell::install_library_docs).
+    pub(crate) library_docs: std::collections::HashMap<String, String>,
     /// The session's terminal-foreground witness, minted once at construction
     /// from the startup `tcgetpgrp == getpgrp` predicate. `Some` when ral owns
     /// the controlling terminal's foreground (interactive REPL, terminal-
