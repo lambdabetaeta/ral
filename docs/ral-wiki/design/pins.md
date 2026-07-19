@@ -19,14 +19,14 @@ only **placement**, the card vocabulary and its decoder reused verbatim:
 
 - `` `pin [key, body] `` — write `body` to register slot `key`, **overwriting in
   place** on re-pin. The `key` is model-chosen and *is the datum's identity* —
-  the thing the host cannot guess, except for the reserved `commitment:*`
-  prefix below.
+  the thing the host cannot guess, save the one reserved key below.
 - `` `unpin [key] `` — drop the slot (a finished plan clears its gauge). An
   **absent body** is the same as `` `unpin ``.
-- `commitment:*` — protected commitment state
-  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
-  Ordinary `surface` calls cannot write or clear these slots; writer/verifier
-  results are projected by the host into the same register.
+- `services` — the one **host-owned** slot. Ordinary model-authored
+  `surface `` `pin ``/`` `unpin `` to it is rejected with a diagnostic
+  (`reject_protected_pin`, [[map/exarch/shell-eval|shell-eval]]); the host writes
+  it as durable [[design/residency|services]] are born and settle, so its
+  legibility is the host's to keep, not the model's to overwrite.
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail
@@ -64,9 +64,9 @@ card is already safe:
 Because pinned state is something the *user is watching* on the rail, the
 [[map/exarch/agent|nudge]] facility keeps the model restless about it. The
 agent keeps a small `key → one-line summary` mirror of the pins as they flow
-past — typed by pin kind, while the session is otherwise pin-blind and the
+past, while the session is otherwise pin-blind and the
 events go straight to the frontend. There is **one** pinned-state nudge,
-uniform for every pin kind (a task, a goal, a protected `commitment:*` pin
+uniform for every pin kind (a task, a goal, any other pinned state
 alike) and every agent role (the interactive trunk and a returning sub-agent
 alike): while anything is pinned, a **budget-free** reminder fires on every
 clean completion, naming the pinned state; with nothing pinned, a gentler,
@@ -75,26 +75,11 @@ throttled reminder suggests `set-goal`/`add-task` instead. The exception is
 waits for their results, because the agent has already delegated the next
 move. This nudge is independent of, and additive with, a *returning* agent's
 separate obligation to call `reply` — neither suppresses the other, so a
-sub-agent that finishes without replying while it still holds a live
-commitment is reminded of both once it is not waiting on children. This is the
+sub-agent that finishes without replying while it still holds live pinned
+state is reminded of both once it is not waiting on children. This is the
 discipline pinning earns: a kit that publishes state to a slot the user watches
-is reminded to keep it true, and the host never lets a protected obligation go
-quiet just because the agent holding it happens to be a sub-agent rather than
-the trunk.
-
-The actor opens a commitment through `commit`, whose input is `{key,
-description}` — it chooses the key and describes intent in its own words, but
-not the criteria that make it falsifiable. The host builds a writer prompt
-from the description and launches an `amnemon` writer the same launch-only,
-always-asynchronous way `amnemon`/`mnemon` launch any other child; the pin
-opens — on the host's own thread, as the writer's settled result drains —
-only when that reply is a structured, matching card carrying at least one
-criterion, refused up front if the key is already live. The actor can then
-request a check through `verify_commitment`, whose input is only the
-protected key; the host reads the saved card, builds the verifier prompt
-itself, and launches an `amnemon` verifier the same way. The pin clears —
-again on the host's own thread, at drain — only on a matching structured pass
-verdict; nothing else, and no one but a verifier, ever clears one.
+is reminded to keep it true, whether the agent holding it is the trunk or a
+sub-agent.
 
 ## Why this shape
 
@@ -125,5 +110,6 @@ this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/frontend|frontend]] (the viewport register and the draw layout),
 [[map/exarch/shell-eval|shell-eval]] (the host sink and the pin-first decode),
 [[map/exarch/agent|agent]] (the nudge that reminds the model of its pins),
-[[decisions/260703_protected-commitment-pins|protected-commitment-pins]], and
+[[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
+(the commitment keyspace retired, leaving `services` the one protected slot), and
 `exarch/data/agent.ral` (the tasks section — the first client).

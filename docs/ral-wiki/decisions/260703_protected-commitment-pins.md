@@ -1,8 +1,18 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260719_agent-names-and-schedule-labels
 ---
 
 # Protected commitment pins
+
+> Superseded by
+> [[decisions/260719_agent-names-and-schedule-labels|one `agent` verb; names and labels are identity; commitments retired]].
+> The whole feature is deleted: the `commit`/`verify-commitment` builtins, the
+> `commit-open`/`commit-verify` desk arms, the `CommitmentIntent`/`CommitmentSettle`
+> classes, the `commitment:*` protected-pin projection, and `PinKind`. It did not
+> earn its machinery; the operator judged it a mistake. The pin register survives
+> as the plain digest mirror, and the single host-owned `services` ledger pin is
+> the only protected slot that remains.
 
 `commitment:*` is a reserved pin keyspace: the actor may see it, but ordinary
 `surface` cannot write or clear it.

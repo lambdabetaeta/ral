@@ -50,8 +50,8 @@ else quiesces.
 ## Uniform spawning: bounded by spawn fuel
 
 Spawning is **universal** — every agent may spawn, so the spawn tree is not
-capped at one level. There is no `spawns()` axis: every agent holds the spawn
-verbs ([[map/exarch/builtins|builtins]]). Depth-N works structurally — a child
+capped at one level. There is no `spawns()` axis: every agent holds the one
+`agent` spawn verb ([[map/exarch/builtins|builtins]]). Depth-N works structurally — a child
 registers in the fleet's registry and `fork` snapshots the parent's shell by
 value at any depth — but each `fork` hands its child one less unit of `fuel`
 than the parent holds (the parent's own `fuel` is untouched, so fan-out itself
@@ -63,21 +63,27 @@ depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
 that decision left open).
 
-The spawn verbs are **launch-only and always asynchronous**
-([[decisions/260617_async-agent-tool|async-agent-tool]]). One call:
+The `agent` spawn verb is **launch-only and always asynchronous**
+([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
+single closed record `[prompt: …, name: …, type: …, grant: …]` — a record
+literal, so a missing or misspelled field is a *static* error naming it, while
+the `type` (`` `amnemon ``/`` `mnemon ``) and `grant` tags are checked at the
+runtime door that enumerates their legal labels
+([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
+One call:
 
 - **`fork`s a child `Agent`** through `Shell::fork_session`
   ([[map/core/shell-state|the flow matrix]]). The child snapshots the parent's
   whole lexical scope, dynamic context (cwd, env, grants, handlers), and the
-  installed builtin table, sets `parent` to the spawning agent's id, and starts
-  fresh in everything else — its own inbox, a fresh cancel token, an owned
-  provider handle seeded from the parent's current model, no terminal authority.
-  This is a **value snapshot**: the child's `cd`, env, and new bindings die with
-  it; there is no flow-back, and the parent receives a string, not the child's
-  bindings. The isolation mirrors a [[design/pipelines|byte-pipeline stage]]'s
-  subshell;
+  installed builtin table, sets `parent` to the spawning agent's id, takes the
+  spawn's `name` as its identity, and starts fresh in everything else — its own
+  inbox, a fresh cancel token, an owned provider handle seeded from the parent's
+  current model, no terminal authority. This is a **value snapshot**: the
+  child's `cd`, env, and new bindings die with it; there is no flow-back, and the
+  parent receives a string, not the child's bindings. The isolation mirrors a
+  [[design/pipelines|byte-pipeline stage]]'s subshell;
 - **runs it on a detached thread** through the same `drive` loop, returning a
-  start receipt `[id: Int, title: Str, log-dir: Str]` at once — a ral record the
+  receipt `[name: Str, log-dir: Str]` at once — a ral record the
   script can bind and fan out over. The child runs off the
   parent's critical path — the one shape in-turn concurrency cannot express, the
   parent turn ending before the child does;
@@ -85,11 +91,12 @@ The spawn verbs are **launch-only and always asynchronous**
   parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
   rendered to prose at the consuming edge.
 
-Two spawn verbs choose the child's **model memory**, not its shell isolation:
+The spawn's **`type`** field chooses the child's **model memory**, not its shell
+isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
 
-- **`amnemon`** is tabula rasa. The child starts with no conversation history;
+- **`` `amnemon ``** is tabula rasa. The child starts with no conversation history;
   only the shell value-snapshot and the chosen prompt cross the edge.
-- **`mnemon`** remembers. The child imports the parent's model-visible context
+- **`` `mnemon ``** remembers. The child imports the parent's model-visible context
   and appends the call's `prompt` as a fresh final user prompt, while
   reusing the parent's current provider selection so provider prompt caches can
   hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
@@ -129,13 +136,14 @@ readable transcript, not a resumable conversation.
 
 ## Peer messages: marked notes, not shared memory
 
-Live agents may send one another a **marked message** by `AgentId` through the
-`message` builtin. The registry resolves the recipient's inbox and posts an
-`AgentMessage`; the recipient sees it at the next tool boundary as
-`[EXARCH AGENT id MESSAGE: title] body [/EXARCH]`, not as human input. This is
+Live agents may send one another a **marked message** by **name** through the
+`message` builtin. The registry resolves the name to the recipient's inbox and
+posts an `AgentMessage`; the recipient sees it at the next tool boundary as a
+marked note naming the sender, not as human input. This is
 coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
-`reply`; the durable cancellation path remains `agent-cancel`.
+`reply`; the durable cancellation path remains `agent-cancel`, addressed by name
+the same way.
 
 ## Cancellation: a key interrupts one turn; a terminator cascades the subtree
 
@@ -167,13 +175,14 @@ is one of the three reasons an agent parks (`ParkMode::UntilCancelled`).
 ## Permissions: the child's ceiling is `parent ⊓ base`
 
 **Every spawn states the child's ceiling explicitly**, through a *mandatory*
-`permissions` argument naming one of the six capability bake-ins — the same
+`grant` field naming one of the six capability bake-ins — the same
 vocabulary as the `--base` CLI flag (`confined`, `minimal`, `read-only`,
 `edit-only`, `reasonable`, `dangerous`; ordered loosest-to-tightest in
-[[map/exarch/policy|policy]]). The child is born with
+[[map/exarch/policy|policy]]). An unknown tag is refused at the runtime door,
+naming all six. The child is born with
 
 ```text
-  child = parent ⊓ resolve_base(permissions)
+  child = parent ⊓ resolve_base(grant)
 ```
 
 computed by `policy::narrow`, the **meet-sibling** of the root's
@@ -197,7 +206,11 @@ child's `Capabilities` as an argument rather than cloning the parent's.
 ## See also
 
 [[design/exarch-architecture|exarch-architecture]] (the agent as a provider loop
-over one shell tool), [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]
+over one shell tool),
+[[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
+(the one record-spec `agent` verb, names as fleet-unique identity, schedule
+labels, commitments retired),
+[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]
 (the Fleet/Agent split, the `parent` collapse, dynamic focus),
 [[design/grant|grant]] (the capability lattice the meet runs in),
 [[map/exarch/tools|tools]], [[map/exarch/agent|agent]],
