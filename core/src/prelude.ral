@@ -294,12 +294,21 @@ let flat-map = { |f items|
     concat $mapped
 }
 
-## Return the first element matching pred; fails if none matches.
+## Find the first element matching pred, as an Option: `` `just`` the
+## matching element, or `` `none`` when nothing matches.
 let first = { |pred items|
-    if !{is-empty $items} { fail [status: 1] } else {
+    if !{is-empty $items} { return `none } else {
         let [head, ...rest] = $items
-        if !{$pred $head} { return $head } else { first $pred $rest }
+        if !{$pred $head} { return `just $head } else { first $pred $rest }
     }
+}
+
+## Eliminate an Option: the payload of `` `just``, or `default` for `` `none``.
+let option-or = { |default opt|
+    case $opt [
+        `none: { |_| return $default },
+        `just: { |x| return $x }
+    ]
 }
 
 ## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
@@ -477,6 +486,9 @@ let elem = { |x items|
         if !{equal $head $x} { return true } else { elem $x $rest }
     }
 }
+
+## Test if items contains x (collection-first; delegates to `elem`).
+let contains = { |items x| elem $x $items }
 
 ## De-duplicate a list, keeping the first occurrence of each element
 ## (compared with `equal`); the result preserves first-seen order.

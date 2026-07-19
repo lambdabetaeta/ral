@@ -856,9 +856,11 @@ A few cells need more than a row:
 | `fold` | `f init items` | left fold |
 | `reduce` | `f items` | fold from first element |
 | `flat-map` | `f items` | map then flatten one level |
-| `first` | `pred items` | first match; **fails** if none |
+| `first` | `pred items` | first match as an Option: `` `just x `` or `` `none `` |
+| `option-or` | `default opt` | payload of `` `just ``, or `default` for `` `none `` |
 | `last` | `items` | last element; fails on empty |
 | `elem` | `x items` | membership (total, returns Bool) |
+| `contains` | `items x` | membership, collection-first (delegates to `elem`) |
 | `enumerate` | `items` | `[index: Int, item: α]` records |
 | `concat` | `xss` | flatten a list of lists |
 | `sum` | `items` | sum of numbers |

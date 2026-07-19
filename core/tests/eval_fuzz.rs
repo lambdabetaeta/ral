@@ -2912,21 +2912,29 @@ fn audit_captures_stderr_and_caps_at_64kb() {
 // ── Regression tests for CHANGELOG items ────────────────────────────────
 
 #[test]
-fn first_fails_on_empty_list() {
-    // §9.2: first now fails on no-match (including empty input), replacing
-    // the old sentinel-unit return.  The failure must be catchable by try.
-    must_fail("first { |_| return true } []");
-    // When wrapped in try, the failure is turned into an error record.
-    let r = must_succeed(
-        "let r = try { first { |_| return true } [] } { |e| return 'caught' }\nreturn $r",
+fn first_returns_none_on_no_match() {
+    // first is a non-failing search returning an Option: `none when nothing
+    // matches, including an empty input.
+    let r = must_succeed("first { |_| return true } []");
+    assert_eq!(
+        r,
+        Value::Variant {
+            label: "none".into(),
+            payload: None,
+        }
     );
-    assert_eq!(r, Value::String("caught".into()));
 }
 
 #[test]
-fn first_returns_match_when_found() {
+fn first_returns_just_match_when_found() {
     let r = must_succeed("first { |x| $[$x > 2] } [1, 2, 3, 4]");
-    assert_eq!(r, Value::Int(3));
+    assert_eq!(
+        r,
+        Value::Variant {
+            label: "just".into(),
+            payload: Some(Box::new(Value::Int(3))),
+        }
+    );
 }
 
 #[test]
