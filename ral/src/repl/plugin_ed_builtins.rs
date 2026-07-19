@@ -219,6 +219,23 @@ pub fn builtin_ed_accept(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 
 // ─── TUI ─────────────────────────────────────────────────────────────────────
 
+/// Build the `[output: .., status: Int]` record returned by `_ed-tui`.
+fn tui_result(output: Value, status: i64) -> Value {
+    Value::map(vec![
+        ("output".into(), output),
+        ("status".into(), Value::Int(status)),
+    ])
+}
+
+/// Decode captured stdout as lossy UTF-8, stripping a single trailing newline.
+fn decode_captured(bytes: &[u8]) -> String {
+    let mut s = String::from_utf8_lossy(bytes).into_owned();
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
 /// `_ed-tui {body}` — suspend editor, run body, return `[output: Str, status: Int]`.
 ///
 /// On success: `status: 0`, `output: <body's return value or captured stdout>`.
@@ -242,24 +259,18 @@ pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-tui", shell)?;
     shell.check_editor_tui()?;
     if shell.in_terminal_loan() {
-        return Ok(Value::map(vec![
-            (
-                "output".into(),
-                Value::String("_ed-tui: already in TUI mode".into()),
-            ),
-            ("status".into(), Value::Int(1)),
-        ]));
+        return Ok(tui_result(
+            Value::String("_ed-tui: already in TUI mode".into()),
+            1,
+        ));
     }
     {
         let pc = ctx(shell)?;
         if pc.inputs.in_readline {
-            return Ok(Value::map(vec![
-                (
-                    "output".into(),
-                    Value::String("_ed-tui: not available inside buffer-change hooks".into()),
-                ),
-                ("status".into(), Value::Int(1)),
-            ]));
+            return Ok(tui_result(
+                Value::String("_ed-tui: not available inside buffer-change hooks".into()),
+                1,
+            ));
         }
     }
     let loan = shell.begin_terminal_loan();
@@ -270,32 +281,16 @@ pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     match result {
         Ok(v) => {
             let v = match v {
-                Value::Unit if !bytes.is_empty() => {
-                    let mut s = String::from_utf8_lossy(&bytes).into_owned();
-                    if s.ends_with('\n') {
-                        s.pop();
-                    }
-                    Value::String(s)
-                }
-                Value::Unit => Value::String(String::new()),
-                Value::Bytes(b) => {
-                    let mut s = String::from_utf8_lossy(&b).into_owned();
-                    if s.ends_with('\n') {
-                        s.pop();
-                    }
-                    Value::String(s)
-                }
+                Value::Unit => Value::String(decode_captured(&bytes)),
+                Value::Bytes(b) => Value::String(decode_captured(&b)),
                 other => other,
             };
-            Ok(Value::map(vec![
-                ("output".into(), v),
-                ("status".into(), Value::Int(0)),
-            ]))
+            Ok(tui_result(v, 0))
         }
-        Err(Break::Error(e)) => Ok(Value::map(vec![
-            ("output".into(), Value::String(e.message.clone())),
-            ("status".into(), Value::Int(i64::from(e.exit_code()))),
-        ])),
+        Err(Break::Error(e)) => Ok(tui_result(
+            Value::String(e.message.clone()),
+            i64::from(e.exit_code()),
+        )),
         Err(other) => Err(other),
     }
 }
