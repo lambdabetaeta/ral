@@ -45,7 +45,7 @@ return { |options|
         let result = try {
             return !{zoxide query --interactive -- ...$args | from-line}
         } { |_| return "" }
-        if !{is-empty $result} {} else { cd $result }
+        if $[not !{is-empty $result}] { cd $result }
     }
 
     let _chpwd = { |ctx|
