@@ -256,7 +256,8 @@ fn freeze_exec_map(
             ExecPolicy::Allow => Ok(ExecDir::Allow),
             ExecPolicy::Deny => Ok(ExecDir::Deny),
             ExecPolicy::Subcommands(_) => Err(format!(
-                "{err_prefix}: '{sigil}' only takes 'allow' or 'deny', not a subcommand list"
+                "{err_prefix}: '{sigil}' only takes 'allow' or 'deny', not a subcommand list \
+                 (a subcommand list matches a command's first argument, so it needs a literal command)"
             )),
         }
     };
@@ -285,18 +286,17 @@ fn freeze_exec_map(
         }
     }
 
-    // A trailing `/` (`'path:/'`, `'system:/'`) strips to the same
-    // bare sigil and lands here in `map.dirs` instead of `map.literals`.
+    // A trailing `/` (`'path:/'`, `'system:/'`) strips to the bare
+    // sigil and lands here in `map.dirs`; reject it before generic
+    // directory handling — `path:`/`system:` is the one spelling.
     for (key, dir) in map.dirs {
-        if key == "path:" {
-            for d in path_dirs(err_prefix)? {
-                insert_dir_meet(&mut dirs, d, dir.clone());
-            }
-        } else if key == "system:" {
-            for d in system_dirs() {
-                insert_dir_meet(&mut dirs, d, dir.clone());
-            }
-        } else if let Some(frozen) = freeze_key(&key)? {
+        if key == "path:" || key == "system:" {
+            return Err(format!(
+                "{err_prefix}: '{key}/' is not a directory grant — \
+                 use '{key}' with no trailing slash"
+            ));
+        }
+        if let Some(frozen) = freeze_key(&key)? {
             insert_dir_meet(&mut dirs, frozen, dir);
         }
     }
@@ -386,7 +386,8 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                 _ => {
                     return Err(sig(format!(
                         "{err_prefix}: directory key '{cmd}' must be 'allow' or 'deny'; \
-                         a subcommand list is name-shaped and requires a literal key"
+                         a subcommand list matches a command's first argument, \
+                         so it requires a literal command key"
                     )));
                 }
             };

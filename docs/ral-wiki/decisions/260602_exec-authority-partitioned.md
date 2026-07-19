@@ -111,6 +111,39 @@ widen. The per-layer matcher (`longest_dir_match`) and the projection
 *composition* (`base.join(extend).meet(restrict)`). Guarded by
 `meet_exec_dirs_deny_beats_allow` and the one-sided-deny tests in `lattice_tests`.
 
+## Exec grants key on the subject, fs grants on the verb
+
+The `grant [...]` surface lays the two dimensions out in opposite orders, and the
+decoder realises both. `decode_exec_grant` keys the exec map on the **command** —
+`git: 'allow'`, `/usr/bin/: 'deny'` — and the value is that one subject's policy
+(`allow` / `deny` / a subcommand list, or the two-valued `ExecDir` for a
+directory key): one command, one verdict. `decode_fs` keys the fs map on the
+**operation** — `read: [...]`, `write: [...]`, `deny: [...]` — and the value is a
+*list* of path regions that verb authorises: one operation, many paths. Same
+grant map, two opposite layouts.
+
+The asymmetry is the honest shape of each dimension, not an oversight — each
+layout makes its dimension's structure the map key:
+
+- **Exec is naturally per-command.** Each binary carries its own verdict, and the
+  structure worth expressing lives on the subject axis (this command allowed,
+  that one denied, this one narrowed to a subcommand set). Keying on the subject
+  makes map-key uniqueness *enforce* "one verdict per name per layer" — a
+  verb-first exec (`allow: [git]`, `deny: [git]`) could spell a layer that
+  contradicts itself and would then need a precedence rule to read; the current
+  shape makes that conflict unrepresentable.
+- **An fs capability is naturally per-operation spanning many paths.** One verb
+  authorises a whole set of regions, and a single region routinely sits under
+  both `read` and `write`. Keying on the verb lets that region appear in both
+  lists without inventing a compound-policy vocabulary — a subject-first fs would
+  need a `'read-write'` value for every shared path.
+
+So the layout that keeps each dimension's grants free of redundancy and free of
+self-contradiction differs between the two: subject-first where the interesting
+structure is per-command, verb-first where one operation ranges over many paths.
+See [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]
+for the read/write/exec surface these grants gate.
+
 The `RawCapabilities` half of the `*.exec` pair this page names was later folded
 into a single always-frozen `Capabilities` —
 [[decisions/260605_capability-stage-collapse|capability-stage-collapse]]; the

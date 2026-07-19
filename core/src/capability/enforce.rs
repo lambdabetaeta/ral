@@ -43,7 +43,7 @@ pub(crate) fn check_exec_args(
         ExecVerdict::Allowed(Admit::Subcommands(allowed)) => {
             let hint = || {
                 format!(
-                    "allowed subcommands: {}",
+                    "allowed subcommands (matched against the command's first argument): {}",
                     allowed.iter().cloned().collect::<Vec<_>>().join(", ")
                 )
             };
