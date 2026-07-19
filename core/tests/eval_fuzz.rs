@@ -16,7 +16,7 @@ use ral_core::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-fn eval(input: &str) -> ral_core::types::Settled<Value> {
+fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
     let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
         Break::Error(Error::new(e.to_string(), 2))
     })?;
@@ -42,8 +42,30 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
         }
     };
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
+    shell.set_env_var("PATH", path);
     builtins::register(&mut shell, common::prelude_comp());
     evaluate(&comp, &mut shell)
+}
+
+/// Evaluate independently of whichever tools happen to be installed on the
+/// test host. Individual process tests supply an explicit path when needed.
+fn eval(input: &str) -> ral_core::types::Settled<Value> {
+    #[cfg(unix)]
+    let path = "/bin:/usr/bin".to_string();
+    #[cfg(windows)]
+    let path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .find(|dir| {
+            ["cat.exe", "pwd.exe", "sleep.exe"]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        })
+        .unwrap_or_else(|| {
+            panic!("eval_fuzz needs cat.exe, pwd.exe, and sleep.exe in one PATH directory")
+        })
+        .to_string_lossy()
+        .into_owned();
+
+    eval_on_path(input, &path)
 }
 
 fn must_succeed(input: &str) -> Value {
@@ -799,9 +821,9 @@ fn within_env_rejects_pwd() {
 }
 
 /// External commands spawned inside `within [dir: X]` must run with `X`
-/// as their cwd.  Captured via `!{pwd}`, which routes through the
-/// bundled `pwd` (and, since `dynamic.ambient.cwd` is set, through the pipeline
-/// helper subprocess that `apply_env` configures with `current_dir`).
+/// as their cwd. Captured via an explicit platform command which, since
+/// `dynamic.ambient.cwd` is set, routes through the pipeline helper subprocess
+/// that `apply_env` configures with `current_dir`.
 /// On systems with firmlinks (macOS `/var` ↔ `/private/var`) we accept
 /// either the raw or canonicalised form.
 #[test]
@@ -811,11 +833,21 @@ fn within_dir_carries_to_external_command() {
     std::fs::create_dir_all(&dir).unwrap();
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
+    #[cfg(unix)]
+    let command = "/bin/pwd";
+    #[cfg(windows)]
+    let command = "cmd.exe /D /C cd";
+    #[cfg(unix)]
+    let path = "";
+    #[cfg(windows)]
+    let path = &std::env::var("PATH").unwrap_or_default();
+
     let script = format!(
-        "within [dir: '{}'] {{ let out = !{{pwd}}; return $out }}",
+        "within [dir: '{}'] {{ let out = !{{{command}}}; return $out }}",
         dir.display()
     );
-    let result = must_succeed(&script);
+    let result = eval_on_path(&script, path)
+        .unwrap_or_else(|e| panic!("should succeed: {script:?}\n  error: {e:?}"));
     let _ = std::fs::remove_dir_all(&dir);
 
     let out = match result {
