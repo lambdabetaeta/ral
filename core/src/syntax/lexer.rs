@@ -957,7 +957,7 @@ impl Lexer {
                             // `${name}`.  The deref span covers `$name`.
                             let deref_span = self.span();
                             self.bump();
-                            let name = self.scan_ident();
+                            let name = self.scan_deref_ident();
                             if name.is_empty() {
                                 return Err(Self::error(
                                     deref_span,
@@ -1145,9 +1145,12 @@ impl Lexer {
         }
     }
 
-    /// Scan a deref after $: $name, $(name), $name[key], $[arith].  Names
-    /// are read by [`Self::scan_ident`] over the identifier alphabet
-    /// `[a-zA-Z_][a-zA-Z0-9_-]*` ([`is_ident_start`]/[`is_ident_cont`]).
+    /// Scan a deref after $: $name, $(name), $name[key], $[arith].  The
+    /// bare `$name` form reads its name with [`Self::scan_deref_ident`],
+    /// which stops before a trailing `-` so `$os-$arch` splits into two
+    /// derefs; the explicit-boundary form `$(name)` uses [`Self::scan_ident`]
+    /// directly and keeps a trailing `-`.  Both draw on the identifier
+    /// alphabet `[a-zA-Z_][a-zA-Z0-9_-]*` ([`is_ident_start`]/[`is_ident_cont`]).
     /// Returns None for bare $ (not followed by ident/paren/bracket).
     fn scan_deref(&mut self) -> Result<Option<StringPart>, LexError> {
         match self.peek() {
@@ -1157,7 +1160,7 @@ impl Lexer {
                 // there to wherever `scan_ident` leaves the cursor.
                 let name_start = self.span().start;
                 let name_file = self.span().file;
-                let name = self.scan_ident();
+                let name = self.scan_deref_ident();
                 let name_end = self.span().start;
                 let name = Spanned::new(Span::new(name_file, name_start, name_end), name);
                 let mut keys: Vec<Spanned<Vec<(Token, Span)>>> = Vec::new();
@@ -1222,6 +1225,21 @@ impl Lexer {
         name.push(ch);
         self.bump();
         name.push_str(&self.take_while(is_ident_cont));
+        name
+    }
+
+    /// Scan the name of a bare `$name` or `!$name` dereference.  A `-` is a
+    /// valid interior name char, but a *trailing* one is left in the stream
+    /// as literal text rather than eaten into the name: `$os-$arch`
+    /// interpolates `os` and `arch` around a literal `-`, and `$foo-` names
+    /// `foo`.  The explicit-boundary form `$(name)` keeps a trailing `-`,
+    /// since its parens already fix where the name ends.
+    fn scan_deref_ident(&mut self) -> String {
+        let mut name = self.scan_ident();
+        while name.ends_with('-') {
+            name.pop();
+            self.pos -= 1;
+        }
         name
     }
 
@@ -1935,6 +1953,84 @@ mod tests {
             }
             _ => panic!("expected DoubleQuoted"),
         }
+    }
+
+    /// A bare `$name` never eats a trailing `-`: `"$os-$arch"` splits into
+    /// two derefs around a literal `-`, so kebab-adjacent interpolations
+    /// don't silently fold the dash into the first name.
+    #[test]
+    fn interpolation_stops_before_trailing_dash() {
+        let toks = tok_types("\"$os-$arch\"");
+        let Token::DoubleQuoted(parts) = &toks[0] else {
+            panic!("expected DoubleQuoted");
+        };
+        let items: Vec<&StringPart> = parts.iter().map(|p| &p.item).collect();
+        assert_eq!(
+            items,
+            vec![
+                &StringPart::Variable("os".into()),
+                &StringPart::Literal("-".into()),
+                &StringPart::Variable("arch".into()),
+            ]
+        );
+    }
+
+    /// A `-` with more name after it is still an interior name char, so a
+    /// genuine kebab identifier `$os-arch` stays a single deref.
+    #[test]
+    fn interpolation_keeps_interior_dash() {
+        let toks = tok_types("\"$os-arch\"");
+        let Token::DoubleQuoted(parts) = &toks[0] else {
+            panic!("expected DoubleQuoted");
+        };
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].item, StringPart::Variable("os-arch".into()));
+    }
+
+    /// A trailing `-` at end of string names the identifier without it and
+    /// leaves the `-` as literal text.
+    #[test]
+    fn interpolation_trailing_dash_at_end() {
+        let toks = tok_types("\"$foo-\"");
+        let Token::DoubleQuoted(parts) = &toks[0] else {
+            panic!("expected DoubleQuoted");
+        };
+        let items: Vec<&StringPart> = parts.iter().map(|p| &p.item).collect();
+        assert_eq!(
+            items,
+            vec![
+                &StringPart::Variable("foo".into()),
+                &StringPart::Literal("-".into()),
+            ]
+        );
+    }
+
+    /// The explicit-boundary form `$(name)` fixes where the name ends, so it
+    /// keeps a trailing `-` that the bare form would drop.
+    #[test]
+    fn explicit_boundary_keeps_trailing_dash() {
+        let toks = tok_types("\"$(foo-)\"");
+        let Token::DoubleQuoted(parts) = &toks[0] else {
+            panic!("expected DoubleQuoted");
+        };
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].item, StringPart::Variable("foo-".into()));
+    }
+
+    /// A bare deref outside strings (`Token::Deref`) obeys the same rule:
+    /// `$os-$arch` is two derefs around a literal-`-` bare word.
+    #[test]
+    fn bare_deref_stops_before_trailing_dash() {
+        let toks = tok_types("$os-$arch");
+        assert_eq!(
+            toks,
+            vec![
+                Token::Deref(StringPart::Variable("os".into())),
+                plain("-"),
+                Token::Deref(StringPart::Variable("arch".into())),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]

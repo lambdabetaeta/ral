@@ -14,8 +14,11 @@ the only code that sees raw bytes and bare words.
 mode-switching a POSIX shell's lexer needs (no separate arithmetic / test / glob
 lexers), because it has no history forcing them. The two sigils stay lexically
 distinct: `$name` is a value dereference, a bare word in head position is a
-command token. The arithmetic sublanguage `$[…]` is pre-scanned by a dedicated
-`scan_expr_block` so its Pratt parser downstream sees exactly those tokens.
+command token. A bare `$name` never absorbs a *trailing* `-` even though `-` is
+a name character, so `"$os-$arch"` splits into two derefs around a literal `-`;
+`$(name)` is the explicit interpolation boundary and keeps such a dash. The
+arithmetic sublanguage `$[…]` is pre-scanned by a dedicated `scan_expr_block` so
+its Pratt parser downstream sees exactly those tokens.
 
 **Parsing is recursive descent with a Pratt core for expressions.**
 `parse(source)` returns `Vec<Stmt>` or a `ParseError`. Statement and pipeline

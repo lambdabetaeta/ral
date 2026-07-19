@@ -861,8 +861,15 @@ a valid Unicode scalar value.  Any other `\X` is a lex error rather
 than a silent literal, on the principle that an unfamiliar escape is
 more often a typo than a deliberate choice.  A bare `!` not followed by
 `{` or `$` remains literal, with `\!` available as the explicit form.
-Where `$name` would otherwise be followed by `[`, the form
-`$(name)[…]` delimits the variable from the index that follows.
+Because `-` is a name character, a bare `$name` never absorbs a
+*trailing* `-`: it belongs to the surrounding text, so `"$os-$arch"`
+interpolates `os` and `arch` around a literal `-`, while `"$os-arch"`
+names the single binding `os-arch`.  The parenthesised form `$(name)`
+is the explicit interpolation boundary: it fixes exactly where the name
+ends, so `$(os)-arch` interpolates `os` before a literal `-arch`, and
+`$(name)` retains a trailing `-` the bare form would drop.  The same
+form delimits a variable from a following index — `$(name)[…]` — where
+`$name[…]` would otherwise read the `[` as the index.
 
 Both quoted forms may span multiple lines, and the REPL prompts for
 continuation while a quote remains open.  `dedent` strips the common
