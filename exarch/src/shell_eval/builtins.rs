@@ -15,7 +15,7 @@ use ral_core::typecheck::builtins::{
 };
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, sig};
-use ral_core::{Shell, Value};
+use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -27,35 +27,32 @@ mod harness;
 
 const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 
-/// The tag `Frame::Attach` carries to name this module's [`install_on`] as
-/// the wire engine child's builtin installer.
+/// The tag `Frame::Attach` carries to name this module's [`host_surface`] as
+/// the wire engine child's builtin surface.
 ///
 /// See `core/src/engine.rs`'s installer table and the enquiry-channel ADR's
 /// shell-parity item.
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
-/// The builtin sets the exarch agent host installs on top of core's
-/// `CORE_BUILTINS`.
-///
-/// These are exarch's own surface ([`EXARCH_BUILTINS`]) and core's
-/// host-selected `service` ([`ral_core::builtins::SERVICE_BUILTIN`] — the
-/// `watch` mechanism with the hosts swapped, kept out of `CORE_BUILTINS` so
-/// that only the agent host, under whose worker lease a durable birth means
-/// anything, gains it). This is the one source of truth: [`install_on`]
-/// installs these sets into the shell, and the prompt's builtin index
-/// ([`crate::prompt`]) reads that same shell's builtin names back off it —
-/// the two cannot drift, by construction rather than by convention.
-pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] = &[
-    EXARCH_BUILTINS,
-    harness::HARNESS_BUILTINS,
-    ral_core::builtins::SERVICE_BUILTIN,
-];
-
-/// Install the exarch host builtins into `shell`. Idempotent. The REPL and
-/// batch hosts never call this, so they never gain `service`.
-pub fn install_on(shell: &mut ral_core::Shell) {
-    for &set in HOST_BUILTIN_SETS {
-        shell.install_builtins(set);
+/// The exarch agent host's builtin surface on top of core's
+/// `CORE_BUILTINS`: exarch's own sets ([`EXARCH_BUILTINS`], the harness
+/// verbs) and core's host-selected `service`
+/// ([`ral_core::builtins::SERVICE_BUILTIN`] — the `watch` mechanism with
+/// the hosts swapped, kept out of `CORE_BUILTINS` so that only the agent
+/// host, under whose worker lease a durable birth means anything, gains
+/// it).  This is the one source of truth: the boot installs it, and the
+/// prompt's builtin index ([`crate::prompt`]) reads the booted shell's
+/// names back off it — the two cannot drift, by construction rather than
+/// by convention.  The REPL and batch hosts never carry it, so they never
+/// gain `service`.
+pub fn host_surface() -> HostSurface {
+    HostSurface {
+        statics: vec![
+            EXARCH_BUILTINS,
+            harness::HARNESS_BUILTINS,
+            ral_core::builtins::SERVICE_BUILTIN,
+        ],
+        captured: Vec::new(),
     }
 }
 
@@ -1091,6 +1088,18 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
 mod tests {
     use super::*;
 
+    /// Dress a bare test shell with exarch's host surface through the
+    /// test-only install doors.
+    fn dress(shell: &mut Shell) {
+        let surface = host_surface();
+        for set in surface.statics {
+            shell.install_builtins(set);
+        }
+        for set in surface.captured {
+            shell.install_captured_builtins(set);
+        }
+    }
+
     fn status(b: Break) -> i32 {
         match b {
             Break::Error(e) => e.exit_code(),
@@ -1271,7 +1280,7 @@ mod tests {
     }
 
     /// Typecheck honesty, positive half: once a shell installs
-    /// `SERVICE_BUILTIN` (here via [`install_on`]), `service` resolves to
+    /// `SERVICE_BUILTIN` (here via the host surface), `service` resolves to
     /// its own `Handle`-returning scheme rather than falling through to an
     /// external command, so binding its result straight into a `Handle`
     /// consumer (`cancel`) typechecks clean.  The negative half — the same
@@ -1281,7 +1290,7 @@ mod tests {
     #[test]
     fn service_typechecks_on_an_exarch_dressed_shell() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut shell);
+        dress(&mut shell);
         match ral_core::compile_and_typecheck(
             r#"let h = service "birth" { return 1 }; cancel $h"#,
             shell.session_schemes(),
@@ -1304,7 +1313,7 @@ mod tests {
     #[test]
     fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut shell);
+        dress(&mut shell);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(
             &mut shell,
@@ -1329,7 +1338,7 @@ mod tests {
     #[test]
     fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut shell);
+        dress(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
         let entry = shell.workers().pop().expect("the service registered");
@@ -1365,7 +1374,7 @@ mod tests {
     #[test]
     fn service_handle_reacquires_a_settled_but_unclaimed_service() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut shell);
+        dress(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
         let entry = shell.workers().pop().expect("the service registered");
@@ -1412,7 +1421,7 @@ mod tests {
     #[test]
     fn service_handle_errors_on_an_unknown_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut shell);
+        dress(&mut shell);
         let err = match builtin_service_handle(&[Value::Int(999_999)], &mut shell) {
             Err(Break::Error(e)) => e,
             other => panic!("an unknown id must error, got {other:?}"),
@@ -1427,7 +1436,7 @@ mod tests {
     #[test]
     fn service_handle_refuses_an_ephemeral_worker_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut shell);
+        dress(&mut shell);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(&mut shell, "spawn { test-block-forever }");
 
@@ -1475,7 +1484,7 @@ mod tests {
     /// `service`'s availability mirrors `watch`'s with the hosts swapped:
     /// implemented in core but absent from `CORE_BUILTINS` (and from the
     /// `WATCH_BUILTIN` set the REPL adds), it reaches a shell only through
-    /// exarch's `install_on` — so a bare ral host has no `service` name to
+    /// exarch's host surface — so a bare ral host has no `service` name to
     /// resolve, while an agent shell dispatches it.
     #[test]
     fn service_is_installed_by_exarch_and_absent_from_the_repl_sets() {
@@ -1502,10 +1511,10 @@ mod tests {
             shell.lookup_builtin("service").is_none(),
             "a bare shell (the REPL's baseline) must not dispatch service"
         );
-        install_on(&mut shell);
+        dress(&mut shell);
         assert!(
             shell.lookup_builtin("service").is_some(),
-            "exarch's install_on must install service"
+            "exarch's host surface must install service"
         );
     }
 
@@ -1558,7 +1567,7 @@ mod tests {
         );
 
         let mut dressed = Shell::new(ral_core::io::TerminalState::default());
-        install_on(&mut dressed);
+        dress(&mut dressed);
         install_agent_library(&mut dressed).expect("embedded agent library");
         let dressed_out = run_help(&mut dressed);
         assert!(

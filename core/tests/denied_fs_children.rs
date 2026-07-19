@@ -61,7 +61,7 @@ use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStd
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
-    ral_core::driver::boot_shell(Default::default(), common::prelude())
+    ral_core::driver::boot_shell(Default::default(), common::prelude(), Default::default())
 }
 
 /// A process-unique work directory under the system temp root, created on

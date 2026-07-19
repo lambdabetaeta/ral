@@ -22,7 +22,7 @@ pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prel
 /// The tag the REPL's `Transport::attach` names as its builtin installer.
 /// The REPL captures its host builtins (`jobs`/`fg`/`bg`/…) as boot-time
 /// closures over co-resident state (`repl::host_handlers`), which a wire
-/// engine child cannot construct — so this tag maps to "install nothing",
+/// engine child cannot construct — so this tag maps to the empty surface,
 /// the honest absence the bare REPL already gives every other host facility.
 #[cfg(unix)]
 pub(crate) const ENGINE_INSTALLER_TAG: &str = "repl";
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
             tag: ENGINE_INSTALLER_TAG,
             prelude: &PRELUDE,
-            install: |_shell| {},
+            surface: ral_core::HostSurface::default,
         }]);
     }
 

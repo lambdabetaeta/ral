@@ -38,15 +38,13 @@ use tui::SessionInfo;
 /// serve the helper dispatch before libtest sees the flag.  The binary
 /// calls this from `main`; test binaries call it from a `#[ctor]`.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
-    ral_core::sandbox::set_child_shell_extension(|shell| {
-        shell_eval::builtins::install_on(shell);
-    });
+    ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
             tag: shell_eval::builtins::INSTALLER_TAG,
             prelude: &shell_eval::PRELUDE,
-            install: shell_eval::builtins::install_on,
+            surface: shell_eval::builtins::host_surface,
         }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {

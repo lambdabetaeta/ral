@@ -143,10 +143,10 @@ pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 /// signature and docs on demand — baking every help string into the prompt
 /// proved far too long. Reading `shell.builtin_names()` directly, rather
 /// than naming
-/// [`HOST_BUILTIN_SETS`](crate::shell_eval::builtins::HOST_BUILTIN_SETS)
+/// [`host_surface`](crate::shell_eval::builtins::host_surface)
 /// here too, means the index is exactly what that agent's shell can
 /// dispatch, true by construction: every resolution site calls this only
-/// after its shell has run `install_on`, so there is no ordering to get
+/// on a shell booted with that surface, so there is no ordering to get
 /// wrong.
 fn builtin_index(shell: &Shell, returns: bool, allow_schedule: bool) -> String {
     let prelude = ral_core::builtins::help::prelude_names()

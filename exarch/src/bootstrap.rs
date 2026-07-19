@@ -40,8 +40,8 @@ pub fn boot_shell() -> Shell {
 
     let terminal = probe_terminal();
     diagnostic::set_terminal(&terminal);
-    let mut shell = ral_core::driver::boot_shell(terminal, &shell_eval::PRELUDE);
-    builtins::install_on(&mut shell);
+    let mut shell =
+        ral_core::driver::boot_shell(terminal, &shell_eval::PRELUDE, builtins::host_surface());
     builtins::install_agent_library(&mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
     seed_no_color(&mut shell);

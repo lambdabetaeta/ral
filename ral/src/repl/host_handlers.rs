@@ -406,8 +406,8 @@ mod tests {
     }
 
     /// Vet refusal: `alias jobs …` on a REPL-dressed table is rejected, not
-    /// silently installed to shadow `jobs` at dispatch.  [`build`] installs
-    /// the six captured entries the same way `Session::boot` does
+    /// silently installed to shadow `jobs` at dispatch.  [`build`] yields
+    /// the six captured entries `Session::boot`'s surface carries
     /// (`repl/session.rs`), so `jobs` sits on the table exactly as it would
     /// in a booted REPL session; `install_alias` reads that same table via
     /// `HandlerEntry::vet`.

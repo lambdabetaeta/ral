@@ -128,9 +128,9 @@ macro_rules! builtin_registry {
         /// Core builtins: every host-implemented name the language ships
         /// with, expanded from the registry into a single static slice.
         ///
-        /// Installed into every fresh [`Shell`] by [`Shell::new`] (via
-        /// [`Shell::install_builtins`]), whose builtin table the
-        /// typechecker reads directly — no separate lookup path.
+        /// Installed into every fresh [`Shell`] by [`Shell::new`], whose
+        /// builtin table the typechecker reads directly — no separate
+        /// lookup path.
         pub static CORE_BUILTINS: &[BuiltinEntry] = &[
             $(
                 $(#[$meta])*
@@ -407,8 +407,7 @@ builtin_registry! {
     Explain { names: ["explain"], arity: 1, ty: Sig(sig::EXPLAIN),
         doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
         call: |args, shell| Ok(help::builtin_explain(args, shell)), },
-    // `_ed-*` builtins (16 entries) are installed into the REPL's own
-    // shell at startup; see
+    // `_ed-*` builtins (16 entries) ride the REPL's boot surface; see
     // `ral::repl::plugin_ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], arity: 0, ty: Scheme(None, scheme::pure_bool),
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
@@ -427,7 +426,7 @@ pub fn core_builtin_table() -> crate::types::BuiltinTable {
 }
 
 /// `watch` — the detached-streaming concurrency builtin, kept out of
-/// [`CORE_BUILTINS`] and exposed for a host to install on its own.
+/// [`CORE_BUILTINS`] and exposed for a host's boot surface to carry.
 ///
 /// A watched worker is line-framed (`concurrency::builtin_watch` over
 /// `spawn_child`'s `ChildIoMode::Watch`) and streams live to the caller's
@@ -450,7 +449,7 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 }];
 
 /// `service` — the durable-birth concurrency builtin, kept out of
-/// [`CORE_BUILTINS`] and exposed for a host to install on its own:
+/// [`CORE_BUILTINS`] and exposed for a host's boot surface to carry:
 /// [`WATCH_BUILTIN`]'s mechanism, its mirror image host-wise.
 ///
 /// A `service`-born worker is an ordinary buffered spawn

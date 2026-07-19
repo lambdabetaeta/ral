@@ -18,11 +18,10 @@
 //! - [`plugin`]   -- Plugin runtime state and hook machinery.
 //! - [`plugin_editor`] -- Plugin context / editor state types (host of
 //!   the type-erased `Box<dyn Any>` core stores in `ReplScratch`).
-//! - [`plugin_ed_builtins`] -- The `_ed-*` builtin family, installed
-//!   into the session builtin table at boot.
+//! - [`plugin_ed_builtins`] -- The `_ed-*` builtin family, carried on
+//!   the session's boot surface.
 //! - [`host_handlers`] -- Captured builtins for job-control and
-//!   plugin-lifecycle commands; installed into the session builtin table
-//!   at boot.
+//!   plugin-lifecycle commands; carried on the session's boot surface.
 //! - [`prompt`]   -- Prompt construction and thunk evaluation.
 //! - [`session`]  -- The REPL state machine driving the loop.
 //! - [`theme`]    -- REPL value-output styling (configurable from rc).

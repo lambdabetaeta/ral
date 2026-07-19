@@ -17,7 +17,7 @@ use ral_core::types::{Capabilities, Settled, Shell};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
 
 fn fresh_shell() -> Shell {
-    ral_core::driver::boot_shell(TerminalState::default(), common::prelude())
+    ral_core::driver::boot_shell(TerminalState::default(), common::prelude(), Default::default())
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {

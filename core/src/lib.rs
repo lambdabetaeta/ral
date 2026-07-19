@@ -71,7 +71,9 @@ pub(crate) mod wire;
 // helpers, the typed-compile API, and ordinary value / rendering / diagnostic
 // types.  A host imports a turn from here; it does not reach the evaluator or
 // syntax layers through the crate root.
-pub use driver::{Captured, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+pub use driver::{
+    Captured, HostSurface, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin,
+};
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};

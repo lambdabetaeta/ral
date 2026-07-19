@@ -39,37 +39,38 @@ use crate::types::{SandboxProjection, Shell};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// Host-supplied callback that a re-exec'd child runs against its fresh
-/// shell so host-owned builtin tables join `CORE_BUILTINS` before any
-/// body is evaluated.
+/// Host-supplied constructor that a re-exec'd child calls to recover its
+/// [`HostSurface`](crate::driver::HostSurface) and install it on its fresh
+/// shell, so host-owned builtin sets join `CORE_BUILTINS` before any body
+/// is evaluated.
 ///
 /// `Shell::new` installs only `CORE_BUILTINS`.  A host like `exarch`
 /// publishes additional static entries (`explore-dir`, `line-hash`,
-/// …) that core cannot link, and the mobile transfer cannot carry the
-/// `BuiltinTable` either (the entries hold function pointers, which
-/// are not valid across process address spaces).  A pipeline-stage
-/// helper is a re-execed copy of the host binary, so the host registers
-/// this hook before [`early_init`]; the child invokes it on its
-/// `Shell::new` *before* [`crate::subprocess::install_shell_mobile`]
-/// runs.  `install_shell_mobile` preserves the receiver's builtin
-/// table by design, so hook-installed entries survive the mobile
-/// install and the body sees the same surface as the parent.
+/// …) that core cannot link, and the mobile transfer cannot carry a
+/// `HostSurface` either (its entries hold function pointers, which are
+/// not valid across process address spaces).  A pipeline-stage helper is
+/// a re-execed copy of the host binary, so the host registers this hook
+/// before [`early_init`]; the child calls it on its `Shell::new` *before*
+/// [`crate::subprocess::install_shell_mobile`] runs.  `install_shell_mobile`
+/// preserves the receiver's builtin table by design, so the surface
+/// installed here survives the mobile install and the body sees the same
+/// surface as the parent.
 ///
 /// `OnceLock` makes the registration last for the process lifetime
 /// and idempotent on second-time calls — handy for test harnesses
 /// that exercise `main` more than once.
-static CHILD_SHELL_HOOK: OnceLock<fn(&mut Shell)> = OnceLock::new();
+static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::driver::HostSurface> = OnceLock::new();
 
-/// Register the host shell-extension hook.  Must be called before
-/// [`early_init`]; subsequent calls are silently ignored.
-pub fn set_child_shell_extension(hook: fn(&mut Shell)) {
-    let _ = CHILD_SHELL_HOOK.set(hook);
+/// Register the host's builtin surface for re-exec'd children.  Must be
+/// called before [`early_init`]; subsequent calls are silently ignored.
+pub fn set_child_shell_extension(surface: fn() -> crate::driver::HostSurface) {
+    let _ = CHILD_SHELL_HOOK.set(surface);
 }
 
-/// Run the registered host shell-extension hook on `shell`, if any.
+/// Install the registered host surface on `shell`, if any.
 pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
-    if let Some(hook) = CHILD_SHELL_HOOK.get() {
-        hook(shell);
+    if let Some(surface) = CHILD_SHELL_HOOK.get() {
+        surface().install_into(&mut shell.session.builtins);
     }
 }
 

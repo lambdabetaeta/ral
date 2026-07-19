@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
-use crate::driver::BakedPrelude;
+use crate::driver::{BakedPrelude, HostSurface};
 use crate::serial::FOValue;
 use crate::transport::{
     Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Turn, answer_probe,
 };
-use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
+use crate::types::{DeferredSink, EnquiryDesk, Error, SurfaceSink};
 use crate::wire::WireChannel;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,9 +31,9 @@ pub struct EngineInstaller {
     /// The prelude to boot the engine's shell with (identical source
     /// across hosts today, but baked into each host's own binary).
     pub prelude: &'static BakedPrelude,
-    /// The host builtin installer to run on the freshly booted shell.
-    /// `|_| {}` names "no host builtins" (the REPL's table).
-    pub install: fn(&mut Shell),
+    /// The host builtin surface to boot the engine's shell with.
+    /// `HostSurface::default` names "no host builtins" (the REPL's table).
+    pub surface: fn() -> HostSurface,
 }
 
 /// A surface sink that writes `Event::Surface` frames live to the wire
@@ -237,9 +237,11 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
             let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
             let _ = rc_path; // TODO: load rc_path — needs the host's RcCtx/plugin machinery, not a core-level concern yet
 
-            let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), target.prelude);
-            (target.install)(&mut shell);
-            shell
+            crate::driver::boot_shell(
+                crate::io::TerminalState::default(),
+                target.prelude,
+                (target.surface)(),
+            )
         }
         Ok(Some(Frame::Detach) | None) => std::process::exit(0),
         Ok(Some(_)) => {
@@ -589,7 +591,7 @@ mod tests {
                 static P: std::sync::OnceLock<BakedPrelude> = std::sync::OnceLock::new();
                 P.get_or_init(BakedPrelude::bake_runtime)
             },
-            install: |_shell| {},
+            surface: HostSurface::default,
         }]
     }
 

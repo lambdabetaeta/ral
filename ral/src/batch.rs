@@ -102,13 +102,13 @@ pub(crate) fn run_batch(
     }
 
     // The batch surface: core plus `watch` (`WATCH_BUILTIN`'s doc explains
-    // why it's host-installed) — exactly what the shell below installs, so
-    // `--check` and a real run agree on what typechecks.
-    let check_table = {
-        let mut t = ral_core::builtins::core_builtin_table();
-        t.install_static(ral_core::builtins::WATCH_BUILTIN);
-        t
+    // why it's host-installed).  One value seeds `--check`'s table and boots
+    // the shell below, so the two agree by construction.
+    let host_surface = ral_core::HostSurface {
+        statics: vec![ral_core::builtins::WATCH_BUILTIN],
+        captured: Vec::new(),
     };
+    let check_table = host_surface.builtin_table();
     let run_check =
         |comp: &ral_core::ir::Comp| -> Result<ral_core::ir::Comp, Vec<ral_core::TypeError>> {
             ral_core::typecheck(
@@ -148,10 +148,7 @@ pub(crate) fn run_batch(
         return ExitCode::SUCCESS;
     }
 
-    let mut shell = ral_core::driver::boot_shell(terminal, &PRELUDE);
-    // `watch` is host-installed (why: WATCH_BUILTIN's doc in core); the batch
-    // path installs it so a script's `watch` runs, not just typechecks.
-    shell.install_builtins(ral_core::builtins::WATCH_BUILTIN);
+    let mut shell = ral_core::driver::boot_shell(terminal, &PRELUDE, host_surface);
     shell.set_exit_hints(load_exit_hints());
     tick!("builtins");
     if let Some(n) = recursion_limit {

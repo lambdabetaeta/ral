@@ -71,9 +71,23 @@ impl Session {
     pub(super) fn boot(is_login: bool, opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
         boot::setup_signals();
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
-        ral_core::dbg_trace!("repl", "before register");
-        let mut shell = ral_core::driver::boot_shell(terminal, &crate::PRELUDE);
-        ral_core::dbg_trace!("repl", "after register");
+        let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
+        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
+        // The host surface — the editor (`_ed-*`) builtins, `watch`, and the
+        // captured job-control/plugin-lifecycle commands — rides the boot:
+        // the typechecker reads this shell's builtin table, and plugins
+        // loaded from rc are checked against it.
+        let mut shell = ral_core::driver::boot_shell(
+            terminal,
+            &crate::PRELUDE,
+            ral_core::HostSurface {
+                statics: vec![
+                    super::plugin_ed_builtins::ED_BUILTINS,
+                    ral_core::builtins::WATCH_BUILTIN,
+                ],
+                captured: vec![super::host_handlers::build(jobs.clone(), runtime.clone())],
+            },
+        );
         shell.set_exit_hints(crate::platform::load_exit_hints());
         boot::setup_panic_hook();
 
@@ -89,17 +103,6 @@ impl Session {
         let mut edit_mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
         let mut surface = Surface::default();
-        let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-
-        // Install the host surface — the editor (`_ed-*`) builtins, `watch`,
-        // and the captured job-control/plugin-lifecycle commands — before
-        // any rc code runs: the typechecker reads this shell's builtin
-        // table, and plugins loaded from rc are checked against it.
-        shell.install_builtins(super::plugin_ed_builtins::ED_BUILTINS);
-        shell.install_builtins(ral_core::builtins::WATCH_BUILTIN);
-        let entries = super::host_handlers::build(jobs.clone(), runtime.clone());
-        shell.install_captured_builtins(entries);
 
         boot::load_profiles(
             is_login,

@@ -1,13 +1,16 @@
 //! Embedding and driving a `Shell` in a host process.
 //!
 //! A host (the interactive `ral` REPL, `exarch`, a test binary) needs the
-//! same three things before it runs any turn: the prelude as a baked
-//! [`Comp`], the prelude's top-level [`Scheme`] list, and a `Shell`
-//! constructed-seeded-and-loaded from both.  This module names the
-//! missing type, [`BakedPrelude`], and the one function that performs the
-//! embedding, [`boot_shell`].  Everything host-specific — terminal
-//! handling, output capture, watchdogs, capability frames, host builtins,
-//! rc files — is interposed by the host before or after the call.
+//! same four things before it runs any turn: the prelude as a baked
+//! [`Comp`], the prelude's top-level [`Scheme`] list, its [`HostSurface`],
+//! and a `Shell` constructed-seeded-and-loaded from all three.  This
+//! module names the missing type, [`BakedPrelude`], the surface type,
+//! [`HostSurface`], and the one function that performs the embedding,
+//! [`boot_shell`], which installs the surface before any rc file or user
+//! code is checked — so the typechecker's builtin table and the runtime's
+//! agree by construction.  Everything else host-specific — terminal
+//! handling, output capture, watchdogs, capability frames, rc files — is
+//! interposed by the host before or after the call.
 //!
 //! This is about *driving* a `Shell` in a host process; probing the
 //! underlying host *machine* (OS, architecture, cwd, git state,
@@ -39,7 +42,9 @@ use crate::source::Span;
 use crate::transport::{Program, Turn};
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
-use crate::types::{DeferredSink, Desk, Nursery, Settled, Shell, SurfaceSink, Value};
+use crate::types::{
+    BuiltinEntry, BuiltinTable, DeferredSink, Desk, Nursery, Settled, Shell, SurfaceSink, Value,
+};
 use crate::types::{DefaultPolicy, Hook, HookName, HookSig, RegisterError, TerminalPolicy};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -126,14 +131,60 @@ macro_rules! baked_prelude {
     };
 }
 
-/// Construct, seed, and load the prelude into a fresh `Shell`.
+/// A host's builtin surface beyond [`CORE_BUILTINS`](crate::builtins::CORE_BUILTINS):
+/// the one definition [`boot_shell`] installs and shell-free typechecking
+/// ([`Self::builtin_table`]) reads, so the checker surface and the runtime
+/// surface cannot drift.  An empty surface (`Default`) is a bare core shell.
+#[derive(Default)]
+pub struct HostSurface {
+    /// Process-static builtin sets.
+    pub statics: Vec<&'static [BuiltinEntry]>,
+    /// Runtime-owned builtin sets capturing host state.
+    pub captured: Vec<Arc<[BuiltinEntry]>>,
+}
+
+impl HostSurface {
+    /// The builtin table this surface presents: [`CORE_BUILTINS`]
+    /// (via [`core_builtin_table`](crate::builtins::core_builtin_table))
+    /// plus every set here — exactly what a shell booted with this
+    /// surface dispatches.  Seeds
+    /// [`SessionSchemes::from_schemes`](crate::typecheck::SessionSchemes)
+    /// for a checker with no live shell (`--check`).
+    ///
+    /// # Panics
+    /// Panics if a name here collides with an installed builtin.
+    pub fn builtin_table(&self) -> BuiltinTable {
+        let mut table = crate::builtins::core_builtin_table();
+        self.install_into(&mut table);
+        table
+    }
+
+    pub(crate) fn install_into(&self, table: &mut BuiltinTable) {
+        for &set in &self.statics {
+            table.install_static(set);
+        }
+        for set in &self.captured {
+            table.install_arc(Arc::clone(set));
+        }
+    }
+}
+
+/// Construct a fresh `Shell`, install the host's builtin surface, seed the
+/// env, and load the prelude.
 ///
-/// Everything
-/// a turn-evaluating host needs before its own builtins, rc files, or
-/// capability frames; terminal handling, output capture, and watchdogs
-/// remain host concerns interposed around this call.
-pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude) -> Shell {
+/// The shell leaves here fully dressed: `surface` lands next to
+/// `CORE_BUILTINS`, before any rc file or user code is checked, so the
+/// typechecker (which reads this shell's builtin table) and the runtime
+/// agree on the surface by construction.  Everything else host-specific —
+/// terminal handling, output capture, watchdogs, capability frames, rc
+/// files — remains interposed around this call.
+///
+/// # Panics
+/// Panics if a name in `surface` collides with a core builtin or repeats
+/// within the surface.
+pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: HostSurface) -> Shell {
     let mut shell = Shell::new(terminal);
+    surface.install_into(&mut shell.session.builtins);
     shell.seed_default_env_vars();
     crate::builtins::register(&mut shell, prelude.comp());
     shell

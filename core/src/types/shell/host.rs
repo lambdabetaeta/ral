@@ -120,12 +120,16 @@ impl Shell {
         self.session.builtins.names()
     }
 
-    /// Install process-static builtin commands into this shell.
+    /// Install process-static builtin commands into this shell — the
+    /// test-dressing door; a production host's surface rides
+    /// [`boot_shell`](crate::driver::boot_shell).
     pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
         self.session.builtins.install_static(entries);
     }
 
-    /// Install captured builtin commands into this shell.
+    /// Install captured builtin commands into this shell — the
+    /// test-dressing door; a production host's surface rides
+    /// [`boot_shell`](crate::driver::boot_shell).
     pub fn install_captured_builtins(&mut self, entries: Arc<[BuiltinEntry]>) {
         self.session.builtins.install_arc(entries);
     }
