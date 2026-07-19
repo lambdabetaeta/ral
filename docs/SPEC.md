@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 917119f -->
+<!-- verified_at_commit: ca2674822c667e858a566d84301a3c29c48012b7 -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -1907,12 +1907,17 @@ for stdout and `[LABEL:err] ` for stderr. `watch` returns a
 
 Because a watched worker is detached yet keeps writing as it runs, its
 output sink must outlive the turn. `watch` is therefore a builtin the
-**host installs**, not one the language ships everywhere: a host whose
-stdout is a durable sink (the `ral` shell, interactive or batch, writing
-to a terminal or pipe) installs it; a host whose active streams are
-per-call capture buffers — an embedding that collects each turn's output —
-does not, so there `watch` is simply not a builtin and naming it resolves
-as any other unknown command would.
+**host installs** into its own shell's builtin table (§16), not one the
+language ships everywhere: a host whose stdout is a durable sink (the
+`ral` shell, interactive or batch, writing to a terminal or pipe)
+installs it; a host whose active streams are per-call capture buffers —
+an embedding that collects each turn's output — does not, so in that
+shell's table `watch` is simply not a builtin and naming it resolves as
+any other unknown command would.  Per-shell scope also fixes where the
+name resolves: workers, pipeline stages, and session forks inherit the
+installing shell's table (§16), so `watch`'s presence or absence is
+decided once, by the host that built the session, and holds throughout
+it — inside spawned bodies included.
 
 The label is mandatory and may be any expression evaluating to a
 String — a literal, an interpolation, or a deref — and the body is
@@ -2144,15 +2149,31 @@ the canonical user-facing commands.  A few carry a leading `_` to mark
 them as implementation primitives (§16.3).
 Return-type rules follow §4.2.
 
-Hosts may also register static host builtins: Rust atoms owned by the
-embedding process rather than by `ral-core`.  A host entry carries its
-names, call function, computation hint, arity, documentation, and
-optional type scheme together.  Registration rejects collisions with
-core names or earlier host names, while re-registering the same static
-table is a no-op.  The `ral` REPL uses this for `_ed-*`,
-`load-plugin` / `unload-plugin`, and job control (§18); `exarch` uses
-it for agent atoms such as `grep-files`, `line-hash`, `explore-dir`, and
-`edit-hash`.  Those exarch names are not core ral features.
+Hosts may also install host builtins: Rust atoms owned by the
+embedding host rather than by `ral-core`.  Builtins are shell-scoped —
+each `Shell` owns a builtin table, seeded with the core set at
+construction, into which a host installs its own sets; there is no
+process-level registry, and the typechecker resolves names against the
+same per-shell table the evaluator dispatches through.  An entry
+carries its name, type-checker rule (a scheme with its fixed arity, or
+a full signature), documentation, and body — a process-static function
+or a closure capturing host state — together.  Installation rejects a
+name collision with anything already on the table, while re-installing
+a set carrying the same names is a no-op.  The table travels with the
+shell: a spawned worker, a pipeline stage, and a session fork all
+inherit the installing shell's table (§13.1).  The `ral` REPL uses
+this for `_ed-*`, `watch` (§13.5), `load-plugin` / `unload-plugin`,
+and job control (§18); `exarch` uses it for agent atoms such as
+`grep-files`, `view-text`, `explore-dir`, and `edit-hash`.  Those
+exarch names are not core ral features.
+
+A host can also install plain `name → doc` entries for a library of
+sourced closures into a shell's session — there is no process-global
+doc registry.  `help` lists them under `Library:`, `explain` resolves
+them, and child shells and workers inherit the same index; a shell no
+host has documented shows no `Library:` section.  `exarch` installs
+the docs for its sourced agent helper library this way, in the same
+act that sources it.
 
 ### 16.1  User-facing
 
@@ -2166,8 +2187,8 @@ it for agent atoms such as `grep-files`, `line-hash`, `explore-dir`, and
 | `has` | Test map membership |
 | `ask` | `/dev/tty` prompt; fails on EOF |
 | `cwd` | Current directory as `String` |
-| `help` | Arity 0; print an overview of builtins, prelude, and library |
-| `explain` | Arity 1; doc, type signature, and source location for one name |
+| `help` | Arity 0; print an overview of the invoking shell's own scope — its builtin table, the prelude, and, when the session carries library docs, a `Library:` section listing them |
+| `explain` | Arity 1; doc, type signature, and source location for one name — a prelude name's signature is read from the shell's own prelude scope (the baked `Bind` nodes carry the checker's schemes), and a library name resolves through the session-held docs |
 | `clear`, `reset` | Arity 0 terminal control, returning `Unit`; an argument is an arity error |
 | `round` | `round <x> <places>` — round a `Float` to `<places>` decimal places (0..308), halves away from zero; always returns a `Float` |
 | `floor`, `ceil`, `trunc` | Map a `Float` to the `Int` in the named direction; all four rounding builtins reject an `Int` at the type level (it is already rounded) and refuse non-finite or out-of-range inputs |
@@ -2442,8 +2463,9 @@ single argument to obtain the manifest; the interactive builtin
 passes none (it defaults to `[:]`) — options are supplied through
 the `~/.ralrc` `plugins:` entries below.  If the module returns a
 manifest map directly, a non-empty options map is a load-time error.
-**`unload-plugin <name>`** removes it.  Both are host builtins
-registered by the ral REPL (§16), not core builtins.
+**`unload-plugin <name>`** removes it.  Both are host builtins the
+ral REPL installs into its own shell's builtin table (§16), not core
+builtins.
 
 **`shell-quote <s>`** and **`shell-split <s>`** form a
 POSIX-style round-trip pair.  `shell-quote` returns one argument in a

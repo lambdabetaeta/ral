@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
-covers_paths: [exarch/src/shell_eval.rs, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
+generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
+generated_at_date: 2026-07-19
+covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / shell eval
@@ -70,8 +70,10 @@ and `run_shell` owns only the turn it builds and the outcome it formats:
   lease's scratch expiry) is not on the request at all — it parameterises
   the [[map/exarch/agent|agent]]'s per-call `advance_worker_epoch` sweep;
 Surface delivery is not a `Turn` field: `dispatch_to_report` takes the live and
-deferred-batch sink closures directly (below), plus an enquiry handler — the
-tool path answers no enquiries, so a probe gets an honest `EnquiryError`.
+deferred-batch sink closures directly (below, both routed through
+`fleet::desk::SurfaceApplier`), plus an enquiry handler answering through the
+per-call `ExarchDesk` when one is installed ([[map/exarch/builtins|builtins]]);
+a desk-less dispatch gets an honest `EnquiryError`.
 
 `BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
 lease constant this module owns but does not put on the request: it is not
@@ -107,12 +109,12 @@ flushes. `accepted_surface` wraps it with the protected-pin guard; each decoded
 Five shapes ride the one `surface` channel, tried pin-first:
 
 - a `` `pin ``/`` `unpin `` wrapper decodes to `Kind::Pin` / `Kind::Unpin`, but
-  `commitment:*` and the host-owned `services` key are protected
+  the host-owned `services` key is protected
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]):
   ordinary `surface` writes or clears there are rejected with a diagnostic
   before they reach the pin mirror or viewport; accepted pins are mirrored as
-  `PinDigest`s so the agent can distinguish ordinary state from commitment
-  state without parsing rendered text;
+  `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name pinned state
+  without parsing rendered text;
 - an `io`-keyed `Map` core emits at a redirect / exec door decodes through
   `value_to_io` / `io_card` into a `Kind::Io { event, card }`, carrying the raw
   effect record beside its rendering ([[map/exarch/io-surface|io-surface]]);
@@ -135,7 +137,7 @@ boundary the events are buffered in the confined child and replayed through the
 parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.
 
-`agent_builtins.rs` registers exarch's resident host atoms — `view-text`, the
+`shell_eval/builtins.rs` registers exarch's resident host atoms — `view-text`, the
 `grep-files` search, and the hash-addressed `edit-hash`/`edit-replace`, whose
 file I/O happens in Rust, below the redirect frame
 ([[map/exarch/io-surface|io-surface]]) — and sources the small embedded

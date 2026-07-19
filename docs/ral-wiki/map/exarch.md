@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 489d125
-generated_at_date: 2026-07-16
-covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
+generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
+generated_at_date: 2026-07-19
+covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
 # Map: exarch
@@ -67,7 +67,7 @@ into its own OAuth-backed provider, ordered after the API-key providers.
 
 ## Credentials and the env scrub
 
-`credential.rs` resolves every provider's secret once at startup and **scrubs
+`provider/credential.rs` resolves every provider's secret once at startup and **scrubs
 the key variables from the process environment, so no child a tool call spawns
 can inherit a live key.**
 
@@ -98,7 +98,7 @@ can inherit a live key.**
 - **`boot_shell`** — the one constructor that may boot a session shell: clear
   stale ral interrupts, install ral's handlers, chain exarch's cancel over them,
   call core's [[map/repl/startup|`ral_core::driver::boot_shell`]], then layer
-  exarch's host builtins and source the `agent.ral` library, register its docs,
+  exarch's host builtins and source the `agent.ral` library,
   suppress ANSI colour at the source, and seed the exit hints.
 - **Machine probing** — `host::snapshot` formats the live machine into the
   prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
@@ -172,13 +172,14 @@ every other section stands.
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — the tool registry: `ral` alone. Every other
-  harness verb — spawning (`amnemon`/`mnemon`, fuel-gated), `reply`, the
-  schedule family, the commitment pair — is a builtin reached through it,
-  answered by the desk. The sub-agent model is [[design/agents|agents]].
+- [[map/exarch/tools|tools]] — `ral` is the one tool; `tools.rs` is a thin
+  seam over it, with no registry. Every other harness verb — the `agent`
+  spawn (one record-spec verb, `` `amnemon ``/`` `mnemon `` by field,
+  fuel-gated), `reply`, the schedule family — is a builtin reached through
+  it, answered by the desk. The sub-agent model is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms and the harness
-  verbs: the hash-addressed edit primitives, the spawn/schedule/commitment/
-  reply family, and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
+  verbs: the hash-addressed edit primitives, the spawn/schedule/reply
+  family, and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and
   the two frontends, the inline TUI and headless.
 - [[map/exarch/cards|cards]] — the render document `surface` carries: a `card` of closed

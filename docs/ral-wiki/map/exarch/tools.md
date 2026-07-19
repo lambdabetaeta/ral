@@ -1,21 +1,21 @@
 ---
-generated_at_commit: 489d125
-generated_at_date: 2026-07-16
-covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
+generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
+generated_at_date: 2026-07-19
+covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
 # Map: exarch / tools
 
 **`ral` is exarch's one tool.** Every other harness affordance the model once
 reached as a provider-advertised `Tool` — spawning, messaging, cancelling,
-scheduling, the commitment pair, and `reply` — is now a ral builtin reached by
-writing ral inside `ral` itself, per the
+scheduling, and `reply` — is now a ral builtin reached by writing ral inside
+`ral` itself, per the
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 migration; see [[map/exarch/builtins|builtins]] for the verbs and
 [[decisions/260706_enquiry-channel|enquiry-channel]] for the desk they speak
-through. `tools.rs` shrinks to:
+through. `shell_eval/tools.rs` shrinks to:
 
-- **`ral`** (`tools/ral.rs`) — the one call that crosses the provider
+- **`ral`** (`shell_eval/tools/ral.rs`) — the one call that crosses the provider
   boundary: evaluate ral source against the session shell, synchronously,
   through [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `cmd`
   (the ral source) and a required one-line `description` (shown on the
@@ -24,13 +24,13 @@ through. `tools.rs` shrinks to:
   optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
   (60s) — a default, not a cap: raise it for known-long work, or `spawn` what
   should outlive the turn.
-- **`tools/agent.rs`** — no longer a tool module, but the fork-detach-register
-  spine every launch shares: `spawn_async`, `AsyncSpawn`, `SpawnedChild`. Both
-  `/branch`'s `spawn_branch` and the desk's `agent-start`/`commit-open`/
-  `commit-verify` handlers build on it, so `/branch` and every harness spawn
-  verb share one mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
+- **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
+  fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
+  `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's `agent-start`
+  handler build on it, so `/branch` and the harness spawn verb share one
+  mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
 
-The harness verbs are answered by the `ExarchDesk` (`exarch/src/desk.rs`),
+The harness verbs are answered by the `ExarchDesk` (`exarch/src/fleet/desk.rs`),
 installed per `ral` call and reached through `shell.enquire(...)` from the
 builtin's body; acting verbs keep `Kind::HarnessCall`/`HarnessResult` rail
 chrome (spawns additionally derive a child tab), listings stay silent since

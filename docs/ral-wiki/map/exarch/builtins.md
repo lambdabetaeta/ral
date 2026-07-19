@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 489d125
-generated_at_date: 2026-07-16
-covers_paths: [exarch/src/agent_builtins.rs, exarch/src/agent_builtins/, exarch/src/desk.rs, exarch/data/agent.ral]
+generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
+generated_at_date: 2026-07-19
+covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
@@ -26,11 +26,11 @@ prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 `Val::Int` and silently fails to compare against the recomputed `String`
 ([[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]).
 
-## Rust atoms — `agent_builtins.rs`
+## Rust atoms — `shell_eval/builtins.rs`
 
-`EXARCH_BUILTINS` is the slice `agent_builtins::install_on` registers into the
+`EXARCH_BUILTINS` is the slice `builtins::install_on` registers into the
 shell, together with core's host-selected `SERVICE_BUILTIN`
-(`AGENT_BUILTIN_SETS`, the one source of truth); it is called by
+(`HOST_BUILTIN_SETS`, the one source of truth); it is called by
 `bootstrap::boot_shell` and named as the wire engine child's builtin installer.
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
@@ -63,7 +63,8 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   ignore-aware, skipping the root and any denied path.
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
   the available skills (fresh scan each call, filtered by the grant), then load
-  one skill's full `SKILL.md` body on demand.
+  one skill's full `SKILL.md` body on demand; the scan and frontmatter parse
+  live in `shell_eval/skill.rs`.
 - `fff <query>` → `[String]`. Frecency-ranked fuzzy filename search over the
   working tree (`fff_index`, the `fff-search` crate); the per-directory index is
   cached process-globally, so forked children sharing the cwd reuse it.
@@ -92,7 +93,7 @@ splits by class instead:
   one row per live service, keyed by id and its birth description, born and
   retired at the same ready-boundary pass `reap_bindings` runs at
   (`Agent::reconcile_service_pins`, `card::services_pin_card`). The pin is
-  unwritable by the program, the same way a `commitment:*` pin is
+  unwritable by the program
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
 
 `service <desc> <thunk>` → `Handle`. The durable-birth verb: an ordinary
@@ -117,7 +118,7 @@ top-level `service-handle N` result cannot cross the host seam (a `Handle` is
 not ground) — it exists to be composed with an eliminator in the same turn:
 `await (service-handle 3)`, `cancel (service-handle 3)`.
 
-Registered only by `agent_builtins::install_on`, alongside the search/edit
+Registered only by `builtins::install_on`, alongside the search/edit
 atoms above: a bare REPL shell, which never installs `EXARCH_BUILTINS` (nor
 `SERVICE_BUILTIN`), has neither `service` nor `service-handle` — its own job
 control is [[map/repl/jobs|repl/jobs]].
@@ -135,16 +136,17 @@ Sourced into the shell at boot:
 - `set-goal` / `clear-goal` — pin or drop a session goal under the `goal`
   register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
 
-## Harness verbs — spawn, schedule, commitment, reply
+## Harness verbs — spawn, schedule, reply
 
-Every verb below is a `BuiltinEntry` in `exarch/src/agent_builtins/harness.rs`
+Every verb below is a `BuiltinEntry` in
+`exarch/src/shell_eval/builtins/harness.rs`
 (`HARNESS_BUILTINS`, chained into `HOST_BUILTIN_SETS` beside the atoms above —
 one registration site for `install_on` and the prompt's `builtin_index`
 alike), landed by
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 over the rail [[decisions/260706_enquiry-channel|enquiry-channel]] built. A
 verb's body validates its arguments engine-side and calls
-`shell.enquire(class)`; `exarch/src/desk.rs`'s `ExarchDesk` decodes the class
+`shell.enquire(class)`; `exarch/src/fleet/desk.rs`'s `ExarchDesk` decodes the class
 label and answers from shared handles (`HostServices`) captured at
 install — never `&mut Agent` — installed per `ral` call in `Agent::run_shell`
 and swapped back to an absent desk immediately after. A closed label set the
@@ -153,39 +155,36 @@ door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
 
-- **`amnemon <prompt> <title> <permissions>` / `mnemon <prompt> <title>
-  <permissions>`** → `F [id: Int, title: Str, log-dir: Str]`. Launch-only and
-  always asynchronous, like the tool they replace: the receipt is the
-  answer, the reply comes later through the inbox. `permissions` is one of
-  the six [[map/exarch/policy|base]] names; `mnemon` additionally imports the
-  parent's model-visible context before the child's fresh final prompt. Fuel
-  bounds delegation depth, not fan-out — refused only once the caller's own
-  `fuel` reaches zero.
-- **`agents`** → `F [[id: Int, title: Str, elapsed-s: Int, log-dir: Str]]`.
+- **`agent [prompt: …, name: …, type: …, grant: …]`** →
+  `F [name: Str, log-dir: Str]`. The one spawn verb, taking a single closed
+  **record** argument. Launch-only and always asynchronous: the receipt is
+  the answer, the reply comes later through the inbox. `name` is the child's
+  identity — the tab-bar contract (`valid_name`), and unique among live
+  agents or the call is refused; `type` is `` `amnemon `` (blank context) or
+  `` `mnemon `` (imports the parent's model-visible context before the fresh
+  final prompt); `grant` is one of the six [[map/exarch/policy|base]] names.
+  Fuel bounds delegation depth, not fan-out — refused only once the caller's
+  own `fuel` reaches zero.
+- **`agents`** → `F [[name: Str, elapsed-s: Int, log-dir: Str]]`.
   Silent; a recovery poll over live descendants.
-- **`message <id> <text>`** / **`agent-cancel <id>`** → `F Unit`.
-  Descendant-only, enforced at the desk; a pure confirmation, so success is
-  the return and failure raises.
-- **`schedule <spec>`** → `F Int`, taking a single closed **record** argument
-  (`[trigger: …, label: …, prompt: …]`) rather than three positional
-  arguments — a record literal infers an exact row, so a missing or surplus
-  field is a static error naming it, which also sidesteps ral's grammar
-  footgun where a nullary tag would otherwise absorb the following
-  positional atom. `trigger` is `` `cron '<expr>' `` or `` `after '<dur>' ``;
-  `label` is `` `some '<name>' `` or `` `none `` (the `sched-{id}` default).
-  Gated on the `--allow-schedule` grant, refused with a didactic text
-  otherwise.
-- **`schedules`** → `F [[id: Int, label: Str, trigger: Str, next-s: Int,
+- **`message <name> <text>`** / **`agent-cancel <name>`** → `F Unit`.
+  Descendant-only, resolved by name and enforced at the desk; a pure
+  confirmation, so success is the return and failure raises.
+- **`schedule <spec>`** → `F [label: Str, next-s: Int]`, taking a single
+  closed **record** argument (`[trigger: …, label: …, prompt: …]`) rather
+  than three positional arguments — a record literal infers an exact row, so
+  a missing or surplus field is a static error naming it, which also
+  sidesteps ral's grammar footgun where a nullary tag would otherwise absorb
+  the following positional atom. `trigger` is `` `cron '<expr>' `` or
+  `` `after '<dur>' ``; `label` is `` `some '<name>' `` or `` `none `` (the
+  `sched-<n>` default). The label is the schedule's identity — unique among
+  live schedules, the `sched-<n>` namespace reserved for defaults — and the
+  receipt's `next-s` reads back the seconds to first fire. Gated on the
+  `--allow-schedule` grant, refused with a didactic text otherwise.
+- **`schedules`** → `F [[label: Str, trigger: Str, next-s: Int,
   fires: Int]]`. Silent; `next-s` saturates to `i64::MAX` for a cron with no
   next occurrence.
-- **`unschedule <id>`** → `F Unit`.
-- **`commit <key> <description>`** / **`verify-commitment <key>`** →
-  `F [id: Int, title: Str, log-dir: Str]`. The write and check halves of a
-  protected `commitment:*` pin
-  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]):
-  each forks a host-owned, read-only-narrowed child through the same spawn
-  spine as `amnemon`, and the pin opens or clears only once the child's
-  settled reply is the right structured shape.
+- **`unschedule <label>`** → `F Unit`.
 - **`reply <value>`** — `∀α. α → F Unit`, first-orderness checked at the
   door. The sole return path for a returning agent; last write wins within a
   turn. Refused on every non-returning agent — the interactive trunk and
@@ -203,12 +202,14 @@ listings stay silent, since their value *is* the returned record.
 
 ## Where to look
 
-- `exarch/src/agent_builtins.rs` (+ `agent_builtins/fff_index.rs`) — the Rust
+- `exarch/src/shell_eval/builtins.rs` (+ `builtins/fff_index.rs`) — the Rust
   atoms, their type schemes, and `EXARCH_BUILTINS`.
-- `exarch/src/agent_builtins/harness.rs` — the harness verbs above,
+- `exarch/src/shell_eval/builtins/harness.rs` — the harness verbs above,
   `HARNESS_BUILTINS`.
-- `exarch/src/desk.rs` — `HostServices`, `ExarchDesk`, and the handler for
-  each enquiry class.
+- `exarch/src/shell_eval/skill.rs` — the skill scan behind
+  `skill-list`/`skill`.
+- `exarch/src/fleet/desk.rs` — `HostServices`, `ExarchDesk`, and the handler
+  for each enquiry class.
 - `exarch/data/agent.ral` — the helper library; seeded by `boot_shell`
   ([[map/exarch|exarch]] hub).
 - The model-facing tool that carries every one of these calls is

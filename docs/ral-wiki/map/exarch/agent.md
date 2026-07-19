@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 489d125
-generated_at_date: 2026-07-16
-covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs, exarch/src/config.rs]
+generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
+generated_at_date: 2026-07-19
+covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs]
 ---
 
 # Map: exarch / agent
@@ -20,7 +20,7 @@ thin [[#The Fleet|`Fleet`]], not on the node
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]). There is no
 `Session`, no `is_root`: every distinction reduces to **position in the tree**,
 read from `parent: Option<AgentId>` together with `interactive`/`focus`. Output
-caps are fixed `digest.rs` constants, not per-agent state.
+caps are fixed `agent/digest.rs` constants, not per-agent state.
 
 The **trunk** is the parent-less node (`parent = None`). An `interactive` node
 built to converse — the interactive trunk, and every `/branch` tab
@@ -218,24 +218,13 @@ driven off the same `react` rule. Live descendants make the agent wait:
 `must_reply` is suspended, and pin/no-pin reminders wait too, since the agent has
 already delegated the next actionable fact. Once the descendants settle, the
 rules resume against the still-live pin register. The pinned-state reminder is
-uniform for every pin kind (tasks, goals, protected `commitment:*` pins alike
-([[decisions/260703_protected-commitment-pins|protected-commitment-pins]])) and
+uniform for every pin kind (tasks, goals, any other pinned state alike) and
 every actionable agent role: budget-free while anything is pinned, independent
 of and additive with `must_reply` — a returning agent that finishes without
-replying while it still holds a live commitment is nudged for both after its
+replying while it still holds pinned state is nudged for both after its
 children have landed. Exhausted transport and rate-limit failures are provider
 facts, so they surface as `Kind::ProviderError` and do not post a model-visible
 self-nudge.
-
-The same agent applies the protected pin settles that
-`commit`/`verify-commitment` ([[map/exarch/builtins|builtins]]) put in flight
-(the pin read/set/clear logic itself lives in
-[[map/exarch/shell-eval|shell-eval]], over the shared `PinDigests`): a settled
-writer's formalized card, or a settled verifier's passing result, is tagged by
-the worker thread that drove it, and
-`Agent::settle_commitment` projects that tag — an open (`Kind::Pin`) or a
-clear (`Kind::Unpin`) — on the parent's own thread as the result drains.
-Ordinary model-authored `surface` cannot reach either path.
 
 ## The Fleet
 
@@ -270,7 +259,11 @@ disagree about what is shared.
 
 The single cascade serves the deliberate teardowns — `agent-cancel`, a
 returning agent's `reply`, and the `/clear` / `/close` subtree reaps.
-`AgentRegistry::Entry` carries a `parent` link, so the registry is the
+`AgentRegistry` lives in `fleet/registry.rs`; an entry's `name` is its
+identity — unique among live entries, enforced at `register`
+(`RegisterError::NameTaken`; the trunk holds `TRUNK_NAME`) and the handle the
+`message`/`agent-cancel` verbs resolve descendants by. Each entry carries a
+`parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
 subtree, `cancel_descendants(root)` abandons a returning agent's children without
 advancing the global generation, and `clear_subtree(root)` reaps a subtree and
@@ -379,8 +372,8 @@ There is no flow-back: the child's `cd`, env, and new bindings die with it. Ever
 agent may spawn, but each fork hands the child one less unit of `fuel` than the
 parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own fuel is never
 debited, so fuel bounds depth, not fan-out); at `fuel == 0` the desk refuses
-`agent-start`/`commit-open`/`commit-verify` with the exhaustion text — the
-spawn verbs stay advertised, the desk is the wall
+`agent-start` with the exhaustion text — the
+spawn verb stays advertised, the desk is the wall
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
 chain bottoms out by refusal a fixed number of generations down. The fork
 mirrors on the bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
@@ -389,10 +382,11 @@ mirrors on the bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
 `true`; `branch` is `fork_with(self.caps, returns: false)` plus
 `inherit_context`, minting a *conversing* peer tab with the parent's verbatim
 authority ([[decisions/260705_branch-minimal|branch-minimal]]). A builtin
-spawn takes the decomposed path instead: the `amnemon`/`mnemon` body forks the
+spawn takes the decomposed path instead: the `agent` verb's body forks the
 session into the turn's nursery (`Shell::fork_into_nursery`), and the desk's
 `agent-start` arm adopts it and calls `Agent::assemble` at one less unit of
-fuel ([[map/exarch/builtins|builtins]]). The mnemon variant additionally forks
+fuel ([[map/exarch/builtins|builtins]]). The `` `mnemon `` memory mode
+additionally forks
 the parent's `AgentLog` and imports its model-visible context before assembly
 ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]); `AgentLog`
 drops a pending unanswered assistant tool-call frame when the parent is
