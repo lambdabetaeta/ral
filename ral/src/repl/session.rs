@@ -92,6 +92,15 @@ impl Session {
         let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
 
+        // Install the host surface — the editor (`_ed-*`) builtins, `watch`,
+        // and the captured job-control/plugin-lifecycle commands — before
+        // any rc code runs: the typechecker reads this shell's builtin
+        // table, and plugins loaded from rc are checked against it.
+        shell.install_builtins(super::plugin_ed_builtins::ED_BUILTINS);
+        shell.install_builtins(ral_core::builtins::WATCH_BUILTIN);
+        let entries = super::host_handlers::build(jobs.clone(), runtime.clone());
+        shell.install_captured_builtins(entries);
+
         boot::load_profiles(
             is_login,
             opts.no_rc,
@@ -117,18 +126,6 @@ impl Session {
         // Install the default prompt only when rc files did not
         // register one already (e.g. via the `prompt` key in ralrc).
         boot::install_default_prompt(&mut shell);
-
-        // Install the host surface — the editor (`_ed-*`) builtins and
-        // `watch` — into this shell's builtin table, so the typechecker
-        // (which reads this same table) sees their schemes.
-        shell.install_builtins(super::plugin_ed_builtins::ED_BUILTINS);
-        shell.install_builtins(ral_core::builtins::WATCH_BUILTIN);
-
-        // Install the captured builtins for job-control and plugin
-        // lifecycle commands.  This must come after capabilities are applied
-        // and before the frontend is created.
-        let entries = super::host_handlers::build(jobs.clone(), runtime.clone());
-        shell.install_captured_builtins(entries);
 
         let frontend = boot::create_frontend(
             interactive_mode,
