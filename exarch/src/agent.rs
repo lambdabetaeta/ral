@@ -33,6 +33,7 @@ use crate::bus::{
     WORKER_PANIC_PREFIX,
 };
 use crate::fleet::desk;
+use crate::fleet::registry::{AgentRegistry, Registration};
 use crate::agent::digest::{
     AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
@@ -42,7 +43,6 @@ use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
 };
 use crate::shell_eval;
-use crate::shell_eval::tools::CommitmentSettle;
 use crate::agent::transcript::Transcript;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
@@ -206,7 +206,7 @@ pub struct Agent {
     /// never touches this field on the parent, it only computes the child's
     /// own `fuel` as one less — an agent may start any number of children
     /// without spending its own fuel.  Zero makes the desk refuse
-    /// `agent-start`/`commit-open`/`commit-verify` with the exhaustion text
+    /// `agent-start` with the exhaustion text
     /// (`crate::fleet::desk::ExarchDesk`'s spawn spine), so a chain terminates by
     /// refusal rather than recursing forever.  The trunk starts at
     /// [`SPAWN_FUEL`].
@@ -299,7 +299,7 @@ pub struct Agent {
     /// depth.  Survives `/clear`: [`clear_subtree`](crate::fleet::registry::AgentRegistry::clear_subtree)
     /// bumps the generation and reaps the focused agent's descendants, so a
     /// worker that settles after the clear drops its result.
-    pub(crate) agents: crate::fleet::registry::AgentRegistry,
+    pub(crate) agents: AgentRegistry,
     /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
     /// posts wakeups into its own inbox), so this is no longer root-only; the
     /// self-wakeup builtins (`schedule`/`schedules`/`unschedule`) still gate
@@ -382,9 +382,9 @@ pub enum TurnOutcome {
 const MAX_STEPS: u32 = 250;
 
 /// The depth budget the trunk starts with; each [`Agent::fork_with`] hands
-/// its child one less, and a `fuel == 0` agent's `agent-start`/
-/// `commit-open`/`commit-verify` calls are refused at the desk
-/// (`ExarchDesk::launch`, `crate::fleet::desk`). Bounds how many generations deep
+/// its child one less, and a `fuel == 0` agent's `agent-start` calls are
+/// refused at the desk (`ExarchDesk::launch`, `crate::fleet::desk`). Bounds
+/// how many generations deep
 /// a delegation chain may recurse — a few hops covers legitimate delegation —
 /// while stopping a runaway spawn-calling chain from exhausting threads
 /// instead of the process. Fan-out is a separate, unbounded axis: how many
@@ -472,10 +472,13 @@ impl Control for NoControl {
     }
 }
 
-/// The trunk's registry title.  The trunk lists its descendants, never itself,
+/// The trunk's registry name.  The trunk lists its descendants, never itself,
 /// so this is never shown — it only fills the entry the frontend looks up by id
-/// for the trunk's mailbox and provider.
-const TRUNK_TITLE: &str = "main";
+/// for the trunk's mailbox and provider. Since names are unique among live
+/// entries ([`crate::fleet::registry::AgentRegistry::register`]), a registry
+/// never holds more than one self-registered root at a time in production —
+/// [`Agent::register_self`]'s one production caller per registry.
+const TRUNK_NAME: &str = "main";
 
 /// The launch configuration threaded into [`Agent::assemble`] — bundled so
 /// the one constructor reads at the call site rather than as a wall of bare
@@ -517,7 +520,7 @@ pub(crate) struct Build {
     pub(crate) tool_enabled: bool,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
-    pub(crate) agents: crate::fleet::registry::AgentRegistry,
+    pub(crate) agents: AgentRegistry,
     /// The operator's disk-warn ceiling, threaded from `config::disk_warn_bytes`
     /// at the trunk's construction and inherited verbatim by every fork — a
     /// host setting, not a per-agent choice.
@@ -610,11 +613,26 @@ impl Agent {
     /// it from the start; a child is registered by its spawn site (which also
     /// arms the ceiling).  Idempotent enough: a re-register overwrites in place.
     fn register_self(&self) {
-        self.agents.register(crate::fleet::registry::Registration {
+        self.register_self_named(TRUNK_NAME);
+    }
+
+    /// [`Self::register_self`], parameterised on the name. The trunk/headless
+    /// root path always passes [`TRUNK_NAME`] through the unparameterised
+    /// caller above; a test that wants a second, independently-named
+    /// self-registration sharing one registry (so it does not collide with
+    /// the root's own `"main"` entry under [`crate::fleet::registry::AgentRegistry::register`]'s
+    /// name-uniqueness rule) reaches this directly. Silently drops a refusal,
+    /// exactly as the discarded `Option` this returned before that rule
+    /// existed — a production root's own registration never collides (it is
+    /// the only self-registering entry its registry ever holds), and a test
+    /// that deliberately wants to observe a collision calls
+    /// [`crate::fleet::registry::AgentRegistry::register`] directly instead.
+    fn register_self_named(&self, name: &str) {
+        let _ = self.agents.register(Registration {
             id: self.id,
             parent: self.parent,
             ceiling: false, // a root (trunk or headless) is never abandoned: no ceiling
-            title: TRUNK_TITLE.to_string(),
+            name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
             eval_root: self.parent.map(|_| self.eval_root()),
@@ -692,7 +710,7 @@ impl Agent {
             // and never returns, so it withholds `reply`; a headless trunk
             // is a returning agent.
             tool_enabled: !chat,
-            agents: crate::fleet::registry::AgentRegistry::new(),
+            agents: AgentRegistry::new(),
             disk_warn_bytes,
         })?;
         agent.register_self();
@@ -968,7 +986,7 @@ impl Agent {
             returns: true,
             allow_schedule: false,
             tool_enabled: true,
-            agents: crate::fleet::registry::AgentRegistry::new(),
+            agents: AgentRegistry::new(),
             // Unconfigured by default: a test that wants to exercise the
             // disk-warn check sets `session.disk_warn_bytes` directly.
             disk_warn_bytes: None,
@@ -1012,9 +1030,7 @@ impl Agent {
     /// service, re-pinned whenever at least one is alive; the pin drops the
     /// moment none remain (cancelled, or settled and reaped). The model
     /// cannot write or clear this pin itself — `shell_eval::
-    /// reject_protected_pin` refuses that key — so this is the one writer,
-    /// the same shape as [`Self::set_commitment_pin`]/[`Self::
-    /// unset_commitment_pin`] for `commitment:*`.
+    /// reject_protected_pin` refuses that key — so this is the one writer.
     fn reconcile_service_pins(&self, emit: &Emitter) {
         let live: Vec<ProbedWorker> = self
             .probe_workers()
@@ -1040,10 +1056,7 @@ impl Agent {
         let card = crate::bus::card::services_pin_card(&live);
         self.pins.lock().expect("pin register poisoned").insert(
             shell_eval::SERVICES_PIN_KEY.to_string(),
-            shell_eval::PinDigest {
-                kind: shell_eval::PinKind::Service,
-                card: card.clone(),
-            },
+            shell_eval::PinDigest::new(card.clone()),
         );
         emit.emit(Kind::Pin {
             key: shell_eval::SERVICES_PIN_KEY.to_string(),
@@ -1425,7 +1438,7 @@ impl Agent {
                     ControlFlow::Continue => continue,
                 }
             }
-            self.land(&turn, emit);
+            announce(&turn, emit);
             // Read the provider in force for this turn; a `/model` swap on this
             // agent lands here next turn, never mid-turn.
             let active = self.provider.current();
@@ -1765,7 +1778,7 @@ impl Agent {
             if !injected.is_empty() {
                 let mut text = String::new();
                 for turn in &injected {
-                    self.land(turn, emit);
+                    announce(turn, emit);
                     if !text.is_empty() {
                         text.push_str("\n\n");
                     }
@@ -1987,7 +2000,7 @@ impl Agent {
         // `ral` is the only name this agent ever recognises, and only when
         // its provider requests actually advertised it (withheld only for a
         // `--chat` trunk) — so a well-behaved model never names anything
-        // else here. Every harness verb (`amnemon`, `reply`, `schedule`, …)
+        // else here. Every harness verb (`agent`, `reply`, `schedule`, …)
         // is a builtin *inside* a `ral` call, not a name `stage` matches.
         if self.tool_enabled && call.fn_name == crate::shell_eval::tools::ral::NAME {
             crate::shell_eval::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
@@ -2186,11 +2199,10 @@ impl Agent {
             allow_schedule: self.allow_schedule,
             reply,
             schedules: self.schedules.clone(),
-            pins: self.pins.clone(),
             log: self.log.clone(),
-            // A desk-spawned child (`amnemon`/`mnemon`/`commit`/
-            // `verify-commitment`) always returns, which may differ from
-            // this agent's own `returns`.
+            // A desk-spawned child (via the `agent` builtin, either memory
+            // mode) always returns, which may differ from this agent's own
+            // `returns`.
             system_template: self.system_base.clone(),
             focus: self.focus.clone(),
             interactive: self.interactive,
@@ -2295,79 +2307,12 @@ impl Agent {
         SessionToolResult { id, content }
     }
 
-    /// The single point a turn arrives, whether at the turn boundary
-    /// ([`Self::drive`]) or mid-batch at a tool boundary
-    /// ([`Self::dispatch`]'s injected drain inside [`Self::apply`]): settle
-    /// any commitment tag it carries before rendering its chrome. Folding
-    /// both steps into one call means a `commit`/`verify-commitment` child
-    /// that settles mid-batch is pinned exactly like one that settles between
-    /// turns — there is no second call site to forget the tag at.
-    fn land(&self, turn: &Turn, emit: &Emitter) {
-        self.settle_commitment(turn, emit);
-        announce(turn, emit);
-    }
-
-    /// A settled `commit`/`verify-commitment` child tags its result with
-    /// what the parent should do to the pin register
-    /// ([`spawn_async`](crate::shell_eval::tools::agent::spawn_async)), decided on the
-    /// worker thread that drove it since only that thread ever holds the raw
-    /// reply.  This applies the tag on the parent's own thread, wherever the
-    /// turn lands ([`Self::land`]), then forwards whatever
-    /// [`Self::apply_commitment_settle`] (the pinning half) says actually
-    /// changed to the viewport (the rendering half).
-    fn settle_commitment(&self, turn: &Turn, emit: &Emitter) {
-        let Turn::Agent(r) = turn else { return };
-        if let Some(kind) = self.apply_commitment_settle(r.commitment_settle.as_ref()) {
-            emit.emit(kind);
-        }
-    }
-
-    /// Pinning, in isolation: apply a settled `commit`/`verify-commitment`
-    /// child's tag to the pin register — `set`/`unset` — and report which
-    /// [`Kind`] (if any) that change is to the caller. Pure state plus a
-    /// description of it; it never touches an [`Emitter`], so it needs no bus
-    /// to test. An untagged settle (every ordinary `amnemon`/`mnemon`) and a
-    /// clear of a key that was not actually live both report `None`.
-    fn apply_commitment_settle(
-        &self,
-        settle: Option<&CommitmentSettle>,
-    ) -> Option<Kind> {
-        match settle {
-            Some(CommitmentSettle::Open { key, card }) => {
-                shell_eval::set_commitment_pin(&self.pins, key, card.clone()).ok()?;
-                Some(Kind::Pin {
-                    key: key.clone(),
-                    card: card.clone(),
-                })
-            }
-            Some(CommitmentSettle::Clear(key)) => {
-                shell_eval::unset_commitment_pin(&self.pins, key)
-                    .ok()
-                    .filter(|&cleared| cleared)?;
-                Some(Kind::Unpin { key: key.clone() })
-            }
-            None => None,
-        }
-    }
-
     /// Non-blocking pop of the next deliverable inbox message, for a test
     /// polling for an async spawn's settle without driving a full turn (and
     /// its provider round-trip) on the parent session.
     #[cfg(test)]
     pub(crate) fn drain_turn_for_test(&self) -> Option<Turn> {
         self.inbox.drain_turn()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_commitment_pin_for_test(&self, key: &str, card: crate::bus::card::Card) {
-        assert!(shell_eval::is_commitment_pin(key));
-        self.pins.lock().expect("pin register poisoned").insert(
-            key.to_string(),
-            shell_eval::PinDigest {
-                kind: shell_eval::PinKind::Commitment,
-                card,
-            },
-        );
     }
 
     /// The current pinned state as a one-line description for the periodic
@@ -2464,7 +2409,7 @@ fn announce(turn: &Turn, emit: &Emitter) {
         Turn::Human(s) | Turn::Wakeup(s) => emit.emit(Kind::UserPromptEcho(s.clone())),
         Turn::Message(_) => emit.emit(Kind::UserPromptEcho(turn.text())),
         Turn::Agent(r) => emit.emit(Kind::SubagentDone {
-            title: r.title.clone(),
+            name: r.name.clone(),
             outcome: r.outcome.clone(),
             text: r.text.clone(),
             elapsed: r.elapsed,
@@ -2772,8 +2717,8 @@ mod tests {
 
     /// Each generation down a fork chain gets one less fuel than the one
     /// before it, bottoming out at zero rather than wrapping — the desk's
-    /// own spawn spine refuses `agent-start`/`commit-open`/`commit-verify`
-    /// once an agent's fuel reads zero.
+    /// own spawn spine refuses `agent-start` once an agent's fuel reads
+    /// zero.
     #[test]
     fn fork_chain_runs_out_of_spawn_fuel() {
         let dir = tmp("spawn-fuel");
@@ -3141,7 +3086,9 @@ mod tests {
         assert!(root_result.content.contains(refusal), "got: {}", root_result.content);
 
         let mut branch = root.branch().expect("branch a conversing child");
-        branch.register_self();
+        // A distinct name: `root` already holds `TRUNK_NAME` in this same
+        // shared registry, and names are unique among live entries.
+        branch.register_self_named("branch");
         let branch_result = branch.run_shell("c2".into(), "reply 1", 5, &emit);
         assert!(
             branch_result.content.contains(refusal),
@@ -3220,11 +3167,11 @@ mod tests {
         // parent is not, at this instant, live.
         child
             .agents
-            .register(crate::fleet::registry::Registration {
+            .register(Registration {
                 id: child.id,
                 parent: Some(parent.id),
                 ceiling: true,
-                title: "child".into(),
+                name: "child".into(),
                 log_dir: dir.join("child"),
                 cancel: child.cancel_token().clone(),
                 eval_root: Some(child.eval_root()),
@@ -3233,11 +3180,11 @@ mod tests {
                 provider: child.provider_handle(),
             })
             .expect("child registration must succeed: its parent is live");
-        child.agents.register(crate::fleet::registry::Registration {
+        let _ = child.agents.register(Registration {
             id: direct,
             parent: Some(child.id),
             ceiling: true,
-            title: "direct".into(),
+            name: "direct".into(),
             log_dir: dir.join("direct"),
             cancel: direct_token.clone(),
             eval_root: Some(direct_root.clone()),
@@ -3245,11 +3192,11 @@ mod tests {
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
-        child.agents.register(crate::fleet::registry::Registration {
+        let _ = child.agents.register(Registration {
             id: grandchild,
             parent: Some(direct),
             ceiling: true,
-            title: "grandchild".into(),
+            name: "grandchild".into(),
             log_dir: dir.join("grandchild"),
             cancel: grandchild_token.clone(),
             eval_root: Some(ral_core::process::DurableRoot::default()),
@@ -3259,11 +3206,11 @@ mod tests {
         });
         let sibling_generation = child
             .agents
-            .register(crate::fleet::registry::Registration {
+            .register(Registration {
                 id: sibling,
                 parent: Some(parent.id),
                 ceiling: true,
-                title: "sibling".into(),
+                name: "sibling".into(),
                 log_dir: dir.join("sibling"),
                 cancel: sibling_token.clone(),
                 eval_root: Some(ral_core::process::DurableRoot::default()),
@@ -3504,218 +3451,6 @@ mod tests {
         }
     }
 
-    /// A commitment tag must land even when its child settles mid-turn, at a
-    /// tool boundary, not only when it settles between turns (T1). Queue the
-    /// `AgentResult` before driving a batch that dispatches an ordinary tool
-    /// call: `dispatch`'s own drain picks it up as `injected`, the same
-    /// `Turn::Agent` shape `drive`'s turn-boundary drain sees, and `apply`
-    /// must land it the same way — not just announce it and drop the tag.
-    #[test]
-    fn commitment_settle_lands_for_a_child_settling_mid_batch() {
-        let dir = tmp("commitment-mid-batch");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
-        let key = "commitment:mid-batch";
-        let card = crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
-            spans: vec![crate::bus::card::Span {
-                role: None,
-                text: "tests pass".into(),
-            }],
-        }]);
-        session
-            .inbox
-            .push(InboxMsg::AgentResult(crate::bus::AgentResult {
-                id: fresh_id(),
-                title: "commit-abc".into(),
-                outcome: AgentOutcome::Complete,
-                text: "writer formalized the commitment".into(),
-                log_dir: dir,
-                elapsed: std::time::Duration::ZERO,
-                generation: session.agents.generation(),
-                commitment_settle: Some(CommitmentSettle::Open {
-                    key: key.to_string(),
-                    card,
-                }),
-            }))
-            .unwrap();
-        let provider = scripted(
-            "test-model",
-            Script::new()
-                .then(Reply::tool_calls(vec![ral_call("c1", "1")]))
-                .then(Reply::text("done")),
-        );
-        let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
-        let token = cancel::Token::new();
-        let _slot = cancel::publish(&token);
-        match session.apply(&provider, Some("go".into()), &token, &emit) {
-            Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "done"),
-            other => panic!("expected the batch to complete normally, got {other:?}"),
-        }
-        assert!(
-            shell_eval::commitment_card(&session.pins, key).is_ok(),
-            "a commitment settle delivered mid-batch must open the pin, exactly \
-             like one delivered at the turn boundary"
-        );
-    }
-
-    /// A settled `verify-commitment` child tagged with a passing verdict
-    /// clears the protected pin when its result drains — the host-side half
-    /// of the async settle, exercised directly rather than through a real
-    /// spawned thread and provider round-trip.
-    #[test]
-    fn settle_commitment_clear_removes_the_pin() {
-        let dir = tmp("settle-commitment-clear");
-        let session = Agent::for_test(&dir, "system").unwrap();
-        let key = "commitment:abc";
-        session.insert_commitment_pin_for_test(
-            key,
-            crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
-                spans: vec![crate::bus::card::Span {
-                    role: None,
-                    text: "criteria 0/1".into(),
-                }],
-            }]),
-        );
-        let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
-        let turn = Turn::Agent(crate::bus::AgentResult {
-            id: fresh_id(),
-            title: "verify-abc".into(),
-            outcome: AgentOutcome::Complete,
-            text: "verifier passed".into(),
-            log_dir: dir,
-            elapsed: std::time::Duration::from_secs(0),
-            generation: 0,
-            commitment_settle: Some(CommitmentSettle::Clear(key.to_string())),
-        });
-        session.settle_commitment(&turn, &emit);
-        assert!(
-            shell_eval::commitment_card(&session.pins, key).is_err(),
-            "a tagged clear must remove the pin"
-        );
-    }
-
-    /// A settled `commit` child tagged with a formalized card opens the
-    /// protected pin when its result drains.
-    #[test]
-    fn settle_commitment_open_sets_the_pin() {
-        let dir = tmp("settle-commitment-open");
-        let session = Agent::for_test(&dir, "system").unwrap();
-        let key = "commitment:abc";
-        let card = crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
-            spans: vec![crate::bus::card::Span {
-                role: None,
-                text: "tests pass".into(),
-            }],
-        }]);
-        let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
-        let turn = Turn::Agent(crate::bus::AgentResult {
-            id: fresh_id(),
-            title: "commit-abc".into(),
-            outcome: AgentOutcome::Complete,
-            text: "writer formalized the commitment".into(),
-            log_dir: dir,
-            elapsed: std::time::Duration::from_secs(0),
-            generation: 0,
-            commitment_settle: Some(CommitmentSettle::Open {
-                key: key.to_string(),
-                card,
-            }),
-        });
-        session.settle_commitment(&turn, &emit);
-        assert!(
-            shell_eval::commitment_card(&session.pins, key).is_ok(),
-            "a tagged open must set the pin"
-        );
-    }
-
-    /// An ordinary settled agent — no commitment tag — never touches the pin
-    /// register, whether or not one happens to be live.
-    #[test]
-    fn settle_commitment_no_tag_is_a_no_op() {
-        let dir = tmp("settle-commitment-no-tag");
-        let session = Agent::for_test(&dir, "system").unwrap();
-        let key = "commitment:abc";
-        session.insert_commitment_pin_for_test(
-            key,
-            crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
-                spans: vec![crate::bus::card::Span {
-                    role: None,
-                    text: "criteria 0/1".into(),
-                }],
-            }]),
-        );
-        let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
-        let turn = Turn::Agent(crate::bus::AgentResult {
-            id: fresh_id(),
-            title: "sub-1".into(),
-            outcome: AgentOutcome::Complete,
-            text: "an ordinary sub-agent's reply".into(),
-            log_dir: dir,
-            elapsed: std::time::Duration::from_secs(0),
-            generation: 0,
-            commitment_settle: None,
-        });
-        session.settle_commitment(&turn, &emit);
-        assert!(
-            shell_eval::commitment_card(&session.pins, key).is_ok(),
-            "an untagged settle must leave any live commitment pin alone"
-        );
-    }
-
-    /// [`Agent::apply_commitment_settle`] is the pinning half on its own —
-    /// exercised directly, with no [`Emitter`] in sight, to pin that it needs
-    /// none: an open reports the pin event only once the register actually
-    /// takes it, and a clear of a key that was never live reports nothing.
-    #[test]
-    fn apply_commitment_settle_reports_only_a_real_change() {
-        let dir = tmp("apply-commitment-settle");
-        let session = Agent::for_test(&dir, "system").unwrap();
-        let key = "commitment:abc".to_string();
-        let card = crate::bus::card::Card(vec![crate::bus::card::Mark::Text {
-            spans: vec![crate::bus::card::Span {
-                role: None,
-                text: "tests pass".into(),
-            }],
-        }]);
-
-        match session.apply_commitment_settle(Some(&CommitmentSettle::Open {
-            key: key.clone(),
-            card,
-        })) {
-            Some(Kind::Pin { key: k, .. }) => assert_eq!(k, key),
-            Some(_) => panic!("expected a Pin event for a fresh open, got some other Kind"),
-            None => panic!("expected a Pin event for a fresh open, got none"),
-        }
-        assert!(
-            shell_eval::commitment_card(&session.pins, &key).is_ok(),
-            "the register must hold the opened pin"
-        );
-
-        assert!(
-            session
-                .apply_commitment_settle(Some(&CommitmentSettle::Clear(
-                    "commitment:never-opened".into()
-                )))
-                .is_none(),
-            "clearing a key that was never live changes nothing, so nothing to report"
-        );
-
-        match session
-            .apply_commitment_settle(Some(&CommitmentSettle::Clear(key.clone())))
-        {
-            Some(Kind::Unpin { key: k }) => assert_eq!(k, key),
-            Some(_) => panic!("expected an Unpin event for a live clear, got some other Kind"),
-            None => panic!("expected an Unpin event for a live clear, got none"),
-        }
-        assert!(
-            shell_eval::commitment_card(&session.pins, &key).is_err(),
-            "the register must have dropped the cleared pin"
-        );
-    }
-
     /// Generation admission: a worker delivers before it retires, so a
     /// result that settled across a `/clear` can reach the inbox — the drive
     /// loop must drop it before it becomes a model turn.  The script is
@@ -3731,13 +3466,12 @@ mod tests {
             .inbox
             .push(InboxMsg::AgentResult(crate::bus::AgentResult {
                 id: fresh_id(),
-                title: "late".into(),
+                name: "late".into(),
                 outcome: AgentOutcome::Complete,
                 text: "settled across the clear".into(),
                 log_dir: dir,
                 elapsed: std::time::Duration::ZERO,
                 generation: stale,
-                commitment_settle: None,
             }))
             .unwrap();
         session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
@@ -3762,13 +3496,12 @@ mod tests {
             .inbox
             .push(InboxMsg::AgentResult(crate::bus::AgentResult {
                 id: fresh_id(),
-                title: "worker".into(),
+                name: "worker".into(),
                 outcome: AgentOutcome::Complete,
                 text: "found it".into(),
                 log_dir: dir,
                 elapsed: std::time::Duration::ZERO,
                 generation: session.agents.generation(),
-                commitment_settle: None,
             }))
             .unwrap();
         // This root session is a headless root (`parent: None`, non-interactive),
@@ -4034,11 +3767,11 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        parent.agents.register(crate::fleet::registry::Registration {
+        let _ = parent.agents.register(Registration {
             id: child.id,
             parent: Some(parent.id),
             ceiling: true,
-            title: "child".into(),
+            name: "child".into(),
             log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),
             eval_root: Some(child.eval_root()),
@@ -4262,7 +3995,6 @@ mod tests {
                 .get(shell_eval::SERVICES_PIN_KEY)
                 .expect("the services pin must be born")
                 .clone();
-            assert_eq!(pin.kind, shell_eval::PinKind::Service);
             let line = crate::bus::card::summary_line(&pin.card);
             assert!(
                 line.contains("watch the thing"),

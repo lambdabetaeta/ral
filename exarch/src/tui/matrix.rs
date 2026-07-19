@@ -21,7 +21,7 @@ pub(super) enum MatrixSort {
     Cost,
 }
 
-/// Max title characters a matrix row's label keeps; a longer title is
+/// Max name characters a matrix row's label keeps; a longer name is
 /// truncated to this. Column alignment down the rows comes from the
 /// measured [`MatrixWidths`], not this cap.
 pub(super) const MATRIX_LABEL_W: usize = 10;
@@ -34,7 +34,7 @@ pub(super) const MATRIX_STEPS_W: usize = 8;
 /// entirely.
 pub(super) fn tab_bar(
     tabs: &[AgentId],
-    titles: &HashMap<AgentId, String>,
+    names: &HashMap<AgentId, String>,
     focused: AgentId,
     dying: &HashMap<AgentId, Instant>,
 ) -> Line<'static> {
@@ -43,11 +43,11 @@ pub(super) fn tab_bar(
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        let title = titles.get(&id).map_or("?", String::as_str);
+        let name = names.get(&id).map_or("?", String::as_str);
         let label: String = if id == focused {
-            format!("[{title}]")
+            format!("[{name}]")
         } else {
-            format!(" {title} ")
+            format!(" {name} ")
         };
         let style = if id == focused {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
@@ -70,10 +70,10 @@ pub(super) fn tab_bar(
 ///
 /// `rows` pairs each tab's id with its viewport (matrix figures are
 /// derived from the viewport: step cells, lines touched, token spend);
-/// `titles`/`focused`/`dying` carry the same row state `tab_bar` reads.
+/// `names`/`focused`/`dying` carry the same row state `tab_bar` reads.
 pub(super) fn matrix_bar(
     rows: &[(AgentId, &Viewport)],
-    titles: &HashMap<AgentId, String>,
+    names: &HashMap<AgentId, String>,
     focused: AgentId,
     root: AgentId,
     dying: &HashMap<AgentId, Instant>,
@@ -81,7 +81,7 @@ pub(super) fn matrix_bar(
 ) -> Vec<Line<'static>> {
     if rows.len() <= 1 {
         let tabs: Vec<AgentId> = rows.iter().map(|(id, _)| *id).collect();
-        return vec![tab_bar(&tabs, titles, focused, dying)];
+        return vec![tab_bar(&tabs, names, focused, dying)];
     }
     // Render-time row order: spawn keeps `rows` (the `tabs` order); cost
     // sorts by cumulative spend, descending, so the budget-burner floats
@@ -112,7 +112,7 @@ pub(super) fn matrix_bar(
         .into_iter()
         .map(|i| {
             MatrixRow::new(
-                rows[i].0, rows[i].1, titles, focused, root, dying, max_tokens,
+                rows[i].0, rows[i].1, names, focused, root, dying, max_tokens,
             )
         })
         .collect();
@@ -165,7 +165,7 @@ impl MatrixRow {
     fn new(
         id: AgentId,
         vp: &Viewport,
-        titles: &HashMap<AgentId, String>,
+        names: &HashMap<AgentId, String>,
         focused: AgentId,
         root: AgentId,
         dying: &HashMap<AgentId, Instant>,
@@ -177,8 +177,8 @@ impl MatrixRow {
             .unwrap_or(AGENT_HUES[0]);
         let dim = dying.contains_key(&id);
 
-        let title = titles.get(&id).map_or("?", String::as_str);
-        let truncated: String = title.chars().take(MATRIX_LABEL_W).collect();
+        let name = names.get(&id).map_or("?", String::as_str);
+        let truncated: String = name.chars().take(MATRIX_LABEL_W).collect();
         let label = if id == focused {
             format!("[{truncated}]")
         } else {

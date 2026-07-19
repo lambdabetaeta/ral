@@ -115,13 +115,13 @@ pub(super) enum BlockKind {
     Thinking(Thinking),
     /// An async subagent's final result, landed in root's scrollback.
     /// Dialable like a tool call: collapsed (L1) to a one-line header
-    /// (`title` · `elapsed` · a size-bar for `text` length, plus an error
+    /// (`name` · `elapsed` · a size-bar for `text` length, plus an error
     /// suffix when `error` is set), dialed open (L3) to the full `text`
-    /// rendered as markdown.  Carries its own `title`/`elapsed`/`error`
+    /// rendered as markdown.  Carries its own `name`/`elapsed`/`error`
     /// because `Markdown` can't, and keeps the `↘` rail identity a `Card`
     /// would lose.
     Subagent {
-        title: String,
+        name: String,
         text: String,
         error: Option<String>,
         elapsed: Duration,
@@ -347,7 +347,7 @@ impl Block {
     /// [`Block::fidelity`] field so the revealed markdown degrades with
     /// root's context floor exactly as committing prose does.
     pub(super) fn subagent(
-        title: String,
+        name: String,
         text: String,
         error: Option<String>,
         elapsed: Duration,
@@ -355,7 +355,7 @@ impl Block {
     ) -> Self {
         Self::new(
             BlockKind::Subagent {
-                title,
+                name,
                 text,
                 error,
                 elapsed,
@@ -827,7 +827,7 @@ impl Block {
                 ls
             }
             BlockKind::Subagent {
-                title,
+                name,
                 text,
                 error,
                 elapsed,
@@ -837,7 +837,7 @@ impl Block {
                     reason = "transcript-block line count; u32 headroom far exceeds any in-memory transcript"
                 )]
                 let size = text.lines().count() as u32;
-                let mut ls = line::subagent_header(title, size, error.as_deref(), *elapsed);
+                let mut ls = line::subagent_header(name, size, error.as_deref(), *elapsed);
                 // L1 is the header alone; L2/L3 extend it with the rendered
                 // body. Build the header first so the markdown rows append
                 // after it intact — the header is row 0 and the markdown's own

@@ -453,13 +453,13 @@ impl Viewport {
     /// result rendered as markdown.
     pub(super) fn push_subagent(
         &mut self,
-        title: String,
+        name: String,
         text: String,
         error: Option<String>,
         elapsed: Duration,
         fidelity: Fidelity,
     ) {
-        self.push_block(Block::subagent(title, text, error, elapsed, fidelity));
+        self.push_block(Block::subagent(name, text, error, elapsed, fidelity));
     }
 
     /// Append a single-file diff block; it re-renders from its hunks at

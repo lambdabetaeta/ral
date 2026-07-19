@@ -213,7 +213,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         let rows = app.tabs.matrix_rows();
         matrix_bar(
             &rows,
-            app.tabs.titles(),
+            app.tabs.names(),
             focused,
             app.tabs.root(),
             app.tabs.dying_map(),
@@ -223,7 +223,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let prompt_hint = prompt_hint(
         app.tabs.root(),
         app.tabs.is_steerable(),
-        app.tabs.titles(),
+        app.tabs.names(),
         focused,
     );
     let picker = app.picker.as_ref();
@@ -398,15 +398,15 @@ fn paint_hover(app: &App, lines: &mut [Line<'static>], offset: usize) {
 fn prompt_hint(
     root: AgentId,
     focused_steerable: bool,
-    titles: &HashMap<AgentId, String>,
+    names: &HashMap<AgentId, String>,
     focused: AgentId,
 ) -> Option<Line<'static>> {
     if focused == root || focused_steerable {
         return None;
     }
-    let title = titles.get(&focused).map_or("?", String::as_str);
+    let name = names.get(&focused).map_or("?", String::as_str);
     Some(Line::from(Span::styled(
-        format!(" watching {title} — tab to main to steer "),
+        format!(" watching {name} — tab to main to steer "),
         Style::default()
             .fg(SLATE)
             .add_modifier(Modifier::DIM | Modifier::ITALIC),

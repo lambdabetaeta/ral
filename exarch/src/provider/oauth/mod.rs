@@ -43,7 +43,7 @@ pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/re
 /// the latest Codex CLI release; bump it as the backend raises the floor for
 /// new models (e.g. the `gpt-5.6` family requires `>= 0.144.0`).
 ///
-/// A pinned constant rots the day OpenAI raises the floor again, so
+/// A pinned constant rots the day `OpenAI` raises the floor again, so
 /// [`codex_client_version`] lets an operator override it without a rebuild.
 const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.144.3";
 

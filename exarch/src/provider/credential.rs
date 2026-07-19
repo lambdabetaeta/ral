@@ -33,9 +33,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// The inert bearer bound for a custom provider declared with no `key` — a
-/// no-auth local endpoint (Ollama et al.). It is not a secret and never
+/// no-auth local endpoint (Ollama et al.).
+///
+/// It is not a secret and never
 /// authenticates anything: such servers ignore the `Authorization` header
-/// entirely, but genai's OpenAI adapter always attaches one, so a placeholder
+/// entirely, but `genai`'s `OpenAI` adapter always attaches one, so a placeholder
 /// stands in for a real key. Distinct, recognisable text so it is obvious in a
 /// captured request that no real credential is in play. `pub` so the
 /// environment-scenario tests in `tests/credential_env.rs` can assert against

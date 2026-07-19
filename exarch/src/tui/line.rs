@@ -411,22 +411,22 @@ pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
 
 
 /// The one-line header for an async subagent's landed result: a leading
-/// blank (like [`tool_call_collapsed`]), then the bold `title` (LIME, or
+/// blank (like [`tool_call_collapsed`]), then the bold `name` (LIME, or
 /// the error hue when `error` is set), a [`SLATE`]-dim ` {elapsed}s `
 /// readout, a [`size_bar`] for the result `size` (lines of `text`), and an
 /// error suffix when one applies.  The `↘` shape arrives via the lifted
 /// rail ([`super::block::Block::render`], `Subagent` shape), so this
 /// builder is rail-less.
 pub(super) fn subagent_header(
-    title: &str,
+    name: &str,
     size: u32,
     error: Option<&str>,
     elapsed: Duration,
 ) -> Vec<Line<'static>> {
     let secs = elapsed.as_secs();
-    let title_color = if error.is_some() { ORANGE } else { LIME };
+    let name_color = if error.is_some() { ORANGE } else { LIME };
     let mut spans = vec![
-        bold(title.to_string(), title_color),
+        bold(name.to_string(), name_color),
         Span::styled(
             format!(" {secs}s "),
             Style::default().fg(SLATE).add_modifier(Modifier::DIM),

@@ -1,6 +1,6 @@
 //! Session/view lifecycle management.
 //!
-//! Owns the viewports, tab ordering, titles, parent-child relationships,
+//! Owns the viewports, tab ordering, names, parent-child relationships,
 //! focus handle, and the linger/age-out clock.  Extracted from [`super::App`]
 //! (Phase 4 of the TUI modularisation).
 
@@ -16,7 +16,7 @@ use crate::bus::{AgentId, NO_FOCUS};
 
 use super::block::AgentSlot;
 use super::viewport::Viewport;
-use super::{LINGER, ROOT_TITLE};
+use super::{LINGER, ROOT_NAME};
 
 /// Session/view lifecycle state.
 ///
@@ -38,9 +38,9 @@ pub(super) struct Tabs {
     /// agents are appended on `Born` and removed when their entry in
     /// `dying` ages out past [`LINGER`].
     tabs: Vec<AgentId>,
-    /// Per-session label.  Root maps to [`ROOT_TITLE`]; subagents to
-    /// the `title` field of their `Kind::Born` event.
-    titles: HashMap<AgentId, String>,
+    /// Per-session label.  Root maps to [`ROOT_NAME`]; subagents to
+    /// the `name` field of their `Kind::Born` event.
+    names: HashMap<AgentId, String>,
     /// Death timestamps for subagents in their linger window.  Tabs
     /// drop from [`Self::tabs`] once [`LINGER`] elapses; the viewport
     /// stays alive for log flushing.
@@ -78,13 +78,13 @@ impl Tabs {
             root_id,
             Viewport::new(root_log_dir.join("user.log"), AgentSlot::default()),
         );
-        let mut titles = HashMap::new();
-        titles.insert(root_id, ROOT_TITLE.to_string());
+        let mut names = HashMap::new();
+        names.insert(root_id, ROOT_NAME.to_string());
         Self {
             viewports,
             dispatch_order: vec![root_id],
             tabs: vec![root_id],
-            titles,
+            names,
             dying: HashMap::new(),
             root: root_id,
             // A placeholder until [`Self::bind_focus`] wires the trunk's shared
@@ -141,7 +141,7 @@ impl Tabs {
         for id in expired {
             self.dying.remove(&id);
             self.tabs.retain(|&t| t != id);
-            self.titles.remove(&id);
+            self.names.remove(&id);
             if self.focus.load(Ordering::Relaxed) == id {
                 let fallback = self.parent_focus(id);
                 self.focus.store(fallback, Ordering::Relaxed);
@@ -162,12 +162,12 @@ impl Tabs {
     pub fn bind_focus(&mut self, focus: Arc<AtomicU64>) {
         self.focus = focus;
     }
-    /// Register a born sub-agent: create viewport, record title and parent, push tab.
+    /// Register a born sub-agent: create viewport, record name and parent, push tab.
     pub(super) fn born(
         &mut self,
         id: AgentId,
         log_dir: &Path,
-        title: String,
+        name: String,
         parent: AgentId,
         branch: bool,
         agent_slot: AgentSlot,
@@ -176,7 +176,7 @@ impl Tabs {
             slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot));
             self.dispatch_order.push(id);
         }
-        self.titles.insert(id, title);
+        self.names.insert(id, name);
         self.parents.insert(id, parent);
         if branch {
             self.branches.insert(id);
@@ -264,9 +264,9 @@ impl Tabs {
         &self.dispatch_order
     }
 
-    /// Per-session titles.
-    pub(super) fn titles(&self) -> &HashMap<AgentId, String> {
-        &self.titles
+    /// Per-session names.
+    pub(super) fn names(&self) -> &HashMap<AgentId, String> {
+        &self.names
     }
 
     /// Death timestamps for subagents in the linger window.

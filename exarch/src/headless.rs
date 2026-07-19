@@ -289,7 +289,7 @@ impl Sink for Headless {
             // breadcrumb is the only live trace of the child.  The full
             // sub-agent transcript lives in its own session log dir.
             Kind::SubagentDone {
-                title,
+                name,
                 outcome,
                 text,
                 elapsed,
@@ -297,9 +297,9 @@ impl Sink for Headless {
                 let secs = elapsed.as_secs_f64();
                 match outcome.breadcrumb(&text).1 {
                     Some(reason) => {
-                        eprintln!("[agent: {title} failed in {secs:.1}s — {reason}]");
+                        eprintln!("[agent: {name} failed in {secs:.1}s — {reason}]");
                     }
-                    None => eprintln!("[agent: {title} done in {secs:.1}s]"),
+                    None => eprintln!("[agent: {name} done in {secs:.1}s]"),
                 }
             }
             // Boundary / Born / Died / UserPromptEcho are interactive-only;

@@ -92,7 +92,7 @@ pub const AGENT_CEILING: Duration = Duration::from_hours(1);
 /// One live agent, by id, for the `agents` listing.
 pub struct AgentInfo {
     pub id: AgentId,
-    pub title: String,
+    pub name: String,
     pub log_dir: PathBuf,
     pub elapsed: Duration,
 }
@@ -106,7 +106,7 @@ pub struct Registration {
     /// Whether to arm a reaper deadline over this agent's whole subtree —
     /// see [`AgentRegistry::register`].
     pub ceiling: bool,
-    pub title: String,
+    pub name: String,
     pub log_dir: PathBuf,
     pub cancel: Token,
     pub eval_root: Option<DurableRoot>,
@@ -137,7 +137,7 @@ struct Entry {
     /// The agent's parent, or `None` for the trunk.  The edge that makes the
     /// registry a tree and drives the subtree cascade.
     parent: Option<AgentId>,
-    title: String,
+    name: String,
     log_dir: PathBuf,
     started: Instant,
     cancel: Token,
@@ -244,21 +244,37 @@ impl AgentRegistry {
     /// `eval_root` and `turn_scope` so the cascade and an interrupt each
     /// reach its running eval.
     ///
-    /// Refuses (`None`) when `parent` is `Some` and is not, at this instant,
-    /// a live and un-terminated entry — a spawn racing an `agent-cancel`/
-    /// `/clear` on its own parent, closed by checking under the very lock the
-    /// cascade holds for its whole walk, so the check can never observe a
-    /// parent mid-teardown: either the cascade has not reached the lock yet
-    /// (parent live, registration proceeds normally) or it already has
-    /// (parent gone or terminated, registration refused) — there is no third
-    /// state. Otherwise returns the birth generation the worker carries into
-    /// its result.
-    pub fn register(&self, reg: Registration) -> Option<u64> {
+    /// # Errors
+    /// Returns [`RegisterError::SessionDead`] when `parent` is `Some` and is
+    /// not, at this instant, a live and un-terminated entry — a spawn racing
+    /// an `agent-cancel`/`/clear` on its own parent, closed by checking under
+    /// the very lock the cascade holds for its whole walk, so the check can
+    /// never observe a parent mid-teardown: either the cascade has not
+    /// reached the lock yet (parent live, registration proceeds normally) or
+    /// it already has (parent gone or terminated, registration refused) —
+    /// there is no third state.
+    ///
+    /// Returns [`RegisterError::NameTaken`] when [`Registration::name`] is
+    /// already borne by another *live* entry — any entry but `id`'s own
+    /// current one, so a re-register under the same id (`register_self`'s
+    /// "idempotent enough" re-register) always overwrites in place rather
+    /// than colliding with the very entry it replaces — checked under the
+    /// same lock, so two same-name spawns racing within one turn cannot both
+    /// succeed: whichever reaches the lock first claims the name, and the
+    /// second observes it already taken. This is the authoritative half of
+    /// the spawn-uniqueness rule; `agent-start`'s own pre-check
+    /// ([`crate::fleet::desk::ExarchDesk::launch`]) is the cheap, didactic
+    /// half that refuses the ordinary case before ever forking a nursery
+    /// session.
+    ///
+    /// Otherwise returns the birth generation the worker carries into its
+    /// result.
+    pub fn register(&self, reg: Registration) -> Result<u64, RegisterError> {
         let Registration {
             id,
             parent,
             ceiling,
-            title,
+            name,
             log_dir,
             cancel,
             eval_root,
@@ -278,13 +294,22 @@ impl AgentRegistry {
         {
             drop(g);
             drop(ceiling_guard);
-            return None;
+            return Err(RegisterError::SessionDead);
+        }
+        // Excludes `id`'s own current entry: a re-register under the same id
+        // (`register_self`'s "idempotent enough" re-register, `Agent::register_self`)
+        // must overwrite in place, not be refused for "colliding" with the
+        // very entry it is about to replace.
+        if g.entries.iter().any(|(&other, e)| other != id && e.name == name) {
+            drop(g);
+            drop(ceiling_guard);
+            return Err(RegisterError::NameTaken(name));
         }
         g.entries.insert(
             id,
             Entry {
                 parent,
-                title,
+                name,
                 log_dir,
                 started: Instant::now(),
                 cancel,
@@ -295,7 +320,29 @@ impl AgentRegistry {
                 _ceiling: ceiling_guard,
             },
         );
-        Some(g.generation)
+        Ok(g.generation)
+    }
+
+    /// Whether any live entry bears `name` — the cheap, didactic half of the
+    /// spawn-uniqueness rule [`Self::register`] enforces authoritatively;
+    /// `agent-start`'s own pre-check reads this before ever forking a
+    /// nursery session, so the ordinary duplicate-name spawn refuses without
+    /// the cost of a fork it would only have to unwind.
+    pub fn name_live(&self, name: &str) -> bool {
+        self.lock().entries.values().any(|e| e.name == name)
+    }
+
+    /// The live entry bearing `name`, if any. Names are unique among live
+    /// entries by construction ([`Self::register`]), so at most one match
+    /// ever exists. `agent-cancel` and `message` resolve their `name`
+    /// argument to an [`AgentId`] through this before reaching the
+    /// id-scoped primitives below.
+    pub fn resolve_name(&self, name: &str) -> Option<AgentId> {
+        let g = self.lock();
+        g.entries
+            .iter()
+            .find(|(_, e)| e.name == name)
+            .map(|(id, _)| *id)
     }
 
     /// The live agent's inbox sender, or `None` once it has settled/cleared.
@@ -324,13 +371,13 @@ impl AgentRegistry {
     /// (`NotADescendant`), or if the recipient's inbox is at quota
     /// (`RecipientInboxFull`).
     pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
-        let (mailbox, from_title) = {
+        let (mailbox, from_name) = {
             let g = self.lock();
-            let from_title = g
+            let from_name = g
                 .entries
                 .get(&from)
                 .ok_or(MessageError::UnknownSender(from))?
-                .title
+                .name
                 .clone();
             let mailbox = g
                 .entries
@@ -342,12 +389,12 @@ impl AgentRegistry {
                 return Err(MessageError::NotADescendant(to));
             }
             drop(g);
-            (mailbox, from_title)
+            (mailbox, from_name)
         };
         mailbox
             .push(InboxMsg::AgentMessage(AgentMessage {
                 from,
-                from_title,
+                from_name,
                 text,
             }))
             .map_err(|reject| MessageError::RecipientInboxFull(to, reject))
@@ -455,7 +502,7 @@ impl AgentRegistry {
             .filter_map(|id| {
                 g.entries.get(&id).map(|e| AgentInfo {
                     id,
-                    title: e.title.clone(),
+                    name: e.name.clone(),
                     log_dir: e.log_dir.clone(),
                     elapsed: e.started.elapsed(),
                 })
@@ -466,10 +513,10 @@ impl AgentRegistry {
         v
     }
 
-    /// Look up one agent's title by id, if it is live.
-    pub fn title_for(&self, id: AgentId) -> Option<String> {
+    /// Look up one agent's name by id, if it is live.
+    pub fn name_for(&self, id: AgentId) -> Option<String> {
         let g = self.lock();
-        g.entries.get(&id).map(|e| e.title.clone())
+        g.entries.get(&id).map(|e| e.name.clone())
     }
     /// `/clear` on `root`: cancel and reap `root`'s proper descendants — the
     /// subtree the rebuilt context no longer owns — and bump the generation so
@@ -494,6 +541,18 @@ impl AgentRegistry {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Why [`AgentRegistry::register`] refused a registration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegisterError {
+    /// `parent` is `Some` and is not, at this instant, a live and
+    /// un-terminated entry — the parent has already vanished or been
+    /// terminated out from under the racing spawn.
+    SessionDead,
+    /// A live entry already bears this name — carries the offending name so
+    /// the caller can render a didactic refusal.
+    NameTaken(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,7 +689,7 @@ mod tests {
             id,
             parent,
             ceiling: parent.is_some(),
-            title: format!("a{id}"),
+            name: format!("a{id}"),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
             eval_root: parent.map(|_| DurableRoot::default()),
@@ -660,11 +719,11 @@ mod tests {
     fn register_arms_a_ceiling_only_when_asked() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk: a live parent for 1 and 2
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: false,
-            title: "branch".into(),
+            name: "branch".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -672,11 +731,11 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 2,
             parent: Some(0),
             ceiling: true,
-            title: "worker".into(),
+            name: "worker".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -717,11 +776,11 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let token = Token::new();
         let eval_root = DurableRoot::default();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: true,
-            title: "worker".into(),
+            name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: token.clone(),
             eval_root: Some(eval_root.clone()),
@@ -750,11 +809,11 @@ mod tests {
     fn clear_gesture_reaps_descendants_but_spares_the_trunks_token() {
         let reg = AgentRegistry::new();
         let trunk_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 0,
             parent: None,
             ceiling: false,
-            title: "trunk".into(),
+            name: "trunk".into(),
             log_dir: PathBuf::from("/tmp/trunk"),
             cancel: trunk_token.clone(),
             eval_root: None,
@@ -763,11 +822,11 @@ mod tests {
             provider: provider(),
         });
         let child_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: true,
-            title: "child".into(),
+            name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -813,11 +872,11 @@ mod tests {
         let branch_token = Token::new();
         let branch_root = DurableRoot::default();
         let child_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: false, // a branch carries no ceiling
-            title: "branch".into(),
+            name: "branch".into(),
             log_dir: PathBuf::from("/tmp/branch"),
             cancel: branch_token.clone(),
             eval_root: Some(branch_root.clone()),
@@ -825,11 +884,11 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
             ceiling: true,
-            title: "grandchild".into(),
+            name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: child_token.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -876,11 +935,11 @@ mod tests {
         // the start of the child's in-flight turn.
         let child_turn_scope: TurnScope = Arc::new(Mutex::new(Some(child_root.child())));
         let grandchild_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: false,
-            title: "child".into(),
+            name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
             eval_root: Some(child_root.clone()),
@@ -888,11 +947,11 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
             ceiling: true,
-            title: "grandchild".into(),
+            name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: grandchild_token.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -940,11 +999,11 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
         let turn_scope: TurnScope = Arc::new(Mutex::new(Some(eval_root.child())));
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: false,
-            title: "child".into(),
+            name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
             eval_root: Some(eval_root.clone()),
@@ -977,11 +1036,11 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let token = Token::new();
         let eval_root = DurableRoot::default();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 7,
             parent: Some(0),
             ceiling: true,
-            title: "lint".into(),
+            name: "lint".into(),
             log_dir: PathBuf::from("/log/7"),
             cancel: token.clone(),
             eval_root: Some(eval_root.clone()),
@@ -990,7 +1049,7 @@ mod tests {
             provider: provider(),
         });
         assert_eq!(reg.list(0).len(), 1, "the trunk lists its one child");
-        assert_eq!(reg.list(0)[0].title, "lint");
+        assert_eq!(reg.list(0)[0].name, "lint");
         assert!(reg.cancel(7), "an existing agent is cancellable");
         assert!(token.is_cancelled(), "cancel sets the worker's token");
         assert!(
@@ -1009,11 +1068,11 @@ mod tests {
         let c = Token::new();
         let g = Token::new();
         let sibling = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: None,
             ceiling: false,
-            title: "r".into(),
+            name: "r".into(),
             log_dir: "/l".into(),
             cancel: r.clone(),
             eval_root: None,
@@ -1021,11 +1080,11 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
             ceiling: true,
-            title: "c".into(),
+            name: "c".into(),
             log_dir: "/l".into(),
             cancel: c.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -1033,11 +1092,11 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 3,
             parent: Some(2),
             ceiling: true,
-            title: "g".into(),
+            name: "g".into(),
             log_dir: "/l".into(),
             cancel: g.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -1045,11 +1104,11 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 4,
             parent: Some(1),
             ceiling: true,
-            title: "s".into(),
+            name: "s".into(),
             log_dir: "/l".into(),
             cancel: sibling.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -1084,11 +1143,11 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 1, None);
         let inbox = crate::bus::Inbox::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
             ceiling: true,
-            title: "worker".into(),
+            name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -1103,7 +1162,7 @@ mod tests {
             panic!("expected a peer message");
         };
         assert_eq!(msg.from, 1);
-        assert_eq!(msg.from_title, "a1");
+        assert_eq!(msg.from_name, "a1");
         assert_eq!(msg.text, "check the lexer");
     }
 
@@ -1148,11 +1207,11 @@ mod tests {
         );
 
         let inbox = crate::bus::Inbox::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 3,
             parent: Some(1),
             ceiling: true,
-            title: "child".into(),
+            name: "child".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -1174,11 +1233,11 @@ mod tests {
     fn cancel_scoped_reaches_only_a_proper_descendant() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: false,
-            title: "leaf".into(),
+            name: "leaf".into(),
             log_dir: PathBuf::from("/tmp/1"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -1187,11 +1246,11 @@ mod tests {
             provider: provider(),
         });
         let sibling_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 2,
             parent: Some(0),
             ceiling: false,
-            title: "sibling".into(),
+            name: "sibling".into(),
             log_dir: PathBuf::from("/tmp/2"),
             cancel: sibling_token.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -1200,11 +1259,11 @@ mod tests {
             provider: provider(),
         });
         let grandchild_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 3,
             parent: Some(1),
             ceiling: true,
-            title: "grandchild".into(),
+            name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: grandchild_token.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -1258,7 +1317,7 @@ mod tests {
             id: 1,
             parent: Some(99), // never registered
             ceiling: false,
-            title: "orphan".into(),
+            name: "orphan".into(),
             log_dir: PathBuf::from("/tmp/orphan"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -1266,8 +1325,9 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        assert!(
-            outcome.is_none(),
+        assert_eq!(
+            outcome,
+            Err(RegisterError::SessionDead),
             "a parent absent from the map refuses the registration"
         );
         assert!(!reg.is_live(1), "the refused entry is never inserted");
@@ -1283,11 +1343,11 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let parent_token = Token::new();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: false,
-            title: "parent".into(),
+            name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: parent_token.clone(),
             eval_root: Some(DurableRoot::default()),
@@ -1302,7 +1362,7 @@ mod tests {
             id: 2,
             parent: Some(1),
             ceiling: true,
-            title: "late-child".into(),
+            name: "late-child".into(),
             log_dir: PathBuf::from("/tmp/late-child"),
             cancel: Token::new(),
             eval_root: Some(DurableRoot::default()),
@@ -1310,11 +1370,60 @@ mod tests {
             mailbox: mb(),
             provider: provider(),
         });
-        assert!(
-            outcome.is_none(),
+        assert_eq!(
+            outcome,
+            Err(RegisterError::SessionDead),
             "a parent already carrying a terminate cause refuses new children"
         );
         assert!(!reg.is_live(2));
+    }
+
+    /// The authoritative half of the spawn-uniqueness rule: two
+    /// registrations bearing the same name never both succeed, even when
+    /// nothing has settled between them — the desk's own pre-check
+    /// (`name_live`) is only the cheap, didactic half; this is the check
+    /// that actually closes the race.
+    #[test]
+    fn register_refuses_a_name_already_borne_by_a_live_entry() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let _ = reg.register(Registration {
+            id: 1,
+            parent: Some(0),
+            ceiling: true,
+            name: "helper".into(),
+            log_dir: PathBuf::from("/tmp/helper"),
+            cancel: Token::new(),
+            eval_root: Some(DurableRoot::default()),
+            turn_scope: None,
+            mailbox: mb(),
+            provider: provider(),
+        });
+        assert!(reg.name_live("helper"), "the first spawn's name is live");
+
+        let outcome = reg.register(Registration {
+            id: 2,
+            parent: Some(0),
+            ceiling: true,
+            name: "helper".into(),
+            log_dir: PathBuf::from("/tmp/helper-2"),
+            cancel: Token::new(),
+            eval_root: Some(DurableRoot::default()),
+            turn_scope: None,
+            mailbox: mb(),
+            provider: provider(),
+        });
+        assert_eq!(
+            outcome,
+            Err(RegisterError::NameTaken("helper".to_string())),
+            "a second live agent may not bear the same name"
+        );
+        assert!(!reg.is_live(2), "the refused registration is never inserted");
+        assert_eq!(
+            reg.resolve_name("helper"),
+            Some(1),
+            "the name still resolves to the entry that actually holds it"
+        );
     }
 
     /// The ceiling reaper's cascade must report `Deadline` ("timed out"), not
@@ -1326,11 +1435,11 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
-        reg.register(Registration {
+        let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
             ceiling: true,
-            title: "worker".into(),
+            name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
             eval_root: Some(eval_root.clone()),

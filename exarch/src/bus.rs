@@ -154,14 +154,14 @@ impl AgentOutcome {
     }
 
     /// The marked synthetic-turn text the model sees when an async result is
-    /// drained, titled with the child's tab label.
-    pub fn marked_turn(&self, title: &str, text: &str) -> String {
+    /// drained, named with the child's tab label.
+    pub fn marked_turn(&self, name: &str, text: &str) -> String {
         match self {
-            Self::Complete => format!("[agent '{title}' finished]\n{text}"),
-            Self::Empty => format!("[agent '{title}' finished with no output]"),
-            Self::Stopped(r) => format!("[agent '{title}' stopped: {r}]"),
-            Self::Cancelled => format!("[agent '{title}' was cancelled]"),
-            Self::Failed(e) => format!("[agent '{title}' failed: {e}]"),
+            Self::Complete => format!("[agent '{name}' finished]\n{text}"),
+            Self::Empty => format!("[agent '{name}' finished with no output]"),
+            Self::Stopped(r) => format!("[agent '{name}' stopped: {r}]"),
+            Self::Cancelled => format!("[agent '{name}' was cancelled]"),
+            Self::Failed(e) => format!("[agent '{name}' failed: {e}]"),
         }
     }
 }
@@ -174,7 +174,7 @@ impl AgentOutcome {
 #[derive(Clone, Debug)]
 pub struct AgentResult {
     pub id: AgentId,
-    pub title: String,
+    pub name: String,
     pub outcome: AgentOutcome,
     pub text: String,
     pub log_dir: PathBuf,
@@ -184,18 +184,12 @@ pub struct AgentResult {
     /// after a `/clear`) is rejected at drain rather than delivered into a
     /// rebuilt context.
     pub generation: u64,
-    /// Set only when this child was a host-orchestrated `commit`/
-    /// `verify-commitment` spawn: what the parent should do to the protected
-    /// pin register when this result drains.  The worker thread computes
-    /// this — not the parent — since only it still holds the raw reply
-    /// payload the decision needs.
-    pub commitment_settle: Option<crate::shell_eval::tools::CommitmentSettle>,
 }
 
 impl AgentResult {
     /// The marked synthetic-turn text the model sees when this is drained.
     fn render(&self) -> String {
-        self.outcome.marked_turn(&self.title, &self.text)
+        self.outcome.marked_turn(&self.name, &self.text)
     }
 }
 
@@ -203,7 +197,7 @@ impl AgentResult {
 #[derive(Clone, Debug)]
 pub struct AgentMessage {
     pub from: AgentId,
-    pub from_title: String,
+    pub from_name: String,
     pub text: String,
 }
 
@@ -213,7 +207,7 @@ impl AgentMessage {
     fn render(&self) -> String {
         format!(
             "[EXARCH AGENT {} MESSAGE: {}]\n{}\n[/EXARCH]",
-            self.from, self.from_title, self.text
+            self.from, self.from_name, self.text
         )
     }
 }
@@ -1133,11 +1127,10 @@ pub const WORKER_PANIC_PREFIX: &str = "worker panicked: ";
 pub enum Kind {
     Born {
         log_dir: PathBuf,
-        /// Short human-readable label for this agent, chosen by the
-        /// dispatching agent (ASCII alnum / `-` / `_`, 1–24 chars).
-        /// Falls back to `sub-{N}` when omitted or invalid.  The TUI
-        /// surfaces it in the tab bar; headless ignores it.
-        title: String,
+        /// This agent's name — its identity everywhere the model can see it
+        /// (ASCII alnum / `-` / `_`, 1–24 chars).  The TUI surfaces it in the
+        /// tab bar; headless ignores it.
+        name: String,
         /// The spawning agent's id — the tab's parent.  The TUI records it so
         /// that when a focused agent ends (`reply`), focus falls back to its
         /// parent, recursing toward the trunk.
@@ -1188,8 +1181,8 @@ pub enum Kind {
     },
     ToolResult(String),
     /// A desk verb acted — `amnemon`/`mnemon` (via `agent-start`), `message`,
-    /// `agent-cancel`, `schedule`, `unschedule`, `commit`, `verify-commitment`,
-    /// or `reply` — rendered on the rail exactly like [`Kind::ToolCall`], but
+    /// `agent-cancel`, `schedule`, `unschedule`, or `reply` — rendered on the
+    /// rail exactly like [`Kind::ToolCall`], but
     /// naming the harness verb the model invoked rather than a name that
     /// crossed the provider boundary: unlike `ral`, none of these are a
     /// provider-facing tool at all any more, so this is the honest kind for
@@ -1229,7 +1222,7 @@ pub enum Kind {
     /// scrollback regardless of nesting depth, since subagent output
     /// otherwise lives only in its own tab and ages out at `LINGER`.
     SubagentDone {
-        title: String,
+        name: String,
         /// How the child settled.  The sink reduces this with `text` through
         /// [`AgentOutcome::breadcrumb`] to the body / header-suffix split —
         /// the same reduction an async result makes — so sync and async land
@@ -2613,7 +2606,7 @@ mod tests {
         inbox
             .push(InboxMsg::AgentMessage(AgentMessage {
                 from: 7,
-                from_title: "review".into(),
+                from_name: "review".into(),
                 text: "please inspect the parser branch".into(),
             }))
             .unwrap();
@@ -2622,7 +2615,7 @@ mod tests {
             inbox.drain_tool().as_slice(),
             [Turn::Message(m)]
                 if m.from == 7
-                    && m.from_title == "review"
+                    && m.from_name == "review"
                     && m.text == "please inspect the parser branch"
                     && m.render()
                         == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser branch\n[/EXARCH]"
@@ -2971,7 +2964,7 @@ mod tests {
             id: 1,
             kind: Kind::Born {
                 log_dir: PathBuf::new(),
-                title: "a".into(),
+                name: "a".into(),
                 parent: 0,
                 branch: false,
             },

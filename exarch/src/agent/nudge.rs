@@ -61,7 +61,7 @@ pub(crate) struct NudgeCtx {
     pub must_reply: bool,
     /// The model's current pinned state as a one-line description, or `None`
     /// when nothing is pinned — the one register covering every pin kind
-    /// (tasks, goals, protected `commitment:*` state alike; see
+    /// (tasks, goals, and other pinned state alike; see
     /// [`Agent::pinned_digest`](crate::agent::Agent)).  Drives the pinned-state
     /// reminder for any actionable agent, regardless of role.
     pub pinned: Option<String>,
@@ -189,7 +189,7 @@ impl Registry {
                 }
             }
             // The one pinned-state nudge: whatever is pinned (a task, a
-            // goal, a protected `commitment:*` pin — [`NudgeCtx::pinned`]
+            // goal, or any other pinned state — [`NudgeCtx::pinned`]
             // covers every kind uniformly) keeps the agent restless,
             // budget-free, on every clean completion.  Only the empty
             // register gets a gentler, throttled suggestion instead.  If a
@@ -654,21 +654,20 @@ mod tests {
         );
     }
 
-    /// A protected `commitment:*` pin is not a special case: it rides the
-    /// same pinned-state digest as a task or a goal, so it keeps the agent
-    /// restless via the one pinned-state nudge, budget-free, until a
-    /// verifier clears it (out of this module's scope — [`nudge`] only
-    /// reports pinned state, it never clears it).
+    /// Any pinned state — a task, a goal, or any other digest alike — keeps
+    /// the agent restless via the one pinned-state nudge, budget-free, until
+    /// whatever cleared it does so (out of this module's scope — [`nudge`]
+    /// only reports pinned state, it never clears it).
     ///
     /// [`nudge`]: crate::agent::nudge
     #[test]
-    fn pinned_commitment_state_keeps_completion_restless() {
+    fn pinned_state_keeps_completion_restless() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("commitment-pin");
+        let mut log = fresh_log("pinned-state");
         let ctx = || NudgeCtx {
             must_reply: false,
             is_headless_root: false,
-            pinned: Some("commitment:abc: criteria 0/1".into()),
+            pinned: Some("tasks 3/8".into()),
             waiting_on_children: false,
         };
         for _ in 0..3 {
@@ -680,32 +679,32 @@ mod tests {
                     &mut log,
                 )
                 .expect("pinned state should nudge");
-            assert!(msg.contains("There is pinned state: commitment:abc: criteria 0/1"));
+            assert!(msg.contains("There is pinned state: tasks 3/8"));
         }
         assert_eq!(reg.used, 0, "pinned-state nudges are budget-free");
     }
 
     /// A parent that has already launched the next action is allowed to wait:
-    /// the commitment remains live, but the pinned-state nudge resumes only
+    /// the pinned state remains live, but the pinned-state nudge resumes only
     /// after the child settles.
     #[test]
     fn pinned_state_waits_while_children_live() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("commitment-pin-waiting");
+        let mut log = fresh_log("pinned-state-waiting");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Complete("waiting on verifier".into())),
+                &Ok(TurnOutcome::Complete("waiting on a descendant".into())),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
-                    pinned: Some("commitment:abc: criteria 0/1".into()),
+                    pinned: Some("tasks 3/8".into()),
                     waiting_on_children: true,
                 },
                 &emit(),
                 &mut log,
             )
             .is_none(),
-            "a live verifier is the next action, so the pin reminder should wait"
+            "a live descendant is the next action, so the pin reminder should wait"
         );
         assert_eq!(reg.used, 0, "waiting must not spend nudge budget");
     }
@@ -722,7 +721,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: true,
             is_headless_root: false,
-            pinned: Some("commitment:abc: criteria 0/1".into()),
+            pinned: Some("tasks 3/8".into()),
             waiting_on_children: false,
         };
         let msg = reg
@@ -738,7 +737,7 @@ mod tests {
             "must still be reminded to reply: {msg}"
         );
         assert!(
-            msg.contains("There is pinned state: commitment:abc: criteria 0/1"),
+            msg.contains("There is pinned state: tasks 3/8"),
             "must also be reminded of its pinned state: {msg}"
         );
         assert_eq!(reg.used, 1, "only the reply half spends budget");

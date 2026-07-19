@@ -1,5 +1,5 @@
 //! Sub-agent spawn machinery — the fork-detach-register spine shared by
-//! `/branch` and the desk's `agent-start`/`commit-open`/`commit-verify` arms.
+//! `/branch` and the desk's `agent-start` arm.
 //!
 //! Launch-only and always asynchronous: every call forks a child, runs it on
 //! a detached thread through the same [`Agent::drive`] loop, and returns a
@@ -10,7 +10,7 @@
 //! the user can see what the child was asked to do.
 
 use crate::agent::Agent;
-use crate::fleet::registry::AgentRegistry;
+use crate::fleet::registry::{AgentRegistry, RegisterError, Registration};
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, InboxMsg, Kind, Mailbox};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -29,13 +29,12 @@ pub(crate) fn spawn_branch(
     prompt: Option<&str>,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
-    let title = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
+    let name = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
     let child = session.branch().map_err(|e| e.to_string())?;
     let spec = AsyncSpawn {
         tool: "/branch",
-        title,
+        name,
         prompt: prompt.map(str::to_string),
-        commitment: None,
         harness: false,
     };
     spawn_async(
@@ -49,24 +48,21 @@ pub(crate) fn spawn_branch(
 }
 
 /// The tool-specific half of an async spawn: everything that varies between
-/// `amnemon`/`mnemon` and `commit`/`verify-commitment`, as opposed to the
-/// fork-detach-register mechanics every one of them shares ([`spawn_async`]).
+/// the `agent` builtin's two `type`s (`amnemon`/`mnemon`) and `/branch`, as
+/// opposed to the fork-detach-register mechanics every one of them shares
+/// ([`spawn_async`]).
 pub(crate) struct AsyncSpawn {
     pub tool: &'static str,
-    pub title: String,
+    pub name: String,
     /// The child's launch prompt, or `None` to park and wait — a branch, which
     /// converses for the human rather than running a seeded turn.
     pub prompt: Option<String>,
-    /// Set only for a `commit`/`verify-commitment` spawn. `None` for every
-    /// ordinary spawn, which can never tag a result for the pin register.
-    pub commitment: Option<crate::fleet::desk::CommitmentIntent>,
-    /// Whether this spawn was launched by a desk harness verb
-    /// (`amnemon`/`mnemon` via `agent-start`, `commit`, `verify-commitment`)
-    /// rather than `/branch`, a human slash command with no desk verb behind
-    /// it at all. Decides which rail chrome the spawn line wears: a harness
-    /// verb never crossed the provider boundary, so it renders as
-    /// [`Kind::HarnessCall`]; `/branch` renders as an ordinary
-    /// [`Kind::ToolCall`].
+    /// Whether this spawn was launched by a desk harness verb (`amnemon`/
+    /// `mnemon` via `agent-start`) rather than `/branch`, a human slash
+    /// command with no desk verb behind it at all. Decides which rail chrome
+    /// the spawn line wears: a harness verb never crossed the provider
+    /// boundary, so it renders as [`Kind::HarnessCall`]; `/branch` renders as
+    /// an ordinary [`Kind::ToolCall`].
     pub harness: bool,
 }
 
@@ -77,30 +73,26 @@ pub(crate) struct AsyncSpawn {
 /// ([`spawn_async`]).
 pub(crate) struct SpawnedChild {
     pub id: crate::bus::AgentId,
-    pub title: String,
+    pub name: String,
     pub log_dir: String,
 }
 
 /// Fork-then-detach: hand an already-forked, already-capped `child` to a
 /// worker thread that drives it to completion off the parent's critical
 /// path, and return the child's identity immediately.  This is the one
-/// launch-only, always-asynchronous shape `amnemon`, `mnemon`, `commit`,
-/// and `verify-commitment` share; each caller differs only in how it built
-/// `child` and `spec`.
+/// launch-only, always-asynchronous shape every `agent` spawn and `/branch`
+/// share; each caller differs only in how it built `child` and `spec`.
 ///
-/// `spec.commitment`, when `Some`, marks this spawn as a `commit`/
-/// `verify-commitment` check: the worker computes — while it still holds the
-/// child's raw reply, before that detail is discarded — what the structured
-/// reply decides, and tags the settled [`AgentResult`] so the parent applies
-/// it to the protected pin register when the result drains
-/// ([`Agent::drive`](crate::agent::Agent::drive)).
-///
-/// If the OS refuses to spawn the worker thread, or the registration itself
-/// is refused (this agent's own entry vanished between the tool call
-/// starting and the registry lock — an `agent-cancel`/`/clear` racing the
-/// spawn), the just-created registry entry (if any) is unwound and the call
-/// returns `Err` — every caller's receipt collapses to that plain error
-/// instead of a start receipt.
+/// The registration itself can refuse for two reasons, closed by
+/// [`AgentRegistry::register`] under its own lock: this agent's own entry
+/// vanished between the tool call starting and the registry lock (an
+/// `agent-cancel`/`/clear` racing the spawn), or `name` is already borne by
+/// another live agent (two same-name spawns racing in one turn). Either way
+/// there is no registry entry to unwind — the registration never happened —
+/// so the call simply returns `Err`. If instead the OS refuses to spawn the
+/// worker thread *after* a successful registration, that entry is unwound
+/// through [`AgentRegistry::settle`] before returning `Err`. Every caller's
+/// receipt collapses to that plain error instead of a start receipt.
 ///
 /// # Errors
 /// Returns `Err(String)` if the registration is refused or the worker
@@ -115,9 +107,8 @@ pub(crate) fn spawn_async(
 ) -> Result<SpawnedChild, String> {
     let AsyncSpawn {
         tool,
-        title,
+        name,
         prompt,
-        commitment,
         harness,
     } = spec;
     // Capture everything off the child before it moves into the worker
@@ -147,21 +138,30 @@ pub(crate) fn spawn_async(
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
     // one fact gates the reaper ceiling, the tab kind, and the settle epilogue.
     let delivers = child.returns();
-    let Some(generation) = registry.register(crate::fleet::registry::Registration {
+    let generation = match registry.register(Registration {
         id: agent_id,
         parent: Some(parent),
         ceiling: delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
-        title: title.clone(),
+        name: name.clone(),
         log_dir: log_dir.clone(),
         cancel,
         eval_root: Some(eval_root),
         turn_scope: Some(turn_scope),
         mailbox: child_mailbox,
         provider: child_provider,
-    }) else {
-        return Err(format!(
-            "could not start agent {agent_id}: this session is no longer live"
-        ));
+    }) {
+        Ok(generation) => generation,
+        Err(RegisterError::SessionDead) => {
+            return Err(format!(
+                "could not start agent {agent_id}: this session is no longer live"
+            ));
+        }
+        Err(RegisterError::NameTaken(name)) => {
+            return Err(format!(
+                "could not start agent '{name}': a live agent already bears this name — pick \
+                 another, or wait for it to settle"
+            ));
+        }
     };
     // An owned, `'static` clone for the worker thread; `registry` itself
     // stays free for the unwind path below if the thread never spawns.
@@ -180,9 +180,9 @@ pub(crate) fn spawn_async(
         emit.muted_child(agent_id, child.transcript())
     };
     let started = Instant::now();
-    let born_title = title.clone();
+    let born_name = name.clone();
     let born_parent = parent;
-    let worker_title = title.clone();
+    let worker_name = name.clone();
     // Seed the launch turn into the child's own inbox: the only downward
     // edge is this one write.  A branch has no prompt — it parks for the human.
     if let Some(p) = &prompt {
@@ -193,7 +193,7 @@ pub(crate) fn spawn_async(
     // the provider boundary, so it renders honestly as `HarnessCall`;
     // `/branch` is a human slash command, rendered as an ordinary `ToolCall`.
     let cmd = prompt.unwrap_or_else(|| "(waiting for you)".to_string());
-    let summary = Some(format!("Agent {title} spawned ({tool})."));
+    let summary = Some(format!("Agent {name} spawned ({tool})."));
     if harness {
         emit.emit(Kind::HarnessCall {
             verb: tool,
@@ -213,7 +213,7 @@ pub(crate) fn spawn_async(
             // draw path.
             child_emit.emit(Kind::Born {
                 log_dir: log_dir.clone(),
-                title: born_title,
+                name: born_name,
                 parent: born_parent,
                 branch: !delivers,
             });
@@ -235,11 +235,6 @@ pub(crate) fn spawn_async(
                     .as_ref()
                     .map(crate::agent::render_reply)
                     .unwrap_or_default();
-                // A commitment writer/verifier's structured reply decides here,
-                // on the worker thread, while the raw payload is still in hand —
-                // the parent only ever sees the tag, never the payload itself.
-                let commitment_settle = commitment
-                    .and_then(|i| crate::fleet::desk::commitment_settle(i, &outcome, payload.as_ref()));
                 // Deliver, then retire.  The parent's park verdict reads child
                 // liveness (the registry) and delivery (its inbox) under two
                 // different locks, and pops its queue only after the verdict —
@@ -251,13 +246,12 @@ pub(crate) fn spawn_async(
                 // admission reads the birth `generation` stamped here.
                 let rejected = parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
                     id: agent_id,
-                    title: worker_title,
+                    name: worker_name,
                     outcome,
                     text,
                     log_dir,
                     elapsed: started.elapsed(),
                     generation,
-                    commitment_settle,
                 }));
                 // No synchronous caller to return this to — the spawn's own
                 // tool_result already returned the "started" receipt — so the
@@ -275,7 +269,7 @@ pub(crate) fn spawn_async(
     match worker {
         Ok(_) => Ok(SpawnedChild {
             id: agent_id,
-            title,
+            name,
             log_dir: log_dir_str,
         }),
         Err(e) => {

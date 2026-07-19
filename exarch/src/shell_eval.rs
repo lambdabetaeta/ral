@@ -88,40 +88,18 @@ pub enum Outcome {
     Static(String),
 }
 
-/// The class of a pinned register slot in the session mirror.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PinKind {
-    Ordinary,
-    Commitment,
-    /// The `services` ledger card: host-authored, like `Commitment`, but
-    /// listing every live durable service rather than one commitment's
-    /// verdict.
-    Service,
-}
-
-/// One mirrored pin: the card the user sees plus the key-derived class the
-/// nudge layer reads.
+/// One mirrored pin: the card the user sees.
 ///
 /// The bus and viewport still carry plain `Kind::Pin`;
 /// this struct exists only inside the agent's session mirror.
 #[derive(Clone, Debug)]
 pub struct PinDigest {
-    pub(crate) kind: PinKind,
     pub(crate) card: crate::bus::card::Card,
 }
 
 impl PinDigest {
-    pub(crate) fn new(key: &str, card: crate::bus::card::Card) -> Self {
-        Self {
-            kind: if is_commitment_pin(key) {
-                PinKind::Commitment
-            } else if is_service_pin(key) {
-                PinKind::Service
-            } else {
-                PinKind::Ordinary
-            },
-            card,
-        }
+    pub(crate) fn new(card: crate::bus::card::Card) -> Self {
+        Self { card }
     }
 }
 
@@ -136,15 +114,6 @@ impl PinDigest {
 /// nudge can name them.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// Reserved register keyspace for host-projected commitment state.  A model
-/// may observe these pins, but ordinary `surface` calls cannot write or clear
-/// them; writer/verifier replies must be projected by host code instead.
-pub(crate) const COMMITMENT_PIN_PREFIX: &str = "commitment:";
-
-pub(crate) fn is_commitment_pin(key: &str) -> bool {
-    key.starts_with(COMMITMENT_PIN_PREFIX)
-}
-
 /// Reserved register key for the host-owned durable-service ledger
 /// (`Agent::reconcile_service_pins`): one card listing every live durable
 /// service.  A model may observe it, but ordinary `surface` calls cannot
@@ -154,89 +123,6 @@ pub(crate) const SERVICES_PIN_KEY: &str = "services";
 
 pub(crate) fn is_service_pin(key: &str) -> bool {
     key == SERVICES_PIN_KEY
-}
-
-/// Read a protected commitment pin for host-owned verification.  Model
-/// code cannot write this prefix through `surface`; verifier orchestration
-/// reads the saved card here and treats it as data.  Read directly off the
-/// captured `PinDigests` Arc by the `` `commit-open ``/`` `commit-verify ``
-/// desk arms ([`crate::fleet::desk::ExarchDesk`]), since a desk handler may only
-/// ever hold `&PinDigests`, never `&Agent`.
-pub(crate) fn commitment_card(pins: &PinDigests, key: &str) -> Result<crate::bus::card::Card, String> {
-    if !is_commitment_pin(key) {
-        return Err(format!(
-            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
-        ));
-    }
-    let m = pins
-        .lock()
-        .map_err(|_| "commitment pin register is unavailable".to_string())?;
-    match m.get(key) {
-        Some(pin) if pin.kind == PinKind::Commitment => Ok(pin.card.clone()),
-        Some(_) => Err(format!(
-            "`{key}` is pinned, but not as protected commitment state"
-        )),
-        None => Err(format!(
-            "no live commitment pin named `{key}`; did the verifier already pass, or was the session cleared?"
-        )),
-    }
-}
-
-/// Host projection for a writer's formalized commitment: set the
-/// protected pin in the session mirror.  Pure state — projecting it to the
-/// viewport is the caller's separate step
-/// ([`crate::agent::Agent::settle_commitment`]).  Refused if the key is
-/// already live: a commitment, once open, can only be closed by a verifier,
-/// never silently replaced.  Called directly off the captured `PinDigests`
-/// Arc by [`crate::agent::Agent::apply_commitment_settle`] when a settled
-/// `commit` child's tag opens the pin.
-pub(crate) fn set_commitment_pin(
-    pins: &PinDigests,
-    key: &str,
-    card: crate::bus::card::Card,
-) -> Result<(), String> {
-    if !is_commitment_pin(key) {
-        return Err(format!(
-            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
-        ));
-    }
-    let mut m = pins
-        .lock()
-        .map_err(|_| "commitment pin register is unavailable".to_string())?;
-    if m.contains_key(key) {
-        return Err(format!(
-            "`{key}` is already a live commitment; verify or clear it before opening a new one"
-        ));
-    }
-    m.insert(
-        key.to_string(),
-        PinDigest {
-            kind: PinKind::Commitment,
-            card,
-        },
-    );
-    drop(m);
-    Ok(())
-}
-
-/// Host projection for a verifier pass: clear the protected pin in the
-/// session mirror.  Pure state — projecting the clear to the viewport is
-/// the caller's separate step ([`crate::agent::Agent::settle_commitment`]).
-/// The model cannot reach this path; ordinary `surface` unpins for the same
-/// prefix are rejected above ([`reject_protected_pin`]).  Called directly
-/// off the captured `PinDigests` Arc by
-/// [`crate::agent::Agent::apply_commitment_settle`] when a settled
-/// `verify-commitment` child's tag clears the pin.
-pub(crate) fn unset_commitment_pin(pins: &PinDigests, key: &str) -> Result<bool, String> {
-    if !is_commitment_pin(key) {
-        return Err(format!(
-            "`{key}` is not a protected commitment pin; expected `{COMMITMENT_PIN_PREFIX}<id>`"
-        ));
-    }
-    let mut m = pins
-        .lock()
-        .map_err(|_| "commitment pin register is unavailable".to_string())?;
-    Ok(m.remove(key).is_some())
 }
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
@@ -306,22 +192,12 @@ pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
 
 fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
     let key = match kind {
-        Kind::Pin { key, .. } | Kind::Unpin { key }
-            if is_commitment_pin(key) || is_service_pin(key) =>
-        {
-            key
-        }
+        Kind::Pin { key, .. } | Kind::Unpin { key } if is_service_pin(key) => key,
         _ => return false,
     };
-    let msg = if is_commitment_pin(key) {
-        format!(
-            "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify-commitment` to check a live commitment"
-        )
-    } else {
-        format!(
-            "`{key}` is a protected service-ledger pin; ordinary `surface` calls cannot write or clear it — it is maintained by the host as services are born and settle"
-        )
-    };
+    let msg = format!(
+        "`{key}` is a protected service-ledger pin; ordinary `surface` calls cannot write or clear it — it is maintained by the host as services are born and settle"
+    );
     emit.emit(Kind::Error(msg));
     true
 }
@@ -618,8 +494,8 @@ pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
 }
 
 /// Project a `reply`'s first-order payload to the JSON a user-facing edge
-/// (the headless `result`, a commitment writer/verifier's structured
-/// decision) reads — **not** [`FOValue`]'s own `serde`/[`Serialize`] impl,
+/// (the headless `result`) reads — **not** [`FOValue`]'s own
+/// `serde`/[`Serialize`] impl,
 /// which is the transport encoding: internally tagged by `kind`, floats
 /// carried by IEEE-754 bits (`core/src/serial.rs:31–84`).  That encoding
 /// would break the promise this projection keeps: a string reply stays a
@@ -1372,30 +1248,6 @@ keep-bottom
     }
 
     #[test]
-    fn model_surface_cannot_write_commitment_pins() {
-        let (emit, rx) = dummy_emitter();
-        let protected = Kind::Pin {
-            key: "commitment:abc".into(),
-            card: crate::bus::card::Card(Vec::new()),
-        };
-        assert!(reject_protected_pin(&protected, &emit));
-        let event = rx.try_recv().expect("rejection should emit an error");
-        assert!(
-            matches!(event.kind, Kind::Error(msg) if msg.contains("protected commitment pin")),
-            "expected protected-pin diagnostic"
-        );
-
-        let (emit, _rx) = dummy_emitter();
-        let ordinary = Kind::Unpin {
-            key: "tasks".into(),
-        };
-        assert!(!reject_protected_pin(&ordinary, &emit));
-    }
-
-    /// The `services` key is protected exactly like a commitment pin: a
-    /// model's own `surface` call cannot write or clear it — only the
-    /// host's reconciliation pass may.
-    #[test]
     fn model_surface_cannot_write_service_pins() {
         let (emit, rx) = dummy_emitter();
         let protected = Kind::Pin {
@@ -1408,6 +1260,12 @@ keep-bottom
             matches!(event.kind, Kind::Error(msg) if msg.contains("protected service-ledger pin")),
             "expected protected-pin diagnostic"
         );
+
+        let (emit, _rx) = dummy_emitter();
+        let ordinary = Kind::Unpin {
+            key: "tasks".into(),
+        };
+        assert!(!reject_protected_pin(&ordinary, &emit));
     }
 
     /// The `InboxDeferred` always posts a deferred worker's batch as an

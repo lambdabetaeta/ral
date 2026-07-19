@@ -286,7 +286,7 @@ impl App {
         match kind {
             Kind::Born {
                 log_dir,
-                title,
+                name,
                 parent,
                 branch,
             } => {
@@ -296,7 +296,7 @@ impl App {
                 )]
                 let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
                 self.tabs
-                    .born(id, &log_dir, title, parent, branch, agent_slot);
+                    .born(id, &log_dir, name, parent, branch, agent_slot);
             }
             Kind::Died => {
                 self.surface.flush_surfaces(self.tabs.viewports_mut());
@@ -394,7 +394,7 @@ impl App {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));
             }
             Kind::SubagentDone {
-                title,
+                name,
                 outcome,
                 text,
                 elapsed,
@@ -414,7 +414,7 @@ impl App {
                 // delegated work.
                 let root = self.tabs.root();
                 self.with_viewport(root, |vp| {
-                    vp.push_subagent(title, text, error, elapsed, fidelity);
+                    vp.push_subagent(name, text, error, elapsed, fidelity);
                 });
             }
             // A surfaced render document: a kit raised a card through the

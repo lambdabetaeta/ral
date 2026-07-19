@@ -1,16 +1,14 @@
-//! The agent-, schedule-, and commitment-family harness builtins:
-//! `amnemon`, `mnemon`, `agents`, `message`, `agent-cancel`, `schedule`,
-//! `schedules`, `unschedule`, `commit`, `verify-commitment` — the model's
-//! action surface onto the `` `agent-start ``/`` `agent-list ``/
-//! `` `agent-cancel ``/`` `message ``/`` `schedule ``/`` `schedule-list ``/
-//! `` `unschedule ``/`` `commit-open ``/`` `commit-verify `` enquiry classes
-//! [`crate::fleet::desk::ExarchDesk`] answers.
+//! The agent- and schedule-family harness builtins: `agent`, `agents`,
+//! `message`, `agent-cancel`, `schedule`, `schedules`, `unschedule`,
+//! `reply` — the model's action surface onto the
+//! `` `agent-start ``/`` `agent-list ``/`` `agent-cancel ``/`` `message ``/
+//! `` `schedule ``/`` `schedule-list ``/`` `unschedule ``/`` `reply ``
+//! enquiry classes [`crate::fleet::desk::ExarchDesk`] answers.
 //!
-//! Each body validates its own arguments at the door — arity, the title
-//! contract, the six-label permissions vocabulary, the trigger/label
-//! vocabularies, the `commitment:*` key grammar — before it ever forks a
-//! session or puts an enquiry, so a malformed call never reaches the host.
-//! A spawning body (`amnemon`/`mnemon`/`commit`/`verify-commitment`) forks
+//! Each body validates its own arguments at the door — arity, the name
+//! contract, the six-label grant vocabulary, the trigger/label
+//! vocabularies — before it ever forks a session or puts an enquiry, so a
+//! malformed call never reaches the host. The spawning body (`agent`) forks
 //! this shell into the turn's nursery
 //! ([`ral_core::Shell::fork_into_nursery`]) and enquires with the adopted
 //! session's id; every other body enquires directly. The desk answers class
@@ -25,9 +23,9 @@ use ral_core::types::{BuiltinBody, BuiltinEntry, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
-/// The six bake-in permission bases a spawn's `permissions` argument may
-/// name — see `crate::policy::base::resolve_base`, whose profiles these
-/// mirror exactly.
+/// The six bake-in permission bases a spawn's `grant` argument may name —
+/// see `crate::policy::base::resolve_base`, whose profiles these mirror
+/// exactly.
 const PERMISSION_LABELS: [&str; 6] = [
     "confined",
     "minimal",
@@ -37,23 +35,39 @@ const PERMISSION_LABELS: [&str; 6] = [
     "dangerous",
 ];
 
-/// True for titles that fit the tab-bar contract — non-empty, ≤24 chars,
+/// True for names that fit the tab-bar contract — non-empty, ≤24 chars,
 /// ASCII alphanumeric plus `-`/`_`. Spaces and punctuation are excluded
-/// because the tab bar lays them out token-by-token. Shared by `amnemon`
-/// and `mnemon`, whose `title` argument is mandatory here (the JSON tools'
-/// silent `sub-{N}` fallback has no place at a door that can simply refuse).
-pub(crate) fn valid_title(s: &str) -> bool {
+/// because the tab bar lays them out token-by-token. The `agent` builtin's
+/// `name` argument is mandatory — it identifies the child everywhere the
+/// model can see it, not just on the tab bar, so there is no default to
+/// fall back to; a door that can refuse simply refuses.
+pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 24
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Decode a permissions argument into its bare tag, or a door error naming
-/// all six legal labels. The argument's own type is row-open (see
-/// `scheme_agent_spawn`'s doc for why), so this runtime check is what
-/// actually closes the rule — the same standard the retiring JSON schema's
-/// `enum` held.
+/// Decode an `agent` spawn's `type` argument into its bare tag, or a door
+/// error naming both legal memory modes. The argument's own type is
+/// row-open (see [`scheme_agent`]'s doc for why), so this runtime check is
+/// what actually closes the rule — the same shape [`permission_label`]
+/// closes for `grant`.
+fn agent_type_label(v: &Value) -> Settled<String> {
+    if let Value::Variant { label, payload: None } = v
+        && (label == "amnemon" || label == "mnemon")
+    {
+        return Ok(label.clone());
+    }
+    Err(sig(format!(
+        "agent: `type` must be `amnemon (blank context) or `mnemon (inherits your conversation) — got {v}"
+    )))
+}
+
+/// Decode a `grant` argument into its bare tag, or a door error naming all
+/// six legal labels. The argument's own type is row-open (see
+/// [`scheme_agent`]'s doc for why), so this runtime check is what actually
+/// closes the rule.
 fn permission_label(v: &Value) -> Settled<String> {
     if let Value::Variant { label, payload: None } = v
         && PERMISSION_LABELS.contains(&label.as_str())
@@ -61,7 +75,7 @@ fn permission_label(v: &Value) -> Settled<String> {
         return Ok(label.clone());
     }
     Err(sig(format!(
-        "permissions must be one of `confined, `minimal, `read-only, `edit-only, `reasonable, `dangerous — got {v}"
+        "grant must be one of `confined, `minimal, `read-only, `edit-only, `reasonable, `dangerous — got {v}"
     )))
 }
 
@@ -133,53 +147,67 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
     }
 }
 
-/// Validate a `commit`/`verify-commitment` `key` argument against the
-/// protected pin grammar — `` `commitment:` `` followed by one or more
-/// ASCII letters, digits, `.`, `_`, or `-` — re-running
-/// [`crate::fleet::desk::valid_commitment_key`] here so a malformed key never
-/// reaches the host. `tool` names the caller for the door error.
-fn commitment_key(v: &Value, tool: &str) -> Settled<String> {
-    let key = v.to_string();
-    if !crate::fleet::desk::valid_commitment_key(&key) {
-        return Err(sig(format!(
-            "{tool}: `key` must look like `{}<id>` using ASCII letters, digits, `.`, `_`, or \
-             `-`, got {key:?}",
-            crate::shell_eval::COMMITMENT_PIN_PREFIX
-        )));
-    }
-    Ok(key)
-}
-
 /// Decode a spawn enquiry's `` `started `` receipt into the record the
 /// builtin returns, or a didactic error naming the shape violation or the
-/// refusal — shared by [`spawn_body`] (`amnemon`/`mnemon`), `commit`, and
-/// `verify-commitment`. `tool` names the caller in the error text.
-fn spawn_receipt(answer: FOValue, tool: &str) -> Settled<Value> {
+/// refusal — the builtin-body half of [`builtin_agent`]'s spawn.
+fn spawn_receipt(answer: FOValue) -> Settled<Value> {
     let FOValue::Variant { label, payload: Some(payload) } = answer else {
-        return Err(sig(format!("{tool}: host answered an unexpected shape for its receipt")));
+        return Err(sig("agent: host answered an unexpected shape for its receipt"));
     };
     if label != "started" {
-        return Err(sig(format!("{tool}: host refused: {label}")));
+        return Err(sig(format!("agent: host refused: {label}")));
     }
     Ok(Value::from(*payload))
 }
 
-/// The `amnemon`/`mnemon` shared body: validate the door, fork this shell
-/// into the turn's nursery, and enquire `` `agent-start `` with the
-/// adopted session's id — the builtin-body half of a spawn, the desk's own
-/// launch spine the other half. `kind` is the bare enquiry tag
-/// (`amnemon`/`mnemon`) the desk selects the log-fork behaviour from.
-fn spawn_body(args: &[Value], shell: &Shell, tool: &str, kind: &'static str) -> Settled<Value> {
-    check_arity(args, 3, tool)?;
-    let prompt = args[0].to_string();
-    let title = args[1].to_string();
-    if !valid_title(&title) {
+/// `agent [prompt: …, name: …, type: …, grant: …]` — validate the door,
+/// fork this shell into the turn's nursery, and enquire `` `agent-start ``
+/// with the adopted session's id — the builtin-body half of a spawn, the
+/// desk's own launch spine ([`crate::fleet::desk::ExarchDesk::launch`]) the
+/// other half. The argument arrives as a [`Value::Map`] — the closed record
+/// row [`scheme_agent`] mints guarantees the four fields statically — but
+/// the `else` arms below stay didactic anyway, matching [`builtin_schedule`]'s
+/// own style: a defensive door costs nothing and never has to trust the
+/// type checker alone.
+fn builtin_agent(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "agent")?;
+    let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
-            "{tool}: title must be non-empty, at most 24 characters, and only ASCII letters, \
-             digits, `-`, or `_` (the tab-bar contract) — got {title:?}"
+            "agent: expected a [prompt: …, name: …, type: …, grant: …] record, got {}",
+            args[0].type_name()
+        )));
+    };
+    let Some(prompt) = spec.get("prompt") else {
+        return Err(sig(
+            "agent: the spec record needs a `prompt` field — the instruction the child starts with",
+        ));
+    };
+    let Some(name) = spec.get("name") else {
+        return Err(sig(
+            "agent: the spec record needs a `name` field — the child's identity",
+        ));
+    };
+    let Some(kind) = spec.get("type") else {
+        return Err(sig(
+            "agent: the spec record needs a `type` field — `amnemon or `mnemon",
+        ));
+    };
+    let Some(grant) = spec.get("grant") else {
+        return Err(sig(
+            "agent: the spec record needs a `grant` field — one of the six permission bases",
+        ));
+    };
+
+    let name = name.to_string();
+    if !valid_name(&name) {
+        return Err(sig(format!(
+            "agent: `name` must be non-empty, at most 24 characters, and only ASCII letters, \
+             digits, `-`, or `_` (the tab-bar contract) — got {name:?}"
         )));
     }
-    let permissions = permission_label(&args[2])?;
+    let kind = agent_type_label(kind)?;
+    let grant = permission_label(grant)?;
+    let prompt = prompt.to_string();
 
     let session = shell.fork_into_nursery()?;
     // A NurseryId is a small monotonic per-turn counter; `unwrap_or` never
@@ -191,28 +219,14 @@ fn spawn_body(args: &[Value], shell: &Shell, tool: &str, kind: &'static str) -> 
         payload: Some(Box::new(FOValue::List {
             items: vec![
                 FOValue::Int { value: session_id },
-                FOValue::Variant { label: kind.to_string(), payload: None },
+                FOValue::Variant { label: kind, payload: None },
                 FOValue::String { value: prompt },
-                FOValue::String { value: title },
-                FOValue::Variant { label: permissions, payload: None },
+                FOValue::String { value: name },
+                FOValue::Variant { label: grant, payload: None },
             ],
         })),
     })?;
-    spawn_receipt(answer, tool)
-}
-
-/// `amnemon` — the blank-context spawn; see [`spawn_body`] for the door and
-/// enquiry it shares with `mnemon`, and the `doc:` field below for the
-/// model-facing contract.
-fn builtin_amnemon(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    spawn_body(args, shell, "amnemon", "amnemon")
-}
-
-/// `mnemon` — the context-inheriting spawn; see [`spawn_body`] for the door
-/// and enquiry it shares with `amnemon`, and the `doc:` field below for the
-/// model-facing contract.
-fn builtin_mnemon(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    spawn_body(args, shell, "mnemon", "mnemon")
+    spawn_receipt(answer)
 }
 
 /// `agents` — thin wrapper around the `` `agent-list `` enquiry: silent, no
@@ -232,55 +246,52 @@ fn builtin_agents(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `message <id> <text>` — validates `id` is non-negative, then enquires
-/// `` `message ``; descendant-scoping and delivery errors are the desk's.
+/// `message <name> <text>` — passes `name` through as the recipient's
+/// identity, then enquires `` `message ``; resolution, descendant-scoping,
+/// and delivery errors are the desk's.
 fn builtin_message(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "message")?;
-    let id = match args[0].as_int() {
-        Some(n) if n >= 0 => n,
-        _ => {
-            return Err(sig(format!(
-                "message: `id` must be a non-negative Int, got {}",
-                args[0].type_name()
-            )));
-        }
-    };
+    let name = args[0].to_string();
     let text = args[1].to_string();
     shell.enquire(FOValue::Variant {
         label: "message".to_string(),
         payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::Int { value: id }, FOValue::String { value: text }],
+            items: vec![FOValue::String { value: name }, FOValue::String { value: text }],
         })),
     })?;
     Ok(Value::Unit)
 }
 
-/// `agent-cancel <id>` — validates `id` is non-negative, then enquires
-/// `` `agent-cancel ``; descendant-scoping is the desk's.
+/// `agent-cancel <name>` — passes `name` through as the target's identity,
+/// then enquires `` `agent-cancel ``; resolution and descendant-scoping are
+/// the desk's.
 fn builtin_agent_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent-cancel")?;
-    let id = match args[0].as_int() {
-        Some(n) if n >= 0 => n,
-        _ => {
-            return Err(sig(format!(
-                "agent-cancel: `id` must be a non-negative Int, got {}",
-                args[0].type_name()
-            )));
-        }
-    };
+    let name = args[0].to_string();
     shell.enquire(FOValue::Variant {
         label: "agent-cancel".to_string(),
         payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::Int { value: id }],
+            items: vec![FOValue::String { value: name }],
         })),
     })?;
     Ok(Value::Unit)
+}
+
+/// Decode the `schedule` enquiry's receipt — a `` `[label: Str, next-s: Int] ``
+/// record — into the value the builtin returns, or a didactic error naming
+/// the shape violation, mirroring [`spawn_receipt`]'s own style.
+fn schedule_receipt(answer: FOValue) -> Settled<Value> {
+    let FOValue::Map { .. } = answer else {
+        return Err(sig("schedule: host answered an unexpected shape for its receipt"));
+    };
+    Ok(Value::from(answer))
 }
 
 /// `schedule <spec>` — decodes the spec record's `trigger`/`label` fields
 /// through [`schedule_trigger`]/[`schedule_label`] (re-running the real
 /// parsers so a malformed expression fails here, not at the desk), then
-/// enquires `` `schedule ``. The grant refusal is the desk's.
+/// enquires `` `schedule ``. The grant refusal and the label-uniqueness /
+/// reserved-namespace refusals are the desk's/registry's.
 fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "schedule")?;
     let Value::Map(spec) = &args[0] else {
@@ -314,10 +325,7 @@ fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             items: vec![trigger, label, FOValue::String { value: prompt }],
         })),
     })?;
-    let FOValue::Int { value } = answer else {
-        return Err(sig("schedule: host answered an unexpected shape for its receipt"));
-    };
-    Ok(Value::Int(value))
+    schedule_receipt(answer)
 }
 
 /// `schedules` — thin wrapper around the `` `schedule-list `` enquiry:
@@ -337,78 +345,19 @@ fn builtin_schedules(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `unschedule <id>` — validates `id` is non-negative, then enquires
-/// `` `unschedule ``; the grant refusal is the desk's.
+/// `unschedule <label>` — passes `label` through as the target schedule's
+/// identity, then enquires `` `unschedule ``; resolution (including the
+/// no-op case) and the grant refusal are the desk's/registry's.
 fn builtin_unschedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "unschedule")?;
-    let id = match args[0].as_int() {
-        Some(n) if n >= 0 => n,
-        _ => {
-            return Err(sig(format!(
-                "unschedule: `id` must be a non-negative Int, got {}",
-                args[0].type_name()
-            )));
-        }
-    };
+    let label = args[0].to_string();
     shell.enquire(FOValue::Variant {
         label: "unschedule".to_string(),
         payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::Int { value: id }],
+            items: vec![FOValue::String { value: label }],
         })),
     })?;
     Ok(Value::Unit)
-}
-
-/// `commit <key> <description>` — validates the key grammar and that
-/// `description` is non-empty, forks this shell into the turn's nursery,
-/// and enquires `` `commit-open `` with the adopted session's id. The
-/// live-key refusal and the writer's own prompt are the desk's.
-fn builtin_commit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "commit")?;
-    let key = commitment_key(&args[0], "commit")?;
-    let description = args[1].to_string();
-    if description.trim().is_empty() {
-        return Err(sig("commit: `description` must not be empty"));
-    }
-
-    let session = shell.fork_into_nursery()?;
-    // A NurseryId is a small monotonic per-turn counter; `unwrap_or` never
-    // actually saturates in practice, but keeps this door total without an
-    // `as` cast's silent wraparound.
-    let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
-    let answer = shell.enquire(FOValue::Variant {
-        label: "commit-open".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![
-                FOValue::Int { value: session_id },
-                FOValue::String { value: key },
-                FOValue::String { value: description },
-            ],
-        })),
-    })?;
-    spawn_receipt(answer, "commit")
-}
-
-/// `verify-commitment <key>` — validates the key grammar, forks this shell
-/// into the turn's nursery, and enquires `` `commit-verify `` with the
-/// adopted session's id. Reading the live pin and building the verifier's
-/// own prompt are the desk's.
-fn builtin_verify_commitment(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "verify-commitment")?;
-    let key = commitment_key(&args[0], "verify-commitment")?;
-
-    let session = shell.fork_into_nursery()?;
-    // A NurseryId is a small monotonic per-turn counter; `unwrap_or` never
-    // actually saturates in practice, but keeps this door total without an
-    // `as` cast's silent wraparound.
-    let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
-    let answer = shell.enquire(FOValue::Variant {
-        label: "commit-verify".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::Int { value: session_id }, FOValue::String { value: key }],
-        })),
-    })?;
-    spawn_receipt(answer, "verify-commitment")
 }
 
 /// `reply <value>` — the first-orderness door runs [`FOValue::try_from`]
@@ -429,75 +378,77 @@ fn builtin_reply(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Unit)
 }
 
-/// The `[id: Int, title: Str, log-dir: Str]` receipt `amnemon`/`mnemon`/
-/// `commit`/`verify-commitment` all answer with.
+/// The `[name: Str, log-dir: Str]` receipt the `agent` builtin answers with.
 fn spawn_receipt_ty() -> Ty {
-    closed_record(&[("id", Ty::Int), ("title", Ty::String), ("log-dir", Ty::String)])
+    closed_record(&[("name", Ty::String), ("log-dir", Ty::String)])
 }
 
-/// `amnemon`/`mnemon :: Str → Str → ∀ρ. Variant ρ → F [id: Int, title: Str, log-dir: Str]`
-/// — the two builtins share this exact shape, so one scheme function backs
-/// both registry entries (the same convention `core/src/typecheck/builtins.rs`
-/// documents for its own shared shapes).
+/// `agent :: ∀ρ1 ρ2. [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2] → F [name: Str, log-dir: Str]`
 ///
-/// The permissions argument's row is open — `` ∀ρ. Variant ρ ``, exactly
-/// [`ral_core::typecheck::builtins::scheme::surface_op`]'s own shape — not
-/// the closed six-label row a first look at "closed rules live in argument
-/// types" suggests. A literal tag infers its *own* open row (`` `bogus``
-/// infers `` [`bogus: Unit | ρ] ``, `typecheck::infer`'s doc on `Val::Variant`),
-/// so unifying it against a *closed* row here would make an unknown label a
-/// static type error — sound, but the wrong failure mode: it never reaches
-/// [`permission_label`], so the model would see a bare row-mismatch
-/// diagnostic instead of the six legal labels enumerated. The open row
-/// defers the whole check to that runtime door, which is where "closed
-/// rule, named labels" actually lives for this argument — the same door
-/// [`valid_title`] already is for the title contract.
-fn scheme_agent_spawn(u: &mut Unifier) -> Scheme {
-    let permissions_row = u.fresh_row_var();
+/// The record row is closed: a record literal with literal keys infers an
+/// exact row (`infer_map_val` builds on `Row::Empty`), so unifying it
+/// against this closed row makes a missing or misspelled field a static
+/// error naming that field — the same rationale [`scheme_schedule`] gives
+/// for its own closed record row.
+///
+/// The two variant rows *inside* the record — `type` and `grant` — stay
+/// open: a literal tag
+/// infers its *own* open row (`` `bogus `` infers `` [`bogus: Unit | ρ] ``,
+/// `typecheck::infer`'s doc on `Val::Variant`), so unifying it against a
+/// *closed* row here would make an unknown label a static type error —
+/// sound, but the wrong failure mode: it would never reach
+/// [`agent_type_label`]/[`permission_label`], so the model would see a bare
+/// row-mismatch diagnostic instead of the legal labels enumerated. The open
+/// row defers the whole check to those runtime doors, which is where
+/// "closed rule, named labels" actually lives for these two arguments — the
+/// same door [`valid_name`] already is for the name contract.
+fn scheme_agent(u: &mut Unifier) -> Scheme {
+    let type_row = u.fresh_row_var();
+    let grant_row = u.fresh_row_var();
     scheme(
         &[],
         &[],
-        &[permissions_row],
+        &[type_row, grant_row],
         thunk(fun(
-            Ty::String,
-            fun(
-                Ty::String,
-                fun(Ty::Variant(Row::Var(permissions_row)), pure(spawn_receipt_ty())),
-            ),
+            closed_record(&[
+                ("prompt", Ty::String),
+                ("name", Ty::String),
+                ("type", Ty::Variant(Row::Var(type_row))),
+                ("grant", Ty::Variant(Row::Var(grant_row))),
+            ]),
+            pure(spawn_receipt_ty()),
         )),
     )
 }
 
-/// `agents :: F [[id: Int, title: Str, elapsed-s: Int, log-dir: Str]]`
+/// `agents :: F [[name: Str, elapsed-s: Int, log-dir: Str]]`
 fn scheme_agents(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
         &[],
         thunk(pure(Ty::List(Box::new(closed_record(&[
-            ("id", Ty::Int),
-            ("title", Ty::String),
+            ("name", Ty::String),
             ("elapsed-s", Ty::Int),
             ("log-dir", Ty::String),
         ]))))),
     )
 }
 
-/// `message :: Int → Str → F Unit`
+/// `message :: Str → Str → F Unit`
 fn scheme_message(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::Int, fun(Ty::String, pure(Ty::Unit)))))
+    scheme(&[], &[], &[], thunk(fun(Ty::String, fun(Ty::String, pure(Ty::Unit)))))
 }
 
-/// `agent-cancel :: Int → F Unit`
+/// `agent-cancel :: Str → F Unit`
 fn scheme_agent_cancel(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::Int, pure(Ty::Unit))))
+    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
 }
 
-/// The `[id: Int, label: Str, trigger: Str, next-s: Int, fires: Int]`
-/// listing row `schedules` answers with.
+/// The `[label: Str, trigger: Str, next-s: Int, fires: Int]` listing row
+/// `schedules` answers with.
 fn schedule_row_ty() -> Ty {
     closed_record(&[
-        ("id", Ty::Int),
         ("label", Ty::String),
         ("trigger", Ty::String),
         ("next-s", Ty::Int),
@@ -505,13 +456,19 @@ fn schedule_row_ty() -> Ty {
     ])
 }
 
-/// `schedule :: ∀ρ1 ρ2. [trigger: Variant ρ1, label: Variant ρ2, prompt: Str] → F Int`
+/// The `[label: Str, next-s: Int]` receipt the `schedule` builtin answers
+/// with.
+fn schedule_receipt_ty() -> Ty {
+    closed_record(&[("label", Ty::String), ("next-s", Ty::Int)])
+}
+
+/// `schedule :: ∀ρ1 ρ2. [trigger: Variant ρ1, label: Variant ρ2, prompt: Str] → F [label: Str, next-s: Int]`
 ///
 /// The record row is closed: a record literal with literal keys infers an
 /// exact row (`infer_map_val` builds on `Row::Empty`), so unifying it
 /// against this closed row makes a missing or misspelled field a static
 /// error naming that field — the accurate diagnostic a closed *variant* row
-/// could not give (`scheme_agent_spawn`'s doc), because a literal tag infers
+/// could not give ([`scheme_agent`]'s doc), because a literal tag infers
 /// an open row where a record literal infers a closed one.
 ///
 /// The two variant rows *inside* the record stay open, for exactly the
@@ -532,34 +489,19 @@ fn scheme_schedule(u: &mut Unifier) -> Scheme {
                 ("label", Ty::Variant(Row::Var(label_row))),
                 ("prompt", Ty::String),
             ]),
-            pure(Ty::Int),
+            pure(schedule_receipt_ty()),
         )),
     )
 }
 
-/// `schedules :: F [[id: Int, label: Str, trigger: Str, next-s: Int, fires: Int]]`
+/// `schedules :: F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
 fn scheme_schedules(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(pure(Ty::List(Box::new(schedule_row_ty())))))
 }
 
-/// `unschedule :: Int → F Unit`
+/// `unschedule :: Str → F Unit`
 fn scheme_unschedule(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::Int, pure(Ty::Unit))))
-}
-
-/// `commit :: Str → Str → F [id: Int, title: Str, log-dir: Str]`
-fn scheme_commit(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        &[],
-        thunk(fun(Ty::String, fun(Ty::String, pure(spawn_receipt_ty())))),
-    )
-}
-
-/// `verify-commitment :: Str → F [id: Int, title: Str, log-dir: Str]`
-fn scheme_verify_commitment(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(spawn_receipt_ty()))))
+    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
 }
 
 /// `reply :: ∀α. α → F Unit` — fully polymorphic in its argument, exactly
@@ -573,64 +515,46 @@ fn scheme_reply(u: &mut Unifier) -> Scheme {
 
 pub static HARNESS_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
-        name: Cow::Borrowed("amnemon"),
-        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_agent_spawn),
-        doc: "amnemon <prompt> <title> <permissions>  — launch an independent, blank-context sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [id: Int, title: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked turn in your inbox. `prompt` starts a fresh conversation (no shared history, only a value-snapshot of your shell's bindings/cwd/env); wrap it in a raw string #'…'# if it carries $, !, or quotes. `title` must fit the tab-bar contract: non-empty, at most 24 characters, ASCII letters/digits/-/_ only, or the call is refused. `permissions` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the turn that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_amnemon),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("mnemon"),
-        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_agent_spawn),
-        doc: "mnemon <prompt> <title> <permissions>  — launch a sub-agent that inherits your current model-visible conversation and reuses your current provider selection, appending `prompt` as its fresh final prompt (good for cache locality when the child needs the context you already built); it also gets a value-snapshot of your shell's bindings/cwd/env. Launch-only and always asynchronous: returns immediately with a receipt [id: Int, title: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked turn in your inbox. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `title` must fit the tab-bar contract: non-empty, at most 24 characters, ASCII letters/digits/-/_ only, or the call is refused. `permissions` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the turn that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_mnemon),
+        name: Cow::Borrowed("agent"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent),
+        doc: "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked turn in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        body: BuiltinBody::Static(builtin_agent),
     },
     BuiltinEntry {
         name: Cow::Borrowed("agents"),
         type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_agents),
-        doc: "agents  — list the live descendants you started that are still running: [[id: Int, title: Str, elapsed-s: Int, log-dir: Str]]. Use it to recover ids after a context compaction, then agent-cancel to stop a straggler. Settled agents are not listed — their replies arrive on their own as marked turns in your inbox. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "agents  — list the live descendants you started that are still running: [[name: Str, elapsed-s: Int, log-dir: Str]]. Use it to recover names after a context compaction, then agent-cancel to stop a straggler. Settled agents are not listed — their replies arrive on their own as marked turns in your inbox. Answered only on the turn that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_agents),
     },
     BuiltinEntry {
         name: Cow::Borrowed("message"),
         type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_message),
-        doc: "message <id> <text>  — send `text` as a marked turn to the live descendant named by `id` (from agents, a spawn receipt, or an id you included in a child's prompt); it lands at its next turn boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. Does not return the recipient's answer — coordination only. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "message <name> <text>  — send `text` as a marked turn to the live descendant named `name` (from agents or a spawn receipt); it lands at its next turn boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. Does not return the recipient's answer — coordination only. Answered only on the turn that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_message),
     },
     BuiltinEntry {
         name: Cow::Borrowed("agent-cancel"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent_cancel),
-        doc: "agent-cancel <id>  — cancel the live descendant named by `id` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent has that id. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent bears that name. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the turn that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_agent_cancel),
     },
     BuiltinEntry {
         name: Cow::Borrowed("schedule"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_schedule),
-        doc: "schedule <spec>  — arm a self-wakeup: at the chosen time a marked turn carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next turn boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to give the schedule a human-readable name shown by schedules, or `none` to take the default sched-{id}; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns the new schedule's id. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "schedule <spec>  — arm a self-wakeup: at the chosen time a marked turn carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next turn boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to name the wakeup — the label is its identity: it must not be borne by another live schedule, and the sched-<n> form is reserved for defaults — or `none` to take the default sched-<n>; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the turn that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_schedule),
     },
     BuiltinEntry {
         name: Cow::Borrowed("schedules"),
         type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_schedules),
-        doc: "schedules  — list your live scheduled wakeups: [[id: Int, label: Str, trigger: Str, next-s: Int, fires: Int]] — next-s the seconds until the next fire, fires how many times it has fired so far. Use it to recover schedule ids after a context compaction, then unschedule to remove one. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "schedules  — list your live scheduled wakeups: [[label: Str, trigger: Str, next-s: Int, fires: Int]] — next-s the seconds until the next fire, fires how many times it has fired so far. Use it to recover labels after a context compaction, then unschedule to remove one. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the turn that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_schedules),
     },
     BuiltinEntry {
         name: Cow::Borrowed("unschedule"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_unschedule),
-        doc: "unschedule <id>  — remove a scheduled wakeup by its id (from schedules). A no-op if no schedule has that id. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). A no-op if no live schedule bears that label. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the turn that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_unschedule),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("commit"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_commit),
-        doc: "commit <key> <description>  — open a new protected commitment. `key` is yours to choose: `commitment:` followed by one or more ASCII letters, digits, `.`, `_`, or `-` (e.g. commitment:plan-x); any other shape is refused, naming the grammar. `description` is what you are committing to, in your own words, and must not be empty — it is not saved verbatim. Launch-only and always asynchronous: forks a host-owned, read-only writer child that formalizes your description into concrete, falsifiable criteria, and returns immediately with a receipt [id: Int, title: Str, log-dir: Str]; the writer's own reply is NOT this call's result — it arrives later, as its own marked turn in your inbox, and only a well-formed criteria card opens the pin. You choose the key and the description; the host alone builds the writer's prompt and bounds it to read-only, so you can never steer its criteria or its authority. Refused if `key` is already a live commitment — verify or clear it first. Once open, only a passing verify-commitment can close it; you cannot unpin or overwrite it yourself. Delegation depth is finite — the writer is handed one less unit of fuel than you hold, and once your fuel reaches zero this call is refused. Answered only on the turn that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_commit),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("verify-commitment"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_verify_commitment),
-        doc: "verify-commitment <key>  — ask a host-owned, read-only verifier child to check one live protected commitment pin. `key` must be the full commitment:-prefixed key of a currently live commitment (from a commit receipt or your own record); any other shape is refused, naming the grammar. You supply only the key — no instructions, evidence, or verifier prompt of your own reach it. Launch-only and always asynchronous: forks the verifier and returns immediately with a receipt [id: Int, title: Str, log-dir: Str]; the verifier's own reply is NOT this call's result — it arrives later, as its own marked turn in your inbox. The host alone reads the saved commitment card, builds the verifier's prompt, and bounds it to read-only; the pin clears only if the verifier returns a structured pass verdict, and stays live on a fail or on any other reply shape. Delegation depth is finite — the verifier is handed one less unit of fuel than you hold, and once your fuel reaches zero this call is refused. Answered only on the turn that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_verify_commitment),
     },
     BuiltinEntry {
         name: Cow::Borrowed("reply"),
@@ -649,15 +573,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn valid_title_boundaries() {
-        assert!(valid_title("a"));
-        assert!(valid_title("refactor-output"));
-        assert!(valid_title("audit_deps"));
-        assert!(valid_title(&"x".repeat(24)));
-        assert!(!valid_title(""));
-        assert!(!valid_title(&"x".repeat(25)));
-        assert!(!valid_title("has space"));
-        assert!(!valid_title("non-ascii-é"));
+    fn valid_name_boundaries() {
+        assert!(valid_name("a"));
+        assert!(valid_name("refactor-output"));
+        assert!(valid_name("audit_deps"));
+        assert!(valid_name(&"x".repeat(24)));
+        assert!(!valid_name(""));
+        assert!(!valid_name(&"x".repeat(25)));
+        assert!(!valid_name("has space"));
+        assert!(!valid_name("non-ascii-é"));
     }
 
     #[test]
@@ -684,7 +608,7 @@ mod tests {
         }
     }
 
-    /// A tab-carrying payload on a permissions variant is not a bare tag —
+    /// A tab-carrying payload on a grant variant is not a bare tag —
     /// refused just like an unknown label, never silently truncated.
     #[test]
     fn permission_label_rejects_a_variant_carrying_a_payload() {
@@ -703,19 +627,19 @@ mod tests {
         p
     }
 
-    /// An unknown permissions label errors engine-side, naming all six
-    /// legal bases, before any enquiry crosses — the door validates title
-    /// and permissions before `fork_into_nursery`/`enquire` ever run, so a
-    /// malformed call never registers a child.
+    /// An unknown `grant` label errors engine-side, naming all six legal
+    /// bases, before any enquiry crosses — the door validates `name`,
+    /// `type`, and `grant` before `fork_into_nursery`/`enquire` ever run, so
+    /// a malformed call never registers a child.
     #[test]
-    fn unknown_permissions_label_errors_before_any_enquiry_crosses() {
-        let dir = tmp("unknown-permissions");
+    fn unknown_grant_label_errors_before_any_enquiry_crosses() {
+        let dir = tmp("unknown-grant");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"amnemon #'hi'# "t" `bogus"#,
+            r"agent [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus]",
             5,
             &emit,
         );
@@ -728,38 +652,89 @@ mod tests {
         }
         assert!(
             session.agents.list(session.id).is_empty(),
-            "an unknown permissions label must never register a child"
+            "an unknown grant label must never register a child"
         );
     }
 
-    /// An invalid title errors engine-side naming the tab-bar contract,
-    /// before any enquiry crosses — the door check the JSON tool's silent
-    /// `sub-{N}` fallback used to paper over.
+    /// An unknown `type` tag errors engine-side, naming both legal memory
+    /// modes, before any enquiry crosses.
     #[test]
-    fn invalid_title_errors_before_any_enquiry_crosses() {
-        let dir = tmp("invalid-title");
+    fn unknown_type_tag_errors_before_any_enquiry_crosses() {
+        let dir = tmp("unknown-type");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"amnemon #'hi'# "has space" `confined"#,
+            r"agent [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined]",
+            5,
+            &emit,
+        );
+        assert!(result.content.contains("amnemon"), "got: {}", result.content);
+        assert!(result.content.contains("mnemon"), "got: {}", result.content);
+        assert!(
+            session.agents.list(session.id).is_empty(),
+            "an unknown type tag must never register a child"
+        );
+    }
+
+    /// An invalid name errors engine-side naming the tab-bar contract,
+    /// before any enquiry crosses — the door check the JSON tool's silent
+    /// `sub-{N}` fallback used to paper over.
+    #[test]
+    fn invalid_name_errors_before_any_enquiry_crosses() {
+        let dir = tmp("invalid-name");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r#"agent [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined]"#,
             5,
             &emit,
         );
         assert!(
-            result.content.contains("title"),
+            result.content.contains("name"),
             "got: {}",
             result.content
         );
         assert!(
             session.agents.list(session.id).is_empty(),
-            "an invalid title must never register a child"
+            "an invalid name must never register a child"
+        );
+    }
+
+    /// A spec record missing a required field is a *static* error naming
+    /// that field: the record literal infers a closed row, and unifying it
+    /// against `scheme_agent`'s closed record row reports exactly which
+    /// label is absent — mirroring `missing_spec_field_errors_statically_naming_the_field`
+    /// in the schedule family below.
+    #[test]
+    fn missing_agent_field_errors_statically_naming_the_field() {
+        let dir = tmp("missing-agent-field");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"agent [prompt: #'hi'#, name: 't', type: `amnemon]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("missing a field named 'grant'"),
+            "the diagnostic must name the missing field, got: {}",
+            result.content
+        );
+        assert!(
+            session.agents.list(session.id).is_empty(),
+            "a missing spec field must never register a child"
         );
     }
 
     /// The full stack, end to end: a scripted provider issues a `ral` tool
-    /// call whose script is `` amnemon #'say hi'# 'helper' `read-only ``
+    /// call whose script is
+    /// `` agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only] ``
     /// — real source, parsed and type-checked, crossing the desk through a
     /// real nursery fork — and the receipt record is the turn's value,
     /// while the child's own reply later settles into the parent's inbox.
@@ -768,11 +743,9 @@ mod tests {
     /// loop: the spawned child inherits the parent's *own* `Arc<Provider>`
     /// (`agent-start`'s `ProviderHandle::new(services.provider.current())`),
     /// so a script consumed by both a driven parent turn and its spawned
-    /// child races unpredictably over which one gets which stage — the same
-    /// reason the commitment pair's own scripted-child tests never drive the
-    /// parent's `apply` either.
+    /// child races unpredictably over which one gets which stage.
     #[test]
-    fn amnemon_full_stack_round_trip_delivers_receipt_and_settles_into_inbox() {
+    fn agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox() {
         let dir = tmp("full-stack-round-trip");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
@@ -787,7 +760,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"amnemon #'say hi'# 'helper' `read-only",
+            r"agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only]",
             5,
             &emit,
         );
@@ -978,14 +951,15 @@ mod tests {
 
     /// The full stack, end to end: `` schedule [trigger: `after '1s',
     /// label: `none, prompt: #'wake'#] `` — real source, parsed and
-    /// type-checked, crossing the desk — answers the new schedule's id, and
-    /// once it fires the marked wakeup lands in the inbox as a
+    /// type-checked, crossing the desk — answers a receipt record naming
+    /// the resolved `sched-{n}` default label and the seconds to first
+    /// fire, and once it fires the marked wakeup lands in the inbox as a
     /// [`crate::bus::Turn::Wakeup`]. Mirrors `crate::fleet::schedule`'s own
     /// `after_fires_once_then_is_removed` for how to wait for the fire — a
     /// real second, since `parse_duration`'s smallest unit is whole
     /// seconds.
     #[test]
-    fn schedule_full_stack_round_trip_answers_id_and_fires_into_inbox() {
+    fn schedule_full_stack_round_trip_answers_receipt_and_fires_into_inbox() {
         let dir = tmp("schedule-full-stack");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
         session.allow_schedule = true;
@@ -1003,9 +977,23 @@ mod tests {
             "a valid schedule call must succeed, got: {}",
             result.content
         );
+        assert!(
+            result.content.contains("next-s"),
+            "the receipt record must be the turn's value, got: {}",
+            result.content
+        );
         let live = session.schedules.list();
         assert_eq!(live.len(), 1, "the schedule must be registered");
-        assert_eq!(live[0].label, format!("sched-{}", live[0].id));
+        assert!(
+            live[0].label.starts_with("sched-"),
+            "must take the minted default label, got: {}",
+            live[0].label
+        );
+        assert!(
+            result.content.contains(&live[0].label),
+            "the receipt must carry the resolved label, got: {}",
+            result.content
+        );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -1029,141 +1017,40 @@ mod tests {
         }
     }
 
-    // ── commitment family door tests ─────────────────────────────────────
-
-    /// A key that does not match the `commitment:*` grammar errors
-    /// engine-side, naming it, before any enquiry crosses.
+    /// `` unschedule <label> `` full stack: schedule one with an explicit
+    /// label, then remove it by that same label — real source, crossing
+    /// the desk and the registry — and confirm nothing live remains.
     #[test]
-    fn bad_commit_key_errors_before_any_enquiry_crosses() {
-        let dir = tmp("bad-commit-key");
+    fn unschedule_full_stack_removes_by_label() {
+        let dir = tmp("unschedule-full-stack");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "commit 'not-a-key' 'do the thing'",
-            5,
-            &emit,
-        );
-        assert!(
-            result.content.contains("commitment:"),
-            "must name the grammar, got: {}",
-            result.content
-        );
-        assert!(
-            session.agents.list(session.id).is_empty(),
-            "a malformed key must never register a writer"
-        );
-    }
-
-    /// An empty `description` errors engine-side, before any enquiry
-    /// crosses.
-    #[test]
-    fn empty_commit_description_errors_before_any_enquiry_crosses() {
-        let dir = tmp("empty-commit-description");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "commit 'commitment:abc' ''",
-            5,
-            &emit,
-        );
-        assert!(
-            result.content.contains("description"),
-            "got: {}",
-            result.content
-        );
-        assert!(
-            session.agents.list(session.id).is_empty(),
-            "an empty description must never register a writer"
-        );
-    }
-
-    /// A key that does not match the `commitment:*` grammar errors
-    /// engine-side for `verify-commitment` too, before any enquiry crosses.
-    #[test]
-    fn bad_verify_commitment_key_errors_before_any_enquiry_crosses() {
-        let dir = tmp("bad-verify-commitment-key");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
-        let result = session.run_shell("call-1".to_string(), "verify-commitment 'nope'", 5, &emit);
-        assert!(
-            result.content.contains("commitment:"),
-            "must name the grammar, got: {}",
-            result.content
-        );
-        assert!(
-            session.agents.list(session.id).is_empty(),
-            "a malformed key must never register a verifier"
-        );
-    }
-
-    /// The full stack, end to end: `` commit 'commitment:abc' 'ship the
-    /// thing, tests must pass' `` — real source, parsed and type-checked,
-    /// crossing the desk through a real nursery fork — and the receipt
-    /// record is the turn's value, while the writer's own well-formed
-    /// criteria card settles tagged for the parent to open.
-    /// Drives `run_shell` directly rather than `Agent::apply`'s provider
-    /// loop, for the same reason `amnemon_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
-    /// does: a script consumed by both a driven parent turn and its spawned
-    /// child races unpredictably over which one gets which stage.
-    #[test]
-    fn commit_full_stack_round_trip_delivers_receipt_and_tags_the_open_settle() {
-        let dir = tmp("commit-full-stack-round-trip");
-        let key = "commitment:abc";
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
-        let reply_cmd = format!(
-            "reply [kind: \"commitment_card\", commitment_key: \"{key}\", summary: \"ship the thing\", criteria: [[id: \"tests\", text: \"tests pass\"]]]"
-        );
-        let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
-            "test-model",
-            crate::provider::ProviderKind::Openai,
-            crate::provider::scripted::Script::new()
-                .then(crate::provider::scripted::Reply::tool_calls(vec![ral_call("reply-1", &reply_cmd)])),
-        ));
-        session.provider_handle().swap(provider);
+        session.allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "commit 'commitment:abc' 'ship the thing, tests must pass'",
+            "schedule [trigger: `after '10m', label: `some 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
             result.content.contains("EXIT: 0"),
-            "a valid commit call must succeed, got: {}",
+            "a valid schedule call must succeed, got: {}",
             result.content
         );
+        assert_eq!(session.schedules.list().len(), 1, "the schedule must be registered");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match session.drain_turn_for_test() {
-                Some(crate::bus::Turn::Agent(r)) => {
-                    assert!(
-                        matches!(
-                            &r.commitment_settle,
-                            Some(crate::shell_eval::tools::CommitmentSettle::Open { key: k, .. }) if k == key
-                        ),
-                        "a passing writer card must tag the settle for the parent to open, got: {:?}",
-                        r.commitment_settle
-                    );
-                    break;
-                }
-                Some(_other) => panic!("expected an Agent result turn"),
-                None => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "writer child did not settle within the timeout"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            }
-        }
+        let result = session.run_shell("call-2".to_string(), "unschedule 'nightly'", 5, &emit);
+        assert!(
+            result.content.contains("EXIT: 0"),
+            "a valid unschedule call must succeed, got: {}",
+            result.content
+        );
+        assert!(
+            session.schedules.list().is_empty(),
+            "unschedule by label must remove the schedule"
+        );
     }
 
     // ── `reply` ───────────────────────────────────────────────────────────
@@ -1188,7 +1075,7 @@ mod tests {
     /// and type-checked, crossing the desk through a real enquiry — and the
     /// structured record it built reaches the parent's inbox, not a
     /// flattened string. Substitutes the child's own script for the
-    /// `reply` *tool* call `amnemon_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
+    /// `reply` *tool* call `agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
     /// uses, for the same non-driven-parent reason that test documents.
     #[test]
     fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
@@ -1207,7 +1094,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"amnemon #'find files'# 'finder' `read-only",
+            r"agent [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only]",
             5,
             &emit,
         );

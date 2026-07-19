@@ -81,7 +81,7 @@ impl Control for ReplControl<'_> {
             let prompt = (!rest.is_empty()).then_some(rest);
             match crate::shell_eval::tools::spawn_branch(session, prompt, emit) {
                 Ok(child) => Agent::note(
-                    format!("branch {} started (agent {})", child.title, child.id),
+                    format!("branch {} started (agent {})", child.name, child.id),
                     emit,
                 ),
                 Err(e) => session.note_error(format!("could not start branch: {e}"), emit),

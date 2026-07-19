@@ -98,12 +98,12 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
     let (name, mut obj) = match kind {
         Kind::Born {
             log_dir,
-            title,
+            name,
             parent,
             branch,
         } => (
             "born",
-            json!({ "log_dir": log_dir.to_string_lossy(), "title": title, "parent": parent, "branch": branch }),
+            json!({ "log_dir": log_dir.to_string_lossy(), "name": name, "parent": parent, "branch": branch }),
         ),
         Kind::Died => ("died", json!({})),
         Kind::Usage(u) => (
@@ -137,7 +137,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         }
         Kind::ProviderError(error) => ("provider_error", json!({ "error": error })),
         Kind::SubagentDone {
-            title,
+            name,
             outcome,
             text,
             elapsed,
@@ -148,7 +148,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             (
                 "subagent_done",
                 json!({
-                    "title": title,
+                    "name": name,
                     "text": text,
                     "error": error,
                     "elapsed_ms": elapsed_ms,

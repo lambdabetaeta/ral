@@ -351,6 +351,30 @@ pub struct ScheduleInfo {
     pub fires: u64,
 }
 
+/// The receipt [`ScheduleRegistry::schedule`] answers.
+///
+/// Carries the resolved label — the caller's own choice, or the minted
+/// `sched-{id}` default — and the delay to its first fire. Model-facing, a
+/// schedule is known only by its label; this is what the desk needs to
+/// answer the `schedule` builtin's own receipt.
+#[derive(Debug)]
+pub struct ScheduleReceipt {
+    pub label: String,
+    pub next_in: Duration,
+}
+
+/// Whether `label` has the reserved `sched-<digits>` shape minted defaults
+/// use: the literal string `sched-` followed by one or more ASCII digits
+/// and nothing else. [`ScheduleRegistry::schedule`] refuses a user-supplied
+/// label of this shape up front, which is what makes every minted default
+/// collision-free by construction — a user label can never coincide with
+/// one.
+fn is_reserved_label(label: &str) -> bool {
+    label
+        .strip_prefix("sched-")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// A session's live scheduled wakeups.
 ///
 /// Cheap to clone — the inner `Arc`
@@ -397,25 +421,44 @@ impl ScheduleRegistry {
         }
     }
 
-    /// Add a schedule and arm its first occurrence on the reaper.  Returns
-    /// the new id, or an error when a cron expression never fires.  `label`
-    /// defaults to `sched-{id}`.  `mailbox` is the *owning session's* mailbox
-    /// the fired wakeup is posted to — a session schedules only itself.
+    /// Add a schedule and arm its first occurrence on the reaper.  `label`
+    /// defaults to `sched-{id}` when absent; when given, it is refused if
+    /// it is already borne by a live schedule, or if it has the reserved
+    /// `sched-<digits>` shape ([`is_reserved_label`]) minted defaults use —
+    /// the two rules that make every minted default collision-free by
+    /// construction.  `mailbox` is the *owning session's* mailbox the fired
+    /// wakeup is posted to — a session schedules only itself.  Returns the
+    /// resolved label and the delay to its first fire.
     ///
     /// # Errors
     /// Returns `Err` if `trigger` has no next occurrence (e.g. a cron
-    /// expression that never fires).
+    /// expression that never fires), if `label` is already borne by a live
+    /// schedule, or if `label` has the reserved `sched-<digits>` shape.
     pub fn schedule(
         &self,
         trigger: Trigger,
         prompt: String,
         label: Option<String>,
         mailbox: &Mailbox,
-    ) -> Result<ScheduleId, String> {
+    ) -> Result<ScheduleReceipt, String> {
+        if let Some(label) = &label
+            && is_reserved_label(label)
+        {
+            return Err(format!(
+                "label '{label}': the sched-<n> form is reserved for default labels — pick another name"
+            ));
+        }
         let delay = trigger
             .next_delay()
             .ok_or_else(|| "this trigger has no next occurrence".to_string())?;
         let mut g = self.lock();
+        if let Some(label) = &label
+            && g.entries.values().any(|e| &e.label == label)
+        {
+            return Err(format!(
+                "label '{label}' is already borne by a live schedule — pick another, or unschedule it first"
+            ));
+        }
         let id = g.next_id;
         g.next_id += 1;
         let label = label.unwrap_or_else(|| format!("sched-{id}"));
@@ -425,20 +468,28 @@ impl ScheduleRegistry {
             Entry {
                 trigger,
                 prompt,
-                label,
+                label: label.clone(),
                 pending: Arc::new(AtomicBool::new(false)),
                 fires: 0,
                 deadline,
             },
         );
         drop(g);
-        Ok(id)
+        Ok(ScheduleReceipt { label, next_in: delay })
     }
 
-    /// Remove one schedule by id; `true` if it existed.  Dropping its entry
-    /// disarms its reaper deadline.
-    pub fn unschedule(&self, id: ScheduleId) -> bool {
-        self.lock().entries.remove(&id).is_some()
+    /// Remove one schedule by its label; `true` if a live schedule bore it.
+    /// Dropping its entry disarms its reaper deadline.  A no-op (`false`) is
+    /// not evidence of a caller mistake: a one-shot schedule may have just
+    /// fired and removed itself between the model reading its label and
+    /// issuing this call, so callers treat it as a successful no-op rather
+    /// than an error.
+    pub fn unschedule(&self, label: &str) -> bool {
+        let mut g = self.lock();
+        let Some(id) = g.entries.iter().find_map(|(id, e)| (e.label == label).then_some(*id)) else {
+            return false;
+        };
+        g.entries.remove(&id).is_some()
     }
 
     /// Whether any schedule is live — the drive loop's park-or-terminate
@@ -665,7 +716,7 @@ mod tests {
     fn registry_schedules_lists_and_unschedules() {
         let reg = ScheduleRegistry::new();
         let inbox = Inbox::new();
-        let id = reg
+        let receipt = reg
             .schedule(
                 Trigger::Cron {
                     schedule: sched("0 3 * * *"),
@@ -676,13 +727,79 @@ mod tests {
                 &inbox.mailbox(),
             )
             .unwrap();
+        assert_eq!(receipt.label, "nightly");
         let live = reg.list();
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].label, "nightly");
         assert_eq!(live[0].trigger, "0 3 * * *");
-        assert!(reg.unschedule(id), "an existing schedule is removable");
+        assert!(reg.unschedule("nightly"), "an existing schedule is removable");
         assert!(reg.list().is_empty());
-        assert!(!reg.unschedule(id), "a removed schedule is gone");
+        assert!(!reg.unschedule("nightly"), "a removed schedule is gone");
+    }
+
+    /// A label already borne by a live schedule is refused, naming both the
+    /// label and the rule, and registers nothing.
+    #[test]
+    fn schedule_rejects_a_label_already_borne_by_a_live_schedule() {
+        let reg = ScheduleRegistry::new();
+        let inbox = Inbox::new();
+        reg.schedule(
+            Trigger::After(Duration::from_mins(1)),
+            "x".into(),
+            Some("nightly".into()),
+            &inbox.mailbox(),
+        )
+        .unwrap();
+        let err = reg
+            .schedule(
+                Trigger::After(Duration::from_mins(1)),
+                "y".into(),
+                Some("nightly".into()),
+                &inbox.mailbox(),
+            )
+            .expect_err("a duplicate label must be refused");
+        assert!(err.contains("nightly"), "must name the offending label, got: {err}");
+        assert!(err.contains("already borne"), "must name the rule, got: {err}");
+        assert_eq!(reg.list().len(), 1, "the duplicate attempt registers nothing");
+    }
+
+    /// A user-supplied label shaped like a minted default (`sched-<digits>`)
+    /// is refused up front — the rule that makes minted defaults
+    /// collision-free by construction.
+    #[test]
+    fn schedule_rejects_a_user_label_shaped_like_a_default() {
+        let reg = ScheduleRegistry::new();
+        let inbox = Inbox::new();
+        let err = reg
+            .schedule(
+                Trigger::After(Duration::from_mins(1)),
+                "x".into(),
+                Some("sched-3".into()),
+                &inbox.mailbox(),
+            )
+            .expect_err("the reserved sched-<n> shape must be refused");
+        assert!(err.contains("sched-3"), "must name the offending label, got: {err}");
+        assert!(err.contains("reserved"), "must name the rule, got: {err}");
+        assert!(reg.list().is_empty(), "the refused attempt registers nothing");
+    }
+
+    /// `unschedule` resolves by label; a label no live schedule bears is a
+    /// no-op, not an error — the same race a one-shot's self-removal creates.
+    #[test]
+    fn unschedule_by_label_removes_the_match_and_is_a_noop_otherwise() {
+        let reg = ScheduleRegistry::new();
+        let inbox = Inbox::new();
+        reg.schedule(
+            Trigger::After(Duration::from_mins(1)),
+            "x".into(),
+            Some("nightly".into()),
+            &inbox.mailbox(),
+        )
+        .unwrap();
+        assert!(!reg.unschedule("no-such-label"), "an unborne label is a no-op");
+        assert!(reg.unschedule("nightly"), "an existing label is removable");
+        assert!(reg.list().is_empty());
+        assert!(!reg.unschedule("nightly"), "a removed label is a no-op, not an error");
     }
 
     #[test]

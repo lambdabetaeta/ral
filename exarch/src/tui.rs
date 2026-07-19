@@ -54,4 +54,4 @@ pub use tui_loop::run;
 /// frame of its scrollback, short enough not to clutter the tab bar.
 pub(super) const LINGER: Duration = Duration::from_secs(90);
 /// Display label for the root session in the tab bar.
-pub(super) const ROOT_TITLE: &str = "main";
+pub(super) const ROOT_NAME: &str = "main";
