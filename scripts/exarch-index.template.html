@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>exarch — a coding agent that runs on the ral shell</title>
-  <meta name="description" content="exarch is a small coding agent that acts only by writing ral programs. Each one runs inside a capability grant the model never wrote — confined by ral's own permissions and an OS sandbox.">
+  <title>exarch — a coding agent with bounded authority</title>
+  <meta name="description" content="exarch is a coding agent whose every action is a ral program. Choose what it may run, read, write, and reach; the agent can use that authority, but it cannot widen it.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,38 +39,45 @@
  ██╔══╝   ██╔██╗ ██╔══██║██╔══██╗██║     ██╔══██║
  ███████╗██╔╝ ██╗██║  ██║██║  ██║╚██████╗██║  ██║
  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝</pre></div></div>
-        <p class="thesis">A coding agent that acts through<br>one tool: the <em>ral</em> shell.</p>
+        <p class="thesis">A coding agent you can give<br>less than your whole machine.</p>
         <div class="rule"></div>
-        <p class="sub">Every move it makes is a <a href="../index.html"><code>ral</code></a> program, run inside a sandbox.</p>
+        <p class="sub">Every move is a <a href="../index.html"><code>ral</code></a> program, run with authority the agent cannot widen.</p>
       </div>
     </div>
 
-    <!-- 2. the agent -->
+    <!-- 2. one language -->
     <section class="section decree">
       <div class="column">
-        <p class="eyebrow">The agent</p>
-        <p>exarch is a small agent around one loop: show the model the conversation, run what it sends back, show it the result. What it sends back is always a <a href="../index.html"><code>ral</code></a> program — there are no file-reader, editor, or shell tools to call. To read a file, edit it, or run the tests, it writes ral and runs it as one top-level turn.</p>
-        <p>Each turn runs inside a <code>grant</code>: which programs may run, which paths may be read or written, whether the network is on. The model never writes that grant — exarch installs it around the turn, so there is no wrapper in the source to drop and nothing to talk past. When a grant withholds files or the network, ral re-runs the command in an OS sandbox — Seatbelt on macOS, bubblewrap on Linux — enforced by the kernel, not just promised. (exarch's own process isn't sandboxed; it needs the network to reach the model.)</p>
-        <p>Because the tool is ral, what comes back is typed data, not text to re-read. Output is a value with a type, and a whole run can be captured as a tree — every command, its output, its exit, the authority in force — with a failed exit handed back as data, not thrown. The string-splicing brittleness of shell-driving agents has nowhere to arise; every session is written out in full besides, to read back later.</p>
+        <p class="eyebrow">One language for the work</p>
+        <p>exarch reads, edits, tests, and repeats. It does all of that through
+        one tool: a persistent <a href="../index.html"><code>ral</code></a>
+        session. Reading a file, changing it, and running the test suite are not
+        separate privileged APIs. They are programs in one small language.</p>
+        <p>Inside each program, results are values rather than text to split and
+        splice. They can be collected into lists and records; failures can be
+        caught and inspected. Bindings, environment changes, and the working
+        directory persist from one turn to the next.</p>
+        <p>Every session is also written out in full. You can read back the
+        conversation, the commands exarch ran, and their complete output.</p>
       </div>
     </section>
 
     <!-- 3. the boundary -->
     <section class="section boundary">
       <div class="column">
-        <p class="eyebrow">ral vs. a raw shell</p>
+        <p class="eyebrow">The boundary lives outside the prompt</p>
         <div class="compare">
           <div class="panel">
-            <div class="panel-label">a string-shell agent</div>
-            <div class="body"><pre><span class="c"># the model writes a string,</span>
-<span class="c"># and whatever it writes, runs</span>
+            <div class="panel-label">an unrestricted shell tool</div>
+            <div class="body"><pre><span class="c"># the tool accepts source;</span>
+<span class="c"># the source decides what runs</span>
 shell(<span class="s">"rm -rf build"</span>)
 shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
           </div>
           <div class="panel bound">
             <div class="panel-label">exarch — ral under a grant</div>
             <div class="body"><pre><span class="c"># the model writes the body;</span>
-<span class="c"># exarch wraps it in a grant</span>
+<span class="c"># the host supplies the boundary</span>
 <span class="a">grant</span> [exec: [git:[], cargo:[]],
        fs:   [read:  [<span class="s">'&lt;cwd&gt;'</span>],
               write: [<span class="s">'&lt;cwd&gt;'</span>]],
@@ -85,38 +92,49 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
     <!-- 4. capability profiles -->
     <section class="section writs">
       <div class="column">
-        <p class="eyebrow">Capability profiles</p>
+        <p class="eyebrow">Choose the authority before the work begins</p>
+        <p class="provider-note">A profile controls which programs may run,
+        which paths may be read or written, and whether the network is
+        available. exarch installs it around every turn; model-written code
+        cannot remove it. Restricted child processes are confined by the
+        platform sandbox as well as ral's own checks.</p>
         <div class="lattice">
           <div class="bound-mark"><span class="g">⊤</span> full ambient authority</div>
 
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">dangerous</span>
-            <span class="desc">No limits — the authority you have at your own prompt.</span>
+            <span class="desc">No attenuation — equivalent to running commands at your own prompt.</span>
             <span class="caps"><span><span class="key">net</span> inherit</span><span><span class="key">exec</span> inherit</span></span>
           </div>
           <div class="writ default">
             <span class="seal">✚</span>
             <span class="name">reasonable</span>
-            <span class="desc">Runs your toolchain; writes only the working directory and scratch.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> system + brew + git</span></span>
+            <span class="desc">Everyday development. Writes stay in the project, caches, and scratch.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> curated toolchain</span></span>
+          </div>
+          <div class="writ">
+            <span class="seal">✚</span>
+            <span class="name">edit-only</span>
+            <span class="desc">May inspect and edit the project; build tools are denied.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> cwd + scratch</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">read-only</span>
-            <span class="desc">Reads broadly; writes only to scratch.</span>
+            <span class="desc">May inspect the project and run tools; writes only to scratch.</span>
             <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> scratch</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">minimal</span>
-            <span class="desc">System tools only — /bin and /usr/bin, no brew, no shells.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> /bin + /usr/bin</span></span>
+            <span class="desc">Reads only the project and scratch; runs system tools.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> system tools</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">confined</span>
-            <span class="desc">Network off; reads and writes only the working directory and scratch.</span>
+            <span class="desc">One project tree, scratch space, and no network.</span>
             <span class="caps"><span><span class="key">net</span> <span class="off">off</span></span><span><span class="key">fs</span> cwd + scratch</span></span>
           </div>
 
@@ -128,13 +146,16 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
     <!-- 5. providers -->
     <section class="section providers-sec">
       <div class="column">
-        <p class="eyebrow">Providers</p>
-        <p class="provider-note">Any provider whose key is in your environment is found at startup — then scrubbed from the environment, so nothing exarch runs can inherit it.</p>
+        <p class="eyebrow">Bring a model</p>
+        <p class="provider-note">exarch discovers provider credentials at startup,
+        keeps them in its own process, and removes them from the environment
+        before any agent-written program runs.</p>
         <div class="providers">
           <span class="chip">anthropic</span>
-          <span class="chip">openai</span>
+          <span class="chip">openai / chatgpt</span>
           <span class="chip">openrouter</span>
           <span class="chip">deepseek</span>
+          <span class="chip">opencode</span>
           <span class="chip">xai</span>
           <span class="chip">qwen</span>
           <span class="chip more">+ custom / self-hosted</span>
@@ -146,7 +167,8 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
     <section class="section get-sec">
       <div class="column">
         <p class="eyebrow">Get exarch</p>
-        <p class="get-note">macOS and Linux. The <a href="../index.html"><code>ral</code></a> shell it runs on is built in — one binary, nothing else to install.</p>
+        <p class="get-note">One binary for macOS or Linux. The
+        <a href="../index.html"><code>ral</code></a> shell is built in.</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
           <code class="cmd" id="install-cmd" role="button" tabindex="0"
@@ -166,7 +188,7 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
             </a>
           </div>
         </div>
-        <p class="get-note">Then set a provider key and run from a project directory:</p>
+        <p class="get-note">Set a provider key, enter a project, and run:</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
           <code class="cmd" id="run-cmd" role="button" tabindex="0"
@@ -180,7 +202,7 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
 
     <section class="section cta last">
       <div class="column">
-        <p class="motto">One verb — <em>write ral</em> — inside a boundary it cannot widen.</p>
+        <p class="motto">One language for every move. <em>Authority that only narrows.</em></p>
         <div class="cta-links">
           <a href="profiles.html">Read the profiles &rarr;</a>
           <a href="https://github.com/lambdabetaeta/ral/tree/main/exarch">Source &rarr;</a>
@@ -191,7 +213,7 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
   </main>
 
   <footer class="footer">
-    exarch &mdash; a coding agent that runs on the <a href="../index.html">ral</a> shell.
+    exarch &mdash; a coding agent with bounded authority, built on <a href="../index.html">ral</a>.
     &middot; <a href="profiles.html">profiles</a>
   </footer>
 
