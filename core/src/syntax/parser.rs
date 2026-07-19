@@ -1366,9 +1366,10 @@ impl Parser {
             let mut depth = 0usize;
             loop {
                 match self.tokens.get(i).map(|(t, _)| t) {
+                    None => break,
                     Some(Token::LBracket | Token::LBrace) => depth += 1,
                     Some(Token::RBracket | Token::RBrace) if depth > 0 => depth -= 1,
-                    Some(Token::Comma | Token::RBracket) | None if depth == 0 => break,
+                    Some(Token::Comma | Token::RBracket) if depth == 0 => break,
                     _ => {}
                 }
                 i += 1;
@@ -2649,6 +2650,14 @@ mod tests {
                 },
             ])]
         );
+    }
+
+    /// An unterminated nested collection inside a leading spread must not
+    /// spin the disambiguation lookahead: EOF ends the scan regardless of
+    /// bracket depth, so the parser reports an error rather than hanging.
+    #[test]
+    fn parse_unterminated_leading_spread_errors_without_hang() {
+        assert!(parse("[...[a: 1").is_err());
     }
 
     #[test]
