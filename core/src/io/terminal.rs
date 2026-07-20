@@ -327,9 +327,8 @@ fn probe_foreground(stdin_tty: bool) -> bool {
     }
     #[cfg(unix)]
     {
-        let fg = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
-        let me = unsafe { libc::getpgrp() };
-        fg >= 0 && fg == me
+        rustix::termios::tcgetpgrp(rustix::stdio::stdin())
+            .is_ok_and(|fg| fg == rustix::process::getpgrp())
     }
     #[cfg(not(unix))]
     {

@@ -175,19 +175,24 @@ fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
     let file_type = entry
         .file_type()
         .map_err(|e| io_err("list-dir", &path, &e))?;
-    let meta = entry.metadata().map_err(|e| io_err("list-dir", &path, &e))?;
+    let meta = entry
+        .metadata()
+        .map_err(|e| io_err("list-dir", &path, &e))?;
     let v = Value::map(vec![
         ("name".into(), Value::String(name.clone())),
         ("type".into(), Value::String(classify(file_type).into())),
-        ("size".into(), Value::Int({
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
-            )]
-            {
-                meta.len() as i64
-            }
-        })),
+        (
+            "size".into(),
+            Value::Int({
+                #[allow(
+                    clippy::cast_possible_wrap,
+                    reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
+                )]
+                {
+                    meta.len() as i64
+                }
+            }),
+        ),
         (
             "mtime".into(),
             Value::Int(secs_since_epoch(meta.modified())),
@@ -219,21 +224,25 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     } else {
         String::new()
     };
-    let name = path
-        .file_name()
-        .map_or_else(|| path.to_string_lossy().into_owned(), |s| s.to_string_lossy().into_owned());
+    let name = path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     Ok(Value::map(vec![
         ("name".into(), Value::String(name)),
         ("type".into(), Value::String(classify(ft).into())),
-        ("size".into(), Value::Int({
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
-            )]
-            {
-                meta.len() as i64
-            }
-        })),
+        (
+            "size".into(),
+            Value::Int({
+                #[allow(
+                    clippy::cast_possible_wrap,
+                    reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
+                )]
+                {
+                    meta.len() as i64
+                }
+            }),
+        ),
         (
             "mtime".into(),
             Value::Int(secs_since_epoch(meta.modified())),
@@ -375,11 +384,7 @@ fn fs_probe_path(
 /// with `W_OK` evaluates the real uid/gid against the file's mode.
 #[cfg(unix)]
 fn is_writable_path(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+    rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
 }
 
 /// Windows has no `access(2)`; `readonly()` on the followed target's

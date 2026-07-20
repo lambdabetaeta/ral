@@ -43,6 +43,7 @@ regex      = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+rustix = { workspace = true, features = ["fs", "process", "stdio", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

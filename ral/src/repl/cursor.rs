@@ -8,48 +8,45 @@
 /// waiting for a newline. Returns `None` on any error or timeout.
 #[cfg(unix)]
 pub(super) fn query_cursor_col() -> Option<usize> {
-    use libc::{TCSANOW, tcsetattr};
+    use rustix::termios::{LocalModes, OptionalActions, SpecialCodeIndex, tcgetattr, tcsetattr};
     use std::io::Write;
 
-    let orig = ral_core::process::termios_snapshot()?;
+    let stdin = rustix::stdio::stdin();
+    let orig = tcgetattr(stdin).ok()?;
 
-    unsafe {
-        let mut raw = orig;
-        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
-        raw.c_cc[libc::VMIN] = 0;
-        raw.c_cc[libc::VTIME] = 1; // 100 ms timeout per read(2)
-        if tcsetattr(0, TCSANOW, &raw const raw) != 0 {
-            return None;
+    let mut raw = orig.clone();
+    raw.local_modes &= !(LocalModes::ICANON | LocalModes::ECHO);
+    raw.special_codes[SpecialCodeIndex::VMIN] = 0;
+    raw.special_codes[SpecialCodeIndex::VTIME] = 1; // 100 ms timeout per read(2)
+    tcsetattr(stdin, OptionalActions::Now, &raw).ok()?;
+
+    let _ = std::io::stdout().write_all(b"\x1b[6n");
+    let _ = std::io::stdout().flush();
+
+    let mut buf = [0u8; 32];
+    let mut len = 0usize;
+    loop {
+        if len >= buf.len() {
+            break;
         }
-
-        let _ = std::io::stdout().write_all(b"\x1b[6n");
-        let _ = std::io::stdout().flush();
-
-        let mut buf = [0u8; 32];
-        let mut len = 0usize;
-        loop {
-            if len >= buf.len() {
-                break;
-            }
-            let n = libc::read(0, buf.as_mut_ptr().add(len).cast::<libc::c_void>(), 1);
-            if n <= 0 {
-                break;
-            }
-            len += 1;
-            if buf[len - 1] == b'R' {
-                break;
-            }
+        match rustix::io::read(stdin, &mut buf[len..len + 1]) {
+            Ok(1) => {}
+            _ => break,
         }
-
-        tcsetattr(0, TCSANOW, &raw const orig);
-
-        if len < 6 || buf[0] != b'\x1b' || buf[1] != b'[' || buf[len - 1] != b'R' {
-            return None;
+        len += 1;
+        if buf[len - 1] == b'R' {
+            break;
         }
-        let inner = &buf[2..len - 1]; // ESC[ … R
-        let semi = inner.iter().position(|&b| b == b';')?;
-        std::str::from_utf8(&inner[semi + 1..]).ok()?.parse().ok()
     }
+
+    let _ = tcsetattr(stdin, OptionalActions::Now, &orig);
+
+    if len < 6 || buf[0] != b'\x1b' || buf[1] != b'[' || buf[len - 1] != b'R' {
+        return None;
+    }
+    let inner = &buf[2..len - 1]; // ESC[ … R
+    let semi = inner.iter().position(|&b| b == b';')?;
+    std::str::from_utf8(&inner[semi + 1..]).ok()?.parse().ok()
 }
 
 /// Query the cursor column via the Win32 console API. Returns `None`

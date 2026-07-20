@@ -118,6 +118,8 @@ ctor = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+rustix = { workspace = true, features = ["fs", "process", "stdio", "termios"] }
+nix = { workspace = true, features = ["signal", "user", "process"] }
 # Unix-only uu_* tools, activated by the `coreutils-unix-only` feature.
 # Each one pulls in uucore modules (entries / process / signals / perms)
 # that are themselves cfg(unix) in upstream uucore, so they cannot be

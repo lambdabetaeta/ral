@@ -17,6 +17,7 @@ libc       = "0.2"
 # transitively via mac_address/termwiz, which pin it; nix majors are breaking,
 # so that one is not ours to move.)
 nix        = "0.31"
+rustix     = "1"
 clap       = { version = "4", features = ["derive"] }
 base64     = "0.22"
 shlex      = "2.0"

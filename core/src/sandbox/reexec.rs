@@ -159,12 +159,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     // Clear FD_CLOEXEC so the fd survives execve into the sandbox child,
     // where `/proc/self/fd/<N>` needs to resolve.
     let raw = exe.as_raw_fd();
-    unsafe {
-        let flags = libc::fcntl(raw, libc::F_GETFD);
-        if flags >= 0 {
-            libc::fcntl(raw, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-        }
-    }
+    let _ = rustix::io::fcntl_setfd(&exe, rustix::io::FdFlags::empty());
     Some((Pin::Fd(exe), crate::path::proc_fd_path(raw)))
 }
 

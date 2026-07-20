@@ -320,14 +320,10 @@ impl HelperTransport for UnixTransport {
     }
 
     fn secure(fd: i32) -> Result<(), String> {
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(())
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let flags = rustix::io::fcntl_getfd(borrowed).map_err(|e| e.to_string())?;
+        rustix::io::fcntl_setfd(borrowed, flags | rustix::io::FdFlags::CLOEXEC)
+            .map_err(|e| e.to_string())
     }
 
     fn reader(fd: i32) -> Box<dyn std::io::BufRead> {
@@ -517,7 +513,10 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     }
 
     let exit_code = uutils::invoke_bundled(tool, tool_args);
-    #[allow(clippy::cast_sign_loss, reason = "clamp(0, 255) bounds the value to the u8 range before the cast")]
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "clamp(0, 255) bounds the value to the u8 range before the cast"
+    )]
     Some(exit_code.clamp(0, 255) as u8)
 }
 

@@ -68,7 +68,10 @@ impl Session {
     /// failure or an escape raised while a capabilities profile evaluates.
     /// Profile/rc errors and escapes are reported and tolerated — a broken
     /// rc must not strand the user, so `source_config_inner` swallows them.
-    pub(super) fn boot(is_login: bool, opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
+    pub(super) fn boot(
+        is_login: bool,
+        opts: &crate::cli::InteractiveOpts,
+    ) -> Result<Self, ExitCode> {
         boot::setup_signals();
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
@@ -94,9 +97,7 @@ impl Session {
         // Login shell: set umask and source system/user profiles.
         #[cfg(unix)]
         if is_login {
-            unsafe {
-                libc::umask(0o022);
-            }
+            rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
         }
 
         boot::setup_terminal(&mut shell);

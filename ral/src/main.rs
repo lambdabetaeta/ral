@@ -79,11 +79,9 @@ fn main() -> ExitCode {
     // Refuse to run setuid: the shell inherits the caller's environment and
     // must not run with elevated privileges the user did not request.
     #[cfg(unix)]
-    unsafe {
-        if libc::geteuid() != libc::getuid() {
-            eprintln!("ral: refusing to run setuid");
-            return ExitCode::from(1);
-        }
+    if rustix::process::geteuid() != rustix::process::getuid() {
+        eprintln!("ral: refusing to run setuid");
+        return ExitCode::from(1);
     }
 
     run_mode(mode)

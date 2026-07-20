@@ -4,9 +4,9 @@
 //! → drained makes "drain before wait" and "wait twice" unwritable.
 
 use crate::io::Sink;
-use crate::types::{Break, Error, Settled};
 #[cfg(unix)]
 use crate::types::Escape;
+use crate::types::{Break, Error, Settled};
 
 /// Who owns the platform process-group bookkeeping on Windows.
 ///
@@ -190,9 +190,12 @@ impl RunningChild {
     fn kill_group(&self, child: &mut crate::process::ChildHandle) {
         #[cfg(unix)]
         match self.pgid {
-            Some(crate::process::Pgid(p)) => unsafe {
-                libc::kill(-p, libc::SIGKILL);
-            },
+            Some(crate::process::Pgid(p)) => {
+                let _ = rustix::process::kill_process_group(
+                    rustix::process::Pid::from_raw(p).unwrap(),
+                    rustix::process::Signal::KILL,
+                );
+            }
             None => {
                 let _ = child.kill();
             }
@@ -262,11 +265,17 @@ impl RunningChild {
                     return None;
                 }
                 let signal = match cause {
-                    crate::process::CancelCause::Interrupt => libc::SIGINT,
-                    _ => libc::SIGTERM,
+                    crate::process::CancelCause::Interrupt => rustix::process::Signal::INT,
+                    _ => rustix::process::Signal::TERM,
                 };
-                #[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-                unsafe { libc::kill(child.id() as libc::pid_t, signal) };
+                #[allow(
+                    clippy::cast_possible_wrap,
+                    reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+                )]
+                let _ = rustix::process::kill_process(
+                    rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+                    signal,
+                );
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
                 let reaped = self.grace_poll(child, deadline);
                 if reaped.is_none() {
@@ -736,15 +745,15 @@ mod tests {
         // returns ESRCH once it is gone; poll briefly to absorb the
         // window between the group SIGKILL and the kernel reaping it.
         let line = reader.join().expect("reader thread");
-        let gc_pid: libc::pid_t = line
+        let gc_pid: i32 = line
             .trim()
             .parse()
             .expect("the grandchild printed its pid on stdout");
         let mut alive = true;
         for _ in 0..50 {
-            // SAFETY: signal 0 performs error checking without delivering
-            // a signal; it never touches an unrelated process.
-            if unsafe { libc::kill(gc_pid, 0) } != 0 {
+            if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+                .is_err()
+            {
                 alive = false;
                 break;
             }

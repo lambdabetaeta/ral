@@ -19,6 +19,11 @@
 
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
+use nix::sys::signal::{SigSet, SigmaskHow};
+use rustix::io::Errno;
+use rustix::process::Pid;
+use rustix::termios::{OptionalActions, Termios};
+
 use super::{ESCALATION, Pgid, PgidPolicy};
 use crate::process::cancel::{CancelCause, request_foreground_cancel, request_root_cancel};
 
@@ -58,16 +63,9 @@ extern "C" fn handler(sig: libc::c_int) {
     }
     // Forward the same signal to any active pipeline groups so external
     // children die too.  The interactive shell rebinds SIGINT to the relay
-    // handler instead, so SIGINT reaches this loop only in batch mode;
-    // SIGTERM/SIGHUP always reach it.
-    for slot in &RELAY_PGIDS {
-        let pgid = slot.load(Ordering::Acquire);
-        if pgid != 0 {
-            unsafe {
-                libc::kill(-pgid, sig);
-            }
-        }
-    }
+    // handler instead, so SIGINT reaches this forwarding only in batch
+    // mode; SIGTERM/SIGHUP always reach it.
+    relay_signal_to_groups(sig);
 }
 
 /// Return the handler function pointer for selective signal installation.
@@ -95,20 +93,27 @@ const MAX_RELAY: usize = 8;
 
 static RELAY_PGIDS: [AtomicI32; MAX_RELAY] = [const { AtomicI32::new(0) }; MAX_RELAY];
 
+/// Forward `sig` to every occupied relay slot's process group.  Shared by
+/// the batch/term handler and the interactive relay; async-signal-safe (a
+/// slot load and a `kill(2)` per entry).
+fn relay_signal_to_groups(sig: libc::c_int) {
+    for slot in &RELAY_PGIDS {
+        let pgid = slot.load(Ordering::Acquire);
+        if pgid != 0 {
+            unsafe {
+                libc::kill(-pgid, sig);
+            }
+        }
+    }
+}
+
 extern "C" fn sigint_relay(_: libc::c_int) {
     // Cancel the current turn's foreground scope so in-process foreground
     // work unwinds at its next poll; a no-op between turns (idle Ctrl-C at
     // the prompt is still handled by the line editor). Detached workers poll
     // their own scopes, not the foreground, so they are spared.
     request_foreground_cancel(CancelCause::Interrupt);
-    for slot in &RELAY_PGIDS {
-        let pgid = slot.load(Ordering::Acquire);
-        if pgid != 0 {
-            unsafe {
-                libc::kill(-pgid, libc::SIGINT);
-            }
-        }
-    }
+    relay_signal_to_groups(libc::SIGINT);
 }
 
 /// Return the relay handler for installation by the interactive shell.
@@ -136,7 +141,7 @@ pub struct PipelineRelay(usize);
 impl PipelineRelay {
     /// Claim an empty slot and record `pgid`.  Returns `None` if all slots
     /// are full (should not happen in practice; 8 concurrent mixed pipelines).
-    pub fn install(pgid: libc::pid_t) -> Option<Self> {
+    pub fn install(pgid: i32) -> Option<Self> {
         for (i, slot) in RELAY_PGIDS.iter().enumerate() {
             if slot
                 .compare_exchange(0, pgid, Ordering::Release, Ordering::Relaxed)
@@ -273,10 +278,13 @@ impl PgidPolicy {
     }
 }
 
-/// The child's OS pid as a `pid_t`.
-#[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
-fn child_pid(child: &std::process::Child) -> libc::pid_t {
-    child.id() as libc::pid_t
+/// The child's OS pid as an `i32`.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→i32 reinterpretation never wraps"
+)]
+fn child_pid(child: &std::process::Child) -> i32 {
+    child.id() as i32
 }
 
 /// Spawn `cmd` with a single, canonical pre-exec discipline:
@@ -345,7 +353,7 @@ where
         PgidPolicy::Inherit => None,
         PgidPolicy::NewLeader => {
             let pid = child_pid(&child);
-            unsafe { libc::setpgid(pid, pid) };
+            let _ = rustix::process::setpgid(Pid::from_raw(pid), Pid::from_raw(pid));
             Some(Pgid(pid))
         }
         PgidPolicy::NewSession => {
@@ -356,8 +364,7 @@ where
             Some(Pgid(child_pid(&child)))
         }
         PgidPolicy::Join(p) => {
-            let pid = child_pid(&child);
-            unsafe { libc::setpgid(pid, p.0) };
+            let _ = rustix::process::setpgid(Pid::from_raw(child_pid(&child)), Pid::from_raw(p.0));
             Some(p)
         }
     };
@@ -372,7 +379,7 @@ where
 // owned by the stopped pgid, and ral hangs.
 //
 // `wait_handling_stop` uses `waitpid(pid, ..., WUNTRACED)` so the wait
-// returns on stop too.  Behaviour on `WIFSTOPPED` depends on whether the
+// returns on stop too.  Behaviour on a stop status depends on whether the
 // caller opted into job-control parking:
 //
 //   * `park_on_stop = true` + `pgid = Some(_)`: return `Stopped` without
@@ -396,7 +403,7 @@ pub(super) fn wait_handling_stop(
     if r < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    classify_wait_status(status, pid, pgid, park_on_stop, child)
+    classify_wait_status(pid, status, pgid, park_on_stop, child)
 }
 
 /// `waitpid(target, flags)` with implicit `EINTR` retry.
@@ -406,10 +413,12 @@ pub(super) fn wait_handling_stop(
 /// nothing pending, `ret < 0` is a terminal errno (e.g. `ECHILD`) with
 /// `errno` set.  `EINTR` is retried and never reaches the caller, so a
 /// signal delivery cannot be mistaken for `ECHILD` and flip a live job to
-/// "gone".  Shared by the blocking wait here and the REPL job table's reap.
-pub fn waitpid_eintr(target: libc::pid_t, flags: libc::c_int) -> (libc::pid_t, libc::c_int) {
+/// "gone".  Shared by every wait in this module and the REPL job table's
+/// reap — and deliberately raw, because the job table waits on whole
+/// groups via negative targets and decodes the statuses itself.
+pub fn waitpid_eintr(target: i32, flags: i32) -> (i32, i32) {
     loop {
-        let mut status: libc::c_int = 0;
+        let mut status: i32 = 0;
         let r = unsafe { libc::waitpid(target, &raw mut status, flags) };
         if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
@@ -431,34 +440,35 @@ pub(super) fn try_wait_handling_stop(
     park_on_stop: bool,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
     let pid = child_pid(child);
-    let mut status: libc::c_int = 0;
-    let r = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG | libc::WUNTRACED) };
+    let (r, status) = waitpid_eintr(pid, libc::WNOHANG | libc::WUNTRACED);
     if r < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EINTR) {
-            return Ok(None);
-        }
-        return Err(err);
+        return Err(std::io::Error::last_os_error());
     }
     if r == 0 {
         return Ok(None);
     }
-    classify_wait_status(status, pid, pgid, park_on_stop, child).map(Some)
+    classify_wait_status(pid, status, pgid, park_on_stop, child).map(Some)
 }
 
-/// Convert a raw `waitpid` status into a [`WaitOutcome`].  Stopped
+/// Translate a raw `waitpid` status into a [`WaitOutcome`].  Stopped
 /// statuses fan out to [`handle_stopped`]; exited / signaled / native
-/// statuses map straight through.  Shared between the blocking
+/// statuses map straight through.  The `WIF*` predicates are safe bit
+/// tests, and unlike a typed decode they classify *any* status the
+/// kernel can produce — including termination by a real-time signal —
+/// without a fallible enum in the middle.  Shared between the blocking
 /// `wait_handling_stop` and the non-blocking `try_wait_handling_stop`.
+///
+/// [`WaitOutcome`]: crate::process::WaitOutcome
 fn classify_wait_status(
-    status: libc::c_int,
-    pid: libc::pid_t,
+    pid: i32,
+    status: i32,
     pgid: Option<Pgid>,
     park_on_stop: bool,
     child: &mut std::process::Child,
 ) -> std::io::Result<crate::process::WaitOutcome> {
     if libc::WIFSTOPPED(status) {
-        return handle_stopped(libc::WSTOPSIG(status), pid, pgid, park_on_stop, child);
+        let stopped_by = crate::process::Signal::new(libc::WSTOPSIG(status));
+        return handle_stopped(stopped_by, pid, pgid, park_on_stop, child);
     }
     if libc::WIFEXITED(status) {
         return Ok(crate::process::WaitOutcome::Exited(libc::WEXITSTATUS(
@@ -473,18 +483,20 @@ fn classify_wait_status(
     Ok(crate::process::WaitOutcome::NativeCode(status))
 }
 
-/// Handle a `WIFSTOPPED` outcome: either park (when `park_on_stop &&
+/// Handle a stopped child: either park (when `park_on_stop &&
 /// pgid.is_some()`) returning [`WaitOutcome::Stopped`], or SIGKILL the
-/// pgid (falling back to the direct pid) and reap before returning
-/// [`WaitOutcome::StoppedThenKilled`].
+/// pgid (falling back to the direct pid) and reap the terminal status
+/// into [`WaitOutcome::StoppedThenKilled`].
+///
+/// [`WaitOutcome::Stopped`]: crate::process::WaitOutcome::Stopped
+/// [`WaitOutcome::StoppedThenKilled`]: crate::process::WaitOutcome::StoppedThenKilled
 fn handle_stopped(
-    stopped_signum: libc::c_int,
-    pid: libc::pid_t,
+    stopped_by: crate::process::Signal,
+    pid: i32,
     pgid: Option<Pgid>,
     park_on_stop: bool,
     child: &mut std::process::Child,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    let stopped_by = crate::process::Signal::new(stopped_signum);
     if park_on_stop && pgid.is_some() {
         crate::dbg_trace!(
             "fg",
@@ -501,23 +513,16 @@ fn handle_stopped(
         pgid,
     );
     match pgid {
-        Some(Pgid(p)) => unsafe {
-            libc::kill(-p, libc::SIGKILL);
-        },
+        Some(Pgid(p)) => {
+            let _ = rustix::process::kill_process_group(
+                Pid::from_raw(p).expect("a tracked pgid is positive"),
+                rustix::process::Signal::KILL,
+            );
+        }
         None => {
             let _ = child.kill();
         }
     }
-    reap_killed(pid, stopped_by)
-}
-
-/// Blocking [`waitpid_eintr`] that translates the terminal status into a
-/// [`WaitOutcome::StoppedThenKilled`] (or, for an already-detached /
-/// exited child, [`WaitOutcome::NativeCode`]).
-fn reap_killed(
-    pid: libc::pid_t,
-    stopped_by: crate::process::Signal,
-) -> std::io::Result<crate::process::WaitOutcome> {
     let (r, status) = waitpid_eintr(pid, 0);
     if r < 0 {
         return Err(std::io::Error::last_os_error());
@@ -542,18 +547,11 @@ fn reap_killed(
 /// Capture stdin's line-discipline state via `tcgetattr`.
 ///
 /// `None` when stdin is not a tty (ENOTTY) or the call otherwise fails.
-/// The single snapshot primitive for every save/restore of terminal
-/// state in the workspace — the foreground guard, the panic hook's
-/// restore, and the cursor-position raw-mode probe — so the `tcgetattr`
-/// into a zeroed `termios` lives in one place.  The restore is left to
-/// the caller, whose `tcsetattr` flush mode (`TCSADRAIN` to drain the
-/// child's last frame, `TCSANOW` for an immediate hand-back) is
-/// site-specific.
-pub fn termios_snapshot() -> Option<libc::termios> {
-    unsafe {
-        let mut t = std::mem::zeroed::<libc::termios>();
-        (libc::tcgetattr(libc::STDIN_FILENO, &raw mut t) == 0).then_some(t)
-    }
+/// The restore is left to the caller, whose `tcsetattr` flush mode
+/// (`Drain` to let the child's last frame drain, `Now` for an immediate
+/// hand-back) is site-specific.
+pub fn termios_snapshot() -> Option<Termios> {
+    rustix::termios::tcgetattr(rustix::stdio::stdin()).ok()
 }
 
 // ── Foreground ownership ───────────────────────────────────────────────────
@@ -569,51 +567,50 @@ pub fn termios_snapshot() -> Option<libc::termios> {
 
 /// RAII guard for terminal foreground ownership and line-discipline state.
 ///
-/// `try_acquire` performs `tcsetpgrp(STDIN_FILENO, target)`, snapshots the
+/// `try_acquire` performs `tcsetpgrp(stdin, target)`, snapshots the
 /// current termios, and remembers the previous foreground pgid; `drop`
 /// restores both.  It cannot be invoked without a [`TerminalLease`] borrow:
 /// holding `&TerminalLease` is the proof that ral owns the controlling
 /// terminal's foreground, replacing the old internal `startup_foreground`
-/// re-check.  Returns `None` only when the pgid handoff itself fails (target
-/// `0`, or `tcsetpgrp` errors) — in which case there is nothing to restore.
-/// Termios snapshot may itself fail (ENOTTY on an exotic fd); that is
-/// non-fatal and only the pgid half is restored on Drop.
+/// re-check.  Returns `None` only when the pgid handoff itself fails (a
+/// non-positive target, or `tcsetpgrp` errors) — in which case there is
+/// nothing to restore.  Termios snapshot may itself fail (ENOTTY on an
+/// exotic fd); that is non-fatal and only the pgid half is restored on Drop.
 ///
 /// [`TerminalLease`]: crate::process::TerminalLease
 pub struct ForegroundGuard {
-    saved_pgid: libc::pid_t,
-    saved_termios: Option<libc::termios>,
+    saved_pgid: Pid,
+    saved_termios: Option<Termios>,
 }
 
 impl ForegroundGuard {
     /// Hand the controlling tty to `target`, recording the prior pgid and
     /// termios for the eventual restore.  Returns `None` when no handoff is
     /// appropriate.
-    pub fn try_acquire(
-        target: libc::pid_t,
-        _lease: &crate::process::TerminalLease,
-    ) -> Option<Self> {
-        if target == 0 {
+    pub fn try_acquire(target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
+        if target <= 0 {
             return None;
         }
-        let saved = unsafe { libc::getpgrp() };
-        let rc = unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, target) };
-        if rc != 0 {
-            #[cfg(debug_assertions)]
+        let target = Pid::from_raw(target)?;
+        let saved = rustix::process::getpgrp();
+        #[cfg_attr(
+            not(debug_assertions),
+            allow(
+                unused_variables,
+                reason = "`dbg_trace!` discards its arguments in release builds"
+            )
+        )]
+        if let Err(err) = rustix::termios::tcsetpgrp(rustix::stdio::stdin(), target) {
             crate::dbg_trace!(
                 "fg",
-                "acquire: tcsetpgrp({target}) failed: {}",
-                std::io::Error::last_os_error()
+                "acquire: tcsetpgrp({}) failed: {err}",
+                target.as_raw_nonzero()
             );
             return None;
         }
         let saved_termios = termios_snapshot();
         if saved_termios.is_none() {
-            crate::dbg_trace!(
-                "fg",
-                "acquire: tcgetattr failed: {}",
-                std::io::Error::last_os_error()
-            );
+            crate::dbg_trace!("fg", "acquire: tcgetattr failed");
         }
         Some(Self {
             saved_pgid: saved,
@@ -631,30 +628,26 @@ impl ForegroundGuard {
 /// SIGTTOU for the tiny restore window.  Children still get SIGTTOU reset by
 /// [`reset_child_signals`]; this guard is parent-local.
 struct SigttouBlock {
-    old: libc::sigset_t,
-    active: bool,
+    /// The pre-block mask; `None` when the block could not be installed,
+    /// in which case there is nothing to restore.
+    old: Option<SigSet>,
 }
 
 impl SigttouBlock {
     /// Block SIGTTOU for the current thread, remembering the previous mask.
     fn new() -> Self {
-        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
-        let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
-        let active = unsafe {
-            libc::sigemptyset(&raw mut set);
-            libc::sigaddset(&raw mut set, libc::SIGTTOU);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, &raw mut old) == 0
-        };
-        Self { old, active }
+        let mut block = SigSet::empty();
+        block.add(nix::sys::signal::Signal::SIGTTOU);
+        Self {
+            old: block.thread_swap_mask(SigmaskHow::SIG_BLOCK).ok(),
+        }
     }
 }
 
 impl Drop for SigttouBlock {
     fn drop(&mut self) {
-        if self.active {
-            unsafe {
-                libc::pthread_sigmask(libc::SIG_SETMASK, &raw const self.old, std::ptr::null_mut());
-            }
+        if let Some(old) = &self.old {
+            let _ = old.thread_set_mask();
         }
     }
 }
@@ -666,47 +659,49 @@ impl Drop for ForegroundGuard {
     /// next tty read returns EIO.  The restore blocks SIGTTOU because the
     /// foreground child made ral a background process group by construction;
     /// without that mask a batch launcher (`claude.ral`) is itself stopped
-    /// while giving the terminal back.  Termios second, with `TCSADRAIN` so
+    /// while giving the terminal back.  Termios second, with `Drain` so
     /// the child's last buffered output drains under the child's settings
-    /// before ours reapply (`TCSANOW` would clobber those bytes' line
-    /// discipline; `TCSAFLUSH` would discard input typed during the child's
+    /// before ours reapply (`Now` would clobber those bytes' line
+    /// discipline; `Flush` would discard input typed during the child's
     /// final frame).  Both syscalls retry on EINTR; persistent failure is
     /// logged via `dbg_trace` so silent-loss is at least observable.
     fn drop(&mut self) {
         let _sigttou = SigttouBlock::new();
         for _ in 0..3 {
-            let rc = unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, self.saved_pgid) };
-            if rc == 0 {
-                break;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::EINTR) {
-                crate::dbg_trace!(
-                    "fg",
-                    "release: tcsetpgrp({}) failed: {err}",
-                    self.saved_pgid
-                );
-                break;
+            match rustix::termios::tcsetpgrp(rustix::stdio::stdin(), self.saved_pgid) {
+                Ok(()) => break,
+                Err(err) => {
+                    if err != Errno::INTR {
+                        crate::dbg_trace!(
+                            "fg",
+                            "release: tcsetpgrp({}) failed: {err}",
+                            self.saved_pgid.as_raw_nonzero()
+                        );
+                        break;
+                    }
+                }
             }
         }
-        let cur = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
-        if cur != self.saved_pgid {
+        let cur = rustix::termios::tcgetpgrp(rustix::stdio::stdin())
+            .map_or(-1, |fg| fg.as_raw_nonzero().get());
+        if cur != self.saved_pgid.as_raw_nonzero().get() {
             crate::dbg_trace!(
                 "fg",
                 "release: tty fg is {cur}, want {} (next tty read may EIO)",
-                self.saved_pgid
+                self.saved_pgid.as_raw_nonzero()
             );
         }
         if let Some(t) = self.saved_termios.as_ref() {
             for _ in 0..3 {
-                let rc = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSADRAIN, t) };
-                if rc == 0 {
-                    return;
-                }
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EINTR) {
-                    crate::dbg_trace!("fg", "release: tcsetattr failed: {err}");
-                    return;
+                match rustix::termios::tcsetattr(rustix::stdio::stdin(), OptionalActions::Drain, t)
+                {
+                    Ok(()) => return,
+                    Err(err) => {
+                        if err != Errno::INTR {
+                            crate::dbg_trace!("fg", "release: tcsetattr failed: {err}");
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -728,13 +723,11 @@ impl Drop for ForegroundGuard {
 /// Signalling *another* group never touches ral's own escalating
 /// counter, so this carries no risk of the third-signal force-exit.
 pub fn interrupt_foreground_child() {
-    let fg = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
-    if fg <= 0 {
+    let Ok(fg) = rustix::termios::tcgetpgrp(rustix::stdio::stdin()) else {
         return;
-    }
-    let me = unsafe { libc::getpgrp() };
-    if fg != me {
-        unsafe { libc::kill(-fg, libc::SIGINT) };
+    };
+    if fg != rustix::process::getpgrp() {
+        let _ = rustix::process::kill_process_group(fg, rustix::process::Signal::INT);
     }
 }
 
@@ -757,7 +750,9 @@ fn active_relay_slots() -> usize {
 mod tests {
     use super::super::{clear, escalation_pending};
     use super::*;
-    use crate::process::cancel::{CancelScope, SLOT_SERIAL, publish_durable_root, publish_foreground};
+    use crate::process::cancel::{
+        CancelScope, SLOT_SERIAL, publish_durable_root, publish_foreground,
+    };
     use std::sync::{Arc, Barrier, Mutex};
 
     // All relay tests share a process-wide lock because `RELAY_PGIDS` is a
@@ -766,11 +761,9 @@ mod tests {
     static RELAY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn sigttou_is_blocked() -> bool {
-        let mut current: libc::sigset_t = unsafe { std::mem::zeroed() };
-        let rc =
-            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &raw mut current) };
-        assert_eq!(rc, 0, "pthread_sigmask query failed");
-        unsafe { libc::sigismember(&raw const current, libc::SIGTTOU) == 1 }
+        SigSet::thread_get_mask()
+            .expect("pthread_sigmask query failed")
+            .contains(nix::sys::signal::Signal::SIGTTOU)
     }
 
     #[test]
@@ -790,7 +783,11 @@ mod tests {
         let _lock = RELAY_TEST_LOCK.lock().unwrap();
 
         // Claim all 8 slots with distinct pgids.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps"
+        )]
         let guards: Vec<_> = (1..=MAX_RELAY as i32)
             .map(|pgid| PipelineRelay::install(pgid).expect("slot should be free"))
             .collect();
@@ -857,7 +854,11 @@ mod tests {
         // or corrupt state.
         let _lock = RELAY_TEST_LOCK.lock().unwrap();
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps"
+        )]
         let _guards: Vec<_> = (1..=MAX_RELAY as i32)
             .map(|p| PipelineRelay::install(p).unwrap())
             .collect();
@@ -977,9 +978,7 @@ mod tests {
         let child_pid = child_pid(&child);
 
         // Parent mirrors setpgid to close the race.
-        unsafe {
-            libc::setpgid(child_pid, child_pid);
-        }
+        let _ = rustix::process::setpgid(Pid::from_raw(child_pid), Pid::from_raw(child_pid));
 
         // Claim relay slot and fire the handler directly.
         let _relay = PipelineRelay::install(child_pid).expect("slot");

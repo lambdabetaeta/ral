@@ -156,7 +156,10 @@ impl Drop for PipelineGroup {
 
 /// The child's OS pid as a `pid_t`.
 #[cfg(unix)]
-#[allow(clippy::cast_possible_wrap, reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps")]
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+)]
 fn child_pid(child: &crate::process::ChildHandle) -> libc::pid_t {
     child.id() as libc::pid_t
 }
@@ -222,9 +225,10 @@ impl AnchorProcess {
         let _ = self.release.take();
         if let Some(mut child) = self.child.take() {
             let pid = child_pid(&child);
-            unsafe {
-                libc::kill(pid, libc::SIGCONT);
-            }
+            let _ = rustix::process::kill_process(
+                rustix::process::Pid::from_raw(pid).unwrap(),
+                rustix::process::Signal::CONT,
+            );
             // Anchor was already SIGCONT'd above, so it's running again
             // (not stopped); a plain blocking wait suffices and the
             // WUNTRACED dance of ChildHandle would never observe a stop.

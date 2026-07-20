@@ -190,11 +190,8 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // the duplicate it creates, so fd 3 arrives here open-across-exec by
     // necessity. Set it CLOEXEC now, the instant the engine owns it, so no
     // external command any turn spawns inherits the protocol socket.
-    if unsafe { libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        eprintln!(
-            "engine: failed to set CLOEXEC on the wire fd: {}",
-            std::io::Error::last_os_error()
-        );
+    if let Err(e) = rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC) {
+        eprintln!("engine: failed to set CLOEXEC on the wire fd: {e}");
         std::process::exit(1);
     }
     let reader_ch = WireChannel::from_stream(stream);

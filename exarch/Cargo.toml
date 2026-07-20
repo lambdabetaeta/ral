@@ -91,3 +91,6 @@ ral-core = { path = "../core" }
 
 [dev-dependencies]
 ctor = "1"
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }

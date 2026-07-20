@@ -97,8 +97,11 @@ impl Resident for Job {
     /// rather than reaching for `SIGKILL` directly.
     fn cancel(&self) {
         #[cfg(unix)]
-        unsafe {
-            libc::kill(-self.pgid, libc::SIGTERM);
+        {
+            let _ = rustix::process::kill_process_group(
+                rustix::process::Pid::from_raw(self.pgid).unwrap(),
+                rustix::process::Signal::TERM,
+            );
         }
         #[cfg(windows)]
         {
@@ -218,8 +221,11 @@ impl JobTable {
     pub fn resume_in_background(&mut self, id: usize) -> Option<i32> {
         let pgid = self.resume(id)?;
         #[cfg(unix)]
-        unsafe {
-            libc::kill(-pgid, libc::SIGCONT);
+        {
+            let _ = rustix::process::kill_process_group(
+                rustix::process::Pid::from_raw(pgid).unwrap(),
+                rustix::process::Signal::CONT,
+            );
         }
         Some(pgid)
     }
@@ -296,13 +302,14 @@ impl JobTable {
         #[cfg(unix)]
         {
             for job in self.jobs.values() {
-                unsafe { libc::kill(-job.pgid, libc::SIGTERM) };
+                let pgid = rustix::process::Pid::from_raw(job.pgid).unwrap();
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
                 // SIGCONT a stopped group after the SIGTERM: a frozen job
                 // cannot act on (or even observe) the termination request
                 // until it runs again, so without this the grace window
                 // elapses doing nothing and a suspended editor is SIGKILLed
                 // with no chance to clean up.  POSIX shells do the same.
-                unsafe { libc::kill(-job.pgid, libc::SIGCONT) };
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::CONT);
             }
 
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -314,7 +321,10 @@ impl JobTable {
             }
 
             for job in self.jobs.values() {
-                unsafe { libc::kill(-job.pgid, libc::SIGKILL) };
+                let _ = rustix::process::kill_process_group(
+                    rustix::process::Pid::from_raw(job.pgid).unwrap(),
+                    rustix::process::Signal::KILL,
+                );
                 // Drain until ECHILD; `waitpid_eintr` swallows EINTR so
                 // we cannot leave a SIGKILL'd child unreaped just
                 // because an unrelated signal landed during shutdown.
@@ -325,7 +335,9 @@ impl JobTable {
 
         #[cfg(windows)]
         {
-            use ral_core::process::{Pgid, break_pipeline_group, kill_pipeline_group, release_win_group};
+            use ral_core::process::{
+                Pgid, break_pipeline_group, kill_pipeline_group, release_win_group,
+            };
 
             // Polite first pass: `CTRL_BREAK_EVENT` to every job, then a
             // 5s grace where natural exits are reaped — the Windows
@@ -415,7 +427,10 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
         // would otherwise drop the group back into Stopped is gone by
         // construction.  Sending to the whole pgid (not just the
         // leader) wakes pipeline siblings together.
-        unsafe { libc::kill(-pgid, libc::SIGCONT) };
+        let _ = rustix::process::kill_process_group(
+            rustix::process::Pid::from_raw(pgid).unwrap(),
+            rustix::process::Signal::CONT,
+        );
 
         loop {
             let (r, status) = waitpid_eintr(-pgid, libc::WUNTRACED);
@@ -431,7 +446,10 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
                 // Stopped.  For Ctrl-Z this is idempotent — the kernel
                 // already stopped every member through the controlling
                 // tty.
-                unsafe { libc::kill(-pgid, libc::SIGSTOP) };
+                let _ = rustix::process::kill_process_group(
+                    rustix::process::Pid::from_raw(pgid).unwrap(),
+                    rustix::process::Signal::STOP,
+                );
                 break ForegroundWait {
                     stopped_by: Some(ral_core::process::Signal::new(libc::WSTOPSIG(status))),
                 };
@@ -507,7 +525,7 @@ mod tests {
     #[test]
     fn resume_flips_stopped_to_running_and_returns_pgid() {
         // `resume` is pure bookkeeping — the SIGCONT lives at the
-        // call site (in `bg`'s libc::kill, in `wait_foreground`'s
+        // call site (in `bg`'s kill_process_group, in `wait_foreground`'s
         // tcsetpgrp-then-SIGCONT dance for `fg`).  The fake pgid is
         // never signalled here.
         let mut jt = JobTable::new();

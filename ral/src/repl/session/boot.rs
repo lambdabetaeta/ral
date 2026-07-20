@@ -107,25 +107,23 @@ fn claim_terminal() -> Result<(), String> {
     if !std::io::stdin().is_terminal() {
         return Ok(());
     }
-    unsafe {
-        // Park ourselves out of the parent's way until foregrounded.  Each
-        // SIGTTIN stops the whole group; when resumed we re-check, since the
-        // foreground may have changed again.
-        while libc::tcgetpgrp(libc::STDIN_FILENO) != libc::getpgrp() {
-            if libc::kill(0, libc::SIGTTIN) == -1 {
-                return Err(format!(
-                    "kill(SIGTTIN): {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
+    let stdin = rustix::stdio::stdin();
+    // Park ourselves out of the parent's way until foregrounded.  Each
+    // SIGTTIN stops the whole group; when resumed we re-check, since the
+    // foreground may have changed again.
+    while rustix::termios::tcgetpgrp(stdin).ok() != Some(rustix::process::getpgrp()) {
+        if let Err(e) = rustix::process::kill_current_process_group(rustix::process::Signal::TTIN) {
+            return Err(format!("kill(SIGTTIN): {e}"));
         }
-        let pid = libc::getpid();
-        if libc::getpgrp() != pid && libc::setpgid(0, 0) == -1 {
-            return Err(format!("setpgid: {}", std::io::Error::last_os_error()));
+    }
+    let pid = rustix::process::getpid();
+    if rustix::process::getpgrp() != pid {
+        if let Err(e) = rustix::process::setpgid(None, None) {
+            return Err(format!("setpgid: {e}"));
         }
-        if libc::tcsetpgrp(libc::STDIN_FILENO, pid) == -1 {
-            return Err(format!("tcsetpgrp: {}", std::io::Error::last_os_error()));
-        }
+    }
+    if let Err(e) = rustix::termios::tcsetpgrp(stdin, pid) {
+        return Err(format!("tcsetpgrp: {e}"));
     }
     Ok(())
 }
@@ -141,13 +139,15 @@ fn claim_terminal() -> Result<(), String> {
 pub(super) fn setup_panic_hook() {
     #[cfg(unix)]
     {
-        let saved = ral_core::process::termios_snapshot();
+        let saved = rustix::termios::tcgetattr(rustix::stdio::stdin()).ok();
         if let Some(t) = saved {
             let crash_dir = crash_log_dir();
             std::panic::set_hook(Box::new(move |info| {
-                unsafe {
-                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const t);
-                }
+                let _ = rustix::termios::tcsetattr(
+                    rustix::stdio::stdin(),
+                    rustix::termios::OptionalActions::Now,
+                    &t,
+                );
                 write_crash_log(&crash_dir, info);
             }));
         }
@@ -171,8 +171,7 @@ pub(super) fn setup_panic_hook() {
 #[cfg(any(unix, windows))]
 fn crash_log_dir() -> std::path::PathBuf {
     let home = crate::platform::home_dir();
-    ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home)
-        .join("ral")
+    ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home).join("ral")
 }
 
 /// Write the panic report both platform hooks share: `dir/crash-<unix-ts>.
@@ -356,8 +355,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
     // `location.source` to this file for the duration of the call, so a
     // runtime error inside the rc file is located against it rather than
     // whatever script context boot inherited.
-    let config = match ral_core::builtins::modules::evaluate_checked(ctx.shell, &comp, &src, path)
-    {
+    let config = match ral_core::builtins::modules::evaluate_checked(ctx.shell, &comp, &src, path) {
         Ok(v) => v,
         Err(Break::Error(e)) => return Err(format!("{path}: {}", e.message)),
         // `exit` in rc: stop sourcing, boot continues.

@@ -52,17 +52,13 @@ mod sigpipe {
         /// Block SIGPIPE on the current thread, remembering whether it
         /// was already blocked so [`Drop`] only unblocks what we blocked.
         pub(super) fn install() -> Self {
-            // Safety: `sigemptyset` / `sigaddset` initialise the set
-            // before use, and `pthread_sigmask` reads/writes only the
-            // local `set` / `old` masks; no signal handler is run here.
-            unsafe {
-                let mut set: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&raw mut set);
-                libc::sigaddset(&raw mut set, libc::SIGPIPE);
-                let mut old: libc::sigset_t = std::mem::zeroed();
-                libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, &raw mut old);
-                let was_blocked = libc::sigismember(&raw const old, libc::SIGPIPE) == 1;
-                Self { was_blocked }
+            use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+            let mut set = SigSet::empty();
+            set.add(Signal::SIGPIPE);
+            let mut old = SigSet::empty();
+            let _ = pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&set), Some(&mut old));
+            Self {
+                was_blocked: old.contains(Signal::SIGPIPE),
             }
         }
     }
@@ -75,28 +71,29 @@ mod sigpipe {
             if self.was_blocked {
                 return;
             }
-            // Safety: every libc call below reads/writes only locally
-            // initialised `sigset_t`s; `sigwait` is invoked only when
-            // `sigpending` reports SIGPIPE pending, so it returns
-            // immediately rather than blocking.  A dead-peer write while
-            // SIGPIPE was blocked leaves it pending; consume it before
-            // unblocking so restoring the mask cannot deliver a deferred
-            // signal and kill the process under the batch-mode SIG_DFL
-            // disposition.
-            unsafe {
-                let mut set: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&raw mut set);
-                libc::sigaddset(&raw mut set, libc::SIGPIPE);
-                let mut pending: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&raw mut pending);
-                if libc::sigpending(&raw mut pending) == 0
-                    && libc::sigismember(&raw const pending, libc::SIGPIPE) == 1
-                {
-                    let mut sig: libc::c_int = 0;
-                    libc::sigwait(&raw const set, &raw mut sig);
-                }
-                libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
+            use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+            let mut set = SigSet::empty();
+            set.add(Signal::SIGPIPE);
+            // `nix` has no `sigpending(2)` wrapper, so the pending check
+            // itself still goes through libc; everything else here is nix.
+            //
+            // Safety: `raw` is fully written by `sigpending` before it is
+            // read via `assume_init`.
+            let pending = unsafe {
+                let mut raw = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+                (libc::sigpending(raw.as_mut_ptr()) == 0)
+                    .then(|| SigSet::from_sigset_t_unchecked(raw.assume_init()))
+            };
+            // A dead-peer write while SIGPIPE was blocked leaves it
+            // pending; consume it before unblocking so restoring the mask
+            // cannot deliver a deferred signal and kill the process under
+            // the batch-mode SIG_DFL disposition. `wait` returns
+            // immediately here since it is only called once `sigpending`
+            // reports SIGPIPE pending.
+            if pending.is_some_and(|p| p.contains(Signal::SIGPIPE)) {
+                let _ = set.wait();
             }
+            let _ = pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&set), None);
         }
     }
 }

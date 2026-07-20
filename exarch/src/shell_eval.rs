@@ -15,10 +15,12 @@ pub mod builtins;
 pub mod skill;
 pub mod tools;
 
-use crate::fleet::registry::AgentRegistry;
-use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
-use crate::bus::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use crate::agent::transcript::Transcript;
+use crate::bus::card::{
+    done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin,
+};
+use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
+use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -351,10 +353,12 @@ pub(crate) fn run_shell(
         // this closure calls is the one `DeskBinding` wraps for the
         // identity path (`docs/ral-wiki/decisions/260706_enquiry-channel.md`).
         |req| match desk {
-            Some(desk) => desk.handle(req).map_err(|e| ral_core::transport::EnquiryError {
-                status: e.exit_code(),
-                message: e.message,
-            }),
+            Some(desk) => desk
+                .handle(req)
+                .map_err(|e| ral_core::transport::EnquiryError {
+                    status: e.exit_code(),
+                    message: e.message,
+                }),
             None => Err(ral_core::transport::EnquiryError {
                 message: "this host answers no enquiries".into(),
                 status: 1,
@@ -489,7 +493,11 @@ pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
         RalValue::Unit => None,
         RalValue::String(s) => Some(s.clone()),
         RalValue::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-        other => Some(ral_core::builtins::pretty_print(other, 0, &VALUE_PRINT_PARAMS)),
+        other => Some(ral_core::builtins::pretty_print(
+            other,
+            0,
+            &VALUE_PRINT_PARAMS,
+        )),
     }
 }
 
@@ -521,7 +529,12 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
         FOValue::Int { value } => serde_json::Value::Number((*value).into()),
         FOValue::Float { value } if value.is_nan() => serde_json::Value::String("NaN".into()),
         FOValue::Float { value } if value.is_infinite() => serde_json::Value::String(
-            if *value > 0.0 { "Infinity" } else { "-Infinity" }.into(),
+            if *value > 0.0 {
+                "Infinity"
+            } else {
+                "-Infinity"
+            }
+            .into(),
         ),
         FOValue::Float { value } => serde_json::Number::from_f64(*value)
             .map_or(serde_json::Value::Null, serde_json::Value::Number),
@@ -531,14 +544,23 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
         }
         FOValue::List { items } => serde_json::Value::Array(items.iter().map(user_json).collect()),
         FOValue::Map { entries } => serde_json::Value::Object(
-            entries.iter().map(|(k, v)| (k.clone(), user_json(v))).collect(),
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), user_json(v)))
+                .collect(),
         ),
-        FOValue::Variant { label, payload: Some(p) } => {
+        FOValue::Variant {
+            label,
+            payload: Some(p),
+        } => {
             let mut m = serde_json::Map::new();
             m.insert(label.clone(), user_json(p));
             serde_json::Value::Object(m)
         }
-        FOValue::Variant { label, payload: None } => serde_json::Value::String(label.clone()),
+        FOValue::Variant {
+            label,
+            payload: None,
+        } => serde_json::Value::String(label.clone()),
         #[allow(
             clippy::uninhabited_references,
             reason = "NoExt is uninhabited, so this arm never actually runs; the dereference \
@@ -573,8 +595,8 @@ mod tests {
     //! mobile-install contract.
 
     use super::*;
-    use crate::shell_eval::builtins;
     use crate::bus::{BusReceiver, Emitter, Inbox, channel};
+    use crate::shell_eval::builtins;
     use ral_core::Shell;
     use ral_core::types::Capabilities;
 
@@ -1031,7 +1053,10 @@ keep-bottom
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
-        assert_eq!(spanning.exit, 0, "a match spanning a real newline must succeed");
+        assert_eq!(
+            spanning.exit, 0,
+            "a match spanning a real newline must succeed"
+        );
         assert_eq!(
             String::from_utf8_lossy(&spanning.stderr),
             format!("[EXARCH] Replaced lines 2-3 of {path2}.\n"),
@@ -1382,9 +1407,9 @@ keep-bottom
             .expect("the grandchild printed its pid on stdout");
         let mut alive = true;
         for _ in 0..50 {
-            // SAFETY: signal 0 performs error checking without delivering
-            // a signal; it never touches an unrelated process.
-            if unsafe { libc::kill(gc_pid as libc::pid_t, 0) } != 0 {
+            if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+                .is_err()
+            {
                 alive = false;
                 break;
             }
@@ -1470,7 +1495,9 @@ keep-bottom
             .expect("the sandboxed grandchild printed its pid on stdout");
         let mut alive = true;
         for _ in 0..50 {
-            if unsafe { libc::kill(gc_pid as libc::pid_t, 0) } != 0 {
+            if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+                .is_err()
+            {
                 alive = false;
                 break;
             }
@@ -1540,9 +1567,9 @@ keep-bottom
             .expect("the grandchild printed its pid on stdout");
         let mut alive = true;
         for _ in 0..50 {
-            // SAFETY: signal 0 performs error checking without delivering
-            // a signal; it never touches an unrelated process.
-            if unsafe { libc::kill(gc_pid as libc::pid_t, 0) } != 0 {
+            if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+                .is_err()
+            {
                 alive = false;
                 break;
             }
@@ -1686,7 +1713,10 @@ return !{{length $hits}}"
         );
 
         let r = run_once(&mut shell, &format!("edit-replace '{file_str}' ':=' '='"));
-        assert_ne!(r.exit, 0, "a repeated match must error, not guess which one");
+        assert_ne!(
+            r.exit, 0,
+            "a repeated match must error, not guess which one"
+        );
         assert_eq!(
             std::fs::read_to_string(&file).expect("read after failed edit"),
             "USE_OPENCV := 1\nUSE_LEVELDB := 1\n",
@@ -1709,7 +1739,10 @@ return !{{length $hits}}"
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("edit-replace '{path}' 'world' 'friend'"));
+        let (r, kinds) = run_capturing(
+            &mut shell,
+            &format!("edit-replace '{path}' 'world' 'friend'"),
+        );
         let wrote = std::fs::read_to_string(dir.join("b")).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
@@ -1985,10 +2018,18 @@ return !{{length $hits}}"
             "the write redirect must succeed; stderr was {:?}",
             String::from_utf8_lossy(&r.stderr)
         );
-        assert_eq!(wrote.as_deref(), Some("short"), "the write committed to disk");
+        assert_eq!(
+            wrote.as_deref(),
+            Some("short"),
+            "the write committed to disk"
+        );
 
         let ios = io_events(&kinds);
-        assert_eq!(ios.len(), 1, "a bare `to-string > b` raises exactly one io card, got {ios:?}");
+        assert_eq!(
+            ios.len(),
+            1,
+            "a bare `to-string > b` raises exactly one io card, got {ios:?}"
+        );
         match ios[0] {
             IoEvent::Write {
                 outcome, old_bytes, ..
@@ -2181,10 +2222,7 @@ return !{{length $hits}}"
             old_bytes: None,
         };
         let card = io_card(&event);
-        let kind = Kind::Io {
-            event,
-            card,
-        };
+        let kind = Kind::Io { event, card };
         let rec = crate::agent::transcript::event_record(7, 3, &kind).expect("an io event records");
 
         assert_eq!(rec["kind"], "io", "the record is tagged io");
@@ -2283,11 +2321,15 @@ return !{{length $hits}}"
             serde_json::json!("NaN")
         );
         assert_eq!(
-            super::user_json(&FOValue::Float { value: f64::INFINITY }),
+            super::user_json(&FOValue::Float {
+                value: f64::INFINITY
+            }),
             serde_json::json!("Infinity")
         );
         assert_eq!(
-            super::user_json(&FOValue::Float { value: f64::NEG_INFINITY }),
+            super::user_json(&FOValue::Float {
+                value: f64::NEG_INFINITY
+            }),
             serde_json::json!("-Infinity")
         );
     }
@@ -2304,7 +2346,9 @@ return !{{length $hits}}"
     fn user_json_bytes_become_a_base64_string() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"hi");
         assert_eq!(
-            super::user_json(&FOValue::Bytes { value: b"hi".to_vec() }),
+            super::user_json(&FOValue::Bytes {
+                value: b"hi".to_vec()
+            }),
             serde_json::Value::String(encoded)
         );
     }
@@ -2336,7 +2380,10 @@ return !{{length $hits}}"
 
     #[test]
     fn user_json_payload_less_variant_becomes_the_bare_label_string() {
-        let v = FOValue::Variant { label: "none".into(), payload: None };
+        let v = FOValue::Variant {
+            label: "none".into(),
+            payload: None,
+        };
         assert_eq!(super::user_json(&v), serde_json::json!("none"));
     }
 }

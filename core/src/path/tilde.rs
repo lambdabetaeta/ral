@@ -68,52 +68,16 @@ impl TildePath {
     }
 }
 
-/// Look up `username`'s home directory via the reentrant
-/// `getpwnam_r(3)`, which writes into a caller-owned buffer rather
-/// than the shared static `passwd` that `getpwnam(3)` returns.
+/// Look up `username`'s home directory via `nix::unistd::User::from_name`,
+/// which wraps the reentrant `getpwnam_r(3)`.
 ///
 /// Falls back to `/home/<name>` when the lookup fails or the
 /// username contains a NUL byte.
 #[cfg(unix)]
 pub fn get_user_home(username: &str) -> Option<String> {
-    use std::ffi::CString;
-    let fallback = || Some(format!("/home/{username}"));
-    let Ok(c_name) = CString::new(username) else {
-        return fallback();
-    };
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    // `_SC_GETPW_R_SIZE_MAX` is only a hint; grow on `ERANGE`.
-    let hint = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "guarded hint > 0; a positive getpw buffer-size hint fits usize"
-    )]
-    let mut len = if hint > 0 { hint as usize } else { 1024 };
-    loop {
-        let mut buf = vec![0u8; len];
-        let rc = unsafe {
-            libc::getpwnam_r(
-                c_name.as_ptr(),
-                &raw mut pwd,
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                &raw mut result,
-            )
-        };
-        if rc == libc::ERANGE {
-            len *= 2;
-            continue;
-        }
-        if rc != 0 || result.is_null() {
-            return fallback();
-        }
-        return Some(unsafe {
-            std::ffi::CStr::from_ptr((*result).pw_dir)
-                .to_string_lossy()
-                .into_owned()
-        });
+    match nix::unistd::User::from_name(username) {
+        Ok(Some(user)) => Some(user.dir.to_string_lossy().into_owned()),
+        _ => Some(format!("/home/{username}")),
     }
 }
 
@@ -234,7 +198,10 @@ mod tests {
     #[test]
     fn unix_named_user_falls_back_when_lookup_misses() {
         let home = get_user_home("ral-tilde-test-no-such-user-8f3c1a");
-        assert_eq!(home, Some("/home/ral-tilde-test-no-such-user-8f3c1a".to_string()));
+        assert_eq!(
+            home,
+            Some("/home/ral-tilde-test-no-such-user-8f3c1a".to_string())
+        );
     }
 
     /// The behaviour the plan requires: off Unix there is no
@@ -252,7 +219,10 @@ mod tests {
 
     #[test]
     fn to_literal_reconstructs_the_parsed_spelling() {
-        assert_eq!(TildePath::parse("~bob/sub").unwrap().to_literal(), "~bob/sub");
+        assert_eq!(
+            TildePath::parse("~bob/sub").unwrap().to_literal(),
+            "~bob/sub"
+        );
         assert_eq!(TildePath::parse("~bob").unwrap().to_literal(), "~bob");
         assert_eq!(TildePath::parse("~/sub").unwrap().to_literal(), "~/sub");
         assert_eq!(TildePath::parse("~").unwrap().to_literal(), "~");
