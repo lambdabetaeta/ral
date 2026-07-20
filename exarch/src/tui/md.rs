@@ -18,7 +18,7 @@ use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::fidelity::Fidelity;
-use super::line::is_blank;
+use super::line::{is_blank, wrap_line};
 use super::palette::{CYAN, LIME, READ_W, SLATE};
 use super::rail::{desaturate, mix};
 
@@ -648,8 +648,8 @@ fn heading_style(level: HeadingLevel) -> Style {
 /// Consume events from `p` up to and including `End(Table)` and emit a
 /// boxed table.  Column widths are the natural max, scaled down
 /// proportionally if the total exceeds the budget.  Cell content beyond
-/// its column width word-wraps onto further rows ([`wrap_spans`]) rather
-/// than being clipped, so no content is lost to a budget squeeze.
+/// its column width word-wraps onto further rows ([`super::line::wrap_line`])
+/// rather than being clipped, so no content is lost to a budget squeeze.
 fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     p: &mut I,
     aligns: &[Alignment],
@@ -772,15 +772,15 @@ fn render_table_row(
     aligns: &[Alignment],
 ) -> Vec<Line<'static>> {
     let empty = Vec::new();
-    let wrapped: Vec<Vec<Vec<Span<'static>>>> = widths
+    let wrapped: Vec<Vec<Line<'static>>> = widths
         .iter()
         .enumerate()
-        .map(|(i, &w)| wrap_spans(row.get(i).unwrap_or(&empty), w))
+        .map(|(i, &w)| wrap_line(&Line::from(row.get(i).unwrap_or(&empty).clone()), w))
         .collect();
     let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
 
     let bar = |s: &'static str| Span::styled(s, Style::default().fg(SLATE));
-    let blank: Vec<Span<'static>> = Vec::new();
+    let blank = Line::default();
     let mut out = Vec::with_capacity(height);
     for li in 0..height {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 4 + 2);
@@ -790,10 +790,7 @@ fn render_table_row(
                 spans.push(bar(" │ "));
             }
             let cell = wrapped[i].get(li).unwrap_or(&blank);
-            let cell_w: usize = cell
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
+            let cell_w = cell.width();
             let pad = w.saturating_sub(cell_w);
             let (lp, rp) = match aligns.get(i).copied().unwrap_or(Alignment::Left) {
                 Alignment::Right => (pad, 0),
@@ -803,7 +800,7 @@ fn render_table_row(
             if lp > 0 {
                 spans.push(Span::raw(" ".repeat(lp)));
             }
-            spans.extend(cell.iter().cloned());
+            spans.extend(cell.spans.iter().cloned());
             if rp > 0 {
                 spans.push(Span::raw(" ".repeat(rp)));
             }
@@ -824,48 +821,6 @@ fn render_table_rule(widths: &[usize]) -> Line<'static> {
     }
     s.push('┤');
     Line::from(Span::styled(s, Style::default().fg(SLATE)))
-}
-
-/// Word-wrap a styled span sequence into lines of at most `w` columns,
-/// preserving each span's style.  Words wider than `w` on their own are
-/// broken by character.  Whitespace between words is normalised to a
-/// single space (table cells fold soft/hard breaks to spaces upstream).
-/// Always yields at least one line, possibly empty.
-fn wrap_spans(spans: &[Span<'static>], w: usize) -> Vec<Vec<Span<'static>>> {
-    let w = w.max(1);
-    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut cur: Vec<Span<'static>> = Vec::new();
-    let mut cur_w = 0;
-    for s in spans {
-        for word in s.content.split_whitespace() {
-            let ww = UnicodeWidthStr::width(word);
-            if cur_w > 0 && cur_w + 1 + ww > w {
-                lines.push(std::mem::take(&mut cur));
-                cur_w = 0;
-            }
-            if ww <= w {
-                if cur_w > 0 {
-                    cur.push(Span::styled(" ".to_string(), s.style));
-                    cur_w += 1;
-                }
-                cur.push(Span::styled(word.to_string(), s.style));
-                cur_w += ww;
-                continue;
-            }
-            // Word exceeds the budget on its own; break it by character.
-            let (last, lw) = char_break(word, w, |chunk, _cw| {
-                cur.push(Span::styled(chunk, s.style));
-                lines.push(std::mem::take(&mut cur));
-                cur_w = 0;
-            });
-            if !last.is_empty() {
-                cur.push(Span::styled(last, s.style));
-                cur_w = lw;
-            }
-        }
-    }
-    lines.push(cur);
-    lines
 }
 
 // ── syntax highlighting ──────────────────────────────────────────────────

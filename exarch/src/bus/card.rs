@@ -68,6 +68,24 @@ pub struct Span {
     pub text: String,
 }
 
+impl Span {
+    /// A roled span carrying `text`.
+    pub fn new(role: Role, text: impl Into<String>) -> Self {
+        Self {
+            role: Some(role),
+            text: text.into(),
+        }
+    }
+
+    /// A roleless (plain-ink) span carrying `text`.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            role: None,
+            text: text.into(),
+        }
+    }
+}
+
 /// The quantitative mark `[label, value, max?, unit?]`, rendered with the
 /// two ordered Bertin variables — size (a bar) and value (lightness).
 ///
@@ -554,15 +572,15 @@ pub fn io_card(event: &IoEvent) -> Card {
             outcome: _,
             status,
         } => {
-            let mut spans = vec![span_plain("$ ")];
+            let mut spans = vec![Span::plain("$ ")];
             spans.extend(exec_cmd_spans(argv));
             let role = if *status == 0 { Role::Ok } else { Role::Bad };
-            spans.push(span_plain(" → "));
-            spans.push(span(role, &status.to_string()));
+            spans.push(Span::plain(" → "));
+            spans.push(Span::new(role, status.to_string()));
             spans
         }
         IoEvent::Grep { scope, pattern } => {
-            let mut spans = vec![span(Role::Muted, "grep ")];
+            let mut spans = vec![Span::new(Role::Muted, "grep ")];
             spans.extend(grep_spans(scope, pattern));
             spans
         }
@@ -598,13 +616,13 @@ fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
     };
     match argv.split_first() {
         Some((prog, args)) => {
-            let mut spans = vec![span(Role::Path, &quote(prog))];
+            let mut spans = vec![Span::new(Role::Path, quote(prog))];
             for arg in args {
-                spans.push(span_plain(&format!(" {}", quote(arg))));
+                spans.push(Span::plain(format!(" {}", quote(arg))));
             }
             spans
         }
-        None => vec![span_plain("(no command)")],
+        None => vec![Span::plain("(no command)")],
     }
 }
 
@@ -613,9 +631,9 @@ fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
 /// carry one shared verb over a comma-joined run.
 fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
     vec![
-        span(Role::Code, pattern),
-        span_plain(" in "),
-        span(Role::Path, scope),
+        Span::new(Role::Code, pattern),
+        Span::plain(" in "),
+        Span::new(Role::Path, scope),
     ]
 }
 
@@ -623,7 +641,7 @@ fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
 /// verbatim per entry in [`reads_card`]'s comma-joined read run, so a lone
 /// read and a grouped one share one shape.
 fn read_spans(path: &str) -> Vec<Span> {
-    vec![span(Role::Muted, "read "), span(Role::Path, path)]
+    vec![Span::new(Role::Muted, "read "), Span::new(Role::Path, path)]
 }
 
 /// A write row: the muted verb `write`, the path as the subject, then the
@@ -635,10 +653,10 @@ fn read_spans(path: &str) -> Vec<Span> {
 /// [`write_preview`].
 fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
     vec![
-        span(Role::Muted, "write "),
-        span(Role::Path, path),
-        span_plain(" "),
-        span(outcome.role(), outcome.label()),
+        Span::new(Role::Muted, "write "),
+        Span::new(Role::Path, path),
+        Span::plain(" "),
+        Span::new(outcome.role(), outcome.label()),
     ]
 }
 
@@ -719,7 +737,7 @@ pub fn execs_card(execs: &[IoEvent]) -> Option<Card> {
     if execs.is_empty() {
         return None;
     }
-    let mut spans = vec![span_plain("$ ")];
+    let mut spans = vec![Span::plain("$ ")];
     join_spans(&mut spans, execs, |spans, e| {
         if let IoEvent::Exec { argv, .. } = e {
             spans.extend(exec_cmd_spans(argv));
@@ -734,7 +752,7 @@ pub fn greps_card(greps: &[IoEvent]) -> Option<Card> {
     if greps.is_empty() {
         return None;
     }
-    let mut spans = vec![span(Role::Muted, "grep ")];
+    let mut spans = vec![Span::new(Role::Muted, "grep ")];
     join_spans(&mut spans, greps, |spans, e| {
         if let IoEvent::Grep { scope, pattern } = e {
             spans.extend(grep_spans(scope, pattern));
@@ -748,25 +766,9 @@ pub fn greps_card(greps: &[IoEvent]) -> Option<Card> {
 fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span>, &T)) {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
-            spans.push(span_plain(", "));
+            spans.push(Span::plain(", "));
         }
         each(spans, item);
-    }
-}
-
-/// A roled span carrying `text`.
-fn span(role: Role, text: &str) -> Span {
-    Span {
-        role: Some(role),
-        text: text.to_string(),
-    }
-}
-
-/// A roleless (plain-ink) span carrying `text`.
-fn span_plain(text: &str) -> Span {
-    Span {
-        role: None,
-        text: text.to_string(),
     }
 }
 
@@ -846,24 +848,24 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
     let mut spans = Vec::new();
     match outcome {
         DoneOutcome::Ok => {
-            spans.push(span(Role::Ok, "done"));
-            spans.push(span_plain("  Background block finished (exit 0)"));
+            spans.push(Span::new(Role::Ok, "done"));
+            spans.push(Span::plain("  Background block finished (exit 0)"));
         }
         DoneOutcome::Err { message, status } => {
-            spans.push(span(Role::Bad, &format!("failed ({status})")));
+            spans.push(Span::new(Role::Bad, format!("failed ({status})")));
             let mut body = String::from("  Background block error");
             if !message.is_empty() {
                 let _ = write!(body, ": {message}");
             }
-            spans.push(span_plain(&body));
+            spans.push(Span::plain(body));
         }
         DoneOutcome::Panic { message } => {
-            spans.push(span(Role::Bad, "panicked"));
+            spans.push(Span::new(Role::Bad, "panicked"));
             let mut body = String::from("  Background block error");
             if !message.is_empty() {
                 let _ = write!(body, ": {message}");
             }
-            spans.push(span_plain(&body));
+            spans.push(Span::plain(body));
         }
     }
     Card(vec![Mark::Text { spans }])
@@ -971,8 +973,8 @@ fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
         ral_core::types::ReapCause::Retention => "finished, result unclaimed",
     };
     let spans = vec![
-        span(Role::Warn, "reaped"),
-        span_plain(&format!("  {cmd} — {phrase}")),
+        Span::new(Role::Warn, "reaped"),
+        Span::plain(format!("  {cmd} — {phrase}")),
     ];
     Card(vec![Mark::Text { spans }])
 }
@@ -992,7 +994,7 @@ fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
         if names.len() == 1 { "" } else { "s" },
         names.join(", "),
     );
-    let spans = vec![span(Role::Muted, &phrase)];
+    let spans = vec![Span::new(Role::Muted, phrase)];
     Card(vec![Mark::Text { spans }])
 }
 
@@ -1004,9 +1006,9 @@ fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
 /// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
 /// state plus host leases").
 fn large_binding_card(name: &str, bytes: u64) -> Card {
-    let spans = vec![span(
+    let spans = vec![Span::new(
         Role::Warn,
-        &format!(
+        format!(
             "large binding: `{name}` — ~{bytes} bytes; consider writing it to a file \
              and binding the path instead of the captured bytes"
         ),
@@ -1026,7 +1028,7 @@ pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card
         .iter()
         .map(|entry| Field {
             label: format!("service {}", entry.id),
-            value: FieldVal::Inline(vec![span_plain(&format!(
+            value: FieldVal::Inline(vec![Span::plain(format!(
                 "{}  (up {}s)",
                 entry.cmd, entry.up_secs
             ))]),

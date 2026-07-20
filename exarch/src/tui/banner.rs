@@ -37,7 +37,7 @@ pub struct SessionInfo<'a> {
 pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     let caps = crate::provider::pricing::caps_or_default(p.model());
     let mut rows: Vec<Field> = vec![
-        meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
+        meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)]),
     ];
 
     // Neither the provider nor the model is named here: the live status bar
@@ -46,7 +46,7 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     if let Some(ctx) = caps.context_window {
         rows.push(meta_field(
             "context",
-            vec![meta_plain(provider::humanize_tokens(ctx))],
+            vec![CardSpan::plain(provider::humanize_tokens(ctx))],
         ));
     }
 
@@ -55,22 +55,22 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     } else {
         Role::Strong
     };
-    rows.push(meta_field("base", vec![meta_span(base_role, s.base)]));
+    rows.push(meta_field("base", vec![CardSpan::new(base_role, s.base)]));
 
     rows.push(meta_field(
         "extend-base",
         match s.extend_base {
-            Some(p) => vec![meta_span(Role::Path, p.display().to_string())],
-            None => vec![meta_span(Role::Muted, "none")],
+            Some(p) => vec![CardSpan::new(Role::Path, p.display().to_string())],
+            None => vec![CardSpan::new(Role::Muted, "none")],
         },
     ));
 
     rows.push(meta_field(
         "restrict",
         if s.restrict_files.is_empty() {
-            vec![meta_span(Role::Muted, "none")]
+            vec![CardSpan::new(Role::Muted, "none")]
         } else {
-            vec![meta_span(Role::Path, join_paths(s.restrict_files))]
+            vec![CardSpan::new(Role::Path, join_paths(s.restrict_files))]
         },
     ));
 
@@ -80,45 +80,25 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     )]
     let system_size = s.system_size as f64;
     let sz = format!("{:.1} kB", system_size / 1024.0);
-    let mut sys_val = vec![meta_plain(sz), meta_span(Role::Muted, " · ")];
+    let mut sys_val = vec![CardSpan::plain(sz), CardSpan::new(Role::Muted, " · ")];
     if s.system_files.is_empty() {
-        sys_val.push(meta_span(Role::Muted, "default"));
+        sys_val.push(CardSpan::new(Role::Muted, "default"));
     } else {
-        sys_val.push(meta_span(Role::Path, join_paths(s.system_files)));
+        sys_val.push(CardSpan::new(Role::Path, join_paths(s.system_files)));
     }
     rows.push(meta_field("system prompt", sys_val));
 
     rows.push(meta_field(
         "scratch",
-        vec![meta_span(Role::Path, s.scratch.display().to_string())],
+        vec![CardSpan::new(Role::Path, s.scratch.display().to_string())],
     ));
 
     Card(vec![Mark::Fields { rows }])
 }
 
-/// [`Role`] (the renderer binds it to a hue), never a colour.
-pub(super) fn meta_span(role: Role, text: impl Into<String>) -> CardSpan {
-    CardSpan {
-        role: Some(role),
-        text: text.into(),
-    }
-}
-
-/// A roleless value span — a quantity readout the matrix renders as plain
-/// ink, carrying no nominal identity.
-pub(super) fn meta_plain(text: impl Into<String>) -> CardSpan {
-    CardSpan {
-        role: None,
-        text: text.into(),
-    }
-}
-
 /// One `(label, value)` row of the startup metadata matrix.
 pub(super) fn meta_field(label: &str, value: Vec<CardSpan>) -> Field {
-    Field {
-        label: label.to_string(),
-        value: FieldVal::Inline(value),
-    }
+    Field { label: label.to_string(), value: FieldVal::Inline(value) }
 }
 
 /// A comma-joined display of `paths` for a single matrix value cell.
