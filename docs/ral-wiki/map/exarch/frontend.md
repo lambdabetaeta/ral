@@ -43,8 +43,7 @@ one inbound inbox**, defined by `bus.rs`:
   run's text is capped (`MERGE_TEXT_CAP`, 256 KiB); past it the front elides
   and one `Kind::SystemNote` overflow marker rides the next drain, naming the
   class and the elided count. `/resources` reads `BusReceiver::depth`/`bytes`
-  for its `bus.depth`/`bus.bytes` rows
-  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+  for its `bus.depth`/`bus.bytes` rows.
 
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
@@ -163,8 +162,7 @@ Two `Sink` implementations:
  dropped; no reload-from-`user.log` machinery is built. Every live viewport
  also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
  `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
- blocks are already durable in `user.log`/`events.json`
- ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+ blocks are already durable in `user.log`/`events.json`.
  `/clear` also cancels the in-flight model turn: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within

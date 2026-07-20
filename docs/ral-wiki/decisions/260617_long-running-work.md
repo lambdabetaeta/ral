@@ -1,11 +1,10 @@
 ---
 status: superseded
-superseded_by: decisions/260705_leases-and-budgets
 ---
 
 # Long-running work is born, not promoted
 
-> Superseded by [[decisions/260705_leases-and-budgets|leases-and-budgets]]: the
+> Superseded by leases-and-budgets: the
 > open regime question is answered as Regime 1, delivered as the durable lease
 > class of a universal worker registry; the verb is spelled `service`, now
 > with a mandatory `description`. The binding-pinning question dissolves

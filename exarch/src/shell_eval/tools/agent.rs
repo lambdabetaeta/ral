@@ -10,7 +10,7 @@
 //! the user can see what the child was asked to do.
 
 use crate::agent::Agent;
-use crate::fleet::registry::{AgentRegistry, RegisterError, Registration};
+use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, InboxMsg, Kind, Mailbox};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -141,7 +141,7 @@ pub(crate) fn spawn_async(
     let generation = match registry.register(Registration {
         id: agent_id,
         parent: Some(parent),
-        ceiling: delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
+        lease: delivers.then_some(AGENT_LEASE_IDLE), // a returning worker is reaped if abandoned; a branch keeps no lease
         name: name.clone(),
         log_dir: log_dir.clone(),
         cancel,

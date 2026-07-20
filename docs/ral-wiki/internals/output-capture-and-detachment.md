@@ -121,8 +121,7 @@ The escape is detachment — the *handle* is its evidence
   boundaries (`Shell::take_worker_reap_notices`, `Agent::drain_worker_reaps`,
   beside the binding-lease drain) into one `Kind::WorkerReaped` transcript/TUI
   event per entry. The model's later "where did my job go?" always has an
-  answer in the log. Full decision record:
-  [[decisions/260705_leases-and-budgets|leases-and-budgets]].
+  answer in the log.
 
 ## Reading a spawned server's output (the exarch caveat)
 
@@ -153,7 +152,7 @@ The escape is detachment — the *handle* is its evidence
 See also
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (why a handle marks detachment, and the doctrine
-[[decisions/260705_leases-and-budgets|leases-and-budgets]] retired: not
+leases-and-budgets retired: not
 "detached workers are unmanaged by design" but unmanaged by default),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the root/foreground
 split and the reaper), [[map/exarch/shell-eval|shell-eval]] (the frame that arms the

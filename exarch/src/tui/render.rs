@@ -79,15 +79,18 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // so it no longer claims the prompt region.
     let text_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
     let prompt_h = app.prompt_state.height_hint(text_w, area.height);
+    // The tab-bar/matrix choice: collapse to the plain one-line `tab_bar`
+    // only when there is no demoted row and at most one promoted row (root
+    // alone) — otherwise the matrix renders, one row per tab, so a lone
+    // demoted agent beside root is never invisible.
+    let demoted = app.demoted();
+    let promoted_rows = app.tabs.len() - demoted.len();
+    let show_bar = !demoted.is_empty() || promoted_rows > 1;
     #[allow(
         clippy::cast_possible_truncation,
         reason = "live-agent tab count; a handful of subprocesses, never near u16::MAX"
     )]
-    let tab_h = if app.tabs.len() > 1 {
-        app.tabs.len() as u16
-    } else {
-        0u16
-    };
+    let tab_h = if show_bar { app.tabs.len() as u16 } else { 0u16 };
     // The queued-user rows sit above the matrix/tab row: prompts the human
     // submitted mid-turn, waiting for a tool or turn boundary. They read only
     // `UserSteering` from the typed inbox, then render through the same prompt
@@ -203,10 +206,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let last_input = app.last_input;
     let context_window = app.context_window;
     let status_model = app.status_model.clone();
-    // The matrix replaces the tab bar when more than one session is
-    // live: one row per agent, each owning its `Line` so the `'static`
-    // draw closure captures no borrow of `app`.
-    let matrix_lines = (app.tabs.len() > 1).then(|| {
+    // The matrix replaces the tab bar per `show_bar` above: one row per
+    // agent (promoted rows, then demoted), each owning its `Line` so the
+    // `'static` draw closure captures no borrow of `app`.
+    let matrix_lines = show_bar.then(|| {
         let rows = app.tabs.matrix_rows();
         matrix_bar(
             &rows,
@@ -214,6 +217,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             focused,
             app.tabs.root(),
             app.tabs.dying_map(),
+            &demoted,
             app.matrix_sort,
         )
     });

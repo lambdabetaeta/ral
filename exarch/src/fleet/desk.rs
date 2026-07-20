@@ -26,7 +26,6 @@ use ral_core::transport::{Event, EventReceiver, Frame};
 use ral_core::types::{Capabilities, EnquiryDesk, Error, Nursery, NurseryId};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 /// Everything a desk handler may read off `&Agent`, snapshotted fresh at
@@ -88,9 +87,6 @@ pub(crate) struct HostServices {
     /// resolves it into the child's own [`Agent::system`] from the child's
     /// own `returns`/`allow_schedule`.
     pub system_template: String,
-    /// The fleet's focused-agent handle, for a spawned child to become
-    /// parkable the instant the human `TAB`s to it.
-    pub focus: Arc<AtomicU64>,
     /// Whether a human is attached to the fleet, inherited by every spawn.
     pub interactive: bool,
     /// The adoption end of this turn's body-side session forks
@@ -397,7 +393,6 @@ impl ExarchDesk {
             parent: Some(s.parent),
             fuel,
             provider: ProviderHandle::new(s.provider.current()),
-            focus: s.focus.clone(),
             interactive: s.interactive,
             returns: true,
             allow_schedule: s.allow_schedule,
@@ -938,8 +933,8 @@ impl EnquiryDesk for DeskBinding {
 )]
 mod tests {
     use super::*;
-    use crate::fleet::registry::Registration;
-    use crate::bus::{BusReceiver, Inbox, NO_FOCUS, channel};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
+    use crate::bus::{BusReceiver, Inbox, channel};
     use crate::agent::event::AgentLog;
     use crate::provider::{Provider, ProviderKind, scripted::{Reply, Script}};
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Transport, Turn};
@@ -991,7 +986,6 @@ mod tests {
             schedules: ScheduleRegistry::new(),
             log: LogCell::new(fresh_log()),
             system_template: String::new(),
-            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive: false,
             nursery: Nursery::default(),
             generation: 0,
@@ -1036,7 +1030,7 @@ mod tests {
         let _ = registry.register(Registration {
             id: parent_id,
             parent: None,
-            ceiling: false,
+            lease: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: crate::agent::cancel::Token::new(),
@@ -1707,7 +1701,7 @@ mod tests {
             let _ = registry.register(Registration {
                 id,
                 parent: Some(parent),
-                ceiling: true,
+                lease: Some(AGENT_LEASE_IDLE),
                 name: name.to_string(),
                 log_dir: PathBuf::from(format!("/tmp/{id}")),
                 cancel: crate::agent::cancel::Token::new(),
@@ -2101,5 +2095,246 @@ mod tests {
             }
         }
         assert!(saw_chrome, "each reply must emit the parent-facing chrome line");
+    }
+
+    // ── P3: engaged-child lifecycle, desk-integration scale ────────────────
+
+    /// Register `child` under `parent_id` with `lease`, mirroring the
+    /// registration half of `shell_eval::tools::agent::spawn_async` — but
+    /// with a caller-chosen lease, since a production spawn always arms the
+    /// fixed `AGENT_LEASE_IDLE` and a millisecond lease is the only way
+    /// these tests can exercise a real reap without waiting out the real
+    /// constant.
+    fn register_lease_child(
+        parent_id: AgentId,
+        lease: Option<Duration>,
+        name: &str,
+        child: &Agent,
+    ) -> u64 {
+        child
+            .agents
+            .register(Registration {
+                id: child.id,
+                parent: Some(parent_id),
+                lease,
+                name: name.to_string(),
+                log_dir: child.log_dir(),
+                cancel: child.cancel_token().clone(),
+                eval_root: Some(child.eval_root()),
+                turn_scope: Some(child.turn_scope()),
+                mailbox: child.mailbox(),
+                provider: child.provider_handle(),
+            })
+            .expect("a fresh child of a live parent always registers")
+    }
+
+    /// Drive an already-registered `child` to completion on a detached
+    /// thread and deliver its result to `parent_mailbox`, exactly as
+    /// `spawn_async`'s own worker epilogue does (deliver, then settle).
+    fn drive_and_deliver(
+        mut child: Agent,
+        name: &str,
+        generation: u64,
+        parent_mailbox: Mailbox,
+    ) -> std::thread::JoinHandle<()> {
+        let id = child.id;
+        let log_dir = child.log_dir();
+        let registry = child.agents.clone();
+        let name = name.to_string();
+        std::thread::spawn(move || {
+            let (tx, _rx) = crate::bus::channel();
+            let emit = Emitter::new(tx, id);
+            let (outcome, payload) = child.drive(&mut crate::agent::NoControl, &emit);
+            let text = payload
+                .as_ref()
+                .map(crate::agent::render_reply)
+                .unwrap_or_default();
+            let _ = parent_mailbox.push(crate::bus::InboxMsg::AgentResult(crate::bus::AgentResult {
+                id,
+                name,
+                outcome,
+                text,
+                log_dir,
+                elapsed: Duration::default(),
+                generation,
+            }));
+            registry.settle(id, generation);
+        })
+    }
+
+    /// Register a live, never-driven child under `parent_id` — just enough
+    /// for `AgentRegistry::has_children` to read true, so `parent_id` parks
+    /// `HeldByChildren` rather than quiescing before either steer lands (or,
+    /// once engaged, so `Engaged` outranks `HeldByChildren` regardless — the
+    /// P3 plan's own §5 edge case). Never touched again by the test.
+    fn register_keepalive(registry: &AgentRegistry, parent_id: AgentId, log_dir: &std::path::Path) {
+        let _ = registry.register(Registration {
+            id: crate::agent::fresh_id(),
+            parent: Some(parent_id),
+            lease: None,
+            name: format!("keepalive-{parent_id}"),
+            log_dir: log_dir.to_path_buf(),
+            cancel: crate::agent::cancel::Token::new(),
+            eval_root: None,
+            turn_scope: None,
+            mailbox: crate::bus::Inbox::new().mailbox(),
+            provider: ProviderHandle::new(scripted_provider()),
+        });
+    }
+
+    /// Poll `path`'s contents until they contain `needle` or `timeout`
+    /// elapses. The child's own `events.json` records every turn
+    /// (`SessionEvent::AssistantMessage`), so a substring poll proves a
+    /// turn actually ran, without any other side channel into a thread the
+    /// test does not otherwise touch mid-flight.
+    fn eventually_logged(path: &std::path::Path, needle: &str, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if let Ok(body) = std::fs::read_to_string(path)
+                && body.contains(needle)
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// An engaged child answers a second steer after the human's attention
+    /// has moved elsewhere — the lifecycle depends on nothing but
+    /// `AgentRegistry::steer`'s own delivery, no notion of TUI focus at all.
+    /// A fake grandchild keeps the child parked `HeldByChildren` rather than
+    /// quiescing before it is ever engaged, so both steers land
+    /// deterministically instead of racing the child's own drive loop.
+    #[test]
+    fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
+        let dir = tmp("engaged-second-steer");
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        child.provider_handle().swap(Arc::new(Provider::scripted(
+            "test-model",
+            ProviderKind::Openai,
+            Script::new()
+                .then(Reply::text("first response, no reply yet"))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "reply 'second response arrived'",
+                )])),
+        )));
+        child.seed("say hi".into());
+        let log_dir = child.log_dir();
+        let child_id = child.id;
+        let registry = child.agents.clone();
+
+        let generation = register_lease_child(parent.id, None, "helper", &child);
+        register_keepalive(&registry, child_id, &dir.join("keepalive"));
+        let handle = drive_and_deliver(child, "helper", generation, parent.mailbox());
+
+        assert!(
+            registry.steer(child_id, "first message".into()),
+            "the freshly registered, parked child accepts a steer"
+        );
+        assert!(registry.engaged(child_id), "steer renews the exchange clock");
+        assert!(
+            eventually_logged(
+                &log_dir.join("events.json"),
+                "first response, no reply yet",
+                Duration::from_secs(5),
+            ),
+            "the child must answer the first steer before the second is sent"
+        );
+
+        assert!(
+            registry.steer(child_id, "second message".into()),
+            "the parked, engaged child still accepts a second steer"
+        );
+        match wait_for_settle(&parent.inbox()) {
+            crate::bus::Turn::Agent(result) => {
+                assert!(
+                    result.text.contains("second response arrived"),
+                    "the second steer's response must reach the parent, got: {}",
+                    result.text
+                );
+            }
+            other => panic!("expected an Agent result turn, got {other:?}"),
+        }
+        handle.join().expect("worker thread must not panic");
+    }
+
+    /// A millisecond-lease child that is never renewed is reaped mid-turn
+    /// and delivers exactly one `AgentOutcome::Cancelled` to the parent
+    /// inbox; a sibling renewed partway through the same ttl survives past
+    /// it. Child A runs a long, cheap tool-call sequence so the lease has
+    /// something to interrupt mid-flight, comfortably inside the round-trip
+    /// loop's own `MAX_STEPS` cap (250) — well past the reap's `ttl`, so the
+    /// lease always wins the race and the surplus is never popped.
+    #[test]
+    fn ms_lease_child_never_renewed_is_cancelled_but_a_renewed_one_survives() {
+        let dir = tmp("ms-lease-integration");
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        // Child A's ttl must land comfortably inside the round-trip loop's
+        // own `MAX_STEPS` cap (250 steps, well under 100 ms on this box) so
+        // the lease — not the step cap — is what ends its turn. Child B's
+        // ttl is independent and generous instead, since its renewal is
+        // paced by `thread::sleep` on the test's own thread, and this VM's
+        // scheduling jitter (`container-disk-setup`/timing notes) can push
+        // a short sleep well past its nominal length.
+        let ttl_a = Duration::from_millis(25);
+        let ttl_b = Duration::from_millis(300);
+
+        let child_a = parent.fork(parent.caps().clone()).expect("fork child a");
+        let mut long_script = Script::new();
+        for i in 0..2_000u32 {
+            long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
+        }
+        child_a.provider_handle().swap(Arc::new(Provider::scripted(
+            "test-model",
+            ProviderKind::Openai,
+            long_script,
+        )));
+        child_a.seed("go".into());
+        let id_a = child_a.id;
+        let registry = child_a.agents.clone();
+        let gen_a = register_lease_child(parent.id, Some(ttl_a), "child-a", &child_a);
+        let handle_a = drive_and_deliver(child_a, "child-a", gen_a, parent.mailbox());
+
+        match wait_for_settle(&parent.inbox()) {
+            crate::bus::Turn::Agent(result) => {
+                assert_eq!(result.id, id_a);
+                assert!(
+                    matches!(result.outcome, crate::bus::AgentOutcome::Cancelled),
+                    "a never-renewed lease reaps mid-turn with Cancelled, got {:?}",
+                    result.outcome
+                );
+            }
+            other => panic!("expected an Agent result turn, got {other:?}"),
+        }
+        assert!(!registry.is_live(id_a), "the reaped entry settles");
+        handle_a.join().expect("worker thread must not panic");
+
+        // Child B: renewed at half the ttl, kept `HeldByChildren` by a fake
+        // grandchild so there is no script to race — `renew` alone, with no
+        // message ever delivered, must be what defers the reap.
+        let child_b = parent.fork(parent.caps().clone()).expect("fork child b");
+        let id_b = child_b.id;
+        let gen_b = register_lease_child(parent.id, Some(ttl_b), "child-b", &child_b);
+        register_keepalive(&registry, id_b, &dir.join("keepalive-b"));
+        let handle_b = drive_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
+
+        std::thread::sleep(ttl_b / 2);
+        assert!(registry.renew(id_b), "a live entry renews");
+
+        std::thread::sleep(ttl_b / 2 + Duration::from_millis(150));
+        assert!(
+            registry.is_live(id_b),
+            "renewed at half the ttl, still alive past the original bound"
+        );
+
+        // Wind child B down cleanly rather than leaving its thread parked
+        // forever: a terminate-cause cancel ends an unengaged
+        // `HeldByChildren` park at once (`bus.rs`'s park-mode contract).
+        registry.cancel(id_b);
+        let _ = wait_for_settle(&parent.inbox());
+        handle_b.join().expect("worker thread must not panic");
     }
 }

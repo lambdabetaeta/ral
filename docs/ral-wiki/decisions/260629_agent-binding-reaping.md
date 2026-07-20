@@ -4,12 +4,12 @@ status: active
 
 # Exarch leases agent scratch bindings; ral bindings do not expire
 
-> [[decisions/260705_leases-and-budgets|leases-and-budgets]] answered this
+> leases-and-budgets answered this
 > page's host-pins question: durable jobs need no pins at all — the worker
 > registry retains the handle itself, so pruning a top-level name never
 > strands a job. This page was itself rewritten, 2026-07-05, around a
 > clean-room single-writer ledger design worked out after
-> `260705_leases-and-budgets` landed; the mechanism below supersedes the
+> leases-and-budgets landed; the mechanism below supersedes the
 > generation-cohort design this page originally proposed, moved to Alternatives.
 
 **A ral binding is lexical state; a lease is agent-host state.** A binding lives
@@ -35,7 +35,7 @@ The host must not manage that by opening `Env`. The
 seam still holds: exarch supplies policy, core supplies behavioural operations,
 and core owns the correspondence between a lease record and the live scope.
 
-By the time this mechanism landed, [[decisions/260705_leases-and-budgets|leases-and-budgets]]
+By the time this mechanism landed, leases-and-budgets
 had already repealed the old worker "death-clock" (a hard age ceiling on a
 `spawn`) in favour of an **idle-observation lease** — reaped when *unobserved*,
 not when *old* — riding a universal per-shell worker registry
@@ -109,7 +109,7 @@ The ledger's epoch ticks once per `Shell::run_source_turn` — a *committed*
 source-door turn, whether or not it fails downstream — at entry, before
 compilation. For exarch, every `ral` tool call is exactly one
 `run_source_turn` dispatch, so **this epoch and `Agent::ral_epoch`** (the
-worker-retention clock [[decisions/260705_leases-and-budgets|leases-and-budgets]]
+worker-retention clock leases-and-budgets
 built) **coincide one-to-one** — two ticks of the same drum, read by two
 different ledgers for two different purposes. A turn that fails parse or
 typecheck ticks but renews nothing, which is the correct non-vacuous reading of
@@ -196,7 +196,7 @@ thread that also owns the only `&mut Shell`.
 `Value::Handle` whose state reads `Running`, and — deliberately — never
 descends into a `Lambda` or `Block`'s captured `Arc<Env>`: chasing that graph
 is the retained-size walk this page and
-[[decisions/260705_leases-and-budgets|leases-and-budgets]] both refuse. A
+leases-and-budgets both refuse. A
 handle reachable only through a closure capture is not "the name of live
 work"; it costs nothing either way, because the worker registry retains the
 handle itself regardless of whether any top-level name still points at it.
@@ -242,9 +242,7 @@ below is this page's own rewrite):
    guards, the sweep, adoption, notices paired with the checkpoint.
 5. **exarch wiring** — the 256-idle-call constant, arming at the two shell
    install sites, the drive-loop boundary drain, and the transcript/TUI event.
-6. **Large-binding soft-threshold warning**
-   ([[decisions/260705_leases-and-budgets|leases-and-budgets]] §"Shell
-   residency is lexical state plus host leases"): a shallow, non-descending
+6. **Large-binding soft-threshold warning**: a shallow, non-descending
    size estimate on `Value`; the lease gains a byte threshold; the install
    chokepoint queues a transcript/TUI-only notice when an armed, session-scope
    install meets it; `/resources` gains a leased-count and largest-binding
@@ -267,7 +265,7 @@ below is this page's own rewrite):
   removes future names and future type seeds, not every historical reference.
 - Shell residency now has two host policies instead of one: an idle lease on
   *lifetime* (this page) and, from parcel 6, a soft *size* warning — the two
-  axes [[decisions/260705_leases-and-budgets|leases-and-budgets]] names
+  axes leases-and-budgets names
   "lifetime is a lease, residency is a budget" — kept genuinely separate: a
   large binding is never evicted early for its size, and an old one is never
   kept alive for being small.
@@ -348,7 +346,7 @@ Resolved, 260705:
   binding again.
 - **Host pins dissolve.** No future durable-job or schedule registry needs to
   pin binding names or handle ids against this reaper:
-  [[decisions/260705_leases-and-budgets|leases-and-budgets]]'s worker registry
+  leases-and-budgets's worker registry
   retains the handle itself, so pruning a top-level name can never strand a
   job, and [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]'s
   `ScheduleId` needs no pin either, for the same reason.
@@ -357,7 +355,5 @@ See also [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]],
 [[decisions/260617_long-running-work|long-running-work]],
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]],
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]],
-[[decisions/260705_leases-and-budgets|leases-and-budgets]],
 [[decisions/260705_session-ledger|session-ledger]],
 [[map/core/shell-state|shell-state]], and [[map/exarch/agent|agent]].

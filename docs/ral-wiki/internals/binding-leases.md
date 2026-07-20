@@ -101,8 +101,7 @@ direction throughout.
 
 ## Where it sits in the decay ladder
 
-Abandonment decays in layers, each with its own lease and its own log line
-([[decisions/260705_leases-and-budgets|leases-and-budgets]]): a worker
+Abandonment decays in layers, each with its own lease and its own log line: a worker
 unobserved for an hour is reaped; its settled registry entry expires after
 256 unclaimed calls; and a name holding a settled handle — settled handles
 are ordinary scratch, and the worker registry retains the handle itself, so

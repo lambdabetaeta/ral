@@ -7,7 +7,7 @@ use crate::provider;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// How the agent×step matrix orders its rows — a render-time projection
 /// of the same `tabs`/`viewports` model, never a reshuffle of the
@@ -82,12 +82,18 @@ fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, S
 /// `rows` pairs each tab's id with its viewport (matrix figures are
 /// derived from the viewport: step cells, lines touched, token spend);
 /// `names`/`focused`/`dying` carry the same row state `tab_bar` reads.
+/// `demoted` maps each idle-and-parked tab to its current idle span — a row
+/// present renders compact (undecorated label, idle-age mark in place of
+/// step glyphs) and sorts into a stable block below every promoted row,
+/// regardless of `sort`; a live agent stays in the strip either way, never
+/// invisible.
 pub(super) fn matrix_bar(
     rows: &[(AgentId, &Viewport)],
     names: &HashMap<AgentId, String>,
     focused: AgentId,
     root: AgentId,
     dying: &HashMap<AgentId, Instant>,
+    demoted: &HashMap<AgentId, Duration>,
     sort: MatrixSort,
 ) -> Vec<Line<'static>> {
     if rows.len() <= 1 {
@@ -119,14 +125,25 @@ pub(super) fn matrix_bar(
         })
         .max()
         .unwrap_or(0);
-    let display_rows: Vec<MatrixRow> = order
+    // Promoted rows first, demoted rows as a stable block below — each
+    // keeps the order the sort above produced; only the partition moves.
+    let (mut display_rows, demoted_rows): (Vec<MatrixRow>, Vec<MatrixRow>) = order
         .into_iter()
         .map(|i| {
+            let id = rows[i].0;
             MatrixRow::new(
-                rows[i].0, rows[i].1, names, focused, root, dying, max_tokens,
+                id,
+                rows[i].1,
+                names,
+                focused,
+                root,
+                dying,
+                demoted.get(&id).copied(),
+                max_tokens,
             )
         })
-        .collect();
+        .partition(|row| row.idle.is_none());
+    display_rows.extend(demoted_rows);
     let widths = MatrixWidths::measure(&display_rows);
     display_rows
         .into_iter()
@@ -170,9 +187,17 @@ struct MatrixRow {
     hue: Color,
     token_style: Style,
     dim: bool,
+    /// This row's idle span if it is demoted, `None` if promoted — the sort
+    /// key [`matrix_bar`] partitions on, and the switch [`Self::render`]
+    /// reads to right-align the steps column instead of left.
+    idle: Option<Duration>,
 }
 
 impl MatrixRow {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one row's worth of render-time projection inputs; a parameter object would only rename this list, not shorten it"
+    )]
     fn new(
         id: AgentId,
         vp: &Viewport,
@@ -180,6 +205,7 @@ impl MatrixRow {
         focused: AgentId,
         root: AgentId,
         dying: &HashMap<AgentId, Instant>,
+        idle: Option<Duration>,
         max_tokens: u64,
     ) -> Self {
         let hue = AGENT_HUES
@@ -187,10 +213,15 @@ impl MatrixRow {
             .copied()
             .unwrap_or(AGENT_HUES[0]);
         let dim = dying.contains_key(&id);
+        let demoted = idle.is_some();
 
         let name = names.get(&id).map_or("?", String::as_str);
         let truncated: String = name.chars().take(MATRIX_LABEL_W).collect();
-        let (label, label_style) = focus_label(&truncated, hue, id == focused, dim);
+        let (label, label_style) = if demoted {
+            (format!(" {truncated} "), Style::default().fg(SLATE))
+        } else {
+            focus_label(&truncated, hue, id == focused, dim)
+        };
 
         let tokens = {
             let u = vp.usage();
@@ -209,6 +240,8 @@ impl MatrixRow {
             label,
             steps: if id == root {
                 String::new()
+            } else if let Some(idle) = idle {
+                idle_age_mark(idle)
             } else {
                 step_cells(vp, dim)
             },
@@ -226,6 +259,7 @@ impl MatrixRow {
             hue,
             token_style,
             dim,
+            idle,
         }
     }
 
@@ -239,6 +273,7 @@ impl MatrixRow {
             hue,
             token_style,
             dim,
+            idle,
         } = self;
         let slate = Style::default().fg(SLATE).add_modifier(if dim {
             Modifier::DIM
@@ -247,15 +282,33 @@ impl MatrixRow {
         });
         let (label_w, steps_w, tokens_w, bar_w) =
             (widths.label, widths.steps, widths.tokens, widths.bar);
+        let steps_span = if idle.is_some() {
+            Span::styled(format!("{steps:>steps_w$}"), Style::default().fg(SLATE))
+        } else {
+            Span::styled(format!("{steps:<steps_w$}"), Style::default().fg(hue))
+        };
         Line::from(vec![
             Span::styled(format!("{label:<label_w$}"), label_style),
             Span::raw("  "),
-            Span::styled(format!("{steps:<steps_w$}"), Style::default().fg(hue)),
+            steps_span,
             Span::raw("  "),
             Span::styled(format!("{tokens:>tokens_w$}"), token_style),
             Span::raw("  "),
             Span::styled(format!("{bar:<bar_w$}"), slate),
         ])
+    }
+}
+
+/// A demoted row's idle-age mark, minute granularity: `12m` below the
+/// hour, `1h05m` past it. Fixed-position (right-aligned in the steps
+/// column) and unanimated — it changes only when the minute value itself
+/// changes.
+fn idle_age_mark(idle: Duration) -> String {
+    let mins = idle.as_secs() / 60;
+    if mins < 60 {
+        format!("{mins}m")
+    } else {
+        format!("{}h{:02}m", mins / 60, mins % 60)
     }
 }
 

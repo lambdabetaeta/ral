@@ -39,7 +39,7 @@ tabula-rasa/inherits split is untouched — it moves from the verb to a field).
   per-child budget, a memory-window cap, a model override — each rides as a new
   optional field on the spec, decoded at the same door, without a new verb or a
   positional-arity break. The surface is open toward the budgets
-  [[decisions/260705_leases-and-budgets|leases-and-budgets]] leaves for later.
+  leases-and-budgets leaves for later.
 
 ## Names are the model-facing identity
 

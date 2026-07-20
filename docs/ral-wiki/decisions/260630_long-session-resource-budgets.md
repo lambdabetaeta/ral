@@ -1,11 +1,10 @@
 ---
 status: superseded
-superseded_by: decisions/260705_leases-and-budgets
 ---
 
 # Long exarch sessions need explicit resource budgets
 
-> Superseded by [[decisions/260705_leases-and-budgets|leases-and-budgets]],
+> Superseded by leases-and-budgets,
 > which carries every per-accumulator decision here forward and adds the probe
 > convention (`/resources` as a fold over registered budget probes), the
 > worker registry as the accounting spine and completion-payload home, and a

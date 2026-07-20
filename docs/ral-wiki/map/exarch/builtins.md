@@ -81,8 +81,8 @@ There is no model-facing listing over the worker registry at all —
 `workers` was retired: a listing carrying live `Value::Handle`s cannot cross
 the host seam (`SerialValue`'s decoder rejects them), and returning the
 registry as a language value was mislayered in the first place — enumeration,
-reaping, and caps belong to the host and the lease layer, never this door
-([[decisions/260705_leases-and-budgets|leases-and-budgets]]). Legibility now
+reaping, and caps belong to the host and the lease layer, never this door.
+Legibility now
 splits by class instead:
 
 - An ordinary `spawn`-born worker (`class: Worker`) gets no listing at all.

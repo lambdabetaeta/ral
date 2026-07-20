@@ -6,8 +6,7 @@ one agent from another is its *position* — whether it has a parent.** A sub-ag
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
 from a value-snapshot of its parent's shell, with a narrowed capability ceiling
 and a `parent: Option<AgentId>` link. The thin `Fleet` holds what every node
-shares — the registry, the one event bus, the focused-agent handle, and whether a
-human is attached ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]).
+shares — the registry, the one event bus, and the transport engine.
 
 ## One predicate, fixed at construction
 
@@ -42,10 +41,10 @@ not decide who returns.
 
 "Returns a value" and "does not park for a human" remain the *same fact*, read in
 one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
-`ParkMode` (`Held` / `Focused` / `HeldByChildren` / `UntilCancelled` / `Quiesce`)
+`ParkMode` (`Held` / `Engaged` / `HeldByChildren` / `UntilCancelled` / `Quiesce`)
 derived on every wake: a conversing agent parks `Held` while its registry entry
-lives, a focused agent parks because the human is attached to it, and everyone
-else quiesces.
+lives, a returning agent a human has exchanged a message with parks `Engaged`
+bounded by the registry's idle lease, and everyone else quiesces.
 
 ## Uniform spawning: bounded by spawn fuel
 
@@ -58,7 +57,7 @@ than the parent holds (the parent's own `fuel` is untouched, so fan-out itself
 is unbounded), and a `fuel == 0` agent's spawn call is refused at the desk
 with the exhaustion text: a delegation chain terminates by refusal a fixed
 number of generations down rather than recursing forever
-([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
+(uniform-agent-nodes, superseding the
 depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
 that decision left open).
@@ -124,15 +123,31 @@ descendants: a parent may choose to abandon unfinished children, but it cannot
 leave live agents registered beneath a settled node. This is not a `/clear`;
 unrelated siblings keep their generation and may still settle normally.
 
-## Focus: the dynamic human attachment
+## Focus is presentation; the idle lease is lifecycle
 
-The human is *attached* to exactly one agent at a time — the **focused** node —
-and attachment is dynamic. The `Fleet` owns `focus`; `TAB` moves it (the TUI),
-the focused agent receives the human's typed lines as fresh turns and owns `Esc`,
-and a de-focused idle agent reaps at quiescence (it is the daemon by another name
-if it lingers). Conversing with a sub-agent is real but ephemeral: once it goes
-idle and you `TAB` away it reaps, and once it `reply`s it is gone — its tab is a
-readable transcript, not a resumable conversation.
+The human's `TAB` cursor is a plain `AgentId` the TUI moves — purely
+presentational, read by neither the registry nor `park_mode`. `TAB`bing to a
+tab lets it receive the human's typed lines and own `Esc`, but looking at a
+tab keeps nothing alive. What keeps a non-conversing returning child alive
+past quiescence is a renewable **idle lease** the registry arms at birth
+(`Registration::lease`, one hour), not the human's attention: the one thing
+that renews it is a delivered human message (`AgentRegistry::steer`), so a
+child a human is actually steering parks `Engaged` and keeps its lease fresh,
+while a lease that is never renewed fires at exactly its birth-seeded hour. A
+`/branch` child and the trunk carry no lease at all and so never idle-reap.
+Neither `TAB`, nor the model-facing `message` builtin, nor a `/resources`
+probe renews anything — enumeration and attention alone can never immortalise
+a child.
+
+A leased child that is parked waiting for input and has sat idle for five
+minutes demotes out of the `TAB` cycle and the tab bar into a compact matrix
+strip, carrying its idle age — a per-frame projection off the registry's
+exchange clock, never stored state, and root is never a candidate. `/focus
+<name>` reaches a demoted tab directly and re-promotes it into the cycle; the
+gesture is presentation only and never touches the lease. When the lease
+itself runs out, the reaper cancels the whole subtree at the bound whether or
+not a human happens to be looking at it — mere focus was never immunity, and
+there is no `TAB`-driven reap to begin with.
 
 ## Peer messages: marked notes, not shared memory
 
@@ -151,7 +166,7 @@ the same way.
 tab's current turn, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
 but only behind the **lifecycle terminators**: the `agent-cancel` builtin, the
-per-agent ceiling reaper, and `/clear`. They share one registry cascade — the
+per-agent idle-lease reaper, and `/clear`. They share one registry cascade — the
 registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link), so
 terminating a mid-tree agent reaps everything below it; `/clear` additionally bumps
 the generation, dropping a late result or deferred surface batch from a cleared
@@ -210,8 +225,6 @@ over one shell tool),
 [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
 (the one record-spec `agent` verb, names as fleet-unique identity, schedule
 labels, commitments retired),
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]
-(the Fleet/Agent split, the `parent` collapse, dynamic focus),
 [[design/grant|grant]] (the capability lattice the meet runs in),
 [[map/exarch/tools|tools]], [[map/exarch/agent|agent]],
 [[map/exarch/policy|policy]],

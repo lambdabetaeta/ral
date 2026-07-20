@@ -12,14 +12,13 @@ canonical [[map/exarch/frontend|event log]] (`AgentLog`), the persistent
 canonical turn and probe vocabulary,
 [[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
 `Capabilities`, its own inbox, nudger, `cancel::Token`, an owned
-hot-swappable `ProviderHandle`, the shared focused-agent handle
-(`focus: Arc<AtomicU64>`, `NO_FOCUS` sentinel in `bus.rs`), and the inherited
+hot-swappable `ProviderHandle`, and the inherited
 `interactive` flag. What every node *shares* — the registry, the one
 [[map/exarch/frontend|`FleetBus`]], and the transport `Engine` — lives on the
-thin [[#The Fleet|`Fleet`]], not on the node
-([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]). There is no
+thin [[#The Fleet|`Fleet`]], not on the node. There is no
 `Session`, no `is_root`: every distinction reduces to **position in the tree**,
-read from `parent: Option<AgentId>` together with `interactive`/`focus`. Output
+read from `parent: Option<AgentId>` together with `interactive` and the
+registry's own engagement state. Output
 caps are fixed `agent/digest.rs` constants, not per-agent state.
 
 The **trunk** is the parent-less node (`parent = None`). An `interactive` node
@@ -33,7 +32,7 @@ never an `is_root` branch:
   conversing(a) =  a.interactive ∧ ¬returns(a)
   park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /clear or /close reaped it
                    Held           if conversing(a)                          // immune to cancellation
-                   Focused        if focus = a.id                           // parks, but a terminate cause still ends it
+                   Engaged        if a.parent ∧ returns(a) ∧ registry.engaged(a)  // parks, but a terminate cause still ends it
                    HeldByChildren if a has live descendants
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
@@ -47,14 +46,14 @@ for the self-wakeup family, so no agent is shown a verb the desk would
 certainly refuse) — the single source of truth, so the nudge layer, parking,
 reply availability, and the advertised vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
-`park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `Focused` /
+`park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `Engaged` /
 `HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus.rs`) is the `should_park`
-verdict: a present human holds the node parked — a conversing node as `Held`,
-immune to cancellation; the agent the human merely `TAB`bed to as `Focused`,
-the same wait except a terminate-class cause still ends it, since focus is not
-a conversation — unless the registry no longer lists it, since an unlisted
-conversing node is unreachable and parking it would be a zombie; live
-descendants hold it
+verdict: a conversing node parks `Held`, immune to cancellation; a returning,
+parented agent the registry has recorded a human exchange with parks
+`Engaged`, the same wait except a terminate-class cause still ends it, since
+an exchange is not a conversation — unless the registry no longer lists it,
+since an unlisted conversing node is unreachable and parking it would be a
+zombie; live descendants hold it
 until their results drain; a live self-schedule holds it until cancelled;
 otherwise it terminates at quiescence — the one-shot contract a headless trunk
 and a settled sub-agent both satisfy. `--chat` builds the trunk with no system
@@ -71,8 +70,8 @@ Three nested loops, the same for trunk and child alike:
   is reached through the registry cascade, not the slot. Each pass pulls the next
   turn from this agent's [[map/exarch/frontend|inbox]] via
   `next_or_idle(|| self.park_mode(), …)`, which **re-evaluates the park verdict
-  on every `Condvar` wake** — so a `TAB` that de-focuses this agent (and notifies
-  its inbox) flips it from `Held` to `Quiesce` and it reaps. A genuine
+  on every `Condvar` wake** — so the idle lease's terminate-cause cancel, or the
+  last live child settling, is seen on the very next wake. A genuine
   turn boundary resets the nudge latches and clears the sticky cancel token
   (`cancel::Token::reset`), so a prior turn's Esc cannot bleed into the next; a
   self-nudge is the same turn continuing and resets neither. `reply` hard-
@@ -131,8 +130,8 @@ chain's idle or backstop bound on a running worker, or the retention sweep
 expiring a settled entry's unclaimed result — rather than one an eliminator
 observed away. Transcript and TUI only — the rendered one-liner is
 [[map/exarch/cards|cards]]'s `reap_card`, the completion card's sibling — never
-model-facing, since delivery of a reap to the model itself is deferred
-([[decisions/260705_leases-and-budgets|leases-and-budgets]]). What `drive`'s
+model-facing, since delivery of a reap to the model itself is deferred.
+What `drive`'s
 top still runs, each pass its own ready boundary: `reconcile_service_pins`
 (the protected `services` pin is (re-)born or dies here), `reap_bindings`
 (below), and `check_disk_warn`.
@@ -177,7 +176,8 @@ binding-ledger figures read as *data* through the transport's Enquiry desk
 (`probe_workers` and its sibling probes,
 [[decisions/260706_enquiry-channel|enquiry-channel]]), plus inbox depth per
 source, the event log's mirror length and history bytes, log-dir and scratch
-disk walked at invocation, and the sub-agent ceiling as a lease row — and
+disk walked at invocation, and the sub-agent idle lease as two rows (nearest
+time-to-reap, and the demote threshold) — and
 `emit_resources` posts one `Kind::Resources`
 carrying the raw rows beside their rendered card — the `Kind::Io` pairing,
 so `transcript.jsonl` records the figures. The frontend appends the rows
@@ -186,9 +186,8 @@ neither half reaches across a thread. Probing never mutates and never
 renews a lease — enumeration is not observation — and the fold is never
 model-facing.
 
-The inbox's per-source depth is a real quota now, not just a probe figure
-([[decisions/260705_leases-and-budgets|leases-and-budgets]], "Inboxes get
-quotas without silent loss"). `Mailbox`/`Inbox::push` return
+The inbox's per-source depth is a real quota now, not just a probe figure.
+`Mailbox`/`Inbox::push` return
 `Result<(), InboxReject>` from one shared rule (`Shared::try_push`), split
 by source: the three idempotent sources (`user`, `schedule`, `nudge`)
 always succeed, coalescing instead of growing the queue — a
@@ -207,8 +206,7 @@ caller left to return to — records straight to the durable
 `transcript.jsonl` instead of the live bus, so holding the rejection report
 never extends a bus sender's lifetime past the turn that queued it.
 
-The headless-completion gate is gone with `expect_action`
-([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag
+The headless-completion gate is gone with `expect_action`: the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
 remain — `must_reply` for a returning agent (`returns()`), `continue` on
 truncation, empty/early-stop repair, the one-shot latch that turns a headless
@@ -243,17 +241,20 @@ disagree about what is shared.
   headless trunk leaves at quiescence; a sub-agent leaves on settle. There is no
   human-less daemon: nothing lingers without a present human, running work, or a
   bounded self-schedule.
-- **Focus is dynamic.** The shared `focus: Arc<AtomicU64>` handle (minted by the
-  trunk, cloned to every node and the frontend) names the attached agent;
-  `NO_FOCUS` (`AgentId::MAX`, `bus.rs`) is the sentinel — off the TUI it never
-  moves, and in
-  the TUI it means the frontend resolves focus to the trunk. `TAB` moves it
-  (the TUI), notifying the previous and new focused inboxes; the focused agent
-  receives the human's typed lines as fresh turns and owns `Esc`. A de-focused
-  idle agent wakes, finds `park_mode` now `Quiesce`, and reaps. A returning
-  agent's `reply` cancels its proper descendants, ends it even
-  mid-conversation, and the TUI then **falls focus back to its parent**,
-  recursing to the trunk.
+- **The idle lease is dynamic; focus is not.** A leased child
+  (`Registration::lease`, armed only for a returning sub-agent) is reaped once
+  its idle span — measured off the registry's last-human-exchange clock,
+  seeded at birth — exceeds its bound: the reaper (`fleet/registry.rs`'s
+  `lease_fire`) re-arms itself for the remaining margin on every fire that
+  finds the entry still live and under bound, and cascades the subtree with
+  `CancelCause::Deadline` once it is not. The one thing that renews the clock
+  is a delivered human message (`AgentRegistry::steer`); nothing else does —
+  not the TUI's `TAB` cursor, a plain, presentation-only `AgentId` local to
+  the frontend (`tui::tabs::Tabs::focus`) that neither the registry nor
+  `park_mode` ever reads, not the model-facing `message` builtin, not a
+  `/resources` probe. A returning agent's `reply` cancels its proper
+  descendants and ends it even mid-conversation, regardless of which tab the
+  human's cursor sits on.
 
 ## Cancellation cascades the subtree, across both layers
 
@@ -340,7 +341,7 @@ shrink to summary + suffix, heap reclamation rather than just a narrower
 read-time view. `events.json` is append-only and untouched either way: a
 failed compaction (tool results pending) drops nothing, and a successful
 one never rewrites what is already on disk
-([[decisions/260705_leases-and-budgets|leases-and-budgets]], "Compaction
+(leases-and-budgets, "Compaction
 physically drops the model prefix in memory").
 
 `Agent::check_disk_warn` is the disk half of the same ADR ("Disk: report
@@ -419,8 +420,7 @@ threads to [[map/exarch/shell-eval|shell-eval]].
 
 [[design/agents|agents]] (the role model these nodes realise — one `parent`
 predicate, the conversing trunk vs returning agents),
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] (the Fleet/Agent
-split this page maps), [[map/exarch/tools|tools]] (the one `ral` tool the
+[[map/exarch/tools|tools]] (the one `ral` tool the
 provider sees) and [[map/exarch/builtins|builtins]] (the harness verbs the
 desk answers), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
 registry, and the two frontends), [[map/exarch/provider|provider]],

@@ -215,7 +215,7 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
   the same lock-free pattern as ral's — and a genuine turn boundary
   `Token::reset`s the flag, so a prior turn's Esc never bleeds into the next.
 - **The registry cascade is two-layer.** `AgentRegistry::cancel` (behind
-  `agent-cancel`, the per-agent ceiling, Esc on a focused subtree, and the
+  `agent-cancel`, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
   session's `DurableRoot` (`Shell::cancel_handle`, held per registry entry). The
   token stops the drive loop between steps; the root cancel unwinds a `ral` eval

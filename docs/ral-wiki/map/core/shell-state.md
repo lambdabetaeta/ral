@@ -95,8 +95,7 @@ field name *is* the invariant** — joined by `Shell`
   worker operation on `host.rs`'s surface: the host's `/clear` arm, it fires
   every entry's cancel scope and resets both ledgers wholesale — entries and
   pending notices alike — since explicit destruction outranks every lease,
-  the durable class included
-  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+  the durable class included.
   `WorkerEntry` also implements the small `Resident` signature
   (`types/resident.rs`, [[design/residency|residency]]) — designator,
   population, capability kind, lease row, state label, cancel — so the
@@ -128,9 +127,8 @@ field name *is* the invariant** — joined by `Shell`
   `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
   `Lambda`/`Block`/`Handle` a small fixed constant, never descended) meets it
   queues a `LargeBindingNotice` regardless of baseline status or idle age —
-  residency and lifetime are independent axes
-  ([[decisions/260705_leases-and-budgets|leases-and-budgets]] §"Shell
-  residency is lexical state plus host leases"). `Shell::leased_binding_count`
+  residency and lifetime are independent axes.
+  `Shell::leased_binding_count`
   and `Shell::take_large_binding_notices` round out the accessor surface, the
   first a probe figure, the second a boundary drain.
 

@@ -9,7 +9,7 @@ floor: a model stuck delegating "redo this" to a fresh child has no reason to
 ever stop, and each hop pays a full session boot, a detached OS thread, and a
 place in the fleet registry.** This decision gives every agent a `fuel: u32`
 that a fork spends one unit of on its child; once an agent's fuel reaches zero,
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]'s `Gate` mechanism
+uniform-agent-nodes's `Gate` mechanism
 removes the spawn tools from its view. This refines, rather than reverses,
 that decision's central claim — no agent is privileged by special-case code,
 only by tree position — because fuel *is* a pure function of position
@@ -17,7 +17,7 @@ only by tree position — because fuel *is* a pure function of position
 
 ## Context
 
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] deliberately
+uniform-agent-nodes deliberately
 deleted a depth-1 spawn cap: "every agent may spawn, so the spawn tree is
 unbounded in depth rather than capped at one level." Nothing since has bounded
 the other axis — a chain of `amnemon`/`mnemon` calls, each one a genuine
@@ -95,7 +95,6 @@ different axes and do not compose into a depth limit.
 
 ## See also
 
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] (the unbounded-depth
-claim this refines), [[decisions/260617_async-agent-tool|async-agent-tool]] (the
+[[decisions/260617_async-agent-tool|async-agent-tool]] (the
 earlier, fully-superseded depth-1 cap), [[design/agents|agents]],
 [[map/exarch/agent|agent]], [[map/exarch/tools|tools]].

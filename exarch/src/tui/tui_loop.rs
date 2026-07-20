@@ -7,7 +7,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -52,11 +52,10 @@ impl Tui {
         stderr_log: &Path,
         vi: bool,
         inbox: Inbox,
-        focus: Arc<AtomicU64>,
         agents: AgentRegistry,
     ) -> io::Result<Self> {
         let guard = TerminalGuard::enter(stderr_log)?;
-        let app = App::new(root_id, root_log_dir, vi, inbox, focus, agents);
+        let app = App::new(root_id, root_log_dir, vi, inbox, agents);
         Ok(Self { guard, app })
     }
 }
@@ -144,16 +143,14 @@ pub fn run(
         &stderr_log,
         vi,
         session.inbox(),
-        session.focus_handle(),
         session.agents.clone(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
     tui.app.update_live_model(provider);
     // The fleet: a session-lived bus over the trunk's inbox, plus the shared
     // registry and transport engine.  Input, the queued-user strip, async-agent
-    // results, and the worker's drive loop all read and write this one inbox;
-    // `TAB` and the focused agent's park predicate share one focus handle,
-    // both already threaded into `tui.app` above.
+    // results, and the worker's drive loop all read and write this one inbox,
+    // already threaded into `tui.app` above.
     let fleet = Fleet::new(
         session.agents.clone(),
         FleetBus::session(&session.inbox()),
@@ -193,8 +190,8 @@ pub fn run(
     // The UI thread's command context: the handles `route_submit` and the
     // `/model` path service a submitted line against, threaded as one.  The
     // registry is the same shared map the worker mutates, so an agent it
-    // registers is visible to the UI at once — for steering, `wake`, and a
-    // `/model` swap on the focused agent's handle.
+    // registers is visible to the UI at once — for steering and a `/model`
+    // swap on the focused agent's handle.
     let mut cmd_ctx = CommandCtx {
         agents: &fleet.agents,
         store,
@@ -249,8 +246,8 @@ pub fn run(
 }
 
 /// The long-lived handles the UI thread services a submitted line against: the
-/// fleet registry (for steering, `wake`, and the focused agent's provider
-/// handle a `/model` swap targets), the credential store and model catalog the
+/// fleet registry (for steering and the focused agent's provider handle a
+/// `/model` swap targets), the credential store and model catalog the
 /// `/model` picker reads (and `/login` writes into, admitting a freshly
 /// signed-in account), the static session info, and the recording emitter a
 /// UI-caused operational event (a model switch, a sign-in) rides.  Bundled so
@@ -273,10 +270,10 @@ pub struct CommandCtx<'a> {
 /// App, a submitted line is routed by [`route_submit`] (view commands run here;
 /// agent commands and plain prompts go onto the focused agent's inbox), and Esc
 /// / Ctrl-C interrupt the focused tab's current turn (never a cascade, never a
-/// kill).  A `TAB` that moves
-/// focus `wake`s the de-focused and newly-focused agents so each re-evaluates
-/// its park verdict.  Returns when the worker finishes (a `/quit`), draining its
-/// final events for one last frame.
+/// kill).  A `TAB` that moves focus updates the live-model chrome to the
+/// newly focused agent's provider; no agent-side lifecycle depends on focus,
+/// so nothing else needs to be woken by the move.  Returns when the worker
+/// finishes (a `/quit`), draining its final events for one last frame.
 fn ui_loop(
     tui: &mut Tui,
     bus: &FleetBus,
@@ -308,8 +305,8 @@ fn ui_loop(
     let mut prev_waiting = tui.app.focused_waiting();
     loop {
         // Focus as of the start of this iteration; compared at the end so a
-        // `TAB`, or a focused agent ending mid-drain, wakes the agents whose
-        // park verdict just changed.
+        // `TAB`, or a focused agent ending mid-drain, updates the live-model
+        // chrome to whatever is now focused.
         let prev_focus = tui.app.tabs.focused();
         // The explicit-done completion contract (shared with the headless
         // `Sink::drive`): drain a batch, then stop only when the worker is
@@ -428,21 +425,13 @@ fn ui_loop(
             }
         }
         // A focus change this iteration (a `TAB`, or a focused agent ending)
-        // wakes both the de-focused and newly-focused agents, so each
-        // re-evaluates its park verdict: the de-focused, unscheduled, idle one
-        // flips to `Quiesce` and reaps; the newly-focused one stays `Held`.
+        // updates the live model chrome to reflect the newly focused agent's
+        // provider — the banner, status bar, and ctx% gauge must follow
+        // focus.  Purely presentational: no agent-side lifecycle reads focus
+        // any more, so there is nothing else to wake here.
         let now_focus = tui.app.tabs.focused();
         if now_focus != prev_focus {
             dirty = true;
-            if let Some(mb) = ctx.agents.mailbox(prev_focus) {
-                mb.wake();
-            }
-            if let Some(mb) = ctx.agents.mailbox(now_focus) {
-                mb.wake();
-            }
-            // Update the live model chrome to reflect the newly focused
-            // agent's provider — the banner, status bar, and ctx% gauge
-            // must follow focus.
             if let Some(ph) = ctx.agents.provider(now_focus) {
                 tui.app.update_live_model(&ph.current());
             }

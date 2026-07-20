@@ -22,7 +22,7 @@ use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
 use crate::bus::card::IoEvent;
-use crate::fleet::registry::AgentRegistry;
+use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
 use crate::provider::{Provider, Usage};
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{
@@ -32,10 +32,9 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::{
+    collections::HashMap,
     io::{self},
     path::{Path, PathBuf},
-    sync::Arc,
-    sync::atomic::AtomicU64,
     time::Duration,
 };
 
@@ -135,10 +134,9 @@ impl App {
         root_log_dir: &Path,
         vi: bool,
         inbox: Inbox,
-        focus: Arc<AtomicU64>,
         agents: AgentRegistry,
     ) -> Self {
-        let tabs = Tabs::new(root_id, root_log_dir, focus);
+        let tabs = Tabs::new(root_id, root_log_dir);
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -205,6 +203,33 @@ impl App {
         self.agents
             .mailbox(self.tabs.focused())
             .is_none_or(|mb| mb.waiting_for_input())
+    }
+
+    /// Idle-and-parked sub-agent tabs due for demotion out of the TAB cycle
+    /// and tab bar into the compact matrix strip, each paired with its
+    /// current idle span — a per-frame projection off the registry's
+    /// exchange clock, never stored state. `waiting_for_input` keeps a
+    /// mid-run tab in the cycle regardless of how stale its exchange clock
+    /// is; excluding the focused id means a tab leaves the cycle only the
+    /// frame after `TAB` moves off it. Root is never a member.
+    pub(super) fn demoted(&self) -> HashMap<AgentId, Duration> {
+        let root = self.tabs.root();
+        let focused = self.tabs.focused();
+        self.tabs
+            .matrix_rows()
+            .into_iter()
+            .filter_map(|(id, _)| {
+                if id == root || id == focused {
+                    return None;
+                }
+                let waiting = self
+                    .agents
+                    .mailbox(id)
+                    .is_some_and(|mb| mb.waiting_for_input());
+                let idle = self.agents.idle(id)?;
+                (waiting && idle >= AGENT_DEMOTE_IDLE).then_some((id, idle))
+            })
+            .collect()
     }
 
     /// Mutable access to the active `/model` picker, for the REPL's picker
@@ -659,7 +684,8 @@ impl App {
             #[allow(clippy::collapsible_match)]
             KeyCode::Tab => {
                 if self.tabs.len() > 1 {
-                    self.tabs.focus_next();
+                    let demoted = self.demoted();
+                    self.tabs.focus_next(&demoted);
                 }
             }
             // Up/Down walk the prompt history, but only from the

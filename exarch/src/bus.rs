@@ -46,13 +46,6 @@ use std::time::{Duration, Instant};
 /// content hash.
 pub type AgentId = u64;
 
-/// The focus sentinel: no agent is attached.
-///
-/// Off the TUI the focus handle holds this for the whole run (there is no
-/// `TAB`); in the TUI it means the frontend resolves focus to the trunk.
-/// Distinct from any real [`AgentId`].
-pub const NO_FOCUS: AgentId = AgentId::MAX;
-
 /// When a message in the inbox may be drained into the model's context.
 ///
 /// The boundary is a *per-message* property, not a global rule.  Everything
@@ -75,8 +68,10 @@ pub enum Boundary {
 }
 
 /// How [`Inbox::next_or_idle`] should treat an empty inbox — the computed
-/// `should_park` verdict, re-evaluated on every wake (focus moves under a
-/// parked agent, and a schedule can arm or disarm).
+/// `should_park` verdict.
+///
+/// Re-evaluated on every wake: a human exchange engages a parked agent, a
+/// live child settles, or a schedule can arm or disarm.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParkMode {
     /// A human is having a live conversation with this agent — the
@@ -86,13 +81,15 @@ pub enum ParkMode {
     /// human line.
     Held,
     /// This agent does not converse — it returns to a parent, or runs
-    /// headless — but the human has `TAB`bed focus to it to watch it work.
-    /// Parks on an empty queue exactly like [`Self::Held`], but a
-    /// *terminate*-cause cancellation (`agent-cancel`, the ceiling) still
-    /// ends it at once: mere focus is not immunity, or a `HeldByChildren`
-    /// parent waiting on this very agent would never receive the cancelled
-    /// result it is owed.
-    Focused,
+    /// headless — but a human has exchanged a message with it: the registry
+    /// carries the exchange, not the TUI's focus cursor.  Parks on an empty
+    /// queue exactly like [`Self::Held`], bounded by the registry's idle
+    /// lease rather than any cancellation immunity — a *terminate*-cause
+    /// cancellation (`agent-cancel`, the lease's own expiry) still ends it
+    /// at once: an exchange is not immunity, or a `HeldByChildren` parent
+    /// waiting on this very agent would never receive the cancelled result
+    /// it is owed.
+    Engaged,
     /// No human, but this agent has live children still running (async
     /// `agent`s it launched).  Each will deliver its result up this agent's
     /// own inbox when it settles, so park — a headless root waiting on its
@@ -508,7 +505,7 @@ struct Shared {
     queue: Mutex<VecDeque<InboxMsg>>,
     signal: Condvar,
     /// True while the consumer is parked in [`ParkMode::Held`] or
-    /// [`ParkMode::Focused`] on an empty queue: the human-facing yield point.
+    /// [`ParkMode::Engaged`] on an empty queue: the human-facing yield point.
     /// A producer clears it before waking the consumer, so frontends can
     /// distinguish "prompt is editable" from "the root is still working"
     /// without minting a presentation event.
@@ -688,13 +685,6 @@ impl Mailbox {
     pub fn push_user(&self, prompt: String) {
         self.push(InboxMsg::UserSteering(prompt))
             .expect("UserSteering is idempotent and never rejects");
-    }
-
-    /// Wake a parked consumer without enqueuing a message, so it re-evaluates
-    /// its park verdict — the `TAB` focus-change signal the frontend sends
-    /// through the registry's mailboxes.
-    pub fn wake(&self) {
-        self.shared.wake();
     }
 
     /// Whether this queue's consumer is parked at a human-input boundary. The
@@ -924,10 +914,11 @@ impl Inbox {
     /// - [`ParkMode::Held`] — a human is having a live conversation with this
     ///   agent.  Parks, ignoring cancellation entirely: an Esc cancels the
     ///   current *turn*, not the agent.
-    /// - [`ParkMode::Focused`] — this agent does not converse, but the human
-    ///   has `TAB`bed to it.  Parks on an empty queue exactly like `Held`
-    ///   above, but a *terminate*-cause cancellation still ends it at once —
-    ///   mere focus grants no immunity.
+    /// - [`ParkMode::Engaged`] — this agent does not converse, but a human has
+    ///   exchanged a message with it.  Parks on an empty queue exactly like
+    ///   `Held` above, but a *terminate*-cause cancellation still ends it at
+    ///   once — the exchange grants no immunity, only the registry's idle
+    ///   lease bounds the wait.
     /// - [`ParkMode::HeldByChildren`] — live children may still deliver a
     ///   result up this inbox.  Parks like [`ParkMode::UntilCancelled`]; a
     ///   cancellation terminates at once, and it falls through to `Quiesce`
@@ -935,14 +926,15 @@ impl Inbox {
     /// - [`ParkMode::UntilCancelled`] — a self-schedule may fire.  Parks, but a
     ///   cancellation terminates at once.
     /// - [`ParkMode::Quiesce`] — nothing will feed this agent again: returns
-    ///   `None`, so a de-focused, unscheduled agent (and a headless trunk)
-    ///   terminates at quiescence.
+    ///   `None`, so an un-engaged idle returning child (and a headless trunk)
+    ///   terminates at quiescence, delivering its digest upward through the
+    ///   worker epilogue.
     ///
-    /// `park` is re-evaluated each iteration, so a `TAB` that de-focuses a
-    /// parked agent (which [`wake`](Self::wake)s its inbox) flips `Held` or
-    /// `Focused` to `Quiesce` and the agent terminates.  A push wakes the park
-    /// at once through the condvar; a cancellation does not notify, so a
-    /// non-`Held` park re-checks `cancel` every [`PARK_POLL`].
+    /// `park` is re-evaluated each iteration, so a lease expiry's
+    /// terminate-cause cancel, or the last live child settling, is seen on
+    /// the very next wake.  A push wakes the park at once through the
+    /// condvar; a cancellation does not notify, so a non-`Held` park
+    /// re-checks `cancel` every [`PARK_POLL`].
     ///
     /// Two orderings carry the loop's correctness.  The verdict runs *under
     /// the queue mutex*, so a push or a bare [`wake`](Self::wake) can never
@@ -964,8 +956,8 @@ impl Inbox {
             // Every park but a genuinely conversing `Held` terminates the
             // instant a *terminate*-cause cancel trips — `agent-cancel`, the
             // ceiling, or `/clear` means stop now, dropping any queued
-            // messages; `Focused` gets no immunity from mere TAB focus.  An
-            // *interrupt*-cause cancel is not a terminate: it drops the
+            // messages; `Engaged` gets no immunity from the exchange alone.
+            // An *interrupt*-cause cancel is not a terminate: it drops the
             // in-flight turn but the agent re-parks.  Only a live human
             // conversation (`Held`) ignores cancellation entirely: an Esc
             // interrupts a turn, not the agent.
@@ -986,7 +978,7 @@ impl Inbox {
                 return None;
             }
             self.shared.waiting_for_input.store(
-                matches!(mode, ParkMode::Held | ParkMode::Focused),
+                matches!(mode, ParkMode::Held | ParkMode::Engaged),
                 Ordering::Release,
             );
             let (guard, _timeout) = self
@@ -999,9 +991,7 @@ impl Inbox {
     }
 
     /// Wake a parked [`next_or_idle`](Self::next_or_idle) without enqueuing a
-    /// message, so it re-evaluates its `park` verdict.  The frontend calls it
-    /// on a `TAB` focus change, on both the de-focused and newly-focused
-    /// agents, so a de-focused idle agent observes the change and reaps.
+    /// message, so it re-evaluates its `park` verdict.
     pub fn wake(&self) {
         self.shared.wake();
     }
@@ -2270,15 +2260,15 @@ mod tests {
         );
     }
 
-    /// `ParkMode::Focused` — a non-conversing agent the human has merely
-    /// `TAB`bed to — grants no cancellation immunity: `agent-cancel`/the
-    /// ceiling firing while the human happens to be looking at an idle child
-    /// must still kill it, or its `HeldByChildren` parent would sit waiting
-    /// on a cancelled-result delivery that never comes.  Contrast
+    /// `ParkMode::Engaged` — a non-conversing agent a human has exchanged a
+    /// message with — grants no cancellation immunity: `agent-cancel`/the
+    /// lease expiring while the exchange is recent must still kill it, or
+    /// its `HeldByChildren` parent would sit waiting on a cancelled-result
+    /// delivery that never comes.  Contrast
     /// [`held_park_survives_a_terminate_cause`], where a *genuine*
     /// conversation stays immune.
     #[test]
-    fn focused_park_dies_on_a_terminate_cause_despite_human_focus() {
+    fn engaged_park_dies_on_a_terminate_cause_despite_the_exchange() {
         let inbox = Inbox::new();
         let observed = Arc::new(AtomicBool::new(false));
         let worker_observed = observed.clone();
@@ -2288,7 +2278,7 @@ mod tests {
             inbox.next_or_idle(
                 || {
                     worker_observed.store(true, Ordering::Release);
-                    ParkMode::Focused
+                    ParkMode::Engaged
                 },
                 &worker_token,
             )
@@ -2302,12 +2292,12 @@ mod tests {
         token.cancel(ral_core::process::CancelCause::Explicit);
         assert!(
             handle.join().expect("cancelled worker joins").is_none(),
-            "a terminate cause ends a Focused park despite human focus"
+            "a terminate cause ends an Engaged park despite the exchange"
         );
     }
 
     /// The complement: a genuinely conversing [`ParkMode::Held`] stays immune
-    /// even to a terminate cause — the split introduced for `Focused` must not
+    /// even to a terminate cause — the split introduced for `Engaged` must not
     /// weaken `Held`'s existing immunity for a live human conversation.  Proved
     /// the same way [`non_human_park_survives_an_interrupt`] proves an
     /// interrupt is ignored: the only remaining exit is a pushed turn, so

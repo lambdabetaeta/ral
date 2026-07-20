@@ -4,7 +4,7 @@ status: active
 
 # A handle is the evidence of detachment
 
-> Amended by [[decisions/260705_leases-and-budgets|leases-and-budgets]]: the
+> Amended by leases-and-budgets: the
 > death-clock's creation-age ceiling becomes an idle-observation lease over a
 > universal worker registry, and "detached workers are unmanaged by design" is
 > retired in favour of *unmanaged by default*. The root/foreground split, the

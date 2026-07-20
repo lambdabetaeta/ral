@@ -31,8 +31,7 @@ batch ral hosts) installs it while an agent host omits it
 `SERVICE_BUILTIN` wraps `concurrency::builtin_service` / `scheme::service` so
 the agent host (exarch), whose lease frame reaps ordinary workers, installs
 the durable-birth verb while the ral hosts — which grant no lease, so every
-spawn of theirs already lives until cancel or exit — omit it
-([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+spawn of theirs already lives until cancel or exit — omit it.
 
 Bodies are grouped by concern, one submodule each:
 
@@ -82,8 +81,7 @@ Bodies are grouped by concern, one submodule each:
   birth arms it — `service` registers `Durable` and arms nothing, so no
   reaper entry ever exists for it; the absent chain *is* the durable
   policy, whose only bounds are the handle's own `cancel`, the host's
-  `/clear`, and process exit
-  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+  `/clear`, and process exit.
   The spawn door also enforces the frame's admission cap
   (`TurnState::worker_cap`): a birth of any class *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
@@ -112,8 +110,7 @@ Bodies are grouped by concern, one submodule each:
   ([[map/core/shell-state|shell-state]]); `await`, `race`'s winner and
   its cancelled losers, and a settled `poll` remove the entry from whichever
   shell observes it, an explicit `cancel` removes it too, and a pending
-  `poll` or a bare listing never touches the registry
-  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]). A `Handle` is
+  `poll` or a bare listing never touches the registry. A `Handle` is
   a resident, process-local reference: it cannot cross the pipeline-stage helper
   wire, so returning one from a helper-evaluated stage raises the wire diagnostic
   *"cannot return a handle from sandboxed evaluation"* (`core/src/serial.rs`)

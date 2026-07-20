@@ -4,7 +4,7 @@ status: proposed
 
 # A wakeup schedules the agent, not a worker
 
-> [[decisions/260705_leases-and-budgets|leases-and-budgets]] and
+> leases-and-budgets and
 > [[decisions/260705_session-ledger|session-ledger]] dissolve this page's
 > `ScheduleId` pin against the binding reaper, and the open
 > compaction-interaction question with it: the schedules registry is the

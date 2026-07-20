@@ -13,6 +13,7 @@ use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
 use super::viewport;
 use crate::bus::{InboxMsg, Mailbox};
+use crate::fleet::registry::AgentRegistry;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ProviderKind};
 use ral_core::path::sigil::expand_path_prefix;
@@ -84,6 +85,12 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: None,
         help: "Close this branch (its tab and any agents it spawned).",
+    },
+    SlashCommand {
+        name: "/focus",
+        aliases: &[],
+        arg: Some("<name>"),
+        help: "Jump focus to a tab by name — reaches one TAB skips (demoted).",
     },
     SlashCommand {
         name: "/compact",
@@ -252,6 +259,24 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     }
 }
 
+/// Jump focus to the live tab named `arg` — the gesture that reaches a
+/// demoted tab, since `TAB` no longer cycles onto one. Resolves through the
+/// registry, the same way `agent-cancel`/`message` resolve a name, then
+/// checks the resolved id actually has a tab before landing on it. Never
+/// renews the lease: focusing is enumeration/attention, not the human
+/// exchange that does.
+pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
+    let id = app.tabs.focused();
+    if arg.is_empty() {
+        app.push_error(id, "usage: /focus <name>");
+        return;
+    }
+    match agents.resolve_name(arg).filter(|&t| app.tabs.is_tab(t)) {
+        Some(target) => app.tabs.set_focus(target),
+        None => app.push_error(id, &format!("no live tab named {arg}")),
+    }
+}
+
 /// Post a session command to the worker's inbox, surfacing a rejection (the
 /// inbox at quota — vanishingly rare, since `Command` is user-paced, never a
 /// flood) to the UI rather than dropping it silently
@@ -279,10 +304,13 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
 /// Commands act on the trunk session alone.  On a sub-agent tab a recognized
 /// command cannot be serviced — sub-agents run under `NoControl`, and routing
 /// to the trunk's inbox would act on the wrong session — so it is refused on
-/// the focused tab rather than misfired.  A plain line instead steers the
-/// focused tab: the trunk's session inbox, or the focused sub-agent's mailbox
-/// (dropped if that agent died between focus and submit).  Errors and notes
-/// target the focused tab so they appear where the user typed.
+/// the focused tab rather than misfired.  `/close` and `/focus` are the two
+/// exceptions: neither touches a session inbox, so both run regardless of
+/// which tab is focused.  A plain line instead steers the focused tab: the
+/// trunk's session inbox, or the focused sub-agent's mailbox through
+/// `AgentRegistry::steer` (dropped if that agent died between focus and
+/// submit).  Errors and notes target the focused tab so they appear where
+/// the user typed.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -295,9 +323,10 @@ pub(super) fn route_submit(
     let focused = tui.app.tabs.focused();
     let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
-        // The one command admitted off the trunk: `/close` kills the focused
-        // branch and its subtree.  It must be matched before the "not available
-        // on this tab" refusal below, which would otherwise swallow it.
+        // `/close` kills the focused branch and its subtree — one of the two
+        // commands admitted off the trunk (`/focus` is the other, below).
+        // Both must be matched before the "not available on this tab"
+        // refusal, which would otherwise swallow them.
         Some((cmd, _)) if cmd.name == "/close" => {
             if focused == root {
                 tui.app
@@ -309,6 +338,11 @@ pub(super) fn route_submit(
                 ctx.agents.remove_subtree(focused);
             }
         }
+        // `/focus` is the other command admitted off the trunk: it moves
+        // focus itself, so it must run regardless of which tab it is typed
+        // from — matched before the "not available on this tab" refusal for
+        // the same reason `/close` is.
+        Some((cmd, arg)) if cmd.name == "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
         Some((cmd, _)) if focused != root => {
             tui.app
                 .push_error(focused, &format!("{} is not available on this tab", cmd.name));
@@ -364,8 +398,10 @@ pub(super) fn route_submit(
                 .push_error(focused, &format!("unknown command: {head} (see /help)"));
         }
         // A plain prompt steers the focused tab: the trunk's session inbox, or
-        // the focused sub-agent's mailbox.  An agent that died between focus and
-        // submit has no mailbox, so its line is dropped rather than reviving it.
+        // the focused sub-agent's mailbox, delivered through the registry's
+        // one steering door (`steer`), which also renews its idle lease. An
+        // agent that died between focus and submit has no live entry, so
+        // `steer` drops the line rather than reviving it.
         None => {
             if focused == root {
                 // A model-less launch parks the trunk with no model bound;
@@ -383,8 +419,8 @@ pub(super) fn route_submit(
                     return Ok(());
                 }
                 mailbox.push_user(text);
-            } else if let Some(mb) = ctx.agents.mailbox(focused) {
-                mb.push_user(text);
+            } else {
+                ctx.agents.steer(focused, text);
             }
         }
     }
@@ -427,6 +463,17 @@ mod tests {
         // A bare /export still matches, with the empty argument its handler
         // turns into the usage hint.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
+    }
+
+    #[test]
+    fn focus_consumes_its_name_argument() {
+        assert_eq!(
+            dispatch("/focus scout"),
+            Some(("/focus", "scout".to_string()))
+        );
+        // A bare /focus still matches, with the empty argument its handler
+        // turns into the usage hint.
+        assert_eq!(dispatch("/focus"), Some(("/focus", String::new())));
     }
 
     #[test]

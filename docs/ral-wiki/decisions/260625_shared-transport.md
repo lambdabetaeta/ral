@@ -8,7 +8,7 @@ status: active
 `Provider`. A `Provider` should be a cheap per-agent *selection* (provider id +
 model + max-tokens + tuning) that borrows one process-wide transport, so a
 `/model` switch or a divergent per-agent model is a re-selection, never a fresh
-runtime.** [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] already
+runtime.** uniform-agent-nodes already
 gave every `Agent` its own hot-swappable `ProviderHandle` (`agent.rs:63`,`192`),
 so per-agent (and per-provider) models are live: `/model` swaps the focused
 agent's handle alone (`tui.rs:3496`), a `fork` seeds the child's own handle from
@@ -158,5 +158,5 @@ Each step compiles.
   banner, status, and gauge cannot disagree, across `/model`, `/clear`, and `TAB`.
 - `SessionInfo` becomes a static snapshot only.
 
-See also [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]],
+See also
 [[map/exarch/provider|provider]], [[map/exarch/agent|agent]].

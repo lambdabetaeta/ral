@@ -27,7 +27,7 @@ independently, the wart this dissolves, why the deep fusion is refused — is
 - **Lease** — a clock, an idle bound, a renewal signal, an optional
   backstop — including the degenerate cases: "none; legibility is the
   bound" (a `service`) and "none; a human owns it" (a stopped job).
-  [[decisions/260705_leases-and-budgets|leases-and-budgets]] is where the
+  leases-and-budgets is where the
   lease machinery itself lives; residency is the frame it sits inside.
 - **Probe** — what the resident costs now, for the `/resources` fold.
 
@@ -149,8 +149,7 @@ stay typed and distinct without the system falling into pieces.
 ## See also
 
 [[decisions/260705_session-ledger|session-ledger]] (the ADR this page
-graduates from, and its full context/alternatives), [[decisions/260705_leases-and-budgets|leases-and-budgets]]
-(the worker registry, leases, and probes this generalises),
+graduates from, and its full context/alternatives),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (the handle model; the job-table separation this restates at the listing
 layer), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]

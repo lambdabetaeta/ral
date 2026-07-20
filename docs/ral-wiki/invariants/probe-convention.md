@@ -3,7 +3,7 @@
 **Every session-lived accumulator registers a probe: its name, current size,
 cap, and pressure policy. An accumulator without a probe is a review
 defect.** The rule turns
-[[decisions/260705_leases-and-budgets|leases-and-budgets]]' prose principle —
+leases-and-budgets' prose principle —
 every session-lived thing must say what bounds it — into a checkable
 convention: a budget that cannot be inspected will be debugged by restarting
 the process.
@@ -43,9 +43,7 @@ The hard rule for new code: a session-lived accumulator lands together with
 its probe row in the `/resources` fold, and its row's policy names how the
 accumulator behaves under pressure — even when the enforcement ships later.
 
-See also [[decisions/260705_leases-and-budgets|leases-and-budgets]] (the
-probe convention's decision; the lease and budget vocabulary the rows
-speak), [[decisions/260705_session-ledger|session-ledger]] (the
+See also [[decisions/260705_session-ledger|session-ledger]] (the
 resident/accumulator line; the probe as one of a resident's four facets),
 [[map/exarch/agent|agent]] (the agent half of the fold),
 [[map/exarch/builtins|builtins]] (the `services` pin, the same

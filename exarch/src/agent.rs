@@ -4,8 +4,8 @@
 //!
 //! An exarch run is a *fleet* of these arranged in a tree
 //! ([[decisions/260624_uniform-agent-nodes]]); the [`Fleet`](crate::fleet::Fleet)
-//! holds what is shared (the registry, the one event bus, the focused-agent
-//! handle, whether a human is attached), and each `Agent` is one node.
+//! holds what is shared (the registry, the one event bus, the transport
+//! engine), and each `Agent` is one node.
 //!
 //! [`Agent::apply`] runs one round-trip against the provider;
 //! [`Agent::drive`] is the one loop — every node alike — that pulls
@@ -15,9 +15,10 @@
 //! distinctions reduce to *position*: the parent-less **trunk** publishes its
 //! cancel token for the OS-signal path, holding `reply` falls out of the
 //! construction-fixed `returns` bit (`!interactive` at the trunk, `true` for
-//! every fork), and parking out of `interactive`/`focus` via `park_mode`.  A
-//! child's single result is delivered up its parent's mailbox by the spawn
-//! site, not here, so `drive` itself is identical for all.
+//! every fork), and parking out of `interactive`/the registry's engagement
+//! read via `park_mode`.  A child's single result is delivered up its
+//! parent's mailbox by the spawn site, not here, so `drive` itself is
+//! identical for all.
 
 pub mod cancel;
 pub mod digest;
@@ -29,11 +30,11 @@ pub mod transcript;
 use crate::shell_eval::builtins;
 use crate::bootstrap::Scratch;
 use crate::bus::{
-    AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, NO_FOCUS, ParkMode, Turn,
+    AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, ParkMode, Turn,
     WORKER_PANIC_PREFIX,
 };
 use crate::fleet::desk;
-use crate::fleet::registry::{AgentRegistry, Registration};
+use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE, AgentRegistry, Registration};
 use crate::agent::digest::{
     AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
@@ -199,7 +200,7 @@ pub struct Agent {
     /// distinction: the trunk publishes its cancel token for the OS-signal path
     /// and, when `interactive`, converses (withholding `reply` and parking
     /// indefinitely); every asymmetry is read from this field plus
-    /// `interactive`/`focus`, never an `is_root` branch.
+    /// `interactive`, never an `is_root` branch.
     parent: Option<AgentId>,
     /// How many more spawn generations may descend from this agent before
     /// the chain bottoms out.  Bounds depth, not fan-out: [`Self::fork`]
@@ -216,11 +217,6 @@ pub struct Agent {
     /// from this one's current provider, so neither disturbs the other.  The
     /// drive loop reads it once per turn.
     provider: ProviderHandle,
-    /// The fleet's focused-agent handle, shared with the frontend and every
-    /// node.  The drive loop reads it in [`Self::park_mode`]: a focused agent
-    /// parks for the human like the conversing trunk.  Off the TUI it holds
-    /// [`NO_FOCUS`] and never changes.
-    focus: Arc<AtomicU64>,
     /// Whether a human is attached to the fleet (the TUI).  With `parent =
     /// None` it makes this the *conversing* trunk; off the TUI (`false`) the
     /// trunk is a one-shot headless agent.  Inherited by every fork.
@@ -511,7 +507,6 @@ pub(crate) struct Build {
     pub(crate) parent: Option<AgentId>,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
-    pub(crate) focus: Arc<AtomicU64>,
     pub(crate) interactive: bool,
     pub(crate) returns: bool,
     pub(crate) allow_schedule: bool,
@@ -538,7 +533,6 @@ impl Agent {
             parent,
             fuel,
             provider,
-            focus,
             interactive,
             returns,
             allow_schedule,
@@ -586,7 +580,6 @@ impl Agent {
             parent,
             fuel,
             provider,
-            focus,
             interactive,
             inbox: Inbox::new(),
             nudges: nudge::Registry::new(),
@@ -631,7 +624,7 @@ impl Agent {
         let _ = self.agents.register(Registration {
             id: self.id,
             parent: self.parent,
-            ceiling: false, // a root (trunk or headless) is never abandoned: no ceiling
+            lease: None, // a root (trunk or headless) is never abandoned: no lease
             name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
@@ -660,10 +653,10 @@ impl Agent {
     }
 
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
-    /// shared registry and focused-agent handle, wraps the initial `provider`,
-    /// and registers itself, so the frontend builds its [`Fleet`](crate::fleet::Fleet)
-    /// by reading these handles back.  `interactive` makes it the *conversing*
-    /// trunk (TUI); off it, a one-shot headless trunk.
+    /// shared registry, wraps the initial `provider`, and registers itself, so
+    /// the frontend builds its [`Fleet`](crate::fleet::Fleet) by reading these
+    /// handles back.  `interactive` makes it the *conversing* trunk (TUI); off
+    /// it, a one-shot headless trunk.
     #[allow(clippy::too_many_arguments)] // launch config, threaded once at boot
     pub(crate) fn root(
         system: String,
@@ -697,11 +690,6 @@ impl Agent {
             parent: None,
             fuel: SPAWN_FUEL,
             provider: ProviderHandle::new(provider),
-            // The focus handle is fleet-shared; off the TUI it never moves, so
-            // it starts at the no-focus sentinel.  The conversing trunk parks
-            // via `interactive`, not via focus, so the trunk need not name
-            // itself here.
-            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive,
             returns: !interactive,
             allow_schedule,
@@ -715,12 +703,6 @@ impl Agent {
         })?;
         agent.register_self();
         Ok(agent)
-    }
-
-    /// The fleet's focused-agent handle, shared with the frontend and every
-    /// fork — the TUI binds its `App` to this and mutates it on `TAB`.
-    pub(crate) fn focus_handle(&self) -> Arc<AtomicU64> {
-        self.focus.clone()
     }
 
     /// This agent's own provider handle — read by the spawn site to register it
@@ -848,9 +830,9 @@ impl Agent {
             // The child seeds its own handle from the parent's current provider,
             // so a later `/model` on either never disturbs the other.
             provider: ProviderHandle::new(self.provider.current()),
-            // The fleet's focus and human-attachment are shared, not re-derived:
-            // a child becomes parkable the instant the human `TAB`s to it.
-            focus: self.focus.clone(),
+            // Human-attachment is shared, not re-derived; engagement is a
+            // registry read, per-agent from the moment a human exchanges a
+            // message with the child, so it needs no inheritance here.
             interactive: self.interactive,
             returns,
             allow_schedule: self.allow_schedule,
@@ -981,7 +963,6 @@ impl Agent {
             parent: None,
             fuel: SPAWN_FUEL,
             provider,
-            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive: false,
             returns: true,
             allow_schedule: false,
@@ -1143,7 +1124,7 @@ impl Agent {
     /// time-to-reap), the inbox's depth per source, the event log's mirror
     /// length and history bytes, the shell's binding count, the log-dir
     /// and scratch disk footprint (walked at invocation, never
-    /// periodically), and the sub-agent ceiling's lease row.  A pure
+    /// periodically), and the sub-agent idle lease's two rows.  A pure
     /// survey: nothing is mutated and no lease is renewed — enumeration is
     /// not observation — so `/resources` can never immortalise the zombies
     /// it exists to reveal.  The frontend appends the rows for the
@@ -1332,13 +1313,23 @@ impl Agent {
             ));
         }
 
-        // ── the sub-agent ceiling, as a lease row ────────────────────────
+        // ── the sub-agent idle lease, as two rows ────────────────────────
         rows.push(ProbeRow::new(
-            "agents.ceiling",
-            crate::fleet::registry::AGENT_CEILING.as_secs(),
-            None,
+            "agents.lease",
+            self.agents
+                .nearest_reap()
+                .unwrap_or(AGENT_LEASE_IDLE)
+                .as_secs(),
+            Some(AGENT_LEASE_IDLE.as_secs()),
             "reap",
-            Some("1 h fixed by design — push-delivery children renew nothing".to_string()),
+            Some("renewed by a human exchange".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "agents.demote",
+            AGENT_DEMOTE_IDLE.as_secs(),
+            None,
+            "warn",
+            Some("idle threshold after which a child leaves the tab cycle".to_string()),
         ));
 
         rows
@@ -1358,8 +1349,9 @@ impl Agent {
     /// deliverable from the inbox, run one [`Self::apply`], let the nudge
     /// registry post any retry as a self-[`InboxMsg::Nudge`], and repeat.  An
     /// empty inbox parks or terminates by [`Self::park_mode`]: a present human
-    /// (the conversing trunk or the focused agent) holds it; a live schedule
-    /// holds it until cancelled; otherwise it terminates at quiescence.
+    /// (the conversing trunk or an engaged returning agent) holds it; a live
+    /// schedule holds it until cancelled; otherwise it terminates at
+    /// quiescence.
     ///
     /// Per-`apply` panic recovery lives here — the `catch_unwind` rolls the
     /// dynamic context back to the last clean tool-call boundary and continues
@@ -1411,9 +1403,11 @@ impl Agent {
             // The disk-warn check's own sibling: amortized on the same ral
             // epoch, a no-op walk-wise when unconfigured.
             self.check_disk_warn(emit);
-            // The park verdict ([`Self::park_mode`]) is recomputed on every wake
-            // inside `next_or_idle`, so a `TAB` that de-focuses this agent (and
-            // wakes its inbox) flips it from `Held` to `Quiesce` and it reaps.
+            // The park verdict ([`Self::park_mode`]) is recomputed on every
+            // wake inside `next_or_idle`: an un-engaged idle returning agent
+            // reads `Quiesce` here and the loop breaks — its digest still
+            // reaches its parent through the worker epilogue's
+            // deliver-then-retire, never through this break itself.
             let Some(turn) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
                 break;
             };
@@ -1507,8 +1501,9 @@ impl Agent {
                     .push(InboxMsg::Nudge(msg.clone()))
                     .expect("Nudge is idempotent and never rejects");
             }
-            // `reply` hard-terminates: end the drive loop regardless of focus or
-            // a self-armed schedule — the agent returns its value and is gone.
+            // `reply` hard-terminates: end the drive loop regardless of
+            // engagement or a self-armed schedule — the agent returns its
+            // value and is gone.
             // Unless the nudge layer just turned this very `reply` back for
             // self-verification (a headless root's first call), in which case
             // `nudge_msg` carries that reminder and the loop must keep running
@@ -1956,11 +1951,12 @@ impl Agent {
 
     /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
     /// *conversing* agent (interactive and holding no `reply`, so it never
-    /// returns) parks [`ParkMode::Held`], immune to cancellation; the agent the
-    /// human has `TAB`bed to instead (`focus = id`) but that does not itself
-    /// converse parks [`ParkMode::Focused`] — the same wait, but a
-    /// terminate-cause cancel still ends it, since mere focus is not a
-    /// conversation.  Live children it launched hold it until they settle
+    /// returns) parks [`ParkMode::Held`], immune to cancellation; a returning
+    /// agent a human has exchanged a message with instead parks
+    /// [`ParkMode::Engaged`] — the same wait, but a terminate-cause cancel
+    /// still ends it, since an exchange is not a conversation and the
+    /// registry's idle lease, not this predicate, bounds how long it lasts.
+    /// Live children it launched hold it until they settle
     /// ([`ParkMode::HeldByChildren`]) so a headless root waiting on its fleet
     /// stays alive to receive their results; a live self-schedule holds it
     /// until cancelled; otherwise it terminates at quiescence.
@@ -1975,8 +1971,12 @@ impl Agent {
             }
             return ParkMode::Held;
         }
-        if self.focus.load(Ordering::Relaxed) == self.id {
-            return ParkMode::Focused;
+        // No `is_live` guard, unlike `Held` above: every entry-removal path
+        // for a parented agent terminate-stamps its token first
+        // (`cancel_and_remove`), and `next_or_idle` checks `terminated()` on
+        // every wake, so an unlisted engaged agent still exits at once.
+        if self.parent.is_some() && self.returns() && self.agents.engaged(self.id) {
+            return ParkMode::Engaged;
         }
         if self.has_live_children() {
             return ParkMode::HeldByChildren;
@@ -2204,7 +2204,6 @@ impl Agent {
             // mode) always returns, which may differ from this agent's own
             // `returns`.
             system_template: self.system_base.clone(),
-            focus: self.focus.clone(),
             interactive: self.interactive,
             nursery,
             generation: self.agents.generation(),
@@ -3036,19 +3035,47 @@ mod tests {
         );
     }
 
-    /// The park verdict distinguishes a conversation from mere focus: a
-    /// conversing agent parks `Held`, immune to cancellation; a non-conversing
-    /// agent the human has `TAB`bed to parks `Focused`, which a terminate
-    /// cause still ends (`bus.rs` pins that half of the contract).
+    /// The park verdict reads engagement from the registry, never from focus:
+    /// a conversing trunk parks `Held` regardless; an un-engaged parented
+    /// returning agent quiesces once idle (the un-replied-worker digest
+    /// path, untouched); the same agent parks `Engaged` the instant a human
+    /// exchange renews it (`bus.rs` pins the terminate-cause half of that
+    /// contract).
     #[test]
-    fn park_mode_maps_focus_without_conversation_to_focused() {
-        let dir = tmp("park-focused");
+    fn park_mode_reads_engagement_from_the_registry() {
+        let dir = tmp("park-engaged");
         let held = trunk(&dir, true);
         assert_eq!(held.park_mode(), ParkMode::Held);
 
-        let focused = trunk(&dir, false);
-        focused.focus.store(focused.id, Ordering::Relaxed);
-        assert_eq!(focused.park_mode(), ParkMode::Focused);
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        child
+            .agents
+            .register(Registration {
+                id: child.id,
+                parent: Some(parent.id),
+                lease: Some(AGENT_LEASE_IDLE),
+                name: "child".into(),
+                log_dir: dir.join("child"),
+                cancel: child.cancel_token().clone(),
+                eval_root: Some(child.eval_root()),
+                turn_scope: Some(child.turn_scope()),
+                mailbox: child.mailbox(),
+                provider: child.provider_handle(),
+            })
+            .expect("child registration must succeed: its parent is live");
+        assert_eq!(
+            child.park_mode(),
+            ParkMode::Quiesce,
+            "un-engaged, no live children, no schedule: idle quiesce delivers the digest"
+        );
+
+        child.agents.renew(child.id);
+        assert_eq!(
+            child.park_mode(),
+            ParkMode::Engaged,
+            "a human exchange engages the child, which now parks messageable"
+        );
     }
 
     #[test]
@@ -3170,7 +3197,7 @@ mod tests {
             .register(Registration {
                 id: child.id,
                 parent: Some(parent.id),
-                ceiling: true,
+                lease: Some(AGENT_LEASE_IDLE),
                 name: "child".into(),
                 log_dir: dir.join("child"),
                 cancel: child.cancel_token().clone(),
@@ -3183,7 +3210,7 @@ mod tests {
         let _ = child.agents.register(Registration {
             id: direct,
             parent: Some(child.id),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "direct".into(),
             log_dir: dir.join("direct"),
             cancel: direct_token.clone(),
@@ -3195,7 +3222,7 @@ mod tests {
         let _ = child.agents.register(Registration {
             id: grandchild,
             parent: Some(direct),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: dir.join("grandchild"),
             cancel: grandchild_token.clone(),
@@ -3209,7 +3236,7 @@ mod tests {
             .register(Registration {
                 id: sibling,
                 parent: Some(parent.id),
-                ceiling: true,
+                lease: Some(AGENT_LEASE_IDLE),
                 name: "sibling".into(),
                 log_dir: dir.join("sibling"),
                 cancel: sibling_token.clone(),
@@ -3770,7 +3797,7 @@ mod tests {
         let _ = parent.agents.register(Registration {
             id: child.id,
             parent: Some(parent.id),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),
@@ -4667,7 +4694,7 @@ mod tests {
     /// worker registry's running/settled split with time-to-reap notes, the
     /// binding count (which a `let` increments by exactly one), the inbox's
     /// per-source depths (counted, never drained), the log figures, the
-    /// disk footprint, and the sub-agent ceiling's lease row.
+    /// disk footprint, and the sub-agent idle lease's two rows.
     #[test]
     fn resource_rows_survey_the_agents_accumulators() {
         let dir = tmp("resource-rows");
@@ -4748,14 +4775,16 @@ mod tests {
             "a settled entry carries its retention remaining in ral calls"
         );
 
-        // The log, disk, and ceiling chapters.
+        // The log, disk, and lease chapters.
         assert!(row(&rows, "log.events").current > 0);
         assert_eq!(row(&rows, "log.bytes").cap, Some(COMPACT_THRESHOLD as u64));
         assert!(
             row(&rows, "disk.log_dir").current > 0,
             "a session dir with a written events.json probes nonzero"
         );
-        assert_eq!(row(&rows, "agents.ceiling").current, 3600);
+        assert_eq!(row(&rows, "agents.lease").current, 3600);
+        assert_eq!(row(&rows, "agents.lease").cap, Some(3600));
+        assert_eq!(row(&rows, "agents.demote").current, 300);
 
         // The inbox chapter counts without draining: two queued messages
         // are visible in the rows, and the whole queue reads identically

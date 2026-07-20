@@ -999,8 +999,7 @@ closed-mark discipline survives inside that class),
 re-types to carry `FOValue`),
 [[decisions/260703_protected-commitment-pins|protected-commitment-pins]] (the
 protected keyspace whose state stops being a parsed card),
-[[decisions/260705_session-ledger|session-ledger]] and
-[[decisions/260705_leases-and-budgets|leases-and-budgets]] (the notice and
+[[decisions/260705_session-ledger|session-ledger]] (the notice and
 probe populations §5 gives seam shapes),
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]] (the gate the desk
 enforces), [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]

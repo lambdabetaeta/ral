@@ -5,9 +5,8 @@ status: active
 # A session is a ledger of residents
 
 > Amended, 2026-07-06 — decided, not yet built: the worker chapter's
-> model-facing listing (`workers`) is retired, split by lease class instead —
-> see [[decisions/260705_leases-and-budgets|leases-and-budgets]] for the full
-> reasoning. The ledger's shape is unaffected: the worker chapter still
+> model-facing listing (`workers`) is retired, split by lease class instead.
+> The ledger's shape is unaffected: the worker chapter still
 > answers identity, capability, lease, and probe; only its *listing* fold
 > changes, from a queried value to nothing (worker class) or a host-pinned
 > row plus `service-handle <id>` (durable class). `agents` remains exarch's
@@ -31,8 +30,7 @@ structs.**
 
 ### Five registries grew independently
 
-- **The worker registry**
-  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]): every detached
+- **The worker registry**: every detached
   worker, registered at birth, holding the `Handle` itself; legible by lease
   class — no model-facing listing for the worker class, a host-pinned ledger
   row for the durable class — governed by idle-observation leases.
@@ -68,7 +66,7 @@ The split was decreed when it was true:
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 ruled that the job table "is not a management layer over `&` or `spawn`" and
 that job control "gains no spawn-handle analogue" — correct while detached
-handles were unlisted by design. [[decisions/260705_leases-and-budgets|leases-and-budgets]]
+handles were unlisted by design. leases-and-budgets
 then built a universal worker registry whose handles *are* listable — first
 through exarch's `workers` verb, since retired, and, since parcel 9, directly
 through the REPL's own `jobs` fold, which reads the registry rather than that
@@ -89,7 +87,7 @@ premise that no longer holds.
   bindings. Capabilities are deliberately not unified; they are the honest
   variance between chapters.
 - **Lease** — the lifetime row from
-  [[decisions/260705_leases-and-budgets|leases-and-budgets]]: a clock, an idle
+  leases-and-budgets: a clock, an idle
   bound, a renewal signal, an optional backstop — including the degenerate
   "none; legibility is the bound" (a `service`) and "none; a human owns it"
   (a stopped job).
@@ -176,7 +174,7 @@ pre-stated: present the four facets, occupy grade 4, and answer the probe.
   exarch's per-chapter projection for the fleet; the worker chapter gets
   none, as of 2026-07-06 — the ephemeral class rides its lease bound instead
   of a listing, the durable class rides a host-pinned ledger row instead of
-  one ([[decisions/260705_leases-and-budgets|leases-and-budgets]]). Which
+  one. Which
   chapters a host verb projects, and whether it projects one as a queried
   listing or a rendered pin, is host policy; that every chapter is *in* the
   fold is not.
@@ -265,9 +263,7 @@ Every open question on this page was settled before implementation began.
 
 ## See also
 
-[[decisions/260705_leases-and-budgets|leases-and-budgets]] (the worker
-registry, leases, and probes this generalises — its registry is the ledger's
-first chapter), [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
+[[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (the handle model; the job-table separation restated here at the listing
 layer), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the
 deferred survivor warning), [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]

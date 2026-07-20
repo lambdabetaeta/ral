@@ -1,14 +1,12 @@
 //! Session/view lifecycle management.
 //!
 //! Owns the viewports, tab ordering, names, parent-child relationships,
-//! focus handle, and the linger/age-out clock.  Extracted from [`super::App`]
-//! (Phase 4 of the TUI modularisation).
+//! the presentation focus cursor, and the linger/age-out clock.  Extracted
+//! from [`super::App`] (Phase 4 of the TUI modularisation).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::text::Line;
 
@@ -21,9 +19,10 @@ use super::{LINGER, ROOT_NAME};
 /// Session/view lifecycle state.
 ///
 /// Owns one [`Viewport`] per session and the tab bar that orders them.
-/// The currently focused tab is resolved via the shared [`AtomicU64`]
-/// handle; when it is stale (an expired tab, or the no-focus sentinel),
-/// focus resolves to root.
+/// The currently focused tab is a plain id, purely presentational: `TAB`
+/// moves it and rendering reads it, but no agent-side lifecycle depends on
+/// it any more.  When it is stale (an expired tab), [`Self::focused`]
+/// resolves it to root.
 #[allow(clippy::struct_field_names)] // `tabs` is the natural name for the tab list.
 pub(super) struct Tabs {
     /// Per-session scrollback.  Populated by `Born`, retained across
@@ -46,12 +45,11 @@ pub(super) struct Tabs {
     /// stays alive for log flushing.
     dying: HashMap<AgentId, Instant>,
     root: AgentId,
-    /// The fleet's focused-agent handle, shared with the agents' drive loops
-    /// (an [`AtomicU64`] of an [`AgentId`], or `NO_FOCUS`).  `TAB` stores into
-    /// it; the focused agent reads it in its park predicate and parks for the
-    /// human.  Reads route through [`Self::focused`] so a stale id (an expired
-    /// tab, or the no-focus sentinel) resolves to root.
-    focus: Arc<AtomicU64>,
+    /// The presentation focus cursor: purely a TUI concern.  `TAB` and the
+    /// gesture/command paths store into it; no agent-side lifecycle reads
+    /// it.  Reads route through [`Self::focused`] so a stale id (an expired
+    /// tab) resolves to root.
+    focus: AgentId,
     /// Each tab's parent (the spawning agent), recorded from `Kind::Born`, so
     /// focus can fall back to the parent — recursing toward the trunk — when a
     /// focused agent ends.
@@ -66,7 +64,7 @@ pub(super) struct Tabs {
 }
 
 impl Tabs {
-    pub fn new(root_id: AgentId, root_log_dir: &Path, focus: Arc<AtomicU64>) -> Self {
+    pub fn new(root_id: AgentId, root_log_dir: &Path) -> Self {
         let mut viewports = HashMap::new();
         viewports.insert(
             root_id,
@@ -81,7 +79,7 @@ impl Tabs {
             names,
             dying: HashMap::new(),
             root: root_id,
-            focus,
+            focus: root_id,
             parents: HashMap::new(),
             branches: HashSet::new(),
             title_frame: 0,
@@ -89,10 +87,9 @@ impl Tabs {
     }
 
     /// Currently focused tab.  Resolves a stale focus (a subagent that aged
-    /// out of the tab bar, or the no-focus sentinel) to the root.
+    /// out of the tab bar) to the root.
     pub(super) fn focused(&self) -> AgentId {
-        let f = self.focus.load(Ordering::Relaxed);
-        if self.tabs.contains(&f) { f } else { self.root }
+        if self.tabs.contains(&self.focus) { self.focus } else { self.root }
     }
 
     /// Walk up the `parents` chain from a (dying) agent to the nearest still-
@@ -133,9 +130,8 @@ impl Tabs {
             self.dying.remove(&id);
             self.tabs.retain(|&t| t != id);
             self.names.remove(&id);
-            if self.focus.load(Ordering::Relaxed) == id {
-                let fallback = self.parent_focus(id);
-                self.focus.store(fallback, Ordering::Relaxed);
+            if self.focus == id {
+                self.focus = self.parent_focus(id);
             }
             self.parents.remove(&id);
             self.branches.remove(&id);
@@ -181,8 +177,8 @@ impl Tabs {
     pub(super) fn died(&mut self, id: AgentId) {
         if id != self.root {
             self.dying.insert(id, Instant::now());
-            if self.focus.load(Ordering::Relaxed) == id {
-                self.focus.store(self.parent_focus(id), Ordering::Relaxed);
+            if self.focus == id {
+                self.focus = self.parent_focus(id);
             }
         }
     }
@@ -199,16 +195,39 @@ impl Tabs {
         for id in retiring {
             self.dying.entry(id).or_insert(now);
         }
-        self.focus.store(self.root, Ordering::Relaxed);
+        self.focus = self.root;
     }
 
-    /// Cycle focus to the next tab (used by Tab key).
-    pub(super) fn focus_next(&self) {
+    /// Cycle focus to the next promoted tab (used by Tab key), skipping any
+    /// id in `demoted` — root is never a member, so the walk always lands
+    /// within one full pass around `tabs`.
+    pub(super) fn focus_next(&mut self, demoted: &HashMap<AgentId, Duration>) {
         let current = self.focused();
         let pos = self.tabs.iter().position(|&id| id == current).unwrap_or(0);
-        let next = (pos + 1) % self.tabs.len();
-        let next_id = self.tabs[next];
-        self.focus.store(next_id, Ordering::Relaxed);
+        let n = self.tabs.len();
+        for step in 1..=n {
+            let next = self.tabs[(pos + step) % n];
+            if !demoted.contains_key(&next) {
+                self.focus = next;
+                return;
+            }
+        }
+    }
+
+    /// Set focus directly to `id` — the `/focus` command's landing gesture,
+    /// the way to reach a demoted tab TAB no longer cycles onto. No
+    /// validation: the caller has already resolved `id` to a live tab
+    /// ([`Self::is_tab`]).
+    pub(super) fn set_focus(&mut self, id: AgentId) {
+        self.focus = id;
+    }
+
+    /// Whether `id` currently has a tab — live or dying, promoted or
+    /// demoted. `/focus` checks this so a name resolving to a live agent
+    /// whose `Born` event has not yet reached the frontend is refused
+    /// rather than silently focusing a tab that does not exist yet.
+    pub(super) fn is_tab(&self, id: AgentId) -> bool {
+        self.tabs.contains(&id)
     }
 
     /// Immutable access to a viewport by id.
@@ -304,7 +323,7 @@ mod tests {
         let root = 1;
         let child = 2;
         let grandchild = 3;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"), Arc::new(AtomicU64::new(0)));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"));
         tabs.parents.insert(child, root);
         tabs.parents.insert(grandchild, child);
         // Make the parent die
@@ -323,7 +342,7 @@ mod tests {
     fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
         let root = 1;
         let child = 2;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"), Arc::new(AtomicU64::new(0)));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"));
         tabs.born(
             child,
             std::path::Path::new("/tmp/test-child"),
@@ -367,6 +386,33 @@ mod tests {
             tabs.viewport(root).unwrap().probe_figures().0,
             1,
             "the live root's own block survives the sibling's tombstoning untouched"
+        );
+    }
+
+    /// `TAB` lands only on a promoted tab: a demoted one is skipped, and
+    /// root — never a member of the demoted set by construction — is
+    /// always a valid landing spot, so the cycle wraps back to it rather
+    /// than sticking on the demoted tab.
+    #[test]
+    fn focus_next_skips_demoted_tabs() {
+        let root = 1;
+        let promoted = 2;
+        let demoted = 3;
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-focus-next"));
+        tabs.tabs.push(promoted);
+        tabs.tabs.push(demoted);
+
+        let mut demoted_set = HashMap::new();
+        demoted_set.insert(demoted, Duration::from_mins(10));
+
+        tabs.focus_next(&demoted_set);
+        assert_eq!(tabs.focused(), promoted, "TAB skips straight past the demoted tab");
+
+        tabs.focus_next(&demoted_set);
+        assert_eq!(
+            tabs.focused(),
+            root,
+            "TAB skips the demoted tab again, wrapping back to root"
         );
     }
 }

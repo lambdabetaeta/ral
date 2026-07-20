@@ -12,7 +12,7 @@
 //!     (`agent-cancel`);
 //!   * the **subtree cascade**: [`AgentRegistry::cancel`] cancels an agent
 //!     *and every descendant*, behind `agent-cancel` and the per-agent
-//!     ceiling; `/clear` and `/close` reap a subtree through `clear_subtree`
+//!     idle lease; `/clear` and `/close` reap a subtree through `clear_subtree`
 //!     and `remove_subtree`, and `terminate_entry` is the per-entry primitive
 //!     all of them share.  Each
 //!     node is cancelled across both layers — the cooperative [`Token`] its
@@ -42,10 +42,11 @@
 //!     *next* turn mints an entirely new scope from the untouched durable
 //!     root, so an interrupt never poisons a later turn.  `eval_root` stays
 //!     the terminate cascade's alone;
-//!   * a **ceiling** (children only), armed on the shared `process::reaper` as
-//!     a `Run` deadline that cancels the worker's subtree, so an abandoned
-//!     detached worker is reaped rather than running forever — the trunk,
-//!     which is never abandoned, gets none;
+//!   * an **idle lease** (children only), armed on the shared
+//!     `process::reaper` as a self-re-arming `Run` deadline against the
+//!     agent's exchange clock, so an abandoned child — never engaged, or
+//!     engaged and then dropped — is reaped rather than running forever;
+//!     the trunk, never abandoned, carries none;
 //!   * a **generation**, bumped on `/clear`, so a worker that settles into a
 //!     rebuilt context has its result rejected instead of delivered. This is
 //!     the one counter every late-settle path in the fleet consults, not a
@@ -64,7 +65,7 @@
 use crate::agent::ProviderHandle;
 use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
 use crate::agent::cancel::Token;
-use ral_core::process::{self, CancelCause, Deadline, DurableRoot, ForegroundScope};
+use ral_core::process::{self, CancelCause, DurableRoot, ForegroundScope};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -79,15 +80,22 @@ use std::time::{Duration, Instant};
 /// agent's first turn runs.
 pub(crate) type TurnScope = Arc<Mutex<Option<ForegroundScope>>>;
 
-/// The detached-worker default ceiling: one hour
-/// ([[concurrency-primitives-detached-vs-structured]]).
+/// A child's idle lease: the wall-clock span since its last human exchange
+/// (birth is the epoch) before its whole subtree is reaped.
 ///
-/// An async agent
-/// doing genuinely long work may want a different bound — that is
-/// long-running-work's open regime question, surfacing here for a tool
-/// rather than a ral verb — but a uniform ceiling keeps an abandoned worker
-/// from running unbounded.
-pub const AGENT_CEILING: Duration = Duration::from_hours(1);
+/// ([[concurrency-primitives-detached-vs-structured]]). A human message
+/// delivered to the agent renews the clock; nothing else does. A lease that
+/// is never renewed therefore fires at exactly this duration from birth —
+/// the fixed reap time is this lease's zero-renewal case, not a second
+/// bound.
+pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
+
+/// How long a leased child may sit idle-and-parked before the frontend
+/// demotes its tab out of the TAB cycle and into the matrix strip.
+///
+/// Read by the frontend only — the registry owns the exchange clock this
+/// threshold measures against, but takes no action of its own at this mark.
+pub const AGENT_DEMOTE_IDLE: Duration = Duration::from_mins(5);
 
 /// One live agent, by id, for the `agents` listing.
 pub struct AgentInfo {
@@ -103,9 +111,11 @@ pub struct Registration {
     pub id: AgentId,
     /// The agent's parent, or `None` for the trunk.
     pub parent: Option<AgentId>,
-    /// Whether to arm a reaper deadline over this agent's whole subtree —
-    /// see [`AgentRegistry::register`].
-    pub ceiling: bool,
+    /// The idle lease to arm over this agent's whole subtree, or `None` to
+    /// arm none — see [`AgentRegistry::register`]. Duration-typed, rather
+    /// than a bare flag, so a test can arm a millisecond lease instead of
+    /// waiting out the real constant.
+    pub lease: Option<Duration>,
     pub name: String,
     pub log_dir: PathBuf,
     pub cancel: Token,
@@ -157,17 +167,25 @@ struct Entry {
     /// `eval_root`.  `None` for the trunk, whose Esc routes through the
     /// published foreground slot instead.
     turn_scope: Option<TurnScope>,
-    /// The agent's inbox sender, so the frontend can route a focused tab's
-    /// typed line into that agent's queue, `wake` it on a focus change, and
-    /// the `message` tool can deliver a marked peer note by id.
+    /// The agent's inbox sender.  A human exchange delivers through
+    /// [`AgentRegistry::steer`], the registry's one steering door; the
+    /// `message` tool delivers a marked peer note by id through
+    /// [`AgentRegistry::message`].
     mailbox: Mailbox,
     /// The agent's hot-swappable provider handle, so a `/model` on the focused
     /// agent swaps *its* provider without disturbing any other.
     provider: ProviderHandle,
-    /// Holds the worker's reaper ceiling armed; dropping the entry on settle
-    /// disarms it, so a worker that finished before its ceiling is never
-    /// reaped by a late pop.  `None` for the trunk, which has no ceiling.
-    _ceiling: Option<Deadline>,
+    /// The idle lease armed over this entry's subtree, or `None` if it
+    /// carries none.  [`register`](AgentRegistry::register) arms the first
+    /// fire from this; the fire itself re-reads it by id through
+    /// [`AgentRegistry::lease_state`] rather than closing over a captured
+    /// copy, so a settled/removed entry ends the chain simply by not being
+    /// found.
+    lease: Option<Duration>,
+    /// The instant of this agent's last human exchange, or `None` before
+    /// the first one — `started` is the epoch until then.  The only writer
+    /// is [`AgentRegistry::renew`].
+    last_exchange: Option<Instant>,
 }
 
 impl Default for AgentRegistry {
@@ -235,12 +253,12 @@ impl AgentRegistry {
     }
 
     /// Register an agent under [`Registration::parent`] (`None` for the
-    /// trunk).  [`Registration::ceiling`] states whether to arm a reaper
-    /// deadline that cancels this agent's whole subtree when it elapses: a
-    /// child no longer *implies* one — the caller says so.  A worker gets one
-    /// (an abandoned detached worker must be reaped); a branch is a parented
-    /// child *without* one (a conversation must not lose a turn at the hour
-    /// mark); a root never had one.  A `parent`-set agent still carries its
+    /// trunk).  [`Registration::lease`] states the idle lease to arm over
+    /// this agent's whole subtree, or `None` to arm none: a child no longer
+    /// *implies* one — the caller says so.  A worker gets one (an abandoned
+    /// detached worker must be reaped); a branch is a parented child
+    /// *without* one (a conversation must not lose a turn at the hour mark);
+    /// a root never had one.  A `parent`-set agent still carries its
     /// `eval_root` and `turn_scope` so the cascade and an interrupt each
     /// reach its running eval.
     ///
@@ -273,7 +291,7 @@ impl AgentRegistry {
         let Registration {
             id,
             parent,
-            ceiling,
+            lease,
             name,
             log_dir,
             cancel,
@@ -282,18 +300,15 @@ impl AgentRegistry {
             mailbox,
             provider,
         } = reg;
-        let ceiling_guard = ceiling.then(|| {
+        if let Some(ttl) = lease {
             let reg = self.clone();
-            process::arm_callback(AGENT_CEILING, move || {
-                reg.cancel_cause(id, CancelCause::Deadline);
-            })
-        });
+            process::arm_callback(ttl, move || lease_fire(&reg, id)).keep();
+        }
         let mut g = self.lock();
         if let Some(p) = parent
             && g.entries.get(&p).is_none_or(|e| e.cancel.terminated())
         {
             drop(g);
-            drop(ceiling_guard);
             return Err(RegisterError::SessionDead);
         }
         // Excludes `id`'s own current entry: a re-register under the same id
@@ -302,7 +317,6 @@ impl AgentRegistry {
         // very entry it is about to replace.
         if g.entries.iter().any(|(&other, e)| other != id && e.name == name) {
             drop(g);
-            drop(ceiling_guard);
             return Err(RegisterError::NameTaken(name));
         }
         g.entries.insert(
@@ -317,7 +331,8 @@ impl AgentRegistry {
                 turn_scope,
                 mailbox,
                 provider,
-                _ceiling: ceiling_guard,
+                lease,
+                last_exchange: None,
             },
         );
         Ok(g.generation)
@@ -346,13 +361,92 @@ impl AgentRegistry {
     }
 
     /// The live agent's inbox sender, or `None` once it has settled/cleared.
-    /// The frontend looks one up by id to route a steering line into that
-    /// agent's queue or to `wake` it on a focus change; a missing entry means
-    /// the tab is dead or lingering, and the line is dropped rather than
-    /// reviving anything.
+    /// The frontend reads this to resolve whether a tab is steerable and
+    /// whether it is waiting for input; [`Self::steer`] is the actual
+    /// delivery door.  A missing entry means the tab is dead or lingering.
     pub fn mailbox(&self, id: AgentId) -> Option<Mailbox> {
         let g = self.lock();
         g.entries.get(&id).map(|e| e.mailbox.clone())
+    }
+
+    /// Deliver a human message to `id`: the registry's one steering door.
+    /// Under one lock acquisition, stamps the exchange clock — renew before
+    /// push, so the woken agent's own park verdict already reads `engaged`
+    /// (verdict-before-pop, [`crate::bus::Inbox::next_or_idle`]) — and
+    /// clones the mailbox out; the push itself runs after the guard drops,
+    /// the same clone-mailbox-out/drop-guard/push shape [`Self::message`]
+    /// follows for the process-wide inbox-before-registry lock order
+    /// (`bus`'s module docs). `false` once the entry is gone, and the line
+    /// is dropped rather than reviving anything.
+    pub fn steer(&self, id: AgentId, text: String) -> bool {
+        let mailbox = {
+            let mut g = self.lock();
+            let Some(e) = g.entries.get_mut(&id) else {
+                return false;
+            };
+            renew_entry(e);
+            let mailbox = e.mailbox.clone();
+            drop(g);
+            mailbox
+        };
+        mailbox.push_user(text);
+        true
+    }
+
+    /// Renew `id`'s idle lease: stamp its exchange clock to now.  The
+    /// registry's write itself lives in [`renew_entry`], shared with
+    /// [`Self::steer`]; this entry point exists for a test to exercise the
+    /// write directly, without going through a mailbox delivery. Neither
+    /// focusing, nor the model-facing [`Self::message`], nor a `/resources`
+    /// probe renews, so enumeration and attention alone can never
+    /// immortalise a child. `false` once the entry is gone.
+    pub fn renew(&self, id: AgentId) -> bool {
+        self.lock().entries.get_mut(&id).map(renew_entry).is_some()
+    }
+
+    /// Whether a human has ever exchanged with `id` — `false` for an entry
+    /// never renewed, or one already gone.
+    pub fn engaged(&self, id: AgentId) -> bool {
+        self.lock()
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.last_exchange.is_some())
+    }
+
+    /// Elapsed time since `id`'s last human exchange, or since birth if it
+    /// was never engaged.  `None` once the entry is gone.
+    pub fn idle(&self, id: AgentId) -> Option<Duration> {
+        let g = self.lock();
+        g.entries
+            .get(&id)
+            .map(|e| e.last_exchange.unwrap_or(e.started).elapsed())
+    }
+
+    /// The nearest time-to-reap across every live leased entry — `ttl -
+    /// idle`, saturating at zero, minimised over the fleet.  `None` when no
+    /// live entry carries a lease.  Read by `/resources`; a pure survey,
+    /// like every other probe figure — it renews nothing.
+    pub fn nearest_reap(&self) -> Option<Duration> {
+        let g = self.lock();
+        g.entries
+            .values()
+            .filter_map(|e| {
+                let ttl = e.lease?;
+                let idle = e.last_exchange.unwrap_or(e.started).elapsed();
+                Some(ttl.saturating_sub(idle))
+            })
+            .min()
+    }
+
+    /// The lease chain's own accessor, read by [`lease_fire`]: for a live
+    /// entry carrying a lease, `(idle, ttl)`; `None` once the entry is gone
+    /// (settled, `/clear`'d, `/close`'d) or carries no lease — either way
+    /// the chain has nothing left to arm.
+    fn lease_state(&self, id: AgentId) -> Option<(Duration, Duration)> {
+        self.lock().entries.get(&id).and_then(|e| {
+            let ttl = e.lease?;
+            Some((e.last_exchange.unwrap_or(e.started).elapsed(), ttl))
+        })
     }
 
     /// Send a marked model-visible message from one live agent to another —
@@ -408,8 +502,9 @@ impl AgentRegistry {
     }
 
     /// Settle a worker born under `generation`: unconditionally reap its own
-    /// entry (disarming its ceiling), whether or not `generation` still
-    /// matches the live one. A worker's settle is authoritative over its
+    /// entry, so its lease chain's next fire finds nothing and ends
+    /// silently, whether or not `generation` still matches the live one. A
+    /// worker's settle is authoritative over its
     /// *own* entry's lifetime — restructured so a stale-generation worker can
     /// never leave a zombie entry behind, rather than relying on `/clear`
     /// being trunk-only (and so bumping the generation in the same stroke
@@ -432,7 +527,7 @@ impl AgentRegistry {
     }
 
     /// Cancel an agent **and its whole subtree** by id, unscoped; `true` if
-    /// the agent existed. The per-agent ceiling routes here (with
+    /// the agent existed. The per-agent lease routes here (with
     /// [`CancelCause::Deadline`]); `/clear` and `/close` reap through
     /// [`Self::clear_subtree`]/[`Self::remove_subtree`] instead. `pub(crate)`
     /// because it trusts its caller to already have decided `id` is a
@@ -443,7 +538,7 @@ impl AgentRegistry {
     }
 
     /// [`Self::cancel`]'s shared implementation, parameterised on the cause
-    /// so the ceiling can report `Deadline` ("timed out") rather than
+    /// so an expired lease can report `Deadline` ("timed out") rather than
     /// `Explicit` ("cancelled") without a second cascade to maintain.
     fn cancel_cause(&self, id: AgentId, cause: CancelCause) -> bool {
         let g = self.lock();
@@ -641,6 +736,36 @@ fn cancel_and_remove(g: &mut Inner, root: AgentId, inclusive: bool) {
     }
 }
 
+/// One firing of an agent's idle lease, on the reaper daemon thread.
+///
+/// A gone entry — settled, `/clear`'d, `/close`'d — or one carrying no
+/// lease ends the chain silently: no cancel, no notice, no re-arm.  A live
+/// leased entry past its bound is reaped through the ordinary cascade
+/// ([`CancelCause::Deadline`]); otherwise the chain re-arms itself for
+/// exactly the remaining margin.  Renewal ([`AgentRegistry::renew`]) never
+/// touches the reaper — this lazy re-arm on the next fire is the whole
+/// mechanism.
+fn lease_fire(reg: &AgentRegistry, id: AgentId) {
+    let Some((idle, ttl)) = reg.lease_state(id) else {
+        return;
+    };
+    if idle >= ttl {
+        reg.cancel_cause(id, CancelCause::Deadline);
+    } else {
+        let reg = reg.clone();
+        process::arm_callback(ttl.checked_sub(idle).unwrap(), move || lease_fire(&reg, id))
+            .keep();
+    }
+}
+
+/// Stamp one entry's exchange clock to now — the single write
+/// [`AgentRegistry::renew`] and [`AgentRegistry::steer`] both perform, each
+/// under its own lock scope shaped by what else it must do at the same
+/// acquisition.
+fn renew_entry(e: &mut Entry) {
+    e.last_exchange = Some(Instant::now());
+}
+
 /// Cancel one entry across both terminate-class layers: the cooperative
 /// [`Token`] the drive loop polls between steps, and — for a parented
 /// agent — its session's durable root, so an in-flight eval unwinds at the
@@ -683,12 +808,26 @@ mod tests {
         )))
     }
 
+    /// Poll `pred` until it holds or `timeout` elapses — the reaper fires on
+    /// its own daemon thread, so a lease test asserts against wall time
+    /// rather than a synchronous call.
+    fn eventually(timeout: Duration, pred: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
     /// Register `id` under `parent`, returning the birth generation.
     fn entry(reg: &AgentRegistry, id: AgentId, parent: Option<AgentId>) -> u64 {
         reg.register(Registration {
             id,
             parent,
-            ceiling: parent.is_some(),
+            lease: parent.is_some().then_some(AGENT_LEASE_IDLE),
             name: format!("a{id}"),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
@@ -708,47 +847,55 @@ mod tests {
         assert!(!reg.settle(1, g), "a settled entry is gone");
     }
 
-    /// The ceiling is an explicit knob, not a consequence of being parented:
-    /// two children of the same parent arm a reaper deadline iff their
-    /// `ceiling` flag is set (a branch passes `false`, a worker `true`).
+    /// A lease is an explicit knob, not a consequence of being parented: a
+    /// `lease: None` entry's eval layer is never reached by the reaper,
+    /// while a `lease: Some(short)` entry's is cancelled once its bound
+    /// elapses — asserted behaviourally (the reap stamps the entry's
+    /// cancel layers; a live drive loop, absent here, is what would go on
+    /// to settle the entry out of the map), since there is no guard field
+    /// left to peek at — liveness gating lives in the fire itself.
     #[test]
-    #[allow(
-        clippy::used_underscore_binding,
-        reason = "RAII guard field; the leading underscore marks it as held for Drop, not read — the test deliberately peeks at whether it is armed"
-    )]
-    fn register_arms_a_ceiling_only_when_asked() {
+    fn register_arms_a_lease_only_when_asked() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk: a live parent for 1 and 2
+        let branch_token = Token::new();
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: false,
+            lease: None,
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp"),
-            cancel: Token::new(),
+            cancel: branch_token.clone(),
             eval_root: Some(DurableRoot::default()),
             turn_scope: None,
             mailbox: mb(),
             provider: provider(),
         });
+        let worker_root = DurableRoot::default();
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(Duration::from_millis(50)),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
+            eval_root: Some(worker_root.clone()),
             turn_scope: None,
             mailbox: mb(),
             provider: provider(),
         });
-        let g = reg.lock();
-        let one_has_no_ceiling = g.entries[&1]._ceiling.is_none();
-        let two_has_ceiling = g.entries[&2]._ceiling.is_some();
-        drop(g);
-        assert!(one_has_no_ceiling, "ceiling = false arms no reaper deadline");
-        assert!(two_has_ceiling, "ceiling = true arms a reaper deadline");
+
+        assert!(
+            eventually(Duration::from_secs(2), || worker_root
+                .as_scope()
+                .is_cancelled()),
+            "lease: Some(short) is reaped once its bound elapses"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !branch_token.is_cancelled(),
+            "lease: None arms no reaper deadline"
+        );
     }
 
     #[test]
@@ -779,7 +926,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: token.clone(),
@@ -812,7 +959,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 0,
             parent: None,
-            ceiling: false,
+            lease: None,
             name: "trunk".into(),
             log_dir: PathBuf::from("/tmp/trunk"),
             cancel: trunk_token.clone(),
@@ -825,7 +972,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
@@ -875,7 +1022,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: false, // a branch carries no ceiling
+            lease: None, // a branch carries no lease
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp/branch"),
             cancel: branch_token.clone(),
@@ -887,7 +1034,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: child_token.clone(),
@@ -938,7 +1085,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: false,
+            lease: None,
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
@@ -950,7 +1097,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: grandchild_token.clone(),
@@ -1002,7 +1149,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: false,
+            lease: None,
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
@@ -1039,7 +1186,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 7,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "lint".into(),
             log_dir: PathBuf::from("/log/7"),
             cancel: token.clone(),
@@ -1071,7 +1218,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: None,
-            ceiling: false,
+            lease: None,
             name: "r".into(),
             log_dir: "/l".into(),
             cancel: r.clone(),
@@ -1083,7 +1230,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "c".into(),
             log_dir: "/l".into(),
             cancel: c.clone(),
@@ -1095,7 +1242,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 3,
             parent: Some(2),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "g".into(),
             log_dir: "/l".into(),
             cancel: g.clone(),
@@ -1107,7 +1254,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 4,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "s".into(),
             log_dir: "/l".into(),
             cancel: sibling.clone(),
@@ -1146,7 +1293,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
@@ -1210,7 +1357,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 3,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: Token::new(),
@@ -1236,7 +1383,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: false,
+            lease: None,
             name: "leaf".into(),
             log_dir: PathBuf::from("/tmp/1"),
             cancel: Token::new(),
@@ -1249,7 +1396,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(0),
-            ceiling: false,
+            lease: None,
             name: "sibling".into(),
             log_dir: PathBuf::from("/tmp/2"),
             cancel: sibling_token.clone(),
@@ -1262,7 +1409,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 3,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: grandchild_token.clone(),
@@ -1316,7 +1463,7 @@ mod tests {
         let outcome = reg.register(Registration {
             id: 1,
             parent: Some(99), // never registered
-            ceiling: false,
+            lease: None,
             name: "orphan".into(),
             log_dir: PathBuf::from("/tmp/orphan"),
             cancel: Token::new(),
@@ -1346,7 +1493,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: false,
+            lease: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: parent_token.clone(),
@@ -1361,7 +1508,7 @@ mod tests {
         let outcome = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "late-child".into(),
             log_dir: PathBuf::from("/tmp/late-child"),
             cancel: Token::new(),
@@ -1390,7 +1537,7 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper"),
             cancel: Token::new(),
@@ -1404,7 +1551,7 @@ mod tests {
         let outcome = reg.register(Registration {
             id: 2,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper-2"),
             cancel: Token::new(),
@@ -1426,19 +1573,21 @@ mod tests {
         );
     }
 
-    /// The ceiling reaper's cascade must report `Deadline` ("timed out"), not
-    /// `Explicit` ("cancelled") — a reaped worker and an `agent-cancel`ed one
+    /// A lease reap's cascade must report `Deadline` ("timed out"), not
+    /// `Explicit` ("cancelled") — a reaped agent and an `agent-cancel`ed one
     /// hit the same shared cascade (`cancel_cause`), distinguished only by
-    /// which cause each caller passes.
+    /// which cause each caller passes.  This is the cascade the lease chain
+    /// itself uses ([`lease_fire`]); this test pins the cause directly,
+    /// independent of the chain's own timing.
     #[test]
-    fn ceiling_reap_reports_deadline_not_explicit() {
+    fn lease_reap_reports_deadline_not_explicit() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            ceiling: true,
+            lease: Some(AGENT_LEASE_IDLE),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
@@ -1473,6 +1622,198 @@ mod tests {
         assert!(
             !reg.is_live(1),
             "but its entry is reaped regardless, never left dangling"
+        );
+    }
+
+    /// `renew` resets the exchange clock, deferring the fire: a lease
+    /// renewed partway through its span survives past the original bound
+    /// and is reaped only once the *renewed* span elapses.
+    #[test]
+    fn renew_defers_the_fire() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let ttl = Duration::from_millis(300);
+        let eval_root = DurableRoot::default();
+        let _ = reg.register(Registration {
+            id: 1,
+            parent: Some(0),
+            lease: Some(ttl),
+            name: "child".into(),
+            log_dir: PathBuf::from("/tmp/child"),
+            cancel: Token::new(),
+            eval_root: Some(eval_root.clone()),
+            turn_scope: None,
+            mailbox: mb(),
+            provider: provider(),
+        });
+
+        std::thread::sleep(ttl / 2);
+        assert!(reg.renew(1), "a live entry renews");
+
+        std::thread::sleep(ttl / 2 + Duration::from_millis(50));
+        assert!(
+            !eval_root.as_scope().is_cancelled(),
+            "renewed at half the ttl, still alive past the original bound"
+        );
+
+        assert!(
+            eventually(Duration::from_secs(2), || eval_root
+                .as_scope()
+                .is_cancelled()),
+            "reaped once the renewed span elapses"
+        );
+    }
+
+    /// Settling before the lease ever fires ends the chain silently: its
+    /// late fire finds no entry and never reaches the settled token.
+    #[test]
+    fn settle_before_the_fire_ends_the_chain_silently() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let ttl = Duration::from_millis(80);
+        let token = Token::new();
+        let g = reg
+            .register(Registration {
+                id: 1,
+                parent: Some(0),
+                lease: Some(ttl),
+                name: "child".into(),
+                log_dir: PathBuf::from("/tmp/child"),
+                cancel: token.clone(),
+                eval_root: Some(DurableRoot::default()),
+                turn_scope: None,
+                mailbox: mb(),
+                provider: provider(),
+            })
+            .expect("registers");
+
+        assert!(reg.settle(1, g), "settles well before the lease would fire");
+
+        std::thread::sleep(ttl * 4);
+        assert!(
+            !token.is_cancelled(),
+            "the chain's late fire found no entry and never touched the settled token"
+        );
+    }
+
+    /// `clear_subtree` outranks a still-armed lease: the reap is immediate
+    /// and the lease's later fire, finding no entry, never overwrites the
+    /// cause `/clear` already stamped.
+    #[test]
+    fn clear_subtree_outranks_the_lease() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let ttl = Duration::from_millis(80);
+        let eval_root = DurableRoot::default();
+        let _ = reg.register(Registration {
+            id: 1,
+            parent: Some(0),
+            lease: Some(ttl),
+            name: "child".into(),
+            log_dir: PathBuf::from("/tmp/child"),
+            cancel: Token::new(),
+            eval_root: Some(eval_root.clone()),
+            turn_scope: None,
+            mailbox: mb(),
+            provider: provider(),
+        });
+
+        reg.clear_subtree(0);
+        assert!(!reg.is_live(1), "the reap removes the entry immediately");
+        assert_eq!(
+            eval_root.as_scope().cause(),
+            Some(CancelCause::Explicit),
+            "clear_subtree cancels through the ordinary /clear cause"
+        );
+
+        std::thread::sleep(ttl * 4);
+        assert_eq!(
+            eval_root.as_scope().cause(),
+            Some(CancelCause::Explicit),
+            "the lease's late fire finds no entry and never overwrites the cause"
+        );
+    }
+
+    /// `engaged`/`idle` read the exchange clock directly: a fresh entry has
+    /// never been engaged and its idle span runs off birth; a raw push onto
+    /// the entry's own mailbox — bypassing `renew` — is not an exchange;
+    /// only `renew` itself flips `engaged` and resets `idle`.
+    #[test]
+    fn engaged_and_idle_read_the_exchange_clock() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let inbox = crate::bus::Inbox::new();
+        let _ = reg.register(Registration {
+            id: 1,
+            parent: Some(0),
+            lease: Some(AGENT_LEASE_IDLE),
+            name: "child".into(),
+            log_dir: PathBuf::from("/tmp/child"),
+            cancel: Token::new(),
+            eval_root: Some(DurableRoot::default()),
+            turn_scope: None,
+            mailbox: inbox.mailbox(),
+            provider: provider(),
+        });
+
+        assert!(!reg.engaged(1), "a fresh entry has never been engaged");
+        assert!(
+            reg.idle(1).is_some(),
+            "idle reads off birth before any exchange"
+        );
+
+        inbox
+            .push(InboxMsg::UserSteering("hello".into()))
+            .unwrap();
+        assert!(!reg.engaged(1), "a raw mailbox push is not an exchange");
+
+        assert!(reg.renew(1), "renew stamps a live entry");
+        assert!(reg.engaged(1), "renewed at least once");
+        let idle_after_renew = reg.idle(1).expect("still live");
+        assert!(
+            idle_after_renew < Duration::from_secs(1),
+            "idle resets to (near) zero right after a renewal"
+        );
+    }
+
+    /// `steer` is the registry's one human-delivery door: it renews the idle
+    /// lease (`engaged` flips true, `idle` resets) and the text actually
+    /// lands on the agent's own queue, in one call.  A dead id is refused
+    /// without panicking, and delivers nothing.
+    #[test]
+    fn steer_renews_and_delivers() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let inbox = crate::bus::Inbox::new();
+        let _ = reg.register(Registration {
+            id: 1,
+            parent: Some(0),
+            lease: Some(AGENT_LEASE_IDLE),
+            name: "child".into(),
+            log_dir: PathBuf::from("/tmp/child"),
+            cancel: Token::new(),
+            eval_root: Some(DurableRoot::default()),
+            turn_scope: None,
+            mailbox: inbox.mailbox(),
+            provider: provider(),
+        });
+
+        assert!(!reg.engaged(1), "not yet engaged");
+        assert!(reg.steer(1, "hello".into()), "a live entry accepts steering");
+        assert!(reg.engaged(1), "steer renews the exchange clock");
+        assert!(
+            reg.idle(1).expect("still live") < Duration::from_secs(1),
+            "idle resets to (near) zero right after a steer"
+        );
+
+        let Some(crate::bus::Turn::Human(text)) = inbox.drain_turn() else {
+            panic!("expected the steered text to have actually landed");
+        };
+        assert_eq!(text, "hello");
+
+        assert!(
+            !reg.steer(99, "nobody".into()),
+            "a dead id is refused, not panicked"
         );
     }
 

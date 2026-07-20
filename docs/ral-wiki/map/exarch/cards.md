@@ -74,8 +74,7 @@ how it settled (`ok`/`bad`), plus a plain gloss naming it a background block.
 through `reap_card` as a `warn` span plus the worker's `cmd` and which lease
 fired ("idle 1h unobserved" / "24h backstop"), with prune and large-binding
 notices rendered by its per-kind siblings
-([[decisions/260705_leases-and-budgets|leases-and-budgets]],
-[[decisions/260706_enquiry-channel|enquiry-channel]]). All are fixed-position
+([[decisions/260706_enquiry-channel|enquiry-channel]]). All are fixed-position
 value marks, never an animation, and all stay inside the existing `text` mark
 vocabulary, so none widens the closed mark set above. `services_pin_card` is
 the host-authored protected `services` pin ([[map/exarch/agent|agent]]).

@@ -39,5 +39,4 @@ context boot but gives a genuine fresh read.
 
 [[design/agents|agents]], [[map/exarch/agent|agent]],
 [[map/exarch/tools|tools]], [[map/exarch/provider|provider]],
-[[decisions/260617_async-agent-tool|async-agent-tool]],
-[[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]].
+[[decisions/260617_async-agent-tool|async-agent-tool]].

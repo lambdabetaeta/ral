@@ -85,9 +85,7 @@ Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
 (1 MiB) rides the same `BindingLease` on the same two arm calls — a
 residency threshold, not a lifetime one, so the install chokepoint checks it
-independently of idle age or baseline status
-([[decisions/260705_leases-and-budgets|leases-and-budgets]] §"Shell
-residency is lexical state plus host leases").
+independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning its `Report`. A detached `spawn`ed worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
