@@ -418,6 +418,19 @@ impl Viewport {
         self.push_block(Block::tool_call(tool, summary, cmd, context));
     }
 
+    /// Append a harness act as its own standalone block — a barrier the
+    /// coalescing projection never folds into a `ral` run, since an act
+    /// changes the world outside the turn rather than observing it.
+    pub(super) fn push_act(
+        &mut self,
+        verb: &'static str,
+        subject: Option<String>,
+        payload: String,
+        failed: bool,
+    ) {
+        self.push_block(Block::act(verb, subject, payload, failed));
+    }
+
     /// Append an async subagent's landed result as its own collapsible
     /// block — collapsed to a one-line header, dialed open to the full
     /// result rendered as markdown.
@@ -494,8 +507,8 @@ impl Viewport {
 
     /// Append a summary-less tool call, shown standalone as a `▸` rail block.
     /// `detail` is `None` for an invisible parse-failure boundary.
-    pub(super) fn push_plain_call(&mut self, tool: &'static str, detail: Option<String>) {
-        self.push_block(Block::plain_call(tool, detail));
+    pub(super) fn push_plain_call(&mut self, detail: Option<String>) {
+        self.push_block(Block::plain_call(detail));
     }
 
     /// Attach a tool result's magnitude — `text.lines().count()` — to the
@@ -1727,6 +1740,82 @@ mod tests {
         assert!(
             vp.tombstone().unwrap().error,
             "the status is not overwritten"
+        );
+    }
+
+    /// An act is a barrier.  A `ral` call on either side of it coalesces
+    /// only with its own neighbours: the run scan ends at the act, so the
+    /// act renders standalone under its own `↗` shape between two separate
+    /// `▸` runs — never swallowed into a burst of reads and greps, and never
+    /// contributing an intent row to one.
+    #[test]
+    fn an_act_breaks_a_run_of_observations() {
+        let mut vp = viewport();
+        vp.push_tool_call(
+            "ral",
+            "read the renderer".into(),
+            "read 'line.rs'".into(),
+            0,
+        );
+        vp.push_tool_call("ral", "read the block".into(), "read 'block.rs'".into(), 0);
+        vp.push_act(
+            "message",
+            Some("hunter".into()),
+            "focus on the renderer first".into(),
+            false,
+        );
+        vp.push_tool_call("ral", "read the rail".into(), "read 'rail.rs'".into(), 0);
+
+        let w = vp.render_window(READ_W, 40);
+        let act = rail_rows(&w.lines, "↗ ");
+        assert_eq!(act.len(), 1, "the act renders exactly one rail row");
+        let runs = rail_rows(&w.lines, "▸ ");
+        assert_eq!(
+            runs.len(),
+            2,
+            "the act splits the reads into two coalesced runs, not one"
+        );
+        assert!(
+            runs[0] < act[0] && act[0] < runs[1],
+            "the act holds its arrival position between the two runs"
+        );
+        // The act's own row is its three columns — not an intent line folded
+        // under a run's head.
+        assert_eq!(
+            plain(&w.lines[act[0]]),
+            "message    hunter              focus on the renderer first"
+        );
+    }
+
+    /// A desk act stamps no magnitude anywhere.  Its result never reaches
+    /// `set_result_size`, and — because an act is not a call-bearing block —
+    /// the `ral` result that follows it walks *past* it to the call that
+    /// actually earned the bar, instead of being intercepted.
+    #[test]
+    fn an_acts_result_stamps_no_bar_and_shields_no_call() {
+        let mut vp = viewport();
+        vp.push_tool_call(
+            "ral",
+            "read the renderer".into(),
+            "read 'line.rs'".into(),
+            0,
+        );
+        vp.push_act("cancel", Some("hunter".into()), String::new(), false);
+        // The `ral` call's own result, landing after the act it interleaved
+        // with, must reach the call.
+        vp.set_result_size(&"a line\n".repeat(40));
+
+        let w = vp.render_window(READ_W, 40);
+        let act = rail_rows(&w.lines, "↗ ");
+        assert_eq!(plain(&w.lines[act[0]]), "cancel     hunter");
+        let run = plain(&w.lines[rail_rows(&w.lines, "▸ ")[0]]);
+        assert!(
+            run.ends_with(crate::tui::line::spark_glyph(Some(40))),
+            "the `ral` call keeps the magnitude it earned: {run:?}"
+        );
+        assert!(
+            !run.ends_with(crate::tui::line::spark_glyph(None)),
+            "and it is not the resultless call's shortest bar: {run:?}"
         );
     }
 }

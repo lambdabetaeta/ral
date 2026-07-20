@@ -224,9 +224,8 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
 }
 
 /// Tool-call header rows: the slate one-line `label`, wrapped under its own
-/// first column. The tool name is rendered in the coalesced ral block
-/// ([`super::group`]), not here — this builder is rail-less, the
-/// disclosure triangle (`▸`/`▽`) living in the lifted rail, prepended by
+/// first column.  This builder is rail-less, the disclosure triangle
+/// (`▸`/`▽`) living in the lifted rail, prepended by
 /// [`super::block::Block::render`].
 /// `size` is the call's result magnitude (`text.lines().count()`),
 /// rendered as a [`size_bar`] trailing the label's first row — the
@@ -353,6 +352,86 @@ pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
         ]));
     }
     ls
+}
+
+/// The verb column of an act row, pinned to the longest verb
+/// (`unschedule`) plus its separating space, so verbs align down the page
+/// across separate blocks.  [`render_field_rows`] cannot supply this: it
+/// derives its column from the row set it is handed, and an act block is a
+/// single row.
+pub(super) const ACT_VERB_W: usize = 11;
+/// The subject column of an act row — an agent name or a schedule label,
+/// truncated into the cell rather than allowed to shift the payload column,
+/// since the alignment *is* the point.  Wide enough that a name never has to
+/// be cut: a subject is an identity, and a cut identity names nothing.
+pub(super) const ACT_SUBJECT_W: usize = 20;
+
+/// A harness act's row: `verb`, `subject`, `payload`, in three columns whose
+/// first two are pinned ([`ACT_VERB_W`], [`ACT_SUBJECT_W`]).  An act changes
+/// the world outside the turn, so it carries no magnitude and wears no
+/// size-bar — the three fields are the whole of what it has
+/// ([[decisions/260720_harness-calls-are-acts]]).  A `failed` act tiers its
+/// payload — the short refusal — hot, on the row that names the attempt; the
+/// long form is the raise, and the raise is the model's.  `full` (L2/L3)
+/// wraps the payload under its own column; reduced (L1), it truncates into
+/// it with an `…`.  The `↗` / `◷` shape arrives via the lifted rail
+/// ([`super::block::Block::render_with`]), so this builder is rail-less.
+pub(super) fn act_row(
+    verb: &str,
+    subject: Option<&str>,
+    payload: &str,
+    failed: bool,
+    width: u16,
+    full: bool,
+) -> Vec<Line<'static>> {
+    let payload_w = (width as usize)
+        .saturating_sub(RAIL_W + ACT_VERB_W + ACT_SUBJECT_W)
+        .max(8);
+    let ink = if failed {
+        Style::default().fg(RED_HOT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(SLATE)
+    };
+    let mut head = vec![Span::styled(
+        format!("{verb:<ACT_VERB_W$}"),
+        Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
+    )];
+    // The subject cell is padded only when a payload follows it, so a
+    // landed `cancel` copies as `cancel     hunter`, with no trailing run
+    // of column padding.
+    if let Some(subject) = subject.filter(|s| !s.is_empty()) {
+        let mut cell = truncate_spans(&[bold(subject.to_string(), LIME)], ACT_SUBJECT_W - 1);
+        if !payload.is_empty() {
+            cell.push(Span::raw(" ".repeat(ACT_SUBJECT_W - span_run_width(&cell))));
+        }
+        head.extend(cell);
+    } else if !payload.is_empty() {
+        head.push(Span::raw(" ".repeat(ACT_SUBJECT_W)));
+    }
+    let mut out = vec![Line::default()];
+    if payload.is_empty() {
+        out.push(Line::from(head));
+    } else if full {
+        push_wrapped(&mut out, payload, payload_w, |chunk, first| {
+            if first {
+                let mut spans = head.clone();
+                spans.push(Span::styled(chunk, ink));
+                Line::from(spans)
+            } else {
+                Line::from(vec![
+                    Span::raw(" ".repeat(RAIL_W + ACT_VERB_W + ACT_SUBJECT_W)),
+                    Span::styled(chunk, ink),
+                ])
+            }
+        });
+    } else {
+        head.extend(truncate_spans(
+            &[Span::styled(payload.to_string(), ink)],
+            payload_w,
+        ));
+        out.push(Line::from(head));
+    }
+    out
 }
 
 /// The one-line header for an async subagent's landed result: a leading

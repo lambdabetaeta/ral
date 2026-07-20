@@ -49,6 +49,16 @@ pub(super) enum RailKind {
     Thinking,
     /// An async subagent's landed result — the `↘` delegated-result shape.
     Subagent,
+    /// An outbound fleet act — `spawn`, `cancel`, `message`, `reply`: the
+    /// `↗` shape, the outbound twin of the `↘` a subagent's result lands
+    /// under. An act changes the world outside the turn, so it wears its own
+    /// shape rather than a tool call's triangle
+    /// ([[decisions/260720_harness-calls-are-acts]]).
+    FleetAct,
+    /// A time act — `schedule`, `unschedule`: the `◷` clock-face shape. Its
+    /// effect lands not now but on a clock, which is the one thing that
+    /// separates it from a fleet act.
+    TimeAct,
     Step,
     Error,
     /// The human turn's fence — a `❖` in the human's [`PROMPT_INK`], beside
@@ -69,6 +79,8 @@ impl RailKind {
             Self::Markdown => "·",
             Self::Thinking => "∴",
             Self::Subagent => "↘",
+            Self::FleetAct => "↗",
+            Self::TimeAct => "◷",
             Self::Step => "━",
             Self::Error => "╳",
             Self::Prompt => "❖",
@@ -89,6 +101,11 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::Markdown, "model prose"),
     (RailKind::Thinking, "thinking trace"),
     (RailKind::Subagent, "subagent result"),
+    (
+        RailKind::FleetAct,
+        "fleet act — spawn, cancel, message, reply",
+    ),
+    (RailKind::TimeAct, "time act — schedule, unschedule"),
     (RailKind::Step, "step boundary"),
     (RailKind::Error, "error"),
     (RailKind::Prompt, "your prompt — the fence"),

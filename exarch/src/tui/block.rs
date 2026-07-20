@@ -1,8 +1,8 @@
 //! Collapsible scrollback blocks.
 //!
 //! A viewport's scrollback is a sequence of [`Block`]s, not a flat line
-//! buffer.  Three block kinds are *dialable* — tool calls, patches, and
-//! subagent results — each carrying a disclosure [`Block::level`] (1–3)
+//! buffer.  Four block kinds are *dialable* — tool calls, patches, subagent
+//! results, and harness acts — each carrying a disclosure [`Block::level`] (1–3)
 //! that grades how much it reveals: from a one-line summary (L1) through a
 //! few lines of context (L2) to the full source (L3).  A block is dialable
 //! only if it has a real summary to collapse to; model prose ([`BlockKind::
@@ -97,14 +97,25 @@ pub(super) enum BlockKind {
         summary: String,
         details: String,
     },
-    /// A summary-less tool call, shown standalone as `▸ tool  details`.
+    /// A summary-less tool call, shown standalone as `▸ details`.
     /// `details` is the text to show, or `None` for a parse-failure
     /// placeholder ([`crate::shell_eval::tools::ral::INVALID_INPUT`]): such a call renders
     /// nothing, present only as the boundary a stray result stops at.
     /// Inert (nothing to dial); wears the shut tool-call triangle `▸`.
-    PlainTool {
-        tool: &'static str,
-        details: Option<String>,
+    PlainTool { details: Option<String> },
+    /// A harness **act** — `spawn`, `cancel`, `message`, `reply`,
+    /// `schedule`, `unschedule`.  An act changes the world outside the turn,
+    /// so it is not an observation: it never coalesces into a `ral` run, it
+    /// carries no magnitude, and it renders as three columns — `verb`,
+    /// `subject`, `payload` — with `failed` tiering the payload hot
+    /// ([[decisions/260720_harness-calls-are-acts]]).  Dialable: reduced (L1)
+    /// the payload truncates into its column, revealed (L2/L3) it wraps in
+    /// full.
+    Act {
+        verb: &'static str,
+        subject: Option<String>,
+        payload: String,
+        failed: bool,
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
     /// Prose is product — always full, inert to the dial, wearing `·`.
@@ -303,6 +314,7 @@ impl Block {
         let level = match kind {
             BlockKind::DiallableTool { .. }
             | BlockKind::Subagent { .. }
+            | BlockKind::Act { .. }
             | BlockKind::Thinking(_) => Reveal::Summary,
             _ => Reveal::Full,
         };
@@ -333,6 +345,23 @@ impl Block {
                 details,
             },
             Fidelity { context, echo: 0 },
+        )
+    }
+    /// A harness act — the desk verb's row, standalone and never folded.
+    pub(super) fn act(
+        verb: &'static str,
+        subject: Option<String>,
+        payload: String,
+        failed: bool,
+    ) -> Self {
+        Self::new(
+            BlockKind::Act {
+                verb,
+                subject,
+                payload,
+                failed,
+            },
+            Fidelity::default(),
         )
     }
     pub(super) fn markdown(src: String, fidelity: Fidelity) -> Self {
@@ -402,8 +431,8 @@ impl Block {
     }
     /// A summary-less tool call.  `details` is the text to show standalone,
     /// or `None` for an invalid-input placeholder (an invisible call boundary).
-    pub(super) fn plain_call(tool: &'static str, details: Option<String>) -> Self {
-        Self::new(BlockKind::PlainTool { tool, details }, Fidelity::default())
+    pub(super) fn plain_call(details: Option<String>) -> Self {
+        Self::new(BlockKind::PlainTool { details }, Fidelity::default())
     }
 
     /// The block's current disclosure rung.
@@ -454,6 +483,7 @@ impl Block {
         match &self.kind {
             BlockKind::DiallableTool { .. }
             | BlockKind::Subagent { .. }
+            | BlockKind::Act { .. }
             | BlockKind::Thinking(_) => true,
             BlockKind::Card { card, .. } => card.has_diff(),
             BlockKind::Markdown { .. } | BlockKind::PlainTool { .. } | BlockKind::Chrome { .. } => {
@@ -513,18 +543,15 @@ impl Block {
     }
 
     /// This call's projected view for the coalesced ral block: its intent
-    /// (`summary`), tool, script (`details`), result magnitude, and the turn's
+    /// (`summary`), script (`details`), result magnitude, and the turn's
     /// context floor (distress on the intent line).  `None` on any block
     /// that is not a tool call, so only a call opens a slot in the group.
     pub(super) fn call_view(&self) -> Option<group::CallParts<'_>> {
         match &self.kind {
             BlockKind::DiallableTool {
-                tool,
-                summary,
-                details,
+                summary, details, ..
             } => Some(group::CallParts {
                 intent: summary,
-                tool,
                 cmd: details,
                 magnitude: self.result_size,
                 context: self.fidelity.context,
@@ -789,19 +816,6 @@ impl Block {
         lines
     }
 
-    /// True for a tool call whose tool renders nothing and seats no rail —
-    /// the `agents` builtin, whose visible effect is the subagent block it
-    /// spawns, not the call that spawned it.  The one guard [`Self::body`]
-    /// and [`Self::rail_kind`] both consult, so a call this rule exempts
-    /// cannot be missed at one site and rendered at the other.
-    fn is_invisible_call(&self) -> bool {
-        matches!(
-            &self.kind,
-            BlockKind::DiallableTool { tool, .. } | BlockKind::PlainTool { tool, .. }
-                if *tool == "agents"
-        )
-    }
-
     /// The rail-less body at `width`, graded by `level`: [`Reveal::Summary`]
     /// the one-line summary; [`Reveal::Context`] the summary plus [`N`] lines;
     /// [`Reveal::Full`] the full source.  (A tool call's [`Reveal::Census`] is
@@ -809,9 +823,6 @@ impl Block {
     /// its summary.) Plain prose and chrome ignore the level — they are always
     /// full; thinking grades from header to partial trace to full trace.
     fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
-        if self.is_invisible_call() {
-            return Vec::new();
-        }
         match &self.kind {
             BlockKind::DiallableTool {
                 summary, details, ..
@@ -825,6 +836,24 @@ impl Block {
                     line::tool_call_collapsed(summary, self.result_size, width)
                 }
             },
+            // An act has exactly two readings: its payload cut to the column
+            // (L1) or laid out whole (L3), with L2 the same layout capped at
+            // [`N`] rows.  There is no third thing to grade — the row *is*
+            // the act.
+            BlockKind::Act {
+                verb,
+                subject,
+                payload,
+                failed,
+            } => {
+                let row =
+                    |full| line::act_row(verb, subject.as_deref(), payload, *failed, width, full);
+                match level {
+                    Reveal::Full => row(true),
+                    Reveal::Context => first_rows(row(true), N),
+                    Reveal::Summary | Reveal::Census => row(false),
+                }
+            }
             BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
             BlockKind::Thinking(t) => {
                 #[allow(
@@ -909,9 +938,6 @@ impl Block {
     /// disclosure triangle tracks the level: `▽` once it reveals context
     /// (L2+), `▸` while reduced.
     fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
-        if self.is_invisible_call() {
-            return None;
-        }
         match &self.kind {
             BlockKind::DiallableTool { .. } => Some(RailKind::ToolCall(level >= Reveal::Context)),
             // A summary-less query is a tool call still — the shut triangle
@@ -919,6 +945,14 @@ impl Block {
             // renders a query alone and reaches this; on screen the coalesced
             // run prepends its own rail.
             BlockKind::PlainTool { .. } => Some(RailKind::ToolCall(false)),
+            // An act's shape says when its effect lands: `◷` on a clock,
+            // `↗` now and outbound.  It holds that shape across every rung —
+            // an act is one thing disclosed, not two states like a call's
+            // triangle.
+            BlockKind::Act { verb, .. } => Some(match *verb {
+                "schedule" | "unschedule" => RailKind::TimeAct,
+                _ => RailKind::FleetAct,
+            }),
             BlockKind::Markdown { .. } => Some(RailKind::Markdown),
             BlockKind::Thinking(_) => Some(RailKind::Thinking),
             // The `↘` keeps the delegated-result identity even on error; the
@@ -1091,6 +1125,201 @@ mod tests {
             // From the ceiling, one click wraps straight to that same floor.
             block.cycle();
             assert_eq!(block.level(), floor);
+        }
+    }
+
+    /// An act's three columns are pinned, so verbs align down the page and
+    /// every payload starts in the same column whatever the verb's length:
+    /// the verb cell is 11 columns, the subject cell 9, and the payload
+    /// begins at their sum.  This is
+    /// the alignment `render_field_rows` cannot supply, since each act is a
+    /// single row and would only ever align with itself.
+    #[test]
+    fn act_columns_are_pinned_across_blocks() {
+        let rendered = |verb, subject: Option<&str>, payload: &str| {
+            let block = Block::act(verb, subject.map(str::to_string), payload.into(), false);
+            let lines = block.body(READ_W, Reveal::Summary);
+            line::plain(lines.last().expect("an act renders one content row"))
+        };
+        assert_eq!(
+            rendered(
+                "spawn",
+                Some("hunter"),
+                "audit every unwrap() in exarch/src"
+            ),
+            "spawn      hunter              audit every unwrap() in exarch/src"
+        );
+        assert_eq!(
+            rendered("unschedule", Some("nightly"), ""),
+            "unschedule nightly",
+            "a landed act with no argument leaves the payload cell empty"
+        );
+        assert_eq!(
+            rendered("schedule", Some("nightly"), "0 9 * * 1-5"),
+            "schedule   nightly             0 9 * * 1-5"
+        );
+        assert_eq!(
+            rendered("reply", None, "[status: \"clean\", findings: 0]"),
+            "reply                          [status: \"clean\", findings: 0]",
+            "a subject-less act leaves the cell blank, not the column"
+        );
+    }
+
+    /// An act changes the world outside the turn; it does not measure it. So
+    /// it reports no magnitude — the rail sits at the base agent hue — and
+    /// its row carries neither the header size-bar nor a sparkline slot: it
+    /// opens no `call_view`, so the coalescing projection has nothing to
+    /// fold.
+    #[test]
+    fn an_act_carries_no_magnitude_and_no_bar() {
+        let block = Block::act(
+            "message",
+            Some("hunter".into()),
+            "focus on it".into(),
+            false,
+        );
+        assert!(block.magnitude().is_none(), "an act ranks nothing");
+        assert!(block.call_view().is_none(), "an act opens no group slot");
+        assert!(!block.is_tool_call() && !block.is_call());
+        for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
+            let text: String = block.body(READ_W, level).iter().map(line::plain).collect();
+            assert!(
+                !text.contains('\u{2588}') && !text.contains('\u{2591}'),
+                "no size-bar on an act row at {level:?}: {text:?}"
+            );
+        }
+    }
+
+    /// A refused act says so on the row that names the attempt, in the error
+    /// tier — hot ink on the outcome, which for a payload-less verb is the
+    /// whole payload column.  The long form is the raise, and the raise is
+    /// the model's.
+    #[test]
+    fn a_refused_act_tiers_its_outcome_hot() {
+        let block = Block::act(
+            "cancel",
+            Some("hunter".into()),
+            "refused: not a descendant".into(),
+            true,
+        );
+        let lines = block.body(READ_W, Reveal::Summary);
+        let row = lines.last().expect("an act renders one content row");
+        assert_eq!(
+            line::plain(row),
+            "cancel     hunter              refused: not a descendant"
+        );
+        let outcome = row.spans.last().expect("the payload span");
+        assert_eq!(outcome.style.fg, Some(super::super::palette::RED_HOT));
+        assert!(outcome.style.add_modifier.contains(Modifier::BOLD));
+
+        // A landed act of the same verb wears the ordinary body ink.
+        let landed = Block::act(
+            "cancel",
+            Some("hunter".into()),
+            "no live agent by that name".into(),
+            false,
+        );
+        let landed = landed.body(READ_W, Reveal::Summary);
+        assert_eq!(
+            landed
+                .last()
+                .expect("a row")
+                .spans
+                .last()
+                .expect("payload")
+                .style
+                .fg,
+            Some(SLATE)
+        );
+    }
+
+    /// The payload is cut to its column while the act is reduced, and the
+    /// dial is what gets the rest back: L3 wraps the whole payload under the
+    /// payload column, hanging at the same offset the head row uses.
+    #[test]
+    fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
+        let payload = "audit every unwrap() in exarch/src and report the ones that can \
+            actually fire, with the file and line and a one-sentence argument for each";
+        let mut block = Block::act("spawn", Some("hunter".into()), payload.into(), false);
+        assert_eq!(block.level(), Reveal::Summary, "an act arrives reduced");
+        assert!(
+            block.dialable(),
+            "the dial is what keeps the rest reachable"
+        );
+
+        let reduced = block.body(READ_W, Reveal::Summary);
+        assert_eq!(reduced.len(), 2, "reduced, an act is one row and its blank");
+        let head = line::plain(&reduced[1]);
+        assert!(
+            head.ends_with('\u{2026}'),
+            "the cut payload ends in an ellipsis: {head:?}"
+        );
+        assert!(
+            head.chars().count() < payload.chars().count(),
+            "the payload was cut to its column"
+        );
+
+        block.dial(1);
+        block.dial(1);
+        assert_eq!(block.level(), Reveal::Full);
+        let full: String = block
+            .body(READ_W, Reveal::Full)
+            .iter()
+            .map(|l| line::plain(l).trim_start().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in ["one-sentence", "argument", "for", "each"] {
+            assert!(
+                full.contains(word),
+                "L3 restores the whole payload: {full:?}"
+            );
+        }
+
+        // The column is the point, so it is measured on the seated rows, rail
+        // span included — the rail lands on the head alone, and every wrapped
+        // row must carry that width itself or it hangs left of the payload it
+        // continues.
+        let payload_col = RAIL_W + line::ACT_VERB_W + line::ACT_SUBJECT_W;
+        let rows: Vec<String> = block
+            .render(READ_W, AgentSlot::default(), true)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .filter(|row: &String| !row.trim().is_empty())
+            .collect();
+        assert!(rows.len() > 1, "the payload wraps at L3: {rows:?}");
+        assert_eq!(
+            rows[0].find("audit").map(|i| rows[0][..i].chars().count()),
+            Some(payload_col),
+            "the head row opens its payload in the payload column: {:?}",
+            rows[0]
+        );
+        for row in &rows[1..] {
+            assert_eq!(
+                row.chars().take_while(|c| *c == ' ').count(),
+                payload_col,
+                "a wrapped row hangs under the payload column: {row:?}"
+            );
+        }
+    }
+
+    /// An act is a barrier, not an observation: the shape it wears says
+    /// *when* its effect lands, and it never joins a run of reads.
+    #[test]
+    fn acts_are_barriers_wearing_their_own_shapes() {
+        for (verb, shape) in [
+            ("spawn", RailKind::FleetAct),
+            ("cancel", RailKind::FleetAct),
+            ("message", RailKind::FleetAct),
+            ("reply", RailKind::FleetAct),
+            ("schedule", RailKind::TimeAct),
+            ("unschedule", RailKind::TimeAct),
+        ] {
+            let block = Block::act(verb, Some("subject".into()), "payload".into(), false);
+            assert!(!block.observation(), "`{verb}` must not coalesce");
+            // The shape is level-invariant: an act is one thing disclosed.
+            for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
+                assert_eq!(block.rail_kind(level), Some(shape), "`{verb}` at {level:?}");
+            }
         }
     }
 }

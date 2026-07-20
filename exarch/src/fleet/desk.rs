@@ -441,7 +441,7 @@ impl ExarchDesk {
             s.mailbox.clone(),
             child,
             crate::shell_eval::tools::agent::AsyncSpawn {
-                tool: "agent",
+                verb: "spawn",
                 name: spec.name,
                 prompt: Some(spec.prompt),
                 harness: true,
@@ -560,31 +560,28 @@ impl ExarchDesk {
             .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
         let name = payload_string(name, "agent-cancel", "name")?;
 
-        // Resolve the name, then run the cancel and derive the chrome from
-        // what actually happened — a summary claiming "cancelled" ahead of
-        // the call would stand contradicted by its own result line on a
-        // no-op or a scope refusal. A name that resolves to nothing (never
-        // spawned, or already settled) is the same no-op as `Ok(false)`
-        // below — both mean "no live agent by that name", not an error.
-        let (summary, content, ok) = match s.registry.resolve_name(&name) {
+        // Resolve the name, then run the cancel and derive the act row from
+        // what actually happened — a row claiming "cancelled" ahead of the
+        // call would assert an effect the world never saw. A name that
+        // resolves to nothing (never spawned, or already settled) is the same
+        // no-op as `Ok(false)` below — both mean "no live agent by that
+        // name", not an error.  `cancel` takes no argument, so its payload
+        // column carries the outcome: blank when the cancel landed.
+        let (payload, content, ok) = match s.registry.resolve_name(&name) {
             None => (
-                format!("No live agent named '{name}'."),
+                "no live agent by that name".to_string(),
                 format!("no live agent named '{name}'"),
                 true,
             ),
             Some(id) => match s.registry.cancel_scoped(s.parent, id) {
-                Ok(true) => (
-                    format!("Agent '{name}' cancelled."),
-                    format!("cancelling agent '{name}'"),
-                    true,
-                ),
+                Ok(true) => (String::new(), format!("cancelling agent '{name}'"), true),
                 Ok(false) => (
-                    format!("No live agent named '{name}'."),
+                    "no live agent by that name".to_string(),
                     format!("no live agent named '{name}'"),
                     true,
                 ),
                 Err(NotADescendant(_)) => (
-                    format!("Agent '{name}' refused: not a descendant."),
+                    "refused: not a descendant".to_string(),
                     format!(
                         "agent '{name}' is not an agent you started; agent-cancel may only reach a descendant of yours"
                     ),
@@ -593,14 +590,15 @@ impl ExarchDesk {
             },
         };
         s.emit.emit(Kind::HarnessCall {
-            verb: "agent-cancel",
-            cmd: format!("cancelling agent '{name}'"),
-            summary: Some(summary),
+            verb: "cancel",
+            subject: Some(name),
+            payload,
+            failed: !ok,
         });
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // A no-op (no live agent by that name) and an actual cancel are both
-        // a successful call; only a scope violation raises, carrying the
-        // same text the chrome already rendered.
+        // a successful call; only a scope violation raises, and the raise
+        // carries the long form — the model's only copy of it.
         if ok {
             Ok(FOValue::Unit)
         } else {
@@ -619,47 +617,44 @@ impl ExarchDesk {
         let name = payload_string(name, "message", "name")?;
         let text = payload_string(text, "message", "text")?;
 
-        // Resolve the name, then run the send and derive the chrome from
-        // what actually happened — a summary claiming "messaged" ahead of
-        // the call would stand contradicted by its own result line on a
-        // delivery failure or a scope refusal. Unlike `agent-cancel`, an
-        // unresolved name is a refusal here, not a no-op: `message` promises
-        // delivery, and there is nothing to deliver to.
-        let cmd = text.clone();
-        let (summary, content, ok) = match s.registry.resolve_name(&name) {
+        // Resolve the name, then run the send and derive the act row from
+        // what actually happened — a row showing the text as sent ahead of
+        // the call would assert a delivery that a scope refusal or a full
+        // inbox never made. Unlike `cancel`, an unresolved name is a refusal
+        // here, not a no-op: `message` promises delivery, and there is
+        // nothing to deliver to.  A delivered message's payload is its text;
+        // a refused one's is why, since the text went nowhere.
+        let sent = text.clone();
+        let (payload, content, ok) = match s.registry.resolve_name(&name) {
             None => (
-                format!("No live agent named '{name}'."),
+                "refused: no live agent by that name".to_string(),
                 format!("no live agent named '{name}'; did it finish already?"),
                 false,
             ),
             Some(to) => match s.registry.message(s.parent, to, text) {
-                Ok(()) => (
-                    format!("Messaged agent '{name}'."),
-                    format!("sent message to agent '{name}'"),
-                    true,
-                ),
+                Ok(()) => (sent, format!("sent message to agent '{name}'"), true),
                 // The target settled in the gap between resolving its name
                 // and this send — the same "no live agent" outcome as an
                 // unresolved name above, just discovered one step later.
                 Err(MessageError::UnknownRecipient(_)) => (
-                    format!("No live agent named '{name}'."),
+                    "refused: no live agent by that name".to_string(),
                     format!("no live agent named '{name}'; did it finish already?"),
                     false,
                 ),
                 Err(MessageError::UnknownSender(n)) => (
-                    format!("Message from agent {n} refused: no longer live."),
+                    "refused: sender is no longer live".to_string(),
                     format!("cannot send from agent {n}: it is no longer live"),
                     false,
                 ),
                 Err(MessageError::NotADescendant(_)) => (
-                    format!("Message to agent '{name}' refused: not a descendant."),
+                    "refused: not a descendant".to_string(),
                     format!(
                         "agent '{name}' is not an agent you started; message may only reach a descendant of yours"
                     ),
                     false,
                 ),
                 Err(MessageError::RecipientInboxFull(_, reject)) => (
-                    format!("Message to agent '{name}' rejected."),
+                    format!("refused: {reject}"),
                     format!("agent '{name}' did not receive the message: {reject}"),
                     false,
                 ),
@@ -667,12 +662,13 @@ impl ExarchDesk {
         };
         s.emit.emit(Kind::HarnessCall {
             verb: "message",
-            cmd,
-            summary: Some(summary),
+            subject: Some(name),
+            payload,
+            failed: !ok,
         });
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Success of the command is the confirmation; a refusal raises,
-        // carrying the same text the chrome already rendered — the desk
+        // carrying the long form — the model's only copy of it — the desk
         // twin of the pure confirmations' `F Unit` contract.
         if ok {
             Ok(FOValue::Unit)
@@ -719,12 +715,16 @@ impl ExarchDesk {
         let label = payload_label(label, "schedule")?;
         let prompt = payload_string(prompt, "schedule", "prompt")?;
 
-        s.emit.emit(Kind::HarnessCall {
-            verb: "schedule",
-            cmd: format!("{}: {}", trigger.describe(), prompt),
-            summary: label.clone(),
-        });
-        let result = s.schedules.schedule(trigger, prompt, label, &s.mailbox);
+        // The act row goes up after the registry call, so a schedule that the
+        // registry refuses tiers its outcome like every other act rather than
+        // reading as one that landed.  The subject stays the caller's own
+        // label: the minted `sched-{id}` default is the registry's answer, not
+        // something the caller named, so an unlabelled schedule leaves the cell
+        // blank ([[decisions/260720_harness-calls-are-acts]]).
+        let described = trigger.describe();
+        let result = s
+            .schedules
+            .schedule(trigger, prompt, label.clone(), &s.mailbox);
         let content = match &result {
             Ok(receipt) => format!(
                 "scheduled '{}' ({}s to first fire)",
@@ -733,6 +733,15 @@ impl ExarchDesk {
             ),
             Err(e) => format!("could not schedule: {e}"),
         };
+        s.emit.emit(Kind::HarnessCall {
+            verb: "schedule",
+            subject: label,
+            payload: match &result {
+                Ok(_) => described,
+                Err(e) => format!("refused: {e}"),
+            },
+            failed: result.is_err(),
+        });
         s.emit.emit(Kind::HarnessResult(content.clone()));
         match result {
             Ok(receipt) => Ok(FOValue::Map {
@@ -802,27 +811,35 @@ impl ExarchDesk {
             .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
         let label = payload_string(label, "unschedule", "label")?;
 
+        // A no-op (no schedule bearing that label) is a successful call,
+        // like `cancel`'s: only the grant refusal above raises for this verb.
+        // `unschedule` takes no argument beyond its label, so — again like
+        // `cancel` — its payload column carries the outcome and the row is
+        // emitted once that outcome is known: blank when the wakeup was
+        // removed.
+        let removed = s.schedules.unschedule(&label);
+        let (payload, content) = if removed {
+            (String::new(), format!("unscheduled '{label}'"))
+        } else {
+            (
+                "no live schedule by that label".to_string(),
+                format!("no live schedule labelled '{label}'"),
+            )
+        };
         s.emit.emit(Kind::HarnessCall {
             verb: "unschedule",
-            cmd: label.clone(),
-            summary: None,
+            subject: Some(label),
+            payload,
+            failed: false,
         });
-        // A no-op (no schedule bearing that label) is a successful call,
-        // like `agent-cancel`'s: only the grant refusal above raises for
-        // this verb.
-        let content = if s.schedules.unschedule(&label) {
-            format!("unscheduled '{label}'")
-        } else {
-            format!("no live schedule labelled '{label}'")
-        };
         s.emit.emit(Kind::HarnessResult(content));
         Ok(FOValue::Unit)
     }
 
     /// `` `reply `` — the desk half of the `reply` builtin: stage the
     /// payload into the reply cell for `Agent::apply`'s drain to lift into
-    /// a `Replied` terminal once the batch drains, and emit the "Replied to
-    /// parent" chrome. Refused on every non-returning agent — the conversing
+    /// a `Replied` terminal once the batch drains, and put the `reply` act
+    /// on the rail. Refused on every non-returning agent — the conversing
     /// trunk and each `/branch` child alike — keyed on the captured
     /// `returns` bit, never on trunk-ness.
     fn reply(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
@@ -842,14 +859,18 @@ impl ExarchDesk {
             .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
         let display =
             shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
+        // `reply` addresses no one it must name — the parent is the only
+        // recipient a returning agent has — so it carries no subject and its
+        // value is the whole payload.
         s.emit.emit(Kind::HarnessCall {
             verb: "reply",
-            cmd: if display.is_empty() {
+            subject: None,
+            payload: if display.is_empty() {
                 "(empty reply)".into()
             } else {
                 display
             },
-            summary: Some("Replied to parent.".to_string()),
+            failed: false,
         });
         s.reply.set(value);
         Ok(FOValue::Unit)
@@ -1889,7 +1910,7 @@ mod tests {
         for event in rx {
             match event.kind {
                 Kind::Unpin { .. } => saw_unpin = true,
-                Kind::HarnessCall { verb: "agent", .. } => {
+                Kind::HarnessCall { verb: "spawn", .. } => {
                     assert!(
                         saw_unpin,
                         "the surfaced unpin must be observed before the spawn's HarnessCall line"
@@ -2153,6 +2174,67 @@ mod tests {
         );
     }
 
+    /// A schedule the registry refuses tiers its act row like any other act.
+    /// The row is emitted after the registry call precisely so `failed` can
+    /// carry the outcome — emitted before, every schedule would read as one
+    /// that landed ([[decisions/260720_harness-calls-are-acts]]).
+    #[test]
+    fn a_refused_schedule_tiers_its_act_row() {
+        let (emit, rx) = dummy_emitter();
+        let mut desk = granted_desk();
+        desk.services.emit = emit;
+        let spec = || FOValue::List {
+            items: vec![
+                FOValue::Variant {
+                    label: "after".into(),
+                    payload: Some(Box::new(FOValue::String { value: "1s".into() })),
+                },
+                FOValue::Variant {
+                    label: "some".into(),
+                    payload: Some(Box::new(FOValue::String {
+                        value: "nightly".into(),
+                    })),
+                },
+                FOValue::String {
+                    value: "wake".into(),
+                },
+            ],
+        };
+        desk.handle(FOValue::Variant {
+            label: "schedule".into(),
+            payload: Some(Box::new(spec())),
+        })
+        .expect("the first schedule must succeed");
+        desk.handle(FOValue::Variant {
+            label: "schedule".into(),
+            payload: Some(Box::new(spec())),
+        })
+        .expect_err("a duplicate label must be refused");
+
+        let mut acts = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Kind::HarnessCall {
+                verb: "schedule",
+                subject,
+                payload,
+                failed,
+            } = event.kind
+            {
+                assert_eq!(subject.as_deref(), Some("nightly"));
+                acts.push((payload, failed));
+            }
+        }
+        assert_eq!(acts.len(), 2, "both attempts draw a row: {acts:?}");
+        assert!(!acts[0].1, "the schedule that landed is not tiered");
+        assert_eq!(acts[0].0, "after 1s", "a landed row carries its trigger");
+        assert!(acts[1].1, "the refused schedule is tiered hot");
+        assert!(
+            acts[1].0.starts_with("refused: "),
+            "a refusal states itself in the payload: {:?}",
+            acts[1].0
+        );
+    }
+
     // ── `reply` ───────────────────────────────────────────────────────────
 
     /// `` `reply `` is refused outright when this agent does not hold
@@ -2185,7 +2267,7 @@ mod tests {
     }
 
     /// A valid `reply` stages the payload into the cell — last write wins —
-    /// and emits the "Replied to parent" chrome.
+    /// and puts a subject-less `reply` act on the rail, carrying the value.
     #[test]
     fn reply_stages_the_payload_last_write_wins() {
         let (emit, rx) = dummy_emitter();
@@ -2210,21 +2292,24 @@ mod tests {
             "the last staged reply wins"
         );
 
-        let mut saw_chrome = false;
+        let mut acts = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if let Kind::HarnessCall {
                 verb: "reply",
-                summary,
-                ..
+                subject,
+                payload,
+                failed,
             } = event.kind
             {
-                assert_eq!(summary.as_deref(), Some("Replied to parent."));
-                saw_chrome = true;
+                assert_eq!(subject, None, "`reply` addresses no named subject");
+                assert!(!failed, "a staged reply is not a refusal");
+                acts.push(payload);
             }
         }
-        assert!(
-            saw_chrome,
-            "each reply must emit the parent-facing chrome line"
+        assert_eq!(
+            acts,
+            ["first", "second"],
+            "each reply emits its own act row, carrying the value it staged"
         );
     }
 

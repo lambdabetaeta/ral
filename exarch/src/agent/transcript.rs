@@ -117,19 +117,22 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             }),
         ),
         Kind::Step { n, tuning } => ("step", json!({ "n": n, "tuning": tuning })),
-        // A desk verb's `HarnessCall`/`HarnessResult` records identically to
-        // a `ral` `ToolCall`/`ToolResult` — the operational trace keeps
-        // showing every acting call the same way; only the live `Kind`
-        // vocabulary distinguishes a genuine provider-boundary tool call
-        // from a harness verb that never crossed it.
-        Kind::ToolCall { tool, cmd, summary }
-        | Kind::HarnessCall {
-            verb: tool,
-            cmd,
-            summary,
-        } => (
+        Kind::ToolCall { tool, cmd, summary } => (
             "tool_call",
             json!({ "tool": tool, "cmd": cmd, "summary": summary }),
+        ),
+        // A desk verb records its three act fields as they are: an act names
+        // a subject and carries a payload, which no `tool_call` shape has a
+        // slot for.  Its result still records as a `tool_result`, so the
+        // forensic pair stays intact.
+        Kind::HarnessCall {
+            verb,
+            subject,
+            payload,
+            failed,
+        } => (
+            "harness_call",
+            json!({ "verb": verb, "subject": subject, "payload": payload, "failed": failed }),
         ),
         Kind::ToolResult(text) | Kind::HarnessResult(text) => {
             ("tool_result", json!({ "text": text }))

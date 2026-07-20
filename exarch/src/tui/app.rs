@@ -410,15 +410,20 @@ impl App {
             // elapsed-wait clock, so a consecutive Phase event simply
             // resets the bar to the new phase.
             Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
-            // A genuine provider-boundary `ral` call and a desk verb's
-            // rail-identical [`Kind::HarnessCall`] render alike: the rail
-            // shows the acting name (`tool`/`verb`) either way.
-            Kind::ToolCall { tool, cmd, summary }
-            | Kind::HarnessCall {
-                verb: tool,
-                cmd,
-                summary,
+            // A desk verb changed the world outside the turn, so it renders
+            // as an act — its own block kind, its own rail shape, and a
+            // barrier the coalescing projection never folds into a run of
+            // observations ([[decisions/260720_harness-calls-are-acts]]).
+            Kind::HarnessCall {
+                verb,
+                subject,
+                payload,
+                failed,
             } => {
+                ral_core::dbg_trace!("tui", "HarnessCall verb={verb} payload={payload:?}");
+                self.with_viewport(id, |vp| vp.push_act(verb, subject, payload, failed));
+            }
+            Kind::ToolCall { tool, cmd, summary } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| match summary {
@@ -431,7 +436,6 @@ impl App {
                     // never reaching back to clobber an earlier call's size bar.
                     None => {
                         vp.push_plain_call(
-                            tool,
                             (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd),
                         );
                     }
@@ -443,7 +447,7 @@ impl App {
             // its line count is the call's magnitude, attached to the
             // most-recent tool-call block as the collapsed header's
             // size-bar.
-            Kind::ToolResult(text) | Kind::HarnessResult(text) => {
+            Kind::ToolResult(text) => {
                 self.with_viewport(id, |vp| vp.set_result_size(&text));
             }
             Kind::UserPromptEcho(text) => {
@@ -454,8 +458,11 @@ impl App {
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
-            // Quiet on the rail; recorded in the trace at the emit seam.
-            Kind::Nudge { .. } => {}
+            // Quiet on the rail; recorded in the trace at the emit seam.  An
+            // act's result joins them there: a desk result is one line, so
+            // the bar it used to stamp was constant ink, and the act row has
+            // already said everything the act has to say.
+            Kind::Nudge { .. } | Kind::HarnessResult(_) => {}
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));
             }

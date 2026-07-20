@@ -234,12 +234,6 @@ impl Sink for Headless {
             }
             Kind::ToolCall {
                 tool, cmd, summary, ..
-            }
-            | Kind::HarnessCall {
-                verb: tool,
-                cmd,
-                summary,
-                ..
             } if id == self.root_id => {
                 eprintln!("[tool: {tool}]");
                 if let Some(s) = &summary {
@@ -248,6 +242,24 @@ impl Sink for Headless {
                     }
                 }
                 for line in cmd.lines() {
+                    eprintln!("  {line}");
+                }
+            }
+            // A stderr line has no rail hue to carry identity and no column
+            // budget to align, so an act keeps the plain `[tool: {verb}]`
+            // shape here, its subject and payload indented under it exactly
+            // as a call's summary and script are.
+            Kind::HarnessCall {
+                verb,
+                subject,
+                payload,
+                ..
+            } if id == self.root_id => {
+                eprintln!("[tool: {verb}]");
+                if let Some(s) = &subject {
+                    eprintln!("  {s}");
+                }
+                for line in payload.lines() {
                     eprintln!("  {line}");
                 }
             }

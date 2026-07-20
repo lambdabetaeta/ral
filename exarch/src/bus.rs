@@ -1174,20 +1174,35 @@ pub enum Kind {
         summary: Option<String>,
     },
     ToolResult(String),
-    /// A desk verb acted — `amnemon`/`mnemon` (via `agent-start`), `message`,
-    /// `agent-cancel`, `schedule`, `unschedule`, or `reply` — rendered on the
-    /// rail exactly like [`Kind::ToolCall`], but
-    /// naming the harness verb the model invoked rather than a name that
-    /// crossed the provider boundary: unlike `ral`, none of these are a
-    /// provider-facing tool at all any more, so this is the honest kind for
-    /// what the desk actually did.
+    /// A desk verb **acted** — `spawn`, `cancel`, `message`, `reply`,
+    /// `schedule`, `unschedule`.  An act changes the world *outside* the
+    /// turn: it starts a process, fills another agent's inbox, arms a wakeup,
+    /// ends a run.  A [`Kind::ToolCall`] only observes, so the two never
+    /// share a rendered shape
+    /// ([[decisions/260720_harness-calls-are-acts]]) — and an act's whole
+    /// information content is these three fields, never a host-authored
+    /// sentence about them.
     HarnessCall {
+        /// The bare imperative the model invoked.
         verb: &'static str,
-        cmd: String,
-        summary: Option<String>,
+        /// What the act names: the agent name or schedule label. `None` for
+        /// an act that addresses nothing (`reply` answers its parent).
+        subject: Option<String>,
+        /// The act's argument — the launch prompt, the message text, the
+        /// trigger description, the replied value — or, when `failed`, the
+        /// short reason it was refused.  Empty when the act carries no
+        /// argument and simply landed (`cancel`, `unschedule`).
+        payload: String,
+        /// Whether the act was refused.  The refusal's *long* form is the
+        /// raise, which reaches the model through captured stderr; this bit
+        /// only tiers the row.
+        failed: bool,
     },
     /// The paired result for a [`Kind::HarnessCall`] — the desk's twin of
-    /// [`Kind::ToolResult`].
+    /// [`Kind::ToolResult`], and a *forensic* record only: the act row says
+    /// on screen everything the act has to say, and the model's copy of a
+    /// refusal travels the raise.  Its one consumer is
+    /// [`crate::agent::transcript`].
     HarnessResult(String),
     UserPromptEcho(String),
     StopReason(String),

@@ -32,7 +32,7 @@ pub(crate) fn spawn_branch(
     let name = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
     let child = session.branch().map_err(|e| e.to_string())?;
     let spec = AsyncSpawn {
-        tool: "/branch",
+        verb: "/branch",
         name,
         prompt: prompt.map(str::to_string),
         harness: false,
@@ -52,7 +52,9 @@ pub(crate) fn spawn_branch(
 /// opposed to the fork-detach-register mechanics every one of them shares
 /// ([`spawn_async`]).
 pub(crate) struct AsyncSpawn {
-    pub tool: &'static str,
+    /// The acting name the rail shows: the bare imperative on the harness
+    /// path (`spawn`), the slash command on `/branch`.
+    pub verb: &'static str,
     pub name: String,
     /// The child's launch prompt, or `None` to park and wait — a branch, which
     /// converses for the human rather than running a seeded turn.
@@ -106,7 +108,7 @@ pub(crate) fn spawn_async(
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
     let AsyncSpawn {
-        tool,
+        verb,
         name,
         prompt,
         harness,
@@ -190,18 +192,23 @@ pub(crate) fn spawn_async(
     }
     // The dispatch shows on the rail before the spawn, so the user can see
     // exactly what the child was asked to do. A harness verb never crossed
-    // the provider boundary, so it renders honestly as `HarnessCall`;
-    // `/branch` is a human slash command, rendered as an ordinary `ToolCall`.
+    // the provider boundary and changes the world outside the turn, so it
+    // renders as an act — verb, subject, payload; `/branch` is a human slash
+    // command, rendered as an ordinary `ToolCall`.
     let cmd = prompt.unwrap_or_else(|| "(waiting for you)".to_string());
-    let summary = Some(format!("Agent {name} spawned ({tool})."));
     if harness {
         emit.emit(Kind::HarnessCall {
-            verb: tool,
-            cmd,
-            summary,
+            verb,
+            subject: Some(name.clone()),
+            payload: cmd,
+            failed: false,
         });
     } else {
-        emit.emit(Kind::ToolCall { tool, cmd, summary });
+        emit.emit(Kind::ToolCall {
+            tool: verb,
+            cmd,
+            summary: Some(format!("Agent {name} spawned ({verb}).")),
+        });
     }
     let worker = thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
