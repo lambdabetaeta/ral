@@ -1,4 +1,4 @@
-//! The `/login` overlay — "Sign in with ChatGPT" driven from inside a running
+//! The `/login` overlay — "Sign in with `ChatGPT`" driven from inside a running
 //! session, modeled on the `/model` picker (`picker.rs` / `model_picker.rs`).
 //!
 //! [`LoginOverlay`] is a pure display+input component (state + key + render,
@@ -17,22 +17,21 @@
 //! establishes: only a station's glyph/brightness changes between phases.
 
 use super::app::Overlay;
+use super::line;
 use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
-use super::picker::{PAD_X, PAD_Y, centered, render_shadow};
-use super::render::draw;
-use super::tui_loop::{CommandCtx, KeyAction, KeyMode, Tui, key_action};
+use super::picker::{PAD_X, PAD_Y, bezel_shell, centered};
+use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::bus::Kind;
 use crate::provider::oauth::{self, LoginMethod, LoginPhase, OAuthToken};
 use ratatui::Frame;
-use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEventKind, poll as ct_poll, read as ct_read};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::Paragraph;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
 
 /// The overlay's fixed content width; clamped to the frame when narrower.
 const OVERLAY_W: u16 = 56;
@@ -48,11 +47,12 @@ enum Mode {
     Choosing,
     /// The flow is running on its background thread. `None` until the first
     /// phase report lands (an instant after the thread spawns, rendering as
-    /// every station pending); `Some` holds the last staged report. Key
-    /// handling is Esc-only (cancel).
+    /// every station pending); `Some` holds the last staged report. No key is
+    /// live — the driver's cancel chord (Esc, Ctrl-C, Ctrl-D) is the only way
+    /// out.
     Running(Option<LoginPhase>),
     /// The flow failed; the reason is shown. Enter returns to `Choosing`
-    /// (retry), Esc closes.
+    /// (retry); the driver's cancel chord closes.
     Failed(String),
 }
 
@@ -79,27 +79,24 @@ impl LoginOverlay {
 }
 
 /// What a key press resolved to. [`drive_login`] acts on the non-`None`
-/// outcomes: spawning the flow thread, or tripping cancellation and closing.
+/// outcome by spawning the flow thread; cancellation (Esc, Ctrl-C, Ctrl-D) is
+/// resolved by the driver before a key ever reaches [`LoginOverlay::key`], so
+/// it never appears here.
 pub(super) enum LoginAction {
     /// Keep the overlay open; redraw.
     None,
     /// Enter in `Choosing`: start the flow with the selected method.
     Start(LoginMethod),
-    /// Esc — cancel/close. In `Running` the driver also trips the cancel
-    /// flag, so the flow thread unwinds promptly.
-    Cancelled,
 }
 
 impl LoginOverlay {
-    /// Handle one key press. Mirrors `Picker::key` (`picker.rs:539-580`).
-    /// `Choosing`: any movement key toggles the two-way method selector,
-    /// Enter starts, Esc cancels. `Running`: Esc is the only live key — there
-    /// is nothing to edit mid-flow. `Failed`: Enter retries (back to
-    /// `Choosing`), Esc closes.
+    /// Handle one key press. Mirrors `Picker::key` (`picker.rs`). `Choosing`:
+    /// any movement key toggles the two-way method selector, Enter starts.
+    /// `Running`: nothing is live — there is nothing to edit mid-flow.
+    /// `Failed`: Enter retries (back to `Choosing`).
     pub(super) fn key(&mut self, code: KeyCode) -> LoginAction {
         match &self.mode {
             Mode::Choosing => match code {
-                KeyCode::Esc => LoginAction::Cancelled,
                 KeyCode::Enter => {
                     let method = self.method;
                     self.mode = Mode::Running(None);
@@ -114,16 +111,12 @@ impl LoginOverlay {
                 }
                 _ => LoginAction::None,
             },
-            Mode::Running(_) => match code {
-                KeyCode::Esc => LoginAction::Cancelled,
-                _ => LoginAction::None,
-            },
+            Mode::Running(_) => LoginAction::None,
             Mode::Failed(_) => match code {
                 KeyCode::Enter => {
                     self.mode = Mode::Choosing;
                     LoginAction::None
                 }
-                KeyCode::Esc => LoginAction::Cancelled,
                 _ => LoginAction::None,
             },
         }
@@ -166,41 +159,20 @@ impl Station {
 
 impl LoginOverlay {
     /// Draw the floating overlay over the centre of `frame`, reusing the
-    /// picker's own chrome vocabulary (`centered`, `render_shadow`, the
-    /// double-line bezel, the padding constants) rather than copying it —
-    /// one overlay chrome, two overlays. Mirrors `Picker::render`
-    /// (`picker.rs:811-891`).
+    /// picker's own chrome (`centered`, `bezel_shell`) rather than copying it
+    /// — one overlay shell, two overlays. Mirrors `Picker::render`
+    /// (`picker.rs`).
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
         let (w, h) = self.desired_size(frame);
         let area = centered(w, h, frame);
         let plane = Style::default().bg(OVERLAY_BG);
 
-        render_shadow(f, area);
-        f.render_widget(Clear, area);
         let hint = match self.mode {
             Mode::Choosing => " ↑↓ method · ⏎ start · esc cancel ",
             Mode::Running(_) => " esc cancel ",
             Mode::Failed(_) => " ⏎ retry · esc close ",
         };
-        let bezel = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
-            .style(plane)
-            .title(
-                Line::from(Span::styled(
-                    " SIGN IN ",
-                    plane.fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
-                ))
-                .centered(),
-            )
-            .title_bottom(
-                Line::from(Span::styled(hint, plane.fg(SLATE).add_modifier(Modifier::DIM)))
-                    .centered(),
-            )
-            .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y));
-        let inner = bezel.inner(area);
-        f.render_widget(bezel, area);
+        let inner = bezel_shell(f, area, plane, " SIGN IN ", hint);
         f.render_widget(Paragraph::new(self.body_lines()).style(plane), inner);
     }
 
@@ -225,8 +197,8 @@ impl LoginOverlay {
 
     /// One row of the method selector — bright cyan for the active method,
     /// dim otherwise, the picker's own `field_label` focus treatment
-    /// (`picker.rs:893-902`) in miniature. `show_field_label` prints the
-    /// `method` column header on the first row only, blank on the second.
+    /// (`picker.rs`) in miniature. `show_field_label` prints the `method`
+    /// column header on the first row only, blank on the second.
     fn method_line(
         &self,
         method: LoginMethod,
@@ -294,7 +266,7 @@ impl LoginOverlay {
             }
             Mode::Running(Some(LoginPhase::AwaitingBrowser { url, opened: false })) => {
                 let mut lines = vec![dim_line("  open this URL to sign in:")];
-                lines.extend(wrap(&format!("  {url}"), Style::default().fg(SLATE).add_modifier(Modifier::DIM)));
+                lines.extend(wrap(url, Style::default().fg(SLATE).add_modifier(Modifier::DIM)));
                 lines
             }
             Mode::Running(Some(LoginPhase::AwaitingDevice { user_code, url })) => vec![
@@ -311,7 +283,7 @@ impl LoginOverlay {
                 ]),
                 dim_line(&format!("           {url}")),
             ],
-            Mode::Failed(reason) => wrap(&format!("  {reason}"), Style::default().fg(RED)),
+            Mode::Failed(reason) => wrap(reason, Style::default().fg(RED)),
         }
     }
 }
@@ -323,24 +295,16 @@ fn dim_line(text: &str) -> Line<'static> {
     ))
 }
 
-/// Word-wrap `text` to [`BODY_W`] columns, styled uniformly — used for the
-/// two detail texts long enough to need it (a manual-open URL, a failure
-/// reason).
+/// Word-wrap `text` to [`BODY_W`] columns (less its two-column indent),
+/// styled uniformly and left-indented — used for the two detail texts long
+/// enough to need it (a manual-open URL, a failure reason). Backed by
+/// [`line::push_wrapped`], the shared display-width-aware wrap primitive
+/// (`picker.rs`'s failed-provider notes use it for the same job).
 fn wrap(text: &str, style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let mut row = String::new();
-    for word in text.split_whitespace() {
-        if !row.is_empty() && row.len() + 1 + word.len() > BODY_W {
-            lines.push(Line::from(Span::styled(std::mem::take(&mut row), style)));
-        }
-        if !row.is_empty() {
-            row.push(' ');
-        }
-        row.push_str(word);
-    }
-    if !row.is_empty() {
-        lines.push(Line::from(Span::styled(row, style)));
-    }
+    line::push_wrapped(&mut lines, text, BODY_W.saturating_sub(2), |chunk, _| {
+        Line::from(Span::styled(format!("  {chunk}"), style))
+    });
     lines
 }
 
@@ -380,10 +344,9 @@ struct FlowHandle {
 
 /// Poll keys and the running flow's messages until the overlay resolves.
 /// Returns the persisted `(token, replaced)` on success, `None` on
-/// cancel/close. Structured exactly as `drive_picker`
-/// (`model_picker.rs:102-207`): the flow runs on a background thread
-/// reporting over an `mpsc` channel, so this render/poll loop never blocks
-/// on the network.
+/// cancel/close. Structured exactly as `drive_picker` (`model_picker.rs`):
+/// the flow runs on a background thread reporting over an `mpsc` channel, so
+/// this render/poll loop never blocks on the network.
 fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
     let mut flow: Option<FlowHandle> = None;
     loop {
@@ -412,55 +375,39 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
             flow = None;
         }
 
-        if draw(&mut tui.app, tui.guard.term()).is_err() {
-            return None;
-        }
-        if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
-            continue;
-        }
-        let Ok(CtEvent::Key(k)) = ct_read() else {
-            continue;
-        };
-        if k.kind != KeyEventKind::Press {
-            continue;
-        }
-        if key_action(KeyMode::Overlay, &k, false) == KeyAction::Cancel {
-            if let Some(handle) = &flow {
-                handle.cancel.store(true, Ordering::Release);
-            }
-            return None;
-        }
-        let action = tui.app.login_mut()?.key(k.code);
-        match action {
-            LoginAction::None => {}
-            LoginAction::Cancelled => {
+        match overlay_tick(tui) {
+            OverlayTick::TerminalLost => return None,
+            OverlayTick::Idle => {}
+            OverlayTick::Cancel => {
                 if let Some(handle) = &flow {
                     handle.cancel.store(true, Ordering::Release);
                 }
                 return None;
             }
-            LoginAction::Start(method) => {
-                let (tx, rx) = mpsc::channel();
-                let cancel = Arc::new(AtomicBool::new(false));
-                let flag = Arc::clone(&cancel);
-                let phase_tx = tx.clone();
-                std::thread::spawn(move || {
-                    let result = oauth::login_flow(
-                        method,
-                        move |p| {
-                            let _ = phase_tx.send(LoginMsg::Phase(p));
-                        },
-                        &flag,
-                    );
-                    let _ = tx.send(LoginMsg::Done(result));
-                });
-                flow = Some(FlowHandle { rx, cancel });
+            OverlayTick::Key(code) => {
+                if let LoginAction::Start(method) = tui.app.login_mut()?.key(code) {
+                    let (tx, rx) = mpsc::channel();
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let flag = Arc::clone(&cancel);
+                    let phase_tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result = oauth::login_flow(
+                            method,
+                            move |p| {
+                                let _ = phase_tx.send(LoginMsg::Phase(p));
+                            },
+                            &flag,
+                        );
+                        let _ = tx.send(LoginMsg::Done(result));
+                    });
+                    flow = Some(FlowHandle { rx, cancel });
+                }
             }
         }
     }
 }
 
-/// The commit step (mirrors `apply_model_switch`, `model_picker.rs:221-278`).
+/// The commit step (mirrors `apply_model_switch`, `model_picker.rs`).
 /// The flow has already persisted the token to disk (`save_one`, inside
 /// `login_flow`); this makes it *live* in the running session — the
 /// credential store and the model catalog's `LiveSource` — and records the

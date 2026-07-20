@@ -393,7 +393,7 @@ fn ui_loop(
                     let focused = tui.app.tabs.focused();
                     let steerable = is_steerable(ctx, tui.app.tabs.root(), focused);
                     tui.app.tabs.set_steerable(steerable);
-                    match key_action(KeyMode::Running, &k, steerable) {
+                    match key_action(&k, steerable) {
                         // Esc / Ctrl-C interrupt the *focused* tab's current
                         // turn — never a cascade, never a kill.  On the trunk
                         // `raise_interrupt()` unwinds the trunk's own turn via
@@ -475,15 +475,40 @@ pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
     k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// The two live input contexts: the running UI loop (the worker drives the
-/// whole session, so the prompt is never an idle read) and the modal `/model`
-/// picker overlay.  There is no idle mode — an interactive root's worker parks
-/// in [`Agent::drive`] rather than returning, so the session ends through
-/// `/quit`, never a keystroke.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum KeyMode {
-    Running,
-    Overlay,
+/// What one overlay poll tick resolved to. Both `/model` (`model_picker.rs`'s
+/// `drive_picker`) and `/login` (`login.rs`'s `drive_login`) drive their modal
+/// on this one tick — draw, poll 100ms, read, filter to a live press — keeping
+/// only their own channel pumping and action match.
+pub(super) enum OverlayTick {
+    /// Nothing arrived within the poll window; loop again.
+    Idle,
+    /// A live key, neither the shared cancel chord nor a release event — hand
+    /// it to the overlay's own `key()`.
+    Key(KeyCode),
+    /// Ctrl-C, Ctrl-D, or Esc: every overlay's one cancel chord.
+    Cancel,
+    /// The terminal draw failed; the driver should give up and close.
+    TerminalLost,
+}
+
+/// Redraw `tui.app` and poll up to 100ms for the overlay's next live key.
+pub(super) fn overlay_tick(tui: &mut Tui) -> OverlayTick {
+    if draw(&mut tui.app, tui.guard.term()).is_err() {
+        return OverlayTick::TerminalLost;
+    }
+    if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
+        return OverlayTick::Idle;
+    }
+    let Ok(CtEvent::Key(k)) = ct_read() else {
+        return OverlayTick::Idle;
+    };
+    if k.kind != KeyEventKind::Press {
+        return OverlayTick::Idle;
+    }
+    if ctrl_key(&k, 'c') || ctrl_key(&k, 'd') || k.code == KeyCode::Esc {
+        return OverlayTick::Cancel;
+    }
+    OverlayTick::Key(k.code)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -493,15 +518,15 @@ pub enum KeyAction {
     Cancel,
 }
 
-pub fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
+/// Classify one key press in the running UI loop: Ctrl-C and Esc always
+/// cancel; otherwise a bare Enter submits when `enter_submits` (the focused
+/// tab's steerability), and everything else edits. The worker drives the
+/// whole session, so the prompt is never an idle read — there is no separate
+/// mode to classify against here. The modal overlays (`/model`, `/login`)
+/// resolve their own cancel chord through [`overlay_tick`] instead.
+pub fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
     if ctrl_key(k, 'c') {
         return KeyAction::Cancel;
-    }
-    if ctrl_key(k, 'd') {
-        return match mode {
-            KeyMode::Overlay => KeyAction::Cancel,
-            KeyMode::Running => KeyAction::Edit,
-        };
     }
     if k.code == KeyCode::Esc {
         return KeyAction::Cancel;

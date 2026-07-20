@@ -3,9 +3,6 @@
 
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::Duration;
-
-use ratatui::crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read};
 
 use crate::bus::Kind;
 use crate::provider::credential::CredentialStore;
@@ -15,8 +12,7 @@ use crate::provider::state;
 
 use super::app::Overlay;
 use super::picker::{self, Picker};
-use super::render::draw;
-use super::tui_loop::{CommandCtx, KeyAction, KeyMode, Tui, key_action};
+use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 
 type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 
@@ -123,32 +119,26 @@ fn drive_picker(
         // Fold any landed fetch results into the picker (and the catalog's
         // caches), on this thread, so the disk write stays single-threaded.
         if let Some(rx) = rx {
-            while let Ok((id, result)) = rx.try_recv() {
-                let state = match result {
-                    Ok(models) => {
-                        catalog.record(&id, models.clone());
-                        picker::ModelsState::Loaded(models)
+            fold_fetch(
+                rx,
+                |id, models| catalog.record(id, models),
+                |id, state| {
+                    if let Some(p) = tui.app.picker_mut() {
+                        p.set_models(id, state);
                     }
-                    Err(reason) => picker::ModelsState::Failed(reason),
-                };
-                if let Some(p) = tui.app.picker_mut() {
-                    p.set_models(&id, state);
-                }
-            }
+                },
+            );
         }
         // Fold any landed serving-provider results the same way.
-        while let Ok((model, result)) = endpoint_rx.try_recv() {
-            let state = match result {
-                Ok(endpoints) => {
-                    catalog.record_endpoints(&model, endpoints.clone());
-                    picker::EndpointsState::Loaded(endpoints)
+        fold_fetch(
+            &endpoint_rx,
+            |model, endpoints| catalog.record_endpoints(model, endpoints),
+            |model, state| {
+                if let Some(p) = tui.app.picker_mut() {
+                    p.set_endpoints(model, state);
                 }
-                Err(reason) => picker::EndpointsState::Failed(reason),
-            };
-            if let Some(p) = tui.app.picker_mut() {
-                p.set_endpoints(&model, state);
-            }
-        }
+            },
+        );
         // When the provider control is focused on an OpenRouter model whose
         // serving providers we have not fetched, seed it from the catalog memo
         // or spawn a background fetch. Seeding the state first dedups: the next
@@ -174,39 +164,53 @@ fn drive_picker(
                 });
             }
         }
-        if draw(&mut tui.app, tui.guard.term()).is_err() {
-            return None;
-        }
-        if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
-            continue;
-        }
-        let Ok(CtEvent::Key(k)) = ct_read() else {
-            continue;
-        };
-        if k.kind != KeyEventKind::Press {
-            continue;
-        }
-        if key_action(KeyMode::Overlay, &k, false) == KeyAction::Cancel {
-            return None;
-        }
-        let action = tui.app.picker_mut()?.key(k.code);
-        match action {
-            picker::PickAction::None => {}
-            picker::PickAction::Cancelled => return None,
-            picker::PickAction::Selected(id, model, tuning, route) => {
-                return Some((id, model, tuning, route));
-            }
-            picker::PickAction::Manual(query, tuning, route) => {
-                let available = store.available();
-                match crate::provider::models::resolve_model_provider(&query, &available, catalog) {
-                    Ok(id) => return Some((id, query, tuning, route)),
-                    Err(e) => {
-                        let root = tui.app.tabs.root();
-                        tui.app.push_error(root, &e);
+        match overlay_tick(tui) {
+            OverlayTick::TerminalLost | OverlayTick::Cancel => return None,
+            OverlayTick::Idle => {}
+            OverlayTick::Key(code) => {
+                let action = tui.app.picker_mut()?.key(code);
+                match action {
+                    picker::PickAction::None => {}
+                    picker::PickAction::Selected(id, model, tuning, route) => {
+                        return Some((id, model, tuning, route));
+                    }
+                    picker::PickAction::Manual(query, tuning) => {
+                        let available = store.available();
+                        match crate::provider::models::resolve_model_provider(
+                            &query, &available, catalog,
+                        ) {
+                            Ok(id) => return Some((id, query, tuning, None)),
+                            Err(e) => {
+                                let root = tui.app.tabs.root();
+                                tui.app.push_error(root, &e);
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Fold every fetch result currently queued on `rx` into the picker via
+/// `set`, recording each success into the catalog via `record` first (so the
+/// on-disk cache stays authoritative for the next open). Shared by the
+/// model-list and serving-provider pumps in [`drive_picker`] — they differ
+/// only in their key, payload, and where each callback writes.
+fn fold_fetch<K, T: Clone>(
+    rx: &std::sync::mpsc::Receiver<(K, Result<T, String>)>,
+    mut record: impl FnMut(&K, T),
+    mut set: impl FnMut(&K, picker::FetchState<T>),
+) {
+    while let Ok((key, result)) = rx.try_recv() {
+        let state = match result {
+            Ok(value) => {
+                record(&key, value.clone());
+                picker::FetchState::Loaded(value)
+            }
+            Err(reason) => picker::FetchState::Failed(reason),
+        };
+        set(&key, state);
     }
 }
 
@@ -282,8 +286,8 @@ fn apply_model_switch(
 }
 
 /// A human-readable suffix for the switch note describing any non-default
-/// tuning and route, e.g. ` · effort high · temp 0.7 · via deepinfra`. Empty
-/// when both knobs are auto and no route is pinned.
+/// tuning and route, e.g. ` · effort high · temp 0.7 · top_p 0.9 · via
+/// deepinfra`. Empty when every knob is auto and no route is pinned.
 fn tuning_suffix(tuning: &provider::Tuning, route: Option<&str>) -> String {
     let mut parts = String::new();
     if let Some(effort) = &tuning.effort {
@@ -291,6 +295,9 @@ fn tuning_suffix(tuning: &provider::Tuning, route: Option<&str>) -> String {
     }
     if let Some(temperature) = tuning.temperature {
         let _ = write!(parts, " · temp {temperature:.1}");
+    }
+    if let Some(top_p) = tuning.top_p {
+        let _ = write!(parts, " · top_p {top_p:.2}");
     }
     if let Some(slug) = route {
         let _ = write!(parts, " · via {slug}");

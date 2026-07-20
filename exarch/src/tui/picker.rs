@@ -73,26 +73,26 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-/// One provider's model-list fetch state.
-pub enum ModelsState {
+/// One background fetch's state, generic over the loaded payload — a
+/// provider's model list ([`ModelsState`]) or a model's serving-provider list
+/// ([`EndpointsState`]).
+pub enum FetchState<T> {
     /// The background fetch is in flight — the row reads "loading…".
     Loading,
-    /// A usable list (from cache or a completed fetch).
-    Loaded(Vec<String>),
-    /// The fetch failed; the provider still accepts a manual model entry.
+    /// A usable value (from cache or a completed fetch).
+    Loaded(T),
+    /// The fetch failed with this reason.
     Failed(String),
 }
 
+/// One provider's model-list fetch state. `Failed`: the provider still
+/// accepts a manual model entry.
+pub type ModelsState = FetchState<Vec<String>>;
+
 /// One model's serving-provider (`OpenRouter` `/endpoints`) fetch state. Keyed by
 /// model id, fetched intent-driven when the provider control is focused on it.
-pub enum EndpointsState {
-    /// The background fetch is in flight — the row reads "loading…".
-    Loading,
-    /// The serving providers `OpenRouter` lists for this model.
-    Loaded(Vec<ProviderEndpoint>),
-    /// The fetch failed; the route stays `auto` (`OpenRouter` decides).
-    Failed(String),
-}
+/// `Failed`: the route stays `auto` (`OpenRouter` decides).
+pub type EndpointsState = FetchState<Vec<ProviderEndpoint>>;
 
 /// The chosen serving provider together with the model it was chosen for. The
 /// control shows it (and [`Picker::apply`] emits it) only while that model is
@@ -103,9 +103,10 @@ struct Route {
     slug: String,
 }
 
-/// What a key press resolved to. The REPL acts on the non-`None` outcomes:
-/// rebuilding the provider with the chosen model *and* tuning, persisting the
-/// selection, and updating the status bar, or closing the picker.
+/// What a key press resolved to. The REPL acts on the non-`None` outcomes,
+/// rebuilding the provider with the chosen model *and* tuning and persisting
+/// the selection; cancellation (Esc, Ctrl-C, Ctrl-D) is resolved by the
+/// driver before a key ever reaches [`Picker::key`], so it never appears here.
 pub enum PickAction {
     /// Keep the picker open; redraw.
     None,
@@ -115,11 +116,9 @@ pub enum PickAction {
     /// Enter on the synthetic manual row: take the raw query as a model
     /// name and let the REPL resolve its provider (the listing-or-name
     /// fallback) — the escape hatch when a fetch failed or the wanted model
-    /// is not listed. Carries the live tuning and route too (the route is
-    /// `None` here — a manual model has no fetched serving-provider list).
-    Manual(String, Tuning, Option<String>),
-    /// Esc — dismiss without switching.
-    Cancelled,
+    /// is not listed. Carries the live tuning; a manual model has no fetched
+    /// serving-provider list, so there is no route to carry.
+    Manual(String, Tuning),
 }
 
 /// A row in the rendered list: either a listed model or the synthetic
@@ -139,6 +138,18 @@ enum Focus {
     Temperature,
     TopP,
 }
+
+/// The canonical focus cycle order. [`Picker::cycle`] filters `Provider` out
+/// unless the highlighted model has one to offer, stating that one rule once
+/// rather than declaring two hardcoded orders that differ only by its
+/// presence.
+const FOCUS_ORDER: &[Focus] = &[
+    Focus::Search,
+    Focus::Provider,
+    Focus::Effort,
+    Focus::Temperature,
+    Focus::TopP,
+];
 
 /// One rung of the effort ladder: its short label, its ramp glyph (an
 /// ascending block, so the ladder *grows* left-to-right), and the genai
@@ -328,6 +339,40 @@ pub(super) fn render_shadow(f: &mut Frame, area: Rect) {
             cast(area.right() + dx, y);
         }
     }
+}
+
+/// Build the overlay's chrome over `area`: cast the drop shadow, clear the
+/// box, and render the double-line CYAN-bold bezel — a gold centered `title`,
+/// a dim slate centered bottom `hint`, [`PAD_X`]/[`PAD_Y`] padding inside —
+/// returning the inner content [`Rect`]. The one shell both `/model` and
+/// `/login` render into. `pub(super)`: shared overlay chrome, reused by
+/// [`super::login`]'s modal.
+pub(super) fn bezel_shell(f: &mut Frame, area: Rect, plane: Style, title: &str, hint: &str) -> Rect {
+    render_shadow(f, area);
+    f.render_widget(Clear, area);
+    let bezel = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
+        .style(plane)
+        .title(
+            Line::from(Span::styled(
+                title.to_string(),
+                plane.fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(
+            Line::from(Span::styled(
+                hint.to_string(),
+                plane.fg(SLATE).add_modifier(Modifier::DIM),
+            ))
+            .centered(),
+        )
+        .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y));
+    let inner = bezel.inner(area);
+    f.render_widget(bezel, area);
+    inner
 }
 
 pub struct Picker {
@@ -538,11 +583,12 @@ impl Picker {
 
     /// Handle one key press. Typing filters (and focuses the search box);
     /// `Tab`/`BackTab` cycle the field; the arrows move the focused control;
-    /// `Enter` applies the model + tuning; `Esc` cancels.
+    /// `Enter` applies the model + tuning. The driver intercepts Esc (and
+    /// Ctrl-C/Ctrl-D) as the shared cancel chord before a key ever reaches
+    /// here, so this never sees one.
     pub fn key(&mut self, code: ratatui::crossterm::event::KeyCode) -> PickAction {
         use ratatui::crossterm::event::KeyCode;
         match code {
-            KeyCode::Esc => return PickAction::Cancelled,
             KeyCode::Enter => {
                 let rows = self.rows();
                 return self.apply(&rows);
@@ -585,14 +631,12 @@ impl Picker {
     /// Resolve the highlighted row into a selection carrying the live tuning and
     /// the route in force for that model.
     fn apply(&self, rows: &[Row]) -> PickAction {
-        let route = self.active_route(rows).map(str::to_string);
         match rows.get(self.selected) {
             Some(Row::Model(id, model)) => {
+                let route = self.active_route(rows).map(str::to_string);
                 PickAction::Selected(id.clone(), model.clone(), self.tuning(rows), route)
             }
-            Some(Row::Manual(query)) => {
-                PickAction::Manual(query.clone(), self.tuning(rows), route)
-            }
+            Some(Row::Manual(query)) => PickAction::Manual(query.clone(), self.tuning(rows)),
             None => PickAction::None,
         }
     }
@@ -603,22 +647,11 @@ impl Picker {
     /// the only model the route applies to; for any other model it is skipped.
     fn cycle(&self, rows: &[Row], forward: bool) -> Focus {
         let has_provider = self.highlighted_or_model(rows).is_some();
-        let order: &[Focus] = if has_provider {
-            &[
-                Focus::Search,
-                Focus::Provider,
-                Focus::Effort,
-                Focus::Temperature,
-                Focus::TopP,
-            ]
-        } else {
-            &[
-                Focus::Search,
-                Focus::Effort,
-                Focus::Temperature,
-                Focus::TopP,
-            ]
-        };
+        let order: Vec<Focus> = FOCUS_ORDER
+            .iter()
+            .copied()
+            .filter(|f| has_provider || *f != Focus::Provider)
+            .collect();
         let pos = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let next = if forward {
             (pos + 1) % order.len()
@@ -817,79 +850,54 @@ impl Picker {
         let plane = Style::default().bg(OVERLAY_BG);
         let rows = self.rows();
 
-        // Cast the drop shadow first (down-right of the box), then blank the
-        // cells beneath the box itself and paint the bezel over them.
-        render_shadow(f, area);
-        f.render_widget(Clear, area);
-        let bezel = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
-            .style(plane)
-            .title(
-                Line::from(Span::styled(
-                    " MODEL ",
-                    plane.fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
-                ))
-                .centered(),
-            )
-            .title_bottom(
-                Line::from(Span::styled(
-                    " ⇥ field · ↑↓ pick · ←→ adjust · ⏎ apply · esc cancel ",
-                    plane.fg(SLATE).add_modifier(Modifier::DIM),
-                ))
-                .centered(),
-            )
-            .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y));
-        let inner = bezel.inner(area);
-        f.render_widget(bezel, area);
+        let inner = bezel_shell(
+            f,
+            area,
+            plane,
+            " MODEL ",
+            " ⇥ field · ↑↓ pick · ←→ adjust · ⏎ apply · esc cancel ",
+        );
 
-        let mut constraints = vec![
+        // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
+        //          + list(VISIBLE+border) + provider(1) + effort(1)
+        //          + temp(1) + top-p(1) + failed notes (wrapped) — the same
+        // eight rows `desired_size` sums the height of.
+        let [search, status, list, provider, effort, temp, top_p, notes] = Layout::vertical([
             Constraint::Length(1),                // search
             Constraint::Length(1),                // status
             Constraint::Length(VISIBLE_ROWS + 2), // bordered model list
-        ];
-        // Always reserve the provider row for layout stability.
-        constraints.push(Constraint::Length(1)); // serving provider
-        constraints.extend_from_slice(&[
-            Constraint::Length(1), // effort
-            Constraint::Length(1), // temperature
-            Constraint::Length(1), // top-p
-            Constraint::Min(0),    // failed-provider notes
-        ]);
-        let chunks = Layout::vertical(constraints).split(inner);
-        let mut ci = 0; // chunk index
-        f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[ci]);
-        ci += 1;
-        f.render_widget(Paragraph::new(self.status_line(&rows)).style(plane), chunks[ci]);
-        ci += 1;
-        self.render_list(f, &rows, chunks[ci], plane);
-        ci += 1;
+            Constraint::Length(1),                // serving provider
+            Constraint::Length(1),                // effort
+            Constraint::Length(1),                // temperature
+            Constraint::Length(1),                // top-p
+            Constraint::Min(0),                    // failed-provider notes
+        ])
+        .areas(inner);
+
+        f.render_widget(Paragraph::new(self.search_line()).style(plane), search);
+        f.render_widget(Paragraph::new(self.status_line(&rows)).style(plane), status);
+        self.render_list(f, &rows, list, plane);
         // Always render the provider row (inert "OpenRouter routing only" for a
         // non-OpenRouter model), so the overlay's height stays stable.
         f.render_widget(
-            Paragraph::new(self.provider_line(&rows, chunks[ci].width)).style(plane),
-            chunks[ci],
+            Paragraph::new(self.provider_line(&rows, provider.width)).style(plane),
+            provider,
         );
-        ci += 1;
         f.render_widget(
             Paragraph::new(self.effort_line(self.supports(&rows, "reasoning"))).style(plane),
-            chunks[ci],
+            effort,
         );
-        ci += 1;
         f.render_widget(
             Paragraph::new(self.temp_line(self.supports(&rows, "temperature"))).style(plane),
-            chunks[ci],
+            temp,
         );
-        ci += 1;
         f.render_widget(
             Paragraph::new(self.top_p_line(self.supports(&rows, "top_p"))).style(plane),
-            chunks[ci],
+            top_p,
         );
-        ci += 1;
-        let notes = self.failed_lines(chunks[ci].width);
-        if !notes.is_empty() {
-            f.render_widget(Paragraph::new(notes).style(plane), chunks[ci]);
+        let note_lines = self.failed_lines(notes.width);
+        if !note_lines.is_empty() {
+            f.render_widget(Paragraph::new(note_lines).style(plane), notes);
         }
     }
 
@@ -1510,16 +1518,9 @@ mod tests {
         }
         // Only the manual row matches; it is selected at index 0.
         match p.key(KeyCode::Enter) {
-            PickAction::Manual(q, _, _) => assert_eq!(q, "claude-future-99"),
+            PickAction::Manual(q, _) => assert_eq!(q, "claude-future-99"),
             _ => panic!("expected Manual(claude-future-99)"),
         }
-    }
-
-    /// Esc cancels.
-    #[test]
-    fn esc_cancels() {
-        let mut p = loaded_picker();
-        assert!(matches!(p.key(KeyCode::Esc), PickAction::Cancelled));
     }
 
     /// `Tab` cycles the focus Search → Effort → Temperature → `TopP` → Search,
