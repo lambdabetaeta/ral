@@ -283,12 +283,7 @@ impl App {
     /// the rebuilt session in the meantime.  `tick` then reaps the faded tabs
     /// (their viewports persist for `flush_logs`, exactly as a naturally-dead
     /// child's do).
-    pub fn clear(
-        &mut self,
-        info: &banner::SessionInfo<'_>,
-        p: &Provider,
-        term: &mut Term,
-    ) -> io::Result<()> {
+    pub fn clear(&mut self, info: &banner::SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
         let root = self.tabs.root();
         // Retire every still-live non-root tab into the linger window. A tab
         // already dying keeps its earlier death instant, so a child that died
@@ -311,7 +306,7 @@ impl App {
         // A fresh root: drop queued user prompts and any stale non-human
         // deliveries (a wakeup or agent result that has not been drained).
         self.inbox.clear();
-        self.banner(term, info, p)
+        self.banner(term, info)
     }
 
     /// Route one event to its viewport.  Born registers a pane; Died
@@ -838,12 +833,7 @@ impl App {
         Ok(vp.flush_log()?.to_path_buf())
     }
 
-    pub fn banner(
-        &mut self,
-        term: &mut Term,
-        s: &banner::SessionInfo<'_>,
-        p: &Provider,
-    ) -> io::Result<()> {
+    pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
         // The wordmark + eagle: a branded splash, an image outside Bertin's
         // data variables, so it alone keeps the saturated palette and reads
         // as neon. It carries no rail — it is not a row on the plane.
@@ -860,13 +850,7 @@ impl App {
             vp.push_chrome(RailShape::Plain, splash);
             vp.push_chrome(
                 RailShape::Plain,
-                line::render_card(
-                    &banner::session_card(
-                        s,
-                        crate::provider::pricing::caps_or_default(p.model()).context_window,
-                    ),
-                    3,
-                ),
+                line::render_card(&banner::session_card(s), 3),
             );
         }
         draw(self, term)

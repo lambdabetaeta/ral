@@ -14,8 +14,6 @@ use super::tui_loop::Tui;
 use super::viewport;
 use crate::bus::{InboxMsg, Mailbox};
 use crate::fleet::registry::AgentRegistry;
-use crate::provider::scripted::Script;
-use crate::provider::{Provider, ProviderKind};
 use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
     pub(super) name: &'static str,
@@ -377,16 +375,7 @@ pub(super) fn route_submit(
             "/clear" => {
                 crate::agent::cancel::raise_interrupt();
                 ctx.agents.cancel_descendants(root);
-                // Read the root's provider for the banner redraw, falling back
-                // to a throwaway scripted provider if the trunk has settled.
-                let provider_guard = ctx.agents.provider(root).map(|ph| ph.current());
-                if let Some(guard) = provider_guard {
-                    tui.app.clear(info, &guard, tui.guard.term())?;
-                } else {
-                    let fallback =
-                        Provider::scripted("unknown", ProviderKind::Openai, Script::new());
-                    tui.app.clear(info, &fallback, tui.guard.term())?;
-                }
+                tui.app.clear(info, tui.guard.term())?;
                 push_command(tui, mailbox, "/clear".into());
             }
             // The worker's `ReplControl` compacts the history / returns Quit.

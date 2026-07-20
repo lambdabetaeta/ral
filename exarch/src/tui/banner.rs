@@ -7,7 +7,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
-use crate::provider;
 
 use super::block::AgentSlot;
 use super::fidelity::Fidelity;
@@ -34,19 +33,12 @@ pub struct SessionInfo<'a> {
 /// A rail-less Plain like the splash above it.  Hue is spent only where it
 /// names something: a path carries the Path identity, a `dangerous` base
 /// alarms; names and quantities stay plain ink.
-pub(super) fn session_card(s: &SessionInfo<'_>, context_window: Option<u64>) -> Card {
+pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     let mut rows: Vec<Field> = vec![meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)])];
 
-    // Neither the provider nor the model is named here: the live status bar
-    // carries both (and updates them on a `/model` switch), so the one-shot
-    // banner card need not — and a model-less launch has nothing to print.
-    if let Some(ctx) = context_window {
-        rows.push(meta_field(
-            "context",
-            vec![CardSpan::plain(provider::humanize_tokens(ctx))],
-        ));
-    }
-
+    // Neither the provider, the model, nor its context window is named here:
+    // the live status bar carries all of that (and updates it on a `/model`
+    // switch), so the one-shot banner card need not.
     let base_role = if s.base == "dangerous" {
         Role::Bad
     } else {
@@ -309,8 +301,8 @@ mod tests {
         }
     }
 
-    fn rows(s: &SessionInfo<'_>, context_window: Option<u64>) -> Vec<(String, FieldVal)> {
-        let card = session_card(s, context_window);
+    fn rows(s: &SessionInfo<'_>) -> Vec<(String, FieldVal)> {
+        let card = session_card(s);
         match card.marks() {
             [Mark::Fields { rows }] => rows
                 .iter()
@@ -333,7 +325,7 @@ mod tests {
     /// roles paths as Path, and leaves quantities as plain ink (no hue).
     #[test]
     fn session_card_orders_and_roles_fields() {
-        let rs = rows(&sample("read-only"), None);
+        let rs = rows(&sample("read-only"));
         let labels: Vec<&str> = rs.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
@@ -356,7 +348,7 @@ mod tests {
     #[test]
     fn dangerous_base_is_the_one_field_that_earns_a_hue() {
         let base_role = |b: &'static str| {
-            let rs = rows(&sample(b), None);
+            let rs = rows(&sample(b));
             lead_role(&rs.iter().find(|(l, _)| l == "base").unwrap().1)
         };
         assert_eq!(base_role("dangerous"), Some(Role::Bad));
@@ -368,7 +360,7 @@ mod tests {
     /// ones read as a muted "none" rather than borrowing a hue.
     #[test]
     fn security_paths_are_roled_present_and_muted_when_absent() {
-        let rs = rows(&sample("read-only"), None);
+        let rs = rows(&sample("read-only"));
         assert_eq!(
             lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
             Some(Role::Muted),
@@ -380,7 +372,7 @@ mod tests {
         let mut s = sample("read-only");
         s.extend_base = Some(ext.as_path());
         s.restrict_files = &restr;
-        let rs = rows(&s, None);
+        let rs = rows(&s);
         assert_eq!(
             lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
             Some(Role::Path)
@@ -395,9 +387,9 @@ mod tests {
     /// each field line opens with a label cell of identical width.
     #[test]
     fn rendered_matrix_aligns_every_value_in_one_column() {
-        let card = session_card(&sample("dangerous"), None);
+        let card = session_card(&sample("dangerous"));
         let lines = line::render_card(&card, 3);
-        let label_w = rows(&sample("dangerous"), None)
+        let label_w = rows(&sample("dangerous"))
             .iter()
             .map(|(l, _)| l.chars().count())
             .max()

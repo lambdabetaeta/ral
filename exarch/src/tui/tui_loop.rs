@@ -160,7 +160,7 @@ pub fn run(
         session.seed(s);
     }
     tui.app
-        .banner(tui.guard.term(), info, provider)
+        .banner(tui.guard.term(), info)
         .map_err(|e| e.to_string())?;
 
     // The worker thread runs the trunk via `Agent::drive`, parking on an empty
