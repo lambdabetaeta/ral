@@ -500,12 +500,12 @@ fn destructure_too_many_values() {
 }
 
 #[test]
-fn not_callable_int() {
+fn not_invocable_int() {
     must_fail("let f = 42\nf 1 2 3");
 }
 
 #[test]
-fn not_callable_list() {
+fn not_invocable_list() {
     must_fail("let f = [1, 2]\nf 1 2");
 }
 

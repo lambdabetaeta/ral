@@ -45,7 +45,7 @@ and `run_shell` owns only the turn it builds and the outcome it formats:
   history view;
 - **`terminal: RequestedTerminalAccess::Denied`** — a tool turn holds no
   [[decisions/260619_terminal-lease|terminal lease]], so the foreground handoff
-  is *uncallable*: a bare pipeline cannot `tcsetpgrp`, and the SIGTTIN crash of
+  is *uninvocable*: a bare pipeline cannot `tcsetpgrp`, and the SIGTTIN crash of
   an agent stealing the controlling terminal becomes a state the types refuse to
   represent. Paired with `stdin: TurnStdin::Empty`, the turn reads no terminal at
   all — an explicit empty source, not a side effect of foreground denial;

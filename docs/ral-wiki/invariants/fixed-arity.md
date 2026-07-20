@@ -1,6 +1,6 @@
 # Fixed arity
 
-**Every callable in ral — builtin, prelude function, user binding — takes a
+**Every invocable in ral — builtin, prelude function, user binding — takes a
 fixed number of arguments.** There is no variadic application, and no optional
 or default argument anywhere in the language, the prelude, or the builtins.
 

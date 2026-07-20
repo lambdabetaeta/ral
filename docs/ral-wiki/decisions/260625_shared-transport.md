@@ -94,7 +94,7 @@ runtime churn disappears. The throwaway `make_runtime()` at `provider.rs:2446`
 ### Concurrency is already proven
 
 Sibling peers already run on detached threads against their own `Arc<Provider>`
-handles, and `runtime.block_on(&self, …)` is callable from many threads at once —
+handles, and `runtime.block_on(&self, …)` can be invoked from many threads at once —
 each agent's thread parks in its own `block_on` while one worker pool drives all
 their HTTP futures. Conversation state lives in each `Agent`'s `Transcript`, never
 in the transport, so sharing one runtime across the fleet is sound (and strictly

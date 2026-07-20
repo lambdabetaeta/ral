@@ -78,7 +78,7 @@ Do not collapse distinct channels just because the code is shorter:
 ## Resolution (as built)
 
 The open questions resolved as follows; the two prior cutovers had already made
-the turn-assembly names un-callable, so this pass was the enforcement-and-tidy
+the turn-assembly names uninvocable, so this pass was the enforcement-and-tidy
 it set out to be, not a re-architecture.
 
 1. **Close the old core exports — done, the aggressive cut.** `core/src/lib.rs`

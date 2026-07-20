@@ -270,7 +270,7 @@ This is not fully linear in the type-theory sense: the token is parked in
 session state rather than moved down the evaluator spine. It still delivers the
 load-bearing guarantees:
 
-- `ForegroundGuard::try_acquire` is uncallable without an unforgeable
+- `ForegroundGuard::try_acquire` is uninvocable without an unforgeable
   `&TerminalLease`.
 - Exarch installs `TerminalAccess::Denied`, so its tool turns cannot obtain that
   borrow.

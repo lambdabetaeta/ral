@@ -6,7 +6,7 @@ or absent — is expressed as an **open variant**, idiomatically `` `some v `` a
 
 This follows from two other commitments:
 
-- **Arguments are not where optionality lives**, because every callable has
+- **Arguments are not where optionality lives**, because every invocable has
   [[invariants/fixed-arity|fixed arity]]: the caller always supplies every
   argument, and the *value* it supplies carries the presence or absence.
 - **Absence is data, not a sentinel**: a null that inhabits every type

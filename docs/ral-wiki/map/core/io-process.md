@@ -63,7 +63,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   most once at session construction iff ral owned the foreground at startup
   (`None` on a backgrounded or tty-less launch, and always on platforms with no
   `tcsetpgrp`), then lent per turn as `&TerminalLease` to the one chokepoint
-  that foregrounds — `ForegroundGuard::try_acquire`, which is *uncallable*
+  that foregrounds — `ForegroundGuard::try_acquire`, which is *uninvocable*
   without the borrow. The type lives at [[map/core/shell-state|shell-state]];
   the rationale at [[decisions/260619_terminal-lease|terminal-lease]].
 - `reaper.rs` — one lazily started, process-global daemon (`ral-reaper`) owning

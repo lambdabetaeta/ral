@@ -473,13 +473,13 @@ fn interpolation_no_error() {
     ok("let x = world; return \"hello $x\"");
 }
 
-// ─── Head-not-callable (T0011, surface phrasing) ──────────────────────────────
+// ─── Head-not-invocable (T0011, surface phrasing) ──────────────────────────────
 
 /// `'foo' bar baz` — a quoted string in command position with arguments.
-/// The diagnostic must talk about the head being non-callable, not about
+/// The diagnostic must talk about the head being non-invocable, not about
 /// `Cmd a vs a → b` jargon nor about an argument-type mismatch.
 #[test]
-fn head_not_callable_string_with_args() {
+fn head_not_invocable_string_with_args() {
     let errs = errors("'foo' bar baz");
     assert!(
         errs.iter()
@@ -499,7 +499,7 @@ fn head_not_callable_string_with_args() {
 /// The error span must cover the whole command — head and args — so the
 /// diagnostic underlines `'foo' bar baz`, not just the opening quote.
 #[test]
-fn head_not_callable_span_covers_whole_command() {
+fn head_not_invocable_span_covers_whole_command() {
     let src = "'foo' bar baz";
     let errs = raw_errors(src);
     assert_eq!(
@@ -520,26 +520,26 @@ fn head_not_callable_span_covers_whole_command() {
     );
 }
 
-/// A bound non-callable value (`let x = 42; $x foo`) must trip the same
+/// A bound non-invocable value (`let x = 42; $x foo`) must trip the same
 /// diagnostic — the value is data, not a function.
 #[test]
-fn head_not_callable_int_variable_with_args() {
+fn head_not_invocable_int_variable_with_args() {
     has_error("let x = 42\n$x foo", "cannot be used as a command head");
 }
 
 /// Nested unescaped `"` inside a `"..."` string silently splits the line
-/// into [string, $deref, string], producing a head-not-callable error far
+/// into [string, $deref, string], producing a head-not-invocable error far
 /// from the actual mistake.  The hint must point at the real cause —
-/// nested double quotes — not the generic "wrap a callable" advice.
+/// nested double quotes — not the generic "wrap a invocable" advice.
 #[test]
-fn head_not_callable_nested_double_quotes_hint() {
+fn head_not_invocable_nested_double_quotes_hint() {
     let src = r#"let p = less
 let m = "sh -c 'bat --pager="$(p)" --width=80'""#;
     let errs = raw_errors(src);
     let hint = errs
         .iter()
         .find_map(ral_core::TypeError::hint)
-        .expect("expected a hint on the head-not-callable diagnostic");
+        .expect("expected a hint on the head-not-invocable diagnostic");
     assert!(
         hint.contains("nested double quotes"),
         "hint should mention nested double quotes, got: {hint:?}"
@@ -549,15 +549,15 @@ let m = "sh -c 'bat --pager="$(p)" --width=80'""#;
 /// The generic `'foo' bar baz` mistake — bare-word args, not quoted —
 /// must keep the original hint, not the nested-quote one.
 #[test]
-fn head_not_callable_bare_args_keeps_generic_hint() {
+fn head_not_invocable_bare_args_keeps_generic_hint() {
     let errs = raw_errors("'foo' bar baz");
     let hint = errs
         .iter()
         .find_map(ral_core::TypeError::hint)
-        .expect("expected a hint on the head-not-callable diagnostic");
+        .expect("expected a hint on the head-not-invocable diagnostic");
     assert!(
         hint.contains("function or a thunk"),
-        "hint should be the generic head-not-callable advice, got: {hint:?}"
+        "hint should be the generic head-not-invocable advice, got: {hint:?}"
     );
 }
 

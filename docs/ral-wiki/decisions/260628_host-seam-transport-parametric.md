@@ -525,7 +525,7 @@ wire form.
 
 0. **Keep language values in the language.** Ordinary aliases, lexical bindings,
    lambdas, and blocks may still be stored in the engine session and invoked from
-   an already framed turn. A callable is only forbidden when the *front-end* wants
+   an already framed turn. An invocable value is only forbidden when the *front-end* wants
    to schedule it as the root program of a new turn.
 1. **Add seeded source turns.** `TurnRequest` grows a small turn-local seed map.
    The engine installs those seeds as the innermost turn scope before
@@ -540,7 +540,7 @@ wire form.
    accepts code to be run later must still be holding source when it accepts it.
    A literal block/lambda may be registered from its source span; a config or
    manifest may also name a program declared in the same session or plugin
-   namespace. A computed callable with no recoverable source is not schedulable as
+   namespace. A computed invocable value with no recoverable source is not schedulable as
    a fresh host turn. The diagnostic should say what shape is accepted, e.g.
    "prompt expects a source block or named prompt program; did you mean
    `prompt: { ... }`?"
@@ -549,7 +549,7 @@ wire form.
    `RequestedTerminalAccess::Denied`; the source-level block boundary keeps its
    local `let`s local. `prompt: { ... }` registers a prompt program; each render
    dispatches a source wrapper with `USER`, `CWD`, and `STATUS` in the seed map,
-   captures stdout, and preserves the user's previous status. A non-callable
+   captures stdout, and preserves the user's previous status. A non-invocable
    prompt remains plain data.
 4. **Lower plugins to private namespaces.** Loading a plugin evaluates source
    that declares plugin-local programs and returns manifest data. The manifest

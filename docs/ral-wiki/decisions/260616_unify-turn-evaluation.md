@@ -355,7 +355,7 @@ once:
 - *Inside the evaluator,* per external child, it factors cleanly.
   [`RunningChild::observe`](../../../core/src/runtime/command/child.rs)
   (`core/src/runtime/command/child.rs`) is `wait()` → classify → `drain()`,
-  and a typestate enforces the order: `drain` is only callable on a
+  and a typestate enforces the order: `drain` is only invocable on a
   `WaitedChild`, which only `wait` can construct, so "join the pump before the
   child is dead" is unwritable. On the cancel branch, `wait`'s poll loop reads
   `self.cancel.cause()` and runs `terminate_group` with that cause — the

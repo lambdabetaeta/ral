@@ -159,7 +159,7 @@ diagnostic.
 ### Pruning: one verb, a checkpoint you cannot forget to take
 
 `Shell::prune_idle_bindings() -> Option<(Vec<BindingPruneNotice>, MobileSnapshot)>`
-is the whole prune operation, callable only at session scope (a mid-frame
+is the whole prune operation, invocable only at session scope (a mid-frame
 caller, such as a lifecycle hook, is refused rather than allowed to unset from
 a transient frame). One pass, in deterministic (sorted) name order, over every
 entry idle past the armed bound:

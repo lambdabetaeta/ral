@@ -228,7 +228,7 @@ else in `ty.rs` is classification.
      encoding the buggy engine's behaviour.
   4. **`env_binding_type` resolves lexically and breaks recursion.** It resolves a
      closure body's free names against its captured environment (lexical, as the
-     checker does), treats a bound non-callable value as `∅` rather than external
+     checker does), treats a bound non-invocable value as `∅` rather than external
      bytes, and breaks recursion with a `seen` set so a self-referential binding is
      mode-neutral (`core/src/ty.rs`, `env_binding_type_seen`).
   5. **A value-arg-consumed stage reports its own channels.** `infer_pipeline`
