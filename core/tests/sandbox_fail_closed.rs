@@ -59,7 +59,7 @@ use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStd
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
     ral_core::driver::boot_shell(
-        Default::default(),
+        ral_core::io::TerminalState::default(),
         common::prelude(),
         &ral_core::driver::HostSurface::default(),
     )

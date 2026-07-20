@@ -122,10 +122,12 @@ pub enum LoginMethod {
     Device,
 }
 
-/// One staged report from a running login flow. Both the CLI adapter (as a
-/// stderr line, via [`Self::stderr_line`]) and the TUI's `/login` overlay (as
-/// a fixed-position phase track) render these three phases; nothing outside
-/// them is a progress tick — no percentage, no elapsed clock.
+/// One staged report from a running login flow.
+///
+/// Both the CLI adapter (as a stderr line, via [`Self::stderr_line`]) and the
+/// TUI's `/login` overlay (as a fixed-position phase track) render these three
+/// phases; nothing outside them is a progress tick — no percentage, no elapsed
+/// clock.
 pub enum LoginPhase {
     /// Browser flow: the authorize URL is open (or shown for manual open when
     /// the platform launcher failed), awaiting the loopback callback.
@@ -161,12 +163,13 @@ impl LoginPhase {
     }
 }
 
-/// Drive one interactive login to a persisted token. Blocking: builds its own
-/// current-thread runtime (callers put it on a thread of their own). `on_phase`
-/// observes the staged progress; `cancel`, polled by the wait loops, aborts an
-/// abandoned flow promptly (freeing the loopback port). Borrowed, not owned:
-/// this call never outlives the caller's own use of the flag (e.g. to trip it
-/// on Esc), so ownership never needs to move here.
+/// Drive one interactive login to a persisted token.
+///
+/// Blocking: builds its own current-thread runtime (callers put it on a thread
+/// of their own). `on_phase` observes the staged progress; `cancel`, polled by
+/// the wait loops, aborts an abandoned flow promptly (freeing the loopback
+/// port). Borrowed, not owned: this call never outlives the caller's own use of
+/// the flag (e.g. to trip it on Esc), so ownership never needs to move here.
 ///
 /// Returns the persisted token and whether an existing account was replaced.
 ///
@@ -202,9 +205,11 @@ pub fn login_flow(
 }
 
 /// Run interactive login (browser flow, or device code when `device`), then
-/// persist the token. A thin adapter over [`login_flow`]: it renders staged
-/// phases to stderr exactly as the flow used to print them inline, and never
-/// cancels (a CLI run has no overlay to Esc out of; Ctrl-C kills the process).
+/// persist the token.
+///
+/// A thin adapter over [`login_flow`]: it renders staged phases to stderr
+/// exactly as the flow used to print them inline, and never cancels (a CLI run
+/// has no overlay to Esc out of; Ctrl-C kills the process).
 ///
 /// # Errors
 /// Returns `Err` if the tokio runtime or HTTP client cannot be built, if the
