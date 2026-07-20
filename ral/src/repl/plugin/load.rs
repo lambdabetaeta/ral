@@ -55,7 +55,12 @@ pub(crate) fn load_plugin(
     )]
     let source = std::fs::read_to_string(&path).map_err(|e| load_err(format!("{path}: {e}")))?;
     let source = ral_core::source::normalize_source_text(source);
-    let value = eval_plugin_file(&path, &source, shell)?;
+    // Core's module loader owns cycle detection, the recursion guard, and
+    // the script-context swap; the plugin policy adds only the fresh frame —
+    // top-level helper bindings are discarded, since the manifest is the
+    // file's *return value*, not its bindings.
+    let value = shell
+        .in_fresh_scope(|shell| ral_core::builtins::modules::evaluate_source(shell, &source, &path))?;
     let module = instantiate(value, options, name_or_path, shell)?;
     check_is_manifest(&module, name_or_path)?;
 
@@ -225,18 +230,6 @@ fn install_bindings(bindings: &[(String, Value)], shell: &mut Shell) -> Result<(
 
 /// Evaluate a plugin file (already read and canonicalized) in an isolated scope.
 ///
-/// Routes through core's shared module loader
-/// ([`evaluate_source`](ral_core::builtins::modules::evaluate_source)), which
-/// owns the cycle-detection stack, the recursion-depth guard, the type-check
-/// pass that writes the evaluator's mode wires, and the script-context swap
-/// that keeps diagnostics pointing at the plugin file.  The plugin policy
-/// adds only lexical-scope isolation: a plugin file's top-level helper
-/// bindings live in a fresh frame and are discarded, since the manifest is
-/// the file's *return value*, not its bindings.
-fn eval_plugin_file(path: &str, source: &str, shell: &mut Shell) -> Settled<Value> {
-    shell.in_fresh_scope(|shell| ral_core::builtins::modules::evaluate_source(shell, source, path))
-}
-
 /// Apply the options map to a parameterised plugin block to yield its
 /// manifest.  If the plugin is already a manifest map, a non-empty options
 /// map is a load-time error; an absent or empty options map is fine.
