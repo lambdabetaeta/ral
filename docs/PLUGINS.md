@@ -2,11 +2,10 @@
 
 A plugin is a ral module (SPEC §8) whose return value is either a
 manifest map, or a block that takes an options map and returns a
-manifest map. `_plugin 'load' $name $options` reads the manifest,
-builds a capabilities layer from its declared capabilities, and registers the
-plugin's hooks and keybindings. There is no plugin DSL and no magic
-config binding; a plugin's knobs are fields on its options map and
-it extracts them by name.
+manifest map. `load-plugin` (§4) reads the manifest and registers the
+plugin's hooks, keybindings, and aliases. There is no plugin DSL and
+no magic config binding; a plugin's knobs are fields on its options
+map and it extracts them by name.
 
 ## 1 Manifest
 
@@ -15,11 +14,6 @@ return { |options|
     let key = get $options key 'ctrl-t'
     return [
         name: 'fzf-files',
-        capabilities: [
-            exec: [fzf: []],
-            fs: [read: ['.']],
-            editor: [read: true, write: true, tui: true],
-        ],
         keybindings: [[key: $key, handler: $_handler]],
     ]
 }
@@ -31,7 +25,6 @@ directly:
 ```
 return [
     name: 'syntax-highlight',
-    capabilities: [editor: [read: true, write: true]],
     hooks: [buffer-change: $_handler],
 ]
 ```
@@ -39,34 +32,29 @@ return [
 | Field | Type | Default |
 |---|---|---|
 | `name` | `Str` | required |
-| `capabilities` | record | `[:]` |
 | `hooks` | `[Str: {B}]` | `[:]` |
-| `keybindings` | `[[key: Str, handler: {F Bool}]]` | `[]` |
+| `keybindings` | `[[key: Str, handler: {F Unit}, guard?: Str]]` | `[]` |
 | `aliases` | `[Str: {[Str] → F Any}]` | `[:]` |
+
+Every unmodified key except `f1`–`f12` requires a `guard`; an
+unguarded binding on such a key is a load-time error (§6).
 
 The `name` must be unique across loaded plugins.  The top-level
 block, if present, takes exactly one argument: the options map.
 Plugins extract fields by name (`get $options key <default>` or
 `$options[key]`) and decide what is required vs. optional.
 
-## 2 Capabilities
+## 2 Authority
 
-`capabilities` is a record whose fields mirror `grant` (SPEC §11):
-`exec`, `fs`, `net`, `editor`, `shell`. Omitted fields default to empty —
-the plugin receives no ambient authority for them.
-`net` is a boolean: `true` allows network access, `false` denies it.
+Plugins run with host authority. A hook, keybinding handler, or
+plugin-registered alias executes under whatever capabilities the
+caller's grant stack (SPEC §11) already holds — the manifest has no
+field for declaring or narrowing that. A `capabilities:` key in a
+manifest is a load-time error, so a plugin cannot mistake a listed
+capability set for enforcement. Confinement is `grant`, applied at
+the call site, not a manifest declaration.
 
-```
-capabilities: [
-    exec: [fzf: [], git: ['status', 'diff']],
-    fs:   [read: ['~/.cache']],
-    net:  true,
-    editor: [read: true, write: true, tui: true],
-    shell:  [chdir: true],
-]
-```
-
-`editor` gates the `_ed-*` builtins:
+`grant`'s `editor` field gates the `_ed-*` builtins (SPEC §11.5):
 
 | Field | Enables |
 |---|---|
@@ -74,19 +62,19 @@ capabilities: [
 | `write` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
 | `tui`   | `_ed-tui` |
 
-`shell` gates shell builtins that modify persistent process state:
+`grant`'s `shell` field gates shell builtins that modify persistent
+process state (SPEC §11.6):
 
 | Field | Enables |
 |---|---|
 | `chdir` | `cd` |
 
-The shell wraps every hook, keybinding handler, and plugin-registered alias
-in `grant $capabilities { … }` before invoking it. That grant is pushed on
-top of the caller's current capabilities stack, so the effective authority is the
-intersection of the caller's current authority and the plugin manifest. A
-plugin can never exceed what its manifest declared, and it also cannot
-escape an enclosing user grant. The `shell.chdir` capability is required
-for hooks, keybindings, and plugin aliases that call `cd`.
+Plugin aliases run with ambient authority — no grant is pushed around
+the call — matching the behaviour of `rc` aliases (§7). Hooks and
+keybinding handlers likewise run under whatever `grant` is already in
+force when they fire; a plugin author who needs `cd` from a hook or
+keybinding handler documents that the enclosing session needs
+`shell: [chdir: true]`, since the plugin itself cannot grant it.
 
 ## 3 The `_ed-*` family
 
@@ -169,35 +157,43 @@ _ed-state $default { |s| return $s }
 
 State is per-plugin and is cleared on unload.
 
-## 4 `_plugin`
+## 4 `load-plugin` / `unload-plugin`
 
-| Sub-command | Shape |
+`load-plugin` and `unload-plugin` are host builtins the ral REPL
+installs into its own shell's builtin table, not core builtins and
+not prelude wrappers around anything else.
+
+| Builtin | Shape |
 |---|---|
-| `'load'` | `Str → [String:A]? → F Unit` |
-| `'unload'` | `Str → F Unit` |
+| `load-plugin` | `Str → F Unit` |
+| `unload-plugin` | `Str → F Unit` |
 
-`load` resolves the argument in order:
+`load-plugin` resolves its argument in order:
 
 1. `$XDG_CONFIG_HOME/ral/plugins/$name.ral` (falls back to `$HOME/.config/…`).
 2. Each `$dir/$name.ral` for `$dir` in `RAL_PATH` (colon-separated).
 3. As a literal path, with `.ral` appended if needed.
 
-The module is evaluated. If its return value is a block, the options
-map is applied as its single argument (defaulting to `[:]` when
-absent); the result must then be a manifest map. If the module's
-return value is already a map, a non-empty options map is a load-time
-error.  Unknown hook names and malformed keybindings are warned on
-stderr and skipped; they do not fail the load. Loading a plugin
-whose name is already registered is an error; `unload` of an unknown
-plugin is also an error.
-
-The prelude provides `load-plugin` and `unload-plugin` as thin
-wrappers. `load-plugin` takes a name and an options map:
+The module is evaluated with no options (`[:]`). If its return value
+is a block, `[:]` is applied as its single argument; the result must
+then be a manifest map. If the module's return value is already a
+map, that map is the manifest directly. Unknown hook names are warned
+on stderr and skipped; they do not fail the load. Invalid key
+notation in a keybinding is a load-time error (§6); a keybinding
+shadowed by an earlier same-chord binding loads with a warning naming
+the shadower. Loading a plugin whose name is already registered is
+an error; `unload-plugin` of an unknown plugin is also an error.
 
 ```
-load-plugin 'syntax-highlight' [:]
-load-plugin 'fzf-files'        [key: 'ctrl-t']
+load-plugin 'syntax-highlight'
+load-plugin 'fzf-files'
+unload-plugin 'fzf-files'
 ```
+
+`load-plugin` takes only a name — there is no way to pass per-plugin
+options through it. A plugin that needs non-default options is
+loaded through `~/.ralrc`'s `plugins:` list (§9), whose `options:`
+field is forwarded to the plugin's top-level block.
 
 ## 5 Hooks
 
@@ -240,7 +236,7 @@ hooks: [
 
 ## 6 Keybindings
 
-Declared as `keybindings: [[key: $str, handler: $thunk], …]`.
+Declared as `keybindings: [[key: $str, handler: $thunk, guard?: $regex], …]`.
 
 **Key notation:**
 
@@ -252,22 +248,41 @@ Declared as `keybindings: [[key: $str, handler: $thunk], …]`.
 | `'up'`, `'down'`, `'left'`, `'right'`, `'home'`, `'end'` | navigation |
 | `'f1' … 'f12'` | function keys |
 
-Invalid notation is warned and skipped.
+Invalid notation is a load-time error.
 
-**Dispatch.** When a bound key fires, the shell walks the handlers
-for that key in **reverse load order**:
+**Dispatch.** Plugin keybindings form one ordered dispatch table
+shared by every REPL frontend: entries in plugin load order (manifest
+order within a plugin), with the editor's built-in action as the
+tail. A key press runs the first entry whose chord matches and whose
+`guard` — a regex tested against the text left of the cursor —
+allows; when no entry claims it, the built-in action runs. Several
+guarded bindings on one chord compose as an ordered pattern match:
+`key: 'tab'` with a guard cooperates with built-in completion, and
+unmatched presses complete as usual.
 
-- Return `true` → the keypress is consumed; stop.
-- Return `false` → fall through to the next handler.
-- Raise an error → log, treat as consumed, stop.
-- All handlers return `false` → run the shell's built-in binding.
+A handler is `{|ctx| → F Unit}`; its return value carries nothing.
+All effects flow through the `_ed-*` builtins (`_ed-set`,
+`_ed-insert`, `_ed-set-lbuffer`, `_ed-push`, `_ed-accept`, `_ed-tui`,
+…). Whether a binding claims a press is decided entirely by its
+guard, before the handler runs — there is no return-value fallthrough.
 
-This is the `?` fallback pattern applied to keypress dispatch. A
-plugin can decline a key it does not want to handle.
+**Load-time rules.** Three rules keep the table honest:
+
+- `ctrl-c` and `ctrl-d` are reserved (interrupt, end-of-file) and
+  cannot be bound, guard or not.
+- Every unmodified key except `f1`–`f12` carries a ral-owned built-in
+  editing action (typing, cursor movement, deletion, completion,
+  history, accept-line, keymap escape); binding one requires a
+  `guard:`, since an unguarded binding would shadow the action on
+  every press. Modified chords (`ctrl-…`, `alt-…`) and function keys
+  may be bound unguarded — replacing the underlying editor default
+  (`ctrl-t`, `alt-c`, `ctrl-r`) is the point.
+- A binding that can never fire — an earlier-loaded unguarded binding
+  owns its chord — loads with a warning naming the shadower.
 
 **What a handler may do.** Use `_ed-set` / `_ed-push` / `_ed-accept`
 / `_ed-ghost` / `_ed-highlight` to mutate editor state. Use `_ed-tui`
-(with `editor.tui` in capabilities) to run a fuzzy finder or other
+(gated by `grant`'s `editor.tui`, §2) to run a fuzzy finder or other
 full-screen program.
 
 After a handler that returns without `accept`, the shell re-enters
@@ -284,26 +299,27 @@ alias already present (from `rc` or a previously loaded plugin) is an
 error. The load is rejected in full; no aliases from that manifest are
 registered.
 
-**Unload.** `_plugin 'unload' $name` removes exactly the aliases that
+**Unload.** `unload-plugin $name` removes exactly the aliases that
 plugin installed. Other aliases are untouched.
 
 **Authority.** Plugin aliases run with ambient authority — no grant is
 pushed around the call. This matches the behaviour of `rc` aliases.
-A plugin alias that calls `cd` therefore always succeeds, without
-requiring `shell: [chdir: true]` in `capabilities`. Declare `shell:
-[chdir: true]` when a *hook* or *keybinding handler* calls `cd`.
+A plugin alias that calls `cd` therefore always succeeds, regardless
+of the caller's `grant` stack. A *hook* or *keybinding handler* that
+calls `cd`, by contrast, needs the enclosing session to hold
+`shell: [chdir: true]` (§2).
 
 ```
 aliases: [
     z: { |args|
         if !{is-empty $args} {
             cd ~
-        } {
-            let cwd = pwd | from-string
+        } else {
+            let here = !{cwd}
             let result = try {
-                return zoxide query --exclude $cwd -- ...$args | from-string
-            } { |_| return '' }
-            _if !{is-empty $result} {} { cd $result }
+                return !{zoxide query --exclude $here -- ...$args | from-line}
+            } { |_| return "" }
+            if $[not !{is-empty $result}] { cd $result }
         }
     },
 ]
@@ -312,13 +328,12 @@ aliases: [
 ## 9 Prelude helpers
 
 The `_ed-*` family is direct builtins (see §3); plugins call them by
-name with no prelude indirection. A few non-editor convenience
-wrappers do live in the prelude:
+name with no prelude indirection. `load-plugin` and `unload-plugin`
+are likewise direct host builtins (§4), not prelude wrappers. Plugin
+code does reach for one genuine prelude helper:
 
 ```
-load-plugin      name opts   -- _plugin 'load' $name $opts
-unload-plugin    name        -- _plugin 'unload' $name
-elem             x items     -- membership test
+elem   x items   -- membership test
 ```
 
 ## 10 `~/.ralrc`
@@ -331,9 +346,10 @@ return [
     env: [EDITOR: 'nvim'],
     plugins: [
         [plugin: 'syntax-highlight'],
-        [plugin: 'fzf-files',   options: [key: 'ctrl-t']],
-        [plugin: 'fzf-cd',      options: [key: 'alt-c']],
-        [plugin: 'fzf-history', options: [key: 'ctrl-r']],
+        [plugin: 'fzf-files',      options: [key: 'ctrl-t']],
+        [plugin: 'fzf-cd',         options: [key: 'alt-c']],
+        [plugin: 'fzf-history',    options: [key: 'ctrl-r']],
+        [plugin: 'fzf-completion'],
     ],
 ]
 ```
@@ -343,22 +359,17 @@ its single argument.  Omit `options:` for plugins that take no
 configuration (or pass `[:]` explicitly).  Unknown top-level keys in
 an entry are warned and ignored.
 
-The `load-plugin` helper takes a name and an options map:
+Plugins are loaded in list order after the ralrc evaluates. This is
+the only path by which a plugin receives non-default options — a
+`load-plugin` call in the ralrc body (see below) always loads with
+`[:]`. For conditional loading with default options, call
+`load-plugin` directly in the body before the final `return`:
 
 ```
-load-plugin 'syntax-highlight' [:]
-load-plugin 'fzf-history'      [key: 'ctrl-r']
-```
-
-Plugins are loaded in list order after the ralrc evaluates. For
-conditional loading, call `load-plugin` directly in the body before
-the final `return`:
-
-```
-load-plugin 'syntax-highlight' [:]
+load-plugin 'syntax-highlight'
 _if !{is-executable 'fzf'} {
-    load-plugin 'fzf-files'   [key: 'ctrl-t']
-    load-plugin 'fzf-history' [key: 'ctrl-r']
+    load-plugin 'fzf-files'
+    load-plugin 'fzf-history'
 } {}
 
 return [env: [...]]
@@ -383,36 +394,57 @@ without a wrapping block.
 
 ### 11.1 CTRL-T — insert files at cursor
 
+Ported from fzf's `key-bindings.zsh`. Reads `$FZF_CTRL_T_COMMAND`,
+`$FZF_CTRL_T_OPTS`, `$FZF_DEFAULT_OPTS`, `$FZF_DEFAULT_OPTS_FILE` (its
+contents are spliced into the option stack rather than passed through
+as a file), and renders in a tmux pane/popup via fzf-tmux when
+`$TMUX_PANE` and one of `$FZF_TMUX` / `$FZF_TMUX_OPTS` say to.
+
 ```
-# Options:  key   keybinding (default 'ctrl-t')
 return { |options|
-    let key = get $options key 'ctrl-t'
-    let _handler = {
-        let cmd       = try { return $env[FZF_CTRL_T_COMMAND] } { |_| return '' }
-        let extra_str = try { return $env[FZF_CTRL_T_OPTS] }    { |_| return '' }
-        let extra = shell-split $extra_str
+    let key = get $options key "ctrl-t"
+    let _handler = { |ctx|
+        let cmd = try { return $env[FZF_CTRL_T_COMMAND] } { |_| return "" }
+        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $env[FZF_CTRL_T_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
+        let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=file,dir,follow,hidden --scheme=path\n$fopts\n$user $extra -m"
+        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
+            if !{is-empty $ftm_opts} {
+                return ["-d$height"]
+            } else {
+                try { return !{shell-split $ftm_opts} } { |_| return ["-d$height"] }
+            }
+        } else { return [] }
         let r = _ed-tui {
-            within [env: [FZF_DEFAULT_COMMAND: $cmd, FZF_DEFAULT_OPTS_FILE: '']] {
-                fzf --reverse --walker 'file,dir,follow,hidden'
-                    --scheme path -m ...$extra
+            within [env: [
+                FZF_DEFAULT_COMMAND: $cmd,
+                FZF_DEFAULT_OPTS_FILE: "",
+                FZF_DEFAULT_OPTS: $opts,
+            ]] {
+                if $[not !{is-empty $tmux_args}] {
+                    fzf-tmux ...$tmux_args --
+                } else {
+                    fzf
+                }
             }
         }
-        # fzf: 0=selection, 1=no-match, 130=Esc; 1 and 130 are silent.
         if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let quoted = join ' ' !{map $shell-quote !{split '\n' $r[output]}}
+            let quoted = intercalate " " !{map $shell-quote !{re-split "\n" $r[output]}}
             _ed-insert "$quoted "
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return true
+        return unit
     }
 
     return [
-        name: 'fzf-files',
-        capabilities: [
-            exec: [fzf: []],
-            editor: [read: true, write: true, tui: true],
-        ],
+        name: "fzf-files",
         keybindings: [[key: $key, handler: $_handler]],
     ]
 }
@@ -420,37 +452,60 @@ return { |options|
 
 ### 11.2 ALT-C — cd to selected directory
 
+Ported the same way as 11.1, walking directories instead of files and
+selecting a single pick (`+m`). Uses `_ed-push` + `_ed-accept` to
+mirror zsh's `push-line` + `accept-line`: the buffer is saved and
+restored on the next prompt while the `cd` runs immediately. The
+target path is resolved with the `absolute-path` builtin (lexical,
+zsh `:a`-style — no filesystem access, unlike `resolve-path`).
+
 ```
-# Options:  key   keybinding (default 'alt-c')
 return { |options|
-    let key = get $options key 'alt-c'
-    let _handler = {
-        let cmd       = try { return $env[FZF_ALT_C_COMMAND] } { |_| return '' }
-        let extra_str = try { return $env[FZF_ALT_C_OPTS] }    { |_| return '' }
-        let extra = shell-split $extra_str
+    let key = get $options key "alt-c"
+    let _handler = { |ctx|
+        let cmd = try { return $env[FZF_ALT_C_COMMAND] } { |_| return "" }
+        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $env[FZF_ALT_C_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
+        let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=dir,follow,hidden --scheme=path\n$fopts\n$user $extra +m"
+        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
+            if !{is-empty $ftm_opts} {
+                return ["-d$height"]
+            } else {
+                try { return !{shell-split $ftm_opts} } { |_| return ["-d$height"] }
+            }
+        } else { return [] }
         let r = _ed-tui {
-            within [env: [FZF_DEFAULT_COMMAND: $cmd, FZF_DEFAULT_OPTS_FILE: '']] {
-                fzf --reverse --walker 'dir,follow,hidden'
-                    --scheme path +m ...$extra
+            within [env: [
+                FZF_DEFAULT_COMMAND: $cmd,
+                FZF_DEFAULT_OPTS_FILE: "",
+                FZF_DEFAULT_OPTS: $opts,
+            ]] {
+                if $[not !{is-empty $tmux_args}] {
+                    fzf-tmux ...$tmux_args --
+                } else {
+                    fzf
+                }
             }
         }
         if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let resolved = resolve-path $r[output]
+            let resolved = absolute-path $r[output]
             _ed-push
             _ed-set [text: "cd !{shell-quote $resolved}", cursor: 0]
             _ed-accept
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return true
+        return unit
     }
 
     return [
-        name: 'fzf-cd',
-        capabilities: [
-            exec: [fzf: []],
-            editor: [read: true, write: true, tui: true],
-        ],
+        name: "fzf-cd",
         keybindings: [[key: $key, handler: $_handler]],
     ]
 }
@@ -458,40 +513,154 @@ return { |options|
 
 ### 11.3 CTRL-R — history search
 
+Ported from fzf's `key-bindings.zsh`. History entries flow
+NUL-separated (`--read0`/`--print0`) so multi-line commands survive
+intact; `--multi` allows picking more than one entry, and multiple
+picks join with newlines into the buffer (upstream's ctrl-r is
+single-pick — this port isn't). `alt-r:toggle-raw` and `--wrap-sign`
+are additional fzf features not in the original zsh integration.
+Upstream's `-n2..,..` is omitted: there is no event-number column
+here.
+
 ```
-# Options:  key   keybinding (default 'ctrl-r')
 return { |options|
-    let key = get $options key 'ctrl-r'
-    let _handler = {
-        let query     = _ed-lbuffer
-        let entries   = _ed-history '' 0
-        let extra_str = try { return $env[FZF_CTRL_R_OPTS] } { |_| return '' }
-        let extra = shell-split $extra_str
+    let key = get $options key "ctrl-r"
+    let _handler = { |ctx|
+        let query = _ed-lbuffer
+        let entries = _ed-history "" 0
+        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $env[FZF_CTRL_R_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
+        let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore\n$fopts\n$user --scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi $extra"
+        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
+            if !{is-empty $ftm_opts} {
+                return ["-d$height"]
+            } else {
+                try { return !{shell-split $ftm_opts} } { |_| return ["-d$height"] }
+            }
+        } else { return [] }
+        let hist_nul = intercalate "\0" $entries
         let r = _ed-tui {
-            to-lines $entries | fzf --scheme history
-                                    '--bind' 'ctrl-r:toggle-sort'
-                                    --highlight-line '--query' $query ...$extra
+            within [env: [
+                FZF_DEFAULT_OPTS_FILE: "",
+                FZF_DEFAULT_OPTS: $opts,
+            ]] {
+                if $[not !{is-empty $tmux_args}] {
+                    to-string $hist_nul | fzf-tmux ...$tmux_args -- "--query" $query --read0 --print0
+                } else {
+                    to-string $hist_nul | fzf "--query" $query --read0 --print0
+                }
+            }
         }
         if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            _ed-set [text: $r[output], cursor: !{length $r[output]}]
+            let picks = filter { |p| return $[not !{is-empty $p}] } !{re-split "\0" $r[output]}
+            let cleaned = map { |p| return !{re-replace "\n*\$" "" $p} } $picks
+            let joined = intercalate "\n" $cleaned
+            _ed-set [text: $joined, cursor: !{length $joined}]
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return true
+        return unit
     }
 
     return [
-        name: 'fzf-history',
-        capabilities: [
-            exec: [fzf: []],
-            editor: [read: true, write: true, tui: true],
-        ],
+        name: "fzf-history",
         keybindings: [[key: $key, handler: $_handler]],
     ]
 }
 ```
 
-### 11.4 Syntax highlight (sketch)
+### 11.4 TAB — `**`-trigger completion
+
+Ported from fzf's `completion.zsh`. Binds `tab` with a `guard` regex
+so that plain tab still falls through to ral's built-in completer;
+only a word ending in the trigger (`**` by default, `$FZF_COMPLETION_TRIGGER`
+at load time) claims the key. Dispatches on the command word to the
+left of the trigger: path/dir completion via `fzf --walker` for most
+commands (`cd`/`rmdir` get dir-only completion via
+`$FZF_COMPLETION_DIR_COMMANDS`), host completion for `ssh`/`telnet`
+(parsed from `~/.ssh/config`, `~/.ssh/known_hosts`, `/etc/hosts`,
+`/etc/ssh/ssh_config` — no `awk`), and PID completion for `kill`. Not
+ported: `export`/`unset`/`unalias` completers, `~user` expansion,
+quoted multi-word prefixes, and the `_fzf_compgen_*` /
+`_fzf_comprun` override hooks.
+
+The manifest, the guard construction, and the dispatch handler:
+
+```
+return { |options|
+    let env_trigger = try { return $env[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
+    let trigger = get $options trigger $env_trigger
+
+    let _envor = { |name default|
+        try { return $env[$name] } { |_| return $default }
+    }
+
+    # Guard: a word, a gap, then the current word ending in the trigger —
+    # upstream's "tokens > 1 and LBUFFER ends with trigger" check.
+    let _guard-for = { |t|
+        if !{is-empty $t} { return '\S\s+\S*$' } else {
+            let esc = re-replace-all '([.^$*+?()\[\]{}|\\])' '\${1}' $t
+            return !{intercalate '' ['\S\s+\S*', $esc, '$']}
+        }
+    }
+    let tab_guard = _guard-for $trigger
+```
+
+```
+    let _handler = { |ctx|
+        let text = _ed-text
+        let cur = _ed-cursor
+        let lb = _ed-lbuffer
+        let p = _ed-parse
+        let cw = _cur-word $p $text $cur $lb
+        let word = $cw[word]
+        let wn = length $word
+        let tn = length $trigger
+        if $[$wn < $tn] { return unit }
+        if $[$tn > 0 && not !{equal !{slice $word $[$wn - $tn] $tn} $trigger}] { return unit }
+        let prefix = slice $word 0 $[$wn - $tn]
+        let lbuf = slice $text 0 $cw[off]
+        let seg = last !{re-split '[|;&\n]' $lbuf}
+        let segw = words $seg
+        let cmd = _first-or $segw ''
+        let prev = _last-or $segw ''
+        let d_cmds = words !{_envor 'FZF_COMPLETION_DIR_COMMANDS' 'cd rmdir'}
+        if !{elem $cmd $d_cmds} {
+            _path-complete $prefix $lbuf 'dir'
+        } elsif $[!{equal $cmd 'ssh'} && !{elem $prev ['-i', '-F', '-E']}] {
+            _path-complete $prefix $lbuf 'path'
+        } elsif !{equal $cmd 'ssh'} {
+            _list-complete !{_with-user $prefix !{_hosts}} $prefix $lbuf '+m'
+        } elsif !{equal $cmd 'telnet'} {
+            _list-complete !{_hosts} $prefix $lbuf '+m'
+        } elsif !{equal $cmd 'kill'} {
+            _kill-complete $prefix $lbuf
+        } else {
+            _path-complete $prefix $lbuf 'path'
+        }
+        return unit
+    }
+
+    return [
+        name: 'fzf-completion',
+        keybindings: [[key: 'tab', handler: $_handler, guard: $tab_guard]],
+    ]
+}
+```
+
+The elided body defines `_path-complete` (walks up from the prefix's
+nearest existing directory ancestor, then runs `fzf --walker` rooted
+there), `_list-complete` and `_kill-complete` (feed a candidate list
+or `ps` output to plain `fzf`), and the host-list readers
+`_cfg-hosts` / `_known-hosts` / `_etc-hosts` / `_hosts`.
+
+### 11.5 Syntax highlight (sketch)
 
 ```
 let _handler = { |_old new _cursor|
@@ -504,12 +673,11 @@ let _handler = { |_old new _cursor|
 
 return [
     name: 'syntax-highlight',
-    capabilities: [editor: [read: true, write: true]],
     hooks: [buffer-change: $_handler],
 ]
 ```
 
-## 10 Future extensions
+## 12 Future extensions
 
 The following appear in earlier design notes but are not yet
 implemented. They are collected here as candidates for future
@@ -541,7 +709,3 @@ releases.
 - **Async prompt hooks.** A `prompt` handler that runs slow work
   (`git status`, VCS queries) without blocking the prompt render;
   current workaround is `spawn` with a cached result.
-
-- **Scripted completion dispatch.** A per-command completion map
-  (e.g. `{ cd: $dir-completer, ssh: $host-completer, … }`)
-  implementable in pure ral on top of `_ed-parse`.

@@ -107,7 +107,7 @@ implicit head dispatch.
 `scope-stage` is the five **control operators** `within`, `grant`,
 `try`, `guard`, `audit`.  They are reserved in `let`-binding position
 and in bare-head command position; each takes a fixed arity of
-callable atoms (blocks, lambdas, or variable references) and
+invocable atoms (blocks, lambdas, or variable references) and
 optionally trailing redirects.  `^within`/`^grant`/`^try`/`^guard`/
 `^audit` bypass the reservation and look up an external command on
 `PATH`; `$within`/`$grant`/`$try`/`$guard`/`$audit` in value position
@@ -1017,7 +1017,7 @@ thunk and discards both the result and any failure.
 
 `try` and `audit` are **control operators** with dedicated grammar
 arms (§1).  `try B H` and `audit B` parse as `scope-stage`, not as
-generic applications: `B` and `H` are callable atoms (blocks,
+generic applications: `B` and `H` are invocable atoms (blocks,
 lambdas, or variable references holding either) and arity is enforced
 at parse time.  Trailing redirects attach to the operator as a
 whole — `try { … } { … } > out` writes the body's stdout to `out`.
@@ -1089,7 +1089,7 @@ internally and return them as a `[output, status]` record.
 `guard B C` is a control operator (§1).  It runs `B`, then runs `C`
 regardless of outcome.  Original failures from `B` propagate
 unchanged; a failure in `C` is logged and discarded.  Both operands
-are callable atoms; trailing redirects attach to the form as a whole.
+are invocable atoms; trailing redirects attach to the form as a whole.
 `^guard` keeps PATH-lookup semantics; `$guard` in value position is a
 compile-time error.
 
@@ -2452,26 +2452,34 @@ binding.
 ```
 [
     name: Str,
-    capabilities: [exec: …, fs: …, net: …, editor: …, shell: …],
     hooks: [event-name: {handler}],
-    keybindings: [[key: Str, handler: {Map → F Any}]],
+    keybindings: [[key: Str, handler: {F Unit}, guard?: Str]],
     aliases: [name: {[Str] → F Any}],
 ]
 ```
 
-All fields except `name` are optional.
+All fields except `name` are optional.  A key is one of `tab`,
+`enter`, `escape`, `up`, `down`, `left`, `right`, `home`, `end`,
+`delete`, `backspace`, `f1`..`f12`, `<char>`, `ctrl-<char>`, or
+`alt-<char>`; malformed notation is a load-time error.  `ctrl-c` and
+`ctrl-d` are reserved for interrupt and end-of-file and cannot be
+bound.  Every unmodified key except `f1`..`f12` carries a ral-owned
+built-in editing action and requires a `guard`; an unguarded binding
+on such a key is a load-time error.  Modified chords (`ctrl-…`,
+`alt-…`) and function keys may be bound unguarded.  A binding shadowed
+by an earlier same-chord binding, in load order, loads with a warning
+naming the shadower.  A `guard`, when present, is a regex matched
+against the text left of the cursor; the binding claims the key only
+on a match, and otherwise the key falls through to the next entry in
+dispatch order.
 
-**Plugins run with host authority.**  The manifest's `capabilities:`
-key is **advisory documentation only** — it is parsed-and-ignored at
-load time and is not enforced at runtime.  Hooks, keybinding handlers,
-and plugin-registered aliases execute under whatever capabilities the
-caller's stack already grants.  To confine a plugin call, wrap the
-call site in `grant { … }` (§11) — that is the one syntactic form
-that demands OS-level enforcement, and it composes with plugin calls
-the same way it composes with any other code.  Authors *should* still
-state a plausible capability set in the manifest so users can inspect
-what the plugin claims to need, but ral does not treat the claim as
-load-bearing.
+**Plugins run with host authority.**  A `capabilities:` key in the
+manifest is a load-time error: plugins execute with whatever
+capabilities the caller's grant stack already holds, and there is no
+manifest-level narrowing of that authority. To confine a plugin call,
+wrap the call site in `grant { … }` (§11) — that is the one syntactic
+form that demands OS-level enforcement, and it composes with plugin
+calls the same way it composes with any other code.
 
 `aliases` are registered into the shell's alias namespace at load
 time and removed at unload.  An alias name collision with an existing
@@ -2555,12 +2563,17 @@ lock released, so handlers must communicate through plugin context
 rather than shared state to avoid reentrancy; `_ed-tui` is rejected
 from inside one.
 
-**Keybinding dispatch.** A chord is owned by exactly one handler —
-the most recently loaded plugin that binds it.  The handler receives
-one context record, `[line: Str, cursor: Int, history: [Str],
-keymap: Str, state]`, and acts through the `_ed-*` ops; its return
-value is not consulted.  An error is logged above the next prompt
-and the line returns to editing.
+**Keybinding dispatch.** Keybindings form one ordered dispatch table
+shared by every REPL frontend: entries in plugin load order (manifest
+order within a plugin), with the editor's built-in action as the
+tail.  A key press runs the first entry whose chord matches and whose
+`guard` allows; when no entry claims it, the built-in action runs.
+The handler receives one context record, `[line: Str, cursor: Int,
+history: [Str], keymap: Str, state]`, and acts through the `_ed-*`
+ops; its return type is `F Unit`, and the value carries nothing — a
+binding claims a press by its guard alone, before the handler runs.
+An error is logged above the next prompt and the line returns to
+editing.
 
 The two write ops `_ed-accept` and `_ed-push` interact with the
 prompt's lifecycle.  `accept` marks the current buffer for immediate

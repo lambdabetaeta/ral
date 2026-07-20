@@ -229,8 +229,8 @@ around a binary. Five profiles ship in the binary, from `dangerous` to
 
 **Plugins.** The interactive shell is extended in ral itself:
 [plugins/](plugins) has autosuggestions, fzf-backed history, file, and
-directory pickers, and zoxide integration. [docs/PLUGINS.md](docs/PLUGINS.md)
-describes the interface.
+directory pickers, `**`-trigger fzf completion, and zoxide integration.
+[docs/PLUGINS.md](docs/PLUGINS.md) describes the interface.
 
 **Editors.** [editors/](editors) carries a tree-sitter grammar (nvim and other
 tree-sitter consumers) and portable syntax definitions for VS Code, Zed,
