@@ -670,7 +670,7 @@ impl App {
                 }
             }
             KeyCode::Down if self.tabs.focused() == self.tabs.root() && k.modifiers.is_empty() => {
-                let last_row = self.prompt_state.row_count() - 1;
+                let last_row = self.prompt_state.row_count().saturating_sub(1);
                 if self.prompt_state.row() == last_row {
                     self.prompt_state.history_next();
                 } else {

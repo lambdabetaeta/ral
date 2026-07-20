@@ -1082,7 +1082,7 @@ impl Picker {
         // The line overflows — keep the label and a window of tags around the
         // active one so the highlight never falls off the edge.
         let active_span = active + 1; // index in spans: 1 = auto, 2 = first tag, …
-        let budget = width as usize - spans[0].width();
+        let budget = (width as usize).saturating_sub(spans[0].width());
 
         let mut lo = active_span;
         let mut hi = active_span + 1; // exclusive

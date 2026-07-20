@@ -73,7 +73,7 @@ fn size_cells(magnitude: u32) -> usize {
         clippy::cast_sign_loss,
         reason = "log2 of a small positive count, then min-clamped"
     )]
-    let cells = (((magnitude + 1) as f32).log2().round() as usize).min(SIZE_BAR_W);
+    let cells = ((magnitude as f32 + 1.0).log2().round() as usize).min(SIZE_BAR_W);
     cells
 }
 
@@ -114,7 +114,7 @@ pub(super) fn spark_glyph(magnitude: Option<u32>) -> char {
         reason = "log2 of a small positive count, then min-clamped"
     )]
     let step =
-        (((magnitude.unwrap_or(0) + 1) as f32).log2().round() as usize).min(SPARK_GLYPHS.len() - 1);
+        ((magnitude.unwrap_or(0) as f32 + 1.0).log2().round() as usize).min(SPARK_GLYPHS.len() - 1);
     SPARK_GLYPHS[step]
 }
 

@@ -439,6 +439,9 @@ fn ui_loop(
                     dirty = true;
                     tui.app.mouse(m);
                 }
+                CtEvent::Resize(_, _) => {
+                    dirty = true;
+                }
                 _ => {}
             }
         }

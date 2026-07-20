@@ -821,6 +821,23 @@ impl Viewport {
         self.flat.row_block.get(row - think_len).copied()
     }
 
+    /// Map a visual row back to its index in the flattened row buffer, or
+    /// `None` when it lands in the virtual thinking seat (which has no backing
+    /// text row) or past the buffer's end.  Mirrors [`Self::block_at`] so the
+    /// mouse layer's absolute virtual rows resolve to the right text.
+    fn flat_row(&self, row: usize) -> Option<usize> {
+        let think_at = self.flat.virtual_think_at;
+        let think_len = self.flat.virtual_think_len;
+        let mapped = if think_len == 0 || row < think_at {
+            row
+        } else if row < think_at + think_len {
+            return None;
+        } else {
+            row - think_len
+        };
+        (mapped < self.flat.rows.len()).then_some(mapped)
+    }
+
     /// Rendered cell width of visual row `row` — its content's extent, not
     /// the pane's — so a gesture can be bound tight to the text and ignore
     /// the dead margin past where the line ends.  `None` past the buffer.
@@ -889,17 +906,16 @@ impl Viewport {
     pub(super) fn selection_text(&self, lo: (usize, u16), hi: (usize, u16)) -> String {
         let (lo_row, lo_col) = lo;
         let (hi_row, hi_col) = hi;
-        let last = self.flat.rows.len().saturating_sub(1);
-        if self.flat.rows.is_empty() || lo_row > last || hi_row > last {
-            return String::new();
-        }
         if lo_row == hi_row {
             let (a, b) = if lo_col <= hi_col {
                 (lo_col, hi_col)
             } else {
                 (hi_col, lo_col)
             };
-            return plain_slice(&self.flat.rows[lo_row], a, b);
+            return match self.flat_row(lo_row) {
+                Some(r) => plain_slice(&self.flat.rows[r], a, b),
+                None => String::new(),
+            };
         }
         let (first_row, first_col) = if lo_row < hi_row {
             (lo_row, lo_col)
@@ -913,13 +929,19 @@ impl Viewport {
         };
         let mut parts: Vec<String> = Vec::new();
         // First row: from first_col to end.
-        parts.push(plain_slice(&self.flat.rows[first_row], first_col, u16::MAX));
+        if let Some(r) = self.flat_row(first_row) {
+            parts.push(plain_slice(&self.flat.rows[r], first_col, u16::MAX));
+        }
         // Middle rows: full lines.
         for row in (first_row + 1)..last_row {
-            parts.push(plain(&self.flat.rows[row]));
+            if let Some(r) = self.flat_row(row) {
+                parts.push(plain(&self.flat.rows[r]));
+            }
         }
         // Last row: from start to last_col.
-        parts.push(plain_slice(&self.flat.rows[last_row], 0, last_col));
+        if let Some(r) = self.flat_row(last_row) {
+            parts.push(plain_slice(&self.flat.rows[r], 0, last_col));
+        }
         parts.join("\n")
     }
 
