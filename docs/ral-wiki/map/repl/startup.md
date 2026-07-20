@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92a
+generated_at_date: 2026-07-20
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -24,7 +24,7 @@ uniform). The chain is two-staged around the sandbox:
 - **Engine entry** (Unix) — `--engine` hands the process to
   `ral_core::engine::run_engine` before anything else: the wire-engine child
   boots the real shell itself, and the REPL's installer tag
-  (`ENGINE_INSTALLER_TAG = "repl"`) maps to "install nothing", since the
+  (`ENGINE_INSTALLER_TAG = "repl"`) maps to the empty `HostSurface`, since the
   captured host builtins are boot-time closures a child cannot construct.
 - **Helper trampolines** — `try_run_pipeline_stage_helper` (the parent re-execs
   `current_exe()` to run one pipeline stage in a fresh subprocess) and
@@ -94,8 +94,8 @@ rather than evaluating it directly**
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]) — so a
   batch run always typechecks, taking `typecheck`'s
   `Result<Comp, Vec<TypeError>>`. A script has no prior session, so the check
-  seeds from the baked scheme list
-  (`SessionSchemes::from_schemes(PRELUDE.schemes())`)
+  seeds from the baked scheme list plus the surface's builtin table
+  (`SessionSchemes::from_schemes(PRELUDE.schemes(), host_surface.builtin_table())`)
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); a
   clean check returns the fully annotated comp, any type error is fatal, and
   `--check` runs the same check and exits without evaluating.
@@ -124,17 +124,17 @@ rather than evaluating it directly**
 
 ## Embedding and the baked prelude
 
-A turn-evaluating host needs three things before its own builtins, rc files, or
-capability frames: the prelude as a baked [[map/core|`Comp`]], its top-level
-scheme list, and a `Shell` seeded from both. `main` reaches for them through
-core's *driver* — the Shell-embedding seam — via a process-wide
-`PRELUDE: ral_core::driver::BakedPrelude` static built by the
+A turn-evaluating host needs three things before rc files or capability
+frames: the prelude as a baked [[map/core|`Comp`]], its top-level scheme
+list, and its own builtin surface as a `ral_core::HostSurface`. `main`
+reaches for them through core's *driver* — the Shell-embedding seam — via a
+process-wide `PRELUDE: ral_core::driver::BakedPrelude` static built by the
 `ral_core::baked_prelude!()` macro, and
-`ral_core::driver::boot_shell(terminal, &PRELUDE)`, which constructs the shell,
-seeds default env vars, registers builtins against the prelude comp, and
-installs the prelude's type hints. `BakedPrelude` lazily `postcard`-decodes the
-IR and scheme blobs on first access. Probing the underlying machine is a
-separate concern, owned by `ral_core::host`.
+`ral_core::driver::boot_shell(terminal, &PRELUDE, surface)`, which constructs
+the shell, installs the surface next to `CORE_BUILTINS`, seeds default env
+vars, and registers builtins against the prelude comp. `BakedPrelude` lazily
+`postcard`-decodes the IR and scheme blobs on first access. Probing the
+underlying machine is a separate concern, owned by `ral_core::host`.
 
 `build.rs` is the git-hash block — stamping `RAL_VERSION_SUFFIX` (`+<hash>`
 in a git checkout, empty in a release tarball) into the version string — plus
@@ -159,12 +159,12 @@ final code funnels through), and `apply_session_capabilities` (above).
 Default-env seeding is core's: `boot_shell` calls
 `Shell::seed_default_env_vars`.
 
-Before any builtin lookup, `main` calls `repl::register_host_surface()` to
-publish the ral host surface — the [[map/repl/plugins|`_ed-*` builtins]] and
-core's `WATCH_BUILTIN` — into core's host table for all modes, since the
-typechecker consults `builtin_names()` even in batch. Registration is only the
-typecheck half; each path also *installs* `WATCH_BUILTIN` into its shell so the
-builtin runs — the REPL session at boot, the batch (`run_batch`) path after
-`boot_shell`. The ral binary has a durable stdout sink in every mode, where an
+Builtins are shell-scoped: each mode declares its surface as one
+`HostSurface` value and hands it to `boot_shell`, so the checker surface and
+the runtime surface cannot drift. Batch's surface is core plus
+`WATCH_BUILTIN`, and the same value seeds `--check`'s builtin table
+(`HostSurface::builtin_table`, the checker with no live shell); the REPL's
+adds the [[map/repl/plugins|`_ed-*` builtins]] and the captured session
+commands. The ral binary has a durable stdout sink in every mode, where an
 agent host does not, so `watch` is the ral host's to install
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).

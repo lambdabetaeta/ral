@@ -1,4 +1,4 @@
-<!-- verified_at_commit: ca2674822c667e858a566d84301a3c29c48012b7 -->
+<!-- verified_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293 -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -1251,21 +1251,24 @@ A unified map keyed by one of four shapes:
   sigils (§11.2.1) may appear at the head of literal-path or subpath
   keys (`xdg:bin/`, `~/.cargo/bin/`, `cwd:/`); they're rewritten to
   absolute paths at policy load.
-- **`path:`** (or `path:/`) — expands at policy load into one
+- **`path:`** — expands at policy load into one
   subpath key per absolute component of `$PATH`, each carrying the
   given verdict.  Relative PATH entries are skipped; an expansion
   yielding no directories is a load error.  Like any subpath key it
-  takes only `'allow'` or `'deny'`.  PATH is snapshotted once at
+  takes only `'allow'` or `'deny'`.  `path:` is the one spelling:
+  the trailing-slash form (`path:/`) is not a directory grant and
+  is rejected at load.  PATH is snapshotted once at
   load, so a later PATH mutation cannot widen the grant.
-- **`system:`** (or `system:/`) — like `path:`, but expands into the
+- **`system:`** — like `path:`, but expands into the
   platform's own tool roots rather than `$PATH`: on Unix, `/usr/bin`
   and `/bin`, plus whichever Homebrew prefix is present
   (`/opt/homebrew`, `/home/linuxbrew/.linuxbrew`); on Windows,
   `%SystemRoot%\System32`, the bundled Windows PowerShell home under
   it, and Git for Windows' `usr\bin` when present.  It lets a
   portable policy admit the system's stock tools without hardcoding
-  Unix prefixes.  Takes only `'allow'` or `'deny'`; unlike `path:`
-  the expansion is never empty (the platform's own roots are
+  Unix prefixes.  Takes only `'allow'` or `'deny'`; like `path:`,
+  the trailing-slash form (`system:/`) is rejected at load; unlike
+  `path:` the expansion is never empty (the platform's own roots are
   unconditional), so there is no empty-expansion load error.
 
 Each value is the policy.  Bare-name and literal-path keys carry the
@@ -1276,8 +1279,9 @@ full lattice:
 - `[s₁, …]` — allow only when `argv[0] ∈ {sᵢ}`;
 - `'deny'` — sticky veto.
 
-Subpath keys carry only `'allow'` or `'deny'` — subcommand lists are
-name-shaped and rejected on a subpath key at policy load.
+Subpath keys carry only `'allow'` or `'deny'` — a subcommand list
+matches a command's first argument, so it requires a literal command
+key and is rejected on a subpath key at policy load.
 
 Strings are lowercase on the ral surface.  The capitalised
 `Allow`/`Deny`/`Subcommands` forms are reserved for the internal IPC
@@ -2159,14 +2163,21 @@ Return-type rules follow §4.2.
 Hosts may also install host builtins: Rust atoms owned by the
 embedding host rather than by `ral-core`.  Builtins are shell-scoped —
 each `Shell` owns a builtin table, seeded with the core set at
-construction, into which a host installs its own sets; there is no
-process-level registry, and the typechecker resolves names against the
-same per-shell table the evaluator dispatches through.  An entry
-carries its name, type-checker rule (a scheme with its fixed arity, or
-a full signature), documentation, and body — a process-static function
-or a closure capturing host state — together.  Installation rejects a
-name collision with anything already on the table, while re-installing
-a set carrying the same names is a no-op.  The table travels with the
+construction; there is no process-level registry, and the typechecker
+resolves names against the same per-shell table the evaluator
+dispatches through.  A host's surface beyond the core set is one
+host-surface value — its process-static sets plus any closure sets
+capturing host state — handed to shell construction and installed
+there, before any rc file or user code is checked; a shell-free batch
+`--check` derives its checker table from the same value.  The checker
+surface and the runtime dispatch surface therefore agree by
+construction, not by convention: production code has no
+post-construction installation door (one remains for dressing test
+shells).  An entry carries its name, type-checker rule (a scheme with
+its fixed arity, or a full signature), documentation, and body — a
+process-static function or a closure capturing host state — together.
+Installation rejects a name collision with anything already on the
+table, while re-installing a set carrying the same names is a no-op.  The table travels with the
 shell: a spawned worker, a pipeline stage, and a session fork all
 inherit the installing shell's table (§13.1).  The `ral` REPL uses
 this for `_ed-*`, `watch` (§13.5), `load-plugin` / `unload-plugin`,
@@ -2307,8 +2318,13 @@ grouped:
 
   - **Control flow and lists.**  `for` (`for <list> <fn>`, the
     argument-flipped `each`), `reduce`, `reverse`, `last`,
-    `take-while`, `drop-while`, `take`, `drop`, `first`, `elem`,
-    `nub` (de-duplication by `equal`, first-seen order), `zip`,
+    `take-while`, `drop-while`, `take`, `drop`, `first` (the first
+    element matching a predicate, as an Option: `` `just `` the match,
+    `` `none `` when nothing matches), `option-or` (eliminate an
+    Option to the payload of `` `just `` or a default for
+    `` `none ``), `elem`, `contains` (the same membership test,
+    collection-first), `nub` (de-duplication by `equal`, first-seen
+    order), `zip`,
     `flat-map`, `enumerate`, `concat`, `sum`, `id`, `cross`
     (cartesian product of two lists, each pair combined by a
     two-argument block), `group-by` (string-keyed partition,
@@ -2556,7 +2572,12 @@ like fzf-driven directory hops.
 
 **`~/.ralrc` integration.** The RC map gains an optional `plugins`
 key, a list of `[plugin: Str, options?: Map]` entries loaded at
-startup through the same resolution path as `load-plugin`.
+startup through the same resolution path as `load-plugin`.  The REPL
+installs its whole host surface — the `_ed-*` family, `watch`, and
+the captured job-control and plugin-lifecycle commands — at shell
+construction (§16), before the profile and rc files are evaluated,
+so a plugin loaded from rc typechecks against the complete session
+surface rather than a partially dressed one.
 `options`, when present, is passed as the single argument to
 the plugin's top-level block:
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: 1cff92a
+generated_at_date: 2026-07-20
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -74,9 +74,9 @@ from `help`. They split into reads (`_ed-get`, `_ed-text`, `_ed-cursor`,
 `_ed-highlight`), services (`_ed-tui`, `_ed-history`, `_ed-parse`, `_ed-state`),
 and terminal escapes (`_ed-clipboard` for OSC 52, `_ed-hyperlink` for OSC 8).
 Every op requires an active `PluginContext`, else it fails with a "no plugin
-context" error. `register_host_surface` publishes them into core's static host
-table at process start; `Session::boot` also installs them into the session's
-own builtin table.
+context" error. They ride the REPL's `HostSurface` into `boot_shell` at
+`Session::boot` ([[map/repl/loop|loop]]), so the typechecker reads them off
+the session's own builtin table from the first rc check.
 
 ## Context and editor state
 
@@ -136,8 +136,8 @@ structural surface matches it against crossterm's.
 
 ## Captured session commands
 
-`host_handlers.rs::build` returns six captured builtins installed at boot, each
-closing over the shared `Arc<Mutex<…>>` state: `jobs`, `fg`, `bg`, `disown`
-([[map/repl/jobs|jobs]]), and `load-plugin` / `unload-plugin`. They are captured
-rather than static because they mutate long-lived runtime state the static
-descriptor cannot reach.
+`host_handlers.rs::build` returns the six captured builtins the REPL's
+`HostSurface` installs at boot, each closing over the shared `Arc<Mutex<…>>`
+state: `jobs`, `fg`, `bg`, `disown` ([[map/repl/jobs|jobs]]), and
+`load-plugin` / `unload-plugin`. They are captured rather than static because
+they mutate long-lived runtime state the static descriptor cannot reach.

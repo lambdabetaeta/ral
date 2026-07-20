@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92a
+generated_at_date: 2026-07-20
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 

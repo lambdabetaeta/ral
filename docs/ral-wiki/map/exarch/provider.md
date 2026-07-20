@@ -1,7 +1,7 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
-covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/pricing.rs, exarch/src/models.rs, exarch/src/oauth/, exarch/src/tui/model_picker.rs]
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
+covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
 # Map: exarch / provider
@@ -20,12 +20,14 @@ and the `/model` picker — and three arms supply it:
 - `Famous(ProviderKind)` — a built-in provider auto-discovered from its
   conventional key env var (`ProviderKind::info` gives `(label, default_model,
   key_env)`; `endpoint`, `default_adapter`, and `flat_rate` give the rest).
-  Eight kinds: Anthropic, OpenAI, OpenRouter, DeepSeek, opencode Zen, opencode
-  Go, xAI, Qwen. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
+  Nine kinds: Anthropic, OpenAI, OpenRouter, DeepSeek, Gemini, opencode Zen,
+  opencode Go, xAI, Qwen. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
 - `Custom(Arc<CustomProvider>)` — an *unusual provider* declared in a
   hand-written `config.ral`: a custom endpoint exarch has no built-in
-  knowledge of. It carries the same four facts as a famous kind — label,
-  key env, endpoint, wire adapter — but as owned runtime data rather than the
+  knowledge of. It carries the same facts as a famous kind — label, endpoint,
+  wire adapter, and an *optional* key env (`None` for a no-auth local
+  endpoint, which resolves to an inert placeholder bearer) — but as owned
+  runtime data rather than the
   `'static` table baked into the enum, with the protocol mapped onto genai's
   `AdapterKind` at decode time. Slice 3 of [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
 - `ChatGpt(Arc<ChatGptAccount>)` — a signed-in ChatGPT account, authorising
@@ -34,7 +36,7 @@ and the `/model` picker — and three arms supply it:
   dimension. It holds only the account label and id; the live tokens live in
   the [[map/exarch/agent|credential]] store's `OAuth` cell, not here. On disk
   the login store is persisted through one door, `write_private`
-  (`oauth/mod.rs`), and the file is *born* owner-private: the Unix arm opens
+  (`provider/oauth/mod.rs`), and the file is *born* owner-private: the Unix arm opens
   it mode `0600`; the Windows arm passes an owner-only, inheritance-protected
   DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW` itself, so at no instant
   does the token file wear the parent directory's inherited ACL.
@@ -89,7 +91,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 - A **pre-stream idle timeout** bounds request open and time-to-response; once a
   streaming response is open, exarch does **not** time out the gap between
   decoded `ChatStreamEvent`s. Liveness is raw transport progress: reqwest's
-  per-read `STREAM_IDLE_TIMEOUT` (180s) turns true byte-level silence into a
+  per-read `STREAM_IDLE_TIMEOUT` (180s, `provider/tls.rs`) turns true byte-level silence into a
   retryable stream error, while provider heartbeats or SSE pings that genai
   consumes below the semantic event layer can keep a long-thinking model alive.
   This lands the first local slice of
@@ -126,8 +128,8 @@ only model-behaviour outcomes, not transport.
 
 ## Structural error classification
 
-`ProviderError::from_genai` **reads retryability from genai's typed variants,
-not from its `Display` string.** A single structural walk, `Fault::of`, descends
+`ProviderError::from_genai` (`provider/error.rs`) **reads retryability from
+genai's typed variants, not from its `Display` string.** A single structural walk, `Fault::of`, descends
 each error to one of three leaves — `Status` (a non-2xx HTTP response), `Transport`
 (a `reqwest` fault with no status), or `Terminal` (no recoverable leaf) — recovering
 the `StatusCode`, the response `HeaderMap`, and the parsed JSON body across the four
@@ -160,7 +162,7 @@ cannot land mid-character and panic (X8).
   [[map/exarch/frontend|TUI]] styles them. An `unmetered` turn (a flat
   subscription) renders its cost slot as `subscription` rather than a price;
   the token counts still render.
-- `pricing.rs` fetches OpenRouter's `/api/v1/models` catalog once per process
+- `provider/pricing.rs` fetches OpenRouter's `/api/v1/models` catalog once per process
   and caches it; `ModelPricing::dollars` strips the cache counts out of `input`
   and bills uncached/cache-creation/cache-read/output each at its rate, falling
   back to the base input rate when no separate cache rate is published. The

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
-covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
+covers_paths: [exarch/src/bus.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
@@ -9,8 +9,10 @@ covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch
 The agent core and the user interface meet at **one outbound event stream and
 one inbound inbox**, defined by `bus.rs`:
 
-- workers stamp a `Kind` with a `SessionId` through an `Emitter`; a `Sink`
-  consumes them. A `Kind` is a token, boundary, usage, tool call/result,
+- workers stamp a `Kind` with an `AgentId` through an `Emitter`; a `Sink`
+  consumes them. A `Kind` is a token or reasoning run (a streamed `Thinking`
+  delta, committed by a final `Reasoning` event), boundary, usage, tool or
+  harness call/result,
   sub-agent lifecycle, a transient `Phase` label naming the worker's current
   synchronous op (shown beside the spinner, recorded to `events.json`), or a
   decoded surface class — a `Card` render document a kit raises through the
@@ -50,7 +52,7 @@ uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]
 headless and test sinks build a **per-turn** bus that closes when the worker
 finishes, keeping async children muted to their own log.
 
-`event.rs` is the canonical per-session record. `AgentLog` owns two things:
+`agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
 - the in-memory event mirror — renders the next provider request, drives
   the protocol state machine (`is_ready` gates a fresh prompt and `quiesce` winds
@@ -123,7 +125,10 @@ Two `Sink` implementations:
    the open buffer as a single trailing row — the markdown rail glyph plus a
    `size_bar` of its line count — that grows in place as one extra scroll row,
    so the settled transcript above stays a finished image until a fence-safe
-   break commits the real `Block::markdown`.
+   break commits the real `Block::markdown`. A reasoning run streams the same
+   way — a provisional thinking seat ahead of the answer row — and commits as
+   one `∴` thinking block per run (`Viewport::commit_thinking`), later deltas
+   ticking that block's magnitude in place rather than opening a new one.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as an indented framed box, its
@@ -161,7 +166,7 @@ Two `Sink` implementations:
  blocks are already durable in `user.log`/`events.json`
  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
  `/clear` also cancels the in-flight model turn: `route_submit` raises
- `cancel::raise_interrupt` and cascades `agents.cancel(root)` *before* blanking
+ `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
  one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
  Straggler tokens the worker already emitted into the bus before the
@@ -194,10 +199,10 @@ Two `Sink` implementations:
   every other event condensed to one line on stderr, exit after one seed turn.
   Takes the default `Sink::drive` and a per-turn bus, so its async children stay
   muted. It is a display only — the durable `transcript.jsonl` / `events.json`
-  are written by each session's own `transcript.rs` / `event.rs` seams, in
-  headless exactly as in the TUI.
+  are written by each session's own `agent/transcript.rs` / `agent/event.rs`
+  seams, in headless exactly as in the TUI.
 
-`cancel.rs` is the per-agent turn cancellation layered on ral's interrupt
+`agent/cancel.rs` is the per-agent turn cancellation layered on ral's interrupt
 handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
 whole drive; the drive loop `reset`s it at each genuine turn boundary. Esc /
 Ctrl-C interrupt the *focused tab's* current turn — never a cascade, never a
@@ -232,7 +237,7 @@ delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
 Exarch session shells are rebuilt only through `bootstrap::boot_shell`, which
 discards stale ral interrupts before library loading and returns with the
 cancel chain installed over ral's handlers. `/clear` therefore works after Esc
-and SIGINT after `/clear` still raises cancel. `host.rs` snapshots the machine (OS, date, cwd,
+and SIGINT after `/clear` still raises cancel. `prompt/host.rs` snapshots the machine (OS, date, cwd,
 user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade (~60 lines): module declarations and re-exports
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods

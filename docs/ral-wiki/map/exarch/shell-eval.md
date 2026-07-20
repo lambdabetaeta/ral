@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
-generated_at_date: 2026-07-19
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -142,9 +142,10 @@ are batched rather than live under the sandbox.
 file I/O happens in Rust, below the redirect frame
 ([[map/exarch/io-surface|io-surface]]) — and sources the small embedded
 `data/agent.ral` helper library (`view-text-around`, the tasks kit) into the
-shell at boot ([[map/exarch/builtins|builtins]]). `install_on` is also the
-installer a wire engine child's `Frame::Attach` names, so a remote shell is
-dressed with the same atoms.
+shell at boot ([[map/exarch/builtins|builtins]]). The one `host_surface()`
+value declaring these sets rides core's `boot_shell` at construction and is
+also the builtin surface a wire engine child's `Frame::Attach` names, so a
+remote shell is dressed with the same atoms.
 
 A tool command that fails under an active OS sandbox carries a kernel-denial
 diagnostic — the blocked syscall, the exact path to grant, the symlink caveat —

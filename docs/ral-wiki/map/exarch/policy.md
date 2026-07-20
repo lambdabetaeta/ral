@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -44,8 +44,9 @@ removes authority and the result is ≤ both operands, so a spawn can reduce a
 child's reach but never escalate it past the parent's: naming a base looser than
 the parent changes nothing (a network-off parent stays offline even under
 `minimal`, since `false ⊓ true = false`), and `dangerous` — the lattice top —
-leaves the parent's authority verbatim. The [[map/exarch/tools|spawn tools]]
-call it at the spawn site with a mandatory `permissions` base.
+leaves the parent's authority verbatim. The desk behind the
+[[map/exarch/builtins|`agent` verb]] (`fleet/desk.rs`) calls it at the spawn
+site with the spawn record's mandatory `grant` base.
 
 `deny_paths` makes a restrict file's own bytes structurally unreachable: a
 restrict file shapes the agent's authority, so the agent must not be able to edit

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -17,9 +17,13 @@ or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
 registers as an ordinary `Scheme` whose factory bakes the reducer boundary
 directly ([[map/core/typecheck|reducer_spec]]); there is no separate reducer
 arm. Fixed arity is the registry's job ([[invariants/fixed-arity|fixed-arity]]).
-`is_builtin` / `builtin_names` gate seeding; `register` clones the prelude
+Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
+([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
+(`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
+`driver::boot_shell`, so the typechecker and the runtime read one table —
+there is no process-global registry. `register` clones the baked prelude's
 bindings into each fresh environment. Two builtins sit *outside* the macro, a
-host-registered pair with the hosts swapped: the public `WATCH_BUILTIN`
+host-installed pair with the hosts swapped: the public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
 `scheme::watch` so a host with a durable stdout sink (the interactive and
 batch ral hosts) installs it while an agent host omits it

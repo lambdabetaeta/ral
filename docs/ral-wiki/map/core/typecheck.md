@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/mode.rs]
 ---
 
@@ -27,10 +27,12 @@ Entry points (`typecheck.rs`):
   structural REPL's typed spine. No extra inference, only retention of what the
   pipeline check already computes; the evaluator never reads it, so an
   un-annotated stage keeps the elaborator's `Unit` placeholder harmlessly. The seed
-  is one `SessionSchemes { bindings, aliases }`
+  is one `SessionSchemes { bindings, aliases, builtins }`
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]):
-  the scope's name→`Option<Scheme>` map plus the alias arms' schemes; `seed_env`
-  is the one seeding routine.
+  the scope's name→`Option<Scheme>` map, the alias arms' schemes, and the
+  shell's own `BuiltinTable` — builtins are shell-scoped, so the checker types
+  against exactly the surface the booted shell dispatches
+  ([[map/core/builtins|builtins]]); `seed_env` is the one seeding routine.
 - `bake_prelude(comp) -> (Comp, Vec<(String, Scheme)>)` — called by the consumer
   `build.rs`: returns the annotated prelude comp alongside the schemes harvested
   off its `Bind` nodes (`harvest_schemes`), one walk behind both the build-time

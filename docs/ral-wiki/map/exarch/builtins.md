@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
-generated_at_date: 2026-07-19
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -28,10 +28,12 @@ prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 
 ## Rust atoms — `shell_eval/builtins.rs`
 
-`EXARCH_BUILTINS` is the slice `builtins::install_on` registers into the
-shell, together with core's host-selected `SERVICE_BUILTIN`
-(`HOST_BUILTIN_SETS`, the one source of truth); it is called by
-`bootstrap::boot_shell` and named as the wire engine child's builtin installer.
+`EXARCH_BUILTINS` is the largest set on `builtins::host_surface()` — the one
+`HostSurface` value declaring exarch's builtins beyond core's, alongside the
+harness verbs and core's host-selected `SERVICE_BUILTIN`. Core's `boot_shell`
+takes the surface and installs it at construction (a half-dressed production
+shell is unrepresentable), and the same `host_surface` is named as the wire
+engine child's builtin surface (`INSTALLER_TAG`).
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 
@@ -118,8 +120,8 @@ top-level `service-handle N` result cannot cross the host seam (a `Handle` is
 not ground) — it exists to be composed with an eliminator in the same turn:
 `await (service-handle 3)`, `cancel (service-handle 3)`.
 
-Registered only by `builtins::install_on`, alongside the search/edit
-atoms above: a bare REPL shell, which never installs `EXARCH_BUILTINS` (nor
+Carried only on `builtins::host_surface()`, alongside the search/edit
+atoms above: a bare REPL shell, whose boot never carries `EXARCH_BUILTINS` (nor
 `SERVICE_BUILTIN`), has neither `service` nor `service-handle` — its own job
 control is [[map/repl/jobs|repl/jobs]].
 
@@ -140,9 +142,8 @@ Sourced into the shell at boot:
 
 Every verb below is a `BuiltinEntry` in
 `exarch/src/shell_eval/builtins/harness.rs`
-(`HARNESS_BUILTINS`, chained into `HOST_BUILTIN_SETS` beside the atoms above —
-one registration site for `install_on` and the prompt's `builtin_index`
-alike), landed by
+(`HARNESS_BUILTINS`, carried on `host_surface()` beside the atoms above — one
+surface for the boot install and the prompt's `builtin_index` alike), landed by
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 over the rail [[decisions/260706_enquiry-channel|enquiry-channel]] built. A
 verb's body validates its arguments engine-side and calls

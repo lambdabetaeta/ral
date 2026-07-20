@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
 ---
 
@@ -74,7 +74,8 @@ and its conversions compose strictly (a parent's `from_X` calls its children's,
 never reaching past them):
 
 - `WireMobile` / `WireContext` — the top;
-- `WireExecNode` — the [[design/audit|audit]] tree fragment;
+- `WireExecNode` — the [[design/audit|audit]] tree fragment, living beside the
+  request it rides in `core/src/child_eval.rs` ([[map/core/runtime|runtime]]);
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
   carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);
@@ -82,9 +83,10 @@ never reaching past them):
 
 `install_shell_mobile` reinstates a received mobile bundle into a child `Shell`.
 `reexec_child_shell` is the one constructor the
-[[internals/pipeline-execution|pipeline-stage helper]] — now the sole re-exec'd
-eval path — builds its shell through (`Shell::new` + the host-builtin extension
-hook + `install_shell_mobile`), so it cannot drop the host builtins. All
+[[internals/pipeline-execution|pipeline-stage helper]] — the sole re-exec'd
+eval path — builds its shell through (`Shell::new` + the host's `HostSurface`
+reinstalled via the child-shell-extension hook + `install_shell_mobile`), so it
+cannot drop the host builtins. All
 conversions share the `InternCtx` from `serial.rs`.
 
 ## Framing codec — `core/src/subprocess_codec.rs`

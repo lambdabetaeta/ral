@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -92,6 +92,7 @@ when an external command fails. Loading the table is the caller's concern.
 ## Debug tracing — `dbg_trace!`
 
 `dbg_trace!(tag, …)` is the single developer-facing trace primitive: a tagged
-red stderr line in debug builds, nothing in release, no environment switch
+stderr line in debug builds (red only where the `ansi` colour gate allows),
+nothing in release, no environment switch for the trace itself
 ([[decisions/260608_one-debug-path|one-debug-path]]). Its call sites are
 permanent instrumentation.

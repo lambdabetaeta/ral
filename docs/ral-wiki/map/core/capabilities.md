@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 917119f
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -76,12 +76,14 @@ sigil-expansion-then-lex: the ordering is in the types, not convention.
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
 
-`prefix_set.rs` holds the `PrefixSet` algebra the sandbox projection folds with:
-each prefix kept in both its *surface* form (lexical — what the OS profile emits,
-since the sandbox matcher works lexically) and its *resolved* form (symlinks
-followed — what intersection is judged on), so layers naming one directory through
-different symlinks unify. The runtime, `Resolver`-backed counterpart to the lexical
-`intersect_prefix_strings` behind `Capabilities::meet`. The duality is load-bearing,
+`prefix_set.rs` holds the `PrefixSet` algebra: each prefix kept in both its
+*surface* form (lexical — what the OS profile emits, since the sandbox matcher
+works lexically) and its *resolved* form (symlinks followed — what containment
+and intersection are judged on), so layers naming one directory through
+different symlinks unify. Both composition surfaces meet on the resolved form:
+the sandbox-projection fold via `PrefixSet::resolve` (which holds a `Resolver`)
+and the `Capabilities` meets via the resolver-free `PrefixSet::from_frozen`
+(frozen prefixes need only canonicalisation). The duality is load-bearing,
 not redundant: enforce the ceiling on the resolved form, emit the surface form the
 sandboxed body will actually open.
 

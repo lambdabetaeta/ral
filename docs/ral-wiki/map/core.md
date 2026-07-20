@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -45,7 +45,9 @@ reduction primitive behind it. A host states policy; core owns resources.
 The crate splits driving a `Shell` from probing the machine it runs on.
 
 - `driver` embeds and drives a `Shell` in a host process: `boot_shell` constructs,
-  seeds, and loads it from a `BakedPrelude`. The prelude is baked ahead of time
+  seeds, loads it from a `BakedPrelude`, and installs the host's `HostSurface` —
+  the builtin surface beyond the core set — at construction, so a half-dressed
+  production shell is unrepresentable. The prelude is baked ahead of time
   into a schema-less `postcard` blob whose single encode site
   (`driver::bake_prelude_to_out_dir`) and single decode site
   (`driver::BakedPrelude`) sit beside one `cargo:rerun-if-changed` shape-file

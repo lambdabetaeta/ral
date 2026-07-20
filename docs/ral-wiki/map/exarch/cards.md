@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 668499f
-generated_at_date: 2026-07-12
-covers_paths: [exarch/src/card.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/surface.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
+covers_paths: [exarch/src/bus/card.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/surface.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -22,7 +22,7 @@ owns the binding to visual variables. See
 ## The marks
 
 A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
-[[map/exarch/frontend|block]]. Six marks, closed (`exarch/src/card.rs`):
+[[map/exarch/frontend|block]]. Six marks, closed (`exarch/src/bus/card.rs`):
 
 - **`text`** — the qualitative mark: a run of spans. A span carries an optional
   nominal **`Role`** (`path`/`code`/`ok`/`warn`/`bad`/`muted`/`strong`) mapped to
@@ -48,7 +48,7 @@ Composability is one rule at three scales: the plane stacks marks (`card`),
 
 ## Decode — `value_to_card`
 
-`value_to_card` (`card.rs`) is the card decoder, reading marks off the runtime
+`value_to_card` (`bus/card.rs`) is the card decoder, reading marks off the runtime
 `Value`; `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) tries the pin,
 io, and notice shapes first ([[map/exarch/io-surface|io-surface]]). The wire
 shape is `Variant{label:"card", payload: List<mark>}`; each mark is
@@ -128,7 +128,7 @@ via `push_observation_card`, a write card via `push_write_card`.
 
 ## Machine log
 
-`transcript.rs` (the session-owned recorder, fed at the emit seam) serialises a
+`agent/transcript.rs` (the session-owned recorder, fed at the emit seam) serialises a
 card to a structured mark tree in `transcript.jsonl` (one `card` arm, the whole
 tree via serde); only a `raw` mark is opaque, and honestly so. The headless
 stderr condenser (`card_stderr`, `headless.rs`) walks marks generically.

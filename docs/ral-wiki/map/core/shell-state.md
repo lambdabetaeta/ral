@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -60,7 +60,9 @@ field name *is* the invariant** — joined by `Shell`
   teardown: the pipeline-stage `Io`, the `surface` sink, the `deferred` sink
   (a detached worker's completion delivery — `None` outside an agent host),
   the `desk` answering the turn's enquiries
-  ([[decisions/260706_enquiry-channel|enquiry-channel]]), the foreground
+  ([[decisions/260706_enquiry-channel|enquiry-channel]]), the `nursery`
+  holding engine-side session forks a desk handler adopts (`None` outside a
+  host that installs one; like `desk`, never given to a deferred worker), the foreground
   `cancel` scope, the source-position `loc` cursor, the deferred-worker
   `WorkerLease` (`deferred_lease` — the idle bound and absolute backstop
   travel as one value; `None` never reaps), the `worker_cap` admission bound
@@ -72,7 +74,8 @@ field name *is* the invariant** — joined by `Shell`
   true only for the one signal-facing session per process), the `sources`
   registry rendered against after a turn returns (reset and reseeded at each
   turn start), the `exit_hints` table, the host-installed
-  `builtins`, and the session's `terminal_lease`.
+  `builtins` with the session's `library_docs`, and the session's
+  `terminal_lease`.
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger); the
   residue once turn and session state are named. The worker registry

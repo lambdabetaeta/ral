@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
-generated_at_date: 2026-07-19
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -97,8 +97,9 @@ can inherit a live key.**
 
 - **`boot_shell`** — the one constructor that may boot a session shell: clear
   stale ral interrupts, install ral's handlers, chain exarch's cancel over them,
-  call core's [[map/repl/startup|`ral_core::driver::boot_shell`]], then layer
-  exarch's host builtins and source the `agent.ral` library,
+  call core's [[map/repl/startup|`ral_core::driver::boot_shell`]] with exarch's
+  host surface (`builtins::host_surface()`) so the host builtins ride
+  construction, then source the `agent.ral` library,
   suppress ANSI colour at the source, and seed the exit hints.
 - **Machine probing** — `host::snapshot` formats the live machine into the
   prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,

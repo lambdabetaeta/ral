@@ -1,15 +1,18 @@
 ---
-generated_at_commit: 917119f
-generated_at_date: 2026-07-13
+generated_at_commit: 1cff92a
+generated_at_date: 2026-07-20
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
 # Map: repl / loop
 
-`ral/src/repl.rs` is the module-tree root and exposes two things: the verb
-`run_interactive`, which boots a `Session` and drives it to an `ExitCode`,
-and `register_host_surface`, which publishes the ral host builtins into
-core's table before any mode runs ([[map/repl/startup|startup]]).
+`ral/src/repl.rs` is the module-tree root and exposes one verb,
+`run_interactive`, which boots a `Session` and drives it to an `ExitCode`
+([[map/repl/startup|startup]]). Builtins are shell-scoped: `Session::boot`
+hands the REPL's `ral_core::HostSurface` — the
+[[map/repl/plugins|`_ed-*` builtins]], `watch`, and the captured job/plugin
+commands — to `driver::boot_shell` before any rc file is checked, so the
+typechecker and the runtime see one surface by construction.
 
 ## The session
 

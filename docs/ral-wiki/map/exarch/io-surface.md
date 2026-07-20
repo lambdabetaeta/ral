@@ -1,7 +1,7 @@
 ---
-generated_at_commit: c754c6b
-generated_at_date: 2026-07-13
-covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/transcript.rs, exarch/src/tui/surface.rs, exarch/src/agent_builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
+generated_at_date: 2026-07-20
+covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/bus/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -27,7 +27,7 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 ## The doors — core emits its own activity
 
 Two operation classes, each with its runtime door. Emission is the one
-`Shell::surface(&self, ev: Value)` method (`types/shell/mod.rs`), the public door
+`Shell::surface(&self, ev: &Value)` method (`types/shell/mod.rs`), the public door
 onto the turn-local [[map/core/shell-state|`SurfaceSink`]]; `emit_io` delegates
 to it. The typed builders and the `WriteOutcome` enum live in one place,
 `runtime/command/io_event.rs`. With no surface installed every door is inert.
@@ -74,7 +74,7 @@ activity adds no concept. The event is a public `Value::Map`, reaching the same
 
 `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) is the shared surface
 decoder: an `io`-keyed map decodes into the typed `IoEvent`
-(`exarch/src/card.rs`) and is bound to a card by `io_card`, emitted as
+(`exarch/src/bus/card.rs`) and is bound to a card by `io_card`, emitted as
 **`Kind::Io { event, card }`** (`bus.rs`) so the bus event carries *both* the
 raw structural event and the rendered mark tree. The other surface shapes (pin,
 notice, card, done) have their own arms; a value matching none drops, the same
@@ -117,7 +117,7 @@ library helper's internal read — both install a read frame. The resolution is
 **not** a suppression flag but the invariant *if a ral redirect always means the
 model's I/O, library plumbing must not be a ral redirect*. So the bulk-I/O
 helpers moved below the line into [[map/exarch/builtins|builtins]]
-(`agent_builtins.rs`), where their reads happen in Rust and never reach the
+(`shell_eval/builtins.rs`), where their reads happen in Rust and never reach the
 frame:
 
 - **`view-text`** reads the whole file in Rust (its adaptive-context witnesses
@@ -143,7 +143,7 @@ turn-time data I/O — and surface nothing by design.
 
 ## Machine log
 
-`transcript.rs::event_record` serialises `Kind::Io` as `("io", {event})` in the
+`agent/transcript.rs::event_record` serialises `Kind::Io` as `("io", {event})` in the
 session-owned `transcript.jsonl`: the raw structural event (snake-case
 `io`/`mode`/`outcome`) is the forensic record; the rendered card — and the
 serde-skipped old/new preview bytes — are rendering, landing only in the TUI's
