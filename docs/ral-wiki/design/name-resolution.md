@@ -52,7 +52,8 @@ Three rules decide the placement, and they are not interchangeable:
   `list-dir`, `file-info`, `is-file` / `is-dir` / `exists`, `glob`, `resolve-path`,
   `temp-dir` answer with records and lists, replacing a shell-out to `stat` / `ls` /
   `dirname` and a re-parse of its text. The bytes→text→structured round-trip never
-  arises.
+  arises. (`absolute-path` is `resolve-path`'s pure lexical sibling — it earns
+  builtin status by needing host state, the logical cwd, not a syscall.)
 - **Conveniences are prelude.** If a capability is expressible as a function over
   values and thunks under ordinary Hindley–Milner typing, it is a prelude binding,
   not a builtin — the same derivability test that keeps `for` / `retry` out of the

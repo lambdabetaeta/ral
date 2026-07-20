@@ -458,6 +458,7 @@ by contrast, functions:
     temp-file              # fresh path in tmpdir
     temp-dir               # fresh directory
     resolve-path $path     # absolute path
+    absolute-path $path    # absolute path, lexical
 
     exists $path           is-file $path        is-dir $path
     is-link $path          is-readable $path    is-writable $path
@@ -714,7 +715,7 @@ The REPL adds line editing, history, completion, and job control:
 `cd` (persistent across the session), `jobs`, `fg`, `bg`, `disown`,
 and Ctrl-Z to park a foreground job.  `quit` (or Ctrl-D) exits.
 
-`alias NAME { |args| … }` installs a command-callable alias;
+`alias NAME { |args| … }` installs an invocable alias;
 `unalias NAME` removes it.  `help` lists all commands, `explain NAME`
 shows a function'\''s signature and source location.
 types.
@@ -916,6 +917,7 @@ bundled coreutils (`cp`, `mv`, `rm`, `mkdir`, `ln`, …).  Queries:
 | `line-count` / `file-empty` | counts and emptiness |
 | `temp-dir` / `temp-file` | fresh temporary paths |
 | `resolve-path` | absolute path |
+| `absolute-path` | absolute path, lexical (symlinks kept, path need not exist) |
 | `exists`, `is-file`, `is-dir`, `is-link`, `is-readable`, `is-writable` | predicates |
 
 ### Concurrency

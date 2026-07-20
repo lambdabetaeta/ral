@@ -15,9 +15,9 @@
 # `drop-while` and `reverse` (which they use to drop edge empties) exist.
 
 # Paths and value coercions — each is a directly registered builtin
-# (resolve-path, file-info, list-dir, temp-dir, temp-file, int, float,
-# str).  Filesystem predicates and size/line-count wrappers live below
-# under "Filesystem queries".
+# (resolve-path, absolute-path, file-info, list-dir, temp-dir, temp-file,
+# int, float, str).  Filesystem predicates and size/line-count wrappers
+# live below under "Filesystem queries".
 
 # Control flow
 # `each`, `map`, `filter`, `sort-list`, `sort-list-by`, `fold`

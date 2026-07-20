@@ -10,6 +10,8 @@
 //! via redirects inside a within-scoped directory.  The predicates each
 //! record their boolean outcome in `shell.last_status`, so pipeline `?`
 //! chaining and `if` see an exit-code-shaped signal alongside the `Bool`.
+//! `absolute-path` is the one exception: purely lexical, it routes
+//! through `shell.resolve` alone — there is no filesystem touch to gate.
 
 use crate::types::{Break, Settled, Shell, Value, sig};
 use std::fs;
@@ -256,6 +258,19 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
         .canonicalise_strict()
         .map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
     Ok(Value::String(resolved.to_string_lossy().into_owned()))
+}
+
+/// Lexical sibling of `resolve-path`: the same sigil expansion and
+/// logical-cwd anchoring (`shell.resolve`), minus `canonicalise_strict` —
+/// symlinks stay as written, `.`/`..` fold by pure string math, and the
+/// path need not exist.  No `check_fs_read`: the gate guards the stat
+/// this builtin never performs.
+pub(super) fn builtin_absolute_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "absolute-path")?;
+    let resolved = shell.resolve(&args[0].to_string());
+    Ok(Value::String(
+        resolved.as_path().to_string_lossy().into_owned(),
+    ))
 }
 
 /// Shared probe: read `path` through [`checked_read_path`] (which honours
