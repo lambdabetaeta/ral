@@ -34,6 +34,11 @@ use super::super::plugin::{PluginRuntime, framed_turn_request};
 /// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
 /// - SIGPIPE → `SIG_IGN`  (writing to a closed pipe yields an error, not death)
 ///
+/// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
+/// handler) and SIGSEGV (claimed by fff-search's crash hook, if installed)
+/// must never be named here: a raw install would silently and permanently
+/// disconnect that registry's dispatch for the signal.
+///
 /// Windows: installs `SetConsoleCtrlHandler` via `signal::install_handlers`.
 pub(super) fn setup_signals() {
     #[cfg(unix)]

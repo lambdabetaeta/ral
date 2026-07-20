@@ -35,6 +35,11 @@ use crate::process::cancel::{CancelCause, request_foreground_cancel, request_roo
 /// `SIG_IGN` dispositions *before* installing ral's own handlers so the
 /// nohup rule (preserve dispositions the parent deliberately ignored) can
 /// be honored in spawned children — see [`reset_child_signals`].
+///
+/// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
+/// handler) and SIGSEGV (claimed by fff-search's crash hook, if installed)
+/// must never be named here: a raw install would silently and permanently
+/// disconnect that registry's dispatch for the signal.
 pub fn install_handlers() {
     snapshot_inherited_ignored();
     unsafe {
