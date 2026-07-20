@@ -143,7 +143,8 @@ pub(super) fn dispatch_keybinding(
 #[cfg(test)]
 mod tests {
     use super::super::plugin::PluginRuntime;
-    use super::super::plugin::manifest::LoadedPlugin;
+    use super::super::plugin::manifest::{KeyBinding, LoadedPlugin};
+    use super::super::plugin::parse_key_notation;
     use ral_core::Value;
     use std::collections::HashMap;
 
@@ -153,7 +154,12 @@ mod tests {
         LoadedPlugin {
             name: name.to_string(),
             hooks: HashMap::new(),
-            keybindings: vec![(key.to_string(), handler)],
+            keybindings: vec![KeyBinding {
+                key: key.to_string(),
+                chord: parse_key_notation(key).expect("test key parses"),
+                handler,
+                guard: None,
+            }],
             bindings: Vec::new(),
             state_cell: None,
             source: std::sync::Arc::from(""),

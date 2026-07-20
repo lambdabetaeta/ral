@@ -5,6 +5,7 @@
 //! and alias thunks, and yields a [`LoadedPlugin`] record plus the list
 //! of `(name, thunk)` pairs that the loader installs into env.
 
+use super::router::{KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
 use ral_core::types::Error;
 use ral_core::{Map, Value};
@@ -15,6 +16,19 @@ use std::sync::Arc;
 /// plugin cannot silently register a handler that never fires.
 pub(super) const KNOWN_HOOKS: &[&str] =
     &["buffer-change", "pre-exec", "post-exec", "chpwd", "prompt"];
+
+/// One keybinding manifest entry.  `chord` is the parsed form of `key`,
+/// validated at load so nothing downstream re-parses or skips.  `guard`,
+/// when present, is a regex compiled at load; the binding claims its chord
+/// only when the regex matches the text left of the cursor, otherwise
+/// dispatch falls to the next table entry or the editor's built-in action.
+#[derive(Debug, Clone)]
+pub(crate) struct KeyBinding {
+    pub(crate) key: String,
+    pub(crate) chord: KeyChord,
+    pub(crate) handler: Value,
+    pub(crate) guard: Option<regex::Regex>,
+}
 
 /// A loaded plugin.  Hooks fire from the rustyline event loop;
 /// keybindings register against rustyline on the next sync; `bindings`
@@ -30,7 +44,7 @@ pub(super) const KNOWN_HOOKS: &[&str] =
 pub(crate) struct LoadedPlugin {
     pub(crate) name: String,
     pub(crate) hooks: HashMap<String, Value>,
-    pub(crate) keybindings: Vec<(String, Value)>,
+    pub(crate) keybindings: Vec<KeyBinding>,
     /// Names installed into env at load time; removed on unload.
     pub(crate) bindings: Vec<String>,
     pub(crate) state_cell: Option<Value>,
@@ -112,7 +126,7 @@ fn parse_hooks(entries: &Map) -> Result<HashMap<String, Value>, Error> {
     Ok(out)
 }
 
-fn parse_keybindings<I>(entries: I) -> Result<Vec<(String, Value)>, Error>
+fn parse_keybindings<I>(entries: I) -> Result<Vec<KeyBinding>, Error>
 where
     I: Iterator<Item = Value>,
 {
@@ -128,12 +142,40 @@ where
             .get("key")
             .map(std::string::ToString::to_string)
             .ok_or_else(|| load_err("keybinding entry missing 'key' field"))?;
+        let chord = parse_key_notation(&key)
+            .ok_or_else(|| load_err(format!("keybinding '{key}': unrecognised key notation")))?;
+        if let Some(action) = reserved_action(chord) {
+            return Err(load_err(format!(
+                "keybinding '{key}' is reserved for {action} and cannot be bound by a plugin"
+            )));
+        }
         let handler = map
             .get("handler")
             .cloned()
             .ok_or_else(|| load_err("keybinding entry missing 'handler' field"))?;
+        let guard = map
+            .get("guard")
+            .map(std::string::ToString::to_string)
+            .map(|g| {
+                regex::Regex::new(&g)
+                    .map_err(|e| load_err(format!("keybinding '{key}': invalid guard regex: {e}")))
+            })
+            .transpose()?;
+        if guard.is_none()
+            && let Some(action) = builtin_action(chord)
+        {
+            return Err(load_err(format!(
+                "unguarded keybinding '{key}' would shadow the built-in {action} on every \
+                 press; add a 'guard:' regex so unmatched presses fall through"
+            )));
+        }
         match handler {
-            Value::Lambda { .. } | Value::Block { .. } => out.push((key, handler)),
+            Value::Lambda { .. } | Value::Block { .. } => out.push(KeyBinding {
+                key,
+                chord,
+                handler,
+                guard,
+            }),
             _ => {
                 eprintln!(
                     "load-plugin: warning: keybinding '{key}' handler is not a block, skipping"
@@ -187,5 +229,115 @@ mod tests {
         let (plugin, aliases) = LoadedPlugin::parse(&manifest).expect("clean manifest parses");
         assert_eq!(plugin.name, "p");
         assert!(aliases.is_empty());
+    }
+
+    /// A trivial `Value::Block` handler, so keybinding entries survive the
+    /// not-a-block filter in [`parse_keybindings`].
+    fn dummy_block() -> Value {
+        Value::Block {
+            body: std::sync::Arc::new(ral_core::source::Spanned::synthetic(
+                ral_core::ir::CompKind::Return(ral_core::ir::Val::Unit),
+            )),
+            captured: std::sync::Arc::new(ral_core::types::Env::default()),
+        }
+    }
+
+    fn keybinding_entry(key: &str, guard: Option<&str>) -> Value {
+        let mut fields = vec![
+            ("key".into(), Value::String(key.into())),
+            ("handler".into(), dummy_block()),
+        ];
+        if let Some(g) = guard {
+            fields.push(("guard".into(), Value::String(g.into())));
+        }
+        Value::map(fields)
+    }
+
+    /// A `guard:` regex compiles and rides along on the parsed binding.
+    #[test]
+    fn guard_parses() {
+        let out = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some(r"\S+"))))
+            .expect("valid guard parses");
+        assert_eq!(out.len(), 1);
+        assert!(out[0].guard.is_some());
+    }
+
+    /// An invalid guard regex is a load error naming the key.
+    #[test]
+    fn invalid_guard_regex_is_load_error() {
+        let err = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some("("))))
+            .expect_err("malformed regex must be rejected");
+        assert!(
+            err.message.contains("ctrl-t") && err.message.contains("guard"),
+            "error should name the key and the guard, got: {}",
+            err.message
+        );
+    }
+
+    /// An unguarded binding on a chord with a ral-owned built-in action is
+    /// rejected — tab/completion is one instance of the general rule.
+    #[test]
+    fn unguarded_builtin_chord_is_load_error() {
+        for (key, action) in [
+            ("tab", "completion"),
+            ("enter", "accept-line"),
+            ("up", "history navigation"),
+            ("t", "text insertion"),
+        ] {
+            let err = parse_keybindings(std::iter::once(keybinding_entry(key, None)))
+                .expect_err("unguarded builtin chord must be rejected");
+            assert!(
+                err.message.contains(key)
+                    && err.message.contains(action)
+                    && err.message.contains("guard"),
+                "error should name the key, the action, and the fix, got: {}",
+                err.message
+            );
+        }
+    }
+
+    /// The same chords parse with a guard: they compose with the built-in
+    /// tail instead of shadowing it.
+    #[test]
+    fn guarded_builtin_chord_parses() {
+        let out = parse_keybindings(std::iter::once(keybinding_entry("enter", Some(r"^git "))))
+            .expect("guarded enter parses");
+        assert_eq!(out.len(), 1);
+    }
+
+    /// Interrupt and EOF are reserved outright — a guard does not help.
+    #[test]
+    fn reserved_chords_are_rejected_guard_or_not() {
+        for (key, guard) in [("ctrl-c", Some(r"\S")), ("ctrl-d", None)] {
+            let err = parse_keybindings(std::iter::once(keybinding_entry(key, guard)))
+                .expect_err("reserved chord must be rejected");
+            assert!(
+                err.message.contains(key) && err.message.contains("reserved"),
+                "error should name the key as reserved, got: {}",
+                err.message
+            );
+        }
+    }
+
+    /// An unparseable key notation is a load error, not a sync-time skip.
+    #[test]
+    fn unrecognised_key_notation_is_load_error() {
+        let err = parse_keybindings(std::iter::once(keybinding_entry("hyper-x", None)))
+            .expect_err("bad notation must be rejected");
+        assert!(
+            err.message.contains("hyper-x") && err.message.contains("notation"),
+            "error should name the notation, got: {}",
+            err.message
+        );
+    }
+
+    /// A modified chord with no ral-owned action parses unguarded —
+    /// replacing the underlying editor default is the intended use.
+    #[test]
+    fn modified_chord_without_builtin_action_parses_unguarded() {
+        let out = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", None)))
+            .expect("ctrl-t without guard still parses");
+        assert_eq!(out.len(), 1);
+        assert!(out[0].guard.is_none());
     }
 }

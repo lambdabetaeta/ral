@@ -39,6 +39,7 @@ nucleo-matcher = "0.3"
 serde_json = { workspace = true }
 clap       = { workspace = true }
 base64     = { workspace = true }
+regex      = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

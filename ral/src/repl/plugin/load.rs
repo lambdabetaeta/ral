@@ -16,6 +16,7 @@ use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Settled};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
 
+use super::super::errfmt::plugin_warning;
 use super::manifest::LoadedPlugin;
 use super::{PluginRuntime, framed_turn_request, load_err, lock, unload_err};
 
@@ -76,10 +77,30 @@ pub(crate) fn load_plugin(
         return Err(Break::Error(e));
     }
 
+    let plugin_name = plugin.name.clone();
     let mut rt = lock(runtime);
     rt.plugins.push(plugin);
-    rt.keybindings_dirty = true;
+    rt.keybindings_changed();
+    // Shadow lint: a dead binding (an earlier unguarded entry owns its
+    // chord) can only be introduced by this load, and only among this
+    // plugin's own entries — earlier plugins keep their precedence.
+    let shadowed: Vec<String> = rt
+        .router
+        .dead_entries()
+        .into_iter()
+        .filter(|(dead, _)| dead.plugin == plugin_name)
+        .map(|(dead, blocker)| {
+            format!(
+                "keybinding '{}' will never fire: an unguarded '{}' binding of plugin '{}' \
+                 precedes it",
+                dead.key, blocker.key, blocker.plugin
+            )
+        })
+        .collect();
     drop(rt);
+    for msg in shadowed {
+        plugin_warning(&plugin_name, &msg);
+    }
     Ok(())
 }
 
@@ -114,11 +135,11 @@ fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(),
                 load_err(format!("plugin '{}': hook '{}': {e}", plugin.name, hook_event))
             })?;
     }
-    for (key_notation, handler) in &plugin.keybindings {
+    for kb in &plugin.keybindings {
         shell
             .register_hook(
-                HookName::plugin(plugin.name.clone(), format!("key:{key_notation}")),
-                handler.clone(),
+                HookName::plugin(plugin.name.clone(), format!("key:{}", kb.key)),
+                kb.handler.clone(),
                 HookSig::Hook {
                     kind: "keybinding".into(),
                 },
@@ -128,7 +149,7 @@ fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(),
             .map_err(|e| {
                 load_err(format!(
                     "plugin '{}': keybinding '{}': {e}",
-                    plugin.name, key_notation
+                    plugin.name, kb.key
                 ))
             })?;
     }
@@ -156,7 +177,7 @@ pub(crate) fn unload_plugin(
     for binding_name in &plugin.bindings {
         shell.remove_alias(binding_name);
     }
-    lock(runtime).keybindings_dirty = true;
+    lock(runtime).keybindings_changed();
     Ok(())
 }
 
@@ -213,24 +234,7 @@ fn install_bindings(bindings: &[(String, Value)], shell: &mut Shell) -> Result<(
 /// bindings live in a fresh frame and are discarded, since the manifest is
 /// the file's *return value*, not its bindings.
 fn eval_plugin_file(path: &str, source: &str, shell: &mut Shell) -> Settled<Value> {
-    shell
-        .in_fresh_scope(|shell| ral_core::builtins::modules::evaluate_source(shell, source, path))
-        .map_err(tag_load_error)
-}
-
-/// Prefix a loader failure with `load-plugin:` while preserving its status,
-/// location, and hint — the surface every plugin-load error carries.  Skips
-/// the prefix when the message already begins with it.
-fn tag_load_error(e: Break) -> Break {
-    match e {
-        Break::Error(mut err) => {
-            if !err.message.starts_with("load-plugin:") {
-                err.message = format!("load-plugin: {}", err.message);
-            }
-            Break::Error(err)
-        }
-        other @ Break::Escape(_) => other,
-    }
+    shell.in_fresh_scope(|shell| ral_core::builtins::modules::evaluate_source(shell, source, path))
 }
 
 /// Apply the options map to a parameterised plugin block to yield its

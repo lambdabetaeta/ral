@@ -55,8 +55,9 @@ use crate::repl::highlight_style::style_ratatui;
 use crate::repl::completion::{self, Sources};
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use crate::repl::plugin::{
-    HookEnvGuard, KeyChord, KeyName, Keymap, PendingKeybinding, PluginRuntime,
-    flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env, run_buffer_change_hooks,
+    HookEnvGuard, KeyChord, KeyName, KeyRouter, Keymap, PendingKeybinding, PluginRuntime,
+    Resolution, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
+    run_buffer_change_hooks,
 };
 use crate::repl::plugin_editor::HighlightSpan;
 use ral_core::text::char_to_byte;
@@ -203,9 +204,9 @@ impl StructuralFrontend {
         // commands/variables/cwd it captures cannot change underfoot.
         let mut sources: Option<Sources> = None;
         let mut menu: Option<Menu> = None;
-        // The plugin keybinding chords, built once on the first keypress (like
-        // `sources`): the runtime does not change while composing.
-        let mut chords: Option<Vec<(String, usize, KeyChord)>> = None;
+        // The keybinding router, snapshot on the first keypress (like
+        // `sources`): the table cannot change while composing.
+        let mut router: Option<KeyRouter> = None;
 
         enable_raw_mode()?;
         let (_cols, rows) = size().unwrap_or((80, 24));
@@ -311,6 +312,9 @@ impl StructuralFrontend {
             }
 
             match k.code {
+                // Reserved chords sit above the router: the manifest rejects
+                // plugin bindings on interrupt/EOF, so this order is defence in
+                // depth, not precedence.
                 KeyCode::Char('c') if ctrl => {
                     if prompt.is_empty() {
                         break Composed::Done(Read::Interrupt);
@@ -325,89 +329,98 @@ impl StructuralFrontend {
                     // cursor (readline's behaviour), not EOF.
                     prompt.handle_key(k);
                 }
-                // Up/Down walk history only from the prompt's edge rows: with
-                // the cursor mid-text in a multi-line draft they fall through
-                // to the editor and move the cursor instead.
-                KeyCode::Up if k.modifiers.is_empty() => {
-                    if prompt.row() == 0 {
-                        self.history_prev(&mut prompt, &mut hist_pos, &mut draft);
-                    } else {
-                        prompt.handle_key(k);
-                    }
-                }
-                KeyCode::Down if k.modifiers.is_empty() => {
-                    if prompt.row() == prompt.row_count() - 1 {
-                        self.history_next(&mut prompt, &mut hist_pos, &mut draft);
-                    } else {
-                        prompt.handle_key(k);
-                    }
-                }
-                KeyCode::Tab => {
-                    // Build the candidate snapshot once, then complete the
-                    // token under the cursor.  A unique match is applied in
-                    // place; several open the menu; none is a no-op.
-                    let row = prompt.row();
-                    let col = prompt.col();
-                    let Some(line) = prompt.line(row) else {
-                        prompt.handle_key(k);
-                        continue;
-                    };
-                    let src = sources.get_or_insert_with(|| Sources::from_shell(shell));
-                    let cursor_byte = char_to_byte(&line, col);
-                    let (start, candidates) = completion::complete(&line, cursor_byte, src);
-                    match candidates.as_slice() {
-                        [] => {}
-                        [only] => {
-                            prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement);
-                        }
-                        _ => {
-                            #[allow(
-                                clippy::cast_possible_truncation,
-                                reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
-                            )]
-                            let anchor_col =
-                                prompt_lines.last_w + line[..start].chars().count() as u16;
-                            menu = Some(Menu::open(candidates, start, row, anchor_col));
-                        }
-                    }
-                }
-                // Right-arrow at end-of-buffer accepts the autosuggestion
-                // ghost (parity with rustyline's hint-accept); elsewhere it
-                // moves the cursor.
-                KeyCode::Right if k.modifiers.is_empty() => match &ghost {
-                    Some(g) if !g.is_empty() && prompt.at_buffer_end() => {
-                        prompt.insert_str(g);
-                    }
-                    _ => {
-                        prompt.handle_key(k);
-                    }
-                },
-                KeyCode::Enter => {
-                    let line = prompt.text();
-                    if ral_core::syntax::parser::needs_continuation(&line) {
-                        prompt.insert_str("\n");
-                    } else {
-                        break Composed::Done(Read::Line(line));
-                    }
-                }
                 _ => {
-                    // A registered plugin chord breaks to dispatch outside the
-                    // viewport; anything else is ordinary editing.  Built-in
-                    // editing keys above take precedence, so a plugin cannot
-                    // shadow Ctrl-C/Ctrl-D/history/Tab/Enter.
-                    let chords =
-                        chords.get_or_insert_with(|| lock(&self.runtime).keybinding_chords());
-                    let hit = chords.iter().find_map(|(name, bi, chord)| {
-                        key_matches(&k, chord).then(|| (name.clone(), *bi))
-                    });
-                    if let Some((plugin, binding_idx)) = hit {
-                        break Composed::Keybinding(PendingKeybinding {
+                    // The router decides every other key: the first plugin entry
+                    // whose chord matches and whose guard allows claims it, and its
+                    // handler dispatches once the viewport is gone.  `Default`
+                    // falls into the built-in arms below — the same tail rustyline
+                    // realizes by running its own action.
+                    if let Some(chord) = chord_of(&k) {
+                        let router =
+                            router.get_or_insert_with(|| lock(&self.runtime).router.clone());
+                        let pos = prompt.cursor_byte_offset();
+                        if let Resolution::Claimed {
                             plugin,
                             binding_idx,
-                            cursor_byte: prompt.cursor_byte_offset(),
-                        });
+                        } = router.resolve(chord, &prompt.text(), pos)
+                        {
+                            break Composed::Keybinding(PendingKeybinding {
+                                plugin,
+                                binding_idx,
+                                cursor_byte: pos,
+                            });
+                        }
                     }
-                    prompt.handle_key(k);
+                    match k.code {
+                        // Up/Down walk history only from the prompt's edge rows: with
+                        // the cursor mid-text in a multi-line draft they fall through
+                        // to the editor and move the cursor instead.
+                        KeyCode::Up if k.modifiers.is_empty() => {
+                            if prompt.row() == 0 {
+                                self.history_prev(&mut prompt, &mut hist_pos, &mut draft);
+                            } else {
+                                prompt.handle_key(k);
+                            }
+                        }
+                        KeyCode::Down if k.modifiers.is_empty() => {
+                            if prompt.row() == prompt.row_count() - 1 {
+                                self.history_next(&mut prompt, &mut hist_pos, &mut draft);
+                            } else {
+                                prompt.handle_key(k);
+                            }
+                        }
+                        KeyCode::Tab => {
+                            // Build the candidate snapshot once, then complete the
+                            // token under the cursor.  A unique match is applied in
+                            // place; several open the menu; none is a no-op.
+                            let row = prompt.row();
+                            let col = prompt.col();
+                            let Some(line) = prompt.line(row) else {
+                                prompt.handle_key(k);
+                                continue;
+                            };
+                            let src = sources.get_or_insert_with(|| Sources::from_shell(shell));
+                            let cursor_byte = char_to_byte(&line, col);
+                            let (start, candidates) = completion::complete(&line, cursor_byte, src);
+                            match candidates.as_slice() {
+                                [] => {}
+                                [only] => {
+                                    prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement);
+                                }
+                                _ => {
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
+                                    )]
+                                    let anchor_col =
+                                        prompt_lines.last_w + line[..start].chars().count() as u16;
+                                    menu = Some(Menu::open(candidates, start, row, anchor_col));
+                                }
+                            }
+                        }
+                        // Right-arrow at end-of-buffer accepts the autosuggestion
+                        // ghost (parity with rustyline's hint-accept); elsewhere it
+                        // moves the cursor.
+                        KeyCode::Right if k.modifiers.is_empty() => match &ghost {
+                            Some(g) if !g.is_empty() && prompt.at_buffer_end() => {
+                                prompt.insert_str(g);
+                            }
+                            _ => {
+                                prompt.handle_key(k);
+                            }
+                        },
+                        KeyCode::Enter => {
+                            let line = prompt.text();
+                            if ral_core::syntax::parser::needs_continuation(&line) {
+                                prompt.insert_str("\n");
+                            } else {
+                                break Composed::Done(Read::Line(line));
+                            }
+                        }
+                        _ => {
+                            prompt.handle_key(k);
+                        }
+                    }
                 }
             }
         };
@@ -537,31 +550,31 @@ impl Frontend for StructuralFrontend {
 
 // ── The editor ──────────────────────────────────────────────────────────────
 
-/// Whether a crossterm key event matches a frontend-neutral plugin [`KeyChord`].
-/// Ctrl/Alt must match exactly; Shift is ignored, as no bindable chord carries
+/// The frontend-neutral chord of a crossterm key event, `None` for keys no
+/// plugin notation can name.  Shift is ignored — no bindable chord carries
 /// it.
-fn key_matches(k: &KeyEvent, chord: &KeyChord) -> bool {
-    if k.modifiers.contains(KeyModifiers::CONTROL) != chord.ctrl
-        || k.modifiers.contains(KeyModifiers::ALT) != chord.alt
-    {
-        return false;
-    }
-    match (chord.name, k.code) {
-        (KeyName::Char(a), KeyCode::Char(b)) => a == b,
-        (KeyName::Tab, KeyCode::Tab)
-        | (KeyName::Enter, KeyCode::Enter)
-        | (KeyName::Escape, KeyCode::Esc)
-        | (KeyName::Up, KeyCode::Up)
-        | (KeyName::Down, KeyCode::Down)
-        | (KeyName::Left, KeyCode::Left)
-        | (KeyName::Right, KeyCode::Right)
-        | (KeyName::Home, KeyCode::Home)
-        | (KeyName::End, KeyCode::End)
-        | (KeyName::Delete, KeyCode::Delete)
-        | (KeyName::Backspace, KeyCode::Backspace) => true,
-        (KeyName::F(a), KeyCode::F(b)) => a == b,
-        _ => false,
-    }
+fn chord_of(k: &KeyEvent) -> Option<KeyChord> {
+    let name = match k.code {
+        KeyCode::Char(c) => KeyName::Char(c),
+        KeyCode::Tab => KeyName::Tab,
+        KeyCode::Enter => KeyName::Enter,
+        KeyCode::Esc => KeyName::Escape,
+        KeyCode::Up => KeyName::Up,
+        KeyCode::Down => KeyName::Down,
+        KeyCode::Left => KeyName::Left,
+        KeyCode::Right => KeyName::Right,
+        KeyCode::Home => KeyName::Home,
+        KeyCode::End => KeyName::End,
+        KeyCode::Delete => KeyName::Delete,
+        KeyCode::Backspace => KeyName::Backspace,
+        KeyCode::F(n) => KeyName::F(n),
+        _ => return None,
+    };
+    Some(KeyChord {
+        name,
+        ctrl: k.modifiers.contains(KeyModifiers::CONTROL),
+        alt: k.modifiers.contains(KeyModifiers::ALT),
+    })
 }
 
 // ── Projection 1: the typed spine ───────────────────────────────────────────
@@ -1611,43 +1624,28 @@ mod tests {
         assert_eq!(abs_char_to_row_col(&lines, 5), None); // past the end
     }
 
-    /// A crossterm key matches a plugin chord only when its name and ctrl/alt
-    /// modifiers agree; shift is ignored, a wrong char or modifier misses.
+    /// `chord_of` reduces a crossterm key to the neutral chord the router
+    /// resolves: name plus ctrl/alt, shift ignored, unmappable keys `None`.
     #[test]
-    fn key_matches_compares_name_and_modifiers() {
-        let ctrl_r = KeyChord {
-            name: KeyName::Char('r'),
-            ctrl: true,
-            alt: false,
-        };
+    fn chord_of_reduces_crossterm_keys_to_neutral_chords() {
         let ev = |code, mods| KeyEvent::new(code, mods);
-        assert!(key_matches(
-            &ev(KeyCode::Char('r'), KeyModifiers::CONTROL),
-            &ctrl_r
-        ));
-        // Wrong char, a missing modifier, or an extra alt all miss.
-        assert!(!key_matches(
-            &ev(KeyCode::Char('t'), KeyModifiers::CONTROL),
-            &ctrl_r
-        ));
-        assert!(!key_matches(
-            &ev(KeyCode::Char('r'), KeyModifiers::NONE),
-            &ctrl_r
-        ));
-        assert!(!key_matches(
-            &ev(
-                KeyCode::Char('r'),
-                KeyModifiers::CONTROL | KeyModifiers::ALT
-            ),
-            &ctrl_r
-        ));
-        // Shift alongside ctrl is tolerated — no bindable chord carries shift.
-        assert!(key_matches(
-            &ev(
+        let chord = |name, ctrl, alt| Some(KeyChord { name, ctrl, alt });
+        assert_eq!(
+            chord_of(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            chord(KeyName::Char('r'), true, false)
+        );
+        assert_eq!(
+            chord_of(&ev(KeyCode::Tab, KeyModifiers::NONE)),
+            chord(KeyName::Tab, false, false)
+        );
+        // Shift alongside ctrl is dropped — no bindable chord carries shift.
+        assert_eq!(
+            chord_of(&ev(
                 KeyCode::Char('r'),
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT
-            ),
-            &ctrl_r
-        ));
+            )),
+            chord(KeyName::Char('r'), true, false)
+        );
+        assert_eq!(chord_of(&ev(KeyCode::BackTab, KeyModifiers::NONE)), None);
     }
 }

@@ -25,6 +25,14 @@
 
 pub(super) mod load;
 pub(super) mod manifest;
+pub(super) mod router;
+
+pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
+// Production code reaches `parse_key_notation` straight from `router`
+// (manifest.rs); this re-export exists only so plugin.rs's and
+// keybinding.rs's test modules can name it via `crate::repl::plugin`.
+#[cfg(test)]
+pub(super) use self::router::parse_key_notation;
 
 use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, Settled};
@@ -35,7 +43,7 @@ use ral_core::{
 use std::time::Duration;
 
 use self::manifest::LoadedPlugin;
-use super::errfmt::{format_plugin_disabled, plugin_error, plugin_warning};
+use super::errfmt::{format_plugin_disabled, plugin_error};
 use super::frontend::EditBuffer;
 use super::plugin_editor::{
     EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs,
@@ -57,15 +65,17 @@ pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntim
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Tag an error with the `load-plugin:` surface every plugin-load failure
-/// carries.  Shared by the loader and the manifest parser.
+/// A plugin-load failure.  The message carries no surface tag: the display
+/// site that reports it (`cmd_error`, the ralrc loader) owns the prefix,
+/// so it appears exactly once.  Shared by the loader and the manifest
+/// parser.
 pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
-    ral_core::types::Error::new(format!("load-plugin: {msg}"), 1)
+    ral_core::types::Error::new(msg.to_string(), 1)
 }
 
-/// Tag an error with the `unload-plugin:` surface.
+/// An unload failure; untagged for the same reason as [`load_err`].
 pub(super) fn unload_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
-    ral_core::types::Error::new(format!("unload-plugin: {msg}"), 1)
+    ral_core::types::Error::new(msg.to_string(), 1)
 }
 
 /// Which keymap the editor is in — the frontend-neutral reduction of
@@ -94,37 +104,6 @@ pub(super) fn keymap_name(keymap: Keymap) -> &'static str {
         Keymap::Vi => "viins",
         Keymap::Emacs => "emacs",
     }
-}
-
-/// A frontend-neutral key name: the subset of keys a plugin keybinding may
-/// bind, exactly the notations [`parse_key_notation`] accepts.  Each editor
-/// backend adapts these to its own event type at its boundary — rustyline's
-/// `KeyEvent` ([`chord_to_key_event`]), crossterm's in the structural surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum KeyName {
-    Char(char),
-    Tab,
-    Enter,
-    Escape,
-    Up,
-    Down,
-    Left,
-    Right,
-    Home,
-    End,
-    Delete,
-    Backspace,
-    F(u8),
-}
-
-/// A frontend-neutral key chord: a [`KeyName`] plus the ctrl/alt modifiers.
-/// [`parse_key_notation`] produces these; the backends compare/adapt them
-/// without ever seeing each other's event types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct KeyChord {
-    pub(super) name: KeyName,
-    pub(super) ctrl: bool,
-    pub(super) alt: bool,
 }
 
 // ── Substructs ──────────────────────────────────────────────────────────
@@ -184,6 +163,9 @@ pub(super) struct DeferredDiagnostics {
 pub(crate) struct PluginRuntime {
     pub(super) plugins: Vec<LoadedPlugin>,
     pub(super) keybindings_dirty: bool,
+    /// The keybinding dispatch table, derived from `plugins`; rebuilt by
+    /// [`Self::keybindings_changed`] whenever the list changes.
+    pub(super) router: KeyRouter,
     pub(super) hooks: EditorHooks,
     pub(super) keybindings: Keybindings,
     pub(super) diagnostics: DeferredDiagnostics,
@@ -657,31 +639,6 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
 
 // ── Keybinding handlers ─────────────────────────────────────────────────
 
-pub(super) struct PluginKeyHandler {
-    pub(super) runtime: Arc<Mutex<PluginRuntime>>,
-    pub(super) plugin: String,
-    pub(super) binding_idx: usize,
-}
-
-impl ConditionalEventHandler for PluginKeyHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        _n: RepeatCount,
-        _positive: bool,
-        ctx: &EventContext,
-    ) -> Option<Cmd> {
-        if let Ok(mut rt) = self.runtime.lock() {
-            rt.keybindings.pending = Some(PendingKeybinding {
-                plugin: self.plugin.clone(),
-                binding_idx: self.binding_idx,
-                cursor_byte: ctx.pos(),
-            });
-        }
-        Some(Cmd::AcceptLine)
-    }
-}
-
 /// Ctrl-D: EOF on an empty line; delete-char otherwise.
 /// Overrides rustyline's Vi-mode default of submitting the line, matching
 /// the bash/zsh convention in every edit mode.
@@ -707,45 +664,41 @@ impl ConditionalEventHandler for CtrlDHandler {
     }
 }
 
-/// Parse a key notation string ("ctrl-r", "alt-x", "f5", "tab", …) into a
-/// frontend-neutral [`KeyChord`].  Returns `None` for unrecognised notations.
-pub(super) fn parse_key_notation(key: &str) -> Option<KeyChord> {
-    const NAMED: &[(&str, KeyName)] = &[
-        ("tab", KeyName::Tab),
-        ("enter", KeyName::Enter),
-        ("escape", KeyName::Escape),
-        ("up", KeyName::Up),
-        ("down", KeyName::Down),
-        ("left", KeyName::Left),
-        ("right", KeyName::Right),
-        ("home", KeyName::Home),
-        ("end", KeyName::End),
-        ("delete", KeyName::Delete),
-        ("backspace", KeyName::Backspace),
-    ];
-    let plain = |name| KeyChord {
-        name,
-        ctrl: false,
-        alt: false,
-    };
-    let key = key.trim();
-    if key.len() == 1 {
-        return Some(plain(KeyName::Char(key.chars().next()?)));
-    }
-    if let Some(&(_, name)) = NAMED.iter().find(|(n, _)| *n == key) {
-        return Some(plain(name));
-    }
-    for (prefix, ctrl, alt) in [("ctrl-", true, false), ("alt-", false, true)] {
-        if let Some(rest) = key.strip_prefix(prefix) {
-            return Some(KeyChord {
-                name: KeyName::Char(rest.chars().next()?),
-                ctrl,
-                alt,
-            });
+/// The one rustyline handler per distinct bound chord.  It consults the
+/// live router, so several entries on one chord resolve in table order;
+/// `None` on [`Resolution::Default`] runs rustyline's own action for the
+/// key.  Resolution is pure — the evaluator never runs here; a claimed
+/// binding is stashed as pending and dispatched after readline returns.
+pub(super) struct RouterKeyHandler {
+    pub(super) runtime: Arc<Mutex<PluginRuntime>>,
+    pub(super) chord: KeyChord,
+}
+
+impl ConditionalEventHandler for RouterKeyHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext,
+    ) -> Option<Cmd> {
+        let mut rt = lock(&self.runtime);
+        match rt.router.resolve(self.chord, ctx.line(), ctx.pos()) {
+            Resolution::Claimed {
+                plugin,
+                binding_idx,
+            } => {
+                rt.keybindings.pending = Some(PendingKeybinding {
+                    plugin,
+                    binding_idx,
+                    cursor_byte: ctx.pos(),
+                });
+                drop(rt);
+                Some(Cmd::AcceptLine)
+            }
+            Resolution::Default => None,
         }
     }
-    let num = key.strip_prefix('f').and_then(|s| s.parse::<u8>().ok())?;
-    (1..=12).contains(&num).then_some(plain(KeyName::F(num)))
 }
 
 /// Adapt a [`KeyChord`] to the rustyline `KeyEvent` rustyline binds against.
@@ -780,19 +733,18 @@ fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
 
 /// Reconcile plugin keybindings with rustyline when `load` / `unload`
 /// has touched the plugin list.  The `keybindings_dirty` flag is set by
-/// those routines and cleared here; if it isn't set we skip the work
-/// (no plugins changed since last sync).
+/// those routines and cleared here; if it isn't set we skip the work.
 ///
-/// rustyline owns the binding table but keys nothing on plugin identity,
-/// so reconciliation is a full unbind-then-rebind: every sequence bound
-/// on the last sync is dropped, then the live plugin list is re-walked.
-/// A plugin removed by `unload` therefore loses its sequences here rather
-/// than leaving a handler whose name now resolves to nothing.
+/// rustyline owns its binding table but the router owns precedence, so
+/// registration is one [`RouterKeyHandler`] per distinct bound chord:
+/// every sequence bound on the last sync is dropped, then the router's
+/// chords are re-bound.  A plugin removed by `unload` therefore loses
+/// its sequences here rather than leaving a handler behind.
 pub(super) fn sync_plugins(
     runtime: &Arc<Mutex<PluginRuntime>>,
     rl: &mut Editor<RalHelper, DefaultHistory>,
 ) {
-    let plugins: Vec<(String, Vec<String>)> = {
+    let chords: Vec<KeyChord> = {
         let mut rt = lock(runtime);
         if !rt.keybindings_dirty {
             return;
@@ -801,34 +753,20 @@ pub(super) fn sync_plugins(
         for key in std::mem::take(&mut rt.keybindings.bound) {
             rl.unbind_sequence(key);
         }
-        rt.plugins
-            .iter()
-            .map(|p| {
-                (
-                    p.name.clone(),
-                    p.keybindings.iter().map(|(k, _)| k.clone()).collect(),
-                )
-            })
-            .collect()
+        rt.router.bound_chords()
     };
 
     let mut bound = Vec::new();
-    for (name, keys) in &plugins {
-        for (bi, key_str) in keys.iter().enumerate() {
-            if let Some(key_event) = parse_key_notation(key_str).map(chord_to_key_event) {
-                rl.bind_sequence(
-                    key_event,
-                    rustyline::EventHandler::Conditional(Box::new(PluginKeyHandler {
-                        runtime: runtime.clone(),
-                        plugin: name.clone(),
-                        binding_idx: bi,
-                    })),
-                );
-                bound.push(key_event);
-            } else {
-                plugin_warning(name, &format!("invalid key notation '{key_str}', skipping"));
-            }
-        }
+    for chord in chords {
+        let key_event = chord_to_key_event(chord);
+        rl.bind_sequence(
+            key_event,
+            rustyline::EventHandler::Conditional(Box::new(RouterKeyHandler {
+                runtime: runtime.clone(),
+                chord,
+            })),
+        );
+        bound.push(key_event);
     }
     lock(runtime).keybindings.bound = bound;
 }
@@ -893,8 +831,15 @@ impl PluginRuntime {
         binding_idx: usize,
     ) -> Option<(usize, String)> {
         let idx = self.plugins.iter().position(|p| p.name == plugin)?;
-        let (key_str, _handler) = self.plugins[idx].keybindings.get(binding_idx)?;
-        Some((idx, key_str.clone()))
+        let kb = self.plugins[idx].keybindings.get(binding_idx)?;
+        Some((idx, kb.key.clone()))
+    }
+
+    /// Record that the plugin list changed: rebuild the dispatch table and
+    /// flag rustyline for re-registration on the next readline iteration.
+    pub(super) fn keybindings_changed(&mut self) {
+        self.router = KeyRouter::build(&self.plugins);
+        self.keybindings_dirty = true;
     }
 
     /// Build the per-hook [`PluginContext`] both the buffer-change and
@@ -934,26 +879,6 @@ impl PluginRuntime {
         }
     }
 
-    /// Every plugin keybinding as a frontend-neutral `(plugin_name,
-    /// binding_idx, chord)` triple, for a frontend that matches incoming
-    /// keys itself rather than registering handlers with rustyline (the
-    /// structural surface).  The `(plugin_name, binding_idx)` pair is the
-    /// same identity [`resolve_keybinding`](Self::resolve_keybinding) resolves, so a matched chord
-    /// dispatches through the shared [`super::keybinding::dispatch_keybinding`].
-    /// An unparseable notation is skipped silently — rustyline's
-    /// [`sync_plugins`] already warns on it, and this runs every keypress.
-    #[cfg(feature = "structural")]
-    pub(super) fn keybinding_chords(&self) -> Vec<(String, usize, KeyChord)> {
-        let mut out = Vec::new();
-        for p in &self.plugins {
-            for (bi, (key_str, _)) in p.keybindings.iter().enumerate() {
-                if let Some(chord) = parse_key_notation(key_str) {
-                    out.push((p.name.clone(), bi, chord));
-                }
-            }
-        }
-        out
-    }
 }
 
 /// Fold a named hook over all plugins that register it, threading an
@@ -1025,31 +950,6 @@ pub(super) fn snapshot_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `parse_key_notation` reduces every supported notation to a
-    /// frontend-neutral [`KeyChord`] — the modifiers and the named keys the
-    /// fzf/zoxide plugins bind, plus the bare-char and function-key forms.
-    #[test]
-    fn parse_key_notation_yields_neutral_chords() {
-        let chord = |name, ctrl, alt| Some(KeyChord { name, ctrl, alt });
-        assert_eq!(
-            parse_key_notation("ctrl-r"),
-            chord(KeyName::Char('r'), true, false)
-        );
-        assert_eq!(
-            parse_key_notation("alt-c"),
-            chord(KeyName::Char('c'), false, true)
-        );
-        assert_eq!(parse_key_notation("tab"), chord(KeyName::Tab, false, false));
-        assert_eq!(
-            parse_key_notation("t"),
-            chord(KeyName::Char('t'), false, false)
-        );
-        assert_eq!(parse_key_notation("f5"), chord(KeyName::F(5), false, false));
-        // Unrecognised notations and out-of-range function keys are rejected.
-        assert_eq!(parse_key_notation("hyper-x"), None);
-        assert_eq!(parse_key_notation("f13"), None);
-    }
 
     /// The rustyline boundary: a parsed chord adapts to exactly the `KeyEvent`
     /// rustyline binds against, so `sync_plugins` and the structural matcher
