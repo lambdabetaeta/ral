@@ -43,7 +43,7 @@
 //! `projection_enforceable` rejecting `net: false` on a backend with no
 //! kernel network enforcement — is covered by the unit tests
 //! `sandbox::tests::projection_enforceable_net_false_tracks_net_enforced`
-//! and, on Windows specifically (where the AppContainer backend *does*
+//! and, on Windows specifically (where the `AppContainer` backend *does*
 //! enforce it), `sandbox::tests::projection_enforceable_allows_net_false_on_windows`;
 //! neither is re-driven through the eval path here.
 
@@ -58,7 +58,11 @@ use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStd
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
-    ral_core::driver::boot_shell(Default::default(), common::prelude(), Default::default())
+    ral_core::driver::boot_shell(
+        Default::default(),
+        common::prelude(),
+        &ral_core::driver::HostSurface::default(),
+    )
 }
 
 /// A process-unique work directory under the system temp root, created on

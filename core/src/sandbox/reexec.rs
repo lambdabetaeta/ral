@@ -14,7 +14,7 @@
 //!   (devfs entries lack the X bit), so we snapshot `(dev, ino)` at boot
 //!   and verify immediately before each spawn.  An atomic-rename swap
 //!   (the cargo-install pattern) flips the inode, which we catch.
-//! - **Windows**: no swap guard. Confinement is the AppContainer token the
+//! - **Windows**: no swap guard. Confinement is the `AppContainer` token the
 //!   *parent* applies to `CreateProcessW` (`sandbox::windows::session`),
 //!   not a re-exec of this binary, so there is no parent-side self re-exec
 //!   for a swap check to protect (`Pin::Unguarded` below).
@@ -36,7 +36,7 @@ pub(super) struct SandboxSelf {
     #[allow(dead_code)]
     pin: Pin,
     /// Exec target passed to `Command::new` on Unix, and — on Windows —
-    /// the bundled-tool self-reexec image the AppContainer is granted RO
+    /// the bundled-tool self-reexec image the `AppContainer` is granted RO
     /// access to (see [`self_exec_path`]).
     exec_path: PathBuf,
     /// `argv[0]` for the spawned child.  Read on Unix only.
@@ -238,7 +238,7 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 /// bwrap respawn path), `None` to continue normally.
 ///
 /// On Windows there is no child re-entry: confinement is not something the
-/// child enters, it is the LowBox token the *parent* applies at spawn time
+/// child enters, it is the `LowBox` token the *parent* applies at spawn time
 /// via `Launch::security_capabilities` (see `sandbox::windows::session`). So
 /// `--sandbox-projection` is never passed to a Windows child by any
 /// legitimate caller — the separate `#[cfg(windows)]` arm below treats

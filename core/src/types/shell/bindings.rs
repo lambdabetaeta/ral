@@ -399,7 +399,7 @@ mod chokepoint_tests {
     /// [`armed_shell`], with an explicit `large_binding_bytes` threshold for
     /// the large-binding tests below.
     fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
-        let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), prelude(), Default::default());
+        let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), prelude(), &crate::driver::HostSurface::default());
         shell.arm_binding_lease(BindingLease {
             idle_calls,
             large_binding_bytes,
@@ -553,7 +553,7 @@ mod chokepoint_tests {
     /// — visible at arm time, so never lease candidates.
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
-        let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), prelude(), Default::default());
+        let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), prelude(), &crate::driver::HostSurface::default());
         let (prelude_name, _) = shell
             .bindings()
             .into_iter()

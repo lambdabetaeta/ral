@@ -265,7 +265,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 /// symlinks stay as written, `.`/`..` fold by pure string math, and the
 /// path need not exist.  No `check_fs_read`: the gate guards the stat
 /// this builtin never performs.
-pub(super) fn builtin_absolute_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
     check_arity(args, 1, "absolute-path")?;
     let resolved = shell.resolve(&args[0].to_string());
     Ok(Value::String(

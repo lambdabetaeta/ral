@@ -600,7 +600,7 @@ mod tests {
         let mut shell = ral_core::driver::boot_shell(
             ral_core::io::TerminalState::default(),
             &PRELUDE,
-            builtins::host_surface(),
+            &builtins::host_surface(),
         );
         builtins::install_agent_library(&mut shell).expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);

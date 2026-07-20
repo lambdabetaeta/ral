@@ -1332,7 +1332,7 @@ mod tests {
     #[test]
     fn registry_and_scheme_arity_agree() {
         let table = crate::builtins::core_builtin_table();
-        for name in table.names().collect::<Vec<_>>() {
+        for name in table.names() {
             let _ = super::builtin_arity(&table, name);
         }
         assert_eq!(super::builtin_arity(&table, "values"), None);

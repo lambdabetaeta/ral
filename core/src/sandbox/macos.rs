@@ -1,4 +1,4 @@
-//! macOS sandbox using the Seatbelt (sandbox_init) API.
+//! macOS sandbox using the Seatbelt (`sandbox_init`) API.
 //!
 //! Single mode of operation: a per-command ral re-exec child carrying
 //! `--sandbox-projection` enters the Seatbelt profile once at startup via
@@ -14,7 +14,7 @@
 //! We deliberately do *not* apply per-command Seatbelt profiles in the
 //! parent ral process or inside plugin handlers: the overhead-vs-benefit
 //! is upside-down for ral's use case (an external like fzf needs a sprawl
-//! of Seatbelt rules — process-info, IOKit, mach-bootstrap, symlink
+//! of Seatbelt rules — process-info, `IOKit`, mach-bootstrap, symlink
 //! resolution for the binary itself — and authorising a binary via
 //! `exec:` already shifts trust to that binary anyway).  Plugin handlers
 //! run externals with the user's full authority; only `grant { fs: ... }
@@ -118,7 +118,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 
 /// Emit the per-prefix `(allow file-read* …)` / `(allow file-write* …)`
 /// rules and ancestor-metadata carve-outs for a restricted fs policy.
-/// Returns the expanded deny_paths so the caller can layer them after
+/// Returns the expanded `deny_paths` so the caller can layer them after
 /// every allow rule has been written (Seatbelt is last-match-wins).
 ///
 /// `Err` when a grant prefix's firmlink/canonical expansion is not
@@ -161,7 +161,7 @@ fn emit_fs_restricted(
 /// attenuate exec at the OS layer.  `Restricted` emits a single combined `file-read*
 /// process-exec` allow over the meet-folded `exec_dirs` and the
 /// resolved `[exec]` literals — folded because Seatbelt requires both
-/// operations to spawn a binary (read for posix_spawn, then exec) and
+/// operations to spawn a binary (read for `posix_spawn`, then exec) and
 /// scattering the read across `system_read_paths` doesn't cover
 /// user-installed toolchain dirs like `~/.rustup/.../bin`.
 ///

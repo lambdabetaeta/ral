@@ -35,7 +35,9 @@ const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
 /// The exarch agent host's builtin surface on top of core's
-/// `CORE_BUILTINS`: exarch's own sets ([`EXARCH_BUILTINS`], the harness
+/// `CORE_BUILTINS`.
+///
+/// It carries exarch's own sets ([`EXARCH_BUILTINS`], the harness
 /// verbs) and core's host-selected `service`
 /// ([`ral_core::builtins::SERVICE_BUILTIN`] — the `watch` mechanism with
 /// the hosts swapped, kept out of `CORE_BUILTINS` so that only the agent

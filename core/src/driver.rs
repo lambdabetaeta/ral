@@ -131,8 +131,9 @@ macro_rules! baked_prelude {
     };
 }
 
-/// A host's builtin surface beyond [`CORE_BUILTINS`](crate::builtins::CORE_BUILTINS):
-/// the one definition [`boot_shell`] installs and shell-free typechecking
+/// A host's builtin surface beyond [`CORE_BUILTINS`](crate::builtins::CORE_BUILTINS).
+///
+/// The one definition [`boot_shell`] installs and shell-free typechecking
 /// ([`Self::builtin_table`]) reads, so the checker surface and the runtime
 /// surface cannot drift.  An empty surface (`Default`) is a bare core shell.
 #[derive(Default)]
@@ -182,7 +183,7 @@ impl HostSurface {
 /// # Panics
 /// Panics if a name in `surface` collides with a core builtin or repeats
 /// within the surface.
-pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: HostSurface) -> Shell {
+pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &HostSurface) -> Shell {
     let mut shell = Shell::new(terminal);
     surface.install_into(&mut shell.session.builtins);
     shell.seed_default_env_vars();

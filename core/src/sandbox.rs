@@ -91,7 +91,7 @@ pub(crate) use diag::{augment_failure, sample_descendants};
 
 /// Whether this platform's OS backend can actually enforce a network
 /// restriction (`net: false`).  Linux (`--unshare-net`), macOS (deny-default
-/// Seatbelt), and Windows (an AppContainer granted no network capability SID
+/// Seatbelt), and Windows (an `AppContainer` granted no network capability SID
 /// cannot open a socket) all can.
 fn net_enforced() -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -268,7 +268,7 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 }
 
 /// Tear down the per-session OS sandbox at a clean shutdown seam: revert
-/// grant ACEs and delete the session's AppContainer profiles (one per
+/// grant ACEs and delete the session's `AppContainer` profiles (one per
 /// distinct fs projection it confined).
 ///
 /// Windows only; a no-op elsewhere, where per-command confinement holds no

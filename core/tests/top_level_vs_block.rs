@@ -33,7 +33,11 @@ use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStd
 /// `exarch::bootstrap::boot_shell()` without the TUI / signal-handler
 /// pieces, which are irrelevant to boundary semantics.
 fn fresh_shell() -> Shell {
-    ral_core::driver::boot_shell(ral_core::io::TerminalState::default(), common::prelude(), Default::default())
+    ral_core::driver::boot_shell(
+        ral_core::io::TerminalState::default(),
+        common::prelude(),
+        &ral_core::driver::HostSurface::default(),
+    )
 }
 
 /// Run one top-level turn against `shell` through the public `run_turn`

@@ -1256,7 +1256,7 @@ mod pty_helper {
     /// cast lets the request argument coerce to whatever `ioctl`
     /// expects on the target.
     pub unsafe fn become_controlling(fd: RawFd) -> std::io::Result<()> {
-        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) } < 0 {
+        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY.into(), 0) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())

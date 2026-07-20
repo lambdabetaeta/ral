@@ -22,7 +22,7 @@
 //! `type=1326` audit record carries no path, so the hint there names the
 //! blocked syscall operation with no path or symlink note.
 //!
-//! Windows is different in kind: an AppContainer denial surfaces only as
+//! Windows is different in kind: an `AppContainer` denial surfaces only as
 //! `ERROR_ACCESS_DENIED` on the confined child, with no kernel audit log
 //! naming the path.  There is nothing to scrape, so the hint is gated on the
 //! exit code instead of a log line — only a plausibly access-denied exit

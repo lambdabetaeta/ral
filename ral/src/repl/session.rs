@@ -80,7 +80,7 @@ impl Session {
         let mut shell = ral_core::driver::boot_shell(
             terminal,
             &crate::PRELUDE,
-            ral_core::HostSurface {
+            &ral_core::HostSurface {
                 statics: vec![
                     super::plugin_ed_builtins::ED_BUILTINS,
                     ral_core::builtins::WATCH_BUILTIN,

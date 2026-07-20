@@ -240,7 +240,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
             crate::driver::boot_shell(
                 crate::io::TerminalState::default(),
                 target.prelude,
-                (target.surface)(),
+                &(target.surface)(),
             )
         }
         Ok(Some(Frame::Detach) | None) => std::process::exit(0),

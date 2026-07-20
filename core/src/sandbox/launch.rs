@@ -34,7 +34,7 @@ pub(crate) enum LaunchTarget<'a> {
 ///
 /// Linux and macOS build a `std::process::Command` (bwrap argv / a Seatbelt
 /// self re-exec) and adopt it via [`Launch::from_command`](crate::process::Launch::from_command);
-/// Windows builds the target `Launch` directly and attaches the AppContainer
+/// Windows builds the target `Launch` directly and attaches the `AppContainer`
 /// `SECURITY_CAPABILITIES` the parent's spawn applies (no re-exec).
 ///
 /// `shell` is taken only for the target's logical cwd, which Linux folds
@@ -230,7 +230,9 @@ fn macos_sandboxed_command(
 
 /// macOS hook: after `early_init` has entered Seatbelt, run the host
 /// program of a `LaunchTarget::Host` re-exec carried in the
-/// `--ral-sandbox-exec` tail.  `execve` replaces this process, so on
+/// `--ral-sandbox-exec` tail.
+///
+/// `execve` replaces this process, so on
 /// success it never returns; a spawn failure surfaces as 127, the POSIX
 /// "command not found / cannot exec" code.
 ///

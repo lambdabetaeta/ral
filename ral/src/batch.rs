@@ -148,7 +148,7 @@ pub(crate) fn run_batch(
         return ExitCode::SUCCESS;
     }
 
-    let mut shell = ral_core::driver::boot_shell(terminal, &PRELUDE, host_surface);
+    let mut shell = ral_core::driver::boot_shell(terminal, &PRELUDE, &host_surface);
     shell.set_exit_hints(load_exit_hints());
     tick!("builtins");
     if let Some(n) = recursion_limit {
