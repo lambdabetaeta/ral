@@ -158,7 +158,7 @@ pub fn run() -> Result<(), String> {
     // and the session's worker threads are created below — so no other
     // thread can race this env mutation. This is the only credential scrub;
     // every spawned child therefore inherits an environment free of keys.
-    let store = provider::credential::CredentialStore::resolve_and_scrub(custom);
+    let mut store = provider::credential::CredentialStore::resolve_and_scrub(custom);
     let available = store.available();
     if available.is_empty() {
         return Err(
@@ -305,7 +305,7 @@ pub fn run() -> Result<(), String> {
             &mut session,
             &provider,
             &info,
-            &store,
+            &mut store,
             &mut catalog,
             &scratch,
             &run_dir,

@@ -13,6 +13,7 @@ use crate::provider::models::{LiveSource, ModelCatalog, ModelSource, ProviderEnd
 use crate::provider::{self, Provider};
 use crate::provider::state;
 
+use super::app::Overlay;
 use super::picker::{self, Picker};
 use super::render::draw;
 use super::tui_loop::{CommandCtx, KeyAction, KeyMode, Tui, key_action};
@@ -24,7 +25,10 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 type EndpointRx = std::sync::mpsc::Receiver<(String, Result<Vec<ProviderEndpoint>, String>)>;
 
 pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
-    let store = ctx.store;
+    // A shared reborrow: `pick_model` only reads the store (`/login`'s
+    // `add_oauth` is the one site that needs it mutably), so `ctx` stays
+    // whole for `apply_model_switch`'s later reborrow.
+    let store = &*ctx.store;
     let available = store.available();
     // Each plan-backed provider's flavour, for the picker's labels: a ChatGPT
     // login (the OAuth credential) reads as the ChatGPT plan, an otherwise-
@@ -88,9 +92,9 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         }
         rx = Some(recv);
     }
-    tui.app.picker = Some(picker);
+    tui.app.overlay = Some(Overlay::Picker(picker));
     let outcome = drive_picker(tui, store, ctx.catalog, rx.as_ref());
-    tui.app.picker = None;
+    tui.app.overlay = None;
     if let Some((id, model, tuning, route)) = outcome {
         apply_model_switch(tui, ctx, &id, &model, &tuning, route.as_ref());
     }
@@ -226,7 +230,7 @@ fn apply_model_switch(
     tuning: &provider::Tuning,
     route: Option<&String>,
 ) {
-    let store = ctx.store;
+    let store = &*ctx.store;
     let info = ctx.info;
     let emit = ctx.emit;
     let id = tui.app.tabs.root();

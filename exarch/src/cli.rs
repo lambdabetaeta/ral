@@ -160,7 +160,10 @@ pub enum Command {
     /// `/model` picker switches between them.  Signing in again with the same
     /// account refreshes its tokens.  Opens a browser by default;
     /// `--device-auth` prints a URL and code instead, for a machine with no
-    /// local browser.
+    /// local browser.  A running session has no need of this subcommand —
+    /// its `/login` slash command drives the identical flow in place; this
+    /// exists for the first sign-in on a keyless machine (exarch refuses to
+    /// start with zero providers available) and for headless/scripted hosts.
     Login {
         #[arg(long = "device-auth")]
         device_auth: bool,

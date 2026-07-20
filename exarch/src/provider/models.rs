@@ -113,6 +113,15 @@ impl LiveSource {
                 .build(),
         }
     }
+
+    /// Admit one freshly-resolved credential into the live source — the
+    /// mid-session counterpart of the startup clone in [`Self::new`], so a
+    /// `/model` listing for an account signed in this session (or one whose
+    /// token just refreshed) reads the same credential the store now holds,
+    /// with no catalog rebuild.
+    pub fn add_credential(&mut self, id: ProviderId, credential: Credential) {
+        self.credentials.insert(id, credential);
+    }
 }
 
 impl ModelSource for LiveSource {
@@ -415,6 +424,14 @@ impl<S: ModelSource> ModelCatalog<S> {
     /// caches are touched only on the main thread via [`Self::record`].
     pub fn source(&self) -> &S {
         &self.source
+    }
+
+    /// Mutable access to the source — `/login`'s commit step calls
+    /// [`LiveSource::add_credential`] through this, so the catalog's own
+    /// clone of the credential map shares a freshly signed-in account with
+    /// no catalog rebuild.
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
     }
 
     /// A non-stale disk-cache entry for `id`, or `None` when the cache is

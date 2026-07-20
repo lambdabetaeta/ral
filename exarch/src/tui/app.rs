@@ -10,6 +10,7 @@ use super::fidelity::{self, Fidelity};
 use super::gesture::GestureState;
 use super::line;
 use super::line::bold;
+use super::login::LoginOverlay;
 use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK};
 use super::matrix::MatrixSort;
 use super::picker::Picker;
@@ -47,6 +48,17 @@ const SCROLL_STEP: isize = 3;
 // App struct
 // ---------------------------------------------------------------------------
 
+/// The one modal overlay that may be open at a time — the `/model` picker or
+/// the `/login` sign-in flow. Two variants is exactly the threshold at which
+/// this stops being premature: each site that used to check "is the picker
+/// open" (the key guard, the cursor suppression, the draw-last dispatch)
+/// checks "is *an* overlay open" instead, so "at most one, and only one kind
+/// at a time" is structural rather than disciplinary.
+pub(super) enum Overlay {
+    Picker(Picker),
+    Login(LoginOverlay),
+}
+
 /// The main TUI application state.
 ///
 /// Owns one [`Viewport`] per session and a flat list of visible tabs.
@@ -76,11 +88,12 @@ pub(crate) struct App {
     /// updated on a `/model` switch. The startup banner is one-shot
     /// chrome; this is where the current model stays visible.
     pub(super) status_model: String,
-    /// The active `/model` picker, taking over the prompt region while
-    /// open. `None` when the prompt is the normal text editor. Modal in
-    /// behaviour (an early-return guard in [`Self::key`]), flat in
-    /// rendering — a strip, not a floating overlay.
-    pub(super) picker: Option<Picker>,
+    /// The active modal overlay — the `/model` picker or the `/login` sign-in
+    /// flow. `None` when the prompt is the normal text editor. Modal in
+    /// behaviour (an early-return guard in [`Self::key`]) and in
+    /// rendering — a floating, bezel-framed modal drawn last, over the
+    /// (dimmed) session.
+    pub(super) overlay: Option<Overlay>,
     /// Grouped surface accumulator: patch-diff coalescing and I/O observation
     /// bucketing, moved out to [`SurfaceBuffer`].
     surface: SurfaceBuffer,
@@ -124,7 +137,7 @@ impl App {
             last_input: 0,
             context_window,
             status_model: String::new(),
-            picker: None,
+            overlay: None,
             gesture: GestureState::new(),
             matrix_sort: MatrixSort::default(),
             root_clear_drain: false,
@@ -168,9 +181,22 @@ impl App {
         self.inbox = inbox;
     }
 
-    /// Mutable access to the active picker, for the REPL's picker loop.
+    /// Mutable access to the active `/model` picker, for the REPL's picker
+    /// loop.
     pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
-        self.picker.as_mut()
+        match self.overlay.as_mut() {
+            Some(Overlay::Picker(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the active `/login` overlay, for the REPL's login
+    /// loop.
+    pub(super) fn login_mut(&mut self) -> Option<&mut LoginOverlay> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Login(l)) => Some(l),
+            _ => None,
+        }
     }
 
     pub fn busy_off(&mut self) {
@@ -577,12 +603,13 @@ impl App {
         if k.kind != KeyEventKind::Press {
             return;
         }
-        // The `/model` picker is modal: while it is open no key reaches the
-        // textarea or the scrollback. Its own key handling runs in the
-        // UI loop's picker loop ([`drive_picker`]), which drives the
-        // picker directly; this guard only keeps a stray key (e.g. one
-        // arriving on a non-prompt path) from leaking through.
-        if self.picker.is_some() {
+        // A modal overlay (the `/model` picker or the `/login` flow) is
+        // exclusive: while one is open no key reaches the textarea or the
+        // scrollback. Its own key handling runs in the UI loop's overlay
+        // loop (`drive_picker`/`drive_login`), which drives it directly;
+        // this guard only keeps a stray key (e.g. one arriving on a
+        // non-prompt path) from leaking through.
+        if self.overlay.is_some() {
             return;
         }
         // Ctrl-X opens the editor-command prefix (emacs convention).  The next

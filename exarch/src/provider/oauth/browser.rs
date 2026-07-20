@@ -2,11 +2,13 @@
 //! redirects to a loopback HTTP listener that captures the authorization
 //! code, which is then exchanged for tokens.
 
-use super::{CLIENT_ID, ISSUER, ORIGINATOR, SCOPE};
+use super::{CLIENT_ID, ISSUER, LoginPhase, ORIGINATOR, SCOPE};
 use std::io::BufRead;
 use std::io::Write;
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// The loopback callback wait is bounded so an abandoned sign-in cannot hang
@@ -14,7 +16,11 @@ use std::time::{Duration, Instant};
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
 /// Drive the browser flow to completion and return the issued tokens.
-pub(super) async fn run(client: &reqwest::Client) -> Result<super::RawTokens, String> {
+pub(super) async fn run(
+    client: &reqwest::Client,
+    on_phase: impl Fn(LoginPhase) + Send,
+    cancel: &Arc<AtomicBool>,
+) -> Result<super::RawTokens, String> {
     let (verifier, challenge) = super::pkce();
     let state = super::random_b64url(32);
 
@@ -26,14 +32,19 @@ pub(super) async fn run(client: &reqwest::Client) -> Result<super::RawTokens, St
     let redirect_uri = format!("http://localhost:{port}/auth/callback");
 
     let url = authorize_url(&redirect_uri, &challenge, &state)?;
-    open_browser(&url);
+    let opened = open_browser(&url);
+    on_phase(LoginPhase::AwaitingBrowser { url, opened });
 
-    eprintln!("Waiting for sign-in to complete...");
+    // `accept_callback` runs under `spawn_blocking`, which requires `'static`;
+    // the shared flag is cloned in (the caller keeps the original to trip it).
     let expected_state = state.clone();
-    let code = tokio::task::spawn_blocking(move || accept_callback(&listener, &expected_state))
-        .await
-        .map_err(|e| format!("callback listener panicked: {e}"))??;
+    let cancel = Arc::clone(cancel);
+    let code =
+        tokio::task::spawn_blocking(move || accept_callback(&listener, &expected_state, &cancel))
+            .await
+            .map_err(|e| format!("callback listener panicked: {e}"))??;
 
+    on_phase(LoginPhase::ExchangingCode);
     super::exchange_code(client, &redirect_uri, &code, &verifier).await
 }
 
@@ -64,12 +75,12 @@ fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<Str
     Ok(url.into())
 }
 
-/// Open the authorize URL in the platform browser. On failure the URL is
-/// printed for the user to open manually rather than treated as an error.
-fn open_browser(url: &str) {
-    if let Err(e) = launch_browser(url) {
-        eprintln!("{e}\nOpen this URL in your browser to sign in:\n  {url}");
-    }
+/// Open the authorize URL in the platform browser, returning whether it
+/// launched. On failure the URL is not printed here: the phase payload
+/// carries it either way, so the CLI adapter and the TUI overlay each show
+/// their own manual-open fallback from it.
+fn open_browser(url: &str) -> bool {
+    launch_browser(url).is_ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -143,8 +154,12 @@ fn launch_browser(_url: &str) -> Result<(), String> {
 
 /// Accept one connection, parse the authorization code from the callback
 /// request, reply with a small confirmation page, and return the code.
-fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
-    let mut stream = accept_within(listener, MAX_WAIT)?;
+fn accept_callback(
+    listener: &TcpListener,
+    expected_state: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<String, String> {
+    let mut stream = accept_within(listener, MAX_WAIT, cancel)?;
     let request_line = read_request_line(&mut stream)?;
 
     let path_and_query = request_line
@@ -181,15 +196,23 @@ fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<Strin
 }
 
 /// Accept one connection, giving up after `timeout` so an abandoned sign-in
-/// cannot block the CLI forever. Polls the listener in nonblocking mode
-/// rather than parking the spawn-blocking thread on `accept` with no way to
-/// time out, then hands back a blocking stream for the read/write below.
-fn accept_within(listener: &TcpListener, timeout: Duration) -> Result<TcpStream, String> {
+/// cannot block the CLI forever, or `cancel` so an abandoned *overlay* frees
+/// the listener within one 100 ms poll. Polls the listener in nonblocking
+/// mode rather than parking the spawn-blocking thread on `accept` with no way
+/// to time out, then hands back a blocking stream for the read/write below.
+fn accept_within(
+    listener: &TcpListener,
+    timeout: Duration,
+    cancel: &Arc<AtomicBool>,
+) -> Result<TcpStream, String> {
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("could not configure callback listener: {e}"))?;
     let start = Instant::now();
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err("sign-in cancelled".to_string());
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 stream

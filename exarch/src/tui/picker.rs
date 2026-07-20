@@ -218,14 +218,15 @@ const OVERLAY_W: u16 = 74;
 
 /// The overlay's interior margins — the Norton-Commander "airy" padding held
 /// inside the bezel: [`PAD_X`] columns each side, [`PAD_Y`] rows top and
-/// bottom, so the controls never crowd the double-line frame.
-const PAD_X: u16 = 4;
-const PAD_Y: u16 = 1;
+/// bottom, so the controls never crowd the double-line frame. `pub(super)`:
+/// shared overlay chrome, reused by [`super::login`]'s modal.
+pub(super) const PAD_X: u16 = 4;
+pub(super) const PAD_Y: u16 = 1;
 /// The drop shadow's depth: the modal casts [`SHADOW_DEPTH`] columns of shade
 /// to its right and one row below — the canonical Turbo-Vision/Norton-Commander
 /// 2:1 lift (cells are ~2:1, so two columns read as square as one row) that
 /// floats the overlay above the (dimmed) session.
-const SHADOW_DEPTH: u16 = 2;
+pub(super) const SHADOW_DEPTH: u16 = 2;
 /// The shadow's foreground — cells under the shadow keep their glyph but are
 /// repainted this near-black slate, so whatever lies beneath shows as a faint
 /// silhouette rather than being blanked, the way Norton Commander inks its lift.
@@ -289,8 +290,9 @@ fn provider_tag(endpoint: &ProviderEndpoint) -> String {
     format!(" {text} ")
 }
 
-/// Centre a `w × h` rect within `area`, clamped to fit.
-fn centered(w: u16, h: u16, area: Rect) -> Rect {
+/// Centre a `w × h` rect within `area`, clamped to fit. `pub(super)`: shared
+/// overlay chrome, reused by [`super::login`]'s modal.
+pub(super) fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect {
@@ -305,8 +307,9 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
 /// below and [`SHADOW_DEPTH`] columns to the right of the overlay are repainted
 /// dark, keeping their glyph as a dim silhouette so the modal reads as lifted
 /// off the session rather than punched into it. `cell_mut` bounds-checks, so
-/// cells that fall off the frame are simply skipped.
-fn render_shadow(f: &mut Frame, area: Rect) {
+/// cells that fall off the frame are simply skipped. `pub(super)`: shared
+/// overlay chrome, reused by [`super::login`]'s modal.
+pub(super) fn render_shadow(f: &mut Frame, area: Rect) {
     let shadow = Style::default().fg(SHADOW_FG).bg(Color::Black);
     let buf = f.buffer_mut();
     let mut cast = |x: u16, y: u16| {

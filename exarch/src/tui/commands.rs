@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use super::App;
 use super::banner::{self, SessionInfo};
 use super::block::RailShape;
+use super::login;
 use super::model_picker::pick_model;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
@@ -65,6 +66,12 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: None,
         help: "Switch the model or provider.",
+    },
+    SlashCommand {
+        name: "/login",
+        aliases: &[],
+        arg: None,
+        help: "Sign in with ChatGPT — adds a plan-backed provider.",
     },
     SlashCommand {
         name: "/branch",
@@ -314,6 +321,7 @@ pub(super) fn route_submit(
             "/model" => {
                 pick_model(tui, ctx);
             }
+            "/login" => login::login(tui, ctx),
             // The viewport blanks immediately, and the in-flight model response
             // is cancelled first — otherwise streamed tokens sitting in the bus
             // keep flowing into the cleared viewport until the worker, parked

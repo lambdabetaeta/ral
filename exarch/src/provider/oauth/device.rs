@@ -2,17 +2,20 @@
 //! while exarch polls the token endpoint. The poll response carries the PKCE
 //! verifier used in the final authorization-code exchange.
 
-use super::{CLIENT_ID, ISSUER};
+use super::{CLIENT_ID, ISSUER, LoginPhase};
 use serde::Deserialize;
 use serde::Deserializer;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
 /// [`MAX_WAIT`] rendered for the user-facing sign-in messages, so the shown
-/// duration cannot drift from the constant.
-fn max_wait_label() -> String {
+/// duration cannot drift from the constant. `pub(super)`: the CLI adapter's
+/// [`LoginPhase::stderr_line`] reproduces this exact text.
+pub(super) fn max_wait_label() -> String {
     format!("{} minutes", MAX_WAIT.as_secs() / 60)
 }
 
@@ -54,16 +57,20 @@ struct PollSuccess {
 }
 
 /// Drive the device-code flow to completion and return the issued tokens.
-pub(super) async fn run(client: &reqwest::Client) -> Result<super::RawTokens, String> {
+pub(super) async fn run(
+    client: &reqwest::Client,
+    on_phase: impl Fn(LoginPhase) + Send,
+    cancel: &Arc<AtomicBool>,
+) -> Result<super::RawTokens, String> {
     let code = request_user_code(client).await?;
 
-    eprintln!(
-        "To sign in, open {ISSUER}/codex/device and enter this code (expires in {}):\n  {}",
-        max_wait_label(),
-        code.user_code
-    );
+    on_phase(LoginPhase::AwaitingDevice {
+        user_code: code.user_code.clone(),
+        url: format!("{ISSUER}/codex/device"),
+    });
 
-    let poll = poll_for_code(client, &code).await?;
+    let poll = poll_for_code(client, &code, cancel).await?;
+    on_phase(LoginPhase::ExchangingCode);
     let redirect_uri = format!("{ISSUER}/deviceauth/callback");
     super::exchange_code(
         client,
@@ -87,8 +94,15 @@ async fn request_user_code(client: &reqwest::Client) -> Result<UserCode, String>
 }
 
 /// Poll the token endpoint until the user authorises the code or 15 minutes
-/// elapse. A 403 or 404 means the user has not finished yet.
-async fn poll_for_code(client: &reqwest::Client, code: &UserCode) -> Result<PollSuccess, String> {
+/// elapse. A 403 or 404 means the user has not finished yet. `cancel` is
+/// checked once per iteration, right after the poll interval's sleep, so an
+/// abandoned flow gives up within one interval (≤ ~5 s) rather than the full
+/// 15-minute deadline.
+async fn poll_for_code(
+    client: &reqwest::Client,
+    code: &UserCode,
+    cancel: &Arc<AtomicBool>,
+) -> Result<PollSuccess, String> {
     let url = format!("{ISSUER}/api/accounts/deviceauth/token");
     let start = Instant::now();
     loop {
@@ -111,6 +125,9 @@ async fn poll_for_code(client: &reqwest::Client, code: &UserCode) -> Result<Poll
                 return Err(format!("device sign-in timed out after {}", max_wait_label()));
             }
             tokio::time::sleep(Duration::from_secs(code.interval)).await;
+            if cancel.load(Ordering::Acquire) {
+                return Err("sign-in cancelled".to_string());
+            }
             continue;
         }
 

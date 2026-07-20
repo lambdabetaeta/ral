@@ -27,6 +27,8 @@ use serde::de::DeserializeOwned;
 use sha2::Digest;
 use sha2::Sha256;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -113,27 +115,115 @@ pub(super) struct RawTokens {
     pub refresh_token: String,
 }
 
-/// Run interactive login (browser flow, or device code when `device`), then
-/// persist the token. Progress is printed to stderr.
+/// Which interactive flow to run. Mirrors the CLI's `--device-auth` toggle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LoginMethod {
+    Browser,
+    Device,
+}
+
+/// One staged report from a running login flow. Both the CLI adapter (as a
+/// stderr line, via [`Self::stderr_line`]) and the TUI's `/login` overlay (as
+/// a fixed-position phase track) render these three phases; nothing outside
+/// them is a progress tick — no percentage, no elapsed clock.
+pub enum LoginPhase {
+    /// Browser flow: the authorize URL is open (or shown for manual open when
+    /// the platform launcher failed), awaiting the loopback callback.
+    AwaitingBrowser { url: String, opened: bool },
+    /// Device flow: the one-time code is issued, awaiting entry at `url`.
+    AwaitingDevice { user_code: String, url: String },
+    /// The authorization code landed; exchanging it for tokens.
+    ExchangingCode,
+}
+
+impl LoginPhase {
+    /// The CLI adapter's stderr line for this phase, reproducing today's
+    /// messages exactly for the two common phases. `None` when the legacy
+    /// flow printed nothing at that point (the exchange has no message of its
+    /// own). The one exception is the browser launch-failure fallback: it no
+    /// longer carries the specific launcher error (`open`/`xdg-open`/…), since
+    /// that detail no longer crosses the flow/renderer seam — see
+    /// `browser::open_browser`.
+    pub fn stderr_line(&self) -> Option<String> {
+        match self {
+            Self::AwaitingBrowser { opened: true, .. } => {
+                Some("Waiting for sign-in to complete...".to_string())
+            }
+            Self::AwaitingBrowser { url, opened: false } => Some(format!(
+                "could not open a browser automatically\nOpen this URL in your browser to sign in:\n  {url}"
+            )),
+            Self::AwaitingDevice { user_code, url } => Some(format!(
+                "To sign in, open {url} and enter this code (expires in {}):\n  {user_code}",
+                device::max_wait_label()
+            )),
+            Self::ExchangingCode => None,
+        }
+    }
+}
+
+/// Drive one interactive login to a persisted token. Blocking: builds its own
+/// current-thread runtime (callers put it on a thread of their own). `on_phase`
+/// observes the staged progress; `cancel`, polled by the wait loops, aborts an
+/// abandoned flow promptly (freeing the loopback port). Borrowed, not owned:
+/// this call never outlives the caller's own use of the flag (e.g. to trip it
+/// on Esc), so ownership never needs to move here.
+///
+/// Returns the persisted token and whether an existing account was replaced.
 ///
 /// # Errors
 /// Returns `Err` if the tokio runtime or HTTP client cannot be built, if the
-/// browser/device flow fails, or if finalising or persisting the token fails.
-pub fn login(device: bool) -> Result<(), String> {
+/// browser/device flow fails or is cancelled, or if finalising or persisting
+/// the token fails.
+pub fn login_flow(
+    method: LoginMethod,
+    on_phase: impl Fn(LoginPhase) + Send,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(OAuthToken, bool), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("could not start runtime: {e}"))?;
     let client = http_client()?;
-    let raw = rt.block_on(async {
-        if device {
-            device::run(&client).await
-        } else {
-            browser::run(&client).await
+    let raw = rt.block_on(async move {
+        match method {
+            LoginMethod::Device => device::run(&client, on_phase, cancel).await,
+            LoginMethod::Browser => browser::run(&client, on_phase, cancel).await,
         }
     })?;
+    // A cancel that lands after the wait loops returned `Ok` (the exchange
+    // itself does not poll the flag) must still not persist — defense in
+    // depth beside the wait loops' own cancel checks.
+    if cancel.load(Ordering::Acquire) {
+        return Err("sign-in cancelled".to_string());
+    }
     let token = finalize(raw)?;
     let replaced = save_one(&token)?;
+    Ok((token, replaced))
+}
+
+/// Run interactive login (browser flow, or device code when `device`), then
+/// persist the token. A thin adapter over [`login_flow`]: it renders staged
+/// phases to stderr exactly as the flow used to print them inline, and never
+/// cancels (a CLI run has no overlay to Esc out of; Ctrl-C kills the process).
+///
+/// # Errors
+/// Returns `Err` if the tokio runtime or HTTP client cannot be built, if the
+/// browser/device flow fails, or if finalising or persisting the token fails.
+pub fn login(device: bool) -> Result<(), String> {
+    let method = if device {
+        LoginMethod::Device
+    } else {
+        LoginMethod::Browser
+    };
+    let (token, replaced) = login_flow(
+        method,
+        |phase| {
+            if let Some(line) = phase.stderr_line() {
+                eprintln!("{line}");
+            }
+        },
+        &Arc::new(AtomicBool::new(false)),
+    )?;
     let verb = if replaced {
         "Updated the login for"
     } else {
@@ -905,4 +995,34 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The CLI adapter's stderr text for each phase, guarding the refactor's
+    /// behaviour-preservation claim: the two common phases reproduce the
+    /// flows' legacy `eprintln!` text exactly (see `browser.rs`/`device.rs`
+    /// before this refactor); the exchange phase — which printed nothing —
+    /// stays silent.
+    #[test]
+    fn stderr_line_reproduces_legacy_messages() {
+        assert_eq!(
+            LoginPhase::AwaitingBrowser {
+                url: "https://auth.openai.com/oauth/authorize?…".into(),
+                opened: true,
+            }
+            .stderr_line()
+            .as_deref(),
+            Some("Waiting for sign-in to complete...")
+        );
+        assert_eq!(
+            LoginPhase::AwaitingDevice {
+                user_code: "ABCD-1234".into(),
+                url: format!("{ISSUER}/codex/device"),
+            }
+            .stderr_line()
+            .as_deref(),
+            Some(
+                "To sign in, open https://auth.openai.com/codex/device and enter this code \
+                 (expires in 15 minutes):\n  ABCD-1234"
+            )
+        );
+        assert_eq!(LoginPhase::ExchangingCode.stderr_line(), None);
+    }
 }

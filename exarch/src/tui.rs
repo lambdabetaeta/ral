@@ -23,6 +23,7 @@ mod gesture;
 mod group;
 mod highlight;
 mod line;
+mod login;
 mod matrix;
 mod md;
 mod model_picker;

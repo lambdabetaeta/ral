@@ -25,6 +25,7 @@ use ratatui::{
 use crate::bus::AgentId;
 
 use super::App;
+use super::app::Overlay;
 use super::block::queued_prompt_rows;
 use super::gesture::COPY_TOAST_TTL;
 use super::line;
@@ -226,7 +227,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         app.tabs.names(),
         focused,
     );
-    let picker = app.picker.as_ref();
+    let overlay = app.overlay.as_ref();
 
     // Bracket the frame's terminal writes in a synchronized update so the
     // emulator buffers the whole diff and swaps it atomically.  Without
@@ -281,9 +282,9 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             f.render_widget(block, prompt_row);
             app.prompt_state.render(f, inner);
             // Show the terminal's native cursor at the edit point —
-            // but not while the picker overlay owns the keyboard, or
-            // the cursor would peek out beneath the modal.
-            if picker.is_none()
+            // but not while a modal overlay owns the keyboard, or the
+            // cursor would peek out beneath it.
+            if overlay.is_none()
                 && let Some(pos) = app.prompt_state.cursor_screen_position()
             {
                 let x = inner.x + pos.0.min(inner.width.saturating_sub(1));
@@ -310,9 +311,12 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             };
             f.render_widget(Paragraph::new(msg).style(Style::default().fg(LIME_HOT)), r);
         }
-        // Last: the floating picker, over the dimmed session.
-        if let Some(p) = picker {
-            p.render(f, area);
+        // Last: the floating overlay (the `/model` picker or `/login`), over
+        // the dimmed session.
+        match overlay {
+            Some(Overlay::Picker(p)) => p.render(f, area),
+            Some(Overlay::Login(l)) => l.render(f, area),
+            None => {}
         }
     });
     execute!(io::stdout(), EndSynchronizedUpdate)?;

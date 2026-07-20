@@ -127,7 +127,7 @@ pub fn run(
     session: &mut Agent,
     provider: &Arc<Provider>,
     info: &banner::SessionInfo<'_>,
-    store: &CredentialStore,
+    store: &mut CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     scratch: &Scratch,
     run_dir: &Path,
@@ -251,13 +251,15 @@ pub fn run(
 /// The long-lived handles the UI thread services a submitted line against: the
 /// fleet registry (for steering, `wake`, and the focused agent's provider
 /// handle a `/model` swap targets), the credential store and model catalog the
-/// `/model` picker reads, the static session info, and the recording emitter a
-/// UI-caused operational event (a model switch) rides.  Bundled so the command
-/// path — `ui_loop` → `route_submit` → `pick_model` → `apply_model_switch` —
-/// threads one context rather than a fistful of handles.
+/// `/model` picker reads (and `/login` writes into, admitting a freshly
+/// signed-in account), the static session info, and the recording emitter a
+/// UI-caused operational event (a model switch, a sign-in) rides.  Bundled so
+/// the command path — `ui_loop` → `route_submit` → `pick_model` /
+/// `login` → `apply_model_switch` / `apply_login` — threads one context
+/// rather than a fistful of handles.
 pub struct CommandCtx<'a> {
     pub(super) agents: &'a AgentRegistry,
-    pub(super) store: &'a CredentialStore,
+    pub(super) store: &'a mut CredentialStore,
     pub(super) catalog: &'a mut ModelCatalog<LiveSource>,
     pub(super) info: &'a SessionInfo<'a>,
     pub(super) emit: &'a Emitter,
