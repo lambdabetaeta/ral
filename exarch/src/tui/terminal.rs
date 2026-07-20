@@ -272,13 +272,15 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Open `path` for append and alias it onto fd 2, returning a `dup` of
-/// the original fd 2 so the caller can restore it later.  `dbg_trace!`
-/// writes to fd 2 directly via `eprintln!`; without this redirect those
-/// writes interleave with the rendered frame and corrupt it.  Child
-/// processes that inherit fds (re-execed sandbox helpers)
-/// pick up the redirected fd, so their `dbg_trace!` output flows into
-/// the same log.
+/// Open `path` for append and alias it onto fd 2, returning a backup of
+/// the original fd 2 so the caller can restore it later.  The backup is
+/// deliberately cloexec: it exists only so this process can restore fd 2
+/// on teardown, and must not leak into any child spawned while the
+/// redirect is active.  `dbg_trace!` writes to fd 2 directly via
+/// `eprintln!`; without this redirect those writes interleave with the
+/// rendered frame and corrupt it.  Child processes that inherit fds
+/// (re-execed sandbox helpers) pick up the redirected fd, so their
+/// `dbg_trace!` output flows into the same log.
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
@@ -289,14 +291,15 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::Ow
     use std::os::fd::AsFd;
 
     let file = OpenOptions::new().create(true).append(true).open(path)?;
-    let backup = rustix::io::dup(rustix::stdio::stderr()).map_err(io::Error::from)?;
+    let backup =
+        rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stderr(), 0).map_err(io::Error::from)?;
     // SAFETY: fd 2 is a process-global fd slot; retargeting it onto the
     // log file is exactly the redirect this function exists to perform.
     unsafe { ral_core::process::clobber_slot(file.as_fd(), rustix::stdio::raw_stderr()) }?;
     Ok(backup)
 }
 
-/// Restore fd 2 from the `dup` saved by [`redirect_stderr_to_file`].
+/// Restore fd 2 from the cloexec backup saved by [`redirect_stderr_to_file`].
 /// Best-effort: any failure inside the TUI's drop has nowhere useful
 /// to surface, and the process is about to return to the user's
 /// shell anyway.
