@@ -79,7 +79,9 @@ pub(super) fn echo_delta(prose: &str, script: &str) -> u8 {
 /// three words) are taken as dissimilar — `0.0` — so a terse call never
 /// reads as an echo.
 fn jaccard(a: &str, b: &str) -> f32 {
-    let (sa, sb) = (shingles(a), shingles(b));
+    let wa: Vec<String> = a.split_whitespace().map(str::to_lowercase).collect();
+    let wb: Vec<String> = b.split_whitespace().map(str::to_lowercase).collect();
+    let (sa, sb) = (shingles(&wa), shingles(&wb));
     let inter = sa.intersection(&sb).count();
     let union = sa.len() + sb.len() - inter;
     if union == 0 {
@@ -94,12 +96,12 @@ fn jaccard(a: &str, b: &str) -> f32 {
     }
 }
 
-/// The lowercased word-trigram shingles of `text`.
-fn shingles(text: &str) -> HashSet<String> {
-    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+/// The word-trigram shingles of `words` (already lowercased) as borrowed
+/// `(word, word, word)` triples — no per-window string splice.
+fn shingles(words: &[String]) -> HashSet<(&str, &str, &str)> {
     words
         .windows(3)
-        .map(|w| format!("{} {} {}", w[0], w[1], w[2]))
+        .map(|w| (w[0].as_str(), w[1].as_str(), w[2].as_str()))
         .collect()
 }
 

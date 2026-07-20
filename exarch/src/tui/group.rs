@@ -188,7 +188,6 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(pinned_intent(
         &[head, Span::raw(INTENT_INDENT)],
-        lead_w,
         // The viewport prepends the rail to this row alone, so continuations
         // bake in its width and the bars target `bar_col - RAIL_W` to land at
         // `bar_col` once the row shifts.
@@ -196,7 +195,6 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         &tip.intent,
         tip.context,
         &sparkline(calls),
-        calls.len().min(MAX_SPARKLINE),
         bar_col(width).saturating_sub(RAIL_W),
     ));
     // The effects nest under the *intent*, not the `ral` head: they hang at
@@ -284,36 +282,33 @@ fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
     pinned_intent(
         &[Span::raw(INTENT_INDENT)],
         GAP,
-        GAP,
         &call.intent,
         call.context,
         &bar(call.magnitude),
-        1,
         bar_col(width),
     )
 }
 
 /// Lay one intent out as a left text block with its bar(s) pinned to the
 /// right.  `lead` opens row 0 — the slate `ral` head at the tip, the bare
-/// indent in the list — occupying `lead_w` columns; `cont_indent` is where the
-/// wrapped continuations hang, baking in the [`RAIL_W`] the viewport prepends
-/// to row 0 (the row the lead owns).  `bars` is the right-aligned sparkline —
-/// the whole run at the tip, one glyph per row in the list — `bars_w` its
-/// width and `bar_last` the column its final glyph lands in.  The intent wraps
-/// to clear the bar band on every row, and the turn's `context` floor
-/// distress-modulates each row (the bar's height stays the magnitude it
-/// encodes; only the intent ink drains its saturation).
-#[allow(clippy::too_many_arguments)]
+/// indent in the list — its measured width the left margin; `cont_indent` is
+/// where the wrapped continuations hang, baking in the [`RAIL_W`] the viewport
+/// prepends to row 0 (the row the lead owns).  `bars` is the right-aligned
+/// sparkline — the whole run at the tip, one glyph per row in the list — its
+/// measured width and `bar_last` (the column its final glyph lands in) fix
+/// where it starts.  The intent wraps to clear the bar band on every row, and
+/// the turn's `context` floor distress-modulates each row (the bar's height
+/// stays the magnitude it encodes; only the intent ink drains its saturation).
 fn pinned_intent(
     lead: &[Span<'static>],
-    lead_w: usize,
     cont_indent: usize,
     intent: &str,
     context: u8,
     bars: &Span<'static>,
-    bars_w: usize,
     bar_last: usize,
 ) -> Vec<Line<'static>> {
+    let lead_w: usize = lead.iter().map(Span::width).sum();
+    let bars_w = bars.width();
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
     // The intent is work-narration, not the answer: it sits in the SLATE

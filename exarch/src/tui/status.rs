@@ -7,32 +7,18 @@ use ratatui::text::{Line, Span};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
-/// The rule line's right-side status readout: model name, the ctx%
-/// value-ramp inputs (`last_input` against `context_window`), and the
-/// running token `usage` figures.
-#[derive(Clone, Copy)]
-pub(super) struct StatusReadout<'a> {
-    pub(super) usage: &'a Usage,
-    pub(super) last_input: u64,
-    pub(super) context_window: Option<u64>,
-    pub(super) model: &'a str,
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(super) fn rule_line(
     width: usize,
     phase: Option<&str>,
     wait_elapsed: Option<Duration>,
     scroll_pct: Option<u16>,
-    status: StatusReadout<'_>,
+    usage: &Usage,
+    last_input: u64,
+    context_window: Option<u64>,
+    status_model: &str,
 ) -> Line<'static> {
-    let StatusReadout {
-        usage,
-        last_input,
-        context_window,
-        model: status_model,
-    } = status;
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut left_w = 0usize;
 
     // ── elapsed-wait bar ──────────────────────────────────────────────
     // A single bar that grows with the current phase's elapsed wall-time
@@ -43,9 +29,7 @@ pub(super) fn rule_line(
     // digit ticks once per second: a calm, unmistakable liveness signal,
     // and the bar ceasing to grow means the turn has wedged.
     let elapsed = wait_elapsed.unwrap_or(Duration::ZERO);
-    let bar = wait_bar(elapsed);
-    left_w += bar.iter().map(Span::width).sum::<usize>();
-    spans.extend(bar);
+    spans.extend(wait_bar(elapsed));
     // ── phase label (fixed-width slot) ─────────────────────────────────
     let mut label = match phase {
         Some(p) => format!("{p}… "),
@@ -57,24 +41,17 @@ pub(super) fn rule_line(
     // to prevent.
     let label_w = UnicodeWidthStr::width(label.as_str());
     label.push_str(&" ".repeat(PHASE_SLOT_W.saturating_sub(label_w)));
-    left_w += PHASE_SLOT_W;
     spans.push(Span::styled(label, Style::default().fg(SLATE)));
     // ── status model ──────────────────────────────────────────────────
-    {
-        let segment: Vec<Span<'static>> = vec![
-            Span::styled(
-                if status_model.is_empty() {
-                    "…".to_owned()
-                } else {
-                    status_model.to_owned()
-                },
-                Style::default().fg(SLATE),
-            ),
-            Span::styled(" · ", Style::default().fg(SLATE)),
-        ];
-        left_w += segment.iter().map(Span::width).sum::<usize>();
-        spans.extend(segment);
-    }
+    spans.push(Span::styled(
+        if status_model.is_empty() {
+            "…".to_owned()
+        } else {
+            status_model.to_owned()
+        },
+        Style::default().fg(SLATE),
+    ));
+    spans.push(Span::styled(" · ", Style::default().fg(SLATE)));
 
     // ── ctx% value-ramp ───────────────────────────────────────────────
     // A fixed-width lightness ramp: filled cells step toward white as
@@ -93,12 +70,11 @@ pub(super) fn rule_line(
         )]
         let pct = ((last_input as f64 / cap as f64) * 100.0).round() as u64;
         let pct = pct.min(999);
-        let bar = ctx_ramp(pct);
-        left_w += bar.iter().map(Span::width).sum::<usize>();
-        spans.extend(bar);
-        let readout = Span::styled(format!(" {pct}%"), Style::default().fg(SLATE));
-        left_w += readout.width();
-        spans.push(readout);
+        spans.extend(ctx_ramp(pct));
+        spans.push(Span::styled(
+            format!(" {pct}%"),
+            Style::default().fg(SLATE),
+        ));
     }
 
     // ── scroll position ───────────────────────────────────────────────
@@ -112,14 +88,13 @@ pub(super) fn rule_line(
         } else {
             format!(" · ⇣ {pct}% ")
         };
-        let seg = Span::styled(text, Style::default().fg(SLATE));
-        left_w += seg.width();
-        spans.push(seg);
+        spans.push(Span::styled(text, Style::default().fg(SLATE)));
     }
 
     // ── usage (right-aligned) ─────────────────────────────────────────
+    let left_w: usize = spans.iter().map(Span::width).sum();
     let right = usage_text(usage);
-    let rw: usize = right.iter().map(|s: &Span<'_>| s.width()).sum();
+    let rw: usize = right.iter().map(Span::width).sum();
     let gap = width.saturating_sub(left_w + rw);
     if gap > 0 {
         spans.push(Span::styled(" ".repeat(gap), Style::default().fg(SLATE)));

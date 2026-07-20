@@ -32,7 +32,7 @@ use super::line;
 use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::matrix::matrix_bar;
 use super::select::highlight_range;
-use super::status::{StatusReadout, rule_line};
+use super::status::rule_line;
 use super::terminal::Term;
 
 const PROMPT_PAD_H: u16 = 1;
@@ -64,15 +64,11 @@ impl FrameGeom {
     /// buffer row and the cell column within the text area (0 = left edge) —
     /// or `None` when the event lands outside the content area.
     pub(super) fn buffer_coords(&self, me: MouseEvent) -> Option<(usize, u16)> {
-        contains(self.text, me.column, me.row).then(|| {
+        self.text.contains(Position::new(me.column, me.row)).then(|| {
             let row = self.offset + (me.row - self.text.y) as usize;
             (row, me.column - self.text.x)
         })
     }
-}
-/// Whether the cell `(col, row)` lies inside `rect`.
-pub(super) fn contains(rect: Rect, col: u16, row: u16) -> bool {
-    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 /// Paint one frame into `term`.
 pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
@@ -256,12 +252,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 phase.as_deref(),
                 wait_elapsed,
                 scroll_pct,
-                StatusReadout {
-                    usage: &usage,
-                    last_input,
-                    context_window,
-                    model: &status_model,
-                },
+                &usage,
+                last_input,
+                context_window,
+                &status_model,
             )),
             status_rect,
         );
@@ -326,12 +320,19 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
 }
 
 /// Emit the terminal tab title: a spinner until the root has yielded to the
-/// human input boundary, a block while the prompt is genuinely idle.
+/// human input boundary, a block while the prompt is genuinely idle. The cwd
+/// basename is session-constant, cached once; the write itself is skipped
+/// whenever the composed title matches the last one emitted.
 fn emit_tab_title(app: &App) {
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "?".into());
+    static CWD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+    let cwd = CWD.get_or_init(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "?".into())
+    });
     let working = !app.inbox.waiting_for_input();
     let glyph = if working {
         SPINNER[(app.tabs.title_frame() / 4) as usize % SPINNER.len()]
@@ -339,9 +340,14 @@ fn emit_tab_title(app: &App) {
         '█'
     };
     let title = format!("{glyph} exarch: {cwd}");
+    let mut last = LAST.lock().unwrap();
+    if *last == title {
+        return;
+    }
     let seq = ral_core::ansi::osc_set_title(&title);
     let _ = std::io::stdout().write_all(seq.as_bytes());
     let _ = std::io::stdout().flush();
+    *last = title;
 }
 
 /// Reverse-video the character range of the active selection that

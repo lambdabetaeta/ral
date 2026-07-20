@@ -4,7 +4,7 @@ use super::rail;
 use super::viewport::Viewport;
 use crate::bus::AgentId;
 use crate::provider;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -44,21 +44,32 @@ pub(super) fn tab_bar(
             spans.push(Span::raw("  "));
         }
         let name = names.get(&id).map_or("?", String::as_str);
-        let label: String = if id == focused {
-            format!("[{name}]")
-        } else {
-            format!(" {name} ")
-        };
-        let style = if id == focused {
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
-        } else if dying.contains_key(&id) {
-            Style::default().fg(SLATE).add_modifier(Modifier::DIM)
-        } else {
-            Style::default().fg(SLATE)
-        };
+        let hue = if id == focused { CYAN } else { SLATE };
+        let (label, style) = focus_label(name, hue, id == focused, dying.contains_key(&id));
         spans.push(Span::styled(label, style));
     }
     Line::from(spans)
+}
+
+/// The focused-label idiom shared by [`tab_bar`] and [`MatrixRow::new`]:
+/// `[{name}]` bold when focused, ` {name} ` otherwise, dimmed while
+/// `dying`. `hue` is the caller's — [`tab_bar`] passes [`CYAN`]/[`SLATE`],
+/// the matrix its per-agent hue — so the two never drift apart on the text
+/// or the modifiers, only the colour.
+fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, Style) {
+    let text = if focused {
+        format!("[{name}]")
+    } else {
+        format!(" {name} ")
+    };
+    let mut style = Style::default().fg(hue);
+    if focused {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if dying {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    (text, style)
 }
 
 /// The multi-agent matrix: one row per live session, columns
@@ -141,10 +152,10 @@ impl MatrixWidths {
                 bar: 0,
             },
             |w, row| Self {
-                label: w.label.max(width(&row.label)),
-                steps: w.steps.max(width(&row.steps)),
-                tokens: w.tokens.max(width(&row.tokens)),
-                bar: w.bar.max(width(&row.bar)),
+                label: w.label.max(row.label.chars().count()),
+                steps: w.steps.max(row.steps.chars().count()),
+                tokens: w.tokens.max(row.tokens.chars().count()),
+                bar: w.bar.max(row.bar.chars().count()),
             },
         )
     }
@@ -156,7 +167,7 @@ struct MatrixRow {
     tokens: String,
     bar: String,
     label_style: Style,
-    hue: ratatui::style::Color,
+    hue: Color,
     token_style: Style,
     dim: bool,
 }
@@ -179,18 +190,7 @@ impl MatrixRow {
 
         let name = names.get(&id).map_or("?", String::as_str);
         let truncated: String = name.chars().take(MATRIX_LABEL_W).collect();
-        let label = if id == focused {
-            format!("[{truncated}]")
-        } else {
-            format!(" {truncated} ")
-        };
-        let mut label_style = Style::default().fg(hue);
-        if id == focused {
-            label_style = label_style.add_modifier(Modifier::BOLD);
-        }
-        if dim {
-            label_style = label_style.add_modifier(Modifier::DIM);
-        }
+        let (label, label_style) = focus_label(&truncated, hue, id == focused, dim);
 
         let tokens = {
             let u = vp.usage();
@@ -230,22 +230,31 @@ impl MatrixRow {
     }
 
     fn render(self, widths: MatrixWidths) -> Line<'static> {
-        let slate = Style::default().fg(SLATE).add_modifier(if self.dim {
+        let Self {
+            label,
+            steps,
+            tokens,
+            bar,
+            label_style,
+            hue,
+            token_style,
+            dim,
+        } = self;
+        let slate = Style::default().fg(SLATE).add_modifier(if dim {
             Modifier::DIM
         } else {
             Modifier::empty()
         });
+        let (label_w, steps_w, tokens_w, bar_w) =
+            (widths.label, widths.steps, widths.tokens, widths.bar);
         Line::from(vec![
-            Span::styled(pad_right(&self.label, widths.label), self.label_style),
+            Span::styled(format!("{label:<label_w$}"), label_style),
             Span::raw("  "),
-            Span::styled(
-                pad_right(&self.steps, widths.steps),
-                Style::default().fg(self.hue),
-            ),
+            Span::styled(format!("{steps:<steps_w$}"), Style::default().fg(hue)),
             Span::raw("  "),
-            Span::styled(pad_left(&self.tokens, widths.tokens), self.token_style),
+            Span::styled(format!("{tokens:>tokens_w$}"), token_style),
             Span::raw("  "),
-            Span::styled(pad_right(&self.bar, widths.bar), slate),
+            Span::styled(format!("{bar:<bar_w$}"), slate),
         ])
     }
 }
@@ -277,17 +286,4 @@ fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
         return 0;
     }
     (tokens * 3).div_ceil(max_tokens).min(3) as u8
-}
-
-fn width(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn pad_left(s: &str, cols: usize) -> String {
-    format!("{}{}", " ".repeat(cols.saturating_sub(width(s))), s)
-}
-
-fn pad_right(s: &str, cols: usize) -> String {
-    let pad = cols.saturating_sub(width(s));
-    format!("{s}{}", " ".repeat(pad))
 }
