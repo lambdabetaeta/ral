@@ -19,6 +19,7 @@
 //! `$[…]` / `$name[k]` derefs — are coloured as their single enclosing
 //! class, not recursed into.
 
+use super::line::fold_styled_lines;
 use super::palette::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
 use ral_core::syntax::is_keyword;
 use ral_core::syntax::lexer::{Token, lex};
@@ -114,27 +115,10 @@ fn class(tok: &Token) -> Style {
 /// row.  Each newline is the split point and is dropped, so rejoining the
 /// lines with `\n` reproduces the span stream's text.
 fn into_lines(spans: Vec<Span<'static>>) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut cur: Vec<Span<'static>> = Vec::new();
-    for span in spans {
-        let style = span.style;
-        let mut segments = span.content.split('\n');
-        if let Some(first) = segments.next()
-            && !first.is_empty()
-        {
-            cur.push(Span::styled(first.to_string(), style));
-        }
-        for segment in segments {
-            lines.push(Line::from(std::mem::take(&mut cur)));
-            if !segment.is_empty() {
-                cur.push(Span::styled(segment.to_string(), style));
-            }
-        }
-    }
-    if !cur.is_empty() || lines.is_empty() {
-        lines.push(Line::from(cur));
-    }
-    lines
+    fold_styled_lines(
+        spans.into_iter().map(|s| (s.content.into_owned(), s.style)),
+        false,
+    )
 }
 
 #[cfg(test)]

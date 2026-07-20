@@ -779,6 +779,19 @@ impl Block {
         lines
     }
 
+    /// True for a tool call whose tool renders nothing and seats no rail —
+    /// the `agents` builtin, whose visible effect is the subagent block it
+    /// spawns, not the call that spawned it.  The one guard [`Self::body`]
+    /// and [`Self::rail_kind`] both consult, so a call this rule exempts
+    /// cannot be missed at one site and rendered at the other.
+    fn is_invisible_call(&self) -> bool {
+        matches!(
+            &self.kind,
+            BlockKind::DiallableTool { tool, .. } | BlockKind::PlainTool { tool, .. }
+                if *tool == "agents"
+        )
+    }
+
     /// The rail-less body at `width`, graded by `level`: [`Reveal::Summary`]
     /// the one-line summary; [`Reveal::Context`] the summary plus [`N`] lines;
     /// [`Reveal::Full`] the full source.  (A tool call's [`Reveal::Census`] is
@@ -786,18 +799,18 @@ impl Block {
     /// its summary.) Plain prose and chrome ignore the level — they are always
     /// full; thinking grades from header to partial trace to full trace.
     fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
+        if self.is_invisible_call() {
+            return Vec::new();
+        }
         match &self.kind {
-            BlockKind::DiallableTool { tool, .. } if *tool == "agents" => {
-                Vec::new()
-            }
-            BlockKind::DiallableTool { tool, summary, details } => match level {
-                Reveal::Full => line::tool_call_expanded(summary, tool, details, width),
-                Reveal::Context => line::tool_call_context(summary, tool, details, N, width),
+            BlockKind::DiallableTool { summary, details, .. } => match level {
+                Reveal::Full => line::tool_call_body(summary, details, None, width),
+                Reveal::Context => line::tool_call_body(summary, details, Some(N), width),
                 // A standalone tool call never renders below its summary: the
                 // log tee forces full, and on screen a call is the head of a
                 // coalesced run, whose Census is rendered by `group`, not here.
                 Reveal::Summary | Reveal::Census => {
-                    line::tool_call_collapsed(summary, tool, self.result_size, width)
+                    line::tool_call_collapsed(summary, self.result_size, width)
                 }
             },
             BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
@@ -870,14 +883,11 @@ impl Block {
                 }
             }
             // The per-block log tee renders a query alone as `tool  query`,
-            // matching a standalone tool call's header; an invisible
-            // placeholder renders nothing.  On screen the flatten coalesces a
-            // run of these into one `tool : …` line instead ([`super::viewport`]).
-            BlockKind::PlainTool { tool, .. } if *tool == "agents" => {
-                Vec::new()
-            }
-            BlockKind::PlainTool { tool, details } => match details {
-                Some(q) => line::tool_call_static(q, tool),
+            // matching a standalone tool call's header.  On screen the
+            // flatten coalesces a run of these into one `tool : …` line
+            // instead ([`super::viewport`]).
+            BlockKind::PlainTool { details, .. } => match details {
+                Some(q) => line::tool_call_static(q),
                 None => Vec::new(),
             },
             BlockKind::Chrome { lines, .. } => lines.clone(),
@@ -889,18 +899,16 @@ impl Block {
     /// disclosure triangle tracks the level: `▽` once it reveals context
     /// (L2+), `▸` while reduced.
     fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
+        if self.is_invisible_call() {
+            return None;
+        }
         match &self.kind {
-            BlockKind::DiallableTool { tool, .. } if *tool != "agents" => {
-                Some(RailKind::ToolCall(level >= Reveal::Context))
-            }
+            BlockKind::DiallableTool { .. } => Some(RailKind::ToolCall(level >= Reveal::Context)),
             // A summary-less query is a tool call still — the shut triangle
             // `▸`, inert (nothing to dial open).  Only the per-block log tee
             // renders a query alone and reaches this; on screen the coalesced
             // run prepends its own rail.
-            BlockKind::PlainTool { tool, .. } if *tool != "agents" => {
-                Some(RailKind::ToolCall(false))
-            }
-            BlockKind::DiallableTool { .. } | BlockKind::PlainTool { .. } => None,
+            BlockKind::PlainTool { .. } => Some(RailKind::ToolCall(false)),
             BlockKind::Markdown { .. } => Some(RailKind::Markdown),
             BlockKind::Thinking(_) => Some(RailKind::Thinking),
             // The `↘` keeps the delegated-result identity even on error; the

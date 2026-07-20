@@ -163,6 +163,16 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
     mix(c, Color::Rgb(luma, luma, luma), t)
 }
 
+/// True when `s` is exactly one shape glyph plus its trailing space — the
+/// marginal 2-column rail chrome [`super::line::plain`] strips on copy and
+/// [`super::line::wrap_line`] detects to indent a rail-led line's
+/// continuations. Checked against [`RAIL_SHAPES`], the one enumeration of
+/// every kind, so a new `RailKind` cannot be added there and missed here.
+pub(super) fn is_rail_prefix(s: &str) -> bool {
+    s.strip_suffix(' ')
+        .is_some_and(|glyph| RAIL_SHAPES.iter().any(|(k, _)| k.glyph() == glyph))
+}
+
 /// Build the 2-column rail span — one shape glyph in the producing agent's
 /// hue, lightened by its magnitude's value-step, then a space. The human's
 /// prompt fence wears its own [`PROMPT_INK`] so it never reads as an agent.

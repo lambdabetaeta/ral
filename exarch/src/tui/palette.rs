@@ -105,22 +105,9 @@ pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
 /// Maximum readable width in columns; markdown is wrapped to this.
 pub(super) const READ_W: u16 = 100;
 
-/// The prompt-fence glyph (`RailKind::Prompt`'s `❖`) plus its trailing
-/// space — named because [`RAIL_GLYPHS`] reuses it as the last entry of the
-/// shape vocabulary. Block content gets its rail from [`super::rail::span`],
-/// prepended by [`super::block::Block::render`].
-pub(super) const RAIL: &str = "❖ ";
-
 /// Rail width in columns: one shape glyph plus one trailing space. Every
 /// block's first content row carries a rail of this width; body rows do
 /// not, so a selection through the block copies as plain text.  The full
 /// rail is also the dial target — both the wheel and the click-cycle act
 /// on a block when the pointer sits anywhere in these two columns.
 pub(super) const RAIL_W: usize = 2;
-
-/// The full rail shape vocabulary: one glyph + space per block kind.
-/// [`super::line::plain`] drops a leading span whose content matches one of
-/// these so copied text carries the content, not the chrome glyph;
-/// [`super::line::wrap_line`] reuses the set to detect a rail-led row and
-/// indent its continuations.
-pub(super) const RAIL_GLYPHS: [&str; 9] = ["▎ ", "▸ ", "▽ ", "· ", "∴ ", "↘ ", "━ ", "╳ ", RAIL];

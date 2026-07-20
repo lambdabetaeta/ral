@@ -9,9 +9,9 @@
 
 use super::highlight::highlight_ral;
 use super::palette::{
-    CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_GLYPHS, RAIL_W, READ_W, RED, RED_HOT,
-    SLATE,
+    CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, READ_W, RED, RED_HOT, SLATE,
 };
+use super::rail::is_rail_prefix;
 use crate::bus::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
 };
@@ -39,11 +39,7 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
 /// rail prepends), else `0` — the leading-span count the copy contract and
 /// the line wrappers skip so the rail chrome never lands in extracted text.
 pub(super) fn rail_skip(l: &Line<'_>) -> usize {
-    usize::from(
-        l.spans
-            .first()
-            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
-    )
+    usize::from(l.spans.first().is_some_and(|s| is_rail_prefix(&s.content)))
 }
 
 /// One scrollback line as the plain text a reader would copy: span
@@ -62,19 +58,27 @@ pub(super) fn plain(line: &Line<'_>) -> String {
 /// 500-line event fills it and a 2-line event barely shows.
 const SIZE_BAR_W: usize = 8;
 
-/// Map `magnitude` to a filled-cell count on a `log2` scale, clamped to
-/// `0..=SIZE_BAR_W`: `0` reads empty, a 2-line event lights a cell or
-/// two, a ~500-line event fills the bar.  Tracks the rail's value-step,
-/// which also buckets `log2` of the line count.
-fn size_cells(magnitude: u32) -> usize {
+/// Bucket `magnitude` onto a `log2` scale, clamped to `0..=cap`: `0` reads
+/// as step `0`, and the step climbs by one each time `magnitude` doubles,
+/// pinning at `cap` once it would run past it.  Shared by [`size_cells`]
+/// and [`spark_glyph`], and tracks the rail's own value-step
+/// ([`super::rail::value_step`]), which buckets `log2` of the same count.
+fn log2_step(magnitude: u32, cap: usize) -> usize {
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "log2 of a small positive count, then min-clamped"
     )]
-    let cells = ((magnitude as f32 + 1.0).log2().round() as usize).min(SIZE_BAR_W);
-    cells
+    let step = ((magnitude as f32 + 1.0).log2().round() as usize).min(cap);
+    step
+}
+
+/// Map `magnitude` to a filled-cell count on a `log2` scale, clamped to
+/// `0..=SIZE_BAR_W`: `0` reads empty, a 2-line event lights a cell or
+/// two, a ~500-line event fills the bar.
+fn size_cells(magnitude: u32) -> usize {
+    log2_step(magnitude, SIZE_BAR_W)
 }
 
 /// The header size-bar span: [`SIZE_BAR_W`] cells, `█` for the filled
@@ -107,15 +111,7 @@ const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'
 /// resolution than the rail's four [`super::rail::value_step`] buckets while
 /// tracking the same scale.
 pub(super) fn spark_glyph(magnitude: Option<u32>) -> char {
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "log2 of a small positive count, then min-clamped"
-    )]
-    let step =
-        ((magnitude.unwrap_or(0) as f32 + 1.0).log2().round() as usize).min(SPARK_GLYPHS.len() - 1);
-    SPARK_GLYPHS[step]
+    SPARK_GLYPHS[log2_step(magnitude.unwrap_or(0), SPARK_GLYPHS.len() - 1)]
 }
 
 /// Width in cells of the header grain run — the patch's diff density
@@ -123,17 +119,19 @@ pub(super) fn spark_glyph(magnitude: Option<u32>) -> char {
 /// *how much*.
 const GRAIN_W: usize = 4;
 
-/// The header grain span: a run of [`GRAIN_W`] braille cells whose
-/// density encodes the addition ratio `add / (add + del)` on the ramp
-/// `⣿⣶⣤⣀` — `⣿` (full) is all additions, `⣀` (sparse) is all deletions.
-/// The ratio is bucketed into quartiles so "mostly additions / balanced
-/// / mostly deletions" reads pre-attentively: `≥0.75 → ⣿`, `≥0.50 → ⣶`,
-/// `≥0.25 → ⣤`, else `⣀`.  Styled [`SLATE`] to match the size-bar — it is
-/// decorative ink, not a data colour that would collide with the `+`/`-`
-/// line colours.  A patch with no changed lines (`add + del == 0`) has no
-/// balance to show and renders blank.
-pub(super) fn grain_run(add: u32, del: u32) -> Span<'static> {
-    let total = add + del;
+/// The header grain span: a run of [`GRAIN_W`] braille cells whose density
+/// encodes the ratio `a / (a + b)` on the ramp `⣿⣶⣤⣀` — `⣿` (full) is all
+/// `a`, `⣀` (sparse) is all `b`. The ratio is bucketed into quartiles so
+/// "mostly `a` / balanced / mostly `b`" reads pre-attentively: `≥0.75 →
+/// ⣿`, `≥0.50 → ⣶`, `≥0.25 → ⣤`, else `⣀`. Styled [`SLATE`] to match the
+/// size-bar — it is decorative ink, not a data colour that would collide
+/// with a data hue (the `+`/`-` line colours, say). `a + b == 0` has no
+/// balance to show and renders blank. Two call sites read this ramp: the
+/// patch header's addition ratio `add / (add + del)`, and the thinking
+/// header's deliberation ratio `think / (think + say)` — how dearly an
+/// answer was bought.
+pub(super) fn grain_run(a: u32, b: u32) -> Span<'static> {
+    let total = a + b;
     #[allow(
         clippy::cast_precision_loss,
         reason = "changed-line counts far below f32 precision limit"
@@ -141,7 +139,7 @@ pub(super) fn grain_run(add: u32, del: u32) -> Span<'static> {
     let cell = if total == 0 {
         ' '
     } else {
-        grain_cell(add as f32 / total as f32)
+        grain_cell(a as f32 / total as f32)
     };
     Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
 }
@@ -165,27 +163,6 @@ fn grain_cell(ratio: f32) -> char {
     }
 }
 
-/// The deliberation grain: a [`GRAIN_W`]-cell run whose density encodes how
-/// dearly an answer was bought — reasoning mass over total, `think /
-/// (think + say)`, on the same ramp the patch grain uses. `⣿` is a
-/// heavily-deliberated answer (the model thought far more than it said),
-/// `⣀` a snap reply. A turn with neither (`think + say == 0`) renders
-/// blank.  Styled [`SLATE`] like the size-bar — decorative ink, not a
-/// data colour.
-pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
-    let total = think + say;
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "changed-line counts far below f32 precision limit"
-    )]
-    let cell = if total == 0 {
-        ' '
-    } else {
-        grain_cell(think as f32 / total as f32)
-    };
-    Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
-}
-
 /// The collapsed header for a thinking block: a blank separator then the
 /// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
 /// reasoning's own magnitude — "how dearly bought" and "how much thinking".
@@ -198,7 +175,7 @@ pub(super) fn thinking_header(
     vec![
         Line::default(),
         Line::from(vec![
-            deliberation_grain(think_chars, say_chars),
+            grain_run(think_chars, say_chars),
             Span::raw(" "),
             size_bar(think_lines),
         ]),
@@ -246,17 +223,16 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
     ))
 }
 
-/// Tool-call header rows: the slate tool name then the white one-line
-/// `label`. The disclosure triangle (`▸`/`▽`) lives in the lifted rail,
-/// prepended by [`super::block::Block::render`], not here — so this
-/// builder is rail-less. Long labels wrap under the label's own first
-/// column (rail width + tool prefix), so the rail + tool prefix stays
-/// visually fixed while the comment reads as a paragraph.
+/// Tool-call header rows: the slate one-line `label`, wrapped under its own
+/// first column. The tool name is rendered in the coalesced ral block
+/// ([`super::group`]), not here — this builder is rail-less, the
+/// disclosure triangle (`▸`/`▽`) living in the lifted rail, prepended by
+/// [`super::block::Block::render`].
 /// `size` is the call's result magnitude (`text.lines().count()`),
 /// rendered as a [`size_bar`] trailing the label's first row — the
 /// collapsed header *is* the call's summary, so the bar is its readout.
 /// `None` (no result yet, or the expanded / static headers) omits it.
-fn tool_call_header(label: &str, _tool: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
+fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
     let prefix_w = RAIL_W;
     // Reserve the size-bar's gutter (`  ` gap + the bar) so the label wraps
     // *before* it. The bar is the row's one quantitative readout (length =
@@ -288,58 +264,27 @@ fn tool_call_header(label: &str, _tool: &str, size: Option<u32>, width: u16) -> 
     });
     out
 }
-/// Clicking the row swaps this for [`tool_call_expanded`].  `size` is the
-/// call's result magnitude, rendered as the header size-bar.
-pub(super) fn tool_call_collapsed(
-    label: &str,
-    tool: &str,
-    size: Option<u32>,
-    width: u16,
-) -> Vec<Line<'static>> {
+/// Clicking the row swaps this for [`tool_call_body`] (L2/L3).  `size` is
+/// the call's result magnitude, rendered as the header size-bar.
+pub(super) fn tool_call_collapsed(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(label, tool, size, width));
+    ls.extend(tool_call_header(label, size, width));
     ls
 }
 
-/// Expanded tool call (L3): the `▽` header followed by the full ral `cmd`.
-/// Both the header comment and source body wrap before the viewport edge:
-/// header continuations align under the comment, and source continuations
-/// align under the line's own opening indentation.
-pub(super) fn tool_call_expanded(
+/// The revealed tool-call views (L2/L3): the header, a blank, then `cmd`'s
+/// source rows — all of them when `cap` is `None` (L3), or the first `cap`
+/// source lines (L2).  Both the header and source body wrap before the
+/// viewport edge: header continuations align under the label, and source
+/// continuations align under the line's own opening indentation.
+pub(super) fn tool_call_body(
     label: &str,
-    tool: &str,
-    cmd: &str,
-    width: u16,
-) -> Vec<Line<'static>> {
-    tool_call_body(label, tool, cmd, None, width)
-}
-
-/// Tool call with context (L2): the header followed by the first `n`
-/// source lines of `cmd`.  The same layout as [`tool_call_expanded`],
-/// only the script is capped to `n` rows so the call reveals its head
-/// without unrolling a long block.
-pub(super) fn tool_call_context(
-    label: &str,
-    tool: &str,
-    cmd: &str,
-    n: usize,
-    width: u16,
-) -> Vec<Line<'static>> {
-    tool_call_body(label, tool, cmd, Some(n), width)
-}
-
-/// Shared body for the revealed tool-call views: the header, a blank, then
-/// `cmd`'s source rows — all of them when `cap` is `None` (L3), or the
-/// first `cap` source lines (L2).
-fn tool_call_body(
-    label: &str,
-    tool: &str,
     cmd: &str,
     cap: Option<usize>,
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(label, tool, None, width));
+    ls.extend(tool_call_header(label, None, width));
     ls.push(Line::default());
     let take = cap.unwrap_or(usize::MAX);
     for line in highlight_ral(cmd).into_iter().take(take) {
@@ -390,16 +335,11 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
 
 /// A summary-less tool call rendered standalone — the per-block `user.log` tee
 /// of a [`super::block::BlockKind::PlainTool`].
-/// `cmd`'s first line is the `tool  label`, any remainder follows
-/// 2-space indented; the block wears the shut triangle `▸`.
-pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
+/// `cmd`'s first line is the label, any remainder follows 2-space indented;
+/// the block wears the shut triangle `▸`.
+pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(
-        cmd.lines().next().unwrap_or(""),
-        tool,
-        None,
-        READ_W,
-    ));
+    ls.extend(tool_call_header(cmd.lines().next().unwrap_or(""), None, READ_W));
     for l in cmd.lines().skip(1) {
         ls.push(Line::from(vec![
             Span::raw("  "),
@@ -687,6 +627,22 @@ fn span_style(role: Option<Role>) -> Style {
     role.map_or_else(|| Style::default().fg(Color::White), role_style)
 }
 
+/// Render one mark at disclosure `level` — the one dispatch every `Mark`
+/// variant routes through, shared by [`render_card`] (every mark, `diff`
+/// included) and [`render_framed`] (every mark but `diff`, which it filters
+/// before dispatch) so a new variant cannot be wired into one interpreter
+/// and forgotten in the other.
+fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
+    match mark {
+        Mark::Text { spans } => render_text(spans),
+        Mark::Measure(m) => vec![render_measure(m)],
+        Mark::Fields { rows } => render_fields(rows),
+        Mark::Diff { path, hunks } => diff_body(path, hunks, level),
+        Mark::Listing { bytes, more } => render_listing(bytes, *more),
+        Mark::Raw { bytes } => render_raw(bytes),
+    }
+}
+
 /// Render a [`Card`] — the one generic interpreter the `surface` builtin
 /// feeds.  Opens with the single leading blank every block wears, then
 /// renders each mark top-to-bottom; the `diff` mark alone honours the
@@ -696,14 +652,7 @@ fn span_style(role: Option<Role>) -> Style {
 pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     for mark in card.marks() {
-        match mark {
-            Mark::Text { spans } => ls.extend(render_text(spans)),
-            Mark::Measure(m) => ls.push(render_measure(m)),
-            Mark::Fields { rows } => ls.extend(render_fields(rows)),
-            Mark::Diff { path, hunks } => ls.extend(diff_body(path, hunks, level)),
-            Mark::Listing { bytes, more } => ls.extend(render_listing(bytes, *more)),
-            Mark::Raw { bytes } => ls.extend(render_raw(bytes)),
-        }
+        ls.extend(render_mark(mark, level));
     }
     ls
 }
@@ -787,18 +736,12 @@ fn render_framed(
         _ => (None, marks),
     };
 
-    // Body marks → logical lines → wrapped to the inner budget.
+    // Body marks → logical lines → wrapped to the inner budget.  A diff mark
+    // is filtered out — diff-bearing cards take the diff path — so the
+    // shared dispatch's level argument is never read here.
     let mut body: Vec<Line<'static>> = Vec::new();
-    for mark in body_marks {
-        match mark {
-            Mark::Text { spans } => body.extend(render_text(spans)),
-            Mark::Measure(m) => body.push(render_measure(m)),
-            Mark::Fields { rows } => body.extend(render_fields(rows)),
-            Mark::Listing { bytes, more } => body.extend(render_listing(bytes, *more)),
-            Mark::Raw { bytes } => body.extend(render_raw(bytes)),
-            // A diff never reaches here — diff-bearing cards take the diff path.
-            Mark::Diff { .. } => {}
-        }
+    for mark in body_marks.iter().filter(|m| !matches!(m, Mark::Diff { .. })) {
+        body.extend(render_mark(mark, 0));
     }
     let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
 
@@ -906,11 +849,29 @@ fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
 /// faithful.  Width-folding happens later in [`wrap_line`], which
 /// preserves each span's style.
 fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
+    fold_styled_lines(
+        spans.iter().map(|cs| (cs.text.clone(), span_style(cs.role))),
+        true,
+    )
+}
+
+/// Fold a stream of `(text, style)` fragments into `Line`s, splitting on
+/// embedded `\n` — the one fold both [`render_text`] and
+/// [`super::highlight::into_lines`] perform over their own fragment source (a
+/// `text` mark's roled spans; a lexer's styled token stream).
+/// `keep_trailing_blank` is their one semantic difference: set, a stream
+/// that ends mid-line (or is empty) still closes with the line in progress
+/// — [`render_text`]'s contract, so a `text` mark's trailing blank line
+/// survives; cleared, it mirrors [`str::lines`] and drops that trailing
+/// empty line — [`super::highlight::into_lines`]'s contract.
+pub(super) fn fold_styled_lines(
+    fragments: impl Iterator<Item = (String, Style)>,
+    keep_trailing_blank: bool,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut cur: Vec<Span<'static>> = Vec::new();
-    for cs in spans {
-        let style = span_style(cs.role);
-        let mut parts = cs.text.split('\n');
+    for (text, style) in fragments {
+        let mut parts = text.split('\n');
         if let Some(first) = parts.next()
             && !first.is_empty()
         {
@@ -923,7 +884,9 @@ fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
             }
         }
     }
-    lines.push(Line::from(cur));
+    if keep_trailing_blank || !cur.is_empty() || lines.is_empty() {
+        lines.push(Line::from(cur));
+    }
     lines
 }
 
@@ -1484,7 +1447,7 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
 /// this hands the line straight back; it only folds on a narrower one.
 ///
 /// Continuations re-indent to the line's leading indentation — an optional
-/// [`RAIL_GLYPHS`] rail glyph (prepended by [`super::block::Block::render_with`])
+/// rail glyph ([`is_rail_prefix`], prepended by [`super::block::Block::render_with`])
 /// plus any leading whitespace the builders inset content with — so a wrapped
 /// prompt echo, code row, or io effect folds under its own indent rather than
 /// sliding back to column zero.  A line with no leading indent wraps flush at
@@ -1764,7 +1727,7 @@ mod tests {
         ]);
         let rows = wrap_line(&line, 20);
         assert!(rows.len() > 1);
-        assert!(RAIL_GLYPHS.contains(&rows[0].spans[0].content.as_ref()));
+        assert!(is_rail_prefix(&rows[0].spans[0].content));
         for row in &rows[1..] {
             let t = text(row);
             assert_eq!(indent_of(&t), 2);

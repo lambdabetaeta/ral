@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{deliberation_grain, is_blank, plain, size_bar};
+use super::line::{grain_run, is_blank, plain, size_bar};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
@@ -987,7 +987,7 @@ impl Viewport {
         vec![
             Line::default(),
             Line::from(vec![
-                deliberation_grain(think_chars, answer_chars),
+                grain_run(think_chars, answer_chars),
                 Span::raw(" "),
                 size_bar(think_lines),
             ]),
