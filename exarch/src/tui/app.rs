@@ -11,8 +11,8 @@ use super::gesture::GestureState;
 use super::line;
 use super::line::bold;
 use super::login::LoginOverlay;
-use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK};
 use super::matrix::MatrixSort;
+use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK};
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
@@ -20,11 +20,11 @@ use super::surface::SurfaceBuffer;
 use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
-use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
+use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use crate::bus::card::IoEvent;
+use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
 use crate::provider::{Provider, Usage};
-use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{
     crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -418,7 +418,12 @@ impl App {
             // A genuine provider-boundary `ral` call and a desk verb's
             // rail-identical [`Kind::HarnessCall`] render alike: the rail
             // shows the acting name (`tool`/`verb`) either way.
-            Kind::ToolCall { tool, cmd, summary } | Kind::HarnessCall { verb: tool, cmd, summary } => {
+            Kind::ToolCall { tool, cmd, summary }
+            | Kind::HarnessCall {
+                verb: tool,
+                cmd,
+                summary,
+            } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| match summary {
@@ -430,7 +435,10 @@ impl App {
                     // boundary (`None`): present only so its result attaches there,
                     // never reaching back to clobber an earlier call's size bar.
                     None => {
-                        vp.push_plain_call(tool, (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd));
+                        vp.push_plain_call(
+                            tool,
+                            (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd),
+                        );
                     }
                 });
             }
@@ -544,7 +552,8 @@ impl App {
                         bytes: bus.bytes() as u64,
                     },
                 );
-                card.0.push(crate::agent::resources::section_mark("frontend"));
+                card.0
+                    .push(crate::agent::resources::section_mark("frontend"));
                 card.0.push(crate::agent::resources::rows_mark(&frontend));
                 self.with_viewport(id, |vp| vp.push_card(card));
                 // One dim line per tombstoned view, right beside the fold —

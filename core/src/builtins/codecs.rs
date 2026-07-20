@@ -19,7 +19,7 @@
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
 use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-use crate::types::{Shell, Settled, sig, Value, sig_hint, Env, as_list, as_map_ref};
+use crate::types::{Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
 use std::sync::Arc;
 
 use super::util::{as_byte_list, check_arity, decode_utf8_strict};

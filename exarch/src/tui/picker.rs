@@ -60,8 +60,8 @@
 
 use super::line;
 use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
-use crate::provider::models::ProviderEndpoint;
 use crate::provider::Subscription;
+use crate::provider::models::ProviderEndpoint;
 use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -347,7 +347,13 @@ pub(super) fn render_shadow(f: &mut Frame, area: Rect) {
 /// returning the inner content [`Rect`]. The one shell both `/model` and
 /// `/login` render into. `pub(super)`: shared overlay chrome, reused by
 /// [`super::login`]'s modal.
-pub(super) fn bezel_shell(f: &mut Frame, area: Rect, plane: Style, title: &str, hint: &str) -> Rect {
+pub(super) fn bezel_shell(
+    f: &mut Frame,
+    area: Rect,
+    plane: Style,
+    title: &str,
+    hint: &str,
+) -> Rect {
     render_shadow(f, area);
     f.render_widget(Clear, area);
     let bezel = Block::default()
@@ -870,7 +876,7 @@ impl Picker {
             Constraint::Length(1),                // effort
             Constraint::Length(1),                // temperature
             Constraint::Length(1),                // top-p
-            Constraint::Min(0),                    // failed-provider notes
+            Constraint::Min(0),                   // failed-provider notes
         ])
         .areas(inner);
 
@@ -1693,7 +1699,10 @@ mod tests {
         p.key(KeyCode::Right); // auto → 0.0
         p.key(KeyCode::Right); // 0.0 → 0.1
         let live = p.tuning(&p.rows());
-        assert_eq!(live.effort.as_ref().map(ReasoningEffort::variant_name), Some("high"));
+        assert_eq!(
+            live.effort.as_ref().map(ReasoningEffort::variant_name),
+            Some("high")
+        );
         assert_eq!(live.temperature, Some(0.1));
 
         // Highlight the chat-only model: effort masked out, temperature kept.
@@ -1715,7 +1724,10 @@ mod tests {
         p.key(KeyCode::Tab); // Search
         p.key(KeyCode::Up); // → reasoner
         assert_eq!(
-            p.tuning(&p.rows()).effort.as_ref().map(ReasoningEffort::variant_name),
+            p.tuning(&p.rows())
+                .effort
+                .as_ref()
+                .map(ReasoningEffort::variant_name),
             Some("high")
         );
     }

@@ -63,8 +63,8 @@
 //! pushed to its parent's inbox rather than collected by id.
 
 use crate::agent::ProviderHandle;
-use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
 use crate::agent::cancel::Token;
+use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
 use ral_core::process::{self, CancelCause, DurableRoot, ForegroundScope};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -315,7 +315,10 @@ impl AgentRegistry {
         // (`register_self`'s "idempotent enough" re-register, `Agent::register_self`)
         // must overwrite in place, not be refused for "colliding" with the
         // very entry it is about to replace.
-        if g.entries.iter().any(|(&other, e)| other != id && e.name == name) {
+        if g.entries
+            .iter()
+            .any(|(&other, e)| other != id && e.name == name)
+        {
             drop(g);
             return Err(RegisterError::NameTaken(name));
         }
@@ -634,7 +637,9 @@ impl AgentRegistry {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -753,8 +758,7 @@ fn lease_fire(reg: &AgentRegistry, id: AgentId) {
         reg.cancel_cause(id, CancelCause::Deadline);
     } else {
         let reg = reg.clone();
-        process::arm_callback(ttl.checked_sub(idle).unwrap(), move || lease_fire(&reg, id))
-            .keep();
+        process::arm_callback(ttl.checked_sub(idle).unwrap(), move || lease_fire(&reg, id)).keep();
     }
 }
 
@@ -1046,7 +1050,10 @@ mod tests {
 
         reg.remove_subtree(1);
 
-        assert!(branch_token.is_cancelled(), "the closed branch's token is set");
+        assert!(
+            branch_token.is_cancelled(),
+            "the closed branch's token is set"
+        );
         assert!(
             branch_root.as_scope().is_cancelled(),
             "close reaches the branch's eval layer, not just its token"
@@ -1057,7 +1064,10 @@ mod tests {
             "the branch itself is gone, unlike a /clear reap"
         );
         assert!(!reg.is_live(2), "and so is its descendant");
-        assert!(reg.is_live(0), "the trunk above the closed subtree survives");
+        assert!(
+            reg.is_live(0),
+            "the trunk above the closed subtree survives"
+        );
     }
 
     /// `interrupt` is the per-tab turn interrupt, not the subtree cascade: it
@@ -1109,7 +1119,10 @@ mod tests {
 
         reg.interrupt(1);
 
-        assert!(child_token.is_cancelled(), "interrupt trips the child's token");
+        assert!(
+            child_token.is_cancelled(),
+            "interrupt trips the child's token"
+        );
         assert!(
             !child_token.terminated(),
             "an interrupt is not a terminate cause"
@@ -1565,7 +1578,10 @@ mod tests {
             Err(RegisterError::NameTaken("helper".to_string())),
             "a second live agent may not bear the same name"
         );
-        assert!(!reg.is_live(2), "the refused registration is never inserted");
+        assert!(
+            !reg.is_live(2),
+            "the refused registration is never inserted"
+        );
         assert_eq!(
             reg.resolve_name("helper"),
             Some(1),
@@ -1762,9 +1778,7 @@ mod tests {
             "idle reads off birth before any exchange"
         );
 
-        inbox
-            .push(InboxMsg::UserSteering("hello".into()))
-            .unwrap();
+        inbox.push(InboxMsg::UserSteering("hello".into())).unwrap();
         assert!(!reg.engaged(1), "a raw mailbox push is not an exchange");
 
         assert!(reg.renew(1), "renew stamps a live entry");
@@ -1799,7 +1813,10 @@ mod tests {
         });
 
         assert!(!reg.engaged(1), "not yet engaged");
-        assert!(reg.steer(1, "hello".into()), "a live entry accepts steering");
+        assert!(
+            reg.steer(1, "hello".into()),
+            "a live entry accepts steering"
+        );
         assert!(reg.engaged(1), "steer renews the exchange clock");
         assert!(
             reg.idle(1).expect("still live") < Duration::from_secs(1),

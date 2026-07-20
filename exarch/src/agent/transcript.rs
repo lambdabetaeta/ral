@@ -122,7 +122,12 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // showing every acting call the same way; only the live `Kind`
         // vocabulary distinguishes a genuine provider-boundary tool call
         // from a harness verb that never crossed it.
-        Kind::ToolCall { tool, cmd, summary } | Kind::HarnessCall { verb: tool, cmd, summary } => (
+        Kind::ToolCall { tool, cmd, summary }
+        | Kind::HarnessCall {
+            verb: tool,
+            cmd,
+            summary,
+        } => (
             "tool_call",
             json!({ "tool": tool, "cmd": cmd, "summary": summary }),
         ),
@@ -143,7 +148,10 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             elapsed,
         } => {
             let (text, error) = outcome.breadcrumb(text);
-            #[allow(clippy::cast_possible_truncation, reason="elapsed-ms fits u64 for any real run")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "elapsed-ms fits u64 for any real run"
+            )]
             let elapsed_ms = elapsed.as_millis() as u64;
             (
                 "subagent_done",
@@ -213,7 +221,10 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
     let map = obj
         .as_object_mut()
         .expect("event_record arms are JSON objects");
-    #[allow(clippy::cast_possible_truncation, reason="elapsed-ms fits u64 for any real run")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "elapsed-ms fits u64 for any real run"
+    )]
     let t_ms_u64 = t_ms as u64;
     map.insert("t_ms".into(), json!(t_ms_u64));
     map.insert("id".into(), json!(id));

@@ -246,9 +246,7 @@ impl TypeErrorKind {
             Self::RecursiveRow => "T0002",
             Self::TypeTooDeep => "T0003",
             Self::TyMismatch { .. } => "T0010",
-            Self::CompTyMismatch { .. } | Self::CommandNotFunction { .. } => {
-                "T0011"
-            }
+            Self::CompTyMismatch { .. } | Self::CommandNotFunction { .. } => "T0011",
             Self::ModeMismatch { .. } => "T0012",
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",

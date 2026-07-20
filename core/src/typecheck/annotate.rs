@@ -49,7 +49,11 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
             ..
         } => {
             let scheme = spine
-                .then(|| ctx.bind_tys.get(&(std::ptr::from_ref::<Comp>(comp) as usize)).cloned())
+                .then(|| {
+                    ctx.bind_tys
+                        .get(&(std::ptr::from_ref::<Comp>(comp) as usize))
+                        .cloned()
+                })
                 .flatten()
                 .map(|ty| {
                     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &ty);

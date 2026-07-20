@@ -328,9 +328,9 @@ impl crate::driver::TurnReport {
             Self::Static { diagnostics } => Report::Static {
                 diagnostics: match diagnostics {
                     StaticDiagnostics::Parse(e) => Diagnostics::Parse(e.message),
-                    StaticDiagnostics::Types(errs) => {
-                        Diagnostics::Types(errs.iter().map(std::string::ToString::to_string).collect())
-                    }
+                    StaticDiagnostics::Types(errs) => Diagnostics::Types(
+                        errs.iter().map(std::string::ToString::to_string).collect(),
+                    ),
                     StaticDiagnostics::Host(e) => Diagnostics::Host(e.message),
                 },
             },
@@ -506,20 +506,32 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
         return Err(format!("probe request must be a variant, got {req:?}"));
     };
     match label.as_str() {
-        "worker-count" => {
-            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+        "worker-count" =>
+        {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "usize cardinality below i64::MAX"
+            )]
             Ok(FOValue::Int {
                 value: shell.worker_count() as i64,
             })
         }
-        "binding-count" => {
-            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+        "binding-count" =>
+        {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "usize cardinality below i64::MAX"
+            )]
             Ok(FOValue::Int {
                 value: shell.binding_count() as i64,
             })
         }
-        "leased-binding-count" => {
-            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+        "leased-binding-count" =>
+        {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "usize cardinality below i64::MAX"
+            )]
             Ok(FOValue::Int {
                 value: shell.leased_binding_count() as i64,
             })
@@ -543,8 +555,12 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
         "cwd" => Ok(FOValue::String {
             value: shell.cwd().display().to_string(),
         }),
-        "grant-depth" => {
-            #[allow(clippy::cast_possible_wrap, reason = "usize cardinality below i64::MAX")]
+        "grant-depth" =>
+        {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "usize cardinality below i64::MAX"
+            )]
             Ok(FOValue::Int {
                 value: shell.grant_depth() as i64,
             })
@@ -559,8 +575,7 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
                 .workers()
                 .into_iter()
                 .map(|entry| {
-                    let running =
-                        *entry.handle.state.lock().unwrap() == HandleState::Running;
+                    let running = *entry.handle.state.lock().unwrap() == HandleState::Running;
                     let up_secs = entry.started.elapsed().unwrap_or_default().as_secs();
                     let idle_secs = entry
                         .handle
@@ -577,10 +592,7 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
                                     value: entry.id.0 as i64,
                                 },
                             ),
-                            (
-                                "cmd".into(),
-                                FOValue::String { value: entry.cmd },
-                            ),
+                            ("cmd".into(), FOValue::String { value: entry.cmd }),
                             (
                                 "class".into(),
                                 FOValue::String {
@@ -701,7 +713,6 @@ impl ControlSender {
             }
         }
     }
-
 }
 
 /// Event receiver.  The front-end drains this while a dispatch is
@@ -764,7 +775,11 @@ mod event_receiver_tests {
     fn try_recv_drains_the_stash_before_the_channel() {
         let (receiver, tx) = receiver();
         tx.send(Frame::Detach).unwrap();
-        receiver.stash.lock().unwrap().push_back(Frame::Control(Control::Resume));
+        receiver
+            .stash
+            .lock()
+            .unwrap()
+            .push_back(Frame::Control(Control::Resume));
 
         assert_eq!(receiver.try_recv(), Some(Frame::Control(Control::Resume)));
         assert_eq!(receiver.try_recv(), Some(Frame::Detach));
@@ -843,7 +858,9 @@ impl SessionLock {
     /// same way `lock` does — a turn that unwound mid-mutation must not wedge
     /// the move-out.
     fn into_inner(self) -> EngineInner {
-        self.0.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -1058,7 +1075,10 @@ struct ForegroundCapture(Arc<std::sync::Mutex<Option<crate::process::ForegroundS
 
 impl crate::turn::TurnLifecycle for ForegroundCapture {
     fn pre_exec(&mut self, shell: &mut crate::types::Shell, _src: &str) {
-        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shell.foreground().clone());
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shell.foreground().clone());
     }
 }
 
@@ -1309,7 +1329,8 @@ impl Transport for WireTransport {
                             ..
                         } => Err(message),
                         Report::Ran {
-                            result: Err(break_), ..
+                            result: Err(break_),
+                            ..
                         } => Err(format!("probe answered abnormally: {break_:?}")),
                         Report::Static { diagnostics } => Err(match diagnostics {
                             Diagnostics::Host(msg) | Diagnostics::Parse(msg) => msg,
@@ -1496,7 +1517,9 @@ mod enquiry_tests {
     #[test]
     #[should_panic(expected = "reentrant session access")]
     fn desk_reentering_shell_mut_panics_never_hangs() {
-        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(crate::io::TerminalState::default())));
+        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(
+            crate::io::TerminalState::default(),
+        )));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
@@ -1530,7 +1553,9 @@ mod enquiry_tests {
     #[test]
     #[should_panic(expected = "reentrant session access")]
     fn desk_reentering_dispatch_panics_never_hangs() {
-        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(crate::io::TerminalState::default())));
+        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(
+            crate::io::TerminalState::default(),
+        )));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
@@ -1664,9 +1689,7 @@ mod probe_tests {
             present,
             FOValue::Variant {
                 label: "some".into(),
-                payload: Some(Box::new(FOValue::String {
-                    value: "42".into()
-                }))
+                payload: Some(Box::new(FOValue::String { value: "42".into() }))
             }
         );
     }
@@ -1759,13 +1782,19 @@ mod runtime_error_seam_tests {
         let Break::Error(rendered) = render_break(EngineBreak::Error(err), &db, true) else {
             panic!("an engine runtime error must project to a transport Break::Error");
         };
-        assert!(rendered.contains("error"), "error prefix missing: {rendered:?}");
+        assert!(
+            rendered.contains("error"),
+            "error prefix missing: {rendered:?}"
+        );
         assert!(rendered.contains("boom"), "message missing: {rendered:?}");
         assert!(
             rendered.contains("exit status 3"),
             "exit status missing: {rendered:?}"
         );
-        assert!(rendered.contains("try harder"), "hint missing: {rendered:?}");
+        assert!(
+            rendered.contains("try harder"),
+            "hint missing: {rendered:?}"
+        );
         assert!(
             rendered.ends_with('\n'),
             "the seam must supply the trailing newline the host prints verbatim: {rendered:?}"

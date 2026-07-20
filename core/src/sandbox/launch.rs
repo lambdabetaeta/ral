@@ -106,7 +106,8 @@ fn windows_sandboxed_command(
             // APPLICATION PACKAGES-readable), and a name we have not resolved
             // is not a path we can stamp — so a bare-name image's readability
             // rests on the fs read projection / AAP, not on an image grant.
-            let image = crate::path::is_absolute(program).then(|| std::path::PathBuf::from(program));
+            let image =
+                crate::path::is_absolute(program).then(|| std::path::PathBuf::from(program));
             (launch, image)
         }
         LaunchTarget::BundledTool { tool } => {

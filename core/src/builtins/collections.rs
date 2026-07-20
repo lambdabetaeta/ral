@@ -9,7 +9,7 @@
 //! their per-element applications directly, so those children land in the
 //! enclosing trail without a wrapping combinator node.
 
-use crate::types::{Value, Shell, Settled, Break, as_list, sig};
+use crate::types::{Break, Settled, Shell, Value, as_list, sig};
 
 use super::apply;
 use super::util::{check_arity, value_ordering};

@@ -58,7 +58,10 @@ impl ModelPricing {
         } else {
             self.input
         };
-        #[allow(clippy::cast_precision_loss, reason="token counts are bounded far below 2^52; f64 represents them exactly")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "token counts are bounded far below 2^52; f64 represents them exactly"
+        )]
         let cost = (uncached_input as f64).mul_add(
             self.input,
             (cache_creation as f64).mul_add(
@@ -503,7 +506,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason="exact sentinel 0.0 returned by parse_price on the empty/invalid path")]
+    #[allow(
+        clippy::float_cmp,
+        reason = "exact sentinel 0.0 returned by parse_price on the empty/invalid path"
+    )]
     fn parse_price_accepts_dollar_strings() {
         assert!((parse_price("0.000003") - 3e-6).abs() < 1e-12);
         assert_eq!(parse_price("0"), 0.0);
@@ -634,7 +640,10 @@ mod tests {
         };
         // 1000 prompt = 200 uncached + 300 write + 500 read; 100 output.
         let d = p.dollars(1000, 100, 300, 500);
-        #[allow(clippy::suboptimal_flops, reason="hand-computed reference value in a test; keep the readable literal form")]
+        #[allow(
+            clippy::suboptimal_flops,
+            reason = "hand-computed reference value in a test; keep the readable literal form"
+        )]
         let expected = 200.0 * 15e-6 + 300.0 * 18.75e-6 + 500.0 * 1.5e-6 + 100.0 * 75e-6;
         assert!((d - expected).abs() < 1e-12, "got {d}, expected {expected}");
     }
@@ -654,7 +663,10 @@ mod tests {
         let d = p.dollars(1000, 100, 0, 400);
         // 600 uncached × 2e-6 + 0 × 2e-6 + 400 × 2e-6 + 100 × 8e-6
         // = (600 + 400) × 2e-6 + 100 × 8e-6 = 2e-3 + 8e-4 = 2.8e-3
-        #[allow(clippy::suboptimal_flops, reason="hand-computed reference value in a test; keep the readable literal form")]
+        #[allow(
+            clippy::suboptimal_flops,
+            reason = "hand-computed reference value in a test; keep the readable literal form"
+        )]
         let expected = 1000.0 * 2e-6 + 100.0 * 8e-6;
         assert!((d - expected).abs() < 1e-12, "got {d}, expected {expected}");
     }

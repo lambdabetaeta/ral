@@ -168,8 +168,7 @@ impl HelperProtocol {
         let job_gate = FrameGate::<ChildEvalRequest>::wire(cmd, env.job)?;
         let (report_reader_ch, report_writer) = platform::pair()?;
         platform::pass(cmd, env.report, &report_writer)?;
-        let report_reader =
-            FrameReader::spawn(report_reader_ch, "pipeline report reader panicked");
+        let report_reader = FrameReader::spawn(report_reader_ch, "pipeline report reader panicked");
 
         // An absent value channel must be cleared, not merely left
         // unset: a helper-evaluated stage can itself launch a pipeline

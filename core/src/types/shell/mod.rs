@@ -55,18 +55,18 @@ use self::modules::Modules;
 use self::repl::ReplScratch;
 use self::workers::{WorkerLease, WorkerRegistry};
 use super::audit::Audit;
+use super::builtin::BuiltinTable;
 use super::capability::GrantStack;
 use super::env::Env;
 use super::env::EnvVars;
 use super::error::Error;
-use super::builtin::BuiltinTable;
 use super::handler::HandlerStack;
 use super::value::Value;
 use crate::diagnostic::LocationCursor;
 use crate::io::Io;
-use crate::source::{Source, SourceDb};
 use crate::process::{DurableRoot, ForegroundScope};
 use crate::source::FileId;
+use crate::source::{Source, SourceDb};
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -728,7 +728,11 @@ impl Shell {
                 let p = self.cwd();
                 let home = crate::path::home_from_env();
                 let cwd_str = crate::path::abbreviate_home(&p, &home);
-                let cwd_str = if cwd_str.is_empty() { "?".into() } else { cwd_str };
+                let cwd_str = if cwd_str.is_empty() {
+                    "?".into()
+                } else {
+                    cwd_str
+                };
                 Some(Value::String(cwd_str))
             }
             "STATUS" => Some(Value::Int(i64::from(self.mobile.control.last_status))),
@@ -874,13 +878,14 @@ mod tests {
     #[test]
     fn nursery_round_trips_a_forked_session() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.mobile.scope.set("parent_binding".to_string(), Value::Int(42));
+        shell
+            .mobile
+            .scope
+            .set("parent_binding".to_string(), Value::Int(42));
         let nursery = Nursery::default();
         shell.turn.nursery = Some(nursery.clone());
 
-        let id = shell
-            .fork_into_nursery()
-            .expect("a nursery is installed");
+        let id = shell.fork_into_nursery().expect("a nursery is installed");
         let child = nursery
             .adopt(id)
             .expect("the parked fork must be adoptable");

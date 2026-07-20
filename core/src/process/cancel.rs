@@ -417,7 +417,12 @@ mod tests {
             CancelCause::RootAbort,
         ];
         for pair in causes.windows(2) {
-            assert!(pair[0] < pair[1], "{:?} must rank below {:?}", pair[0], pair[1]);
+            assert!(
+                pair[0] < pair[1],
+                "{:?} must rank below {:?}",
+                pair[0],
+                pair[1]
+            );
         }
         for cause in causes {
             assert_eq!(

@@ -10,8 +10,8 @@
 //! the user can see what the child was asked to do.
 
 use crate::agent::Agent;
-use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, InboxMsg, Kind, Mailbox};
+use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;

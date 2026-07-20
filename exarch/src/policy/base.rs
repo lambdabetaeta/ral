@@ -64,21 +64,17 @@ pub(super) fn resolve_base(
     };
     let mut shell = Shell::new(TerminalState::default());
     let virtual_path = format!("<built-in:{name}>");
-    let mut caps = ral_core::capability::load_capabilities_from_str(
-        &mut shell,
-        text,
-        &virtual_path,
-        ctx,
-    )
-    .map_err(|e| match e {
-        ral_core::types::Break::Error(err) => format!(
-            "exarch: built-in base '{name}' failed to parse: {}",
-            err.message
-        ),
-        other @ ral_core::types::Break::Escape(_) => {
-            format!("exarch: built-in base '{name}' failed: {other:?}")
-        }
-    })?;
+    let mut caps =
+        ral_core::capability::load_capabilities_from_str(&mut shell, text, &virtual_path, ctx)
+            .map_err(|e| match e {
+                ral_core::types::Break::Error(err) => format!(
+                    "exarch: built-in base '{name}' failed to parse: {}",
+                    err.message
+                ),
+                other @ ral_core::types::Break::Escape(_) => {
+                    format!("exarch: built-in base '{name}' failed: {other:?}")
+                }
+            })?;
     drop_dead_exec_grants(&mut caps, cfg!(unix));
     Ok(caps)
 }
@@ -448,9 +444,7 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let cargo = format!(
-            "{home}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
-        );
+        let cargo = format!("{home}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo");
         let mut shell = Shell::default();
         shell
             .with_capabilities(caps, |sh| {
@@ -686,7 +680,10 @@ mod tests {
         // absolute under Windows path semantics — those tests are
         // `cfg(unix)`-gated for exactly that reason; this one is not).
         let cwd = std::env::temp_dir();
-        let ctx = FreezeCtx { home: &home, cwd: &cwd };
+        let ctx = FreezeCtx {
+            home: &home,
+            cwd: &cwd,
+        };
         let roots = ral_core::path::sigil::system_tool_roots();
         for (name, text) in [
             ("reasonable", REASONABLE_RAL),
@@ -723,12 +720,14 @@ mod tests {
     /// synthetic "install" is present.
     #[test]
     fn windows_tool_roots_produce_a_sane_grant_set() {
-        let roots = ral_core::path::sigil::windows_tool_roots(
-            r"C:\Windows",
-            &[r"C:\Program Files"],
-            |p| p == r"C:\Program Files\Git\usr\bin",
+        let roots =
+            ral_core::path::sigil::windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |p| {
+                p == r"C:\Program Files\Git\usr\bin"
+            });
+        assert!(
+            roots.contains(&r"C:\Windows\System32".to_string()),
+            "{roots:?}"
         );
-        assert!(roots.contains(&r"C:\Windows\System32".to_string()), "{roots:?}");
         assert!(
             roots.contains(&r"C:\Windows\System32\WindowsPowerShell\v1.0".to_string()),
             "{roots:?}"
@@ -755,8 +754,14 @@ mod tests {
         let mut caps = load("reasonable", REASONABLE_RAL, &ctx);
         {
             let exec = caps.exec.as_ref().expect("reasonable declares exec");
-            assert!(exec.literals.contains_key("tac"), "host build should still bundle tac");
-            assert!(exec.literals.contains_key("test"), "host build should still bundle test");
+            assert!(
+                exec.literals.contains_key("tac"),
+                "host build should still bundle tac"
+            );
+            assert!(
+                exec.literals.contains_key("test"),
+                "host build should still bundle test"
+            );
         }
 
         drop_dead_exec_grants(&mut caps, false);

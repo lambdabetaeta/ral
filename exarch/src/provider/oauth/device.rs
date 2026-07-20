@@ -122,7 +122,10 @@ async fn poll_for_code(
         // shared status/decode handling's to resolve.
         if matches!(resp.status().as_u16(), 403 | 404) {
             if start.elapsed() >= MAX_WAIT {
-                return Err(format!("device sign-in timed out after {}", max_wait_label()));
+                return Err(format!(
+                    "device sign-in timed out after {}",
+                    max_wait_label()
+                ));
             }
             tokio::time::sleep(Duration::from_secs(code.interval)).await;
             if cancel.load(Ordering::Acquire) {

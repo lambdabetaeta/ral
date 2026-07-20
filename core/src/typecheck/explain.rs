@@ -7,8 +7,8 @@
 //! a pure function of that data — which makes every message and hint
 //! unit-testable and reviewable in one place.
 
-use super::fmt::{FmtCtx, fmt_mode_ctx, fmt_ty_ctx};
 use super::error::{CompDiff, Reason, TypeErrorKind};
+use super::fmt::{FmtCtx, fmt_mode_ctx, fmt_ty_ctx};
 use super::ty::Ty;
 use crate::syntax::ast::BinaryOpKind;
 
@@ -57,9 +57,7 @@ impl TypeErrorKind {
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
-            Self::CaseNotExhaustive { missing, extra } => {
-                fmt_case_exhaustiveness(missing, extra)
-            }
+            Self::CaseNotExhaustive { missing, extra } => fmt_case_exhaustiveness(missing, extra),
             Self::CaseLabelTypeMismatch {
                 label,
                 expected,

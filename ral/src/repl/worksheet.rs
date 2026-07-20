@@ -143,7 +143,8 @@ impl Worksheet {
 /// bind multiple names and are not single worksheet nodes — they are
 /// ignored, matching how [`crate::syntax::group`] only knots `Name` lets.
 fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
-    ast.as_name_let().map(|(name, value)| (name, value.item.as_ref()))
+    ast.as_name_let()
+        .map(|(name, value)| (name, value.item.as_ref()))
 }
 
 /// Walk an annotated comp's top-level `Bind` nodes into `(name, effectful)`

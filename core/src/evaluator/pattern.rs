@@ -12,7 +12,7 @@
 use super::comp::eval_comp;
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::{Shell, Raw, Value, Binding, Tail};
+use crate::types::{Binding, Raw, Shell, Tail, Value};
 
 /// Refuse each name a `let` pattern binds that would shadow a PATH command.
 /// Driven from `eval_bind` only: lambda parameters bind through

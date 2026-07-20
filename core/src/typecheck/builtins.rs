@@ -1082,8 +1082,8 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 
 /// Number of value arguments the builtin's scheme declares (count of nested
 /// `Fun` layers under the outer `Thunk`).
-    ///
-    /// Used to η-expand first-class
+///
+/// Used to η-expand first-class
 /// builtin references (`$upper`) into curried lambda thunks.  `None` for
 /// builtins without an arity — typically variadic ones like `echo` or
 /// command-only dispatchers.

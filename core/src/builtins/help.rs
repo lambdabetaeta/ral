@@ -16,7 +16,12 @@ use std::sync::OnceLock;
 /// checker's harvested schemes, so there is nothing to look up beyond
 /// the shell's environment.
 fn prelude_type_hint(name: &str, shell: &Shell) -> Option<String> {
-    let scheme = shell.mobile.scope.get_prelude_binding(name)?.scheme.as_ref()?;
+    let scheme = shell
+        .mobile
+        .scope
+        .get_prelude_binding(name)?
+        .scheme
+        .as_ref()?;
     Some(fmt_scheme(scheme))
 }
 
@@ -215,7 +220,9 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
             format!("explain: {name}: not found\n")
         } else {
             hits.sort_by(|a, b| a.0.cmp(&b.0));
-            hits.iter().map(|(n, doc)| fmt_line(n, doc, colors)).collect()
+            hits.iter()
+                .map(|(n, doc)| fmt_line(n, doc, colors))
+                .collect()
         }
     };
     let _ = shell.write_stdout(out.as_bytes());
@@ -373,7 +380,8 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell);
-        let help_out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        let help_out =
+            String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
             help_out.contains("Library:") && help_out.contains("frob"),
             "help must list the installed library entry, got:\n{help_out}"

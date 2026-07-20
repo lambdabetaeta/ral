@@ -14,10 +14,10 @@ use super::TerminalAccess;
 use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
 use super::repl::ReplScratch;
 use super::workers::ReapCause;
-use crate::source::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
+use crate::source::SourceDb;
 use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, WorkerId};
 use std::sync::Arc;
 
@@ -308,15 +308,18 @@ impl Shell {
                         },
                     ),
                     ("name".into(), Value::String(notice.name)),
-                    ("bytes".into(), Value::Int({
-                        #[allow(
-                            clippy::cast_possible_wrap,
-                            reason = "u64 in-memory byte count is far below i64::MAX"
-                        )]
-                        {
-                            notice.bytes as i64
-                        }
-                    })),
+                    (
+                        "bytes".into(),
+                        Value::Int({
+                            #[allow(
+                                clippy::cast_possible_wrap,
+                                reason = "u64 in-memory byte count is far below i64::MAX"
+                            )]
+                            {
+                                notice.bytes as i64
+                            }
+                        }),
+                    ),
                 ]))),
             });
         }

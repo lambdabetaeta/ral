@@ -17,9 +17,9 @@ use super::super::plugin::{
     HookEnvGuard, PluginRuntime, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
     snapshot_history, sync_plugins,
 };
-use ral_core::text::char_to_byte;
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, Read};
+use ral_core::text::char_to_byte;
 
 pub(in crate::repl) struct RustylineFrontend {
     rl: Editor<RalHelper, DefaultHistory>,
@@ -82,7 +82,8 @@ impl RustylineFrontend {
             fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
                 let s = String::from_utf8_lossy(bytes).into_owned();
                 if let Ok(mut p) = self.0.lock() {
-                    p.print(s).map_err(|e| std::io::Error::other(e.to_string()))?;
+                    p.print(s)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
                 }
                 Ok(())
             }

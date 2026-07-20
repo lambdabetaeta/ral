@@ -232,7 +232,11 @@ const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
 /// unchanged.
 fn strip_windows_extension(name: &str) -> &str {
     match name.rsplit_once('.') {
-        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) => {
+        Some((stem, ext))
+            if WINDOWS_EXEC_EXTENSIONS
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(ext)) =>
+        {
             stem
         }
         _ => name,

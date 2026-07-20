@@ -2312,10 +2312,9 @@ mod tests {
             // retried forever.
             let created = format!("ral.test.recovery.{}", std::process::id());
             let ghost = format!("ral.test.recovery.ghost.{}", std::process::id());
-            let profile = super::super::appcontainer::AppContainerProfile::create_or_reuse(
-                &created,
-            )
-            .expect("test profile creation");
+            let profile =
+                super::super::appcontainer::AppContainerProfile::create_or_reuse(&created)
+                    .expect("test profile creation");
             drop(profile); // frees the in-memory SID; the OS profile stays registered
 
             let dir = ensure_ledger_dir().unwrap();
@@ -2502,7 +2501,10 @@ mod tests {
             );
             let persisted = read_ledger(&m.ledger_path).unwrap();
             assert!(
-                persisted.applied.iter().any(|a| a.ace_type == AceType::Deny),
+                persisted
+                    .applied
+                    .iter()
+                    .any(|a| a.ace_type == AceType::Deny),
                 "on-disk ledger must record the deny stamp"
             );
 

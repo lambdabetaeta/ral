@@ -152,10 +152,7 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
             .map(NormalizedPrefix::into_string)
             .collect()
     };
-    let path_env = ctx
-        .env_overrides()
-        .get("PATH")
-        .map_or("", String::as_str);
+    let path_env = ctx.env_overrides().get("PATH").map_or("", String::as_str);
     let mut deny_paths = Vec::new();
     let mut deny_basenames = Vec::new();
     for name in &denied_names {
@@ -219,11 +216,15 @@ fn admitted_literal_paths(ctx: &Context, names: &BTreeSet<String>, path_env: &st
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let deny: Vec<&str> = [name.as_str(), resolved.as_str(), crate::path::basename(&resolved)]
-            .into_iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let deny: Vec<&str> = [
+            name.as_str(),
+            resolved.as_str(),
+            crate::path::basename(&resolved),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
         if let ExecVerdict::Allowed(_) = evaluate_exec(
             ctx,
             ExecNames {

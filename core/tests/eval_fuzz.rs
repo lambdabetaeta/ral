@@ -3142,7 +3142,10 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let comp = Arc::new(ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default()));
+        let comp = Arc::new(ral_core::elaborator::elaborate(
+            &ast,
+            std::collections::HashSet::default(),
+        ));
         let mut saw = false;
         walk(&comp, &mut saw);
         assert!(

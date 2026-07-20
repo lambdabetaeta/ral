@@ -52,7 +52,9 @@ fn with_env(values: &[(&str, Option<&str>)], body: impl FnOnce()) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: Mutex<()> = Mutex::new(());
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // A fresh empty state dir per call, so `oauth::load_all` finds no
     // tokens unless the scenario sets one up under its own XDG_STATE_HOME.
     let state_dir = std::env::temp_dir().join(format!(

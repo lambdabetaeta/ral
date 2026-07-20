@@ -50,13 +50,23 @@ fn print_result(val: &Value) {
 
 /// Fire the `pre-exec` lifecycle hook before a dispatch.
 fn pre_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, src: &str) {
-    run_lifecycle_hook(runtime, shell, "pre-exec", &[Value::String(src.to_string())]);
+    run_lifecycle_hook(
+        runtime,
+        shell,
+        "pre-exec",
+        &[Value::String(src.to_string())],
+    );
 }
 
 /// Drain a pending `chpwd` then fire `post-exec` after a dispatch — both
 /// side-effects; neither redefines the turn status, which the transport
 /// already computed.
-fn post_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, src: &str, status: i32) {
+fn post_exec(
+    runtime: &Arc<Mutex<PluginRuntime>>,
+    shell: &mut ral_core::Shell,
+    src: &str,
+    status: i32,
+) {
     if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
         run_lifecycle_hook(
             runtime,
@@ -120,13 +130,18 @@ pub(super) fn execute_input(
 
     // Dispatch and drain to the terminal Report.  The REPL renders no live
     // surface values or deferred batches, and answers no enquiries.
-    let report =
-        transport::dispatch_to_report(transport, turn, |_val| {}, |_batch| {}, |_req| {
+    let report = transport::dispatch_to_report(
+        transport,
+        turn,
+        |_val| {},
+        |_batch| {},
+        |_req| {
             Err(transport::EnquiryError {
                 message: "this host answers no enquiries".into(),
                 status: 1,
             })
-        });
+        },
+    );
 
     let Some(report) = report else {
         eprintln!("ral: internal error: dispatch completed without a Report");

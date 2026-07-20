@@ -4,12 +4,12 @@
 //! plumbing for `> file` is delegated to [`super::redirect::open_file`].
 
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Shell, Settled, Break, Error};
+use crate::types::{Break, Error, Settled, Shell};
 
-#[cfg(windows)]
-use super::process::pipe_err;
 use super::io_event;
 use super::io_event::WriteOutcome;
+#[cfg(windows)]
+use super::process::pipe_err;
 use super::redirect::{AtomicCommit, EvalRedirect, EvalRedirectV, open_file, stderr_mode};
 
 /// Capability witness that fd 0 of the parent process is safe to inherit
@@ -282,8 +282,7 @@ pub(super) fn wire_stderr(
             {
                 let stdio = if let Some(dup) = stdout_file_dup {
                     dup
-                } else if inherit_tty || matches!(shell.turn.io.stdout, crate::io::Sink::Terminal)
-                {
+                } else if inherit_tty || matches!(shell.turn.io.stdout, crate::io::Sink::Terminal) {
                     // The child inherits the helper's fd 1.  Duplicate fd 1 for
                     // stderr so `2>&1` routes diagnostics to whatever fd 1 points
                     // at — terminal, parent pipe, or a downstream pipeline stage

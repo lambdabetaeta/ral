@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::bus::Kind;
 use crate::provider::credential::CredentialStore;
 use crate::provider::models::{LiveSource, ModelCatalog, ModelSource, ProviderEndpoint};
-use crate::provider::{self, Provider};
 use crate::provider::state;
+use crate::provider::{self, Provider};
 
 use super::app::Overlay;
 use super::picker::{self, Picker};
@@ -66,14 +66,12 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     let to_fetch: Vec<_> = picker
         .loading_providers()
         .into_iter()
-        .filter(|id| {
-            match ctx.catalog.cached(id) {
-                Some(models) => {
-                    picker.set_models(id, picker::ModelsState::Loaded(models));
-                    false
-                }
-                None => true,
+        .filter(|id| match ctx.catalog.cached(id) {
+            Some(models) => {
+                picker.set_models(id, picker::ModelsState::Loaded(models));
+                false
             }
+            None => true,
         })
         .collect();
     if !to_fetch.is_empty() {

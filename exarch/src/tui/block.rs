@@ -16,8 +16,8 @@
 use super::fidelity::Fidelity;
 use super::group;
 use super::line::{self, is_blank};
-use super::palette::{QUEUED_PROMPT_BG, RAIL_W, READ_W, SLATE};
 use super::md::{self, MD_INDENT};
+use super::palette::{QUEUED_PROMPT_BG, RAIL_W, READ_W, SLATE};
 use super::rail::{self, RailKind};
 use crate::bus::card::{Card, Hunk, Mark, ObservationKind};
 use ratatui::style::{Color, Modifier, Style};
@@ -203,9 +203,7 @@ pub(super) fn queued_prompt_rows(
         out.push(line::wash(
             Line::from(Span::styled(
                 format!("⋯ ({hidden} more)"),
-                Style::default()
-                    .fg(SLATE)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(SLATE).add_modifier(Modifier::ITALIC),
             )),
             QUEUED_PROMPT_BG,
             Some(width as usize),
@@ -303,9 +301,9 @@ impl Block {
     /// (today's full render).
     fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
-            BlockKind::DiallableTool { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
-                Reveal::Summary
-            }
+            BlockKind::DiallableTool { .. }
+            | BlockKind::Subagent { .. }
+            | BlockKind::Thinking(_) => Reveal::Summary,
             _ => Reveal::Full,
         };
         Self {
@@ -322,9 +320,18 @@ impl Block {
     /// its coalesced intent line drains its saturation under context
     /// pressure exactly as committed prose does (Move 7); echo does not
     /// apply — an intent is the model's stated purpose, not committed prose.
-    pub(super) fn tool_call(tool: &'static str, summary: String, details: String, context: u8) -> Self {
+    pub(super) fn tool_call(
+        tool: &'static str,
+        summary: String,
+        details: String,
+        context: u8,
+    ) -> Self {
         Self::new(
-            BlockKind::DiallableTool { tool, summary, details },
+            BlockKind::DiallableTool {
+                tool,
+                summary,
+                details,
+            },
             Fidelity { context, echo: 0 },
         )
     }
@@ -445,9 +452,9 @@ impl Block {
     /// card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
-            BlockKind::DiallableTool { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
-                true
-            }
+            BlockKind::DiallableTool { .. }
+            | BlockKind::Subagent { .. }
+            | BlockKind::Thinking(_) => true,
             BlockKind::Card { card, .. } => card.has_diff(),
             BlockKind::Markdown { .. } | BlockKind::PlainTool { .. } | BlockKind::Chrome { .. } => {
                 false
@@ -472,7 +479,6 @@ impl Block {
     pub(super) fn is_call(&self) -> bool {
         self.is_tool_call() || self.is_plain_call()
     }
-
 
     /// True for a block the coalescing projection folds into a ral block —
     /// a tool call, or a read / grep / exec effect.  Everything else (a
@@ -512,7 +518,11 @@ impl Block {
     /// that is not a tool call, so only a call opens a slot in the group.
     pub(super) fn call_view(&self) -> Option<group::CallParts<'_>> {
         match &self.kind {
-            BlockKind::DiallableTool { tool, summary, details } => Some(group::CallParts {
+            BlockKind::DiallableTool {
+                tool,
+                summary,
+                details,
+            } => Some(group::CallParts {
                 intent: summary,
                 tool,
                 cmd: details,
@@ -803,7 +813,9 @@ impl Block {
             return Vec::new();
         }
         match &self.kind {
-            BlockKind::DiallableTool { summary, details, .. } => match level {
+            BlockKind::DiallableTool {
+                summary, details, ..
+            } => match level {
                 Reveal::Full => line::tool_call_body(summary, details, None, width),
                 Reveal::Context => line::tool_call_body(summary, details, Some(N), width),
                 // A standalone tool call never renders below its summary: the
@@ -819,14 +831,12 @@ impl Block {
                     clippy::cast_possible_truncation,
                     reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
                 )]
-                let think_chars =
-                    (t.text.chars().count() + t.provisional.chars().count()) as u32;
+                let think_chars = (t.text.chars().count() + t.provisional.chars().count()) as u32;
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
                 )]
-                let think_lines =
-                    (t.text.lines().count() + t.provisional.lines().count()) as u32;
+                let think_lines = (t.text.lines().count() + t.provisional.lines().count()) as u32;
                 let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
                 if level >= Reveal::Context {
                     ls.push(Line::default());

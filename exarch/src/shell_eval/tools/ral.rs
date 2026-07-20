@@ -6,8 +6,8 @@
 //! error block on the rail with no detour through the session.
 
 use crate::agent::Agent;
-use crate::bus::{Emitter, Kind};
 use crate::agent::event::ToolResult as SessionToolResult;
+use crate::bus::{Emitter, Kind};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
@@ -67,7 +67,11 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
         return Err("`description` must be non-empty".to_string());
     }
     let description = if description.chars().count() > DESCRIPTION_MAX {
-        description.chars().take(DESCRIPTION_MAX).collect::<String>() + "..."
+        description
+            .chars()
+            .take(DESCRIPTION_MAX)
+            .collect::<String>()
+            + "..."
     } else {
         description
     };

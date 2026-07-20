@@ -1732,7 +1732,9 @@ impl Inferencer<'_> {
             CompKind::Bind { rest, .. } => self.final_output_of_comp(rest, cty),
             CompKind::Lam { body, .. }
             | CompKind::Force(Val::Thunk(body))
-            | CompKind::Scope(ScopeOp::Redirect { body, .. }) => self.final_output_of_comp(body, cty),
+            | CompKind::Scope(ScopeOp::Redirect { body, .. }) => {
+                self.final_output_of_comp(body, cty)
+            }
             CompKind::If { then, else_, .. } => {
                 let then_out = self.final_output_of_comp(then, cty);
                 let else_out = self.final_output_of_comp(else_, cty);

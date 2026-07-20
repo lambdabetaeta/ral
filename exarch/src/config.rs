@@ -65,9 +65,10 @@ const CONFIG_FILE: &str = "config.ral";
 /// same fail-loud discipline the provider [`load`] follows.
 pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
     match std::env::var("EXARCH_DISK_WARN_BYTES") {
-        Ok(s) => s.parse().map(Some).map_err(|e| {
-            format!("EXARCH_DISK_WARN_BYTES: '{s}' is not a byte count: {e}")
-        }),
+        Ok(s) => s
+            .parse()
+            .map(Some)
+            .map_err(|e| format!("EXARCH_DISK_WARN_BYTES: '{s}' is not a byte count: {e}")),
         Err(_) => Ok(None),
     }
 }

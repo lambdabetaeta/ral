@@ -195,10 +195,15 @@ pub(crate) fn now_secs() -> u64 {
 /// Format a Unix timestamp as `YYYY-MM-DD-HHMMSS` (UTC) via `jiff`.
 /// Falls back to the raw seconds string if the timestamp is out of range.
 fn stamp_from_secs(secs: u64) -> String {
-    #[allow(clippy::cast_possible_wrap, reason="unix seconds fit i64; from_second still guards its own range")]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "unix seconds fit i64; from_second still guards its own range"
+    )]
     let secs_i64 = secs as i64;
-    jiff::Timestamp::from_second(secs_i64)
-        .map_or_else(|_| secs.to_string(), |t| t.strftime("%Y-%m-%d-%H%M%S").to_string())
+    jiff::Timestamp::from_second(secs_i64).map_or_else(
+        |_| secs.to_string(),
+        |t| t.strftime("%Y-%m-%d-%H%M%S").to_string(),
+    )
 }
 
 /// The per-project directory `$XDG_STATE_HOME/exarch/<project>/`, where

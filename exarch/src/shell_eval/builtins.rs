@@ -68,11 +68,12 @@ pub fn host_surface() -> HostSurface {
 /// Returns `Err` if sourcing the embedded library raises a ral error
 /// (re-surfaced as a signal) or propagates a non-error escape.
 pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
-    let result = ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>")
-        .map_err(|e| match e {
-            Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
-            other @ Break::Escape(_) => other,
-        })?;
+    let result =
+        ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>")
+            .map_err(|e| match e {
+                Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
+                other @ Break::Escape(_) => other,
+            })?;
     shell.install_library_docs(agent_library_docs());
     Ok(result)
 }

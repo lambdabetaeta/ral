@@ -33,8 +33,8 @@ use std::fmt::Write;
 use super::block::Reveal;
 use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
-use super::palette::{CODE_BG, RAIL_W, SLATE};
 use super::md;
+use super::palette::{CODE_BG, RAIL_W, SLATE};
 use crate::bus::card::ObservationKind;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -145,7 +145,10 @@ fn bar_col(width: usize) -> usize {
 /// calls, the figure the data-encoding rail's value-step reads.  `None`
 /// when no call carried a result (the rail then renders at the base hue).
 pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
-    calls.iter().filter_map(|c| c.magnitude).reduce(|a, b| a + b)
+    calls
+        .iter()
+        .filter_map(|c| c.magnitude)
+        .reduce(|a, b| a + b)
 }
 
 /// Render a coalesced ral block's rail-less body at `level`.  The caller
@@ -356,10 +359,7 @@ fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
 /// other line label.  Coalesced calls are homogeneous in tool (the agent's
 /// observation calls are all `ral`), so the latest call names the head.
 fn head_span(calls: &[Call]) -> Span<'static> {
-    let tool = calls
-        .last()
-        .map_or("ral", |c| c.tool.as_str())
-        .to_string();
+    let tool = calls.last().map_or("ral", |c| c.tool.as_str()).to_string();
     Span::styled(tool, Style::default().fg(SLATE))
 }
 

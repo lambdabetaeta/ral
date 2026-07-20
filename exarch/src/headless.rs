@@ -16,8 +16,8 @@
 //! exactly as in the TUI, for the root and every forked child alike.
 
 use crate::agent::Agent;
-use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
 use crate::bus::card::{Card, Mark, Row};
+use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
 use crate::shell_eval::user_json;
@@ -161,7 +161,10 @@ fn card_stderr(card: &Card) -> Vec<String> {
 fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duration) -> String {
     use serde_json::json;
     let u = &h.usage;
-    #[allow(clippy::cast_possible_truncation, reason="elapsed-ms fits u64 for any real run")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "elapsed-ms fits u64 for any real run"
+    )]
     let duration_ms = elapsed.as_millis() as u64;
     let mut obj = json!({
         "type": "result",
@@ -549,8 +552,12 @@ mod tests {
                 "files".to_string(),
                 ral_core::serial::FOValue::List {
                     items: vec![
-                        ral_core::serial::FOValue::String { value: "a.rs".into() },
-                        ral_core::serial::FOValue::String { value: "b.rs".into() },
+                        ral_core::serial::FOValue::String {
+                            value: "a.rs".into(),
+                        },
+                        ral_core::serial::FOValue::String {
+                            value: "b.rs".into(),
+                        },
                     ],
                 },
             )],

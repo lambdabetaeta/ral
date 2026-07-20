@@ -971,16 +971,8 @@ impl Unifier {
                     // form, and a variant row must be all-tag.
                     if is_tag_label(&l1) != is_tag_label(&l2) {
                         return Err(TypeErrorKind::TyMismatch {
-                            expected: Ty::Record(Row::Extend(
-                                l1,
-                                t1.clone(),
-                                Box::new(Row::Empty),
-                            )),
-                            actual: Ty::Record(Row::Extend(
-                                l2,
-                                t2.clone(),
-                                Box::new(Row::Empty),
-                            )),
+                            expected: Ty::Record(Row::Extend(l1, t1.clone(), Box::new(Row::Empty))),
+                            actual: Ty::Record(Row::Extend(l2, t2.clone(), Box::new(Row::Empty))),
                         });
                     }
                     // Scoped-labels side condition (Gaster–Jones, Leijen):

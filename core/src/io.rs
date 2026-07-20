@@ -25,11 +25,13 @@ pub(crate) use sink::{
     tee_with_buffer,
 };
 pub use source::{Source, SourceReader};
-#[cfg(windows)]
-pub use terminal::{console_mode_snapshot, enable_virtual_terminal_processing, restore_console_mode};
 pub use terminal::{InteractiveMode, TerminalState};
 #[cfg(windows)]
 pub(crate) use terminal::{STD_ERROR_HANDLE, is_console};
+#[cfg(windows)]
+pub use terminal::{
+    console_mode_snapshot, enable_virtual_terminal_processing, restore_console_mode,
+};
 
 use std::io;
 

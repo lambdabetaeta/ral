@@ -47,7 +47,8 @@ pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
     AtomicCommit, EvalRedirect, EvalRedirectV, RedirectGuard, StdinRedirectGuard, apply_redirects,
-    atomic_write, commit_atomics, install_stdin_redirect, open_file, restore_redirects, stderr_mode,
+    atomic_write, commit_atomics, install_stdin_redirect, open_file, restore_redirects,
+    stderr_mode,
 };
 use stdio::classify_redirects;
 pub(crate) use stdio::{StdinRoute, TtyInputPermit};

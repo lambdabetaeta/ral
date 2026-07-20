@@ -19,9 +19,9 @@
 
 mod common;
 
+use ral_core::transport::{Program, Turn};
 #[cfg(unix)]
 use ral_core::types::FsPolicy;
-use ral_core::transport::{Program, Turn};
 use ral_core::types::{Capabilities, Settled, Shell};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
 

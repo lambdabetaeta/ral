@@ -29,8 +29,8 @@ use super::app::Overlay;
 use super::block::queued_prompt_rows;
 use super::gesture::COPY_TOAST_TTL;
 use super::line;
-use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::matrix::matrix_bar;
+use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::select::highlight_range;
 use super::status::rule_line;
 use super::terminal::Term;
@@ -64,10 +64,12 @@ impl FrameGeom {
     /// buffer row and the cell column within the text area (0 = left edge) —
     /// or `None` when the event lands outside the content area.
     pub(super) fn buffer_coords(&self, me: MouseEvent) -> Option<(usize, u16)> {
-        self.text.contains(Position::new(me.column, me.row)).then(|| {
-            let row = self.offset + (me.row - self.text.y) as usize;
-            (row, me.column - self.text.x)
-        })
+        self.text
+            .contains(Position::new(me.column, me.row))
+            .then(|| {
+                let row = self.offset + (me.row - self.text.y) as usize;
+                (row, me.column - self.text.x)
+            })
     }
 }
 /// Paint one frame into `term`.
@@ -90,7 +92,11 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         clippy::cast_possible_truncation,
         reason = "live-agent tab count; a handful of subprocesses, never near u16::MAX"
     )]
-    let tab_h = if show_bar { app.tabs.len() as u16 } else { 0u16 };
+    let tab_h = if show_bar {
+        app.tabs.len() as u16
+    } else {
+        0u16
+    };
     // The queued-user rows sit above the matrix/tab row: prompts the human
     // submitted mid-turn, waiting for a tool or turn boundary. They read only
     // `UserSteering` from the typed inbox, then render through the same prompt
@@ -221,7 +227,12 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             app.matrix_sort,
         )
     });
-    let prompt_hint = prompt_hint(app.tabs.root(), app.is_steerable(), app.tabs.names(), focused);
+    let prompt_hint = prompt_hint(
+        app.tabs.root(),
+        app.is_steerable(),
+        app.tabs.names(),
+        focused,
+    );
     let overlay = app.overlay.as_ref();
 
     // Bracket the frame's terminal writes in a synchronized update so the

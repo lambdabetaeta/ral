@@ -117,7 +117,8 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         return stmts.iter().map(|s| StmtGroup::Single(s.clone())).collect();
     }
 
-    let candidate_names: HashSet<String> = defs.keys().map(std::string::ToString::to_string).collect();
+    let candidate_names: HashSet<String> =
+        defs.keys().map(std::string::ToString::to_string).collect();
 
     // Build a directed dependency graph over def_list indices.
     // Edge i→j: binding i's RHS has a free reference to binding j's name.

@@ -6,7 +6,7 @@
 //! that pipeline `?` chaining and `if` see a familiar exit-code-shaped
 //! signal alongside the returned `Bool`.
 
-use crate::types::{Value, Settled, as_map_ref, Shell, Break, Error};
+use crate::types::{Break, Error, Settled, Shell, Value, as_map_ref};
 
 use super::util::{check_arity, order_cmp, values_equal};
 

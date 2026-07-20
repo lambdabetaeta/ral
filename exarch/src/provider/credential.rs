@@ -132,7 +132,10 @@ impl CredentialStore {
             // to scrub.
             let Some(var) = id.key_env() else {
                 if matches!(id, ProviderId::Custom(_)) {
-                    ready.insert(id.clone(), Credential::ApiKey(NO_AUTH_PLACEHOLDER.to_string()));
+                    ready.insert(
+                        id.clone(),
+                        Credential::ApiKey(NO_AUTH_PLACEHOLDER.to_string()),
+                    );
                 }
                 continue;
             };
@@ -208,9 +211,9 @@ impl CredentialStore {
     /// other `ChatGPT` accounts, before the custom ones). Returns the
     /// account's `ProviderId`.
     pub fn add_oauth(&mut self, token: &crate::provider::oauth::OAuthToken) -> ProviderId {
-        let existing_id = self.all.iter().find(|id| {
-            matches!(id, ProviderId::ChatGpt(acc) if acc.account_id == token.account_id)
-        });
+        let existing_id = self.all.iter().find(
+            |id| matches!(id, ProviderId::ChatGpt(acc) if acc.account_id == token.account_id),
+        );
         let Some(old_id) = existing_id.cloned() else {
             let id = ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(token)));
             self.ready.insert(
@@ -333,7 +336,10 @@ mod tests {
                     ProviderId::Famous(ProviderKind::Anthropic),
                     Credential::ApiKey("key".into()),
                 ),
-                (llama.clone(), Credential::ApiKey(NO_AUTH_PLACEHOLDER.into())),
+                (
+                    llama.clone(),
+                    Credential::ApiKey(NO_AUTH_PLACEHOLDER.into()),
+                ),
             ]),
             all: vec![ProviderId::Famous(ProviderKind::Anthropic), llama.clone()],
         };
@@ -405,13 +411,26 @@ mod tests {
 
         assert_eq!(new_id.label(), "alex@work");
         assert_ne!(new_id, old_id);
-        assert!(!store.is_available(&old_id), "the old id no longer resolves");
-        assert!(store.is_available(&new_id), "the credential survives under the new id");
-        assert_eq!(store.all, vec![new_id.clone()], "re-keyed in place, not duplicated");
+        assert!(
+            !store.is_available(&old_id),
+            "the old id no longer resolves"
+        );
+        assert!(
+            store.is_available(&new_id),
+            "the credential survives under the new id"
+        );
+        assert_eq!(
+            store.all,
+            vec![new_id.clone()],
+            "re-keyed in place, not duplicated"
+        );
         let Some(Credential::OAuth(moved)) = store.get(&new_id) else {
             panic!("expected an OAuth credential");
         };
-        assert!(Arc::ptr_eq(moved, &cell), "the same shared cell moves to the new id");
+        assert!(
+            Arc::ptr_eq(moved, &cell),
+            "the same shared cell moves to the new id"
+        );
     }
 
     /// opencode Go is a flat-rate subscription (unmetered) while opencode Zen

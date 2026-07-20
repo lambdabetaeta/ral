@@ -14,13 +14,13 @@
 //! (see [`super::session::Session::boot`]).
 
 use ral_core::builtins::util::{arg0_str, check_arity};
-use ral_core::types::as_list;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
 use ral_core::typecheck::{CompTy, PipeMode, PipeSpec, Row, Scheme, Ty, Unifier};
+use ral_core::types::as_list;
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, as_map, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
@@ -420,15 +420,9 @@ pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 
     let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::String(w)).collect();
 
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "word index, far below i64::MAX"
-    )]
+    #[allow(clippy::cast_possible_wrap, reason = "word index, far below i64::MAX")]
     let current_i = current as i64;
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "word index, far below i64::MAX"
-    )]
+    #[allow(clippy::cast_possible_wrap, reason = "word index, far below i64::MAX")]
     let offset_i = offset_chars as i64;
     Ok(Value::map(vec![
         ("words".into(), Value::list(word_values)),

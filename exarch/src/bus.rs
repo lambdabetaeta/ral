@@ -23,11 +23,11 @@
 pub mod card;
 
 use crate::agent::cancel;
-use crate::bus::card::{Card, IoEvent};
 use crate::agent::event::ProviderErrorRecord;
-use crate::provider::{Tuning, Usage};
-use crate::fleet::schedule::ScheduleId;
 use crate::agent::transcript::Transcript;
+use crate::bus::card::{Card, IoEvent};
+use crate::fleet::schedule::ScheduleId;
+use crate::provider::{Tuning, Usage};
 use ral_core::Value;
 use std::collections::VecDeque;
 use std::io;
@@ -415,7 +415,11 @@ impl std::fmt::Display for InboxReject {
 /// pulled on demand with `await $h`.
 fn surface_notice(values: &[Value]) -> String {
     use crate::bus::card::DoneOutcome;
-    let settled = match values.iter().rev().find_map(crate::bus::card::value_to_done) {
+    let settled = match values
+        .iter()
+        .rev()
+        .find_map(crate::bus::card::value_to_done)
+    {
         Some(DoneOutcome::Ok) => "finished (exit 0)".to_string(),
         Some(DoneOutcome::Err { message, status }) => {
             format!("finished (exit {status}): {message}")

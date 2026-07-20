@@ -7,8 +7,8 @@
 //! sends bytes and parses responses.  The provider-boundary error taxonomy
 //! and the genai fault classifier live in the [`error`] submodule.
 
-mod error;
 pub mod credential;
+mod error;
 pub mod models;
 pub mod oauth;
 pub mod pricing;
@@ -424,11 +424,17 @@ pub fn humanize_tokens(n: u64) -> String {
     // Tier on the rounded display, not the raw count: a value within ~50
     // tokens of 1M rounds to `1.0m`, never `1000k`.
     if n >= 999_950 {
-        #[allow(clippy::cast_precision_loss, reason="display rounding of a token count; magnitude far below 2^52")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "display rounding of a token count; magnitude far below 2^52"
+        )]
         let m = n as f64 / 1_000_000.0;
         format!("{m:.1}m")
     } else if n >= 10_000 {
-        #[allow(clippy::cast_precision_loss, reason="display rounding of a token count; magnitude far below 2^52")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "display rounding of a token count; magnitude far below 2^52"
+        )]
         let thousands = n as f64 / 1_000.0;
         let k = format!("{thousands:.1}");
         format!("{}k", k.strip_suffix(".0").unwrap_or(&k))
@@ -656,7 +662,9 @@ impl Tuning {
 /// (the overlay never constructs the value-carrying `Budget`).
 impl PartialEq for Tuning {
     fn eq(&self, other: &Self) -> bool {
-        let key = |e: &Option<ReasoningEffort>| e.as_ref().map(genai::chat::ReasoningEffort::variant_name);
+        let key = |e: &Option<ReasoningEffort>| {
+            e.as_ref().map(genai::chat::ReasoningEffort::variant_name)
+        };
         key(&self.effort) == key(&other.effort)
             && self.temperature == other.temperature
             && self.top_p == other.top_p
@@ -902,7 +910,9 @@ fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, Ada
 fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
     let auth = AuthResolver::from_resolver_fn(move |iden: ModelIden| {
         if iden.adapter_kind == AdapterKind::OpenAIResp {
-            let token = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let token = cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(Some(AuthData::RequestOverride {
                 url: oauth::RESPONSES_URL.to_string(),
                 headers: Headers::from(oauth::request_headers(&token, "text/event-stream")),
@@ -1596,15 +1606,14 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: Ada
         .and_then(|d| d.cached_tokens)
         .map(|n| u64::try_from(n).unwrap_or(0));
     let dollars = if metered {
-        crate::provider::pricing::lookup_for(model, adapter)
-            .map_or(0.0, |p| {
-                p.dollars(
-                    input,
-                    output,
-                    cache_creation.unwrap_or(0),
-                    cache_read.unwrap_or(0),
-                )
-            })
+        crate::provider::pricing::lookup_for(model, adapter).map_or(0.0, |p| {
+            p.dollars(
+                input,
+                output,
+                cache_creation.unwrap_or(0),
+                cache_read.unwrap_or(0),
+            )
+        })
     } else {
         0.0
     };

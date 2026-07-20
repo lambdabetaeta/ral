@@ -51,9 +51,8 @@ pub fn path_within(path: &Path, prefix: &Path) -> bool {
     let qs = path_aliases(prefix);
     if cfg!(windows) {
         ps.iter().any(|p| {
-            qs.iter().any(|q| {
-                starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), true)
-            })
+            qs.iter()
+                .any(|q| starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), true))
         })
     } else {
         // Off Windows, compare the original `&Path`s directly rather than
@@ -582,7 +581,11 @@ mod tests {
     fn windows_identity_strips_forward_slash_verbatim_prefix() {
         assert!(starts_with_identity(r"//?/C:/work/sub", r"C:\work", true));
         assert!(starts_with_identity(r"C:\work\sub", "//?/c:/work", true));
-        assert!(starts_with_identity(r"//?/C:/work/sub", r"\\?\c:\WORK", true));
+        assert!(starts_with_identity(
+            r"//?/C:/work/sub",
+            r"\\?\c:\WORK",
+            true
+        ));
         // Mixed separators within the same verbatim spelling.
         assert!(starts_with_identity(r"//?\C:\work/sub", r"C:\work", true));
     }

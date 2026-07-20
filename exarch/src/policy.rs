@@ -20,8 +20,8 @@ mod load;
 
 use base::{resolve_base, root_fs_policy};
 use load::{absolute_in, load_capabilities_ral};
-use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list};
 use ral_core::io::TerminalState;
+use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list};
 use ral_core::types::{Capabilities, Shell};
 use std::path::{Path, PathBuf};
 

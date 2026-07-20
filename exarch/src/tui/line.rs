@@ -12,10 +12,10 @@ use super::palette::{
     CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, READ_W, RED, RED_HOT, SLATE,
 };
 use super::rail::is_rail_prefix;
+use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
 };
-use crate::agent::event::ProviderErrorRecord;
 use crate::provider;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -247,9 +247,7 @@ fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'sta
     let mut out = Vec::new();
     push_wrapped(&mut out, label, body_w, |chunk, first| {
         if first {
-            let mut spans = vec![
-                Span::styled(chunk, Style::default().fg(SLATE)),
-            ];
+            let mut spans = vec![Span::styled(chunk, Style::default().fg(SLATE))];
             if let Some(magnitude) = size {
                 spans.push(Span::raw("  "));
                 spans.push(size_bar(magnitude));
@@ -266,7 +264,11 @@ fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'sta
 }
 /// Clicking the row swaps this for [`tool_call_body`] (L2/L3).  `size` is
 /// the call's result magnitude, rendered as the header size-bar.
-pub(super) fn tool_call_collapsed(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
+pub(super) fn tool_call_collapsed(
+    label: &str,
+    size: Option<u32>,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(label, size, width));
     ls
@@ -339,7 +341,11 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
 /// the block wears the shut triangle `▸`.
 pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(cmd.lines().next().unwrap_or(""), None, READ_W));
+    ls.extend(tool_call_header(
+        cmd.lines().next().unwrap_or(""),
+        None,
+        READ_W,
+    ));
     for l in cmd.lines().skip(1) {
         ls.push(Line::from(vec![
             Span::raw("  "),
@@ -348,7 +354,6 @@ pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     }
     ls
 }
-
 
 /// The one-line header for an async subagent's landed result: a leading
 /// blank (like [`tool_call_collapsed`]), then the bold `name` (LIME, or
@@ -740,7 +745,10 @@ fn render_framed(
     // is filtered out — diff-bearing cards take the diff path — so the
     // shared dispatch's level argument is never read here.
     let mut body: Vec<Line<'static>> = Vec::new();
-    for mark in body_marks.iter().filter(|m| !matches!(m, Mark::Diff { .. })) {
+    for mark in body_marks
+        .iter()
+        .filter(|m| !matches!(m, Mark::Diff { .. }))
+    {
         body.extend(render_mark(mark, 0));
     }
     let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
@@ -850,7 +858,9 @@ fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
 /// preserves each span's style.
 fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
     fold_styled_lines(
-        spans.iter().map(|cs| (cs.text.clone(), span_style(cs.role))),
+        spans
+            .iter()
+            .map(|cs| (cs.text.clone(), span_style(cs.role))),
         true,
     )
 }
@@ -1225,8 +1235,11 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
                 // Suppress the raw retry-after keys the wait field subsumes:
                 // the second-count readers plus the absolute `resets_at` twin.
                 Some(b) => {
-                    let consumed: Vec<&str> =
-                        RETRY_SECS_KEYS.iter().copied().chain(["resets_at"]).collect();
+                    let consumed: Vec<&str> = RETRY_SECS_KEYS
+                        .iter()
+                        .copied()
+                        .chain(["resets_at"])
+                        .collect();
                     fs.extend(body_fields(b, &consumed));
                 }
                 None => fs.push(text_field("cause", prettify(cause))),

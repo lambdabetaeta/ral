@@ -748,7 +748,10 @@ impl Viewport {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j].block), &entry.block);
+                let lead = opens_rail_run(
+                    i.checked_sub(1).map(|j| &self.blocks[j].block),
+                    &entry.block,
+                );
                 entry.block.log_lines(self.agent, lead)
             })
             .collect::<Vec<_>>();
@@ -1273,7 +1276,6 @@ impl Viewport {
         }
         calls
     }
-
 }
 
 #[cfg(test)]

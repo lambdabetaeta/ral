@@ -39,7 +39,10 @@ pub struct Skill {
 /// The two skill roots, in precedence order: the project-local
 /// `.exarch/skills/` (cwd), then the user's `$XDG_CONFIG_HOME/exarch/skills/`.
 pub(crate) fn skill_roots(cwd: &Path, config_dir: &Path) -> [PathBuf; 2] {
-    [cwd.join(".exarch").join("skills"), config_dir.join("skills")]
+    [
+        cwd.join(".exarch").join("skills"),
+        config_dir.join("skills"),
+    ]
 }
 
 /// Discover all skill directories from both roots — directory names only,

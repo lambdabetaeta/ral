@@ -329,7 +329,8 @@ fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
 
 fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
     let mut all = load_all_at(path);
-    let replaced = if let Some(existing) = all.iter_mut().find(|t| t.account_id == token.account_id) {
+    let replaced = if let Some(existing) = all.iter_mut().find(|t| t.account_id == token.account_id)
+    {
         *existing = token.clone();
         true
     } else {
@@ -688,7 +689,7 @@ mod windows_dacl {
         SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CREATE_ALWAYS, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, CreateFileW,
+        CREATE_ALWAYS, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -868,7 +869,11 @@ mod windows_dacl {
             }
             // SAFETY: `handle` is a just-created, valid file handle opened
             // for `GENERIC_WRITE` with no other owner.
-            Ok(unsafe { std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle) })
+            Ok(
+                unsafe {
+                    std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle)
+                },
+            )
         })();
 
         // SAFETY: `acl` was allocated by `SetEntriesInAclW` (which uses

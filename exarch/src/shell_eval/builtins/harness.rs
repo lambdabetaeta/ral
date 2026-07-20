@@ -17,7 +17,9 @@
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::builtins::util::check_arity;
 use ral_core::serial::FOValue;
-use ral_core::typecheck::builtins::{BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk};
+use ral_core::typecheck::builtins::{
+    BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
+};
 use ral_core::typecheck::{Row, Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Settled, sig};
 use ral_core::{Shell, Value};
@@ -54,7 +56,10 @@ pub(crate) fn valid_name(s: &str) -> bool {
 /// what actually closes the rule — the same shape [`permission_label`]
 /// closes for `grant`.
 fn agent_type_label(v: &Value) -> Settled<String> {
-    if let Value::Variant { label, payload: None } = v
+    if let Value::Variant {
+        label,
+        payload: None,
+    } = v
         && (label == "amnemon" || label == "mnemon")
     {
         return Ok(label.clone());
@@ -69,7 +74,10 @@ fn agent_type_label(v: &Value) -> Settled<String> {
 /// [`scheme_agent`]'s doc for why), so this runtime check is what actually
 /// closes the rule.
 fn permission_label(v: &Value) -> Settled<String> {
-    if let Value::Variant { label, payload: None } = v
+    if let Value::Variant {
+        label,
+        payload: None,
+    } = v
         && PERMISSION_LABELS.contains(&label.as_str())
     {
         return Ok(label.clone());
@@ -87,7 +95,11 @@ fn permission_label(v: &Value) -> Settled<String> {
 /// [`scheme_schedule`]'s doc for why), so this runtime check is what
 /// actually closes the rule.
 fn schedule_trigger(v: &Value) -> Settled<FOValue> {
-    let Value::Variant { label, payload: Some(payload) } = v else {
+    let Value::Variant {
+        label,
+        payload: Some(payload),
+    } = v
+    else {
         return Err(sig(format!(
             "schedule: trigger must be `cron '<5-field-cron-expr>'` or `after '<n><unit>'`, got {v}"
         )));
@@ -103,14 +115,18 @@ fn schedule_trigger(v: &Value) -> Settled<FOValue> {
             CronSchedule::parse(expr).map_err(|e| sig(format!("schedule: {e}")))?;
             Ok(FOValue::Variant {
                 label: "cron".to_string(),
-                payload: Some(Box::new(FOValue::String { value: expr.clone() })),
+                payload: Some(Box::new(FOValue::String {
+                    value: expr.clone(),
+                })),
             })
         }
         "after" => {
             parse_duration(expr).map_err(|e| sig(format!("schedule: {e}")))?;
             Ok(FOValue::Variant {
                 label: "after".to_string(),
-                payload: Some(Box::new(FOValue::String { value: expr.clone() })),
+                payload: Some(Box::new(FOValue::String {
+                    value: expr.clone(),
+                })),
             })
         }
         other => Err(sig(format!(
@@ -125,11 +141,17 @@ fn schedule_trigger(v: &Value) -> Settled<FOValue> {
 /// standard [`schedule_trigger`] and `permission_label` hold theirs to.
 fn schedule_label(v: &Value) -> Settled<FOValue> {
     match v {
-        Value::Variant { label, payload: None } if label == "none" => Ok(FOValue::Variant {
+        Value::Variant {
+            label,
+            payload: None,
+        } if label == "none" => Ok(FOValue::Variant {
             label: "none".to_string(),
             payload: None,
         }),
-        Value::Variant { label, payload: Some(payload) } if label == "some" => {
+        Value::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "some" => {
             let Value::String(name) = payload.as_ref() else {
                 return Err(sig(format!(
                     "schedule: `some`'s payload must be a Str, got {}",
@@ -138,7 +160,9 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
             };
             Ok(FOValue::Variant {
                 label: "some".to_string(),
-                payload: Some(Box::new(FOValue::String { value: name.clone() })),
+                payload: Some(Box::new(FOValue::String {
+                    value: name.clone(),
+                })),
             })
         }
         other => Err(sig(format!(
@@ -151,8 +175,14 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
 /// builtin returns, or a didactic error naming the shape violation or the
 /// refusal — the builtin-body half of [`builtin_agent`]'s spawn.
 fn spawn_receipt(answer: FOValue) -> Settled<Value> {
-    let FOValue::Variant { label, payload: Some(payload) } = answer else {
-        return Err(sig("agent: host answered an unexpected shape for its receipt"));
+    let FOValue::Variant {
+        label,
+        payload: Some(payload),
+    } = answer
+    else {
+        return Err(sig(
+            "agent: host answered an unexpected shape for its receipt",
+        ));
     };
     if label != "started" {
         return Err(sig(format!("agent: host refused: {label}")));
@@ -219,10 +249,16 @@ fn builtin_agent(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         payload: Some(Box::new(FOValue::List {
             items: vec![
                 FOValue::Int { value: session_id },
-                FOValue::Variant { label: kind, payload: None },
+                FOValue::Variant {
+                    label: kind,
+                    payload: None,
+                },
                 FOValue::String { value: prompt },
                 FOValue::String { value: name },
-                FOValue::Variant { label: grant, payload: None },
+                FOValue::Variant {
+                    label: grant,
+                    payload: None,
+                },
             ],
         })),
     })?;
@@ -241,7 +277,9 @@ fn builtin_agents(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
         payload: None,
     })?;
     let FOValue::List { items } = answer else {
-        return Err(sig("agents: host answered an unexpected shape for the listing"));
+        return Err(sig(
+            "agents: host answered an unexpected shape for the listing",
+        ));
     };
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
@@ -256,7 +294,10 @@ fn builtin_message(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     shell.enquire(FOValue::Variant {
         label: "message".to_string(),
         payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::String { value: name }, FOValue::String { value: text }],
+            items: vec![
+                FOValue::String { value: name },
+                FOValue::String { value: text },
+            ],
         })),
     })?;
     Ok(Value::Unit)
@@ -282,7 +323,9 @@ fn builtin_agent_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// the shape violation, mirroring [`spawn_receipt`]'s own style.
 fn schedule_receipt(answer: FOValue) -> Settled<Value> {
     let FOValue::Map { .. } = answer else {
-        return Err(sig("schedule: host answered an unexpected shape for its receipt"));
+        return Err(sig(
+            "schedule: host answered an unexpected shape for its receipt",
+        ));
     };
     Ok(Value::from(answer))
 }
@@ -340,7 +383,9 @@ fn builtin_schedules(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
         payload: None,
     })?;
     let FOValue::List { items } = answer else {
-        return Err(sig("schedules: host answered an unexpected shape for the listing"));
+        return Err(sig(
+            "schedules: host answered an unexpected shape for the listing",
+        ));
     };
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
@@ -373,7 +418,9 @@ fn builtin_reply(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     })?;
     shell.enquire(FOValue::Variant {
         label: "reply".to_string(),
-        payload: Some(Box::new(FOValue::List { items: vec![payload] })),
+        payload: Some(Box::new(FOValue::List {
+            items: vec![payload],
+        })),
     })?;
     Ok(Value::Unit)
 }
@@ -437,7 +484,12 @@ fn scheme_agents(_u: &mut Unifier) -> Scheme {
 
 /// `message :: Str → Str → F Unit`
 fn scheme_message(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, fun(Ty::String, pure(Ty::Unit)))))
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::String, fun(Ty::String, pure(Ty::Unit)))),
+    )
 }
 
 /// `agent-cancel :: Str → F Unit`
@@ -496,7 +548,12 @@ fn scheme_schedule(u: &mut Unifier) -> Scheme {
 
 /// `schedules :: F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
 fn scheme_schedules(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::List(Box::new(schedule_row_ty())))))
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(pure(Ty::List(Box::new(schedule_row_ty())))),
+    )
 }
 
 /// `unschedule :: Str → F Unit`
@@ -587,14 +644,20 @@ mod tests {
     #[test]
     fn permission_label_accepts_every_bake_in() {
         for label in PERMISSION_LABELS {
-            let v = Value::Variant { label: label.to_string(), payload: None };
+            let v = Value::Variant {
+                label: label.to_string(),
+                payload: None,
+            };
             assert_eq!(permission_label(&v).unwrap(), label);
         }
     }
 
     #[test]
     fn permission_label_rejects_an_unknown_tag_naming_all_six() {
-        let v = Value::Variant { label: "bogus".to_string(), payload: None };
+        let v = Value::Variant {
+            label: "bogus".to_string(),
+            payload: None,
+        };
         let err = match permission_label(&v) {
             Err(ral_core::types::Break::Error(e)) => e,
             other => panic!("expected a door error, got {other:?}"),
@@ -622,7 +685,8 @@ mod tests {
     /// A unique scratch directory per test, mirroring `tests/agent_apply.rs`'s
     /// own `tmp` helper.
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("exarch-harness-test-{}-{tag}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("exarch-harness-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         p
     }
@@ -670,7 +734,11 @@ mod tests {
             5,
             &emit,
         );
-        assert!(result.content.contains("amnemon"), "got: {}", result.content);
+        assert!(
+            result.content.contains("amnemon"),
+            "got: {}",
+            result.content
+        );
         assert!(result.content.contains("mnemon"), "got: {}", result.content);
         assert!(
             session.agents.list(session.id).is_empty(),
@@ -693,11 +761,7 @@ mod tests {
             5,
             &emit,
         );
-        assert!(
-            result.content.contains("name"),
-            "got: {}",
-            result.content
-        );
+        assert!(result.content.contains("name"), "got: {}", result.content);
         assert!(
             session.agents.list(session.id).is_empty(),
             "an invalid name must never register a child"
@@ -751,8 +815,12 @@ mod tests {
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
-            crate::provider::scripted::Script::new()
-                .then(crate::provider::scripted::Reply::tool_calls(vec![ral_call("reply-1", "reply 'say hi'")])),
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "reply-1",
+                    "reply 'say hi'",
+                )]),
+            ),
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
@@ -1039,7 +1107,11 @@ mod tests {
             "a valid schedule call must succeed, got: {}",
             result.content
         );
-        assert_eq!(session.schedules.list().len(), 1, "the schedule must be registered");
+        assert_eq!(
+            session.schedules.list().len(),
+            1,
+            "the schedule must be registered"
+        );
 
         let result = session.run_shell("call-2".to_string(), "unschedule 'nightly'", 5, &emit);
         assert!(
@@ -1084,9 +1156,12 @@ mod tests {
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
-            crate::provider::scripted::Script::new().then(crate::provider::scripted::Reply::tool_calls(vec![
-                ral_call("c1", r#"let found = ["a.rs", "b.rs"]; reply [files: $found]"#),
-            ])),
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    r#"let found = ["a.rs", "b.rs"]; reply [files: $found]"#,
+                )]),
+            ),
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
@@ -1109,7 +1184,9 @@ mod tests {
             match session.drain_turn_for_test() {
                 Some(crate::bus::Turn::Agent(r)) => {
                     assert!(
-                        r.text.contains("files:") && r.text.contains("a.rs") && r.text.contains("b.rs"),
+                        r.text.contains("files:")
+                            && r.text.contains("a.rs")
+                            && r.text.contains("b.rs"),
                         "the structured record must reach the parent inbox, got: {}",
                         r.text
                     );
@@ -1164,9 +1241,12 @@ mod tests {
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
-            crate::provider::scripted::Script::new().then(crate::provider::scripted::Reply::tool_calls(vec![
-                ral_call("c1", r#"reply "first"; reply "second""#),
-            ])),
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    r#"reply "first"; reply "second""#,
+                )]),
+            ),
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
@@ -1182,7 +1262,9 @@ mod tests {
             Ok(crate::agent::TurnOutcome::Replied(v)) => {
                 assert_eq!(
                     v,
-                    ral_core::serial::FOValue::String { value: "second".into() },
+                    ral_core::serial::FOValue::String {
+                        value: "second".into()
+                    },
                     "the last reply in the turn must win"
                 );
             }

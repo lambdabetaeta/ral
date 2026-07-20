@@ -176,7 +176,11 @@ fn expand_tilde(dir: &str) -> Option<String> {
     if home == "." {
         return None;
     }
-    ral_core::path::tilde::expand_tilde_path(parsed.user.as_deref(), parsed.suffix.as_deref(), &home)
+    ral_core::path::tilde::expand_tilde_path(
+        parsed.user.as_deref(),
+        parsed.suffix.as_deref(),
+        &home,
+    )
 }
 
 /// A directory entry offered as a path candidate.  Carries `is_dir` so the

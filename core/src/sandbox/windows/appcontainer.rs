@@ -60,7 +60,9 @@ use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows_sys::Win32::Security::{DeriveCapabilitySidsFromName, FreeSid, PSID, SID_AND_ATTRIBUTES};
+use windows_sys::Win32::Security::{
+    DeriveCapabilitySidsFromName, FreeSid, PSID, SID_AND_ATTRIBUTES,
+};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 // `windows-sys` generates `PSID`/`HLOCAL` as the same underlying
@@ -192,10 +194,14 @@ impl AppContainerProfile {
             let mut derived: PSID = ptr::null_mut();
             // SAFETY: `name_wide` is valid for the duration of the call;
             // `derived` is a valid out-param.
-            let hr2 =
-                unsafe { DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut derived) };
+            let hr2 = unsafe {
+                DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut derived)
+            };
             if hr2 < 0 {
-                return Err(hresult_err("DeriveAppContainerSidFromAppContainerName", hr2));
+                return Err(hresult_err(
+                    "DeriveAppContainerSidFromAppContainerName",
+                    hr2,
+                ));
             }
             sid = derived;
         } else if hr < 0 {

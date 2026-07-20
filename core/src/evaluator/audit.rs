@@ -21,8 +21,8 @@
 //! the dispatcher path can call them unconditionally.
 
 use crate::types::{
-    epoch_us, AuditIo, AuditTime, BodyResult, Break, CallSite, CapturePolicy, Control, Escape,
-    ExecNode, Map, Raw, Settled, Shell, Value, STDERR_CAP_BYTES,
+    AuditIo, AuditTime, BodyResult, Break, CallSite, CapturePolicy, Control, Escape, ExecNode, Map,
+    Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
 };
 
 /// Stamp captured at the start of a command, paired with

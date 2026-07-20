@@ -398,8 +398,10 @@ pub(super) fn call_plugin_hook(
             // Encode at this edge: a plugin hook call is not itself a
             // transport door, so a non-first-order argument is this call
             // site's bug to report, not `run_turn`'s.
-            let fo_args: Result<Vec<_>, _> =
-                args.iter().map(ral_core::serial::FOValue::try_from).collect();
+            let fo_args: Result<Vec<_>, _> = args
+                .iter()
+                .map(ral_core::serial::FOValue::try_from)
+                .collect();
             let report = match fo_args {
                 Ok(fo_args) => {
                     let mut req = framed_turn_request(
@@ -878,7 +880,6 @@ impl PluginRuntime {
             p.state_cell = state_cell.cloned();
         }
     }
-
 }
 
 /// Fold a named hook over all plugins that register it, threading an

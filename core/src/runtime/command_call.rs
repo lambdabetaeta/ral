@@ -217,7 +217,12 @@ impl Drop for MaskedHandler<'_> {
 /// Run a user handler entry.  The matched frame is lifted from the
 /// stack for the dynamic extent of the body so a same-name call from
 /// inside reaches the next outer match.
-fn run_handler(entry: &HandlerEntry, depth: usize, args: &[Value], shell: &mut Shell) -> Raw<Value> {
+fn run_handler(
+    entry: &HandlerEntry,
+    depth: usize,
+    args: &[Value],
+    shell: &mut Shell,
+) -> Raw<Value> {
     let thunk = entry.thunk.clone();
     let call_args = match entry.arity {
         HandlerArity::CatchAll => vec![

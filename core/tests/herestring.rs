@@ -59,7 +59,10 @@ fn expect_string(shell: &mut Shell, source: &str) -> String {
 #[test]
 fn literal_body_feeds_stdin() {
     let mut shell = fresh_shell();
-    assert_eq!(expect_string(&mut shell, "from-string << #'hello'#"), "hello");
+    assert_eq!(
+        expect_string(&mut shell, "from-string << #'hello'#"),
+        "hello"
+    );
 }
 
 /// One newline at the front of the payload is dropped — the bash-heredoc

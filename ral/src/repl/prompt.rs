@@ -7,12 +7,12 @@
 
 use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, HookName};
-#[cfg(test)]
-use ral_core::{DefaultPolicy, HookSig};
 use ral_core::{
     Captured, RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value,
     diagnostic,
 };
+#[cfg(test)]
+use ral_core::{DefaultPolicy, HookSig};
 use std::sync::{Arc, Mutex};
 
 use super::plugin::{FramedHook, HookFraming, PluginRuntime, call_plugin_hook, fold_hook};
@@ -124,15 +124,16 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         ral_core::source::Span::synthetic(),
     );
 
-    let (result, captured) =
-        shell.with_preserved_status(|shell| match shell.run_turn(prompt_turn("__eval_prompt_test__")) {
+    let (result, captured) = shell.with_preserved_status(|shell| {
+        match shell.run_turn(prompt_turn("__eval_prompt_test__")) {
             TurnReport::Ran {
                 result, captured, ..
             } => (result, captured),
             TurnReport::Static { .. } => {
                 unreachable!("a thunk prompt body never compiles source")
             }
-        });
+        }
+    });
 
     prompt_text_from(result, captured)
 }
@@ -228,7 +229,10 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default()));
+        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(
+            &ast,
+            std::collections::HashSet::default(),
+        ));
         let prompt = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
         assert!(
             matches!(prompt, Value::Lambda { .. } | Value::Block { .. }),

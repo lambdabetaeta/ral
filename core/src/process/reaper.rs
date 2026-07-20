@@ -171,10 +171,7 @@ fn arm(action: Action, after: Duration) -> Deadline {
     // A newly armed entry may be sooner than what the daemon is sleeping
     // toward; wake it to re-peek the heap top.
     reaper.wake.notify_one();
-    Deadline {
-        armed,
-        keep: false,
-    }
+    Deadline { armed, keep: false }
 }
 
 /// A handle to an armed deadline.

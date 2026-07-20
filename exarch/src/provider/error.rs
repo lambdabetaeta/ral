@@ -113,13 +113,11 @@ impl ProviderError {
                     body,
                 }
             }
-            Fault::Status { status, body, .. } if status.is_server_error() => {
-                Self::Transient {
-                    cause: msg,
-                    attempts: 1,
-                    body,
-                }
-            }
+            Fault::Status { status, body, .. } if status.is_server_error() => Self::Transient {
+                cause: msg,
+                attempts: 1,
+                body,
+            },
             // Any remaining non-success status (4xx, redirects) is a
             // request the user must change — not retryable.
             Fault::Status { status, body, .. } => Self::Api {
@@ -317,9 +315,7 @@ impl ProviderError {
     /// `Display`.
     pub(crate) fn brief(&self) -> String {
         match self {
-            Self::Transient { cause, .. } | Self::RateLimited { cause, .. } => {
-                cause.clone()
-            }
+            Self::Transient { cause, .. } | Self::RateLimited { cause, .. } => cause.clone(),
             Self::Other(s) => s.clone(),
             other => other.to_string(),
         }
@@ -337,12 +333,8 @@ impl ProviderError {
     pub fn summary(&self) -> String {
         match self {
             Self::Cancelled(where_) => format!("cancelled {where_}"),
-            Self::Transient { body, .. } => {
-                with_body_message("web stream failed", body.as_ref())
-            }
-            Self::RateLimited { body, .. } => {
-                with_body_message("rate limited", body.as_ref())
-            }
+            Self::Transient { body, .. } => with_body_message("web stream failed", body.as_ref()),
+            Self::RateLimited { body, .. } => with_body_message("rate limited", body.as_ref()),
             Self::Api {
                 status,
                 message,

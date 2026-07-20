@@ -419,7 +419,10 @@ impl Drop for BackupFd {
         // Best-effort: clobber_slot failures inside Drop have nowhere to
         // go.  `backup`'s own `Drop` closes it once this returns.
         use std::os::fd::AsFd;
-        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+        )]
         let _ = unsafe { crate::process::clobber_slot(self.backup.as_fd(), self.fd as i32) };
     }
 }
@@ -566,7 +569,10 @@ pub(crate) fn apply_redirects(
                 install_dup2(owned.as_raw_fd(), *fd, &mut guard)?;
             }
             EvalRedirect::Fd(target_fd) => {
-                #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+                #[allow(
+                    clippy::cast_possible_wrap,
+                    reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+                )]
                 install_dup2(*target_fd as i32, *fd, &mut guard)?;
             }
         }
@@ -593,24 +599,29 @@ fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<
     // child — a child spawned while the guard is live (a nested external
     // launched from inside the redirected builtin body) must not inherit
     // it.
-    #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+    )]
     // SAFETY: `dst_fd` is the slot this redirect is about to overwrite; the
     // caller's contract (`apply_redirects`) guarantees it names a live fd
     // for the life of this borrow, which ends with this statement.
-    let backup = unsafe {
-        rustix::io::fcntl_dupfd_cloexec(BorrowedFd::borrow_raw(dst_fd as i32), 0)
-    }
-    .map_err(|e| {
-        Break::Error(Error::new(
-            format!(
-                "redirect to fd {dst_fd}: cannot save the existing descriptor \
+    let backup =
+        unsafe { rustix::io::fcntl_dupfd_cloexec(BorrowedFd::borrow_raw(dst_fd as i32), 0) }
+            .map_err(|e| {
+                Break::Error(Error::new(
+                    format!(
+                        "redirect to fd {dst_fd}: cannot save the existing descriptor \
                  ({e}) — refusing to install a redirect with no restore path"
-            ),
-            1,
-        ))
-    })?;
+                    ),
+                    1,
+                ))
+            })?;
     guard.saved.push(BackupFd { fd: dst_fd, backup });
-    #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+    )]
     // SAFETY: `src_fd` is kept open by its caller for the length of this
     // call (either the just-opened file's `OwnedFd`, or a live standard
     // slot); `dst_fd` is the redirect target slot, and retargeting it onto
@@ -841,9 +852,15 @@ mod tests {
     fn pinned_unopened_fd() -> (u32, BarrierFd) {
         let barrier = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 32) };
         assert!(barrier >= 0, "could not pin a high barrier fd");
-        #[allow(clippy::cast_sign_loss, reason = "barrier is a fcntl-returned fd asserted >= 0 on the line above, so no sign is lost")]
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "barrier is a fcntl-returned fd asserted >= 0 on the line above, so no sign is lost"
+        )]
         let target = barrier as u32 + 1;
-        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+        )]
         let target_fd = target as i32;
         assert!(!fd_is_open(target_fd), "target fd {target} must start free");
         (target, BarrierFd(barrier))
@@ -862,7 +879,9 @@ mod tests {
     /// `dup2` with no restore path.  The fd stays unopened afterward.
     #[test]
     fn file_redirect_to_unopened_fd_errors_and_leaks_nothing() {
-        let _serial = FD_TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = FD_TABLE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (fd, _barrier) = pinned_unopened_fd();
         let mut shell = Shell::default();
         let dir = tempfile::tempdir().unwrap();
@@ -876,7 +895,10 @@ mod tests {
         let result = apply_redirects(&redirects, &mut shell);
 
         assert!(result.is_err(), "redirect to unopened fd {fd} must error");
-        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+        )]
         let fd_i32 = fd as i32;
         assert!(
             !fd_is_open(fd_i32),
@@ -888,7 +910,9 @@ mod tests {
     /// for the same reason — no backup, no restore path.
     #[test]
     fn fd_dup_redirect_to_unopened_fd_errors_and_leaks_nothing() {
-        let _serial = FD_TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = FD_TABLE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (fd, _barrier) = pinned_unopened_fd();
         let mut shell = Shell::default();
         let redirects = [EvalRedirectV {
@@ -900,7 +924,10 @@ mod tests {
         let result = apply_redirects(&redirects, &mut shell);
 
         assert!(result.is_err(), "redirect to unopened fd {fd} must error");
-        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
+        )]
         let fd_i32 = fd as i32;
         assert!(
             !fd_is_open(fd_i32),

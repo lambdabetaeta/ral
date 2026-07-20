@@ -566,10 +566,7 @@ fn available_labels(available: &[ProviderId]) -> String {
 /// # Errors
 /// Returns `Err` if no provider is available, or if no available provider's
 /// label matches `name`.
-pub fn resolve_pinned_provider(
-    name: &str,
-    available: &[ProviderId],
-) -> Result<ProviderId, String> {
+pub fn resolve_pinned_provider(name: &str, available: &[ProviderId]) -> Result<ProviderId, String> {
     if let Some(id) = available.iter().find(|id| id.label() == name) {
         return Ok(id.clone());
     }

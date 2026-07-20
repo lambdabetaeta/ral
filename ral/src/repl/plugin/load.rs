@@ -59,8 +59,9 @@ pub(crate) fn load_plugin(
     // the script-context swap; the plugin policy adds only the fresh frame —
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
-    let value = shell
-        .in_fresh_scope(|shell| ral_core::builtins::modules::evaluate_source(shell, &source, &path))?;
+    let value = shell.in_fresh_scope(|shell| {
+        ral_core::builtins::modules::evaluate_source(shell, &source, &path)
+    })?;
     let module = instantiate(value, options, name_or_path, shell)?;
     check_is_manifest(&module, name_or_path)?;
 
@@ -77,7 +78,9 @@ pub(crate) fn load_plugin(
     // Commit the hooks and alias bindings.  Any partial failure past this
     // point rolls back the whole plugin namespace, so nothing dispatchable
     // survives a failed load.
-    if let Err(e) = register_plugin_hooks(&plugin, shell).and_then(|()| install_bindings(&bindings, shell)) {
+    if let Err(e) =
+        register_plugin_hooks(&plugin, shell).and_then(|()| install_bindings(&bindings, shell))
+    {
         shell.remove_plugin_hooks(&plugin.name);
         return Err(Break::Error(e));
     }
@@ -137,7 +140,10 @@ fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(),
                 origin,
             )
             .map_err(|e| {
-                load_err(format!("plugin '{}': hook '{}': {e}", plugin.name, hook_event))
+                load_err(format!(
+                    "plugin '{}': hook '{}': {e}",
+                    plugin.name, hook_event
+                ))
             })?;
     }
     for kb in &plugin.keybindings {

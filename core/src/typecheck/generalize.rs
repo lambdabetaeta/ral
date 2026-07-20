@@ -202,7 +202,10 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     // construction here (a residual is drawn from `free_ty`'s output, which only
     // reports unbound canonical roots); the assertion makes the contract
     // explicit and guards a future change that derives residuals otherwise.
-    #[allow(clippy::debug_assert_with_mut_call, reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless")]
+    #[allow(
+        clippy::debug_assert_with_mut_call,
+        reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
+    )]
     {
         debug_assert!(
             residuals_are_live_roots(u, &residuals),
@@ -315,7 +318,10 @@ pub fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
 /// `alias_arm_scheme`, `binding_value_scheme`) must satisfy this closure
 /// invariant; `msg` names the site so a violation trips there rather than
 /// corrupting a later inference run.
-#[allow(clippy::debug_assert_with_mut_call, reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless")]
+#[allow(
+    clippy::debug_assert_with_mut_call,
+    reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
+)]
 pub fn debug_assert_scheme_closed(u: &mut Unifier, scheme: &Scheme, msg: &str) {
     debug_assert!(scheme_is_closed(u, scheme), "{msg}");
 }

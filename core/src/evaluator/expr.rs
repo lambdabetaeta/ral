@@ -162,8 +162,7 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value,
     require_numeric(l, shell)?;
     require_numeric(r, shell)?;
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        let overflow =
-            || shell.err(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
+        let overflow = || shell.err(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
         Ok(match op {
             ArithOp::Add => a.checked_add(*b).map(Value::Int).ok_or_else(overflow)?,
             ArithOp::Sub => a.checked_sub(*b).map(Value::Int).ok_or_else(overflow)?,

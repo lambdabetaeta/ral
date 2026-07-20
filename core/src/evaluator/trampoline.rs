@@ -7,7 +7,9 @@
 use super::comp::eval_comp;
 use super::pattern::assign_pattern;
 use crate::ir::IrPattern;
-use crate::types::{Env, Value, Shell, Raw, ThunkBody, Settled, Break, Error, Tail, Control, TailCall};
+use crate::types::{
+    Break, Control, Env, Error, Raw, Settled, Shell, Tail, TailCall, ThunkBody, Value,
+};
 
 /// One lambda call frame: evaluate the body *in place* on the caller's
 /// shell via [`Shell::with_thunk_body`] — the body shares the caller's

@@ -169,7 +169,11 @@ fn build_seccomp_filter() -> Vec<u8> {
     // For each clause: load nr; if nr == k, fall through to KILL; else skip.
     prog.insn(LD_W_ABS, 0, 0, NR);
     for &nr in denied {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "nr is a libc::SYS_* syscall number: small and non-negative, always within u32")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "nr is a libc::SYS_* syscall number: small and non-negative, always within u32"
+        )]
         prog.insn(JEQ_K, 0, 1, nr as u32); // jf=1: skip past the kill
         prog.insn(RET_K, 0, 0, KILL);
     }
@@ -210,7 +214,10 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
     unsafe {
         cmd.pre_exec(move || {
             let name = c"seccomp".as_ptr();
-            #[allow(clippy::cast_possible_truncation, reason = "memfd_create returns a small fd or -1, both within c_int")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "memfd_create returns a small fd or -1, both within c_int"
+            )]
             let fd = libc::syscall(libc::SYS_memfd_create, name, 0u32) as libc::c_int;
             if fd < 0 {
                 return Err(std::io::Error::last_os_error());
@@ -233,7 +240,10 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
                         "seccomp memfd write returned 0",
                     ));
                 }
-                #[allow(clippy::cast_sign_loss, reason = "n > 0 is guaranteed: the n < 0 and n == 0 branches return above")]
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "n > 0 is guaranteed: the n < 0 and n == 0 branches return above"
+                )]
                 {
                     written += n as usize;
                 }
@@ -278,7 +288,10 @@ pub(super) fn respawn_under_bwrap(
     let status = child
         .wait()
         .map_err(|e| format!("ral: failed to enter sandbox: {e}"))?;
-    #[allow(clippy::cast_sign_loss, reason = "clamp(0, 255) bounds the value to the u8 range before the cast")]
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "clamp(0, 255) bounds the value to the u8 range before the cast"
+    )]
     Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
 }
 

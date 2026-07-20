@@ -276,7 +276,10 @@ impl Trigger {
                 let now = Zoned::now();
                 let next = schedule.next_after(&now)?;
                 let secs = next.timestamp().duration_since(now.timestamp()).as_secs();
-                #[allow(clippy::cast_sign_loss, reason="max(0) floors the delay to a non-negative seconds count")]
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "max(0) floors the delay to a non-negative seconds count"
+                )]
                 let secs = secs.max(0) as u64;
                 Some(Duration::from_secs(secs))
             }
@@ -475,7 +478,10 @@ impl ScheduleRegistry {
             },
         );
         drop(g);
-        Ok(ScheduleReceipt { label, next_in: delay })
+        Ok(ScheduleReceipt {
+            label,
+            next_in: delay,
+        })
     }
 
     /// Remove one schedule by its label; `true` if a live schedule bore it.
@@ -486,7 +492,11 @@ impl ScheduleRegistry {
     /// than an error.
     pub fn unschedule(&self, label: &str) -> bool {
         let mut g = self.lock();
-        let Some(id) = g.entries.iter().find_map(|(id, e)| (e.label == label).then_some(*id)) else {
+        let Some(id) = g
+            .entries
+            .iter()
+            .find_map(|(id, e)| (e.label == label).then_some(*id))
+        else {
             return false;
         };
         g.entries.remove(&id).is_some()
@@ -586,7 +596,9 @@ impl ScheduleRegistry {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -732,7 +744,10 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].label, "nightly");
         assert_eq!(live[0].trigger, "0 3 * * *");
-        assert!(reg.unschedule("nightly"), "an existing schedule is removable");
+        assert!(
+            reg.unschedule("nightly"),
+            "an existing schedule is removable"
+        );
         assert!(reg.list().is_empty());
         assert!(!reg.unschedule("nightly"), "a removed schedule is gone");
     }
@@ -758,9 +773,19 @@ mod tests {
                 &inbox.mailbox(),
             )
             .expect_err("a duplicate label must be refused");
-        assert!(err.contains("nightly"), "must name the offending label, got: {err}");
-        assert!(err.contains("already borne"), "must name the rule, got: {err}");
-        assert_eq!(reg.list().len(), 1, "the duplicate attempt registers nothing");
+        assert!(
+            err.contains("nightly"),
+            "must name the offending label, got: {err}"
+        );
+        assert!(
+            err.contains("already borne"),
+            "must name the rule, got: {err}"
+        );
+        assert_eq!(
+            reg.list().len(),
+            1,
+            "the duplicate attempt registers nothing"
+        );
     }
 
     /// A user-supplied label shaped like a minted default (`sched-<digits>`)
@@ -778,9 +803,15 @@ mod tests {
                 &inbox.mailbox(),
             )
             .expect_err("the reserved sched-<n> shape must be refused");
-        assert!(err.contains("sched-3"), "must name the offending label, got: {err}");
+        assert!(
+            err.contains("sched-3"),
+            "must name the offending label, got: {err}"
+        );
         assert!(err.contains("reserved"), "must name the rule, got: {err}");
-        assert!(reg.list().is_empty(), "the refused attempt registers nothing");
+        assert!(
+            reg.list().is_empty(),
+            "the refused attempt registers nothing"
+        );
     }
 
     /// `unschedule` resolves by label; a label no live schedule bears is a
@@ -796,10 +827,16 @@ mod tests {
             &inbox.mailbox(),
         )
         .unwrap();
-        assert!(!reg.unschedule("no-such-label"), "an unborne label is a no-op");
+        assert!(
+            !reg.unschedule("no-such-label"),
+            "an unborne label is a no-op"
+        );
         assert!(reg.unschedule("nightly"), "an existing label is removable");
         assert!(reg.list().is_empty());
-        assert!(!reg.unschedule("nightly"), "a removed label is a no-op, not an error");
+        assert!(
+            !reg.unschedule("nightly"),
+            "a removed label is a no-op, not an error"
+        );
     }
 
     #[test]

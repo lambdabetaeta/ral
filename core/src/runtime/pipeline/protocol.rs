@@ -48,8 +48,8 @@ use unix as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub(super) use common::{FrameReader, HelperProtocol, pipe_error};
 use common::PendingFrame;
+pub(super) use common::{FrameReader, HelperProtocol, pipe_error};
 
 #[cfg(unix)]
 pub(super) use unix::{Channel as ValueChannel, pair as create_value_pair, pass};

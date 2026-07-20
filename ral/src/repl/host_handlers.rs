@@ -6,9 +6,7 @@
 
 use ral_core::diagnostic;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
-use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, HandleState, Resident, WorkerEntry,
-};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, HandleState, Resident, WorkerEntry};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};

@@ -126,7 +126,11 @@ pub(super) const DEFAULT_EDITOR: &str = "vi";
 /// else `default`.  Pulled out of [`editor_command`] as a pure function of
 /// its inputs so the fallback logic is unit-testable without touching the
 /// process environment.
-pub(super) fn pick_editor_spec(visual: Option<&str>, editor: Option<&str>, default: &str) -> String {
+pub(super) fn pick_editor_spec(
+    visual: Option<&str>,
+    editor: Option<&str>,
+    default: &str,
+) -> String {
     visual
         .filter(|s| !s.trim().is_empty())
         .or_else(|| editor.filter(|s| !s.trim().is_empty()))

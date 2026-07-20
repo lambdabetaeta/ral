@@ -41,12 +41,18 @@
 //! pre-pass to detect mutually recursive binding groups, then elaborates
 //! each group.
 
-use crate::ir::{IrPattern, CommandName, Args, RedirectV, Comp, CommandWord, CompKind, Exec, Val, ValListElem, ScopeOp, ValMapEntry, ValRedirectTarget};
+use crate::ir::{
+    Args, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, RedirectV, ScopeOp, Val,
+    ValListElem, ValMapEntry, ValRedirectTarget,
+};
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::syntax::ast::{Pattern, MapPatternEntry, Stmt, Ast, Word, Head, ScopeAst, ListElem, MapEntry, IfBranch, Redirect, RedirectTarget, Expr};
+use crate::syntax::ast::{
+    Ast, Expr, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, Redirect,
+    RedirectTarget, ScopeAst, Stmt, Word,
+};
 use crate::syntax::group::{StmtGroup, group_stmts};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -500,8 +506,7 @@ impl Elaborator {
                         false,
                     ),
                     Head::Value(_) => {
-                        let head_comp =
-                            value_head_comp.expect("computed above for Head::Value");
+                        let head_comp = value_head_comp.expect("computed above for Head::Value");
                         self.apply_head(head_comp, arg_vals, redirect_vals)
                     }
                 }

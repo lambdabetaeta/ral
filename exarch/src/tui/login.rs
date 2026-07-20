@@ -187,7 +187,12 @@ impl LoginOverlay {
     fn body_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
             self.method_line(LoginMethod::Browser, "browser", "open a browser tab", true),
-            self.method_line(LoginMethod::Device, "device", "type a code elsewhere", false),
+            self.method_line(
+                LoginMethod::Device,
+                "device",
+                "type a code elsewhere",
+                false,
+            ),
             Line::default(),
             self.phase_line(),
         ];
@@ -213,7 +218,11 @@ impl LoginOverlay {
         } else {
             dim
         };
-        let field = if show_field_label { "method " } else { "       " };
+        let field = if show_field_label {
+            "method "
+        } else {
+            "       "
+        };
         let marker = if active { "▸" } else { " " };
         Line::from(vec![
             Span::styled(format!("  {field} {marker} "), dim),
@@ -228,7 +237,10 @@ impl LoginOverlay {
     fn phase_line(&self) -> Line<'static> {
         let (start, sign_in, exchange) = self.stations();
         Line::from(vec![
-            Span::styled("  step    ", Style::default().fg(SLATE).add_modifier(Modifier::DIM)),
+            Span::styled(
+                "  step    ",
+                Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+            ),
             start.span(),
             Span::styled(" start   ", start.style()),
             sign_in.span(),
@@ -266,15 +278,23 @@ impl LoginOverlay {
             }
             Mode::Running(Some(LoginPhase::AwaitingBrowser { url, opened: false })) => {
                 let mut lines = vec![dim_line("  open this URL to sign in:")];
-                lines.extend(wrap(url, Style::default().fg(SLATE).add_modifier(Modifier::DIM)));
+                lines.extend(wrap(
+                    url,
+                    Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+                ));
                 lines
             }
             Mode::Running(Some(LoginPhase::AwaitingDevice { user_code, url })) => vec![
                 Line::from(vec![
-                    Span::styled("  code    ", Style::default().fg(SLATE).add_modifier(Modifier::DIM)),
+                    Span::styled(
+                        "  code    ",
+                        Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+                    ),
                     Span::styled(
                         user_code.clone(),
-                        Style::default().fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(BANNER_GOLD)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         "   expires in 15 minutes",
@@ -426,7 +446,11 @@ fn apply_login(ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
     ctx.catalog.source_mut().add_credential(id, cred);
     ctx.emit.emit(Kind::SystemNote(format!(
         "[{} ChatGPT account {} — run /model to use it]",
-        if replaced { "Updated the login for" } else { "Signed in to" },
+        if replaced {
+            "Updated the login for"
+        } else {
+            "Signed in to"
+        },
         token.label(),
     )));
 }

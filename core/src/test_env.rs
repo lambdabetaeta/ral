@@ -17,7 +17,9 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Acquire the shared environment lock.  Hold the returned guard for the
 /// duration of any `set_var` / `remove_var` and the reads that depend on it.
 pub(crate) fn env_guard() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Run `f` with `key` set to `val` (or removed when `None`), restoring its

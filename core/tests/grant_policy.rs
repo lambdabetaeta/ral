@@ -498,7 +498,12 @@ fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
     shell
         .with_capabilities(outer, |sh| {
             sh.with_capabilities(inner, |sh| {
-                sh.check_exec_call("/usr/bin/git", &["/usr/bin/git", "git"], &["/usr/bin/git"], &[])
+                sh.check_exec_call(
+                    "/usr/bin/git",
+                    &["/usr/bin/git", "git"],
+                    &["/usr/bin/git"],
+                    &[],
+                )
             })
         })
         .expect("live gate must admit /usr/bin/git");

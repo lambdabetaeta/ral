@@ -29,7 +29,11 @@ use crate::evaluator::comp::{eval_comp, with_scope};
 use crate::evaluator::scope::error_record;
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
-use crate::types::{SurfaceBuffer, DeferredSink, EventSink, Value, Shell, Raw, Env, LeaseClass, Settled, HandleInner, CapReached, sig, HandleState, WorkerId, WorkerEntry, WorkerLease, WorkerRegistry, ReapCause, Tail, Break, Error, CompletedHandle, Escape};
+use crate::types::{
+    Break, CapReached, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink, HandleInner,
+    HandleState, LeaseClass, Raw, ReapCause, Settled, Shell, SurfaceBuffer, Tail, Value,
+    WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
+};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
@@ -85,18 +89,12 @@ fn done_event(cmd: &str, outcome: &Value) -> FOValue {
     // (`` `ok `` over `Unit`, `` `err `` over `break_record`'s all-scalar
     // map, `` `panic `` over a `String`) — never the block's actual return
     // value, so it is provably first-order.
-    let outcome = FOValue::try_from(outcome)
-        .expect("spawn outcome tag is statically first-order");
+    let outcome = FOValue::try_from(outcome).expect("spawn outcome tag is statically first-order");
     FOValue::Variant {
         label: "done".into(),
         payload: Some(Box::new(FOValue::Map {
             entries: vec![
-                (
-                    "cmd".into(),
-                    FOValue::String {
-                        value: cmd.into(),
-                    },
-                ),
+                ("cmd".into(), FOValue::String { value: cmd.into() }),
                 ("outcome".into(), outcome),
             ],
         })),
@@ -501,11 +499,7 @@ pub(crate) fn builtin_spawn(args: &[Value], shell: &Shell) -> Settled<Value> {
 /// the thread's natural lifecycle; and the OS sandbox (if any) wraps
 /// the worker by virtue of wrapping the parent process, so no confined
 /// re-exec is attempted from a worker thread.
-fn spawn_buffered(
-    body: Arc<crate::ir::Comp>,
-    captured: Arc<Env>,
-    shell: &Shell,
-) -> Settled<Value> {
+fn spawn_buffered(body: Arc<crate::ir::Comp>, captured: Arc<Env>, shell: &Shell) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
         shell,
@@ -2071,7 +2065,10 @@ mod tests {
 
         // The deferred sink wins the latch first, recording one batch.
         wait_for_batch(&batches);
-        assert!(*handle.joined.lock().unwrap(), "the deferred flush set `joined");
+        assert!(
+            *handle.joined.lock().unwrap(),
+            "the deferred flush set `joined"
+        );
 
         // A later `await` reads the result but finds the latch set, so it
         // replays no card into the live turn.

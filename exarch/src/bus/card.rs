@@ -229,7 +229,10 @@ impl Card {
 /// magnitude, shared by [`Card::magnitude`] and the renderer's size-bar.
 /// Context rows are unchanged, so they do not count.
 pub fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
-    #[allow(clippy::cast_possible_truncation, reason="changed-line count cannot approach u32::MAX")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "changed-line count cannot approach u32::MAX"
+    )]
     let n = hunks
         .iter()
         .flat_map(|h| h.rows.iter())
@@ -321,7 +324,10 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     let mut hunks = Vec::new();
     for group in diff.grouped_ops(2) {
         let first = group.first().expect("grouped_ops yields non-empty groups");
-        #[allow(clippy::cast_possible_truncation, reason="diff line index cannot approach u32::MAX")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "diff line index cannot approach u32::MAX"
+        )]
         let start = first.old_range().start as u32 + 1;
         let mut rows = Vec::new();
         for op in &group {
@@ -563,7 +569,11 @@ pub fn io_card(event: &IoEvent) -> Card {
             ..
         } => {
             if *outcome == WriteOutcome::Committed {
-                body.extend(write_preview(path, old_bytes.as_deref(), new_bytes.as_deref()));
+                body.extend(write_preview(
+                    path,
+                    old_bytes.as_deref(),
+                    new_bytes.as_deref(),
+                ));
             }
             write_spans(path, *outcome)
         }
@@ -897,7 +907,10 @@ pub enum Notice {
     /// boundary — one notice per boundary, however many names fell.
     /// `idle_calls` rides parallel to `names`, so the card can report the
     /// truthful minimum age across a multi-name prune.
-    Prune { names: Vec<String>, idle_calls: Vec<u64> },
+    Prune {
+        names: Vec<String>,
+        idle_calls: Vec<u64>,
+    },
     /// A session-scope binding install met the large-binding soft
     /// threshold — a residency nudge, never an eviction.
     LargeBinding { name: String, bytes: u64 },
@@ -937,7 +950,10 @@ pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
             },
         },
         "large-binding" => {
-            #[allow(clippy::cast_sign_loss, reason="max(0) floors to a non-negative byte size")]
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "max(0) floors to a non-negative byte size"
+            )]
             let bytes = int_field(m, "bytes")?.max(0) as u64;
             Notice::LargeBinding {
                 name: str_field(m, "name")?,
@@ -1375,7 +1391,11 @@ fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
 fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     match m.get(field) {
         Some(RalValue::Int(n)) => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason="value pre-clamped to [0, u32::MAX]")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "value pre-clamped to [0, u32::MAX]"
+            )]
             let clamped = (*n).clamp(0, i64::from(u32::MAX)) as u32;
             Some(clamped)
         }

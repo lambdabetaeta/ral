@@ -89,7 +89,11 @@ impl Tabs {
     /// Currently focused tab.  Resolves a stale focus (a subagent that aged
     /// out of the tab bar) to the root.
     pub(super) fn focused(&self) -> AgentId {
-        if self.tabs.contains(&self.focus) { self.focus } else { self.root }
+        if self.tabs.contains(&self.focus) {
+            self.focus
+        } else {
+            self.root
+        }
     }
 
     /// Walk up the `parents` chain from a (dying) agent to the nearest still-
@@ -406,7 +410,11 @@ mod tests {
         demoted_set.insert(demoted, Duration::from_mins(10));
 
         tabs.focus_next(&demoted_set);
-        assert_eq!(tabs.focused(), promoted, "TAB skips straight past the demoted tab");
+        assert_eq!(
+            tabs.focused(),
+            promoted,
+            "TAB skips straight past the demoted tab"
+        );
 
         tabs.focus_next(&demoted_set);
         assert_eq!(

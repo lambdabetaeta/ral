@@ -229,9 +229,19 @@ pub(crate) fn run_batch(
         Err(Break::Error(e)) => {
             let single_command = ral_core::ir::is_single_command(&comp);
             if audit {
-                diagnostic::report_runtime_error(&mut std::io::sink(), shell.sources(), e, single_command)
+                diagnostic::report_runtime_error(
+                    &mut std::io::sink(),
+                    shell.sources(),
+                    e,
+                    single_command,
+                )
             } else {
-                diagnostic::report_runtime_error(&mut std::io::stderr(), shell.sources(), e, single_command)
+                diagnostic::report_runtime_error(
+                    &mut std::io::stderr(),
+                    shell.sources(),
+                    e,
+                    single_command,
+                )
             }
         }
         #[cfg(unix)]

@@ -108,8 +108,14 @@ fn surface_forwards_the_event_to_the_sink() {
     let FOValue::Map { entries } = payload else {
         panic!("expected a record payload, got {payload:?}");
     };
-    assert_eq!(fo_map_get(entries, "done"), Some(&FOValue::Int { value: 1 }));
-    assert_eq!(fo_map_get(entries, "total"), Some(&FOValue::Int { value: 3 }));
+    assert_eq!(
+        fo_map_get(entries, "done"),
+        Some(&FOValue::Int { value: 1 })
+    );
+    assert_eq!(
+        fo_map_get(entries, "total"),
+        Some(&FOValue::Int { value: 3 })
+    );
     assert_eq!(
         fo_map_get(entries, "label"),
         Some(&FOValue::String {

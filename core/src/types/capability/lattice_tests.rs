@@ -458,8 +458,16 @@ fn ipc_roundtrip_preserves_frozen_capabilities() {
 fn meet_fs_unions_denies_and_intersects_prefixes() {
     let m = witness_a().meet(witness_b());
     let fs = m.fs.unwrap();
-    assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp/work").as_str()));
-    assert!(fs.deny_paths.iter().any(|p| p == np("/tmp/secret").as_str()));
+    assert!(
+        fs.read_prefixes
+            .iter()
+            .any(|p| p == np("/tmp/work").as_str())
+    );
+    assert!(
+        fs.deny_paths
+            .iter()
+            .any(|p| p == np("/tmp/secret").as_str())
+    );
     assert!(
         fs.deny_paths
             .iter()
@@ -592,8 +600,16 @@ fn join_fs_unions_prefixes_and_denies() {
     let m = witness_a().join(witness_b());
     let fs = m.fs.unwrap();
     assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp").as_str()));
-    assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp/work").as_str()));
-    assert!(fs.deny_paths.iter().any(|p| p == np("/tmp/secret").as_str()));
+    assert!(
+        fs.read_prefixes
+            .iter()
+            .any(|p| p == np("/tmp/work").as_str())
+    );
+    assert!(
+        fs.deny_paths
+            .iter()
+            .any(|p| p == np("/tmp/secret").as_str())
+    );
     assert!(
         fs.deny_paths
             .iter()

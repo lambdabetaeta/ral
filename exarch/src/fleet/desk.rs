@@ -16,8 +16,8 @@
 //! `` `reply ``.
 
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
-use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
+use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
 use crate::shell_eval::{self, PinDigests};
 use ral_core::Value as RalValue;
@@ -132,10 +132,16 @@ fn payload_list(
     n: usize,
 ) -> Result<Vec<FOValue>, Error> {
     let Some(payload) = payload else {
-        return Err(Error::new(format!("`{class}` requires a payload {shape}"), 1));
+        return Err(Error::new(
+            format!("`{class}` requires a payload {shape}"),
+            1,
+        ));
     };
     let FOValue::List { items } = *payload else {
-        return Err(Error::new(format!("`{class}` payload must be a list {shape}"), 1));
+        return Err(Error::new(
+            format!("`{class}` payload must be a list {shape}"),
+            1,
+        ));
     };
     if items.len() != n {
         return Err(Error::new(
@@ -171,7 +177,10 @@ fn payload_string(v: FOValue, class: &str, field: &str) -> Result<String, Error>
 
 fn payload_tag(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
     match v {
-        FOValue::Variant { label, payload: None } => Ok(label),
+        FOValue::Variant {
+            label,
+            payload: None,
+        } => Ok(label),
         other => Err(Error::new(
             format!("`{class}`: `{field}` must be a bare variant tag, got {other:?}"),
             1,
@@ -186,12 +195,19 @@ fn payload_tag(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
 /// only line of defence.
 fn payload_trigger(v: FOValue, class: &str) -> Result<Trigger, Error> {
     match v {
-        FOValue::Variant { label, payload: Some(payload) } if label == "cron" => {
+        FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "cron" => {
             let expr = payload_string(*payload, class, "trigger")?;
-            let schedule = CronSchedule::parse(&expr).map_err(|e| Error::new(format!("`{class}`: {e}"), 1))?;
+            let schedule =
+                CronSchedule::parse(&expr).map_err(|e| Error::new(format!("`{class}`: {e}"), 1))?;
             Ok(Trigger::Cron { schedule, expr })
         }
-        FOValue::Variant { label, payload: Some(payload) } if label == "after" => {
+        FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "after" => {
             let dur = payload_string(*payload, class, "trigger")?;
             let d = parse_duration(&dur).map_err(|e| Error::new(format!("`{class}`: {e}"), 1))?;
             Ok(Trigger::After(d))
@@ -208,10 +224,14 @@ fn payload_trigger(v: FOValue, class: &str) -> Result<Trigger, Error> {
 /// [`ScheduleRegistry::schedule`] mints its `sched-{id}` default.
 fn payload_label(v: FOValue, class: &str) -> Result<Option<String>, Error> {
     match v {
-        FOValue::Variant { label, payload: Some(payload) } if label == "some" => {
-            Ok(Some(payload_string(*payload, class, "label")?))
-        }
-        FOValue::Variant { label, payload: None } if label == "none" => Ok(None),
+        FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "some" => Ok(Some(payload_string(*payload, class, "label")?)),
+        FOValue::Variant {
+            label,
+            payload: None,
+        } if label == "none" => Ok(None),
         other => Err(Error::new(
             format!("`{class}`: `label` must be `some <str>` or `none`, got {other:?}"),
             1,
@@ -270,7 +290,10 @@ impl ExarchDesk {
             "schedule-list" => self.schedule_list(),
             "unschedule" => self.unschedule(payload),
             "reply" => self.reply(payload),
-            other => Err(Error::new(format!("unrecognised enquiry class `{other}`"), 1)),
+            other => Err(Error::new(
+                format!("unrecognised enquiry class `{other}`"),
+                1,
+            )),
         }
     }
 
@@ -369,7 +392,9 @@ impl ExarchDesk {
             let mut child_log = parent_log
                 .fork(child_id, system_prompt.len())
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
-            let inherited = spec.inherit_context.then(|| parent_log.inherited_context_messages());
+            let inherited = spec
+                .inherit_context
+                .then(|| parent_log.inherited_context_messages());
             drop(parent_log);
             if let Some(messages) = inherited {
                 child_log
@@ -429,7 +454,12 @@ impl ExarchDesk {
                 payload: Some(Box::new(FOValue::Map {
                     entries: vec![
                         ("name".to_string(), FOValue::String { value: child.name }),
-                        ("log-dir".to_string(), FOValue::String { value: child.log_dir }),
+                        (
+                            "log-dir".to_string(),
+                            FOValue::String {
+                                value: child.log_dir,
+                            },
+                        ),
                     ],
                 })),
             }),
@@ -452,9 +482,15 @@ impl ExarchDesk {
             .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
         let session_id = payload_int(session, "agent-start", "session")?;
         if session_id < 0 {
-            return Err(Error::new("`agent-start`: `session` must be a non-negative Int", 1));
+            return Err(Error::new(
+                "`agent-start`: `session` must be a non-negative Int",
+                1,
+            ));
         }
-        #[allow(clippy::cast_sign_loss, reason = "session_id checked non-negative above")]
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "session_id checked non-negative above"
+        )]
         let session_id = session_id as u64;
         let kind = payload_tag(kind, "agent-start", "kind")?;
         let mnemon = match kind.as_str() {
@@ -701,8 +737,18 @@ impl ExarchDesk {
         match result {
             Ok(receipt) => Ok(FOValue::Map {
                 entries: vec![
-                    ("label".to_string(), FOValue::String { value: receipt.label }),
-                    ("next-s".to_string(), FOValue::Int { value: secs_to_i64(receipt.next_in) }),
+                    (
+                        "label".to_string(),
+                        FOValue::String {
+                            value: receipt.label,
+                        },
+                    ),
+                    (
+                        "next-s".to_string(),
+                        FOValue::Int {
+                            value: secs_to_i64(receipt.next_in),
+                        },
+                    ),
                 ],
             }),
             Err(_) => Err(Error::new(content, 1)),
@@ -730,7 +776,12 @@ impl ExarchDesk {
                     FOValue::Map {
                         entries: vec![
                             ("label".to_string(), FOValue::String { value: info.label }),
-                            ("trigger".to_string(), FOValue::String { value: info.trigger }),
+                            (
+                                "trigger".to_string(),
+                                FOValue::String {
+                                    value: info.trigger,
+                                },
+                            ),
                             ("next-s".to_string(), FOValue::Int { value: next_s }),
                             ("fires".to_string(), FOValue::Int { value: fires }),
                         ],
@@ -933,10 +984,13 @@ impl EnquiryDesk for DeskBinding {
 )]
 mod tests {
     use super::*;
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
-    use crate::bus::{BusReceiver, Inbox, channel};
     use crate::agent::event::AgentLog;
-    use crate::provider::{Provider, ProviderKind, scripted::{Reply, Script}};
+    use crate::bus::{BusReceiver, Inbox, channel};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
+    use crate::provider::{
+        Provider, ProviderKind,
+        scripted::{Reply, Script},
+    };
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Transport, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
@@ -952,16 +1006,18 @@ mod tests {
     fn fresh_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "exarch-desk-test-{}-{n}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("exarch-desk-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
     }
 
     fn scripted_provider() -> Arc<Provider> {
-        Arc::new(Provider::scripted("test-model", ProviderKind::Openai, Script::new()))
+        Arc::new(Provider::scripted(
+            "test-model",
+            ProviderKind::Openai,
+            Script::new(),
+        ))
     }
 
     /// The base capture every desk in this module builds on: a fresh
@@ -994,7 +1050,9 @@ mod tests {
     }
 
     fn desk() -> ExarchDesk {
-        ExarchDesk { services: base_services() }
+        ExarchDesk {
+            services: base_services(),
+        }
     }
 
     /// [`desk`] with the self-wakeup grant held, so the schedule family's
@@ -1200,7 +1258,10 @@ mod tests {
                 saw_unpin = true;
             }
         }
-        assert!(saw_unpin, "the drained surface frame must render onto the bus");
+        assert!(
+            saw_unpin,
+            "the drained surface frame must render onto the bus"
+        );
 
         // And the transport's queue is now empty: `enquire` consumed
         // everything pending, never leaving a straggler for a later drain
@@ -1220,7 +1281,10 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             ProviderKind::Openai,
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'hi from child'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "reply 'hi from child'",
+            )])),
         ));
         desk.services.provider.swap(provider);
 
@@ -1255,7 +1319,11 @@ mod tests {
             })
             .expect("a valid agent-start must succeed");
 
-        let FOValue::Variant { label, payload: Some(payload) } = answer else {
+        let FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } = answer
+        else {
             panic!("expected a `started` variant");
         };
         assert_eq!(label, "started");
@@ -1263,15 +1331,21 @@ mod tests {
             panic!("expected a record payload");
         };
         assert!(
-            entries.iter().any(|(k, v)| k == "name"
-                && matches!(v, FOValue::String { value } if value == "helper")),
+            entries
+                .iter()
+                .any(|(k, v)| k == "name"
+                    && matches!(v, FOValue::String { value } if value == "helper")),
             "the receipt must carry the child's name"
         );
         assert!(
             entries.iter().any(|(k, _)| k == "log-dir"),
             "the receipt must carry the child's log directory"
         );
-        assert_eq!(entries.len(), 2, "the receipt is exactly [name, log-dir] — no id");
+        assert_eq!(
+            entries.len(),
+            2,
+            "the receipt is exactly [name, log-dir] — no id"
+        );
 
         match wait_for_settle(&parent_inbox) {
             crate::bus::Turn::Agent(result) => {
@@ -1319,7 +1393,10 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             ProviderKind::Openai,
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'hi from child'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "reply 'hi from child'",
+            )])),
         ));
         desk.services.provider.swap(provider);
 
@@ -1354,7 +1431,11 @@ mod tests {
             })
             .expect("a valid agent-start must succeed");
 
-        let FOValue::Variant { payload: Some(payload), .. } = answer else {
+        let FOValue::Variant {
+            payload: Some(payload),
+            ..
+        } = answer
+        else {
             panic!("expected a `started` variant");
         };
         let FOValue::Map { entries } = *payload else {
@@ -1496,7 +1577,9 @@ mod tests {
                             label: "amnemon".into(),
                             payload: None,
                         },
-                        FOValue::String { value: "go again".into() },
+                        FOValue::String {
+                            value: "go again".into(),
+                        },
                         FOValue::String {
                             value: "helper".into(),
                         },
@@ -1720,7 +1803,9 @@ mod tests {
                 label: "message".into(),
                 payload: Some(Box::new(FOValue::List {
                     items: vec![
-                        FOValue::String { value: "sibling".into() },
+                        FOValue::String {
+                            value: "sibling".into(),
+                        },
                         FOValue::String { value: "hi".into() },
                     ],
                 })),
@@ -1737,7 +1822,9 @@ mod tests {
                     label: "message".into(),
                     payload: Some(Box::new(FOValue::List {
                         items: vec![
-                            FOValue::String { value: "grandchild".into() },
+                            FOValue::String {
+                                value: "grandchild".into()
+                            },
                             FOValue::String { value: "hi".into() },
                         ],
                     })),
@@ -1750,7 +1837,9 @@ mod tests {
             .handle(FOValue::Variant {
                 label: "agent-cancel".into(),
                 payload: Some(Box::new(FOValue::List {
-                    items: vec![FOValue::String { value: "parent".into() }],
+                    items: vec![FOValue::String {
+                        value: "parent".into(),
+                    }],
                 })),
             })
             .expect_err("cancelling an ancestor must be refused");
@@ -1764,7 +1853,9 @@ mod tests {
                 .handle(FOValue::Variant {
                     label: "agent-cancel".into(),
                     payload: Some(Box::new(FOValue::List {
-                        items: vec![FOValue::String { value: "grandchild".into() }],
+                        items: vec![FOValue::String {
+                            value: "grandchild".into()
+                        }],
                     })),
                 })
                 .is_ok(),
@@ -1832,7 +1923,9 @@ mod tests {
                             label: "none".into(),
                             payload: None,
                         },
-                        FOValue::String { value: "wake".into() },
+                        FOValue::String {
+                            value: "wake".into(),
+                        },
                     ],
                 })),
             })
@@ -1867,7 +1960,9 @@ mod tests {
             .handle(FOValue::Variant {
                 label: "unschedule".into(),
                 payload: Some(Box::new(FOValue::List {
-                    items: vec![FOValue::String { value: "sched-0".into() }],
+                    items: vec![FOValue::String {
+                        value: "sched-0".into(),
+                    }],
                 })),
             })
             .expect_err("unschedule must be refused without the grant");
@@ -1897,7 +1992,9 @@ mod tests {
                             label: "none".into(),
                             payload: None,
                         },
-                        FOValue::String { value: "wake".into() },
+                        FOValue::String {
+                            value: "wake".into(),
+                        },
                     ],
                 })),
             })
@@ -1905,11 +2002,16 @@ mod tests {
         let FOValue::Map { entries } = answer else {
             panic!("expected a receipt record");
         };
-        let Some(FOValue::String { value: label }) = entries.iter().find_map(|(k, v)| (k == "label").then_some(v))
+        let Some(FOValue::String { value: label }) = entries
+            .iter()
+            .find_map(|(k, v)| (k == "label").then_some(v))
         else {
             panic!("expected a `label` entry");
         };
-        assert!(label.starts_with("sched-"), "must be the minted default, got: {label}");
+        assert!(
+            label.starts_with("sched-"),
+            "must be the minted default, got: {label}"
+        );
         let listing = desk.services.schedules.list();
         assert_eq!(listing.len(), 1, "exactly one live schedule");
         assert_eq!(&listing[0].label, label);
@@ -1932,9 +2034,13 @@ mod tests {
                         },
                         FOValue::Variant {
                             label: "some".into(),
-                            payload: Some(Box::new(FOValue::String { value: "nightly".into() })),
+                            payload: Some(Box::new(FOValue::String {
+                                value: "nightly".into(),
+                            })),
                         },
-                        FOValue::String { value: "wake".into() },
+                        FOValue::String {
+                            value: "wake".into(),
+                        },
                     ],
                 })),
             })
@@ -1943,12 +2049,14 @@ mod tests {
             panic!("expected a receipt record");
         };
         assert!(
-            entries.iter().any(
-                |(k, v)| k == "label" && matches!(v, FOValue::String { value } if value == "nightly")
-            ),
+            entries.iter().any(|(k, v)| k == "label"
+                && matches!(v, FOValue::String { value } if value == "nightly")),
             "the receipt must carry the resolved label"
         );
-        assert!(entries.iter().any(|(k, _)| k == "next-s"), "the receipt must carry next-s");
+        assert!(
+            entries.iter().any(|(k, _)| k == "next-s"),
+            "the receipt must carry next-s"
+        );
 
         let listing = desk
             .handle(FOValue::Variant {
@@ -1964,23 +2072,26 @@ mod tests {
             panic!("expected a record");
         };
         assert!(
-            entries.iter().any(
-                |(k, v)| k == "label" && matches!(v, FOValue::String { value } if value == "nightly")
-            ),
+            entries.iter().any(|(k, v)| k == "label"
+                && matches!(v, FOValue::String { value } if value == "nightly")),
             "the listing must carry the label given at schedule time"
         );
         assert!(
-            entries.iter().any(
-                |(k, v)| k == "trigger" && matches!(v, FOValue::String { value } if value == "after 2h")
-            ),
+            entries.iter().any(|(k, v)| k == "trigger"
+                && matches!(v, FOValue::String { value } if value == "after 2h")),
             "the listing must carry the trigger's description"
         );
-        assert!(!entries.iter().any(|(k, _)| k == "id"), "the listing carries no id");
+        assert!(
+            !entries.iter().any(|(k, _)| k == "id"),
+            "the listing carries no id"
+        );
 
         desk.handle(FOValue::Variant {
             label: "unschedule".into(),
             payload: Some(Box::new(FOValue::List {
-                items: vec![FOValue::String { value: "nightly".into() }],
+                items: vec![FOValue::String {
+                    value: "nightly".into(),
+                }],
             })),
         })
         .expect("unschedule must succeed");
@@ -1994,7 +2105,10 @@ mod tests {
         let FOValue::List { items } = listing else {
             panic!("expected a List");
         };
-        assert!(items.is_empty(), "the schedule must be gone after unschedule");
+        assert!(
+            items.is_empty(),
+            "the schedule must be gone after unschedule"
+        );
     }
 
     /// The desk half of the duplicate-label refusal: a live schedule's own
@@ -2003,20 +2117,22 @@ mod tests {
     #[test]
     fn schedule_at_the_desk_refuses_a_duplicate_label() {
         let desk = granted_desk();
-        let spec = |label: &str| {
-            FOValue::List {
-                items: vec![
-                    FOValue::Variant {
-                        label: "after".into(),
-                        payload: Some(Box::new(FOValue::String { value: "1s".into() })),
-                    },
-                    FOValue::Variant {
-                        label: "some".into(),
-                        payload: Some(Box::new(FOValue::String { value: label.into() })),
-                    },
-                    FOValue::String { value: "wake".into() },
-                ],
-            }
+        let spec = |label: &str| FOValue::List {
+            items: vec![
+                FOValue::Variant {
+                    label: "after".into(),
+                    payload: Some(Box::new(FOValue::String { value: "1s".into() })),
+                },
+                FOValue::Variant {
+                    label: "some".into(),
+                    payload: Some(Box::new(FOValue::String {
+                        value: label.into(),
+                    })),
+                },
+                FOValue::String {
+                    value: "wake".into(),
+                },
+            ],
         };
         desk.handle(FOValue::Variant {
             label: "schedule".into(),
@@ -2030,7 +2146,11 @@ mod tests {
             })
             .expect_err("a duplicate label must be refused");
         assert!(err.message.contains("nightly"), "got: {}", err.message);
-        assert_eq!(desk.services.schedules.list().len(), 1, "the duplicate registers nothing");
+        assert_eq!(
+            desk.services.schedules.list().len(),
+            1,
+            "the duplicate registers nothing"
+        );
     }
 
     // ── `reply` ───────────────────────────────────────────────────────────
@@ -2053,7 +2173,8 @@ mod tests {
             })
             .expect_err("a non-returning agent's reply must be refused");
         assert!(
-            err.message.contains("you converse with the user; you do not return"),
+            err.message
+                .contains("you converse with the user; you do not return"),
             "got: {}",
             err.message
         );
@@ -2083,18 +2204,28 @@ mod tests {
 
         assert_eq!(
             d.services.reply.take(),
-            Some(FOValue::String { value: "second".into() }),
+            Some(FOValue::String {
+                value: "second".into()
+            }),
             "the last staged reply wins"
         );
 
         let mut saw_chrome = false;
         while let Ok(event) = rx.try_recv() {
-            if let Kind::HarnessCall { verb: "reply", summary, .. } = event.kind {
+            if let Kind::HarnessCall {
+                verb: "reply",
+                summary,
+                ..
+            } = event.kind
+            {
                 assert_eq!(summary.as_deref(), Some("Replied to parent."));
                 saw_chrome = true;
             }
         }
-        assert!(saw_chrome, "each reply must emit the parent-facing chrome line");
+        assert!(
+            saw_chrome,
+            "each reply must emit the parent-facing chrome line"
+        );
     }
 
     // ── P3: engaged-child lifecycle, desk-integration scale ────────────────
@@ -2149,15 +2280,16 @@ mod tests {
                 .as_ref()
                 .map(crate::agent::render_reply)
                 .unwrap_or_default();
-            let _ = parent_mailbox.push(crate::bus::InboxMsg::AgentResult(crate::bus::AgentResult {
-                id,
-                name,
-                outcome,
-                text,
-                log_dir,
-                elapsed: Duration::default(),
-                generation,
-            }));
+            let _ =
+                parent_mailbox.push(crate::bus::InboxMsg::AgentResult(crate::bus::AgentResult {
+                    id,
+                    name,
+                    outcome,
+                    text,
+                    log_dir,
+                    elapsed: Duration::default(),
+                    generation,
+                }));
             registry.settle(id, generation);
         })
     }
@@ -2234,7 +2366,10 @@ mod tests {
             registry.steer(child_id, "first message".into()),
             "the freshly registered, parked child accepts a steer"
         );
-        assert!(registry.engaged(child_id), "steer renews the exchange clock");
+        assert!(
+            registry.engaged(child_id),
+            "steer renews the exchange clock"
+        );
         assert!(
             eventually_logged(
                 &log_dir.join("events.json"),

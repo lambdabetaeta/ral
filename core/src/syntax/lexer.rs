@@ -491,11 +491,7 @@ impl Lexer {
     /// string and a `!{…}` inside it; both are still open").  Other
     /// failures (an invalid escape, "expected identifier after `$(`")
     /// pass through unchanged so the user still sees the precise spot.
-    fn rewrap_inner_into_string(
-        outer_span: Span,
-        form: StringForm,
-        inner: LexError,
-    ) -> LexError {
+    fn rewrap_inner_into_string(outer_span: Span, form: StringForm, inner: LexError) -> LexError {
         if inner.kind.is_incomplete() {
             Self::err_unterminated_string(outer_span, form, Some(Box::new(inner.kind)))
         } else {
@@ -1115,7 +1111,10 @@ impl Lexer {
                 ));
             }
             None => {
-                return Err(Self::error(span!(), "unterminated double-quoted string after `\\`"));
+                return Err(Self::error(
+                    span!(),
+                    "unterminated double-quoted string after `\\`",
+                ));
             }
         }
         Ok(())
@@ -1191,15 +1190,19 @@ impl Lexer {
                 // the latter belongs to UnclosedDeref so an enclosing
                 // double-quoted string can re-anchor it.
                 if self.peek().is_none() {
-                    return Err(
-                        Self::typed_error(span, LexErrorKind::UnclosedDeref { opened: span })
-                    );
+                    return Err(Self::typed_error(
+                        span,
+                        LexErrorKind::UnclosedDeref { opened: span },
+                    ));
                 }
                 if name.is_empty() {
                     return Err(Self::error(span, "expected identifier after '$('"));
                 }
                 if self.peek() != Some(')') {
-                    return Err(Self::error(span, "expected ')' to close '$(...)' dereference"));
+                    return Err(Self::error(
+                        span,
+                        "expected ')' to close '$(...)' dereference",
+                    ));
                 }
                 self.bump();
                 Ok(Some(StringPart::Variable(name)))
@@ -1274,7 +1277,10 @@ impl Lexer {
         // rather than overflowing the call stack.  Real programs sit
         // well below the cap.
         if self.delim_stack.len() >= crate::syntax::NESTING_DEPTH_LIMIT {
-            return Err(Self::error(opener, crate::syntax::nesting_too_deep_message()));
+            return Err(Self::error(
+                opener,
+                crate::syntax::nesting_too_deep_message(),
+            ));
         }
         // The caller already consumed the opener without going through
         // `open_delim`, so we mirror its delim_stack push here.  On a

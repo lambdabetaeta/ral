@@ -16,8 +16,8 @@
 //! [`Agent::nudges`]: crate::agent::Agent
 
 use crate::agent::TurnOutcome;
-use crate::bus::{Emitter, Kind};
 use crate::agent::event::AgentLog;
+use crate::bus::{Emitter, Kind};
 use crate::provider::ProviderError;
 
 /// Outer-attempt budget per user turn.  Independent of the provider's
@@ -582,7 +582,9 @@ mod tests {
         };
         let msg = reg
             .react(
-                &Ok(TurnOutcome::Replied(FOValue::String { value: "done".into() })),
+                &Ok(TurnOutcome::Replied(FOValue::String {
+                    value: "done".into(),
+                })),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -607,7 +609,9 @@ mod tests {
         };
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(FOValue::String { value: "first".into() })),
+                &Ok(TurnOutcome::Replied(FOValue::String {
+                    value: "first".into()
+                })),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -639,7 +643,9 @@ mod tests {
         let mut log = fresh_log("verify-peer");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(FOValue::String { value: "findings".into() })),
+                &Ok(TurnOutcome::Replied(FOValue::String {
+                    value: "findings".into()
+                })),
                 &NudgeCtx {
                     must_reply: true,
                     is_headless_root: false,

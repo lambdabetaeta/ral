@@ -344,8 +344,10 @@ pub(super) fn route_submit(
         // the same reason `/close` is.
         Some((cmd, arg)) if cmd.name == "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
         Some((cmd, _)) if focused != root => {
-            tui.app
-                .push_error(focused, &format!("{} is not available on this tab", cmd.name));
+            tui.app.push_error(
+                focused,
+                &format!("{} is not available on this tab", cmd.name),
+            );
         }
         Some((cmd, arg)) => match cmd.name {
             "/help" => cmd_help(&mut tui.app),

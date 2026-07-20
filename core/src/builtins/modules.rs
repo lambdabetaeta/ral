@@ -25,7 +25,7 @@ use std::path::Path;
 
 use crate::ir::Comp;
 use crate::source::{FileId, Source};
-use crate::types::{Shell, Settled, Value, sig, Break};
+use crate::types::{Break, Settled, Shell, Value, sig};
 
 use super::util::arg0_str;
 

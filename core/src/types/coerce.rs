@@ -7,7 +7,7 @@
 //! consumer reach them through `use crate::types::*` without either layer
 //! importing the other's helper module.
 
-use super::{Break, Error, Value, Settled, Map, List};
+use super::{Break, Error, List, Map, Settled, Value};
 
 pub fn sig(message: impl Into<String>) -> Break {
     Break::Error(Error::new(message, 1))
@@ -46,6 +46,9 @@ pub fn as_map(val: &Value, ctx: &str) -> Settled<Map> {
 pub fn as_list(val: &Value, ctx: &str) -> Settled<List> {
     match val {
         Value::List(items) => Ok(items.clone()),
-        _ => Err(sig(format!("{ctx} expects a List, got {}", val.type_name()))),
+        _ => Err(sig(format!(
+            "{ctx} expects a List, got {}",
+            val.type_name()
+        ))),
     }
 }

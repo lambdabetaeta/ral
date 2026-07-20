@@ -168,13 +168,16 @@ impl KeyRouter {
         let entries = plugins
             .iter()
             .flat_map(|p| {
-                p.keybindings.iter().enumerate().map(|(bi, kb)| RouterEntry {
-                    plugin: p.name.clone(),
-                    binding_idx: bi,
-                    key: kb.key.clone(),
-                    chord: kb.chord,
-                    guard: kb.guard.clone(),
-                })
+                p.keybindings
+                    .iter()
+                    .enumerate()
+                    .map(|(bi, kb)| RouterEntry {
+                        plugin: p.name.clone(),
+                        binding_idx: bi,
+                        key: kb.key.clone(),
+                        chord: kb.chord,
+                        guard: kb.guard.clone(),
+                    })
             })
             .collect();
         Self { entries }
@@ -399,10 +402,8 @@ mod tests {
             source: std::sync::Arc::from(""),
             buffer_change_health: HookHealth::default(),
         };
-        let router = KeyRouter::build(&[
-            plugin("p", &["ctrl-t", "ctrl-r"]),
-            plugin("q", &["alt-c"]),
-        ]);
+        let router =
+            KeyRouter::build(&[plugin("p", &["ctrl-t", "ctrl-r"]), plugin("q", &["alt-c"])]);
         let order: Vec<(&str, usize, &str)> = router
             .entries
             .iter()

@@ -233,9 +233,7 @@ impl Parser {
     }
 
     fn peek(&self) -> &Token {
-        self.tokens
-            .get(self.pos)
-            .map_or(&Token::Eof, |(t, _)| t)
+        self.tokens.get(self.pos).map_or(&Token::Eof, |(t, _)| t)
     }
 
     /// Span of the current token, or — once the cursor has run past the
@@ -250,10 +248,7 @@ impl Parser {
     }
 
     fn advance(&mut self) -> &Token {
-        let tok = self
-            .tokens
-            .get(self.pos)
-            .map_or(&Token::Eof, |(t, _)| t);
+        let tok = self.tokens.get(self.pos).map_or(&Token::Eof, |(t, _)| t);
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -1049,8 +1044,10 @@ impl Parser {
                         "`<<` always feeds stdin — drop the file-descriptor prefix",
                     ));
                 }
-                let default_fd =
-                    u32::from(!matches!(mode, RedirectMode::Read | RedirectMode::HereString));
+                let default_fd = u32::from(!matches!(
+                    mode,
+                    RedirectMode::Read | RedirectMode::HereString
+                ));
                 let target = if let Some(tfd) = target_fd {
                     RedirectTarget::Fd(tfd)
                 } else {
@@ -1059,12 +1056,10 @@ impl Parser {
                         && let Ast::Word(w) = &word
                     {
                         let message: String = match w {
-                            Word::Plain(_) => {
-                                "ral has no heredocs: `<<` feeds a string to \
+                            Word::Plain(_) => "ral has no heredocs: `<<` feeds a string to \
                                  stdin. Use a raw string: `cmd << #' ... '#`, \
                                  which may use newlines"
-                                    .into()
-                            }
+                                .into(),
                             Word::Slash(_) | Word::Tilde(_) => {
                                 "`<<` feeds a string to stdin, not a file — \
                                  to read a file into stdin, use `< path`"
@@ -2811,8 +2806,7 @@ mod tests {
         for src in ["cat <<EOF", "cat << EOF"] {
             let err = parse(src).expect_err("bare word after `<<` must not parse");
             assert!(
-                err.message.contains("ral has no heredocs")
-                    && err.message.contains("#' ... '#"),
+                err.message.contains("ral has no heredocs") && err.message.contains("#' ... '#"),
                 "for {src:?} got: {}",
                 err.message
             );
@@ -2824,11 +2818,7 @@ mod tests {
     #[test]
     fn herestring_path_word_is_rejected() {
         let err = parse("cat << ./body.txt").expect_err("path after `<<` must not parse");
-        assert!(
-            err.message.contains("use `< path`"),
-            "got: {}",
-            err.message
-        );
+        assert!(err.message.contains("use `< path`"), "got: {}", err.message);
     }
 
     /// `<<` always feeds stdin: fd 0 may be spelled explicitly, anything

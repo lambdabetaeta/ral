@@ -109,12 +109,9 @@ impl PromptEditor {
         let row = self.state.cursor.row;
         let col = self.state.cursor.col;
         let prior: usize = (0..row)
-            .map(|r| {
-                row_to_string(&self.state.lines, r).map_or(0, |s| s.len() + 1)
-            })
+            .map(|r| row_to_string(&self.state.lines, r).map_or(0, |s| s.len() + 1))
             .sum();
-        let byte_col =
-            row_to_string(&self.state.lines, row).map_or(0, |s| char_to_byte(&s, col));
+        let byte_col = row_to_string(&self.state.lines, row).map_or(0, |s| char_to_byte(&s, col));
         prior + byte_col
     }
 
@@ -352,7 +349,8 @@ fn shell_line_edit_edtui(state: &mut EditorState, key: &KeyEvent) -> bool {
 /// is one the editor has no binding for; ignoring it is the correct behaviour.
 fn key_to_edtui(key: crossterm::event::KeyEvent) -> Option<edtui::events::KeyInput> {
     use crossterm::event::KeyCode::{
-        Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab, Up,
+        Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
+        Up,
     };
     match key.code {
         Char(_) | Enter | Esc | Backspace | Delete | Tab | Left | Right | Up | Down | Home

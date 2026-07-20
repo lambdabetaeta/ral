@@ -12,8 +12,8 @@ use crate::provider;
 use super::block::AgentSlot;
 use super::fidelity::Fidelity;
 use super::line;
-use super::palette::{AGENT_HUES, CODE_BG, READ_W, SLATE};
 use super::md;
+use super::palette::{AGENT_HUES, CODE_BG, READ_W, SLATE};
 use super::rail::{self, RailKind};
 use super::status::{ctx_ramp, wait_bar};
 
@@ -35,9 +35,7 @@ pub struct SessionInfo<'a> {
 /// names something: a path carries the Path identity, a `dangerous` base
 /// alarms; names and quantities stay plain ink.
 pub(super) fn session_card(s: &SessionInfo<'_>, context_window: Option<u64>) -> Card {
-    let mut rows: Vec<Field> = vec![
-        meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)]),
-    ];
+    let mut rows: Vec<Field> = vec![meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)])];
 
     // Neither the provider nor the model is named here: the live status bar
     // carries both (and updates them on a `/model` switch), so the one-shot
@@ -97,7 +95,10 @@ pub(super) fn session_card(s: &SessionInfo<'_>, context_window: Option<u64>) -> 
 
 /// One `(label, value)` row of the startup metadata matrix.
 pub(super) fn meta_field(label: &str, value: Vec<CardSpan>) -> Field {
-    Field { label: label.to_string(), value: FieldVal::Inline(value) }
+    Field {
+        label: label.to_string(),
+        value: FieldVal::Inline(value),
+    }
 }
 
 /// A comma-joined display of `paths` for a single matrix value cell.
@@ -187,10 +188,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
     ls.extend(line::legend_rows(vec![
         (
             "code",
-            swatch(
-                "scripts and shell output — a recessed panel",
-                Some(CODE_BG),
-            ),
+            swatch("scripts and shell output — a recessed panel", Some(CODE_BG)),
         ),
         (
             "prose",

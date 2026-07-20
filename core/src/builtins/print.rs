@@ -93,7 +93,10 @@ pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String 
                             quote_string(&elide(s, params.max_string), params)
                         }
                         Value::Bytes(b) if params.quote_bytes && params.max_string > 0 => {
-                            quote_string(&elide(&String::from_utf8_lossy(b), params.max_string), params)
+                            quote_string(
+                                &elide(&String::from_utf8_lossy(b), params.max_string),
+                                params,
+                            )
                         }
                         _ => pretty_print(v, indent + 1, params),
                     };
@@ -124,9 +127,18 @@ fn elide(s: &str, budget: usize) -> String {
     let total = s.chars().count();
     let head_budget = budget / 2;
     let tail_budget = budget - head_budget;
-    let head: String = s.chars().take_while(|&c| c != '\n').take(head_budget).collect();
+    let head: String = s
+        .chars()
+        .take_while(|&c| c != '\n')
+        .take(head_budget)
+        .collect();
     let tail: String = {
-        let rev: String = s.chars().rev().take_while(|&c| c != '\n').take(tail_budget).collect();
+        let rev: String = s
+            .chars()
+            .rev()
+            .take_while(|&c| c != '\n')
+            .take(tail_budget)
+            .collect();
         rev.chars().rev().collect()
     };
     let elided = total
@@ -138,7 +150,13 @@ fn elide(s: &str, budget: usize) -> String {
     format!("{head} […elided {elided} characters…] {tail}")
 }
 
-fn bracketed(parts: &[String], indent: usize, open: &str, close: &str, params: &PrintParams) -> String {
+fn bracketed(
+    parts: &[String],
+    indent: usize,
+    open: &str,
+    close: &str,
+    params: &PrintParams,
+) -> String {
     let inline = format!("{open}{}{close}", parts.join(", "));
     if inline.chars().count() <= params.max_width && !inline.contains('\n') {
         return inline;
@@ -185,7 +203,8 @@ mod tests {
             max_depth: 1,
             ..REPL_PRINT_PARAMS
         };
-        let nested = Value::List(vec![Value::List(vec![Value::Int(1), Value::Int(2)].into())].into());
+        let nested =
+            Value::List(vec![Value::List(vec![Value::Int(1), Value::Int(2)].into())].into());
         let out = pretty_print(&nested, 0, &params);
         assert_eq!(out, "[[...2 items]]");
     }
@@ -220,7 +239,10 @@ mod tests {
         let val = Value::Map(
             vec![(
                 "note".into(),
-                Value::String("a very long and tiresome sentence that goes on and on and so the play ended".into()),
+                Value::String(
+                    "a very long and tiresome sentence that goes on and on and so the play ended"
+                        .into(),
+                ),
             )]
             .into(),
         );
@@ -229,7 +251,10 @@ mod tests {
             out.contains("…elided") && out.contains("characters…"),
             "expected an elision marker, got {out:?}"
         );
-        assert!(out.starts_with("[note: 'a very lon"), "keeps the head, got {out:?}");
+        assert!(
+            out.starts_with("[note: 'a very lon"),
+            "keeps the head, got {out:?}"
+        );
         assert!(out.ends_with("play ended']"), "keeps the tail, got {out:?}");
     }
 

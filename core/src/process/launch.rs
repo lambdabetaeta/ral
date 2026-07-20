@@ -670,8 +670,10 @@ mod windows {
         // the `Capabilities` pointer inside it borrows
         // `launch.security_capabilities`'s own `Vec`, which `launch` keeps
         // alive for this whole function.
-        let security_caps_value: Option<SECURITY_CAPABILITIES> =
-            launch.security_capabilities.as_mut().map(|caps| SECURITY_CAPABILITIES {
+        let security_caps_value: Option<SECURITY_CAPABILITIES> = launch
+            .security_capabilities
+            .as_mut()
+            .map(|caps| SECURITY_CAPABILITIES {
                 AppContainerSid: caps.app_container_sid,
                 Capabilities: caps.capabilities.as_mut_ptr(),
                 CapabilityCount: caps.capabilities.len() as u32,
@@ -986,7 +988,10 @@ mod windows {
             Ok(())
         }
 
-        fn update_security_capabilities(&mut self, value: &SECURITY_CAPABILITIES) -> io::Result<()> {
+        fn update_security_capabilities(
+            &mut self,
+            value: &SECURITY_CAPABILITIES,
+        ) -> io::Result<()> {
             let ok = unsafe {
                 UpdateProcThreadAttribute(
                     self.as_mut_ptr(),
@@ -1140,7 +1145,10 @@ mod windows {
 
         pub(crate) fn kill(&mut self) -> io::Result<()> {
             let ok = unsafe {
-                windows_sys::Win32::System::Threading::TerminateProcess(self.raw_process_handle(), 1)
+                windows_sys::Win32::System::Threading::TerminateProcess(
+                    self.raw_process_handle(),
+                    1,
+                )
             };
             if ok == 0 {
                 return Err(io::Error::last_os_error());

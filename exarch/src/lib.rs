@@ -168,8 +168,8 @@ pub fn run() -> Result<(), String> {
         );
     }
 
-    let cwd = std::env::current_dir()
-        .map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
+    let cwd =
+        std::env::current_dir().map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
     let state_dir = bootstrap::project_dir(&cwd);
 
     // Resolve the initial selection: an explicit `--provider` pin, else an
@@ -177,14 +177,13 @@ pub fn run() -> Result<(), String> {
     // provider is available), else the first available provider's default model.
     let mut catalog =
         provider::models::ModelCatalog::new(provider::models::LiveSource::new(&store));
-    let (id, model, mut tuning, route) =
-        resolve_initial_selection(
-            c.provider.as_deref(),
-            c.model.as_deref(),
-            &state_dir,
-            &available,
-            &mut catalog,
-        )?;
+    let (id, model, mut tuning, route) = resolve_initial_selection(
+        c.provider.as_deref(),
+        c.model.as_deref(),
+        &state_dir,
+        &available,
+        &mut catalog,
+    )?;
     if let Some(keyword) = c.effort.as_deref() {
         tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword).ok_or_else(
             || format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"),

@@ -612,11 +612,9 @@ mod tests {
 
     #[test]
     fn windows_tool_roots_adds_git_for_windows_usr_bin_when_present() {
-        let roots = windows_tool_roots(
-            r"C:\Windows",
-            &[r"C:\Program Files"],
-            |p| p == r"C:\Program Files\Git\usr\bin",
-        );
+        let roots = windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |p| {
+            p == r"C:\Program Files\Git\usr\bin"
+        });
         assert!(
             roots.contains(&r"C:\Program Files\Git\usr\bin".to_string()),
             "got {roots:?}"

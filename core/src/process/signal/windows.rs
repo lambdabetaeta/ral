@@ -138,11 +138,10 @@ mod win_groups {
         CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
     };
     use windows_sys::Win32::System::JobObjects::{
-        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
-        JobObjectBasicLimitInformation, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        TerminateJobObject,
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectAssociateCompletionPortInformation, JobObjectBasicLimitInformation,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
     use windows_sys::Win32::System::Threading::{
@@ -718,10 +717,7 @@ pub fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
 /// Set an active-process limit on a Job Object handle the caller owns.
 /// Used by `sandbox::apply_child_limits` for the per-child job it
 /// creates.  Returns `true` when applied.
-pub fn set_active_process_limit(
-    job: windows_sys::Win32::Foundation::HANDLE,
-    limit: u32,
-) -> bool {
+pub fn set_active_process_limit(job: windows_sys::Win32::Foundation::HANDLE, limit: u32) -> bool {
     win_groups::set_active_process_limit(job, limit)
 }
 

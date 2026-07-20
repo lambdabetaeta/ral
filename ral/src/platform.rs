@@ -6,10 +6,10 @@
 //! other's module.  Both Unix and Windows env-var fallbacks are encoded
 //! explicitly.
 
-use ral_core::types::{Break, Escape};
-use ral_core::{Shell, diagnostic};
 use ral_core::exit_hints::ExitHints;
 use ral_core::io::{InteractiveMode, TerminalState};
+use ral_core::types::{Break, Escape};
+use ral_core::{Shell, diagnostic};
 use std::process::ExitCode;
 
 /// Probe the terminal under the active `RAL_INTERACTIVE_MODE`, plumb

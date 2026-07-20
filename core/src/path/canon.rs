@@ -186,9 +186,7 @@ pub fn match_variants_list<S: AsRef<str>>(paths: &[S]) -> Result<Vec<String>, St
 /// exercised directly with genuine non-UTF-8 [`Path`]s in tests —
 /// [`match_variants_list`]'s `S: AsRef<str>` bound means it can never
 /// be handed one.
-fn match_variants_paths<'a>(
-    paths: impl Iterator<Item = &'a Path>,
-) -> Result<Vec<String>, String> {
+fn match_variants_paths<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for p in paths {
@@ -349,7 +347,11 @@ mod tests {
         // And the reverse direction.
         let canon = PathBuf::from(OsStr::from_bytes(b"/private/tmp/\xFFghost"));
         let back = firmlink_toggle(&canon).expect("/private/tmp is a firmlink root");
-        assert_eq!(back.as_os_str().as_bytes(), b"/tmp/\xFFghost", "got {back:?}");
+        assert_eq!(
+            back.as_os_str().as_bytes(),
+            b"/tmp/\xFFghost",
+            "got {back:?}"
+        );
     }
 
     /// Security regression: two distinct non-UTF-8 paths must not

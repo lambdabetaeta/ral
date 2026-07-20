@@ -51,8 +51,8 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
-use crate::repl::highlight_style::style_ratatui;
 use crate::repl::completion::{self, Sources};
+use crate::repl::highlight_style::style_ratatui;
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use crate::repl::plugin::{
     HookEnvGuard, KeyChord, KeyName, KeyRouter, Keymap, PendingKeybinding, PluginRuntime,
@@ -60,8 +60,8 @@ use crate::repl::plugin::{
     run_buffer_change_hooks,
 };
 use crate::repl::plugin_editor::HighlightSpan;
-use ral_core::text::char_to_byte;
 use crate::repl::worksheet::Worksheet;
+use ral_core::text::char_to_byte;
 
 mod menu;
 use menu::Menu;
@@ -219,13 +219,7 @@ impl StructuralFrontend {
             reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
         )]
         let lead_rows = prompt_lines.lead.len() as u16;
-        let height = viewport_height(
-            lead_rows,
-            &prompt,
-            &ws_rows,
-            &matrix,
-            rows,
-        );
+        let height = viewport_height(lead_rows, &prompt, &ws_rows, &matrix, rows);
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
             backend,
@@ -385,7 +379,12 @@ impl StructuralFrontend {
                             match candidates.as_slice() {
                                 [] => {}
                                 [only] => {
-                                    prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement);
+                                    prompt.replace_row_bytes(
+                                        row,
+                                        start,
+                                        cursor_byte,
+                                        &only.replacement,
+                                    );
                                 }
                                 _ => {
                                     #[allow(
@@ -884,7 +883,11 @@ fn matrix_rows(user: &[(String, Value)], mut job_rows: Vec<MxRow>) -> Vec<MxRow>
         .filter_map(|(name, value)| match value {
             Value::Handle(h) => Some(MxRow {
                 name: name.clone(),
-                state: (*h.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into(),
+                state: (*h
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner))
+                .into(),
                 cmd: h.cmd.clone(),
             }),
             _ => None,
@@ -901,7 +904,9 @@ fn matrix_rows(user: &[(String, Value)], mut job_rows: Vec<MxRow>) -> Vec<MxRow>
 /// Labelled `%id` after the shell's job-spec syntax.
 #[cfg(unix)]
 fn job_rows(jobs: &Arc<Mutex<JobTable>>) -> Vec<MxRow> {
-    let guard = jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = jobs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .list()
         .into_iter()

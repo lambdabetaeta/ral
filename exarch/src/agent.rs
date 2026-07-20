@@ -27,7 +27,12 @@ pub mod nudge;
 pub mod resources;
 pub mod transcript;
 
-use crate::shell_eval::builtins;
+use crate::agent::digest::{
+    AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
+    compaction_due, render, suffix_keep_budget, summary_cap_tokens,
+};
+use crate::agent::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
+use crate::agent::transcript::Transcript;
 use crate::bootstrap::Scratch;
 use crate::bus::{
     AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, ParkMode, Turn,
@@ -35,16 +40,11 @@ use crate::bus::{
 };
 use crate::fleet::desk;
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE, AgentRegistry, Registration};
-use crate::agent::digest::{
-    AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
-    compaction_due, render, suffix_keep_budget, summary_cap_tokens,
-};
-use crate::agent::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
 use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
 };
 use crate::shell_eval;
-use crate::agent::transcript::Transcript;
+use crate::shell_eval::builtins;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -680,7 +680,13 @@ impl Agent {
         // and `Build` carries the same string on to become `Agent::system`.
         let system_prompt =
             crate::prompt::resolve_builtin_index(&system, &shell, !interactive, allow_schedule);
-        let log = AgentLog::root(&sessions_root, id, model, provider_label, system_prompt.len())?;
+        let log = AgentLog::root(
+            &sessions_root,
+            id,
+            model,
+            provider_label,
+            system_prompt.len(),
+        )?;
         let agent = Self::assemble(Build {
             system,
             system_prompt,
@@ -780,11 +786,7 @@ impl Agent {
     /// same bit, so they cannot disagree.  [`Self::fork`] passes `true` (an
     /// ordinary returning sub-agent); [`Self::branch`] passes `false` (a
     /// conversing child that parks for the human, holding no `reply`).
-    fn fork_with(
-        &self,
-        caps: ral_core::types::Capabilities,
-        returns: bool,
-    ) -> io::Result<Self> {
+    fn fork_with(&self, caps: ral_core::types::Capabilities, returns: bool) -> io::Result<Self> {
         // The child is an independent fork of the parent: it snapshots the
         // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
@@ -1254,7 +1256,10 @@ impl Agent {
             payload: None,
         }) {
             Ok(FOValue::Int { value }) => {
-                #[allow(clippy::cast_sign_loss, reason="probe binding-count is a non-negative cardinality")]
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "probe binding-count is a non-negative cardinality"
+                )]
                 let count = value as u64;
                 count
             }
@@ -1660,7 +1665,10 @@ impl Agent {
             if let Some(reasoning) = reasoning.as_deref()
                 && !reasoning.trim().is_empty()
             {
-                #[allow(clippy::cast_possible_truncation, reason="answer char count cannot approach u32::MAX")]
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "answer char count cannot approach u32::MAX"
+                )]
                 let answer_chars = last_text.chars().count() as u32;
                 emit.emit(Kind::Reasoning {
                     text: reasoning.to_string(),
@@ -1732,10 +1740,7 @@ impl Agent {
                         // A transient transport hiccup we recovered from, not
                         // a misconfiguration: an operational note, not an error.
                         Self::note(
-                            format!(
-                                "[Stream stalled: {}]",
-                                cause.replace('\n', " | ")
-                            ),
+                            format!("[Stream stalled: {}]", cause.replace('\n', " | ")),
                             emit,
                         );
                         cause.clone()
@@ -1755,11 +1760,7 @@ impl Agent {
                 });
             }
             if truncated {
-                Self::note(
-                    "[Truncated mid-tool-call; continuing]"
-                        .into(),
-                    emit,
-                );
+                Self::note("[Truncated mid-tool-call; continuing]".into(), emit);
             }
             let Dispatch { results, injected } = self.dispatch(tool_calls, token, emit);
             self.log
@@ -1889,7 +1890,12 @@ impl Agent {
     /// result synchronously — a spawn inside the `ral` eval launches a
     /// detached peer and answers with a start receipt — so there is no join
     /// phase and no `thread::scope`.
-    fn dispatch(&mut self, tool_calls: Vec<ToolCall>, token: &cancel::Token, emit: &Emitter) -> Dispatch {
+    fn dispatch(
+        &mut self,
+        tool_calls: Vec<ToolCall>,
+        token: &cancel::Token,
+        emit: &Emitter,
+    ) -> Dispatch {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
@@ -2786,7 +2792,10 @@ mod tests {
             "the creator's context is imported in mnemon order: {view}"
         );
 
-        assert!(!child.returns(), "a branch withholds `reply` and never returns");
+        assert!(
+            !child.returns(),
+            "a branch withholds `reply` and never returns"
+        );
         assert_eq!(
             child.caps(),
             parent.caps(),
@@ -2804,7 +2813,10 @@ mod tests {
     fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
         // Keyed by the caller's own `tmp` dir, so two tests building trunks
         // concurrently never share (and wipe) one pid-keyed scratch.
-        let tag = dir.file_name().expect("tmp dir has a name").to_string_lossy();
+        let tag = dir
+            .file_name()
+            .expect("tmp dir has a name")
+            .to_string_lossy();
         let scratch = Scratch::for_test(&tag).expect("scratch dir");
         Agent::root(
             "system".into(),
@@ -2837,9 +2849,7 @@ mod tests {
         );
         let headless = trunk(&dir, false);
         assert!(headless.returns(), "a headless trunk is a returning agent");
-        let child = headless
-            .fork(headless.caps().clone())
-            .expect("fork child");
+        let child = headless.fork(headless.caps().clone()).expect("fork child");
         assert!(child.returns(), "an ordinary fork holds `reply`");
         let branch = headless.branch().expect("branch child");
         assert!(
@@ -3083,11 +3093,17 @@ mod tests {
         let cell = ReplyCell::default();
         assert_eq!(cell.take(), None, "an unset cell takes None");
 
-        cell.set(FOValue::String { value: "first".into() });
-        cell.set(FOValue::String { value: "second".into() });
+        cell.set(FOValue::String {
+            value: "first".into(),
+        });
+        cell.set(FOValue::String {
+            value: "second".into(),
+        });
         assert_eq!(
             cell.take(),
-            Some(FOValue::String { value: "second".into() }),
+            Some(FOValue::String {
+                value: "second".into()
+            }),
             "the last write wins"
         );
         assert_eq!(cell.take(), None, "take leaves the cell empty");
@@ -3110,7 +3126,11 @@ mod tests {
         let emit = Emitter::new(tx, root.id);
         let root_result = root.run_shell("c1".into(), "reply 1", 5, &emit);
         let refusal = "you converse with the user; you do not return";
-        assert!(root_result.content.contains(refusal), "got: {}", root_result.content);
+        assert!(
+            root_result.content.contains(refusal),
+            "got: {}",
+            root_result.content
+        );
 
         let mut branch = root.branch().expect("branch a conversing child");
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
@@ -3402,7 +3422,10 @@ mod tests {
     }
 
     /// test-only: cancels whatever token is staged in [`T2_CANCEL_TOKEN`].
-    #[allow(clippy::unnecessary_wraps, reason = "fixed BuiltinBody::Static signature")]
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "fixed BuiltinBody::Static signature"
+    )]
     fn builtin_t2_cancel_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
         T2_CANCEL_TOKEN.with(|cell| {
             if let Some(token) = cell.borrow().as_ref() {
@@ -3547,7 +3570,12 @@ mod tests {
             matches!(outcome, AgentOutcome::Complete),
             "a live-generation result must be delivered; got {outcome:?}"
         );
-        assert_eq!(payload, Some(FOValue::String { value: "done".into() }));
+        assert_eq!(
+            payload,
+            Some(FOValue::String {
+                value: "done".into()
+            })
+        );
     }
 
     /// The same admission control's `Surface` half: a deferred `spawn`
@@ -3611,7 +3639,12 @@ mod tests {
             matches!(outcome, AgentOutcome::Complete),
             "a live-generation surface batch must be delivered; got {outcome:?}"
         );
-        assert_eq!(payload, Some(FOValue::String { value: "done".into() }));
+        assert_eq!(
+            payload,
+            Some(FOValue::String {
+                value: "done".into()
+            })
+        );
     }
 
     // ── worker registry: `/clear` cascade, lease-reap drain ───────────────
@@ -4090,12 +4123,7 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
-        session.run_shell(
-            "c1".into(),
-            r#"surface `unpin [key: "services"]"#,
-            5,
-            &emit,
-        );
+        session.run_shell("c1".into(), r#"surface `unpin [key: "services"]"#, 5, &emit);
 
         let mut saw_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -4104,7 +4132,10 @@ mod tests {
                 saw_error = true;
             }
         }
-        assert!(saw_error, "the forged pin must be rejected with a diagnostic");
+        assert!(
+            saw_error,
+            "the forged pin must be rejected with a diagnostic"
+        );
         assert!(
             session
                 .pins

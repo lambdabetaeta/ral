@@ -223,7 +223,10 @@ fn visible_text(text: &str) -> String {
         match bytes[i] {
             0x1b => i += ral_core::ansi::escape_seq_len(bytes, i),
             b'\n' => {
-                #[allow(clippy::iter_with_drain, reason = "line buffer capacity must survive across lines")]
+                #[allow(
+                    clippy::iter_with_drain,
+                    reason = "line buffer capacity must survive across lines"
+                )]
                 out.extend(line.drain(..));
                 out.push('\n');
                 col = 0;

@@ -243,9 +243,10 @@ pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) ->
             report.hint.as_deref(),
         );
     }
-    let range = err
-        .span
-        .map_or_else(|| eof_char_range(source), |s| byte_span_to_char_range(source, s));
+    let range = err.span.map_or_else(
+        || eof_char_range(source),
+        |s| byte_span_to_char_range(source, s),
+    );
     render_ariadne(
         file,
         source,

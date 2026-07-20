@@ -477,10 +477,7 @@ impl TryFrom<&Value> for FOValue {
             Value::String(v) => Self::String { value: v.clone() },
             Value::Bytes(v) => Self::Bytes { value: v.clone() },
             Value::List(items) => Self::List {
-                items: items
-                    .iter()
-                    .map(Self::try_from)
-                    .collect::<Result<_, _>>()?,
+                items: items.iter().map(Self::try_from).collect::<Result<_, _>>()?,
             },
             Value::Map(items) => Self::Map {
                 entries: items
@@ -519,9 +516,12 @@ impl From<FOValue> for Value {
             FOValue::String { value } => Self::String(value),
             FOValue::Bytes { value } => Self::Bytes(value),
             FOValue::List { items } => Self::list(items.into_iter().map(Self::from).collect()),
-            FOValue::Map { entries } => {
-                Self::Map(entries.into_iter().map(|(k, v)| (k, Self::from(v))).collect())
-            }
+            FOValue::Map { entries } => Self::Map(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, Self::from(v)))
+                    .collect(),
+            ),
             FOValue::Variant { label, payload } => Self::Variant {
                 label,
                 payload: payload.map(|p| Box::new(Self::from(*p))),

@@ -71,10 +71,7 @@ pub(super) fn rule_line(
         let pct = ((last_input as f64 / cap as f64) * 100.0).round() as u64;
         let pct = pct.min(999);
         spans.extend(ctx_ramp(pct));
-        spans.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(SLATE),
-        ));
+        spans.push(Span::styled(format!(" {pct}%"), Style::default().fg(SLATE)));
     }
 
     // ── scroll position ───────────────────────────────────────────────

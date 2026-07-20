@@ -19,8 +19,8 @@
 
 use crate::ir::Val;
 use crate::types::{
-    as_map, sig, validate_handler_arity, BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry,
-    HandlerRole, Map, Raw, Settled, Shell, Value,
+    BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry, HandlerRole, Map, Raw, Settled,
+    Shell, Value, as_map, sig, validate_handler_arity,
 };
 
 use crate::evaluator::val::eval_val;
