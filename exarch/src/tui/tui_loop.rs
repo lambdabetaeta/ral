@@ -7,7 +7,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -20,7 +20,7 @@ use crossterm::event::{
 use crate::{
     agent::{Agent, Control, ControlFlow, cancel},
     bootstrap::Scratch,
-    bus::{AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass},
+    bus::{AgentId, Emitter, FleetBus, Inbox, InboxMsg, Pass, drain_pass},
     fleet::{Fleet, registry::AgentRegistry},
     provider::{
         self, Provider,
@@ -49,12 +49,14 @@ impl Tui {
     pub fn new(
         root_id: AgentId,
         root_log_dir: &Path,
-        context_window: Option<u64>,
         stderr_log: &Path,
         vi: bool,
+        inbox: Inbox,
+        focus: Arc<AtomicU64>,
+        agents: AgentRegistry,
     ) -> io::Result<Self> {
         let guard = TerminalGuard::enter(stderr_log)?;
-        let app = App::new(root_id, root_log_dir, context_window, vi);
+        let app = App::new(root_id, root_log_dir, vi, inbox, focus, agents);
         Ok(Self { guard, app })
     }
 }
@@ -135,25 +137,23 @@ pub fn run(
     vi: bool,
     engine: Arc<provider::Engine>,
 ) -> Result<(), String> {
-    let caps = crate::provider::pricing::caps_or_default(provider.model());
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
         session.id,
         &session.log_dir(),
-        caps.context_window,
         &stderr_log,
         vi,
+        session.inbox(),
+        session.focus_handle(),
+        session.agents.clone(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider = provider::provider_label(provider.subscription(), provider.id().label());
-    tui.app.update_live_model(provider, &status_provider);
-    // Bind the App's inbox and focus to the trunk's shared handles, then build
-    // the fleet: a session-lived bus over the trunk's inbox, plus the shared
+    tui.app.update_live_model(provider);
+    // The fleet: a session-lived bus over the trunk's inbox, plus the shared
     // registry and transport engine.  Input, the queued-user strip, async-agent
     // results, and the worker's drive loop all read and write this one inbox;
-    // `TAB` and the focused agent's park predicate share one focus handle.
-    tui.app.bind_inbox(session.inbox());
-    tui.app.tabs.bind_focus(session.focus_handle());
+    // `TAB` and the focused agent's park predicate share one focus handle,
+    // both already threaded into `tui.app` above.
     let fleet = Fleet::new(
         session.agents.clone(),
         FleetBus::session(&session.inbox()),
@@ -286,7 +286,7 @@ fn ui_loop(
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
     // The session inbox, so a routed line (a plain prompt, a session command)
-    // reaches the worker's drive loop through the queue the App is bound to.
+    // reaches the worker's drive loop through the App's own queue.
     let mailbox = tui.app.inbox.mailbox();
     let rx = bus.rx();
     // The frame clock: the instant the last frame was painted, seeded a frame
@@ -301,21 +301,11 @@ fn ui_loop(
     // a drained bus event, a consumed keystroke, a focus change, or a probe
     // flip. Seeded true so the first frame always paints.
     let mut dirty = true;
-    // Sampled once per iteration from the focused tab's mailbox: flips when
-    // that agent's drive loop parks or unparks, which repaints the tab title
-    // and prompt chrome but raises no bus event of its own. A tab with no live
-    // agent has no queue to be busy on, so it reads as idle (waiting).
-    let focused_waiting = |ctx: &CommandCtx<'_>, focused| {
-        ctx.agents
-            .mailbox(focused)
-            .is_none_or(|mb| mb.waiting_for_input())
-    };
-    // A tab is steerable when it is the trunk (slash commands and prompts) or
-    // a live peer with a registered inbox; recomputed each frame and on every
-    // key, since a focused agent can settle between one and the next.
-    let is_steerable =
-        |ctx: &CommandCtx<'_>, root, focused| focused == root || ctx.agents.mailbox(focused).is_some();
-    let mut waiting_for_input = focused_waiting(ctx, tui.app.tabs.focused());
+    // Sampled once per iteration, purely for the dirty-flip below: whether the
+    // focused tab's drive loop parks or unparks repaints the tab title and
+    // prompt chrome even with no bus event of its own, but `App` derives the
+    // bit itself (via [`App::focused_waiting`]) whenever it actually needs it.
+    let mut prev_waiting = tui.app.focused_waiting();
     loop {
         // Focus as of the start of this iteration; compared at the end so a
         // `TAB`, or a focused agent ending mid-drain, wakes the agents whose
@@ -343,8 +333,6 @@ fn ui_loop(
                 // reports `Stop` again; its verdict is not needed.
                 drain_pass(rx, done, None, |ev| tui.app.handle(ev, rx));
                 tui.app.busy_off();
-                let steerable = is_steerable(ctx, tui.app.tabs.root(), tui.app.tabs.focused());
-                tui.app.tabs.set_steerable(steerable);
                 draw(&mut tui.app, tui.guard.term())?;
                 return Ok(());
             }
@@ -352,12 +340,9 @@ fn ui_loop(
             Pass::Idle => false,
         };
         dirty |= handled_any;
-        let now_waiting = focused_waiting(ctx, tui.app.tabs.focused());
-        dirty |= now_waiting != waiting_for_input;
-        waiting_for_input = now_waiting;
-        // Hand the sole sample to `App` so `animating`'s spinner test follows
-        // the focused tab without re-reading the flag.
-        tui.app.set_focused_waiting(now_waiting);
+        let now_waiting = tui.app.focused_waiting();
+        dirty |= now_waiting != prev_waiting;
+        prev_waiting = now_waiting;
         // Paint only when a frame is due, so a multi-batch backlog still drains
         // at full throughput but redraws at most once per interval.  `tick`
         // always runs on the due frame, painted or not: it ages dying tabs out
@@ -366,8 +351,6 @@ fn ui_loop(
             let ticked = tui.app.tabs.tick();
             let animating = tui.app.animating(frame);
             if dirty || ticked || animating {
-                let steerable = is_steerable(ctx, tui.app.tabs.root(), tui.app.tabs.focused());
-                tui.app.tabs.set_steerable(steerable);
                 draw(&mut tui.app, tui.guard.term())?;
                 dirty = false;
             }
@@ -391,8 +374,7 @@ fn ui_loop(
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
                     dirty = true;
                     let focused = tui.app.tabs.focused();
-                    let steerable = is_steerable(ctx, tui.app.tabs.root(), focused);
-                    tui.app.tabs.set_steerable(steerable);
+                    let steerable = tui.app.is_steerable();
                     match key_action(&k, steerable) {
                         // Esc / Ctrl-C interrupt the *focused* tab's current
                         // turn — never a cascade, never a kill.  On the trunk
@@ -424,7 +406,7 @@ fn ui_loop(
                             }
                         }
                         KeyAction::Edit => {
-                            tui.app.key(k, steerable);
+                            tui.app.key(k);
                             if tui.app.prompt_state.take_editor_request() {
                                 terminal::compose_in_editor(tui)?;
                             }
@@ -462,9 +444,7 @@ fn ui_loop(
             // agent's provider — the banner, status bar, and ctx% gauge
             // must follow focus.
             if let Some(ph) = ctx.agents.provider(now_focus) {
-                let p = ph.current();
-                let status_provider = provider::provider_label(p.subscription(), p.id().label());
-                tui.app.update_live_model(&p, &status_provider);
+                tui.app.update_live_model(&ph.current());
             }
         }
     }

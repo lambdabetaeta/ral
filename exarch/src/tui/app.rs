@@ -22,6 +22,7 @@ use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
 use crate::bus::card::IoEvent;
+use crate::fleet::registry::AgentRegistry;
 use crate::provider::{Provider, Usage};
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{
@@ -33,6 +34,8 @@ use ratatui::{
 use std::{
     io::{self},
     path::{Path, PathBuf},
+    sync::Arc,
+    sync::atomic::AtomicU64,
     time::Duration,
 };
 
@@ -68,15 +71,20 @@ pub(super) enum Overlay {
 pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
-    /// The session'\''s own inbox, bound here by [`Self::bind_inbox`] at REPL
-    /// start so the input editor, queued-user strip, and worker drive loop
-    /// share one queue. A submitted prompt is pushed onto it (through a
-    /// `Mailbox`); the worker drains a non-slash prefix after a tool result to
-    /// steer the next assistant step ([`Agent::dispatch`]) and the remainder at
-    /// the next turn boundary ([`Inbox::next_or_idle`]). Until drained, the
-    /// strip renders queued user prompts, and bare Up on an empty prompt pulls
-    /// the whole queued run back into the editor for revision.
+    /// The session's own inbox, shared with the input editor, queued-user
+    /// strip, and worker drive loop. A submitted prompt is pushed onto it
+    /// (through a `Mailbox`); the worker drains a non-slash prefix after a
+    /// tool result to steer the next assistant step ([`Agent::dispatch`])
+    /// and the remainder at the next turn boundary ([`Inbox::next_or_idle`]).
+    /// Until drained, the strip renders queued user prompts, and bare Up on
+    /// an empty prompt pulls the whole queued run back into the editor for
+    /// revision.
     pub(super) inbox: Inbox,
+    /// The fleet's shared agent registry — a clone of the same handle the
+    /// worker and every fork mutate, so whether the focused tab is steerable
+    /// and whether it is waiting for input are derived by lookup rather than
+    /// sampled and pushed into the App each frame.
+    agents: AgentRegistry,
     pub(super) total_usage: Usage,
     /// Last turn'\''s prompt size (genai'\''s `prompt_tokens`, which already
     /// folds the cache-read and cache-creation counts in); drives the
@@ -113,35 +121,44 @@ pub(crate) struct App {
     /// streaming select notices the flag (at most one `wait_for_cancel` poll).
     /// Disarmed when the next `UserPromptEcho` arrives.
     root_clear_drain: bool,
-    /// The focused tab's `waiting_for_input` bit, resampled by the UI loop each
-    /// iteration so the spinner follows the tab in view, not the trunk. The
-    /// loop owns the sample (it also needs it for the dirty-flip); `animating`,
-    /// with no registry access, reads this stored copy.
-    focused_waiting: bool,
+    /// The terminal tab's cwd basename — session-constant, computed once
+    /// here rather than lazily cached by [`render::emit_tab_title`].
+    pub(super) cwd_basename: String,
+    /// The last terminal tab title [`render::emit_tab_title`] emitted, so it
+    /// skips the write when the composed title is unchanged.
+    pub(super) last_title: String,
 }
 
 impl App {
     pub fn new(
         root_id: AgentId,
         root_log_dir: &Path,
-        context_window: Option<u64>,
         vi: bool,
+        inbox: Inbox,
+        focus: Arc<AtomicU64>,
+        agents: AgentRegistry,
     ) -> Self {
-        let tabs = Tabs::new(root_id, root_log_dir);
+        let tabs = Tabs::new(root_id, root_log_dir, focus);
+        let cwd_basename = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "?".into());
         Self {
             tabs,
             prompt_state: PromptState::new(vi),
-            inbox: Inbox::new(),
+            inbox,
+            agents,
             total_usage: Usage::default(),
             surface: SurfaceBuffer::new(),
             last_input: 0,
-            context_window,
+            context_window: None,
             status_model: String::new(),
             overlay: None,
             gesture: GestureState::new(),
             matrix_sort: MatrixSort::default(),
             root_clear_drain: false,
-            focused_waiting: true,
+            cwd_basename,
+            last_title: String::new(),
         }
     }
 
@@ -161,7 +178,8 @@ impl App {
     /// status bar label and the context window — the denominator of the ctx%
     /// gauge — so both follow `/model` and `TAB`.  Call at startup, after
     /// every focus change, and after a model switch.
-    pub fn update_live_model(&mut self, p: &Provider, status_provider: &str) {
+    pub fn update_live_model(&mut self, p: &Provider) {
+        let status_provider = crate::provider::provider_label(p.subscription(), p.id().label());
         // A model-less launch (a custom provider with no default model, no
         // `--model`, no saved selection) shows the provider plus a nudge to
         // the picker rather than a bare trailing slash.
@@ -173,12 +191,20 @@ impl App {
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
     }
 
-    /// Bind the App's inbox to the session's own queue, so the input editor,
-    /// queued-user strip, and worker drive loop read and write one inbox.
-    /// Called once at REPL start; before it, the App holds the throwaway inbox
-    /// [`App::new`] seeded for input editing.
-    pub fn bind_inbox(&mut self, inbox: Inbox) {
-        self.inbox = inbox;
+    /// Whether the focused tab is steerable — root always is, a live
+    /// sub-agent with a registered mailbox is, and a dead/lingering one is
+    /// not.
+    pub(super) fn is_steerable(&self) -> bool {
+        let focused = self.tabs.focused();
+        focused == self.tabs.root() || self.agents.mailbox(focused).is_some()
+    }
+
+    /// Whether the focused tab's agent is parked waiting for input — a dead
+    /// or lingering tab has no mailbox to be busy on, so it reads as waiting.
+    pub(super) fn focused_waiting(&self) -> bool {
+        self.agents
+            .mailbox(self.tabs.focused())
+            .is_none_or(|mb| mb.waiting_for_input())
     }
 
     /// Mutable access to the active `/model` picker, for the REPL's picker
@@ -220,12 +246,7 @@ impl App {
             .tabs
             .viewport(self.tabs.focused())
             .is_some_and(|vp| vp.phase_label().is_some());
-        phase_live || self.gesture.toast_live(margin) || !self.focused_waiting
-    }
-
-    /// Record the focused tab's `waiting_for_input` bit for [`Self::animating`].
-    pub(super) fn set_focused_waiting(&mut self, waiting: bool) {
-        self.focused_waiting = waiting;
+        phase_live || self.gesture.toast_live(margin) || !self.focused_waiting()
     }
 
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
@@ -325,11 +346,8 @@ impl App {
                     .born(id, &log_dir, name, parent, branch, agent_slot);
             }
             Kind::Died => {
-                self.surface.flush_surfaces(self.tabs.viewports_mut());
                 let floor = self.context_floor();
-                if let Some(vp) = self.tabs.viewport_mut(id) {
-                    vp.flush_open(floor);
-                }
+                self.with_viewport(id, |vp| vp.flush_open(floor));
                 // Root never enters the linger window; it lives as
                 // long as the program does.
                 self.tabs.died(id);
@@ -352,21 +370,15 @@ impl App {
                 }
             }
             Kind::Token(text) => {
-                self.surface.flush_surfaces(self.tabs.viewports_mut());
                 let floor = self.context_floor();
-                if let Some(vp) = self.tabs.viewport_mut(id) {
-                    vp.push_token(&text, floor);
-                }
+                self.with_viewport(id, |vp| vp.push_token(&text, floor));
             }
             Kind::Thinking(text) => {
                 self.with_viewport(id, |vp| vp.push_thinking(&text));
             }
             Kind::Boundary => {
-                self.surface.flush_surfaces(self.tabs.viewports_mut());
                 let floor = self.context_floor();
-                if let Some(vp) = self.tabs.viewport_mut(id) {
-                    vp.close_boundary(floor);
-                }
+                self.with_viewport(id, |vp| vp.close_boundary(floor));
             }
             // Final reasoning is its own block; the answer's markdown run
             // remains a separate `·` block.
@@ -465,18 +477,13 @@ impl App {
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
             }
-            // A detached worker settled: its one-line outcome card lands as
-            // its own scrollback block, same as any other surfaced card —
-            // but never through the diff-detection path above, since a
-            // done card is always plain text.
-            Kind::Done { card, .. } => {
-                self.with_viewport(id, |vp| vp.push_card(card));
-            }
-            // Core's own ready-boundary housekeeping pushed a notice — a
-            // worker the lease chain reaped, idle bindings the ledger
-            // pruned, or a large-binding residency nudge: same
-            // one-line-card-as-scrollback-block treatment.
-            Kind::Notice { card, .. } => {
+            // A detached worker settled (its one-line outcome card, never
+            // through the diff-detection path above since it is always plain
+            // text) or core's own ready-boundary housekeeping pushed a notice
+            // (a worker the lease chain reaped, idle bindings the ledger
+            // pruned, a large-binding residency nudge): either way the card
+            // lands as its own scrollback block.
+            Kind::Done { card, .. } | Kind::Notice { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
             // The `/resources` fold: the agent's card arrives carrying its
@@ -599,7 +606,7 @@ impl App {
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
         self.push_chrome(id, RailShape::Error, line::error(message));
     }
-    pub fn key(&mut self, k: KeyEvent, can_edit: bool) {
+    pub fn key(&mut self, k: KeyEvent) {
         if k.kind != KeyEventKind::Press {
             return;
         }
@@ -612,6 +619,7 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
+        let can_edit = self.is_steerable();
         // Ctrl-X opens the editor-command prefix (emacs convention).  The next
         // key completes the chord: Ctrl-E composes the prompt in `$EDITOR` (the
         // request is drained by the UI loop, which owns the terminal it must
@@ -692,11 +700,8 @@ impl App {
         // Refresh the hover mark on every event — motion, wheel, or press —
         // so the brightened dial glyph tracks the pointer the instant it
         // crosses a dialable block.
-        self.gesture.set_hover(self.gesture.hover_block(
-            me,
-            self.tabs.viewports(),
-            self.tabs.focused(),
-        ));
+        self.gesture
+            .update_hover(me, self.tabs.viewports(), self.tabs.focused());
         match me.kind {
             // Anywhere over a dialable block, the wheel dials its disclosure
             // level (up reveals, down reduces) and consumes the event; once
@@ -705,13 +710,15 @@ impl App {
             MouseEventKind::ScrollDown if self.wheel_dial(-1) => {}
             MouseEventKind::ScrollUp => {
                 let f = self.tabs.focused();
-                self.gesture
-                    .scroll(self.tabs.viewports_mut(), f, -SCROLL_STEP);
+                if let Some(vp) = self.tabs.viewport_mut(f) {
+                    vp.scroll_by(-SCROLL_STEP);
+                }
             }
             MouseEventKind::ScrollDown => {
                 let f = self.tabs.focused();
-                self.gesture
-                    .scroll(self.tabs.viewports_mut(), f, SCROLL_STEP);
+                if let Some(vp) = self.tabs.viewport_mut(f) {
+                    vp.scroll_by(SCROLL_STEP);
+                }
             }
             MouseEventKind::Down(MouseButton::Left)
                 if !me.modifiers.contains(KeyModifiers::SHIFT) =>
@@ -818,7 +825,13 @@ impl App {
             vp.push_chrome(RailShape::Plain, splash);
             vp.push_chrome(
                 RailShape::Plain,
-                line::render_card(&banner::session_card(s, p), 3),
+                line::render_card(
+                    &banner::session_card(
+                        s,
+                        crate::provider::pricing::caps_or_default(p.model()).context_window,
+                    ),
+                    3,
+                ),
             );
         }
         draw(self, term)

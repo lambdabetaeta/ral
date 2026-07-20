@@ -72,7 +72,7 @@ impl GestureState {
     /// dials, and the click cycles anywhere over a coalesced run, but the
     /// target hugs the rendered text: each row reaches only as far right as
     /// its own content, never into the empty margin beside a short line.
-    pub(super) fn hover_block(
+    fn hover_block(
         &self,
         me: MouseEvent,
         viewports: &HashMap<AgentId, Viewport>,
@@ -89,9 +89,14 @@ impl GestureState {
         self.hover
     }
 
-    /// Update the hover target — called on every mouse event.
-    pub(super) fn set_hover(&mut self, idx: Option<usize>) {
-        self.hover = idx;
+    /// Recompute and store the hover target — called on every mouse event.
+    pub(super) fn update_hover(
+        &mut self,
+        me: MouseEvent,
+        viewports: &HashMap<AgentId, Viewport>,
+        focused: AgentId,
+    ) {
+        self.hover = self.hover_block(me, viewports, focused);
     }
 
     /// Begin a left-button gesture: drop any prior selection, anchor at the
@@ -154,30 +159,6 @@ impl GestureState {
         }
     }
 
-    /// Scroll the focused pane by `delta` rows (negative = up).
-    #[allow(
-        clippy::unused_self,
-        reason = "one of a family of scroll gestures (`scroll` / `scroll_page`) invoked uniformly as `self.gesture.<method>(viewports, focused, delta)`; `scroll_page` reads `self.frame` and delegates to `self.scroll`, so dropping the receiver here would split the pair's call shape."
-    )]
-    pub(super) fn scroll(
-        &self,
-        viewports: &mut HashMap<AgentId, Viewport>,
-        focused: AgentId,
-        delta: isize,
-    ) {
-        if let Some(vp) = viewports.get_mut(&focused) {
-            if delta < 0 {
-                #[allow(clippy::cast_sign_loss, reason = "sign guarded by the enclosing branch")]
-                let up = (-delta) as usize;
-                vp.scroll_up(up);
-            } else {
-                #[allow(clippy::cast_sign_loss, reason = "sign guarded by the enclosing branch")]
-                let down = delta as usize;
-                vp.scroll_down(down);
-            }
-        }
-    }
-
     /// Scroll one content-height per page key, falling back to a sane
     /// step before the first frame is drawn.
     pub(super) fn scroll_page(
@@ -194,7 +175,9 @@ impl GestureState {
             let rows = f.text.height.saturating_sub(1).max(1) as isize;
             rows
         });
-        self.scroll(viewports, focused, dir * page);
+        if let Some(vp) = viewports.get_mut(&focused) {
+            vp.scroll_by(dir * page);
+        }
     }
     pub(super) fn clear_selection(&mut self) {
         self.selection = None;

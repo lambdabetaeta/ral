@@ -217,12 +217,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             app.matrix_sort,
         )
     });
-    let prompt_hint = prompt_hint(
-        app.tabs.root(),
-        app.tabs.is_steerable(),
-        app.tabs.names(),
-        focused,
-    );
+    let prompt_hint = prompt_hint(app.tabs.root(), app.is_steerable(), app.tabs.names(), focused);
     let overlay = app.overlay.as_ref();
 
     // Bracket the frame's terminal writes in a synchronized update so the
@@ -320,34 +315,24 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
 }
 
 /// Emit the terminal tab title: a spinner until the root has yielded to the
-/// human input boundary, a block while the prompt is genuinely idle. The cwd
-/// basename is session-constant, cached once; the write itself is skipped
-/// whenever the composed title matches the last one emitted.
-fn emit_tab_title(app: &App) {
-    static CWD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-
-    let cwd = CWD.get_or_init(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "?".into())
-    });
+/// human input boundary, a block while the prompt is genuinely idle. The
+/// write itself is skipped whenever the composed title matches the last one
+/// emitted.
+fn emit_tab_title(app: &mut App) {
     let working = !app.inbox.waiting_for_input();
     let glyph = if working {
         SPINNER[(app.tabs.title_frame() / 4) as usize % SPINNER.len()]
     } else {
         '█'
     };
-    let title = format!("{glyph} exarch: {cwd}");
-    let mut last = LAST.lock().unwrap();
-    if *last == title {
+    let title = format!("{glyph} exarch: {}", app.cwd_basename);
+    if app.last_title == title {
         return;
     }
     let seq = ral_core::ansi::osc_set_title(&title);
     let _ = std::io::stdout().write_all(seq.as_bytes());
     let _ = std::io::stdout().flush();
-    *last = title;
+    app.last_title = title;
 }
 
 /// Reverse-video the character range of the active selection that

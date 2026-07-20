@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use ratatui::text::Line;
 
-use crate::bus::{AgentId, NO_FOCUS};
+use crate::bus::AgentId;
 
 use super::block::AgentSlot;
 use super::viewport::Viewport;
@@ -50,8 +50,7 @@ pub(super) struct Tabs {
     /// (an [`AtomicU64`] of an [`AgentId`], or `NO_FOCUS`).  `TAB` stores into
     /// it; the focused agent reads it in its park predicate and parks for the
     /// human.  Reads route through [`Self::focused`] so a stale id (an expired
-    /// tab, or the no-focus sentinel) resolves to root.  Bound to the trunk's
-    /// shared handle by [`Self::bind_focus`].
+    /// tab, or the no-focus sentinel) resolves to root.
     focus: Arc<AtomicU64>,
     /// Each tab's parent (the spawning agent), recorded from `Kind::Born`, so
     /// focus can fall back to the parent — recursing toward the trunk — when a
@@ -64,15 +63,10 @@ pub(super) struct Tabs {
     /// Frame counter incremented each tick, driving the terminal tab-title
     /// spinner.
     title_frame: u64,
-
-    /// Whether the currently focused tab is steerable — root always is, a live
-    /// sub-agent with a registered mailbox is, and a dead/lingering one is not.
-    /// Recomputed and set by the UI loop each frame and on every keypress.
-    focused_steerable: bool,
 }
 
 impl Tabs {
-    pub fn new(root_id: AgentId, root_log_dir: &Path) -> Self {
+    pub fn new(root_id: AgentId, root_log_dir: &Path, focus: Arc<AtomicU64>) -> Self {
         let mut viewports = HashMap::new();
         viewports.insert(
             root_id,
@@ -87,13 +81,10 @@ impl Tabs {
             names,
             dying: HashMap::new(),
             root: root_id,
-            // A placeholder until [`Self::bind_focus`] wires the trunk's shared
-            // handle; `focused()` resolves the no-focus sentinel to root.
-            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
+            focus,
             parents: HashMap::new(),
             branches: HashSet::new(),
             title_frame: 0,
-            focused_steerable: true,
         }
     }
 
@@ -156,12 +147,6 @@ impl Tabs {
         changed
     }
 
-    /// Bind the Tabs's focus to the fleet's shared handle (the trunk's), so a
-    /// `TAB` here and the focused agent's park predicate read and write one
-    /// [`AtomicU64`].  Called once at REPL start, like [`super::App::bind_inbox`].
-    pub fn bind_focus(&mut self, focus: Arc<AtomicU64>) {
-        self.focus = focus;
-    }
     /// Register a born sub-agent: create viewport, record name and parent, push tab.
     pub(super) fn born(
         &mut self,
@@ -301,16 +286,6 @@ impl Tabs {
             .collect()
     }
 
-    /// Whether the focused tab is steerable.
-    pub(super) fn is_steerable(&self) -> bool {
-        self.focused_steerable
-    }
-
-    /// Set the steerable flag.
-    pub(super) fn set_steerable(&mut self, s: bool) {
-        self.focused_steerable = s;
-    }
-
     /// Frame counter for the terminal tab-title spinner.
     pub(super) fn title_frame(&self) -> u64 {
         self.title_frame
@@ -329,7 +304,7 @@ mod tests {
         let root = 1;
         let child = 2;
         let grandchild = 3;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"), Arc::new(AtomicU64::new(0)));
         tabs.parents.insert(child, root);
         tabs.parents.insert(grandchild, child);
         // Make the parent die
@@ -348,7 +323,7 @@ mod tests {
     fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
         let root = 1;
         let child = 2;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"), Arc::new(AtomicU64::new(0)));
         tabs.born(
             child,
             std::path::Path::new("/tmp/test-child"),

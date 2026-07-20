@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
-use crate::provider::{self, Provider};
+use crate::provider;
 
 use super::block::AgentSlot;
 use super::fidelity::Fidelity;
@@ -34,8 +34,7 @@ pub struct SessionInfo<'a> {
 /// A rail-less Plain like the splash above it.  Hue is spent only where it
 /// names something: a path carries the Path identity, a `dangerous` base
 /// alarms; names and quantities stay plain ink.
-pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
-    let caps = crate::provider::pricing::caps_or_default(p.model());
+pub(super) fn session_card(s: &SessionInfo<'_>, context_window: Option<u64>) -> Card {
     let mut rows: Vec<Field> = vec![
         meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)]),
     ];
@@ -43,7 +42,7 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     // Neither the provider nor the model is named here: the live status bar
     // carries both (and updates them on a `/model` switch), so the one-shot
     // banner card need not — and a model-less launch has nothing to print.
-    if let Some(ctx) = caps.context_window {
+    if let Some(ctx) = context_window {
         rows.push(meta_field(
             "context",
             vec![CardSpan::plain(provider::humanize_tokens(ctx))],
@@ -295,13 +294,10 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
 mod tests {
     use super::{SessionInfo, legend_panel, session_card};
     use crate::bus::card::{FieldVal, Mark, Role};
-    use crate::provider::scripted::Script;
-    use crate::provider::{Provider, ProviderKind};
     use crate::tui::{line, rail};
     use std::path::{Path, PathBuf};
 
-    /// A representative session: a fetched-catalog model (distinct slug,
-    /// known context window), default system prompt, no extend/restrict.
+    /// A representative session: default system prompt, no extend/restrict.
     #[allow(clippy::disallowed_methods)] // test scaffolding: a fixed literal scratch path, no path semantics to get wrong
     fn sample(base: &'static str) -> SessionInfo<'static> {
         SessionInfo {
@@ -315,12 +311,8 @@ mod tests {
         }
     }
 
-    fn sample_provider() -> Provider {
-        Provider::scripted("claude-opus-4-8", ProviderKind::Anthropic, Script::new())
-    }
-
-    fn rows(s: &SessionInfo<'_>, p: &Provider) -> Vec<(String, FieldVal)> {
-        let card = session_card(s, p);
+    fn rows(s: &SessionInfo<'_>, context_window: Option<u64>) -> Vec<(String, FieldVal)> {
+        let card = session_card(s, context_window);
         match card.marks() {
             [Mark::Fields { rows }] => rows
                 .iter()
@@ -343,7 +335,7 @@ mod tests {
     /// roles paths as Path, and leaves quantities as plain ink (no hue).
     #[test]
     fn session_card_orders_and_roles_fields() {
-        let rs = rows(&sample("read-only"), &sample_provider());
+        let rs = rows(&sample("read-only"), None);
         let labels: Vec<&str> = rs.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
@@ -366,7 +358,7 @@ mod tests {
     #[test]
     fn dangerous_base_is_the_one_field_that_earns_a_hue() {
         let base_role = |b: &'static str| {
-            let rs = rows(&sample(b), &sample_provider());
+            let rs = rows(&sample(b), None);
             lead_role(&rs.iter().find(|(l, _)| l == "base").unwrap().1)
         };
         assert_eq!(base_role("dangerous"), Some(Role::Bad));
@@ -378,7 +370,7 @@ mod tests {
     /// ones read as a muted "none" rather than borrowing a hue.
     #[test]
     fn security_paths_are_roled_present_and_muted_when_absent() {
-        let rs = rows(&sample("read-only"), &sample_provider());
+        let rs = rows(&sample("read-only"), None);
         assert_eq!(
             lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
             Some(Role::Muted),
@@ -390,7 +382,7 @@ mod tests {
         let mut s = sample("read-only");
         s.extend_base = Some(ext.as_path());
         s.restrict_files = &restr;
-        let rs = rows(&s, &sample_provider());
+        let rs = rows(&s, None);
         assert_eq!(
             lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
             Some(Role::Path)
@@ -405,9 +397,9 @@ mod tests {
     /// each field line opens with a label cell of identical width.
     #[test]
     fn rendered_matrix_aligns_every_value_in_one_column() {
-        let card = session_card(&sample("dangerous"), &sample_provider());
+        let card = session_card(&sample("dangerous"), None);
         let lines = line::render_card(&card, 3);
-        let label_w = rows(&sample("dangerous"), &sample_provider())
+        let label_w = rows(&sample("dangerous"), None)
             .iter()
             .map(|(l, _)| l.chars().count())
             .max()

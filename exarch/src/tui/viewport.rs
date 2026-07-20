@@ -876,6 +876,14 @@ impl Viewport {
         self.sticky = false;
         self.offset = self.offset.saturating_add(n);
     }
+    /// Scroll by `delta` rows, negative for up.
+    pub(super) fn scroll_by(&mut self, delta: isize) {
+        if delta < 0 {
+            self.scroll_up(delta.unsigned_abs());
+        } else {
+            self.scroll_down(delta.unsigned_abs());
+        }
+    }
 
     /// Plain text the drag-selection copies.  `lo` and `hi` are each
     /// `(row, col)` where `col` is a cell-column within the text area

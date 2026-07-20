@@ -267,10 +267,8 @@ fn apply_model_switch(
         route.cloned(),
     ));
     let label = provider_id.label();
-    let status_provider = crate::provider::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
-    tui.app
-        .update_live_model(&provider.current(), &status_provider);
+    tui.app.update_live_model(&provider.current());
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(
         &state_dir,
