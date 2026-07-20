@@ -52,7 +52,7 @@ pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
 /// with the log path is enough").
 pub(super) struct Tombstone {
     pub(super) id: AgentId,
-    pub(super) status: TombstoneStatus,
+    pub(super) error: bool,
     pub(super) log_path: PathBuf,
 }
 
@@ -60,10 +60,7 @@ impl Tombstone {
     /// The tombstone's one-line rendering: dim chrome naming the agent, its
     /// final status, and where its full transcript still lives.
     pub(super) fn line(&self) -> Line<'static> {
-        let status = match self.status {
-            TombstoneStatus::Done => "done",
-            TombstoneStatus::Error => "error",
-        };
+        let status = if self.error { "error" } else { "done" };
         Line::from(format!(
             "· agent {} {status} — {}",
             self.id,
@@ -72,27 +69,13 @@ impl Tombstone {
     }
 }
 
-/// A dead view's coarse final status, read off its last block before the
-/// full scrollback is dropped — the same signal [`Viewport::last_is_error`]
-/// already exposes for the matrix's leading glyph.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum TombstoneStatus {
-    Done,
-    Error,
-}
-
 pub(super) struct Viewport {
-    /// The session's scrollback, oldest block first.
-    blocks: Vec<Block>,
-    /// Rendered-row estimate per entry of [`Self::blocks`], same order and
-    /// length — each block's `log_lines` count, captured where it is already
-    /// computed ([`Self::log_block`], [`Self::rewrite_log`]). Their sum is the
-    /// [`VIEWPORT_MAX_ROWS`] eviction trigger, refolded per push — cheap
-    /// because the per-block counts are never re-walked, only summed.
-    block_rows: Vec<usize>,
+    /// The session's scrollback, oldest block first — each block alongside
+    /// its rendered `user.log` row count ([`Entry`]).
+    blocks: Vec<Entry>,
     /// Set once this view has been evicted into a tombstone
-    /// ([`Self::evict_to_tombstone`]); `blocks`/`block_rows` are empty from
-    /// that point on. `None` for a live (or still-lingering) view.
+    /// ([`Self::evict_to_tombstone`]); `blocks` is empty from that point on.
+    /// `None` for a live (or still-lingering) view.
     tombstone: Option<Tombstone>,
     /// This session's agent palette slot, stamped onto every block at
     /// push. Root is `0`; subagents take the next slot at birth.
@@ -156,6 +139,15 @@ pub(super) struct RenderWindow {
     pub(super) scroll_pct: Option<u16>,
 }
 
+/// One scrollback entry: the block plus its rendered `user.log` row count
+/// ([`Viewport::log_block`], [`Viewport::rewrite_log`]), captured where it
+/// is already computed. Summed over [`Viewport::blocks`], it is the
+/// [`VIEWPORT_MAX_ROWS`] eviction trigger.
+struct Entry {
+    block: Block,
+    rows: usize,
+}
+
 /// Memoised whole-buffer flatten: every block's lines wrapped to `width`
 /// into `rows`, with `row_block[i]` the block each visual row came from.
 /// Rebuilt when `dirty` or when asked at a different width.
@@ -168,6 +160,15 @@ struct Flat {
     virtual_think_at: usize,
     virtual_think_len: usize,
     virtual_think_widths: Vec<usize>,
+}
+
+/// Where visual row `row` resolves against [`Flat`]'s virtual thinking
+/// seat: either a row backed by the committed flatten (indexed after
+/// subtracting the seat, if `row` falls past it), or a row inside the seat
+/// itself, which has no backing text row of its own.
+enum RowSite {
+    Committed(usize),
+    Seat(usize),
 }
 
 /// Walk `open` for the latest paragraph break reached at fence depth
@@ -231,22 +232,6 @@ fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
     io::BufWriter::new(sink)
 }
 
-fn extend_visible_lines(
-    out: &mut Vec<Line<'static>>,
-    window_start: usize,
-    window_end: usize,
-    segment_start: usize,
-    segment: &[Line<'static>],
-) {
-    let segment_end = segment_start + segment.len();
-    if window_start >= segment_end || window_end <= segment_start {
-        return;
-    }
-    let start = window_start.saturating_sub(segment_start);
-    let end = window_end.saturating_sub(segment_start).min(segment.len());
-    out.extend_from_slice(&segment[start..end]);
-}
-
 /// Copy an already-flushed `user.log` at `src` to the user-chosen `dest`
 /// for `/export`.  The caller resolves `dest`, refuses to overwrite it, and
 /// flushes the log first; this is the doored copy, kept beside [`open_log`]
@@ -265,7 +250,6 @@ impl Viewport {
     pub(super) fn new(log_path: PathBuf, agent: AgentSlot) -> Self {
         Self {
             blocks: Vec::new(),
-            block_rows: Vec::new(),
             tombstone: None,
             agent,
             usage: Usage::default(),
@@ -305,10 +289,10 @@ impl Viewport {
     /// `false`.  Empty when no step boundary has landed yet.
     pub(super) fn steps(&self) -> Vec<bool> {
         let mut steps: Vec<bool> = Vec::new();
-        for block in &self.blocks {
-            if block.is_step() {
+        for entry in &self.blocks {
+            if entry.block.is_step() {
                 steps.push(false);
-            } else if block.is_tool_call()
+            } else if entry.block.is_tool_call()
                 && let Some(last) = steps.last_mut()
             {
                 *last = true;
@@ -321,13 +305,16 @@ impl Viewport {
     /// over its diff blocks.  Drives the matrix's size readout; `0` for a
     /// read-only agent, and prose volume never inflates it.
     pub(super) fn lines_touched(&self) -> u32 {
-        self.blocks.iter().filter_map(Block::lines_changed).sum()
+        self.blocks
+            .iter()
+            .filter_map(|e| e.block.lines_changed())
+            .sum()
     }
 
     /// Whether the session's last block is an error — the matrix renders
     /// the row's leading cell as `╳` rather than the done/running glyph.
     pub(super) fn last_is_error(&self) -> bool {
-        self.blocks.last().is_some_and(Block::is_error)
+        self.blocks.last().is_some_and(|e| e.block.is_error())
     }
 
     /// The viewport's probe figures for the `/resources` fold:
@@ -376,18 +363,7 @@ impl Viewport {
     /// Wipe scrollback, scroll state, and streaming buffer, and truncate
     /// the `user.log` by reopening it.  Used by `/clear` on the root.
     pub(super) fn reset(&mut self) {
-        self.blocks.clear();
-        self.block_rows.clear();
-        self.usage = Usage::default();
-        self.open.clear();
-        self.thinking.clear();
-        self.offset = 0;
-        self.sticky = true;
-        self.flat = Flat::default();
-        self.log = open_log(&self.log_path);
-        self.log_prev_blank = true;
-        self.phase = None;
-        self.pins.clear();
+        *self = Self::new(self.log_path.clone(), self.agent);
     }
 
     /// Evict this view's heap state into a [`Tombstone`] carrying exactly the
@@ -401,18 +377,12 @@ impl Viewport {
         if self.tombstone.is_some() {
             return;
         }
-        let status = if self.last_is_error() {
-            TombstoneStatus::Error
-        } else {
-            TombstoneStatus::Done
-        };
         self.tombstone = Some(Tombstone {
             id,
-            status,
+            error: self.last_is_error(),
             log_path: self.log_path.clone(),
         });
         self.blocks = Vec::new();
-        self.block_rows = Vec::new();
         self.open = String::new();
         self.thinking = String::new();
         self.flat = Flat::default();
@@ -543,10 +513,10 @@ impl Viewport {
             reason = "content count; u32 headroom far exceeds any in-memory transcript"
         )]
         let n = text.lines().count() as u32;
-        if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.is_call())
-            && block.is_tool_call()
+        if let Some(entry) = self.blocks.iter_mut().rev().find(|e| e.block.is_call())
+            && entry.block.is_tool_call()
         {
-            block.set_result_size(n);
+            entry.block.set_result_size(n);
             self.flat.dirty = true;
         }
     }
@@ -589,7 +559,7 @@ impl Viewport {
     /// real block.
     pub(super) fn push_thinking(&mut self, text: &str) {
         if let Some(idx) = self.thinking_target() {
-            self.blocks[idx].push_provisional_thinking(text);
+            self.blocks[idx].block.push_provisional_thinking(text);
         } else {
             self.thinking.push_str(text);
         }
@@ -601,10 +571,10 @@ impl Viewport {
     /// chrome do not break the run — only an answer paragraph (the reader has
     /// been spoken to since) or a new human turn seeds a fresh block.
     fn thinking_target(&self) -> Option<usize> {
-        let idx = self.blocks.iter().rposition(Block::is_thinking)?;
+        let idx = self.blocks.iter().rposition(|e| e.block.is_thinking())?;
         let unbroken = !self.blocks[idx + 1..]
             .iter()
-            .any(|b| b.is_markdown() || b.is_prompt());
+            .any(|e| e.block.is_markdown() || e.block.is_prompt());
         unbroken.then_some(idx)
     }
 
@@ -665,8 +635,8 @@ impl Viewport {
             .blocks
             .iter()
             .rev()
-            .find(|b| b.is_tool_call())
-            .and_then(Block::ral_cmd)
+            .find(|e| e.block.is_tool_call())
+            .and_then(|e| e.block.ral_cmd())
             .map_or(0, |cmd| fidelity::echo_delta(text, cmd));
         Fidelity {
             context: context_floor,
@@ -678,25 +648,29 @@ impl Viewport {
     /// next render rebuilds it, and enforce the window caps.
     fn push_block(&mut self, block: Block) {
         let rows = self.log_block(&block);
-        self.blocks.push(block);
-        self.block_rows.push(rows);
+        self.blocks.push(Entry { block, rows });
         self.flat.dirty = true;
         self.enforce_window_caps();
     }
 
     /// Evict oldest-first once either window cap is crossed — the dropped
     /// blocks are already durable in `user.log`/`events.json` and are never
-    /// re-read from heap (`decisions/260705_leases-and-budgets`).
+    /// re-read from heap (`decisions/260705_leases-and-budgets`).  Walked
+    /// once from the tail to find the longest suffix satisfying both caps,
+    /// then the rest is dropped in a single `drain`.
     fn enforce_window_caps(&mut self) {
-        let mut evicted = false;
-        while self.blocks.len() > VIEWPORT_MAX_BLOCKS
-            || self.block_rows.iter().sum::<usize>() > VIEWPORT_MAX_ROWS
-        {
-            self.blocks.remove(0);
-            self.block_rows.remove(0);
-            evicted = true;
+        let mut kept = 0usize;
+        let mut rows = 0usize;
+        for entry in self.blocks.iter().rev() {
+            if kept == VIEWPORT_MAX_BLOCKS || rows + entry.rows > VIEWPORT_MAX_ROWS {
+                break;
+            }
+            kept += 1;
+            rows += entry.rows;
         }
-        if evicted {
+        let drop = self.blocks.len() - kept;
+        if drop > 0 {
+            self.blocks.drain(..drop);
             self.flat.dirty = true;
         }
     }
@@ -710,7 +684,7 @@ impl Viewport {
             .blocks
             .iter()
             .rev()
-            .map_while(Block::markdown_src)
+            .map_while(|e| e.block.markdown_src())
             .fold(0u32, |n, text| {
                 n.saturating_add(text.chars().count() as u32)
             });
@@ -727,7 +701,7 @@ impl Viewport {
             return;
         }
         if let Some(idx) = self.thinking_target() {
-            self.blocks[idx].append_thinking(&text, answer_chars);
+            self.blocks[idx].block.append_thinking(&text, answer_chars);
             self.rewrite_log();
             self.flat.dirty = true;
             return;
@@ -737,11 +711,11 @@ impl Viewport {
         let insert_at = self
             .blocks
             .iter()
-            .rposition(|b| !b.is_markdown() && !b.is_thinking())
+            .rposition(|e| !e.block.is_markdown() && !e.block.is_thinking())
             .map_or(0, |i| i + 1);
         let block = Block::thinking(text, answer_chars);
-        if insert_at < self.blocks.len() && self.blocks[insert_at].is_markdown() {
-            self.blocks.insert(insert_at, block);
+        if insert_at < self.blocks.len() && self.blocks[insert_at].block.is_markdown() {
+            self.blocks.insert(insert_at, Entry { block, rows: 0 });
             self.rewrite_log();
             self.flat.dirty = true;
         } else {
@@ -755,7 +729,7 @@ impl Viewport {
     /// ([`Self::push_block`]) reuses this rather than paying for a second
     /// pass over the block.
     fn log_block(&mut self, block: &Block) -> usize {
-        let lead = opens_rail_run(self.blocks.last(), block);
+        let lead = opens_rail_run(self.blocks.last().map(|e| &e.block), block);
         let lines = block.log_lines(self.agent, lead);
         let n = lines.len();
         self.write_log_lines(lines);
@@ -764,24 +738,26 @@ impl Viewport {
 
     /// Rebuild the whole log from `self.blocks` — used when an existing
     /// block was mutated or a new one inserted mid-vector (a thinking-block
-    /// append or insert), rather than appended. Also rebuilds
-    /// [`Self::block_rows`] from the same pass (no second walk) and
-    /// re-enforces the window caps, since an in-place append can grow a
-    /// block past the row budget without changing [`Self::blocks`]'s length.
+    /// append or insert), rather than appended. Also refreshes each entry's
+    /// row count from the same pass (no second walk) and re-enforces the
+    /// window caps, since an in-place append can grow a block past the row
+    /// budget without changing [`Self::blocks`]'s length.
     fn rewrite_log(&mut self) {
-        let entries = self
+        let rendered = self
             .blocks
             .iter()
             .enumerate()
-            .map(|(i, block)| {
-                let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j]), block);
-                block.log_lines(self.agent, lead)
+            .map(|(i, entry)| {
+                let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j].block), &entry.block);
+                entry.block.log_lines(self.agent, lead)
             })
             .collect::<Vec<_>>();
-        self.block_rows = entries.iter().map(Vec::len).collect();
+        for (entry, lines) in self.blocks.iter_mut().zip(&rendered) {
+            entry.rows = lines.len();
+        }
         self.log = open_log(&self.log_path);
         self.log_prev_blank = true;
-        for lines in entries {
+        for lines in rendered {
             self.write_log_lines(lines);
         }
         self.enforce_window_caps();
@@ -807,18 +783,29 @@ impl Viewport {
 
     // ── interaction ──────────────────────────────────────────────────────
 
-    /// The block owning visual row `row`, or `None` past the buffer's
-    /// end.  Valid against the most recent [`Self::render_window`].
-    pub(super) fn block_at(&self, row: usize) -> Option<usize> {
+    /// Resolve visual row `row` against the virtual thinking seat: a row
+    /// backed by the committed flatten, or a row inside the seat itself.
+    /// The one statement of the seat-splice arithmetic; [`Self::block_at`],
+    /// [`Self::flat_row`], and [`Self::row_width`] are each one-liners over it.
+    fn row_site(&self, row: usize) -> RowSite {
         let think_at = self.flat.virtual_think_at;
         let think_len = self.flat.virtual_think_len;
         if think_len == 0 || row < think_at {
-            return self.flat.row_block.get(row).copied();
+            RowSite::Committed(row)
+        } else if row < think_at + think_len {
+            RowSite::Seat(row - think_at)
+        } else {
+            RowSite::Committed(row - think_len)
         }
-        if row < think_at + think_len {
-            return None;
+    }
+
+    /// The block owning visual row `row`, or `None` past the buffer's
+    /// end.  Valid against the most recent [`Self::render_window`].
+    pub(super) fn block_at(&self, row: usize) -> Option<usize> {
+        match self.row_site(row) {
+            RowSite::Committed(r) => self.flat.row_block.get(r).copied(),
+            RowSite::Seat(_) => None,
         }
-        self.flat.row_block.get(row - think_len).copied()
     }
 
     /// Map a visual row back to its index in the flattened row buffer, or
@@ -826,38 +813,27 @@ impl Viewport {
     /// text row) or past the buffer's end.  Mirrors [`Self::block_at`] so the
     /// mouse layer's absolute virtual rows resolve to the right text.
     fn flat_row(&self, row: usize) -> Option<usize> {
-        let think_at = self.flat.virtual_think_at;
-        let think_len = self.flat.virtual_think_len;
-        let mapped = if think_len == 0 || row < think_at {
-            row
-        } else if row < think_at + think_len {
-            return None;
-        } else {
-            row - think_len
-        };
-        (mapped < self.flat.rows.len()).then_some(mapped)
+        match self.row_site(row) {
+            RowSite::Committed(r) => (r < self.flat.rows.len()).then_some(r),
+            RowSite::Seat(_) => None,
+        }
     }
 
     /// Rendered cell width of visual row `row` — its content's extent, not
     /// the pane's — so a gesture can be bound tight to the text and ignore
     /// the dead margin past where the line ends.  `None` past the buffer.
     pub(super) fn row_width(&self, row: usize) -> Option<usize> {
-        let think_at = self.flat.virtual_think_at;
-        let think_len = self.flat.virtual_think_len;
-        if think_len == 0 || row < think_at {
-            return self.flat.rows.get(row).map(Line::width);
+        match self.row_site(row) {
+            RowSite::Committed(r) => self.flat.rows.get(r).map(Line::width),
+            RowSite::Seat(s) => self.flat.virtual_think_widths.get(s).copied(),
         }
-        if row < think_at + think_len {
-            return self.flat.virtual_think_widths.get(row - think_at).copied();
-        }
-        self.flat.rows.get(row - think_len).map(Line::width)
     }
 
     /// Whether the block at `idx` is dialable — a stable property of its
     /// kind, independent of its current level, so a wheel resting on its
     /// glyph can claim the gesture even when the level is already clamped.
     pub(super) fn block_dialable(&self, idx: usize) -> bool {
-        self.blocks.get(idx).is_some_and(Block::dialable)
+        self.blocks.get(idx).is_some_and(|e| e.block.dialable())
     }
 
     /// Dial the block at `idx` by `delta` if it is dialable, returning
@@ -876,9 +852,10 @@ impl Viewport {
     /// Apply `f` to the dialable block at `idx`, marking the flatten stale
     /// when its memo actually dropped, and report whether it changed.
     fn mutate_block(&mut self, idx: usize, f: impl FnOnce(&mut Block)) -> bool {
-        let Some(block) = self.blocks.get_mut(idx) else {
+        let Some(entry) = self.blocks.get_mut(idx) else {
             return false;
         };
+        let block = &mut entry.block;
         if !block.dialable() {
             return false;
         }
@@ -957,7 +934,7 @@ impl Viewport {
             .blocks
             .iter()
             .rev()
-            .map_while(Block::markdown_src)
+            .map_while(|e| e.block.markdown_src())
             .collect();
         tail.reverse();
         tail.concat().trim().to_owned()
@@ -998,11 +975,11 @@ impl Viewport {
         let start = self
             .blocks
             .iter()
-            .rposition(|b| !b.is_markdown() && !b.is_thinking())
+            .rposition(|e| !e.block.is_markdown() && !e.block.is_thinking())
             .map_or(0, |i| i + 1);
         self.blocks
             .get(start)
-            .is_some_and(Block::is_markdown)
+            .is_some_and(|e| e.block.is_markdown())
             .then_some(start)
     }
 
@@ -1094,7 +1071,6 @@ impl Viewport {
             self.offset = self.offset.min(max_off);
             self.sticky = self.offset >= max_off;
         }
-        let end = (self.offset + height).min(total);
         // Scroll position as a percentage of the scrollable range: `0%` at the
         // top, `100%` once `offset` reaches `max_off` (the tail).  `None` when
         // the whole buffer fits, so the rule line shows no readout.  `offset`
@@ -1105,23 +1081,16 @@ impl Viewport {
         )]
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
-        let mut lines = Vec::new();
-        extend_visible_lines(
-            &mut lines,
-            self.offset,
-            end,
-            0,
-            &self.flat.rows[..think_at.min(committed)],
-        );
-        extend_visible_lines(&mut lines, self.offset, end, think_at, &think);
-        extend_visible_lines(
-            &mut lines,
-            self.offset,
-            end,
-            think_at + think.len(),
-            &self.flat.rows[think_at.min(committed)..],
-        );
-        extend_visible_lines(&mut lines, self.offset, end, committed + think.len(), &seat);
+        let split = think_at.min(committed);
+        let lines: Vec<Line<'static>> = self.flat.rows[..split]
+            .iter()
+            .chain(&think)
+            .chain(&self.flat.rows[split..])
+            .chain(&seat)
+            .skip(self.offset)
+            .take(height)
+            .cloned()
+            .collect();
         RenderWindow {
             lines,
             offset: self.offset,
@@ -1135,12 +1104,10 @@ impl Viewport {
     /// ([`Block::observation`] — a call and its reads/greps/execs, bridged
     /// across the interior step boundaries between consecutive calls,
     /// [`Self::observation_run_end`]) folds into one dialable ral block
-    /// ([`super::group`]); a run of adjacent same-tool summary-less queries
-    /// ([`Block::is_query`], bridged the same way) folds into one flat
-    /// `tool : …` line ([`Self::render_query_run`]); every genuine barrier — a
-    /// diff, a write, a surfaced card, markdown, a subagent result, or chrome —
-    /// renders as its own block exactly as before, save a step boundary interior
-    /// to a run, which is folded away.  The projection reads what arrival order
+    /// ([`super::group`]); every genuine barrier — a diff, a write, a
+    /// surfaced card, markdown, a subagent result, or chrome — renders as
+    /// its own block exactly as before, save a step boundary interior to a
+    /// run, which is folded away.  The projection reads what arrival order
     /// already adjoins; nothing about how blocks are pushed, logged, or
     /// aggregated changes.
     /// Each visual row maps to its source block index — a group's rows to
@@ -1161,19 +1128,21 @@ impl Viewport {
             // `prompt` is true only for the human turn — the flatten paints its
             // full-width rule fence here, where the content width is known, so
             // the rule spans the reading column as the turn's opening seam.
-            let (anchor, lines, prompt) = if self.blocks[i].observation() {
+            let (anchor, lines, prompt) = if self.blocks[i].block.observation() {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
                 let segment = (anchor, self.render_group(i, end, anchor, content_w), false);
                 i = end;
                 segment
             } else {
-                let prompt = self.blocks[i].is_prompt();
-                let lead =
-                    opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j]), &self.blocks[i]);
+                let prompt = self.blocks[i].block.is_prompt();
+                let lead = opens_rail_run(
+                    i.checked_sub(1).map(|j| &self.blocks[j].block),
+                    &self.blocks[i].block,
+                );
                 let segment = (
                     i,
-                    self.blocks[i].lines(content_w, agent, lead).to_vec(),
+                    self.blocks[i].block.lines(content_w, agent, lead).to_vec(),
                     prompt,
                 );
                 i += 1;
@@ -1203,30 +1172,23 @@ impl Viewport {
 
     /// The end (exclusive) of the maximal observation run starting at
     /// `start` — the span of [`Block::observation`] blocks the projection
-    /// coalesces into one ral block.  [`Self::run_end`] over the observation
-    /// predicate.
+    /// coalesces into one ral block, **bridged across the step boundaries
+    /// interior to it**.  Each call is its own provider round-trip, so a
+    /// [`Block::is_step`] chrome (`Kind::Step`) lands between consecutive
+    /// calls; left a barrier it would cut every burst back to a single call.
+    /// A step boundary is provider bookkeeping, not content: when it falls
+    /// *between* run members it is subsumed (and never rendered); a step at
+    /// the run's tail is also subsumed — the step carries no content and the
+    /// run's own rail already marks its edge.
     fn observation_run_end(&self, start: usize) -> usize {
-        self.run_end(start, Block::observation)
-    }
-
-    /// The end (exclusive) of the maximal run of `in_run` blocks starting at
-    /// `start`, **bridged across the step boundaries interior to it** — the one
-    /// genuinely shared piece between the ral observation group and the `fff`
-    /// query coalesce.  Each call is its own provider round-trip, so a
-    /// [`Block::is_step`] chrome (`Kind::Step`) lands between consecutive calls;
-    /// left a barrier it would cut every burst back to a single call.  A step
-    /// boundary is provider bookkeeping, not content: when it falls *between*
-    /// run members it is subsumed (and never rendered); a step at the run's tail
-    /// is also subsumed — the step carries no content and the run's own rail
-    /// already marks its edge.
-    fn run_end(&self, start: usize, in_run: impl Fn(&Block) -> bool) -> usize {
         // `end` advances past every run member and any step, so a trailing
         // step is folded into the run rather than rendered as its own block.
         let mut end = start;
         let mut i = start;
         while i < self.blocks.len() {
+            let block = &self.blocks[i].block;
             // A run member or a step both fold into the run; anything else ends it.
-            if in_run(&self.blocks[i]) || self.blocks[i].is_step() {
+            if block.observation() || block.is_step() {
                 i += 1;
                 end = i;
             } else {
@@ -1250,7 +1212,7 @@ impl Viewport {
         anchor: usize,
         width: u16,
     ) -> Vec<Line<'static>> {
-        let level = self.blocks[anchor].level();
+        let level = self.blocks[anchor].block.level();
         let calls = self.group_calls(start, end);
         let mut lines = group::body(&calls, level, width as usize);
         let open = level >= Reveal::Context;
@@ -1268,7 +1230,7 @@ impl Viewport {
     /// run's first block when (defensively) no call leads it.
     fn group_anchor(&self, start: usize, end: usize) -> usize {
         (start..end)
-            .find(|&i| self.blocks[i].is_tool_call())
+            .find(|&i| self.blocks[i].block.is_tool_call())
             .unwrap_or(start)
     }
 
@@ -1281,8 +1243,8 @@ impl Viewport {
         let mut effects: Vec<Line<'static>> = Vec::new();
         let mut tally = group::Tally::default();
         let mut pending: Option<group::CallParts<'_>> = None;
-        for block in &self.blocks[start..end] {
-            if let Some(parts) = block.call_view() {
+        for entry in &self.blocks[start..end] {
+            if let Some(parts) = entry.block.call_view() {
                 if let Some(prev) = pending.take() {
                     calls.push(group::Call::new(
                         prev,
@@ -1292,8 +1254,8 @@ impl Viewport {
                 }
                 pending = Some(parts);
             } else {
-                effects.extend(block.effect_lines());
-                if let Some((kind, count)) = block.io_tally() {
+                effects.extend(entry.block.effect_lines());
+                if let Some((kind, count)) = entry.block.io_tally() {
                     tally.add(kind, count);
                 }
             }
@@ -1653,18 +1615,13 @@ mod tests {
             VIEWPORT_MAX_BLOCKS,
             "capped at the block limit"
         );
-        assert_eq!(
-            vp.block_rows.len(),
-            VIEWPORT_MAX_BLOCKS,
-            "the row-estimate ledger tracks blocks 1:1"
-        );
         assert!(
-            block_text(&vp.blocks[0]).contains("marker 50"),
+            block_text(&vp.blocks[0].block).contains("marker 50"),
             "oldest-first eviction: the 51st pushed block is now the oldest survivor: {}",
-            block_text(&vp.blocks[0])
+            block_text(&vp.blocks[0].block)
         );
         assert!(
-            block_text(vp.blocks.last().unwrap())
+            block_text(&vp.blocks.last().unwrap().block)
                 .contains(&format!("marker {}", VIEWPORT_MAX_BLOCKS + 49)),
             "the newest block always survives"
         );
@@ -1690,22 +1647,21 @@ mod tests {
             vp.blocks.len()
         );
         assert!(
-            vp.block_rows.iter().sum::<usize>() <= VIEWPORT_MAX_ROWS,
+            vp.blocks.iter().map(|e| e.rows).sum::<usize>() <= VIEWPORT_MAX_ROWS,
             "resident rows stay under the cap"
         );
         assert!(
-            !block_text(&vp.blocks[0]).contains("b0 line"),
+            !block_text(&vp.blocks[0].block).contains("b0 line"),
             "the oldest block (b0) was evicted, not a newer one"
         );
         assert!(
-            block_text(vp.blocks.last().unwrap()).contains("b4 line"),
+            block_text(&vp.blocks.last().unwrap().block).contains("b4 line"),
             "the newest block (b4) survives"
         );
     }
 
     /// Eviction into a tombstone carries exactly the agent id, the final
-    /// status, and the log path — everything else (blocks, the row ledger,
-    /// pins) is dropped.
+    /// status, and the log path — everything else (blocks, pins) is dropped.
     #[test]
     fn evict_to_tombstone_keeps_exactly_the_three_facts() {
         let mut vp = viewport();
@@ -1719,10 +1675,9 @@ mod tests {
         assert!(vp.tombstone().is_some());
         let t = vp.tombstone().expect("tombstoned");
         assert_eq!(t.id, 42);
-        assert_eq!(t.status, TombstoneStatus::Done);
+        assert!(!t.error);
         assert_eq!(t.log_path, log_path);
         assert!(vp.blocks.is_empty(), "the scrollback is dropped");
-        assert!(vp.block_rows.is_empty(), "the row ledger is dropped");
         assert!(vp.pins().is_empty(), "the pinned register is dropped");
 
         // Its one-line rendering names the agent, the status, and the path.
@@ -1736,14 +1691,14 @@ mod tests {
     }
 
     /// The tombstone's status is read off the view's last block before it is
-    /// dropped: an error-terminated session tombstones as `Error`.
+    /// dropped: an error-terminated session tombstones as an error.
     #[test]
     fn evict_to_tombstone_reads_error_status_off_the_last_block() {
         let mut vp = viewport();
         vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
         assert!(vp.last_is_error());
         vp.evict_to_tombstone(7);
-        assert_eq!(vp.tombstone().unwrap().status, TombstoneStatus::Error);
+        assert!(vp.tombstone().unwrap().error);
     }
 
     /// Re-evicting an already-tombstoned view is a no-op — the first
@@ -1754,14 +1709,13 @@ mod tests {
         let mut vp = viewport();
         vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
         vp.evict_to_tombstone(1);
-        assert_eq!(vp.tombstone().unwrap().status, TombstoneStatus::Error);
+        assert!(vp.tombstone().unwrap().error);
         // A second call (e.g. a defensive re-tick) must not reset the id or
         // status even though the view is now clean (no error block).
         vp.evict_to_tombstone(999);
         assert_eq!(vp.tombstone().unwrap().id, 1, "the id is not overwritten");
-        assert_eq!(
-            vp.tombstone().unwrap().status,
-            TombstoneStatus::Error,
+        assert!(
+            vp.tombstone().unwrap().error,
             "the status is not overwritten"
         );
     }
