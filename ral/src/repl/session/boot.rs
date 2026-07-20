@@ -117,10 +117,10 @@ fn claim_terminal() -> Result<(), String> {
         }
     }
     let pid = rustix::process::getpid();
-    if rustix::process::getpgrp() != pid {
-        if let Err(e) = rustix::process::setpgid(None, None) {
-            return Err(format!("setpgid: {e}"));
-        }
+    if rustix::process::getpgrp() != pid
+        && let Err(e) = rustix::process::setpgid(None, None)
+    {
+        return Err(format!("setpgid: {e}"));
     }
     if let Err(e) = rustix::termios::tcsetpgrp(stdin, pid) {
         return Err(format!("tcsetpgrp: {e}"));

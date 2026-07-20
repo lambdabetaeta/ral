@@ -212,7 +212,7 @@ pub fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
 pub struct TerminalGuard {
     term: Term,
     #[cfg(unix)]
-    stderr_backup: Option<std::os::fd::RawFd>,
+    stderr_backup: Option<std::os::fd::OwnedFd>,
     #[cfg(windows)]
     stderr_backup: Option<WindowsStderrBackup>,
 }
@@ -280,31 +280,15 @@ impl Drop for TerminalGuard {
     clippy::disallowed_methods,
     reason = "[io-door:silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
 )]
-pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::RawFd> {
+pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
     use std::fs::OpenOptions;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::AsFd;
 
     let file = OpenOptions::new().create(true).append(true).open(path)?;
-    // SAFETY: STDERR_FILENO is always a valid kernel fd in a normal
-    // process; `dup` either returns a new fd or `-1` with `errno` set.
-    let backup = unsafe { libc::dup(libc::STDERR_FILENO) };
-    if backup < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `file.as_raw_fd()` is open for the duration of this
-    // block; `dup2` atomically closes the existing fd 2 and aliases
-    // the source onto it.  After `dup2`, the kernel holds an
-    // independent fd-table entry for fd 2 backed by the same open
-    // file description, so dropping `file` here is fine.
-    let r = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
-    if r < 0 {
-        let e = io::Error::last_os_error();
-        // SAFETY: `backup` is a valid fd we just obtained from `dup`.
-        unsafe {
-            libc::close(backup);
-        }
-        return Err(e);
-    }
+    let backup = rustix::io::dup(rustix::stdio::stderr()).map_err(io::Error::from)?;
+    // SAFETY: fd 2 is a process-global fd slot; retargeting it onto the
+    // log file is exactly the redirect this function exists to perform.
+    unsafe { ral_core::process::clobber_slot(file.as_fd(), rustix::stdio::raw_stderr()) }?;
     Ok(backup)
 }
 
@@ -313,13 +297,17 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::Ra
 /// to surface, and the process is about to return to the user's
 /// shell anyway.
 #[cfg(unix)]
-pub(super) fn restore_stderr(backup: std::os::fd::RawFd) {
-    // SAFETY: `backup` is a live fd returned by `dup`; `dup2` is
-    // idempotent on the target and `close` releases the backup.
-    unsafe {
-        libc::dup2(backup, libc::STDERR_FILENO);
-        libc::close(backup);
-    }
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "consuming the backup is the contract: fd 2 is restored from it, then it closes here"
+)]
+pub(super) fn restore_stderr(backup: std::os::fd::OwnedFd) {
+    use std::os::fd::AsFd;
+
+    let target = rustix::stdio::raw_stderr();
+    // SAFETY: fd 2 is a process-global fd slot; retargeting it back onto
+    // the backup is exactly the restore this function exists to perform.
+    let _ = unsafe { ral_core::process::clobber_slot(backup.as_fd(), target) };
 }
 
 /// Everything [`restore_stderr`] needs to undo [`redirect_stderr_to_file`]'s

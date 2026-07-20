@@ -297,15 +297,13 @@ fn open_atomic(
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&target).ok().map_or_else(
             || {
-                // `libc::umask` is a combined getter/setter with no
-                // read-only variant: set a throwaway value to read the
+                // `rustix::process::umask` is a combined getter/setter with
+                // no read-only variant: set a throwaway value to read the
                 // current mask, then restore it immediately.
+                let prev = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
+                rustix::process::umask(prev);
                 #[allow(clippy::useless_conversion)] // libc::mode_t is u16 on macOS/BSD
-                let mask = u32::from(unsafe {
-                    let prev = libc::umask(0o022);
-                    libc::umask(prev);
-                    prev
-                });
+                let mask = u32::from(prev.as_raw_mode());
                 0o666 & !mask
             },
             |m| m.permissions().mode() & 0o7777,
@@ -412,18 +410,17 @@ pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settl
 #[cfg(unix)]
 pub(crate) struct BackupFd {
     pub(crate) fd: u32,
-    pub(crate) backup: i32,
+    pub(crate) backup: std::os::fd::OwnedFd,
 }
 
 #[cfg(unix)]
 impl Drop for BackupFd {
     fn drop(&mut self) {
-        // Best-effort: dup2 / close failures inside Drop have nowhere to go.
-        unsafe {
-            #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
-            libc::dup2(self.backup, self.fd as i32);
-            libc::close(self.backup);
-        }
+        // Best-effort: clobber_slot failures inside Drop have nowhere to
+        // go.  `backup`'s own `Drop` closes it once this returns.
+        use std::os::fd::AsFd;
+        #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
+        let _ = unsafe { crate::process::clobber_slot(self.backup.as_fd(), self.fd as i32) };
     }
 }
 
@@ -561,13 +558,12 @@ pub(crate) fn apply_redirects(
                 if let Some(c) = commit {
                     guard.commits.push(c);
                 }
-                use std::os::unix::io::IntoRawFd;
-                let raw = file.into_raw_fd();
-                if let Err(e) = install_dup2(raw, *fd, &mut guard) {
-                    unsafe { libc::close(raw) };
-                    return Err(e);
-                }
-                unsafe { libc::close(raw) };
+                // `owned` closes on drop at the end of this arm — on the
+                // success path once installed onto `*fd`, and just as well
+                // on the `?`-propagated error path below.
+                use std::os::fd::AsRawFd;
+                let owned: std::os::fd::OwnedFd = file.into();
+                install_dup2(owned.as_raw_fd(), *fd, &mut guard)?;
             }
             EvalRedirect::Fd(target_fd) => {
                 #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
@@ -590,31 +586,40 @@ pub(crate) fn apply_redirects(
 /// restores it on unwind.
 #[cfg(unix)]
 fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<()> {
+    use std::os::fd::BorrowedFd;
+
     // `F_DUPFD_CLOEXEC` rather than a bare `dup`: this backup is internal
     // bookkeeping for the redirect guard, not a descriptor meant for any
     // child — a child spawned while the guard is live (a nested external
     // launched from inside the redirected builtin body) must not inherit
     // it.
     #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
-    let backup = unsafe { libc::fcntl(dst_fd as i32, libc::F_DUPFD_CLOEXEC, 0) };
-    if backup < 0 {
-        return Err(Break::Error(Error::new(
+    // SAFETY: `dst_fd` is the slot this redirect is about to overwrite; the
+    // caller's contract (`apply_redirects`) guarantees it names a live fd
+    // for the life of this borrow, which ends with this statement.
+    let backup = unsafe {
+        rustix::io::fcntl_dupfd_cloexec(BorrowedFd::borrow_raw(dst_fd as i32), 0)
+    }
+    .map_err(|e| {
+        Break::Error(Error::new(
             format!(
                 "redirect to fd {dst_fd}: cannot save the existing descriptor \
-                 ({}) — refusing to install a redirect with no restore path",
-                std::io::Error::last_os_error()
+                 ({e}) — refusing to install a redirect with no restore path"
             ),
             1,
-        )));
-    }
+        ))
+    })?;
     guard.saved.push(BackupFd { fd: dst_fd, backup });
     #[allow(clippy::cast_possible_wrap, reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap")]
-    if unsafe { libc::dup2(src_fd, dst_fd as i32) } < 0 {
+    // SAFETY: `src_fd` is kept open by its caller for the length of this
+    // call (either the just-opened file's `OwnedFd`, or a live standard
+    // slot); `dst_fd` is the redirect target slot, and retargeting it onto
+    // `src_fd` is exactly the redirect `apply_redirects` is installing.
+    if let Err(e) =
+        unsafe { crate::process::clobber_slot(BorrowedFd::borrow_raw(src_fd), dst_fd as i32) }
+    {
         return Err(Break::Error(Error::new(
-            format!(
-                "redirect to fd {dst_fd}: dup2 failed ({})",
-                std::io::Error::last_os_error()
-            ),
+            format!("redirect to fd {dst_fd}: dup2 failed ({e})"),
             1,
         )));
     }

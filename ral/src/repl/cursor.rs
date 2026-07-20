@@ -29,7 +29,7 @@ pub(super) fn query_cursor_col() -> Option<usize> {
         if len >= buf.len() {
             break;
         }
-        match rustix::io::read(stdin, &mut buf[len..len + 1]) {
+        match rustix::io::read(stdin, &mut buf[len..=len]) {
             Ok(1) => {}
             _ => break,
         }

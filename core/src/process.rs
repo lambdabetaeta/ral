@@ -27,6 +27,8 @@ pub mod lease;
 pub mod outcome;
 pub mod reaper;
 pub mod signal;
+#[cfg(unix)]
+pub mod slot;
 
 pub(crate) use outcome::not_found_hint;
 pub use outcome::{CommandFailure, Signal, SpawnFailure, WaitOutcome};
@@ -49,6 +51,9 @@ pub use signal::{
     relay_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
     termios_snapshot, waitpid_eintr,
 };
+
+#[cfg(unix)]
+pub use slot::clobber_slot;
 
 #[cfg(windows)]
 pub use signal::{
