@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: be40775f432a5cb0d3eea709624d4220add0d939
+generated_at_date: 2026-07-21
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -110,8 +110,12 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
   external group, `relay_handler` fans SIGINT to active external pgids, and
   `quit_handler` is the Ctrl-`\` root abort. Platform handlers live in
-  `signal/unix.rs` and `signal/windows.rs`; the Windows side carries the
-  console-control escalation ladder (`CTRL_BREAK_EVENT` fan-out, then
+  `signal/unix.rs` and `signal/windows.rs`. Unix child and process-group waits
+  pass through typed blocking / polling funnels for pids and pgids: rustix owns
+  pid and total status types, while the funnel shape owns optionality and makes
+  `EINTR` invisible without conflating `NOHANG` with `ECHILD`
+  ([[decisions/260720_total-wait-status|total-wait-status]]). The Windows side
+  carries the console-control escalation ladder (`CTRL_BREAK_EVENT` fan-out, then
   `TerminateJobObject`, then exit), `relay_interrupt` — `relay_handler`'s
   non-escalating twin, whose fan-out skips a detached worker's group — and
   `break_pipeline_group`, the SIGTERM-grade cooperative break a job teardown

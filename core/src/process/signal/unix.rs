@@ -12,8 +12,8 @@
 //!     every external child gets `setpgid` + `reset_child_signals` via a
 //!     single `pre_exec` funnel.
 //!   * **Wait handling** for stopped children polls `waitpid` with
-//!     `WUNTRACED` so a SIGSTOP'd child is classified (parked or
-//!     killed-then-reaped) rather than mistaken for still-running.
+//!     [`WaitOptions::UNTRACED`] so a SIGSTOP'd child is classified
+//!     (parked or killed-then-reaped) rather than mistaken for still-running.
 //!   * **Foreground / tty ownership** hands the controlling terminal to a
 //!     foreground child and restores the pgid and line discipline on drop.
 
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use nix::sys::signal::{SigSet, SigmaskHow};
 use rustix::io::Errno;
-use rustix::process::Pid;
+use rustix::process::{Pid, WaitOptions, WaitStatus};
 use rustix::termios::{OptionalActions, Termios};
 
 use super::{ESCALATION, Pgid, PgidPolicy};
@@ -273,7 +273,7 @@ impl PgidPolicy {
                 Self::Inherit => 0,
                 Self::NewLeader => libc::setpgid(0, 0),
                 Self::NewSession => libc::setsid(),
-                Self::Join(Pgid(leader)) => libc::setpgid(0, leader),
+                Self::Join(group) => libc::setpgid(0, group.as_raw()),
             }
         };
         if rc == -1 {
@@ -284,6 +284,7 @@ impl PgidPolicy {
 }
 
 /// The child's OS pid as an `i32`.
+#[cfg(test)]
 #[allow(
     clippy::cast_possible_wrap,
     reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→i32 reinterpretation never wraps"
@@ -357,20 +358,20 @@ where
     let leader = match pgid {
         PgidPolicy::Inherit => None,
         PgidPolicy::NewLeader => {
-            let pid = child_pid(&child);
-            let _ = rustix::process::setpgid(Pid::from_raw(pid), Pid::from_raw(pid));
-            Some(Pgid(pid))
+            let pid = Pid::from_child(&child);
+            let _ = rustix::process::setpgid(Some(pid), Some(pid));
+            Some(Pgid::from_pid(pid))
         }
         PgidPolicy::NewSession => {
             // `setsid` can run only in the child — a process cannot move
             // another into a new session — so there is no parent-side
             // mirror to close the race: the child's `pre_exec` is the sole
             // authority.  The new session's pgid equals the child's pid.
-            Some(Pgid(child_pid(&child)))
+            Some(Pgid::from_pid(Pid::from_child(&child)))
         }
-        PgidPolicy::Join(p) => {
-            let _ = rustix::process::setpgid(Pid::from_raw(child_pid(&child)), Pid::from_raw(p.0));
-            Some(p)
+        PgidPolicy::Join(group) => {
+            let _ = rustix::process::setpgid(Some(Pid::from_child(&child)), Some(group.as_pid()));
+            Some(group)
         }
     };
     Ok((child, leader))
@@ -383,9 +384,9 @@ where
 // stays stopped indefinitely — the wait blocks, the controlling tty stays
 // owned by the stopped pgid, and ral hangs.
 //
-// `wait_handling_stop` uses `waitpid(pid, ..., WUNTRACED)` so the wait
-// returns on stop too.  Behaviour on a stop status depends on whether the
-// caller opted into job-control parking:
+// `wait_handling_stop` uses `waitpid` with `WaitOptions::UNTRACED` so the
+// wait returns on stop too.  Behaviour on a stop status depends on whether
+// the caller opted into job-control parking:
 //
 //   * `park_on_stop = true` + `pgid = Some(_)`: return `Stopped` without
 //     killing.  The caller (eventually `RunningChild::wait`) surfaces this
@@ -403,39 +404,71 @@ pub(super) fn wait_handling_stop(
     pgid: Option<Pgid>,
     park_on_stop: bool,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    let pid = child_pid(child);
-    let (r, status) = waitpid_eintr(pid, libc::WUNTRACED);
-    if r < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let pid = Pid::from_child(child);
+    let (_, status) = waitpid_eintr(pid, WaitOptions::UNTRACED)?;
     classify_wait_status(pid, status, pgid, park_on_stop, child)
 }
 
-/// `waitpid(target, flags)` with implicit `EINTR` retry.
+/// Wait for `pid`, retrying transparently after `EINTR`.
 ///
-/// Returns the raw
-/// `(ret, status)`: `ret > 0` reaped a child, `ret == 0` is `WNOHANG` with
-/// nothing pending, `ret < 0` is a terminal errno (e.g. `ECHILD`) with
-/// `errno` set.  `EINTR` is retried and never reaches the caller, so a
-/// signal delivery cannot be mistaken for `ECHILD` and flip a live job to
-/// "gone".  Shared by every wait in this module and the REPL job table's
-/// reap — and deliberately raw, because the job table waits on whole
-/// groups via negative targets and decodes the statuses itself.
-pub fn waitpid_eintr(target: i32, flags: i32) -> (i32, i32) {
-    loop {
-        let mut status: i32 = 0;
-        let r = unsafe { libc::waitpid(target, &raw mut status, flags) };
-        if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        return (r, status);
-    }
+/// `EINTR` never reaches the caller, so a signal delivery cannot be mistaken
+/// for `ECHILD` and flip a live child to "gone". `NOHANG` is excluded here by
+/// construction; [`try_waitpid_eintr`] owns the optional result.
+fn waitpid_eintr(pid: Pid, options: WaitOptions) -> rustix::io::Result<(Pid, WaitStatus)> {
+    wait_blocking_eintr(|| {
+        rustix::process::waitpid(Some(pid), options.difference(WaitOptions::NOHANG))
+    })
+}
+
+/// Poll `pid`, retrying transparently after `EINTR`.
+fn try_waitpid_eintr(
+    pid: Pid,
+    options: WaitOptions,
+) -> rustix::io::Result<Option<(Pid, WaitStatus)>> {
+    rustix::io::retry_on_intr(|| rustix::process::waitpid(Some(pid), options | WaitOptions::NOHANG))
+}
+
+/// Wait for a member of `pgid`, retrying transparently after `EINTR`.
+///
+/// `NOHANG` is excluded by construction; [`try_waitpgid_eintr`] owns the
+/// optional result.
+///
+/// # Errors
+///
+/// Returns any terminal wait error, including `ECHILD`.
+pub fn waitpgid_eintr(pgid: Pgid, options: WaitOptions) -> rustix::io::Result<(Pid, WaitStatus)> {
+    wait_blocking_eintr(|| {
+        rustix::process::waitpgid(pgid.as_pid(), options.difference(WaitOptions::NOHANG))
+    })
+}
+
+/// Poll a member of `pgid`, retrying transparently after `EINTR`.
+///
+/// `Ok(None)` means no member has a requested status ready.
+///
+/// # Errors
+///
+/// Returns any terminal wait error, including `ECHILD`.
+pub fn try_waitpgid_eintr(
+    pgid: Pgid,
+    options: WaitOptions,
+) -> rustix::io::Result<Option<(Pid, WaitStatus)>> {
+    rustix::io::retry_on_intr(|| {
+        rustix::process::waitpgid(pgid.as_pid(), options | WaitOptions::NOHANG)
+    })
+}
+
+fn wait_blocking_eintr(
+    wait: impl FnMut() -> rustix::io::Result<Option<(Pid, WaitStatus)>>,
+) -> rustix::io::Result<(Pid, WaitStatus)> {
+    rustix::io::retry_on_intr(wait)
+        .map(|status| status.expect("wait without NOHANG returns a status"))
 }
 
 /// Non-blocking variant of [`wait_handling_stop`] for cancel-aware
 /// polling: returns `Ok(None)` when nothing is pending.  Crucially uses
-/// `WUNTRACED` so a SIGSTOP'd child does not look "still running" — the
-/// stop notification is consumed and classified just like in the
+/// `WaitOptions::UNTRACED` so a SIGSTOP'd child does not look "still
+/// running" — the stop notification is consumed and classified just like in the
 /// blocking path (parked when `park_on_stop`, otherwise killed and
 /// reaped).  Without this, the pre-wait poll in
 /// `RunningChild::wait` would spin forever on a self-stopping child.
@@ -444,48 +477,41 @@ pub(super) fn try_wait_handling_stop(
     pgid: Option<Pgid>,
     park_on_stop: bool,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
-    let pid = child_pid(child);
-    let (r, status) = waitpid_eintr(pid, libc::WNOHANG | libc::WUNTRACED);
-    if r < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if r == 0 {
+    let pid = Pid::from_child(child);
+    let Some((_, status)) = try_waitpid_eintr(pid, WaitOptions::UNTRACED)? else {
         return Ok(None);
-    }
+    };
     classify_wait_status(pid, status, pgid, park_on_stop, child).map(Some)
 }
 
-/// Translate a raw `waitpid` status into a [`WaitOutcome`].  Stopped
+/// Translate a `waitpid` status into a [`WaitOutcome`].  Stopped
 /// statuses fan out to [`handle_stopped`]; exited / signaled / native
-/// statuses map straight through.  The `WIF*` predicates are safe bit
-/// tests, and unlike a typed decode they classify *any* status the
-/// kernel can produce — including termination by a real-time signal —
-/// without a fallible enum in the middle.  Shared between the blocking
+/// statuses map straight through. `WaitStatus` is a total, transparent
+/// view of the kernel bits, so it also classifies termination by a real-time
+/// signal without a fallible enum in the middle. Shared between the blocking
 /// `wait_handling_stop` and the non-blocking `try_wait_handling_stop`.
 ///
 /// [`WaitOutcome`]: crate::process::WaitOutcome
 fn classify_wait_status(
-    pid: i32,
-    status: i32,
+    pid: Pid,
+    status: WaitStatus,
     pgid: Option<Pgid>,
     park_on_stop: bool,
     child: &mut std::process::Child,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    if libc::WIFSTOPPED(status) {
-        let stopped_by = crate::process::Signal::new(libc::WSTOPSIG(status));
+    if let Some(signal) = status.stopping_signal() {
+        let stopped_by = crate::process::Signal::new(signal);
         return handle_stopped(stopped_by, pid, pgid, park_on_stop, child);
     }
-    if libc::WIFEXITED(status) {
-        return Ok(crate::process::WaitOutcome::Exited(libc::WEXITSTATUS(
-            status,
-        )));
+    if let Some(code) = status.exit_status() {
+        return Ok(crate::process::WaitOutcome::Exited(code));
     }
-    if libc::WIFSIGNALED(status) {
+    if let Some(signal) = status.terminating_signal() {
         return Ok(crate::process::WaitOutcome::Signaled(
-            crate::process::Signal::new(libc::WTERMSIG(status)),
+            crate::process::Signal::new(signal),
         ));
     }
-    Ok(crate::process::WaitOutcome::NativeCode(status))
+    Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
 }
 
 /// Handle a stopped child: either park (when `park_on_stop &&
@@ -497,7 +523,7 @@ fn classify_wait_status(
 /// [`WaitOutcome::StoppedThenKilled`]: crate::process::WaitOutcome::StoppedThenKilled
 fn handle_stopped(
     stopped_by: crate::process::Signal,
-    pid: i32,
+    pid: Pid,
     pgid: Option<Pgid>,
     park_on_stop: bool,
     child: &mut std::process::Child,
@@ -518,35 +544,28 @@ fn handle_stopped(
         pgid,
     );
     match pgid {
-        Some(Pgid(p)) => {
-            let _ = rustix::process::kill_process_group(
-                Pid::from_raw(p).expect("a tracked pgid is positive"),
-                rustix::process::Signal::KILL,
-            );
+        Some(group) => {
+            let _ =
+                rustix::process::kill_process_group(group.as_pid(), rustix::process::Signal::KILL);
         }
         None => {
             let _ = child.kill();
         }
     }
-    let (r, status) = waitpid_eintr(pid, 0);
-    if r < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if libc::WIFSIGNALED(status) {
+    let (_, status) = waitpid_eintr(pid, WaitOptions::empty())?;
+    if let Some(signal) = status.terminating_signal() {
         return Ok(crate::process::WaitOutcome::StoppedThenKilled {
             stopped_by,
-            killed_by: crate::process::Signal::new(libc::WTERMSIG(status)),
+            killed_by: crate::process::Signal::new(signal),
         });
     }
-    if libc::WIFEXITED(status) {
+    if let Some(code) = status.exit_status() {
         // The child raced the kill and exited on its own in the
         // stop→kill window — report the real exit, not a kill signal the
         // kernel never delivered.
-        return Ok(crate::process::WaitOutcome::Exited(libc::WEXITSTATUS(
-            status,
-        )));
+        return Ok(crate::process::WaitOutcome::Exited(code));
     }
-    Ok(crate::process::WaitOutcome::NativeCode(status))
+    Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
 }
 
 /// Capture stdin's line-discipline state via `tcgetattr`.

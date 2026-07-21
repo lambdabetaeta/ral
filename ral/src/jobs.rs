@@ -36,11 +36,16 @@
 //!     downstream caller (and the pipeline lifecycle) cfg-free.
 
 use ral_core::Shell;
+use ral_core::process::Pgid;
 use ral_core::types::Resident;
 use std::collections::HashMap;
 
 #[cfg(unix)]
-use ral_core::process::waitpid_eintr;
+use ral_core::process::{try_waitpgid_eintr, waitpgid_eintr};
+#[cfg(unix)]
+use rustix::io::Errno;
+#[cfg(unix)]
+use rustix::process::WaitOptions;
 
 #[derive(Debug, Clone)]
 pub struct Job {
@@ -48,7 +53,7 @@ pub struct Job {
     /// Process-group id of the whole pipeline.  All signal and wait
     /// operations on the job target the whole group so they reach every
     /// stage.
-    pub pgid: i32,
+    pub pgid: Pgid,
     pub cmd: String,
     pub state: JobState,
 }
@@ -99,13 +104,13 @@ impl Resident for Job {
         #[cfg(unix)]
         {
             let _ = rustix::process::kill_process_group(
-                rustix::process::Pid::from_raw(self.pgid).unwrap(),
+                self.pgid.as_pid(),
                 rustix::process::Signal::TERM,
             );
         }
         #[cfg(windows)]
         {
-            ral_core::process::kill_pipeline_group(ral_core::process::Pgid(self.pgid));
+            ral_core::process::kill_pipeline_group(self.pgid);
         }
     }
 }
@@ -137,6 +142,7 @@ impl JobTable {
     /// that registers jobs is `cfg(unix)`-gated.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub fn add(&mut self, pgid: i32, cmd: String, state: JobState) -> usize {
+        let pgid = Pgid::from_raw(pgid).expect("a job pgid is positive");
         let id = self.jobs.keys().max().map_or(1, |n| n + 1);
         self.jobs.insert(
             id,
@@ -150,9 +156,9 @@ impl JobTable {
         id
     }
 
-    /// Mark every job with this pgid as stopped (e.g. observed via
-    /// `WIFSTOPPED` after a SIGTSTP delivered to the group on Unix).
-    pub fn stop(&mut self, pgid: i32) {
+    /// Mark every job with this pgid as stopped (e.g. observed through a
+    /// stopped wait status after SIGTSTP reaches the group on Unix).
+    pub fn stop(&mut self, pgid: Pgid) {
         for job in self.jobs.values_mut() {
             if job.pgid == pgid {
                 job.state = JobState::Stopped;
@@ -160,12 +166,12 @@ impl JobTable {
         }
     }
 
-    /// Mark every job with this pgid as running (observed via
-    /// `WIFCONTINUED` when the group is resumed out-of-band — an external
-    /// `kill -CONT` rather than this shell's `bg`/`fg`).  Without it a job
-    /// continued behind the shell's back shows `stopped` forever.
+    /// Mark every job with this pgid as running (observed through a
+    /// continued wait status when the group is resumed out-of-band — an
+    /// external `kill -CONT` rather than this shell's `bg`/`fg`). Without it
+    /// a job continued behind the shell's back shows `stopped` forever.
     #[cfg(unix)]
-    pub fn mark_running(&mut self, pgid: i32) {
+    pub fn mark_running(&mut self, pgid: Pgid) {
         for job in self.jobs.values_mut() {
             if job.pgid == pgid {
                 job.state = JobState::Running;
@@ -202,7 +208,7 @@ impl JobTable {
     ///
     /// Idempotent for an already-running job: the state flip is gated
     /// on `Stopped`, the pgid lookup is not.
-    pub fn resume(&mut self, id: usize) -> Option<i32> {
+    pub fn resume(&mut self, id: usize) -> Option<Pgid> {
         let job = self.jobs.get_mut(&id)?;
         if job.state == JobState::Stopped {
             job.state = JobState::Running;
@@ -218,67 +224,72 @@ impl JobTable {
     /// Not for `fg`: there the SIGCONT must be sequenced after the
     /// tty handoff inside [`wait_foreground`].  Idempotent for an
     /// already-running job (the SIGCONT is a kernel no-op).
-    pub fn resume_in_background(&mut self, id: usize) -> Option<i32> {
+    pub fn resume_in_background(&mut self, id: usize) -> Option<Pgid> {
         let pgid = self.resume(id)?;
         #[cfg(unix)]
         {
-            let _ = rustix::process::kill_process_group(
-                rustix::process::Pid::from_raw(pgid).unwrap(),
-                rustix::process::Signal::CONT,
-            );
+            let _ =
+                rustix::process::kill_process_group(pgid.as_pid(), rustix::process::Signal::CONT);
         }
         Some(pgid)
     }
 
     /// Reap any pipeline members that have exited or stopped (non-blocking).
     ///
-    /// Unix: `waitpid(-pgid, …, WNOHANG | WUNTRACED)` drains ready
-    /// events; ECHILD drops the job from the table.  Windows: poll the
-    /// leader via `try_reap_leader`; an exit (or unknown group) drops the
-    /// entry and closes the Job handle, killing stragglers through
-    /// `KILL_ON_JOB_CLOSE`.  No live path populates `JobTable` on
-    /// Windows — the only live [`Self::add`] caller is the Unix
-    /// `Break::Stopped` arm in `repl/exec.rs` (`&` registers `Worker`s,
-    /// never `JobTable` jobs) — so the Windows arm here is exercised only
-    /// by unit-test fixtures; revisit if that changes.
+    /// Unix: `waitpgid_eintr` with `NOHANG | UNTRACED` drains ready events;
+    /// ECHILD drops the job from the table. Windows: poll the leader via
+    /// `try_reap_leader`; an exit (or unknown group) drops the entry and
+    /// closes the Job handle, killing stragglers through `KILL_ON_JOB_CLOSE`.
+    /// No live path populates `JobTable` on Windows — the only live
+    /// [`Self::add`] caller is the Unix `Break::Stopped` arm in `repl/exec.rs`
+    /// (`&` registers `Worker`s, never `JobTable` jobs) — so the Windows arm
+    /// here is exercised only by unit-test fixtures; revisit if that changes.
     pub fn reap(&mut self) {
         #[cfg(unix)]
         {
-            let entries: Vec<(usize, i32)> =
+            let entries: Vec<(usize, Pgid)> =
                 self.jobs.iter().map(|(id, j)| (*id, j.pgid)).collect();
             for (id, pgid) in entries {
                 loop {
-                    let (r, status) =
-                        waitpid_eintr(-pgid, libc::WNOHANG | libc::WUNTRACED | libc::WCONTINUED);
-                    if r == 0 {
-                        break; // nothing pending — leave the entry alone
+                    match try_waitpgid_eintr(pgid, WaitOptions::UNTRACED | WaitOptions::CONTINUED) {
+                        Ok(None) => break,
+                        Err(Errno::CHILD) => {
+                            // ECHILD: every member is reaped, group is gone.
+                            self.jobs.remove(&id);
+                            break;
+                        }
+                        Err(err) => {
+                            ral_core::dbg_trace!(
+                                "jobs",
+                                "waitpgid({pgid}) failed: {err}; keeping job"
+                            );
+                            break;
+                        }
+                        Ok(Some((_, status))) => {
+                            if status.stopped() {
+                                self.stop(pgid);
+                            } else if status.continued() {
+                                // Resumed out-of-band (external `kill -CONT`);
+                                // observing continued statuses keeps the job
+                                // from reading `stopped` forever.
+                                self.mark_running(pgid);
+                            }
+                            // Exit / signaled — keep draining.
+                        }
                     }
-                    if r < 0 {
-                        // ECHILD: every member is reaped, group is gone.
-                        self.jobs.remove(&id);
-                        break;
-                    }
-                    if libc::WIFSTOPPED(status) {
-                        self.stop(pgid);
-                    } else if libc::WIFCONTINUED(status) {
-                        // Resumed out-of-band (external `kill -CONT`); without
-                        // `WCONTINUED` the job would read `stopped` forever.
-                        self.mark_running(pgid);
-                    }
-                    // Exit / signaled — keep draining.
                 }
             }
         }
         #[cfg(windows)]
         {
-            use ral_core::process::{Pgid, ReapStatus, release_win_group, try_reap_leader};
-            let entries: Vec<(usize, i32)> =
+            use ral_core::process::{ReapStatus, release_win_group, try_reap_leader};
+            let entries: Vec<(usize, Pgid)> =
                 self.jobs.iter().map(|(id, j)| (*id, j.pgid)).collect();
             for (id, pgid) in entries {
-                match try_reap_leader(Pgid(pgid)) {
+                match try_reap_leader(pgid) {
                     ReapStatus::Running => {}
                     ReapStatus::Exited(_) | ReapStatus::Unknown => {
-                        release_win_group(pgid);
+                        release_win_group(pgid.as_raw());
                         self.jobs.remove(&id);
                     }
                 }
@@ -302,7 +313,7 @@ impl JobTable {
         #[cfg(unix)]
         {
             for job in self.jobs.values() {
-                let pgid = rustix::process::Pid::from_raw(job.pgid).unwrap();
+                let pgid = job.pgid.as_pid();
                 let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
                 // SIGCONT a stopped group after the SIGTERM: a frozen job
                 // cannot act on (or even observe) the termination request
@@ -321,29 +332,28 @@ impl JobTable {
             }
 
             for job in self.jobs.values() {
+                let pgid = job.pgid;
                 let _ = rustix::process::kill_process_group(
-                    rustix::process::Pid::from_raw(job.pgid).unwrap(),
+                    pgid.as_pid(),
                     rustix::process::Signal::KILL,
                 );
-                // Drain until ECHILD; `waitpid_eintr` swallows EINTR so
+                // Drain until ECHILD; `waitpgid_eintr` swallows EINTR so
                 // we cannot leave a SIGKILL'd child unreaped just
                 // because an unrelated signal landed during shutdown.
-                while waitpid_eintr(-job.pgid, 0).0 > 0 {}
+                while waitpgid_eintr(pgid, WaitOptions::empty()).is_ok() {}
             }
             self.jobs.clear();
         }
 
         #[cfg(windows)]
         {
-            use ral_core::process::{
-                Pgid, break_pipeline_group, kill_pipeline_group, release_win_group,
-            };
+            use ral_core::process::{break_pipeline_group, kill_pipeline_group, release_win_group};
 
             // Polite first pass: `CTRL_BREAK_EVENT` to every job, then a
             // 5s grace where natural exits are reaped — the Windows
             // analogue of the Unix arm's SIGTERM.
             for job in self.jobs.values() {
-                break_pipeline_group(Pgid(job.pgid));
+                break_pipeline_group(job.pgid);
             }
 
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -357,8 +367,8 @@ impl JobTable {
             // Hard stop: `TerminateJobObject` for survivors, then
             // release the Job handle.
             for job in self.jobs.values() {
-                kill_pipeline_group(Pgid(job.pgid));
-                release_win_group(job.pgid);
+                kill_pipeline_group(job.pgid);
+                release_win_group(job.pgid.as_raw());
             }
             self.jobs.clear();
         }
@@ -394,11 +404,11 @@ impl ForegroundWait {
 ///      ever hand it the terminal.  Idempotent for a group that was
 ///      already running (this entrypoint handles both `fg <stopped>`
 ///      and `fg <running-bg>`);
-///   3. `waitpid(-pgid, …, WUNTRACED)` loop with EINTR retry.  A
-///      `WIFSTOPPED` on any member returns with `stopped_by` set; an
-///      `ECHILD` drain returns `stopped_by = None`.  Misclassifying
-///      EINTR as "group is gone" would let the caller remove a live
-///      job from the table — `waitpid_eintr` rules that out;
+///   3. `waitpgid_eintr` with `UNTRACED` loops over typed statuses. A
+///      stopping signal from any member returns with `stopped_by` set; an
+///      `ECHILD` drain returns `stopped_by = None`. Misclassifying EINTR as
+///      "group is gone" would let the caller remove a live job from the
+///      table — the retrying funnel rules that out;
 ///   4. on stop, SIGSTOP the whole `-pgid` so any sibling stages that
 ///      were still running park together — mirrors
 ///      `PipelineCollector::note_stop`, which handles the
@@ -412,7 +422,7 @@ impl ForegroundWait {
 /// is nothing to hand the console to (it's shared across attached
 /// processes), and no SIGTSTP analogue — `stopped_by` is therefore
 /// always `None`; a stopped foreground job is unreachable on Windows.
-pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
+pub fn wait_foreground(pgid: Pgid, shell: &Shell) -> ForegroundWait {
     #[cfg(unix)]
     {
         // RAII handoff: tcsetpgrp + termios snapshot on acquire,
@@ -421,24 +431,20 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
         // is no tty handoff to do, so we still SIGCONT and wait but
         // skip the tty dance.
         let _fg_guard = shell.terminal_lease().and_then(|lease| {
-            ral_core::process::ForegroundGuard::try_acquire(pgid as libc::pid_t, lease)
+            ral_core::process::ForegroundGuard::try_acquire(pgid.as_raw(), lease)
         });
         // SIGCONT after the tty handoff: the kernel-level race that
         // would otherwise drop the group back into Stopped is gone by
         // construction.  Sending to the whole pgid (not just the
         // leader) wakes pipeline siblings together.
-        let _ = rustix::process::kill_process_group(
-            rustix::process::Pid::from_raw(pgid).unwrap(),
-            rustix::process::Signal::CONT,
-        );
+        let _ = rustix::process::kill_process_group(pgid.as_pid(), rustix::process::Signal::CONT);
 
         loop {
-            let (r, status) = waitpid_eintr(-pgid, libc::WUNTRACED);
-            if r < 0 {
+            let Ok((_, status)) = waitpgid_eintr(pgid, WaitOptions::UNTRACED) else {
                 // ECHILD: every member exited and was reaped.
                 break ForegroundWait { stopped_by: None };
-            }
-            if libc::WIFSTOPPED(status) {
+            };
+            if let Some(signal) = status.stopping_signal() {
                 // Park any still-running siblings before _fg_guard
                 // hands the tty back: a partial-stop (programmatic
                 // `kill -STOP` on one member) would otherwise leave
@@ -447,11 +453,11 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
                 // already stopped every member through the controlling
                 // tty.
                 let _ = rustix::process::kill_process_group(
-                    rustix::process::Pid::from_raw(pgid).unwrap(),
+                    pgid.as_pid(),
                     rustix::process::Signal::STOP,
                 );
                 break ForegroundWait {
-                    stopped_by: Some(ral_core::process::Signal::new(libc::WSTOPSIG(status))),
+                    stopped_by: Some(ral_core::process::Signal::new(signal)),
                 };
             }
             // Exit or signal: keep waiting for the rest of the group.
@@ -461,7 +467,7 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
     #[cfg(windows)]
     {
         let _ = shell;
-        let _ = ral_core::process::wait_leader_blocking(ral_core::process::Pgid(pgid));
+        let _ = ral_core::process::wait_leader_blocking(pgid);
         ForegroundWait { stopped_by: None }
     }
 }
@@ -470,10 +476,14 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
 mod tests {
     use super::*;
 
+    fn pgid(raw: i32) -> Pgid {
+        Pgid::from_raw(raw).expect("the test pgid is positive")
+    }
+
     fn job(id: usize, pgid: i32, cmd: &str, state: JobState) -> Job {
         Job {
             id,
-            pgid,
+            pgid: self::pgid(pgid),
             cmd: cmd.into(),
             state,
         }
@@ -502,9 +512,9 @@ mod tests {
         let _ = jt.add(1001, "a".into(), JobState::Running);
         let _ = jt.add(1001, "duplicate-pgid".into(), JobState::Running);
         let _ = jt.add(1002, "other".into(), JobState::Running);
-        jt.stop(1001);
+        jt.stop(pgid(1001));
         for j in jt.list() {
-            let want = if j.pgid == 1001 {
+            let want = if j.pgid == pgid(1001) {
                 JobState::Stopped
             } else {
                 JobState::Running
@@ -530,7 +540,7 @@ mod tests {
         // never signalled here.
         let mut jt = JobTable::new();
         let id = jt.add(99_999_991, "x".into(), JobState::Stopped);
-        assert_eq!(jt.resume(id), Some(99_999_991));
+        assert_eq!(jt.resume(id), Some(pgid(99_999_991)));
         assert_eq!(jt.list()[0].state, JobState::Running);
     }
 
@@ -552,9 +562,9 @@ mod tests {
         let _ = jt.add(2001, "a".into(), JobState::Stopped);
         let _ = jt.add(2001, "same-pgid".into(), JobState::Stopped);
         let _ = jt.add(2002, "other".into(), JobState::Stopped);
-        jt.mark_running(2001);
+        jt.mark_running(pgid(2001));
         for j in jt.list() {
-            let want = if j.pgid == 2001 {
+            let want = if j.pgid == pgid(2001) {
                 JobState::Running
             } else {
                 JobState::Stopped
@@ -571,7 +581,7 @@ mod tests {
         // kernel no-op).
         let mut jt = JobTable::new();
         let id = jt.add(99_999_992, "y".into(), JobState::Running);
-        assert_eq!(jt.resume(id), Some(99_999_992));
+        assert_eq!(jt.resume(id), Some(pgid(99_999_992)));
         assert_eq!(jt.list()[0].state, JobState::Running);
     }
 

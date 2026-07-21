@@ -223,7 +223,7 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             match removed {
                 Some(_job) => {
                     #[cfg(windows)]
-                    ral_core::process::disown_pipeline_group(ral_core::process::Pgid(_job.pgid));
+                    ral_core::process::disown_pipeline_group(_job.pgid);
                 }
                 None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
             }

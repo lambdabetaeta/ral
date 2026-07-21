@@ -190,9 +190,9 @@ impl RunningChild {
     fn kill_group(&self, child: &mut crate::process::ChildHandle) {
         #[cfg(unix)]
         match self.pgid {
-            Some(crate::process::Pgid(p)) => {
+            Some(group) => {
                 let _ = rustix::process::kill_process_group(
-                    rustix::process::Pid::from_raw(p).unwrap(),
+                    group.as_pid(),
                     rustix::process::Signal::KILL,
                 );
             }
@@ -476,18 +476,18 @@ impl RunningChild {
         // owns the release for them.
         #[cfg(windows)]
         if matches!(self.group_owner, GroupOwner::Standalone)
-            && let Some(crate::process::Pgid(p)) = self.pgid
+            && let Some(group) = self.pgid
         {
             crate::dbg_trace!(
                 "wait",
                 "win-job-drain-begin name={} pid={} leader={} elapsed={:?}",
                 self.name,
                 pid,
-                p,
+                group,
                 t_enter.elapsed(),
             );
-            let _ = crate::process::wait_leader_blocking(crate::process::Pgid(p));
-            crate::process::release_win_group(p);
+            let _ = crate::process::wait_leader_blocking(group);
+            crate::process::release_win_group(group.as_raw());
             crate::dbg_trace!(
                 "wait",
                 "win-job-drain-end name={} pid={} elapsed={:?}",
@@ -619,10 +619,8 @@ impl Drop for RunningChild {
         };
         self.kill_group(&mut child);
         #[cfg(windows)]
-        if let (GroupOwner::Standalone, Some(crate::process::Pgid(p))) =
-            (self.group_owner, self.pgid)
-        {
-            crate::process::release_win_group(p);
+        if let (GroupOwner::Standalone, Some(group)) = (self.group_owner, self.pgid) {
+            crate::process::release_win_group(group.as_raw());
         }
         if let Some(jh) = self.pump.take() {
             let _ = jh.join();

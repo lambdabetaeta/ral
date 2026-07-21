@@ -195,8 +195,11 @@ pub fn apply_child_limits_in_pipeline(
     #[cfg(windows)]
     {
         match _leader {
-            Some(crate::process::Pgid(p)) if crate::process::is_known_group(p) => {
-                if !crate::process::apply_group_active_process_limit(p, ACTIVE_PROCESS_CAP) {
+            Some(group) if crate::process::is_known_group(group.as_raw()) => {
+                if !crate::process::apply_group_active_process_limit(
+                    group.as_raw(),
+                    ACTIVE_PROCESS_CAP,
+                ) {
                     eprintln!("ral: warning: failed to apply active-process limit to pipeline job");
                 }
             }

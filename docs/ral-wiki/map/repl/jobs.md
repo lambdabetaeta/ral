@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92a
-generated_at_date: 2026-07-20
+generated_at_commit: be40775f432a5cb0d3eea709624d4220add0d939
+generated_at_date: 2026-07-21
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -13,12 +13,17 @@ stage is placed in its own pgid — set in each stage's `pre_exec` on Unix, via
 waiting, and foreground handoff always target the whole group. There is no
 pid/pgid ambiguity here: only the group.
 
-Core's `waitpid_eintr` swallows `EINTR` so an interrupted wait is never mistaken for
-`ECHILD` (which would flip a live job to "gone"). The table backs the four
-captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
+Core's typed `waitpgid_eintr` / `try_waitpgid_eintr` funnels keep `EINTR`
+opaque, so an interrupted wait is never mistaken for `ECHILD` (which would flip
+a live job to "gone"). Blocking and polling results have different types, and a
+job stores a positive `Pgid`, not an integer to revalidate at each syscall.
+Statuses remain total kernel data through rustix's transparent `WaitStatus`;
+stopped, continued, exited, and signalled observations need no fallible enum decode
+([[decisions/260720_total-wait-status|total-wait-status]]). The table backs the
+four captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
 `disown` — and is reaped each turn and on exit by the [[map/repl/loop|session]].
 A bare `fg`/`bg`/`disown` defaults to `most_recent_id` (the highest, == newest,
-job id) per SPEC §18. `reap` waits with `WCONTINUED` as well as `WUNTRACED`, so
+job id) per SPEC §18. `reap` requests continued as well as stopped statuses, so
 a group resumed out-of-band by an external `kill -CONT` flips back to running
 (`mark_running`) rather than reading `stopped` forever. On exit a job group is
 taken down in three steps:

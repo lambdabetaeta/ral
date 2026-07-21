@@ -118,9 +118,9 @@ impl PipelineGroup {
         // See the SIGINT/relay invariant note: the relay must never be
         // active over a child-less pgid.
         if self.relay.is_none()
-            && let Some(Pgid(p)) = self.leader
+            && let Some(group) = self.leader
         {
-            self.relay = crate::process::PipelineRelay::install(p);
+            self.relay = crate::process::PipelineRelay::install(group.as_raw());
         }
         Ok(child)
     }
@@ -131,10 +131,10 @@ impl PipelineGroup {
         // borrow is the unforgeable proof `try_acquire` now demands.
         if self.terminal.owns_tty()
             && self.foreground.is_none()
-            && let Some(Pgid(leader)) = self.leader
+            && let Some(group) = self.leader
             && let Some(lease) = shell.terminal_lease()
         {
-            self.foreground = crate::process::ForegroundGuard::try_acquire(leader, lease);
+            self.foreground = crate::process::ForegroundGuard::try_acquire(group.as_raw(), lease);
         }
     }
 }
@@ -148,8 +148,8 @@ impl Drop for PipelineGroup {
             }
         }
         #[cfg(windows)]
-        if let Some(Pgid(leader)) = self.leader {
-            crate::process::release_win_group(leader);
+        if let Some(group) = self.leader {
+            crate::process::release_win_group(group.as_raw());
         }
     }
 }
@@ -208,7 +208,8 @@ impl AnchorProcess {
     }
 
     fn pgid(&self) -> Pgid {
-        Pgid(child_pid(self.child.as_ref().expect("anchor child")))
+        Pgid::from_raw(child_pid(self.child.as_ref().expect("anchor child")))
+            .expect("a child pid is positive")
     }
 
     /// Close the release pipe and reap the anchor.  When the pipeline

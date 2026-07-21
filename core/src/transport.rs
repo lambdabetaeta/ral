@@ -301,7 +301,7 @@ fn render_break(
             Escape::Exit(code) => Break::Exit(code.clamp(0, 255)),
             #[cfg(unix)]
             Escape::Stopped { pgid, signal, .. } => Break::Stopped {
-                pgid: pgid.0,
+                pgid: pgid.as_raw(),
                 signal: signal.number(),
                 signal_name: signal.name().unwrap_or("?").to_string(),
             },

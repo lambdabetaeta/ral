@@ -49,7 +49,7 @@ pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending
 pub use signal::{
     ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
     relay_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
-    termios_snapshot, waitpid_eintr,
+    termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
 };
 
 #[cfg(unix)]

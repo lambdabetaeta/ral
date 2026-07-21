@@ -400,7 +400,7 @@ fn break_to_outcome(b: Break) -> WireOutcome {
         Break::Escape(Escape::Exit(code)) => WireOutcome::Exit { code },
         #[cfg(unix)]
         Break::Escape(Escape::Stopped { pgid, signal, cmd }) => WireOutcome::Stopped {
-            pgid: pgid.0,
+            pgid: pgid.as_raw(),
             signal: signal.number(),
             cmd,
         },
@@ -528,7 +528,8 @@ pub(crate) fn decode_response(response: ChildEvalResponse) -> Settled<DecodedRes
         WireOutcome::Stopped { pgid, signal, cmd } => (
             None,
             Some(Break::Escape(Escape::Stopped {
-                pgid: crate::process::Pgid(pgid),
+                pgid: crate::process::Pgid::from_raw(pgid)
+                    .expect("a stopped child's pgid is positive"),
                 signal: crate::process::Signal::new(signal),
                 cmd,
             })),

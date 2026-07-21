@@ -297,7 +297,8 @@ mod win_groups {
                     detached,
                 })
             }
-            super::PgidPolicy::Join(super::Pgid(leader)) => {
+            super::PgidPolicy::Join(group) => {
+                let leader = group.as_raw();
                 let groups = GROUPS.lock().unwrap();
                 let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
                     return Err(std::io::Error::new(
@@ -773,19 +774,19 @@ pub enum ReapStatus {
 /// code.  Used by `JobTable::wait_foreground` and `wait_foreground` on
 /// Windows.  Returns `Unknown` when the group is no longer tracked.
 pub fn wait_leader_blocking(pgid: Pgid) -> ReapStatus {
-    win_groups::wait_job_blocking(pgid.0)
+    win_groups::wait_job_blocking(pgid.as_raw())
 }
 
 /// Non-blocking poll on the pipeline-group's whole-job completion.
 /// Used by `JobTable::reap`.
 pub fn try_reap_leader(pgid: Pgid) -> ReapStatus {
-    win_groups::wait_job(pgid.0, 0)
+    win_groups::wait_job(pgid.as_raw(), 0)
 }
 
 /// `SIGKILL` analogue: terminate every member of the group.  Used by
 /// `JobTable::cleanup` on shell exit.  Idempotent.
 pub fn kill_pipeline_group(pgid: Pgid) {
-    win_groups::kill_group(pgid.0);
+    win_groups::kill_group(pgid.as_raw());
 }
 
 /// `SIGTERM` analogue: `CTRL_BREAK_EVENT` to every member of the group,
@@ -793,14 +794,14 @@ pub fn kill_pipeline_group(pgid: Pgid) {
 /// before `JobTable::cleanup` escalates to [`kill_pipeline_group`] — the
 /// same grace Unix's `SIGTERM`-then-`SIGKILL` pair gives.  Idempotent.
 pub fn break_pipeline_group(pgid: Pgid) {
-    win_groups::break_group(pgid.0);
+    win_groups::break_group(pgid.as_raw());
 }
 
 /// `disown` analogue: clear `KILL_ON_JOB_CLOSE` and release the group
 /// without terminating members.  After this returns, the children keep
 /// running; ral has forgotten them.  Idempotent.
 pub fn disown_pipeline_group(pgid: Pgid) {
-    win_groups::disown(pgid.0);
+    win_groups::disown(pgid.as_raw());
 }
 
 // ── Wait handling ──────────────────────────────────────────────────────────

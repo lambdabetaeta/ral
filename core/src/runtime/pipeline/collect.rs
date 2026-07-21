@@ -370,7 +370,7 @@ mod tests {
 
     fn stopped_escape(pgid: i32) -> Escape {
         Escape::Stopped {
-            pgid: Pgid(pgid),
+            pgid: Pgid::from_raw(pgid).expect("a child pid is positive"),
             signal: Signal::new(libc::SIGTSTP),
             cmd: "test-stage".into(),
         }
@@ -384,7 +384,10 @@ mod tests {
     fn note_stop_records_pgid_and_marks_break() {
         let mut c = PipelineCollector::new();
         c.note_stop(stopped_escape(FAKE_PGID));
-        assert_eq!(c.stopped_pgid, Some(Pgid(FAKE_PGID)));
+        assert_eq!(
+            c.stopped_pgid,
+            Some(Pgid::from_raw(FAKE_PGID).expect("the fake pgid is positive"))
+        );
         assert!(matches!(
             c.break_,
             Some(PipelineBreak::Control(Escape::Stopped { .. }))
@@ -397,7 +400,10 @@ mod tests {
         c.note_stop(stopped_escape(FAKE_PGID));
         c.note_stop(stopped_escape(FAKE_PGID + 1));
         // First Stopped wins; later calls do not overwrite the recorded pgid.
-        assert_eq!(c.stopped_pgid, Some(Pgid(FAKE_PGID)));
+        assert_eq!(
+            c.stopped_pgid,
+            Some(Pgid::from_raw(FAKE_PGID).expect("the fake pgid is positive"))
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@
 //! file re-exports the items each platform provides and keeps the
 //! portable data types and the unwind-poll path here.
 
+use std::num::NonZeroI32;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(unix)]
@@ -31,7 +32,7 @@ mod unix;
 pub use unix::{
     ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
     relay_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
-    termios_snapshot, waitpid_eintr,
+    termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
 };
 
 #[cfg(windows)]
@@ -51,10 +52,10 @@ pub(crate) use windows::{
 // ── Child handle ───────────────────────────────────────────────────────────
 //
 // Bare `std::process::Child::wait` / `try_wait` call `waitpid` without
-// `WUNTRACED`: a SIGSTOP'd child is invisible to `try_wait` (it reports
-// "still running"), and `wait` blocks indefinitely.  Every external
-// child ral tracks therefore goes through `ChildHandle`, whose wait
-// methods pass `WUNTRACED` on Unix and classify the result.  Direct
+// stop notifications: a SIGSTOP'd child is invisible to `try_wait` (it
+// reports "still running"), and `wait` blocks indefinitely. Every external
+// child ral tracks therefore goes through `ChildHandle`, whose wait methods
+// request stopped statuses on Unix and classify the result. Direct
 // `Child::wait` / `try_wait` calls outside this file are blocked by
 // `clippy::disallowed_methods` (see `clippy.toml`); the few legitimate
 // exceptions are tagged with `#[allow]` at the call site.
@@ -62,8 +63,8 @@ pub(crate) use windows::{
 /// Wrapper around a spawned child that hides the raw `wait` / `try_wait`
 ///
 /// and only exposes [`Self::wait_handling_stop`] /
-/// [`Self::try_wait_handling_stop`] — the WUNTRACED-aware peers that
-/// can't misclassify a stopped child as "still running".
+/// [`Self::try_wait_handling_stop`] — the stop-aware peers that can't
+/// misclassify a stopped child as "still running".
 pub struct ChildHandle(ChildRepr);
 
 enum ChildRepr {
@@ -138,9 +139,8 @@ impl ChildHandle {
         }
     }
 
-    /// Blocking wait that observes `WIFSTOPPED` on Unix.  See the
-    /// platform `wait_handling_stop` for the park / kill-and-reap
-    /// dispatch on stop.
+    /// Blocking wait that observes stopped statuses on Unix. See the platform
+    /// `wait_handling_stop` for the park / kill-and-reap dispatch on stop.
     ///
     /// # Errors
     /// Returns `Err` if the underlying `waitpid` (Windows: the wait, or the
@@ -344,10 +344,42 @@ impl ForegroundGuard {
 /// member list and a Job Object that ties them together for abort-time
 /// `TerminateJobObject`.
 ///
-/// Constructed only from a real pid; no `0` sentinel encodes "no pgid"
-/// — the `Option<Pgid>` does.
+/// Constructed only from a positive pid; no integer sentinel encodes "no
+/// pgid" — the `Option<Pgid>` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pgid(pub i32);
+pub struct Pgid(NonZeroI32);
+
+impl Pgid {
+    /// Construct a process-group id from its positive kernel spelling.
+    pub fn from_raw(raw: i32) -> Option<Self> {
+        NonZeroI32::new(raw)
+            .filter(|raw| raw.is_positive())
+            .map(Self)
+    }
+
+    /// Return the positive kernel spelling of this process-group id.
+    pub const fn as_raw(self) -> i32 {
+        self.0.get()
+    }
+
+    #[cfg(unix)]
+    pub(crate) const fn from_pid(pid: rustix::process::Pid) -> Self {
+        Self(pid.as_raw_nonzero())
+    }
+
+    /// View this group identifier as the positive pid rustix uses for pgids.
+    #[cfg(unix)]
+    pub const fn as_pid(self) -> rustix::process::Pid {
+        // SAFETY: `Pgid::from_raw` admits only positive integers.
+        unsafe { rustix::process::Pid::from_raw_unchecked(self.as_raw()) }
+    }
+}
+
+impl std::fmt::Display for Pgid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 #[cfg(unix)]
 impl Pgid {
@@ -360,7 +392,7 @@ impl Pgid {
     /// already done the right thing if the group is gone.
     pub fn signal_group(self, signal: Signal) {
         unsafe {
-            libc::kill(-self.0, signal.number());
+            libc::kill(-self.as_raw(), signal.number());
         }
     }
 }
