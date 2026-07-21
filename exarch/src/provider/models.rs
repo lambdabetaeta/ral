@@ -426,14 +426,6 @@ impl<S: ModelSource> ModelCatalog<S> {
         &self.source
     }
 
-    /// Mutable access to the source — `/login`'s commit step calls
-    /// [`LiveSource::add_credential`] through this, so the catalog's own
-    /// clone of the credential map shares a freshly signed-in account with
-    /// no catalog rebuild.
-    pub fn source_mut(&mut self) -> &mut S {
-        &mut self.source
-    }
-
     /// A non-stale disk-cache entry for `id`, or `None` when the cache is
     /// absent, unreadable, missing this provider, or stale.
     fn fresh_from_disk(&self, id: &ProviderId) -> Option<Vec<String>> {
@@ -469,6 +461,14 @@ impl<S: ModelSource> ModelCatalog<S> {
         if let Ok(json) = serde_json::to_string_pretty(&file) {
             let _ = std::fs::write(path, json);
         }
+    }
+}
+
+impl ModelCatalog<LiveSource> {
+    /// Admit a freshly signed-in account without exposing the catalog's
+    /// generic source to arbitrary mutation.
+    pub fn add_credential(&mut self, id: ProviderId, credential: Credential) {
+        self.source.add_credential(id, credential);
     }
 }
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: caa853f2ddce6abeeafda69239711a1b284706ca
+generated_at_date: 2026-07-21
 covers_paths: [exarch/src/bus.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -182,7 +182,7 @@ Two `Sink` implementations:
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`, `/resources`) run on the UI thread; session commands
+ `/export`, `/model`, `/login`, `/resources`) run on the UI thread; session commands
  (`/clear`, `/compact`, `/branch`, `/quit`) enter the focused
  agent's inbox as `Command` turns and run in `ReplControl`. `/branch`
  forks a *conversing* tab from the focused context — a peer conversation
@@ -192,6 +192,13 @@ Two `Sink` implementations:
  selects over input, inbox, and the session bus
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
+- `/model` and `/login` share `picker::overlay_frame`: one centred double-line
+  bezel, shadow, palette, padding, title, and hint frame around distinct
+  bodies. The login body drives browser or device OAuth on a background thread,
+  receives typed `LoginPhase`s over a channel, and carries the device expiry
+  label from the flow rather than reconstructing it in the view. Closing the
+  overlay sets its relaxed cancellation flag; browser accept polls it directly,
+  while device polling checks it before each bounded request.
 - `headless.rs` — one-shot pipe: assistant tokens to stdout (or, under
   `--output-format json`, one result object built from the root's `reply`),
   every other event condensed to one line on stderr, exit after one seed turn.

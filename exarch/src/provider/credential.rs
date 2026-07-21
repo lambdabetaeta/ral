@@ -209,44 +209,46 @@ impl CredentialStore {
     /// new account is inserted as its own [`ProviderId`], in the ordering
     /// [`Self::all`] holds (after the famous providers, by label among the
     /// other `ChatGPT` accounts, before the custom ones). Returns the
-    /// account's `ProviderId`.
-    pub fn add_oauth(&mut self, token: &crate::provider::oauth::OAuthToken) -> ProviderId {
+    /// account's `ProviderId` and credential, ready for admission to other
+    /// live views of the store.
+    pub fn add_oauth(
+        &mut self,
+        token: &crate::provider::oauth::OAuthToken,
+    ) -> (ProviderId, Credential) {
         let existing_id = self.all.iter().find(
             |id| matches!(id, ProviderId::ChatGpt(acc) if acc.account_id == token.account_id),
         );
         let Some(old_id) = existing_id.cloned() else {
-            let id = ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(token)));
-            self.ready.insert(
-                id.clone(),
-                Credential::OAuth(Arc::new(Mutex::new(token.clone()))),
-            );
+            let id = chatgpt_id(token);
+            let credential = Credential::OAuth(Arc::new(Mutex::new(token.clone())));
+            self.ready.insert(id.clone(), credential.clone());
             self.insert_chatgpt(id.clone());
-            return id;
+            return (id, credential);
         };
 
         let Some(Credential::OAuth(cell)) = self.ready.get(&old_id) else {
             unreachable!("a ChatGpt ProviderId is always bound to an OAuth credential");
         };
+        let cell = Arc::clone(cell);
         *cell
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = token.clone();
+        let credential = Credential::OAuth(cell);
 
         if old_id.label() == token.label() {
-            return old_id;
+            return (old_id, credential);
         }
         // The label changed (an email appeared or changed on re-login): the
         // label is the identity the picker and the persisted selection key
         // by, so re-key the ProviderId. The shared cell — just upserted
         // above — moves to the new id unchanged, so a live provider's next
         // request keeps authenticating through it.
-        let Some(Credential::OAuth(cell)) = self.ready.remove(&old_id) else {
-            unreachable!("a ChatGpt ProviderId is always bound to an OAuth credential");
-        };
-        let new_id = ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(token)));
+        self.ready.remove(&old_id);
+        let new_id = chatgpt_id(token);
         self.all.retain(|id| *id != old_id);
-        self.ready.insert(new_id.clone(), Credential::OAuth(cell));
+        self.ready.insert(new_id.clone(), credential.clone());
         self.insert_chatgpt(new_id.clone());
-        new_id
+        (new_id, credential)
     }
 
     /// Insert `id` (a signed-in `ChatGPT` account) into [`Self::all`] at the
@@ -265,6 +267,10 @@ impl CredentialStore {
             .unwrap_or(self.all.len());
         self.all.insert(pos, id);
     }
+}
+
+fn chatgpt_id(token: &crate::provider::oauth::OAuthToken) -> ProviderId {
+    ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(token)))
 }
 
 /// The state of a provider's key environment variable, from a single read.
@@ -344,8 +350,8 @@ mod tests {
             all: vec![ProviderId::Famous(ProviderKind::Anthropic), llama.clone()],
         };
 
-        let bravo = store.add_oauth(&oauth_token("acc_b", Some("bravo@work")));
-        let alpha = store.add_oauth(&oauth_token("acc_a", Some("alpha@work")));
+        let (bravo, _) = store.add_oauth(&oauth_token("acc_b", Some("bravo@work")));
+        let (alpha, _) = store.add_oauth(&oauth_token("acc_a", Some("alpha@work")));
 
         assert_eq!(
             store.available(),
@@ -380,9 +386,13 @@ mod tests {
             access_token: "fresh-at".into(),
             ..oauth_token("acc_1", Some("alex@work"))
         };
-        let returned = store.add_oauth(&refreshed);
+        let (returned, returned_credential) = store.add_oauth(&refreshed);
 
         assert_eq!(returned, id);
+        let Credential::OAuth(returned_cell) = returned_credential else {
+            panic!("expected an OAuth credential");
+        };
+        assert!(Arc::ptr_eq(&returned_cell, &cell));
         assert_eq!(store.available(), before, "a re-login adds no new provider");
         assert_eq!(
             cell.lock().unwrap().access_token,
@@ -407,7 +417,8 @@ mod tests {
             all: vec![old_id.clone()],
         };
 
-        let new_id = store.add_oauth(&oauth_token("acc_1", Some("alex@work")));
+        let (new_id, returned_credential) =
+            store.add_oauth(&oauth_token("acc_1", Some("alex@work")));
 
         assert_eq!(new_id.label(), "alex@work");
         assert_ne!(new_id, old_id);
@@ -431,6 +442,10 @@ mod tests {
             Arc::ptr_eq(moved, &cell),
             "the same shared cell moves to the new id"
         );
+        let Credential::OAuth(returned_cell) = returned_credential else {
+            panic!("expected an OAuth credential");
+        };
+        assert!(Arc::ptr_eq(&returned_cell, &cell));
     }
 
     /// opencode Go is a flat-rate subscription (unmetered) while opencode Zen

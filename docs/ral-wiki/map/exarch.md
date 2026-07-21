@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: caa853f2ddce6abeeafda69239711a1b284706ca
+generated_at_date: 2026-07-21
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -59,6 +59,9 @@ provider — there is no second account dimension.
 
 - `login` adds or refreshes one account (opening a browser, or `--device-auth`
   for a headless host).
+- `/login` performs the same sign-in inside a running TUI session, then admits
+  the returned shared OAuth credential to both the live store and model
+  catalog; a refresh of the selected account is visible to its next request.
 - `logout` removes one account by email or id, or `--all`.
 - `accounts` lists the signed-in set.
 

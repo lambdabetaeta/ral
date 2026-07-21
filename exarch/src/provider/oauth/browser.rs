@@ -18,7 +18,7 @@ const MAX_WAIT: Duration = Duration::from_mins(15);
 /// Drive the browser flow to completion and return the issued tokens.
 pub(super) async fn run(
     client: &reqwest::Client,
-    on_phase: impl Fn(LoginPhase) + Send,
+    on_phase: impl Fn(LoginPhase),
     cancel: &Arc<AtomicBool>,
 ) -> Result<super::RawTokens, String> {
     let (verifier, challenge) = super::pkce();
@@ -210,7 +210,7 @@ fn accept_within(
         .map_err(|e| format!("could not configure callback listener: {e}"))?;
     let start = Instant::now();
     loop {
-        if cancel.load(Ordering::Acquire) {
+        if cancel.load(Ordering::Relaxed) {
             return Err("sign-in cancelled".to_string());
         }
         match listener.accept() {

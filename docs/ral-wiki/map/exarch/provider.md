@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: caa853f2ddce6abeeafda69239711a1b284706ca
+generated_at_date: 2026-07-21
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -74,6 +74,11 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 - API-key providers list through genai's `all_model_names`.
 - ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
   their live OAuth cell after the common stale-token check.
+- `/login` admits an account mid-session through
+  `CredentialStore::add_oauth`; that operation returns the exact shared
+  `Credential` which `ModelCatalog<LiveSource>::add_credential` admits through
+  its narrow live-source seam. Re-login updates the cell in place, including
+  when a changed account label rekeys its `ProviderId`.
 - OpenRouter serving endpoints remain a separate, intent-driven request after
   a model is selected.
 

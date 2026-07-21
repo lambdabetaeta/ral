@@ -237,7 +237,7 @@ pub(super) const PAD_Y: u16 = 1;
 /// to its right and one row below — the canonical Turbo-Vision/Norton-Commander
 /// 2:1 lift (cells are ~2:1, so two columns read as square as one row) that
 /// floats the overlay above the (dimmed) session.
-pub(super) const SHADOW_DEPTH: u16 = 2;
+const SHADOW_DEPTH: u16 = 2;
 /// The shadow's foreground — cells under the shadow keep their glyph but are
 /// repainted this near-black slate, so whatever lies beneath shows as a faint
 /// silhouette rather than being blanked, the way Norton Commander inks its lift.
@@ -347,13 +347,8 @@ pub(super) fn render_shadow(f: &mut Frame, area: Rect) {
 /// returning the inner content [`Rect`]. The one shell both `/model` and
 /// `/login` render into. `pub(super)`: shared overlay chrome, reused by
 /// [`super::login`]'s modal.
-pub(super) fn bezel_shell(
-    f: &mut Frame,
-    area: Rect,
-    plane: Style,
-    title: &str,
-    hint: &str,
-) -> Rect {
+pub(super) fn overlay_frame(f: &mut Frame, area: Rect, title: &str, hint: &str) -> Rect {
+    let plane = Style::default().bg(OVERLAY_BG);
     render_shadow(f, area);
     f.render_widget(Clear, area);
     let bezel = Block::default()
@@ -856,10 +851,9 @@ impl Picker {
         let plane = Style::default().bg(OVERLAY_BG);
         let rows = self.rows();
 
-        let inner = bezel_shell(
+        let inner = overlay_frame(
             f,
             area,
-            plane,
             " MODEL ",
             " ⇥ field · ↑↓ pick · ←→ adjust · ⏎ apply · esc cancel ",
         );

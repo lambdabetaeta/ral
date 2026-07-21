@@ -59,7 +59,7 @@ struct PollSuccess {
 /// Drive the device-code flow to completion and return the issued tokens.
 pub(super) async fn run(
     client: &reqwest::Client,
-    on_phase: impl Fn(LoginPhase) + Send,
+    on_phase: impl Fn(LoginPhase),
     cancel: &Arc<AtomicBool>,
 ) -> Result<super::RawTokens, String> {
     let code = request_user_code(client).await?;
@@ -67,6 +67,7 @@ pub(super) async fn run(
     on_phase(LoginPhase::AwaitingDevice {
         user_code: code.user_code.clone(),
         url: format!("{ISSUER}/codex/device"),
+        expires_in: max_wait_label(),
     });
 
     let poll = poll_for_code(client, &code, cancel).await?;
@@ -95,9 +96,8 @@ async fn request_user_code(client: &reqwest::Client) -> Result<UserCode, String>
 
 /// Poll the token endpoint until the user authorises the code or 15 minutes
 /// elapse. A 403 or 404 means the user has not finished yet. `cancel` is
-/// checked once per iteration, right after the poll interval's sleep, so an
-/// abandoned flow gives up within one interval (≤ ~5 s) rather than the full
-/// 15-minute deadline.
+/// checked before each request; an in-flight request remains bounded by the
+/// HTTP client's own timeout.
 async fn poll_for_code(
     client: &reqwest::Client,
     code: &UserCode,
@@ -106,6 +106,9 @@ async fn poll_for_code(
     let url = format!("{ISSUER}/api/accounts/deviceauth/token");
     let start = Instant::now();
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("sign-in cancelled".to_string());
+        }
         let resp = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -128,9 +131,6 @@ async fn poll_for_code(
                 ));
             }
             tokio::time::sleep(Duration::from_secs(code.interval)).await;
-            if cancel.load(Ordering::Acquire) {
-                return Err("sign-in cancelled".to_string());
-            }
             continue;
         }
 

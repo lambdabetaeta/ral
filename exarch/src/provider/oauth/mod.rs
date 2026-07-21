@@ -133,7 +133,11 @@ pub enum LoginPhase {
     /// the platform launcher failed), awaiting the loopback callback.
     AwaitingBrowser { url: String, opened: bool },
     /// Device flow: the one-time code is issued, awaiting entry at `url`.
-    AwaitingDevice { user_code: String, url: String },
+    AwaitingDevice {
+        user_code: String,
+        url: String,
+        expires_in: String,
+    },
     /// The authorization code landed; exchanging it for tokens.
     ExchangingCode,
 }
@@ -152,11 +156,14 @@ impl LoginPhase {
                 Some("Waiting for sign-in to complete...".to_string())
             }
             Self::AwaitingBrowser { url, opened: false } => Some(format!(
-                "could not open a browser automatically\nOpen this URL in your browser to sign in:\n  {url}"
+                "could not open a browser automatically\nOpen this URL in your browser to sign in:\n  {url}\nWaiting for sign-in to complete..."
             )),
-            Self::AwaitingDevice { user_code, url } => Some(format!(
-                "To sign in, open {url} and enter this code (expires in {}):\n  {user_code}",
-                device::max_wait_label()
+            Self::AwaitingDevice {
+                user_code,
+                url,
+                expires_in,
+            } => Some(format!(
+                "To sign in, open {url} and enter this code (expires in {expires_in}):\n  {user_code}"
             )),
             Self::ExchangingCode => None,
         }
@@ -165,11 +172,11 @@ impl LoginPhase {
 
 /// Drive one interactive login to a persisted token.
 ///
-/// Blocking: builds its own current-thread runtime (callers put it on a thread
-/// of their own). `on_phase` observes the staged progress; `cancel`, polled by
-/// the wait loops, aborts an abandoned flow promptly (freeing the loopback
-/// port). Borrowed, not owned: this call never outlives the caller's own use of
-/// the flag (e.g. to trip it on Esc), so ownership never needs to move here.
+/// Blocking: builds its own current-thread runtime. `on_phase` observes the
+/// staged progress; `cancel`, polled by the wait loops, aborts an abandoned
+/// flow promptly (freeing the loopback port). Borrowed, not owned: this call
+/// never outlives the caller's own use of the flag (e.g. to trip it on Esc), so
+/// ownership never needs to move here.
 ///
 /// Returns the persisted token and whether an existing account was replaced.
 ///
@@ -179,7 +186,7 @@ impl LoginPhase {
 /// the token fails.
 pub fn login_flow(
     method: LoginMethod,
-    on_phase: impl Fn(LoginPhase) + Send,
+    on_phase: impl Fn(LoginPhase),
     cancel: &Arc<AtomicBool>,
 ) -> Result<(OAuthToken, bool), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -196,7 +203,7 @@ pub fn login_flow(
     // A cancel that lands after the wait loops returned `Ok` (the exchange
     // itself does not poll the flag) must still not persist — defense in
     // depth beside the wait loops' own cancel checks.
-    if cancel.load(Ordering::Acquire) {
+    if cancel.load(Ordering::Relaxed) {
         return Err("sign-in cancelled".to_string());
     }
     let token = finalize(raw)?;
@@ -1022,9 +1029,22 @@ mod tests {
             Some("Waiting for sign-in to complete...")
         );
         assert_eq!(
+            LoginPhase::AwaitingBrowser {
+                url: "https://auth.openai.com/oauth/authorize?…".into(),
+                opened: false,
+            }
+            .stderr_line()
+            .as_deref(),
+            Some(
+                "could not open a browser automatically\nOpen this URL in your browser to sign \
+                 in:\n  https://auth.openai.com/oauth/authorize?…\nWaiting for sign-in to complete..."
+            )
+        );
+        assert_eq!(
             LoginPhase::AwaitingDevice {
                 user_code: "ABCD-1234".into(),
                 url: format!("{ISSUER}/codex/device"),
+                expires_in: "15 minutes".into(),
             }
             .stderr_line()
             .as_deref(),

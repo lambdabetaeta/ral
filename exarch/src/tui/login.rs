@@ -19,9 +19,10 @@
 use super::app::Overlay;
 use super::line;
 use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
-use super::picker::{PAD_X, PAD_Y, bezel_shell, centered};
+use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::bus::Kind;
+use crate::provider::ProviderId;
 use crate::provider::oauth::{self, LoginMethod, LoginPhase, OAuthToken};
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
@@ -159,7 +160,7 @@ impl Station {
 
 impl LoginOverlay {
     /// Draw the floating overlay over the centre of `frame`, reusing the
-    /// picker's own chrome (`centered`, `bezel_shell`) rather than copying it
+    /// picker's own chrome (`centered`, `overlay_frame`) rather than copying it
     /// — one overlay shell, two overlays. Mirrors `Picker::render`
     /// (`picker.rs`).
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
@@ -172,7 +173,7 @@ impl LoginOverlay {
             Mode::Running(_) => " esc cancel ",
             Mode::Failed(_) => " ⏎ retry · esc close ",
         };
-        let inner = bezel_shell(f, area, plane, " SIGN IN ", hint);
+        let inner = overlay_frame(f, area, " SIGN IN ", hint);
         f.render_widget(Paragraph::new(self.body_lines()).style(plane), inner);
     }
 
@@ -284,7 +285,11 @@ impl LoginOverlay {
                 ));
                 lines
             }
-            Mode::Running(Some(LoginPhase::AwaitingDevice { user_code, url })) => vec![
+            Mode::Running(Some(LoginPhase::AwaitingDevice {
+                user_code,
+                url,
+                expires_in,
+            })) => vec![
                 Line::from(vec![
                     Span::styled(
                         "  code    ",
@@ -297,7 +302,7 @@ impl LoginOverlay {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        "   expires in 15 minutes",
+                        format!("   expires in {expires_in}"),
                         Style::default().fg(SLATE).add_modifier(Modifier::DIM),
                     ),
                 ]),
@@ -348,7 +353,7 @@ pub(super) fn login(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     let outcome = drive_login(tui);
     tui.app.overlay = None;
     if let Some((token, replaced)) = outcome {
-        apply_login(ctx, &token, replaced);
+        apply_login(tui, ctx, &token, replaced);
     }
 }
 
@@ -400,7 +405,10 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
             OverlayTick::Idle => {}
             OverlayTick::Cancel => {
                 if let Some(handle) = &flow {
-                    handle.cancel.store(true, Ordering::Release);
+                    // The flag publishes no accompanying data: the flow only
+                    // needs to observe this one monotone bit. Its result and
+                    // phase payloads cross the separately ordered mpsc channel.
+                    handle.cancel.store(true, Ordering::Relaxed);
                 }
                 return None;
             }
@@ -434,23 +442,33 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 /// event. No provider swap: a `ChatGPT` account has no built-in default model
 /// (`lib.rs`'s `resolve_initial_selection`), so the user is not
 /// auto-switched — the note points at `/model`. A re-login for the
-/// *currently selected* account still needs no swap: `add_oauth`'s upsert
-/// refreshes the very cell the live provider already reads through.
-fn apply_login(ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
-    let id = ctx.store.add_oauth(token);
-    let cred = ctx
-        .store
-        .get(&id)
-        .cloned()
-        .expect("add_oauth just inserted this id's credential");
-    ctx.catalog.source_mut().add_credential(id, cred);
+/// account selected by the *focused tab* still needs no swap: `add_oauth`'s
+/// upsert refreshes the very cell that tab's live provider already reads
+/// through.
+fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
+    let already_active = ctx
+        .agents
+        .provider(tui.app.tabs.focused())
+        .is_some_and(|provider| {
+            matches!(
+                provider.current().id(),
+                ProviderId::ChatGpt(account) if account.account_id == token.account_id
+            )
+        });
+    let (id, credential) = ctx.store.add_oauth(token);
+    ctx.catalog.add_credential(id, credential);
+    let action = if replaced {
+        "Updated the login for"
+    } else {
+        "Signed in to"
+    };
+    let next = if already_active {
+        ""
+    } else {
+        " — run /model to use it"
+    };
     ctx.emit.emit(Kind::SystemNote(format!(
-        "[{} ChatGPT account {} — run /model to use it]",
-        if replaced {
-            "Updated the login for"
-        } else {
-            "Signed in to"
-        },
+        "[{action} ChatGPT account {}{next}]",
         token.label(),
     )));
 }
