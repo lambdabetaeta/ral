@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2c2f89a
-verified_at_date: 2026-06-24
-anchors: [from_genai, Fault, of_webc, of_boxed, of_reqwest, status_of, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, parse_json_body, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS]
+verified_at_commit: 6b953ce7c41c3f4897ac01596772fd1d09141944
+verified_at_date: 2026-07-21
+anchors: [from_genai, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, parse_json_body, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS]
 ---
 
 # Provider faults and recovery
@@ -10,10 +10,11 @@ anchors: [from_genai, Fault, of_webc, of_boxed, of_reqwest, status_of, ProviderE
 overloaded 5xx, a 429 asking us to wait, a socket that drops mid-token, a
 gateway that returns HTML where JSON was promised — and exactly three things
 can be done about any of them: retry it, surface it to the user, or commit the
-partial work we already showed.** `provider.rs` collapses the dozen shapes onto
-those three responses with a single rule: *read the recovery from the error's
-typed structure, never from its `Display` string.* This page walks the path a
-genai error takes from the wire to a recovery decision.
+partial work we already showed.** The provider's `error`, `retry`, and `stream`
+modules collapse the dozen shapes onto those three responses with a single
+rule: *read the recovery from the error's typed structure, never from its
+`Display` string.* This page walks the path a genai error takes from the wire
+to a recovery decision.
 
 The transport itself — identity, client building, the streaming and summary
 calls — is [[map/exarch/provider|the provider map]]; this is the failure half.
@@ -172,18 +173,18 @@ transport blip.
 
 ## The streaming-specific rule: commit, don't double-render
 
-Streaming adds one wrinkle the driver respects. Once a token has flowed to
-`on_text`, the UI has *committed* to a partial render; a re-issue would print
-those tokens twice. So `complete` tracks `seen_any_token`, and when the stream
-breaks after visible text:
+Streaming adds one wrinkle the driver respects. Once text or reasoning has
+flowed to `on_text` / `on_think`, the UI has *committed* to a partial render; a
+re-issue would print that content twice. So `complete` tracks whether either
+stream has yielded content, and when the stream breaks:
 
-- **zero tokens streamed** → return `Attempt::Failed(Transient)` and let the
-  driver re-issue (nothing was shown).
-- **tokens already streamed** → `stalled_step_out` projects the streamed prefix
-  into a `CutShort::Stalled` `StepOut` — a text-only assistant message, no tool
-  calls, no stop reason, the stall cause carried for the operator note — and
-  hands it back as `Attempt::Done`. The session commits the prefix and continues
-  the turn, mirroring the output-cap truncation path.
+- **no text or reasoning streamed** → return `Attempt::Failed(Transient)` and
+  let the driver re-issue (nothing was shown).
+- **content already streamed** → `stalled_step_out` projects the text prefix
+  and reasoning into a `CutShort::Stalled` `StepOut` — no tool calls, no stop
+  reason, the stall cause carried for the operator note — and hands it back as
+  `Attempt::Done`. The session commits the prefix and continues the turn,
+  mirroring the output-cap truncation path.
 
 This is why `Attempt` needs no third "don't retry" variant: a committed stall is
 simply a `Done` carrying partial work. A stream that ends without an `End` frame
@@ -192,18 +193,20 @@ committed when something did.
 
 ## The idle timeout
 
-A silent socket is the failure mode raw `next()` cannot catch — it just blocks.
-`STREAM_IDLE_TIMEOUT` (120 s) re-arms on the initial connect and on every loop
-iteration, bounding connect + time-to-first-event and the gap *between* chunks
-(never the total response, so a long correct generation is never cut). A trip
-surfaces as a `Transient`, so the budget re-issues it.
+Before a streaming response opens, `idle_timeout` bounds connect and
+time-to-first-event: the first attempt gets `STREAM_IDLE_TIMEOUT` (180 s), then
+retries get `RETRY_IDLE_TIMEOUT` (60 s). Once a stream is open there is no
+timeout between decoded `ChatStreamEvent`s. Liveness moves down to the
+transport's 180-second per-read timeout, so raw byte silence fails while SSE
+pings or provider heartbeats consumed below the semantic event layer keep a
+long-thinking model alive. A read timeout surfaces as a stream error and enters
+the same transient-or-committed rule above.
 
-The total idle budget is bounded by construction: even the worst case — the
-full transient budget, each attempt idling the whole timeout — is
-`STREAM_IDLE_TIMEOUT × MAX_ATTEMPTS` = 360 s, so a genuinely stalled stream
-fails as a turn in minutes rather than appearing to hang. A test pins that the
-budget stays modest, so a future bump of the timeout or the attempt count can't
-silently let it grow into an effective hang.
+The worst pre-stream idle burn is bounded by construction at 180 + 60 + 60 =
+300 seconds. A non-streaming summary has no incremental events, so its
+per-attempt `idle_timeout` bounds the whole `exec_chat` call. Tests pin the
+first-attempt/retry distinction and the aggregate budget; the transport rule is
+the local slice of [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
 
 ## What is deliberately terminal
 
@@ -255,5 +258,7 @@ attempt count.
 - [[design/failure|failure]] — ral's own status-vs-truth failure model, a
   contrast: there failure is a propagating status, here a fault is a recovered
   transport outcome.
-- `exarch/src/provider.rs` (`from_genai`, `Fault`, `retry_with_backoff`) and
-  `exarch/src/tls.rs` (`STREAM_IDLE_TIMEOUT`, the `read_timeout` it backs).
+- `exarch/src/provider/error.rs` (`from_genai`, `Fault`),
+  `exarch/src/provider/retry.rs` (`retry_with_backoff`), and
+  `exarch/src/provider/tls.rs` (`STREAM_IDLE_TIMEOUT`, the `read_timeout` it
+  backs).

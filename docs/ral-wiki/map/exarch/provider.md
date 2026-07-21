@@ -1,13 +1,20 @@
 ---
-generated_at_commit: caa853f2ddce6abeeafda69239711a1b284706ca
+generated_at_commit: 6b953ce7c41c3f4897ac01596772fd1d09141944
 generated_at_date: 2026-07-21
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
 # Map: exarch / provider
 
-`provider.rs` is the LLM transport — a wrapper over the `genai` crate. The
-transcript owns history; the `Provider` only sends bytes and parses replies.
+`provider.rs` is the LLM facade over `genai`: it owns `Provider`, its live or
+scripted `Backend`, and OpenRouter route admission. The transcript owns
+history; the provider only sends bytes and parses replies. Invariants are
+local below the facade: `provider/identity.rs` owns selectable identity,
+`request.rs` wire shaping, `transport.rs` credential binding and caching,
+`stream.rs` completion and summary execution, `retry.rs` recovery timing,
+`usage.rs` accounting, and `error.rs` fault classification. The public facade
+re-exports their established types; sibling modules meet through narrow
+methods on `Engine` and `Transport`, not visible fields.
 
 ## Provider identity
 
@@ -45,11 +52,12 @@ and the `/model` picker — and three arms supply it:
 turn carries no per-token price, and a provider reaches that state two ways:
 opencode Go is a flat $10/mo gateway flagged by `ProviderKind::flat_rate`,
 while a ChatGPT plan rides its OAuth login cell instead — so a ChatGPT account
-is *not* `flat_rate`. `Live::metered` is false when either holds.
+is *not* `flat_rate`. `Transport::metered` is false when either holds.
 
 ## Building the transport
 
-`build_client` binds the resolved `Credential` to a genai `Client`:
+`provider/transport.rs::build_client` binds the resolved `Credential` to a
+genai `Client`:
 
 - An **API key** keeps the provider's native adapter (it fixes the wire
   format, so an Anthropic provider speaks Anthropic even at a custom base URL).
@@ -116,8 +124,9 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 
 ## Retry driver
 
-Both paths run on a tokio runtime through **one retry driver**,
-`retry_with_backoff` over an `Attempt<T>` (`Done` / `Failed`):
+Both paths in `provider/stream.rs` run on a tokio runtime through **one retry
+driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
+/ `Failed`):
 
 - The streaming-specific rule rides on `Done`: once text or reasoning has
   flowed to `on_text`/`on_think` the UI has committed to a partial render, so a
@@ -175,8 +184,9 @@ cannot land mid-character and panic (X8).
   supplies `ModelCaps` (context window, canonical slug) for the startup banner.
   Offline starts degrade to `—`.
 
-`build_cached_request` sets two `cache_control: ephemeral` breakpoints (system
-+ tools, growing transcript) for the message-based adapters, and a per-process
+`provider/request.rs::build_cached_request` sets two `cache_control: ephemeral`
+breakpoints (system + tools, growing transcript) for the message-based adapters,
+and a per-process
 `prompt_cache_key` for OpenAI shard routing. The Responses adapter is the
 exception: its system prompt rides the top-level `instructions` field, since a
 `System` message would leave `instructions` empty and the Codex backend rejects
