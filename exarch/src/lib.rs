@@ -280,6 +280,7 @@ pub fn run() -> Result<(), String> {
             interactive: !c.headless,
             chat: c.chat,
             disk_warn_bytes,
+            fuel: agent::SPAWN_FUEL,
         },
         agent::RootSeat::Identity {
             scratch: Arc::clone(&scratch),

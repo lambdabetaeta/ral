@@ -40,7 +40,7 @@ use clap::Parser;
 pub fn run() -> Result<(), String> {
     let cli = cli::Cli::parse();
     let grant = grant::Grant::open(&cli.folder)?;
-    let machine = vm_manager::detect()
+    let mut machine = vm_manager::detect()
         .boot(&grant.machine_spec())
         .map_err(|e| {
             format!(
@@ -48,5 +48,5 @@ pub fn run() -> Result<(), String> {
                 grant.root().display()
             )
         })?;
-    session::start(&grant, machine.as_ref(), &cli)
+    session::start(&grant, machine.as_mut(), &cli)
 }

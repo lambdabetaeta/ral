@@ -215,8 +215,9 @@ pub struct Agent {
     /// without spending its own fuel.  Zero makes the desk refuse
     /// `agent-start` with the exhaustion text
     /// (`crate::fleet::desk::ExarchDesk`'s spawn spine), so a chain terminates by
-    /// refusal rather than recursing forever.  The trunk starts at
-    /// [`SPAWN_FUEL`].
+    /// refusal rather than recursing forever.  The trunk starts at whatever
+    /// [`RootConfig::fuel`] its launch site chose — [`SPAWN_FUEL`] for
+    /// exarch, `0` for synod, which asks and answers, never fleets.
     fuel: u32,
     /// This agent's own hot-swappable provider.  A `/model` on the focused
     /// agent swaps *its* handle alone; a `fork` seeds the child's own handle
@@ -367,15 +368,15 @@ pub enum TurnOutcome {
 /// reaches it.
 const MAX_STEPS: u32 = 250;
 
-/// The depth budget the trunk starts with; each [`Agent::fork_with`] hands
-/// its child one less, and a `fuel == 0` agent's `agent-start` calls are
-/// refused at the desk (`ExarchDesk::launch`, `crate::fleet::desk`). Bounds
-/// how many generations deep
-/// a delegation chain may recurse — a few hops covers legitimate delegation —
-/// while stopping a runaway spawn-calling chain from exhausting threads
-/// instead of the process. Fan-out is a separate, unbounded axis: how many
-/// children any one agent starts never spends this budget.
-const SPAWN_FUEL: u32 = 3;
+/// The depth budget exarch's own trunks start with, passed as
+/// [`RootConfig::fuel`]; each [`Agent::fork_with`] hands its child one less,
+/// and a `fuel == 0` agent's `agent-start` calls are refused at the desk
+/// (`ExarchDesk::launch`, `crate::fleet::desk`). Bounds how many generations
+/// deep a delegation chain may recurse — a few hops covers legitimate
+/// delegation — while stopping a runaway spawn-calling chain from exhausting
+/// threads instead of the process. Fan-out is a separate, unbounded axis:
+/// how many children any one agent starts never spends this budget.
+pub(crate) const SPAWN_FUEL: u32 = 3;
 
 /// How many ral calls elapse between disk-warn ceiling checks, once
 /// `disk_warn_bytes` is configured — the walk's cost is real (a full scan of
@@ -538,6 +539,10 @@ pub struct RootConfig {
     pub interactive: bool,
     pub chat: bool,
     pub disk_warn_bytes: Option<u64>,
+    /// The depth budget this trunk starts with (see [`SPAWN_FUEL`]'s doc).
+    /// Exarch's own launch sites pass [`SPAWN_FUEL`]; synod passes `0` — an
+    /// office job is asked and answered, never a fleet.
+    pub fuel: u32,
 }
 
 /// Where the trunk's engine lives — the one construction-time choice
@@ -547,6 +552,17 @@ pub enum RootSeat {
     /// In-process: the trunk boots its own shell from `scratch` and drives
     /// it through an identity transport.
     Identity { scratch: Arc<Scratch> },
+    /// Out-of-process: the trunk drives an already-built `transport` whose
+    /// engine lives elsewhere — a spawned `--engine` child or, as synod uses
+    /// it, an adopted control-plane stream into a guest VM. `cwd`/`home` are
+    /// the caller's own, since under a VM the workspace is a guest path this
+    /// process cannot resolve for itself.
+    #[cfg(unix)]
+    Wire {
+        transport: Box<ral_core::transport::WireTransport>,
+        cwd: std::path::PathBuf,
+        home: std::path::PathBuf,
+    },
 }
 
 impl Agent {
@@ -646,7 +662,12 @@ impl Agent {
     /// # Errors
     /// Returns `Err` if the trunk's session directory cannot be created or
     /// its event log cannot be opened.
-    pub fn root(cfg: RootConfig, seat: RootSeat, provider: Arc<Provider>) -> io::Result<Self> {
+    ///
+    /// # Panics
+    /// Never in practice: an internal `expect` asserts that the shell built
+    /// above for an identity seat is still there when the seat itself is
+    /// assembled a few lines later.
+    pub fn root(cfg: RootConfig, root_seat: RootSeat, provider: Arc<Provider>) -> io::Result<Self> {
         let RootConfig {
             system,
             caps,
@@ -657,16 +678,34 @@ impl Agent {
             interactive,
             chat,
             disk_warn_bytes,
+            fuel,
         } = cfg;
-        let RootSeat::Identity { scratch } = seat;
-        let shell = seat::boot_root_shell(&scratch);
+        // Index resolution reads only the compiled-in builtin table, which
+        // an identity seat's own shell and a wire seat's boot recipe dress
+        // identically (`bootstrap::exarch_shell`). An identity seat resolves
+        // off the very shell it goes on to run turns through; a wire seat's
+        // real shell lives in the remote engine, so the shared dressing —
+        // the boot recipe minus its engine-local scratch — stands in here
+        // and is then discarded.
+        let identity_shell = match &root_seat {
+            RootSeat::Identity { scratch } => Some(seat::boot_root_shell(scratch)),
+            #[cfg(unix)]
+            RootSeat::Wire { .. } => None,
+        };
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
         // This agent's own builtin index, resolved from its own `returns`/
         // `allow_schedule` bits — once, here: the bookend records its
         // length (the log must exist before the agent it describes does)
         // and `Build` carries the same string on to become `Agent::system`.
-        let indexes = crate::prompt::BuiltinIndexes::resolve(&shell);
+        let throwaway_wire_shell;
+        let indexes = crate::prompt::BuiltinIndexes::resolve(if let Some(shell) = &identity_shell {
+            shell
+        } else {
+            throwaway_wire_shell =
+                crate::bootstrap::exarch_shell(ral_core::io::TerminalState::default());
+            &throwaway_wire_shell
+        });
         let system_prompt = indexes.apply(&system, !interactive, allow_schedule);
         let log = AgentLog::root(
             &sessions_root,
@@ -675,7 +714,19 @@ impl Agent {
             &provider_label,
             system_prompt.len(),
         )?;
-        let seat = Seat::identity(shell, scratch, &log);
+        let seat = match root_seat {
+            RootSeat::Identity { scratch } => Seat::identity(
+                identity_shell.expect("built above for an identity seat"),
+                scratch,
+                &log,
+            ),
+            #[cfg(unix)]
+            RootSeat::Wire {
+                transport,
+                cwd,
+                home,
+            } => Seat::wire(*transport, cwd, home),
+        };
         let agent = Self::assemble(Build {
             system,
             system_prompt,
@@ -684,7 +735,7 @@ impl Agent {
             seat,
             log,
             parent: None,
-            fuel: SPAWN_FUEL,
+            fuel,
             provider: ProviderHandle::new(provider),
             interactive,
             returns: !interactive,
@@ -801,7 +852,11 @@ impl Agent {
         let fuel = self.fuel.saturating_sub(1);
         // The child rides the same seat kind as its parent, sharing the
         // session scratch (the forked shell already inherited its seeding).
-        let Seat::Identity { scratch, .. } = &self.seat;
+        // `shell_mut` above already panicked on a wire seat, so reaching
+        // here means `self.seat` is an identity seat.
+        let Seat::Identity { scratch, .. } = &self.seat else {
+            unreachable!("shell_mut already panicked above for a wire seat")
+        };
         let seat = Seat::identity(shell, scratch.clone(), &log);
         Self::assemble(Build {
             // The unresolved template: the child's own children resolve
@@ -2122,10 +2177,18 @@ impl Agent {
         nursery: ral_core::types::Nursery,
         reply: ReplyCell,
     ) -> desk::HostServices {
-        let Seat::Identity { scratch, .. } = &self.seat;
+        // A wire seat owns no host-side scratch (the session's real one
+        // lives inside the guest the transport dials); `agent-start`'s spawn
+        // spine, the one consumer, never reaches its `None` in practice — a
+        // wire session's fuel is always 0 (session-is-a-process).
+        let scratch = match &self.seat {
+            Seat::Identity { scratch, .. } => Some(scratch.clone()),
+            #[cfg(unix)]
+            Seat::Wire { .. } => None,
+        };
         desk::HostServices {
             registry: self.agents.clone(),
-            scratch: scratch.clone(),
+            scratch,
             parent: self.id,
             mailbox: self.mailbox(),
             emit: emit.clone(),
@@ -2746,6 +2809,7 @@ mod tests {
                 interactive,
                 chat: false,
                 disk_warn_bytes: None,
+                fuel: SPAWN_FUEL,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -2806,6 +2870,7 @@ mod tests {
                 interactive: true,
                 chat: false,
                 disk_warn_bytes: None,
+                fuel: SPAWN_FUEL,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -2941,6 +3006,7 @@ mod tests {
                 interactive: true,
                 chat: false,
                 disk_warn_bytes: None,
+                fuel: SPAWN_FUEL,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),

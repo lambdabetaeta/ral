@@ -40,15 +40,16 @@ pub fn boot_shell() -> Shell {
 
     let terminal = probe_terminal();
     diagnostic::set_terminal(&terminal);
-    dressed_shell(terminal)
+    exarch_shell(terminal)
 }
 
-/// The shell dressing shared by every exarch boot: prelude + host surface,
-/// the embedded agent library, colour seeding, exit hints.
+/// A shell dressed as exarch — the dressing every exarch boot shares:
+/// prelude + host surface, the embedded agent library, colour seeding,
+/// exit hints.
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
-fn dressed_shell(terminal: TerminalState) -> Shell {
+pub(crate) fn exarch_shell(terminal: TerminalState) -> Shell {
     let mut shell =
         ral_core::driver::boot_shell(terminal, &shell_eval::PRELUDE, &builtins::host_surface());
     builtins::install_agent_library(&mut shell)
@@ -64,7 +65,7 @@ fn dressed_shell(terminal: TerminalState) -> Shell {
 ///
 /// Run engine-side at Attach — including the fresh process `/clear` boots
 /// after killing the old one — the full identity-seat parity:
-/// [`dressed_shell`] plus an engine-local [`Scratch`] and the same ledger
+/// [`exarch_shell`] plus an engine-local [`Scratch`] and the same ledger
 /// arming the identity ceremony performs. No signal ceremony (a cancel
 /// reaches the engine as a `Control` frame, not a signal) and no terminal
 /// probe (the engine has no terminal; its state is conveyed at Attach).
@@ -73,7 +74,7 @@ fn dressed_shell(terminal: TerminalState) -> Shell {
 /// Panics if the agent library or the engine-local scratch cannot be set
 /// up — a shell missing either would fail mysteriously later.
 pub fn engine_boot_shell() -> Shell {
-    let mut shell = dressed_shell(TerminalState::default());
+    let mut shell = exarch_shell(TerminalState::default());
     Scratch::new(EXARCH)
         .unwrap_or_else(|e| panic!("exarch engine: scratch creation failed: {e}"))
         .install_into(&mut shell);

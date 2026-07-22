@@ -42,8 +42,10 @@ use std::time::Duration;
 pub(crate) struct HostServices {
     /// The fleet's shared agent registry — `agents.clone()`.
     pub registry: AgentRegistry,
-    /// The session scratch a spawned child's seat shares with its parent.
-    pub scratch: Arc<crate::bootstrap::Scratch>,
+    /// The session scratch a spawned child's identity seat shares with its
+    /// parent — `None` on a wire seat, which owns no host-side scratch at
+    /// all (`Agent::host_services`).
+    pub scratch: Option<Arc<crate::bootstrap::Scratch>>,
     /// This turn's agent: the child's upward edge for `agent-start`'s
     /// receipt and the descendant check `message`/`agent-cancel` enforce.
     pub parent: AgentId,
@@ -409,7 +411,18 @@ impl ExarchDesk {
         // with the adopted shell and forked log standing in for
         // `fork_session`'s fresh ones.
         let fuel = s.fuel - 1;
-        let seat = crate::agent::seat::Seat::identity(shell, s.scratch.clone(), &child_log);
+        // Only an identity seat's `agent-start` ever reaches this far: a
+        // wire session's fuel is always 0 (step 2 above already refused
+        // it), since a guest-side spawn is not yet built
+        // (docs/ral-wiki/decisions/260722_session-is-a-process.md).
+        let Some(scratch) = s.scratch.clone() else {
+            return Err(Error::new(
+                "agent-start refused: this session has no host-side scratch to fork an \
+                 in-process child into",
+                1,
+            ));
+        };
+        let seat = crate::agent::seat::Seat::identity(shell, scratch, &child_log);
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,
@@ -1027,13 +1040,13 @@ mod tests {
         let (emit, _rx) = dummy_emitter();
         HostServices {
             registry: AgentRegistry::new(),
-            scratch: Arc::new(
+            scratch: Some(Arc::new(
                 crate::bootstrap::Scratch::for_test(
                     crate::bootstrap::EXARCH,
                     &format!("desk-{}", crate::agent::fresh_id()),
                 )
                 .expect("scratch dir"),
-            ),
+            )),
             parent: 0,
             mailbox: Inbox::new().mailbox(),
             emit,

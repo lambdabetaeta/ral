@@ -52,7 +52,7 @@ overwritten while you have it on screen.";
 /// # Panics
 /// Panics if the chosen provider is absent from the credential store — an
 /// invariant [`choose`] upholds by choosing only among available ones.
-pub fn start(grant: &Grant, machine: &dyn Machine, cli: &Cli) -> Result<(), String> {
+pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), String> {
     let job =
         exarch::cli::load_seed(None, cli.job_file.clone(), cli.job.clone())?.ok_or_else(|| {
             "please say what you would like done — for example: \
@@ -73,10 +73,7 @@ pub fn start(grant: &Grant, machine: &dyn Machine, cli: &Cli) -> Result<(), Stri
 
     // The agent works where the machine put the folder: the granted folder
     // itself under a host machine, the guest's `/work` under a real one.
-    // Process-wide, and so done here, while startup is still single-threaded.
-    let workspace = machine.workspace_path();
-    std::env::set_current_dir(workspace)
-        .map_err(|e| format!("could not open {} to work in: {e}", workspace.display()))?;
+    let workspace = machine.workspace_path().to_path_buf();
     let cwd = workspace.to_string_lossy().into_owned();
 
     // The provider config and credentials are exarch's, read from the
@@ -120,6 +117,42 @@ pub fn start(grant: &Grant, machine: &dyn Machine, cli: &Cli) -> Result<(), Stri
     let system = crate::prompt::assemble(&caps, &scratch, grant.root(), &config_dir)?;
     let system_size = system.len();
 
+    // A machine that hands back a control-plane stream is a real VM: the
+    // agent's engine dials in from inside the guest, so the workspace is a
+    // guest path — never a directory this host process could `chdir` into.
+    // A machine with nothing to hand back (today's only backend) runs the
+    // engine right here, in the folder itself. Decided here, right before
+    // the transport runtime starts, while startup is still single-threaded
+    // — the same window the `chdir` this replaces always needed.
+    #[cfg(unix)]
+    let root_seat = if let Some(fd) = machine.take_control() {
+        exarch::agent::RootSeat::Wire {
+            transport: Box::new(
+                ral_core::transport::WireTransport::adopt(
+                    std::os::unix::net::UnixStream::from(fd),
+                    ral_core::transport::Liveness::default(),
+                )
+                .map_err(|e| format!("could not take control of the machine: {e}"))?,
+            ),
+            cwd: workspace.clone(),
+            home: workspace,
+        }
+    } else {
+        std::env::set_current_dir(&workspace)
+            .map_err(|e| format!("could not open {} to work in: {e}", workspace.display()))?;
+        exarch::agent::RootSeat::Identity {
+            scratch: Arc::clone(&scratch),
+        }
+    };
+    #[cfg(not(unix))]
+    let root_seat = {
+        std::env::set_current_dir(&workspace)
+            .map_err(|e| format!("could not open {} to work in: {e}", workspace.display()))?;
+        exarch::agent::RootSeat::Identity {
+            scratch: Arc::clone(&scratch),
+        }
+    };
+
     let engine = Engine::new();
     let provider = Arc::new(Provider::build(
         engine.clone(),
@@ -146,10 +179,11 @@ pub fn start(grant: &Grant, machine: &dyn Machine, cli: &Cli) -> Result<(), Stri
             interactive: false,
             chat: false,
             disk_warn_bytes,
+            // An office job is asked and answered, never a fleet: no
+            // sub-agent may ever start from it.
+            fuel: 0,
         },
-        exarch::agent::RootSeat::Identity {
-            scratch: Arc::clone(&scratch),
-        },
+        root_seat,
         Arc::clone(&provider),
     )
     .map_err(|e| format!("could not start the assistant: {e}"))?;

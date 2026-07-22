@@ -97,6 +97,17 @@ pub(crate) enum EvalReach {
         eval_root: DurableRoot,
         turn_scope: TurnScope,
     },
+    /// The wire reach: a wire session's only host-reachable cancel primitive
+    /// is `Control::Cancel` on its own in-flight dispatch — there is no
+    /// host-side turn scope or durable root to reach separately, so both
+    /// [`Self::interrupt`] and [`Self::terminate`] resolve to the same
+    /// [`ControlSender::cancel_in_flight`]. A wire-seated agent never
+    /// actually has a child today (a wire session's `agent-start` is always
+    /// refused, `docs/ral-wiki/decisions/260722_session-is-a-process.md`),
+    /// so this variant is unreached in production but must still answer both
+    /// calls honestly.
+    #[cfg(unix)]
+    Wire(ral_core::transport::ControlSender),
 }
 
 impl EvalReach {
@@ -104,13 +115,18 @@ impl EvalReach {
     /// [`ForegroundScope`] the turn-scope cell currently holds.  Never
     /// touches the durable root — the next turn is born uncancelled.
     pub(crate) fn interrupt(&self) {
-        let Self::Identity { turn_scope, .. } = self;
-        if let Some(scope) = turn_scope
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            scope.cancel(CancelCause::Interrupt);
+        match self {
+            Self::Identity { turn_scope, .. } => {
+                if let Some(scope) = turn_scope
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    scope.cancel(CancelCause::Interrupt);
+                }
+            }
+            #[cfg(unix)]
+            Self::Wire(ctrl) => ctrl.cancel_in_flight(),
         }
     }
 
@@ -120,8 +136,11 @@ impl EvalReach {
     /// design — every caller is ending the agent, so there is no later turn
     /// for a poisoned root to break.
     pub(crate) fn terminate(&self, cause: CancelCause) {
-        let Self::Identity { eval_root, .. } = self;
-        eval_root.cancel(cause);
+        match self {
+            Self::Identity { eval_root, .. } => eval_root.cancel(cause),
+            #[cfg(unix)]
+            Self::Wire(ctrl) => ctrl.cancel_in_flight(),
+        }
     }
 }
 

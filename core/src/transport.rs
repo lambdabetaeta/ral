@@ -723,12 +723,20 @@ impl ControlSender {
         let _ = CURRENT_CONTROL.set(self);
     }
 
+    /// Cancel this sender's own in-flight dispatch: read `current_dispatch`
+    /// and send `Control::Cancel(DispatchId(id))` down whichever channel this
+    /// sender writes — the wire, or (under the identity transport) the
+    /// process-global foreground scope directly.
+    pub fn cancel_in_flight(&self) {
+        let id = self
+            .current_dispatch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.send(Control::Cancel(DispatchId(id)));
+    }
+
     pub fn cancel_current() {
         if let Some(ctrl) = CURRENT_CONTROL.get() {
-            let id = ctrl
-                .current_dispatch
-                .load(std::sync::atomic::Ordering::Relaxed);
-            ctrl.send(Control::Cancel(DispatchId(id)));
+            ctrl.cancel_in_flight();
         }
     }
 
