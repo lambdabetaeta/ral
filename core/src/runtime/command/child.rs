@@ -71,6 +71,13 @@ pub(crate) enum GroupOwner {
 pub(crate) struct RunningChild {
     pub child: Option<crate::process::ChildHandle>,
     pub pgid: Option<crate::process::Pgid>,
+    /// The transient guest-jail cgroup this child was placed in, if any —
+    /// `None` on every platform but a real Linux guest.  `kill_group` and
+    /// `wait`/`Drop`'s cleanup prefer this over the pgid once it is `Some`:
+    /// a grandchild that `setsid()`'d away escapes `kill(-pgid, …)` but
+    /// cannot leave its cgroup.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub jail: Option<crate::process::jail::JailCgroup>,
     pub pump: Option<std::thread::JoinHandle<()>>,
     /// Pump thread draining piped stderr into the caller-supplied sink.
     /// `None` when stderr was inherited / file / `2>&1`.
@@ -147,6 +154,10 @@ impl RunningChild {
     /// [`super::super::pipeline::group::PipelineGroup`] owns the
     /// release.  Children with no group at all (Unix `Inherit`,
     /// builtins-via-spawn) pass `None`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the single assembly point for every field RunningChild carries; splitting it would just scatter the same parameters across a builder"
+    )]
     pub(crate) fn assemble_with_owner(
         child: crate::process::ChildHandle,
         pgid: Option<crate::process::Pgid>,
@@ -155,6 +166,7 @@ impl RunningChild {
         park_on_stop: bool,
         group_owner: GroupOwner,
         cancel: crate::process::CancelScope,
+        jail: Option<crate::process::jail::JailCgroup>,
     ) -> Self {
         let mut child = child;
         let ExternalPlumbing {
@@ -166,6 +178,7 @@ impl RunningChild {
         Self {
             child: Some(child),
             pgid,
+            jail,
             pump,
             stderr_pump,
             name,
@@ -187,7 +200,18 @@ impl RunningChild {
     /// `GroupOwner::Standalone`.  On the success path `wait` calls
     /// `release_win_group` after `wait_leader_blocking`; on the abort
     /// path `Drop` makes the equivalent call inline.
+    ///
+    /// On a Linux guest with a jail cgroup tracked, `cgroup.kill` is used
+    /// instead of the pgid signal: it reaches a grandchild that
+    /// `setsid()`'d out of the tracked pgid, which `kill(-pgid, …)`
+    /// cannot — moving cgroups needs write permission on `cgroup.procs`,
+    /// which the jail's unprivileged uid does not have.
     fn kill_group(&self, child: &mut crate::process::ChildHandle) {
+        #[cfg(target_os = "linux")]
+        if let Some(cgroup) = &self.jail {
+            crate::process::jail::linux::kill(cgroup);
+            return;
+        }
         #[cfg(unix)]
         match self.pgid {
             Some(group) => {
@@ -247,6 +271,12 @@ impl RunningChild {
     /// peek (the caller must not `wait` again), `None` otherwise (the
     /// caller's follow-up blocking `wait_handling_stop` reaps it).  Falls
     /// back to a direct child kill when no group is tracked.
+    ///
+    /// The grace phase stays pgid-addressed: it delivers the signal a
+    /// well-behaved tree expects, and a jailed grandchild that `setsid()`'d
+    /// away would miss it either way. Every unconditional final kill goes
+    /// through [`Self::kill_group`], so a tracked jail's `cgroup.kill`
+    /// substitutes there.
     fn terminate_group(
         &self,
         child: &mut crate::process::ChildHandle,
@@ -261,7 +291,7 @@ impl RunningChild {
                 // would deny this lone child the escalation every other
                 // path documents.
                 if cause == crate::process::CancelCause::RootAbort {
-                    let _ = child.kill();
+                    self.kill_group(child);
                     return None;
                 }
                 let signal = match cause {
@@ -279,12 +309,12 @@ impl RunningChild {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
                 let reaped = self.grace_poll(child, deadline);
                 if reaped.is_none() {
-                    let _ = child.kill();
+                    self.kill_group(child);
                 }
                 return reaped;
             };
             if cause == crate::process::CancelCause::RootAbort {
-                pgid.signal_group(crate::process::Signal::new(libc::SIGKILL));
+                self.kill_group(child);
                 return None;
             }
             let signal = match cause {
@@ -298,11 +328,10 @@ impl RunningChild {
             // summary and exit.
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
             let reaped = self.grace_poll(child, deadline);
-            // SIGKILL the whole group unconditionally: harmless on a tree
-            // that already exited cleanly, decisive against a grandchild
-            // that trapped the chosen signal and is still holding the
-            // pipe open.
-            pgid.signal_group(crate::process::Signal::new(libc::SIGKILL));
+            // Unconditional final kill: harmless on a tree that already
+            // exited cleanly, decisive against a grandchild that trapped
+            // the chosen signal and is still holding the pipe open.
+            self.kill_group(child);
             reaped
         }
         #[cfg(not(unix))]
@@ -496,6 +525,16 @@ impl RunningChild {
                 t_enter.elapsed(),
             );
         }
+        // The leader is confirmed dead (the `Stopped` branch above already
+        // returned): `cgroup.kill` on settle — a straggler the leader left
+        // behind must not outlive the command — then remove the transient
+        // cgroup, the same structural point Windows releases its own group
+        // bookkeeping.
+        #[cfg(target_os = "linux")]
+        if let Some(jail) = &self.jail {
+            crate::process::jail::linux::kill(jail);
+            crate::process::jail::linux::remove(jail);
+        }
         crate::dbg_trace!(
             "wait",
             "ready-for-drain name={} pid={} elapsed={:?} outcome={:?}",
@@ -622,6 +661,10 @@ impl Drop for RunningChild {
         if let (GroupOwner::Standalone, Some(group)) = (self.group_owner, self.pgid) {
             crate::process::release_win_group(group.as_raw());
         }
+        #[cfg(target_os = "linux")]
+        if let Some(jail) = &self.jail {
+            crate::process::jail::linux::remove(jail);
+        }
         if let Some(jh) = self.pump.take() {
             let _ = jh.join();
         }
@@ -714,6 +757,7 @@ mod tests {
             false,
             GroupOwner::None,
             scope.clone(),
+            None,
         );
 
         // Fire the interrupt from another thread once `wait` has had time

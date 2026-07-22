@@ -82,6 +82,14 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/path/which.rs", "io-door:silent:which-readdir"),
     ("core/src/path/which.rs", "io-door:silent:which-stat"),
     (
+        "core/src/process/jail/linux.rs",
+        "io-door:silent:jail-cgroup-procs",
+    ),
+    (
+        "core/src/process/jail/linux.rs",
+        "io-door:silent:jail-cgroup-write",
+    ),
+    (
         "core/src/process/launch.rs",
         "io-door:surface:process-launch",
     ),

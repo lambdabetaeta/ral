@@ -64,6 +64,10 @@ pub const ENVIRONMENT: &[(&str, &str)] = &[
     // TERM should find an honest answer rather than a capability list it
     // cannot use.
     ("TERM", "dumb"),
+    // The sole channel by which `core::engine::run_engine` (the same
+    // multicall binary run here) learns it is running inside a guest, so
+    // it can install the process jail (§5) onto the shell it boots.
+    ("RAL_GUEST", "1"),
 ];
 
 /// How long the daemon keeps trying to reach the host's control-plane
@@ -251,6 +255,18 @@ mod tests {
             ENVIRONMENT.iter().all(|(_, value)| !value.is_empty()),
             "an empty value is not a setting"
         );
+    }
+
+    /// `RAL_GUEST` is the entire signal `core::engine::run_engine` reads to
+    /// know it is booting inside a guest, so it must always be set and
+    /// non-empty.
+    #[test]
+    fn ral_guest_is_set_and_non_empty() {
+        let value = ENVIRONMENT
+            .iter()
+            .find_map(|(name, value)| (*name == "RAL_GUEST").then_some(*value))
+            .expect("the engine is given RAL_GUEST");
+        assert!(!value.is_empty());
     }
 
     /// Every directory the engine will search for a command is absolute:

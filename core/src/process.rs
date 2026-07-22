@@ -16,12 +16,16 @@
 //!     the handlers deliver onto.
 //!   * **Launch** ([`launch`]) — the owned [`Launch`] value the runtime
 //!     hands the subsystem to spawn one external command.
+//!   * **Jail** ([`jail`]) — the guest-only per-exec decision (fresh
+//!     uid/gid, transient cgroup) and, on Linux, the thin syscall edge
+//!     that carries it out.
 //!   * **Lease** ([`lease`]) — [`TerminalLease`], the unforgeable
 //!     controlling-terminal-foreground authority.
 //!   * **Reaper** ([`reaper`]) — the process-global deadline daemon that
 //!     fires an armed lifetime ceiling as a [`CancelCause::Deadline`].
 
 pub mod cancel;
+pub mod jail;
 pub mod launch;
 pub mod lease;
 pub mod outcome;

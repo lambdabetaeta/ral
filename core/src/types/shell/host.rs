@@ -69,6 +69,15 @@ impl Shell {
         self.session.exit_hints = hints;
     }
 
+    /// Install the guest process jail onto a freshly-booted Shell — the
+    /// one construction point [`crate::engine::run_engine`] uses when it
+    /// detects `RAL_GUEST`.  Every other host bootstrap (exarch, a future
+    /// synod) stays unaware that jails exist.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn install_guest_jail(&mut self, jail: Arc<crate::process::jail::GuestJail>) {
+        self.session.guest_jail = Some(jail);
+    }
+
     /// Cached terminal state probed at startup (isatty / ANSI / mode bits).
     /// `Copy`, so frontends read the bits they need without borrowing.
     pub fn terminal(&self) -> TerminalState {

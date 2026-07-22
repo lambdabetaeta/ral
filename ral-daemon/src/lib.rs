@@ -27,12 +27,15 @@
 //!    place to fix it is a periodic correction over the protocol, not a
 //!    second clock authority down here.
 //! 6. **Mount everything else**, in the order [`mounts::plan`] fixes.
-//! 7. **Listen for the end.**  PID 1 has no default signal dispositions, so
+//! 7. **Apply the guest-wide sysctls** ([`sysctl::plan`]) the engine's jail
+//!    (§5) depends on — user namespaces off — before any external code gets
+//!    a chance to run.
+//! 8. **Listen for the end.**  PID 1 has no default signal dispositions, so
 //!    the handlers for "the host wants this machine off" are installed by
 //!    hand, before there is a child that could outlive them.
-//! 8. **Dial the host** on the control-plane vsock port and hand the
+//! 9. **Dial the host** on the control-plane vsock port and hand the
 //!    connection to the engine as fd 3.
-//! 9. **Wait.**  Forever, until the engine dies or the host says stop.
+//! 10. **Wait.**  Forever, until the engine dies or the host says stop.
 //!
 //! ## Console → host log
 //!
@@ -67,6 +70,8 @@ pub mod engine;
 pub mod mounts;
 #[cfg(target_os = "linux")]
 pub mod reap;
+#[cfg(target_os = "linux")]
+pub mod sysctl;
 
 #[cfg(target_os = "linux")]
 mod init;

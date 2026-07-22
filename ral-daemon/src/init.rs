@@ -18,6 +18,7 @@ use crate::boot::Boot;
 use crate::engine;
 use crate::mounts;
 use crate::reap::{self, Waking};
+use crate::sysctl;
 
 /// How long the engine is given to finish after being asked to stop, before
 /// it is killed.  Long enough for a turn to abandon its work and flush the
@@ -91,6 +92,12 @@ pub fn serve() -> Result<Infallible, String> {
         mounts::WORK,
         boot.workspace
     );
+
+    // Before any external code can run: the jail's whole cross-uid-ptrace
+    // argument depends on unprivileged user namespaces being off.
+    for setting in sysctl::plan() {
+        setting.apply()?;
+    }
 
     listen_for_the_end();
     if STOPPING.load(Ordering::Acquire) {

@@ -65,6 +65,7 @@ impl Shell {
                 terminal_lease: crate::process::TerminalLease::mint_at_startup(
                     terminal.startup_foreground,
                 ),
+                guest_jail: None,
             },
             local: LocalState::default(),
         };

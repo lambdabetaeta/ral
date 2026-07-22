@@ -313,7 +313,22 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
             let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
             let _ = rc_path; // TODO: load rc_path — needs the host's RcCtx/plugin machinery, not a core-level concern yet
 
-            (target.boot)()
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+            let mut shell = (target.boot)();
+            // Only ral-daemon's closed engine environment sets RAL_GUEST,
+            // so this is the whole "am I inside a guest?" signal. Gated on
+            // the env var, never on `installer`'s tag, so every boot
+            // recipe is jailed alike without any bootstrap knowing jails
+            // exist.
+            #[cfg(target_os = "linux")]
+            if std::env::var("RAL_GUEST").is_ok() {
+                shell.install_guest_jail(std::sync::Arc::new(crate::process::jail::GuestJail::new(
+                    std::path::PathBuf::from("/sys/fs/cgroup/ral-exec"),
+                    100_000,
+                    crate::process::jail::JailLimits::default(),
+                )));
+            }
+            shell
         }
         Ok(Some(Frame::Detach) | None) => return 0,
         Ok(Some(_)) => {

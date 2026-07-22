@@ -471,6 +471,12 @@ pub struct SessionState {
     /// foreground handoff via [`Shell::terminal_lease`], and only when the
     /// installed turn's [`TerminalAccess`] permits.
     pub(crate) terminal_lease: Option<crate::process::TerminalLease>,
+    /// The guest process jail, installed once by
+    /// [`crate::engine::run_engine`] when `RAL_GUEST` is set — never on an
+    /// ordinary host run. Shared by `Arc`, never cloned-and-reset, across
+    /// every fork and spawned worker, so concurrent spawns from sibling
+    /// Shells still mint distinct uids and cgroups off the one counter.
+    pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
 }
 
 /// Host-local scratch whose members carry their own flow rules — not a

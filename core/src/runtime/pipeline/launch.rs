@@ -154,7 +154,7 @@ pub(super) fn spawn_into_group(
     park_on_stop: bool,
     spawn_error: impl FnOnce(std::io::Error) -> Break,
 ) -> Settled<command::RunningChild> {
-    let child = group.spawn(cmd).map_err(spawn_error)?;
+    let (child, jail) = group.spawn(cmd).map_err(spawn_error)?;
     if shell.has_active_capabilities() {
         // Pipeline path: any active grant routes its limits through the
         // pipeline's job (Windows) instead of assigning the child to a
@@ -172,6 +172,7 @@ pub(super) fn spawn_into_group(
         // owns the release.
         command::GroupOwner::BorrowedByPipeline,
         shell.turn.cancel.as_scope().clone(),
+        jail,
     ))
 }
 

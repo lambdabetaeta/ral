@@ -155,4 +155,11 @@ impl Shell {
     pub fn sandbox_projection(&self) -> Option<SandboxProjection> {
         crate::capability::sandbox_projection(&self.mobile.context)
     }
+
+    /// The guest process jail installed on this session, if any — `None`
+    /// everywhere but a real Linux guest.  Thin forwarder, same shape as
+    /// [`Self::sandbox_projection`].
+    pub fn guest_jail(&self) -> Option<std::sync::Arc<crate::process::jail::GuestJail>> {
+        self.session.guest_jail.clone()
+    }
 }

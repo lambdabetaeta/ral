@@ -19,6 +19,7 @@ pub(crate) use windows::RawChild;
 #[cfg(not(windows))]
 pub struct Launch {
     cmd: std::process::Command,
+    jail: Option<crate::process::jail::JailCgroup>,
 }
 
 #[cfg(windows)]
@@ -169,7 +170,7 @@ impl Launch {
             reason = "[io-door:surface:process-launch] Builds the external exec image at ral's owned launch boundary; command::run emits the user-facing exec card with the resolved argv and status."
         )]
         let cmd = std::process::Command::new(program);
-        Self { cmd }
+        Self { cmd, jail: None }
     }
 
     /// Adopt an existing `Command`.
@@ -181,7 +182,7 @@ impl Launch {
     /// them across; treating them as uncarried on every platform keeps that a
     /// documented contract rather than a Windows-only surprise.
     pub fn from_command(cmd: std::process::Command) -> Self {
-        Self { cmd }
+        Self { cmd, jail: None }
     }
 
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
@@ -246,6 +247,28 @@ impl Launch {
         }
     }
 
+    /// Prepare this exec's transient cgroup and register the pre-exec
+    /// closure that places the child in it and drops it to the plan's
+    /// unprivileged uid/gid.  Called by `build_command` when a
+    /// [`crate::process::jail::GuestJail`] is installed on the shell;
+    /// structurally absent from a build that lacks the Linux jail edge,
+    /// the same way [`Self::apply_unix_resource_limits`] is
+    /// `cfg(unix)`-only.
+    ///
+    /// # Errors
+    /// Returns the kernel's error for any mkdir/write/open the cgroup
+    /// setup performs.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_guest_jail(
+        &mut self,
+        plan: &crate::process::jail::JailPlan,
+    ) -> std::io::Result<()> {
+        let (cgroup, procs) = crate::process::jail::linux::prepare(plan)?;
+        crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs);
+        self.jail = Some(cgroup);
+        Ok(())
+    }
+
     #[cfg(unix)]
     pub fn clear_cloexec_on_spawn(&mut self, fd: std::os::fd::RawFd) {
         use std::os::unix::process::CommandExt;
@@ -264,8 +287,8 @@ impl Launch {
     }
 
     /// Lower this launch to a `std::process::Command` and spawn it with the
-    /// requested process-group placement, returning the child handle and its
-    /// leader pgid.
+    /// requested process-group placement, returning the child handle, its
+    /// leader pgid, and the jail cgroup `apply_guest_jail` staged (if any).
     ///
     /// # Errors
     /// Returns `Err` if the spawn fails — the `fork`/`exec` itself or the
@@ -273,9 +296,13 @@ impl Launch {
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,
-    ) -> std::io::Result<(crate::process::ChildHandle, Option<crate::process::Pgid>)> {
+    ) -> std::io::Result<(
+        crate::process::ChildHandle,
+        Option<crate::process::Pgid>,
+        Option<crate::process::jail::JailCgroup>,
+    )> {
         let (child, pgid) = crate::process::spawn_with_pgid(&mut self.cmd, pgid)?;
-        Ok((crate::process::ChildHandle::from_std(child), pgid))
+        Ok((crate::process::ChildHandle::from_std(child), pgid, self.jail.take()))
     }
 }
 
@@ -404,7 +431,9 @@ impl Launch {
 
     /// Lower this launch through the raw `CreateProcessW` boundary and spawn
     /// it with the requested process-group placement, returning the child
-    /// handle and its leader pgid.
+    /// handle and its leader pgid.  The jail cgroup is always `None` here —
+    /// the guest jail exists only inside a Linux guest — kept in the return
+    /// shape purely so callers stay platform-uniform.
     ///
     /// # Errors
     /// Returns `Err` if the program is a `.bat`/`.cmd` file (refused), if any
@@ -414,8 +443,12 @@ impl Launch {
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,
-    ) -> std::io::Result<(crate::process::ChildHandle, Option<crate::process::Pgid>)> {
-        windows::spawn(self, pgid)
+    ) -> std::io::Result<(
+        crate::process::ChildHandle,
+        Option<crate::process::Pgid>,
+        Option<crate::process::jail::JailCgroup>,
+    )> {
+        windows::spawn(self, pgid).map(|(child, pgid)| (child, pgid, None))
     }
 }
 

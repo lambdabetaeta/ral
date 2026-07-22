@@ -45,8 +45,9 @@
 //! (via [`TurnState::inherit_from`](super::TurnState::inherit_from)
 //! / [`return_to`](super::TurnState::return_to)), `local.audit`, and
 //! `local.repl` each carry their own inherit / return rule; `session.builtins`,
-//! `session.library_docs`, and `session.root` are shared so dispatch, the
-//! `help`/`explain` index, and the cancel root reach the child.  The
+//! `session.library_docs`, `session.root`, and `session.guest_jail` are shared
+//! so dispatch, the `help`/`explain` index, the cancel root, and (on a guest)
+//! the jail's uid counter reach the child.  The
 //! asymmetry between the two manifests is the flow matrix — the source
 //! cursor (`turn.loc`) and the `within`-attenuable bits do not flow back,
 //! but `context.cwd` does.
@@ -229,6 +230,10 @@ impl Shell {
             .library_docs
             .clone_from(&parent.session.library_docs);
         child
+            .session
+            .guest_jail
+            .clone_from(&parent.session.guest_jail);
+        child
     }
 
     /// Fork this shell into an independent child *session* — the primitive a
@@ -275,8 +280,9 @@ impl Shell {
     ///
     /// `local.workers` — the worker registry — is shared into the new
     /// thread's `Shell` by `Arc` clone, alongside `session.root`,
-    /// `session.builtins`, and `session.library_docs`: a `spawn` inside
-    /// `f`'s body registers into the same registry this shell's own workers
+    /// `session.builtins`, `session.library_docs`, and `session.guest_jail`:
+    /// a `spawn` inside `f`'s body registers into the same registry this
+    /// shell's own workers
     /// do, rather than a private one of its own.
     pub fn spawn_thread<F, R>(
         &self,
@@ -293,6 +299,7 @@ impl Shell {
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let library_docs = self.session.library_docs.clone();
+        let guest_jail = self.session.guest_jail.clone();
         let workers = self.local.workers.clone();
         let cancel = root.child();
         let worker_cancel = cancel.as_scope().clone();
@@ -305,6 +312,7 @@ impl Shell {
             child.session.root = root;
             child.session.builtins = builtins;
             child.session.library_docs = library_docs;
+            child.session.guest_jail = guest_jail;
             child.local.workers = workers;
             // Shared, not owned: this worker's shell dropping must not
             // cancel the parent's whole registry.
@@ -326,6 +334,7 @@ impl Shell {
         self.session.builtins = parent.session.builtins.clone();
         self.session.library_docs = parent.session.library_docs.clone();
         self.session.root = parent.session.root.clone();
+        self.session.guest_jail = parent.session.guest_jail.clone();
     }
 
     /// Flow mutations made by a child computation back to `parent`.

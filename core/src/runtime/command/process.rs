@@ -22,7 +22,14 @@ use super::vet::{ExecImage, SpawnPlan};
 /// Invoked by [`super::run`] and by the pipeline stage builder
 /// (`launch_external_stage`); it is never spawned here.
 pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::process::Launch> {
-    let mut cmd = if let Some(projection) = shell.sandbox_projection() {
+    // A guest jail IS the guest's sandbox: bwrap needs unprivileged user
+    // namespaces, which the guest's boot-time sysctl turns off, so a
+    // jailed shell never wraps a spawn in bwrap on top — `check_exec_args`
+    // still gates the call, only the OS-confinement layer changes.
+    let jail = shell.guest_jail();
+    let mut cmd = if jail.is_none()
+        && let Some(projection) = shell.sandbox_projection()
+    {
         // Per-command OS confinement: when a projection is active, confine
         // the child per-command under the effective projection.  The grant
         // body itself evaluates locally; this launcher is the sole OS-sandbox
@@ -61,6 +68,11 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::p
     if shell.has_active_capabilities() {
         cmd.apply_unix_resource_limits();
     }
+    #[cfg(target_os = "linux")]
+    if let Some(jail) = jail {
+        cmd.apply_guest_jail(&jail.plan())
+            .map_err(|e| Break::Error(Error::new(format!("guest jail: {e}"), 1)))?;
+    }
     Ok(cmd)
 }
 
@@ -80,12 +92,16 @@ pub(crate) fn spawn(
     cmd: &mut crate::process::Launch,
     pgid: crate::process::PgidPolicy,
     shell: &Shell,
-) -> std::io::Result<(crate::process::ChildHandle, Option<crate::process::Pgid>)> {
-    let (child, leader) = cmd.spawn(pgid)?;
+) -> std::io::Result<(
+    crate::process::ChildHandle,
+    Option<crate::process::Pgid>,
+    Option<crate::process::jail::JailCgroup>,
+)> {
+    let (child, leader, jail) = cmd.spawn(pgid)?;
     if shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits(&child);
     }
-    Ok((child, leader))
+    Ok((child, leader, jail))
 }
 
 /// Map a spawn `io::Error` for command `name` into a [`Break`].

@@ -105,12 +105,15 @@ impl PipelineGroup {
     pub(super) fn spawn(
         &mut self,
         cmd: &mut crate::process::Launch,
-    ) -> std::io::Result<crate::process::ChildHandle> {
+    ) -> std::io::Result<(
+        crate::process::ChildHandle,
+        Option<crate::process::jail::JailCgroup>,
+    )> {
         let policy = match self.leader {
             Some(leader) => PgidPolicy::Join(leader),
             None => PgidPolicy::NewLeader,
         };
-        let (child, leader) = cmd.spawn(policy)?;
+        let (child, leader, jail) = cmd.spawn(policy)?;
         if self.leader.is_none() {
             self.leader = leader;
         }
@@ -122,7 +125,7 @@ impl PipelineGroup {
         {
             self.relay = crate::process::PipelineRelay::install(group.as_raw());
         }
-        Ok(child)
+        Ok((child, jail))
     }
 
     pub(super) fn claim_foreground(&mut self, shell: &Shell) {
@@ -181,7 +184,7 @@ impl AnchorProcess {
         // Mark the child end inheritable + stash its fd in env, the
         // same primitive the protocol's gate setup uses.
         super::protocol::pass(&mut cmd, super::helper::ANCHOR_FD_ENV, &child_end)?;
-        let (mut child, leader) = cmd.spawn(PgidPolicy::NewLeader).map_err(|e| {
+        let (mut child, leader, _jail) = cmd.spawn(PgidPolicy::NewLeader).map_err(|e| {
             Break::Error(crate::types::Error::new(format!("pipeline anchor: {e}"), 1))
         })?;
         if shell.has_active_capabilities() {

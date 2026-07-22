@@ -149,7 +149,7 @@ pub(crate) fn run(
     // the spawn so a kernel deny logged by the child falls inside the
     // window the failure arm reads back (see `sandbox::diag`).
     let started = std::time::Instant::now();
-    let (child, wait_pgid) = match spawn(&mut command, fg.pgid_policy(), shell) {
+    let (child, wait_pgid, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
         Ok(pair) => pair,
         Err(e) => {
             // Door 3 — EXEC (spawn failure): the synthesized exit code is
@@ -211,6 +211,7 @@ pub(crate) fn run(
         park_on_stop,
         group_owner,
         shell.turn.cancel.as_scope().clone(),
+        jail,
     );
 
     // `wait` consumes `RunningChild`; the resulting `WaitedChild` is
