@@ -26,19 +26,18 @@ pub mod prompt;
 pub mod session;
 pub mod workspace;
 
-use clap::Parser;
-
 /// The binary's entry point, lifted into the library so tests can link
 /// the whole crate.
 ///
 /// Opens the granted folder, boots a machine to hold it, and hands the
-/// pair to [`session::start`].
+/// pair to [`session::start`], which then holds the conversation for the
+/// whole life of the process.
 ///
 /// # Errors
 /// Returns `Err` if the folder cannot be granted, if no machine can be
 /// booted for it, or if the session itself fails.
 pub fn run() -> Result<(), String> {
-    let cli = cli::Cli::parse();
+    let cli = cli::Cli::parse()?;
     let grant = grant::Grant::open(&cli.folder)?;
     let mut machine = vm_manager::detect()
         .boot(&grant.machine_spec())
@@ -48,5 +47,5 @@ pub fn run() -> Result<(), String> {
                 grant.root().display()
             )
         })?;
-    session::start(&grant, machine.as_mut(), &cli)
+    session::start(&grant, machine.as_mut())
 }

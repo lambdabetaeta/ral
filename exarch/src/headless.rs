@@ -442,10 +442,138 @@ pub fn run(
     r
 }
 
+/// One exchange of a converse session.
+///
+/// Seed `message`, drive it (and any nudge continuations it raises) to the
+/// agent's next park, streaming the same events [`run`]'s text mode streams
+/// — tokens to stdout, everything else to stderr.  `session` must have been
+/// built with [`RootConfig::interactive`](crate::agent::RootConfig) set: a
+/// conversing trunk withholds `reply` and parks between messages instead of
+/// returning once, so — unlike `run` — there is no result to report at the
+/// end, only the narration itself; a per-turn digest that merely says "no
+/// reply" is therefore not an error and never surfaces as one. Call this
+/// once per user message on the *same* session, so each exchange sees what
+/// came before — the interactive trunk's own drive loop
+/// ([`Agent::drive_queued`](crate::agent::Agent)) shares its per-turn step
+/// with the one [`run`] and the TUI both drive forever, rather than
+/// running a second loop of its own.
+///
+/// # Errors
+/// Returns `Err` if the drive worker panics or the sink's drive fails.
+pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Result<(), String> {
+    let mut sink = Headless::new(false, session.id);
+    let root_transcript = session.transcript();
+    // Per-exchange, like headless's own per-turn bus: this call's channel
+    // closes when the exchange parks, so draining it can never block on a
+    // later message the caller has not sent yet.
+    let fleet = Fleet::new(
+        session.agents.clone(),
+        FleetBus::per_turn(&session.inbox()),
+        engine,
+    );
+    session.seed(message);
+    let root_id = session.id;
+    let outcome = pump(&mut sink, &fleet.bus, root_id, root_transcript, |emit| {
+        session.drive_queued(emit)
+    });
+    match outcome {
+        Ok(Some(_)) => {
+            if !sink.ended_with_newline {
+                println!();
+            }
+            Ok(())
+        }
+        Ok(None) => Err("worker panicked".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs scaffolding for a throwaway run dir"
+)]
 mod tests {
     use super::*;
+    use crate::agent::{RootConfig, RootSeat};
     use crate::provider::Tuning;
+    use crate::provider::scripted::{Reply, Script};
+
+    /// Build a fresh interactive (conversing) trunk over a scripted
+    /// provider, under its own throwaway run dir — the fixture both new
+    /// tests below share as their only setup.
+    fn converse_trunk(tag: &str, script: Script) -> Agent {
+        let dir = std::env::temp_dir().join(format!("exarch-converse-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp run dir");
+        let scratch = Arc::new(
+            crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
+                .expect("scratch dir"),
+        );
+        Agent::root(
+            RootConfig {
+                system: "system".into(),
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir,
+                model: "test-model".into(),
+                provider_label: "test".into(),
+                allow_schedule: false,
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+                fuel: 0,
+            },
+            RootSeat::Identity { scratch },
+            Arc::new(Provider::scripted(
+                "test-model",
+                crate::provider::ProviderKind::Openai,
+                script,
+            )),
+        )
+        .expect("root trunk")
+    }
+
+    /// Two exchanges over one session: the second's rendered context must
+    /// carry the first's user text and reply, proving they share one
+    /// session rather than each starting fresh — exactly what a
+    /// conversation, and not a sequence of one-shot runs, requires.
+    #[test]
+    fn converse_carries_context_from_one_exchange_into_the_next() {
+        let mut session = converse_trunk(
+            "context",
+            Script::new()
+                .then(Reply::text("hello back"))
+                .then(Reply::text("and again")),
+        );
+        let engine = Engine::new();
+        converse(&mut session, "first message".into(), engine.clone())
+            .expect("a conversing trunk never fails for want of a reply");
+        converse(&mut session, "second message".into(), engine)
+            .expect("the second exchange runs on the same, unbroken session");
+
+        let rendered = format!("{:?}", session.rendered_messages());
+        assert!(rendered.contains("first message"), "{rendered}");
+        assert!(rendered.contains("hello back"), "{rendered}");
+        assert!(rendered.contains("second message"), "{rendered}");
+    }
+
+    /// The interactive trunk parks rather than returning a reply: a plain
+    /// assistant turn with no tool calls carries no payload up, and the
+    /// per-turn digest never reduces to the returning agent's `Complete`
+    /// tag — the shape only a deliberate `reply` produces.
+    #[test]
+    fn the_interactive_trunk_parks_rather_than_replying() {
+        let mut session = converse_trunk("parks", Script::new().then(Reply::text("hi there")));
+        session.seed("hello".into());
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+        let (outcome, payload) = session.drive_queued(&emit);
+        assert!(payload.is_none(), "a conversing trunk carries no reply payload");
+        assert!(
+            !matches!(outcome, AgentOutcome::Complete),
+            "a conversing trunk never completes by returning a value: {outcome:?}"
+        );
+    }
 
     /// A recovered worker panic must surface in the JSON result as an error,
     /// not a clean completion: `pump` absorbs the unwind and returns the worker

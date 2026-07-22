@@ -141,8 +141,13 @@ impl HistoryStore {
         Ok(found)
     }
 
-    /// The most recent job: its before-checkpoint, and the after one when
-    /// the run lived long enough to take it.
+    /// The most recent job: its before-checkpoint, and the most recent
+    /// after-checkpoint that followed it, if the run has lived long enough
+    /// to take at least one.
+    ///
+    /// A conversation may capture several afters after its one before — one
+    /// per exchange — so this pairs the before with the *last* of them, the
+    /// cumulative state as of now, not the first exchange's alone.
     ///
     /// # Errors
     /// A plain sentence when the records cannot be read back.
@@ -153,6 +158,7 @@ impl HistoryStore {
         };
         let after = all[at + 1..]
             .iter()
+            .rev()
             .find(|c| c.moment == Moment::After)
             .cloned();
         Ok(Some((all[at].clone(), after)))
@@ -330,6 +336,30 @@ mod tests {
         let (before, after) = store.latest_job().expect("reads").expect("a job exists");
         assert_eq!(before.id, b2.id);
         assert!(after.is_none(), "a crashed run left no after-checkpoint");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A conversation captures one before and many afters, one per
+    /// exchange. `latest_job` must pair the before with the *last* after —
+    /// the cumulative state as of now — not the first exchange's alone,
+    /// which is all a plain `find` would ever see.
+    #[test]
+    fn a_conversations_many_afters_pair_with_the_before_by_the_last_one() {
+        let (dir, folder, store) = workshop("many-afters");
+        std::fs::write(folder.join("a.txt"), b"one").expect("fixture");
+        let before = store.capture(&folder, Moment::Before).expect("captures");
+        store.capture(&folder, Moment::After).expect("exchange 1");
+        store.capture(&folder, Moment::After).expect("exchange 2");
+        let last = store.capture(&folder, Moment::After).expect("exchange 3");
+
+        let (paired_before, paired_after) =
+            store.latest_job().expect("reads").expect("a job exists");
+        assert_eq!(paired_before.id, before.id);
+        assert_eq!(
+            paired_after.expect("a conversation with three exchanges has an after").id,
+            last.id,
+            "the report must reflect the most recent exchange, not the first"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

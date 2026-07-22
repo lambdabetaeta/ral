@@ -6,9 +6,9 @@
   <title>Synod</title>
   <style>
     /* ---------------------------------------------------------------
-       Synod — the review surface.  A calm, editorial "quiet desk":
-       a warm paper light theme, a deep ink dark theme, a system serif
-       for headings and the system sans for prose (no web fonts, by
+       Synod — the conversation.  A calm, editorial "quiet desk": a warm
+       paper light theme, a deep ink dark theme, a system serif for
+       headings and the system sans for prose (no web fonts, by
        constraint), generous space, and buttons no one has to hunt for.
        Everything here is for someone who does office work, not code.
        --------------------------------------------------------------- */
@@ -38,6 +38,9 @@
       --conflict: #a5641c;
       --conflict-bg: #f7ecd9;
       --conflict-line: #e6cfa6;
+      --danger: #a5401c;
+      --danger-bg: #f7ded9;
+      --danger-line: #e6b6a6;
 
       --shadow: 0 1px 2px rgba(60, 48, 32, 0.06), 0 8px 24px rgba(60, 48, 32, 0.08);
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
@@ -66,6 +69,9 @@
         --conflict: #e0a85e;
         --conflict-bg: #34291a;
         --conflict-line: #5a4526;
+        --danger: #e08a5e;
+        --danger-bg: #34211a;
+        --danger-line: #5a3526;
 
         --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.35);
         --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
@@ -80,6 +86,7 @@
       --accent: #2f6d5c; --accent-hover: #275c4d; --accent-ink: #fbf8f1;
       --accept: #2f6d5c; --accept-soft: #e7efe9; --discard: #9a6a52;
       --conflict: #a5641c; --conflict-bg: #f7ecd9; --conflict-line: #e6cfa6;
+      --danger: #a5401c; --danger-bg: #f7ded9; --danger-line: #e6b6a6;
       --shadow: 0 1px 2px rgba(60,48,32,0.06), 0 8px 24px rgba(60,48,32,0.08);
     }
     :root[data-theme="dark"] {
@@ -89,6 +96,7 @@
       --accent: #74c3aa; --accent-hover: #86cfb8; --accent-ink: #17201c;
       --accept: #74c3aa; --accept-soft: #22322c; --discard: #c79a83;
       --conflict: #e0a85e; --conflict-bg: #34291a; --conflict-line: #5a4526;
+      --danger: #e08a5e; --danger-bg: #34211a; --danger-line: #5a3526;
       --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
     }
 
@@ -113,25 +121,15 @@
     }
 
     /* --- shell ------------------------------------------------------ */
-    #app {
-      min-height: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: clamp(28px, 6vh, 72px) 20px 64px;
-    }
+    #app { min-height: 100%; }
 
-    .screen { display: none; width: 100%; }
-    .screen.active { display: block; animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .screen { display: none; }
+    .screen.active { display: flex; }
 
     @keyframes rise {
       from { opacity: 0; transform: translateY(10px); }
       to { opacity: 1; transform: translateY(0); }
     }
-
-    .wrap { margin: 0 auto; }
-    #screen-start .wrap, #screen-working .wrap { max-width: 640px; }
-    #screen-review .wrap { max-width: 820px; }
 
     .wordmark {
       font-family: var(--serif);
@@ -148,103 +146,55 @@
       font-weight: 600;
     }
 
+    /* --- start screen: a folder picker, and nothing else ------------ */
+    #screen-start {
+      min-height: 100%;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      text-align: center;
+    }
+    #screen-start .wrap {
+      max-width: 480px;
+      animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
     h1.title {
       font-family: var(--serif);
       font-weight: 600;
-      font-size: clamp(30px, 5vw, 44px);
-      line-height: 1.1;
+      font-size: clamp(28px, 5vw, 40px);
+      line-height: 1.15;
       letter-spacing: -0.01em;
       margin: 10px 0 6px;
     }
-
     .lede {
-      font-size: 17px;
+      font-size: 16.5px;
       line-height: 1.55;
       color: var(--ink-soft);
-      margin: 0;
-      max-width: 46ch;
+      margin: 0 0 28px;
     }
-
-    /* --- staggered reveal on load ---------------------------------- */
-    .stagger > * { opacity: 0; animation: rise 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-    .stagger > *:nth-child(1) { animation-delay: 0.02s; }
-    .stagger > *:nth-child(2) { animation-delay: 0.10s; }
-    .stagger > *:nth-child(3) { animation-delay: 0.18s; }
-    .stagger > *:nth-child(4) { animation-delay: 0.26s; }
-    .stagger > *:nth-child(5) { animation-delay: 0.34s; }
-
-    /* --- panels ----------------------------------------------------- */
-    .panel {
-      background: var(--raised);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      padding: 26px;
-      margin-top: 22px;
-    }
-
-    .step-num {
-      font-family: var(--serif);
-      font-size: 15px;
-      color: var(--accent);
-      font-weight: 600;
-    }
-
-    label.field-label {
-      display: block;
+    .btn-primary {
+      background: var(--accent);
+      color: var(--accent-ink);
       font-size: 16px;
       font-weight: 600;
-      color: var(--ink);
-      margin: 0 0 12px;
+      padding: 14px 26px;
     }
-    label.field-label .hint {
-      display: block;
-      font-weight: 400;
+    .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
+    #start-error {
+      margin-top: 18px;
+      padding: 12px 16px;
+      border-radius: 11px;
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-line);
+      color: var(--danger);
       font-size: 14px;
-      color: var(--ink-soft);
-      margin-top: 3px;
-    }
-
-    /* --- folder chooser -------------------------------------------- */
-    .chosen {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 14px 16px;
-      background: var(--raised-2);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      margin-top: 4px;
-    }
-    .chosen .folder-icon { font-size: 20px; line-height: 1; }
-    .chosen .path {
-      flex: 1;
-      min-width: 0;
-      font-family: var(--mono);
-      font-size: 13.5px;
-      color: var(--ink);
-      overflow-wrap: anywhere;
-    }
-    .chosen .path .empty { color: var(--ink-faint); font-family: var(--sans); font-size: 14.5px; }
-
-    textarea#task {
-      width: 100%;
-      min-height: 120px;
-      resize: vertical;
-      font-family: var(--sans);
-      font-size: 16px;
       line-height: 1.5;
-      color: var(--ink);
-      background: var(--raised-2);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 14px 16px;
+      display: none;
     }
-    textarea#task::placeholder { color: var(--ink-faint); }
+    #start-error.show { display: block; }
 
-    .divider { height: 1px; background: var(--line); margin: 24px 0; border: 0; }
-
-    /* --- buttons ---------------------------------------------------- */
+    /* --- buttons, shared -------------------------------------------- */
     button {
       font-family: var(--sans);
       cursor: pointer;
@@ -261,22 +211,13 @@
       border-radius: 8px;
     }
 
-    .btn-primary {
-      background: var(--accent);
-      color: var(--accent-ink);
-      font-size: 16px;
-      font-weight: 600;
-      padding: 14px 24px;
-    }
-    .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
-
     .btn-outline {
       background: var(--raised);
       color: var(--ink);
       border-color: var(--line-strong);
-      font-size: 15px;
+      font-size: 14.5px;
       font-weight: 550;
-      padding: 12px 18px;
+      padding: 10px 16px;
     }
     .btn-outline:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 
@@ -288,79 +229,146 @@
       padding: 8px 12px;
       border-radius: 9px;
     }
-    .btn-quiet:hover { color: var(--accent); background: var(--raised-2); }
+    .btn-quiet:not(:disabled):hover { color: var(--accent); background: var(--raised-2); }
 
-    .start-row {
+    /* --- conversation screen: two columns on a wide window ----------- */
+    #screen-conversation {
+      flex-direction: column;
+      height: 100%;
+    }
+
+    .topbar {
       display: flex;
       align-items: center;
-      gap: 16px;
-      margin-top: 26px;
+      gap: 14px;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--line);
+      background: var(--raised);
+      flex: none;
     }
-    .start-row .note { font-size: 13.5px; color: var(--ink-faint); }
-
-    /* --- working ---------------------------------------------------- */
-    #screen-working .wrap { text-align: center; padding-top: 4vh; }
-    .breathing {
-      width: 92px; height: 92px;
-      margin: 8px auto 26px;
-      position: relative;
+    .topbar .folder {
+      flex: 1;
+      min-width: 0;
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--ink-soft);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .breathing .ring {
-      position: absolute; inset: 0;
-      border-radius: 50%;
-      border: 2px solid var(--accent);
-      opacity: 0.5;
-      animation: breathe 2.6s ease-in-out infinite;
+    .topbar .status {
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      color: var(--ink-faint);
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
-    .breathing .ring:nth-child(2) { animation-delay: 0.8s; }
-    .breathing .ring:nth-child(3) { animation-delay: 1.6s; }
-    .breathing .core {
-      position: absolute; inset: 34px;
-      border-radius: 50%;
+    .topbar .status .spinner {
+      width: 9px; height: 9px; border-radius: 50%;
       background: var(--accent);
-      animation: pulse 2.6s ease-in-out infinite;
-    }
-    @keyframes breathe {
-      0% { transform: scale(0.5); opacity: 0.55; }
-      70% { opacity: 0; }
-      100% { transform: scale(1.15); opacity: 0; }
+      animation: pulse 1.4s ease-in-out infinite;
     }
     @keyframes pulse {
-      0%, 100% { transform: scale(0.9); opacity: 0.85; }
-      50% { transform: scale(1.05); opacity: 1; }
+      0%, 100% { opacity: 0.35; transform: scale(0.85); }
+      50% { opacity: 1; transform: scale(1); }
     }
 
-    .working-head {
-      font-family: var(--serif);
-      font-size: 30px;
-      font-weight: 600;
-      margin: 0 0 8px;
+    .layout {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: row;
     }
-    .working-head .dots::after {
-      content: "";
-      animation: dots 1.6s steps(4, end) infinite;
+    @media (max-width: 880px) {
+      .layout { flex-direction: column; overflow-y: auto; }
     }
-    @keyframes dots {
-      0% { content: ""; } 25% { content: "."; }
-      50% { content: ".."; } 75% { content: "..."; }
+
+    /* --- the conversation column -------------------------------------- */
+    .convo-col {
+      flex: 1 1 60%;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--line);
     }
-    .working-sub { color: var(--ink-soft); font-size: 16px; margin: 0 0 4px; }
-    .working-folder { color: var(--ink-faint); font-size: 14px; font-family: var(--mono); overflow-wrap: anywhere; }
+    @media (max-width: 880px) {
+      .convo-col { border-right: none; border-bottom: 1px solid var(--line); }
+    }
+
+    .transcript {
+      flex: 1;
+      overflow-y: auto;
+      padding: 22px clamp(16px, 4vw, 40px);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    @media (max-width: 880px) {
+      .transcript { max-height: 60vh; }
+    }
+
+    .msg { max-width: 74ch; animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .msg.user { align-self: flex-end; }
+    .msg .who {
+      font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--ink-faint); margin-bottom: 5px;
+    }
+    .msg.user .who { text-align: right; }
+    .msg .bubble {
+      padding: 13px 16px;
+      border-radius: 14px;
+      font-size: 15.5px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .msg.user .bubble {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-bottom-right-radius: 4px;
+    }
+    .msg.assistant .bubble {
+      background: var(--raised);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      border-bottom-left-radius: 4px;
+      box-shadow: var(--shadow-soft);
+    }
+    .msg.assistant .bubble:empty::after {
+      content: "…";
+      color: var(--ink-faint);
+    }
+    .msg.system .bubble {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-line);
+      color: var(--danger);
+      font-size: 14px;
+    }
+    .welcome {
+      color: var(--ink-faint);
+      font-size: 15px;
+      line-height: 1.6;
+      max-width: 52ch;
+      margin: auto;
+      text-align: center;
+    }
 
     details.log {
-      margin: 30px auto 0;
-      max-width: 640px;
+      margin: 0 clamp(16px, 4vw, 40px) 16px;
       text-align: left;
-      background: var(--raised);
+      background: var(--raised-2);
       border: 1px solid var(--line);
       border-radius: 12px;
       overflow: hidden;
+      flex: none;
     }
     details.log > summary {
       cursor: pointer;
       list-style: none;
-      padding: 13px 18px;
-      font-size: 14px;
+      padding: 10px 16px;
+      font-size: 13px;
       font-weight: 600;
       color: var(--ink-soft);
       user-select: none;
@@ -370,161 +378,169 @@
     details.log[open] > summary::before { content: "▾ "; }
     .log-body {
       border-top: 1px solid var(--line);
-      max-height: 240px;
+      max-height: 180px;
       overflow-y: auto;
-      padding: 12px 18px;
+      padding: 10px 16px;
       font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.65;
-      background: var(--raised-2);
+      font-size: 11.5px;
+      line-height: 1.6;
     }
-    .log-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
-    .log-line.err { color: var(--ink-faint); }
-    .log-empty { color: var(--ink-faint); font-family: var(--sans); font-size: 13.5px; }
+    .log-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-soft); }
+    .log-empty { color: var(--ink-faint); font-family: var(--sans); font-size: 13px; }
 
-    .working-actions { margin-top: 28px; }
-
-    /* --- review ----------------------------------------------------- */
-    .review-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
-    .review-head h1 {
-      font-family: var(--serif); font-weight: 600;
-      font-size: clamp(26px, 4vw, 36px); line-height: 1.15; margin: 6px 0 6px;
+    .composer {
+      flex: none;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      padding: 14px clamp(16px, 4vw, 40px) 20px;
+      border-top: 1px solid var(--line);
+      background: var(--raised);
     }
-    .review-head .sub { color: var(--ink-soft); font-size: 15.5px; margin: 0; }
-
-    .heads-up {
-      display: flex; gap: 10px; align-items: flex-start;
-      margin: 22px 0 0;
-      padding: 13px 15px;
+    textarea#message {
+      flex: 1;
+      min-height: 46px;
+      max-height: 200px;
+      resize: vertical;
+      font-family: var(--sans);
+      font-size: 15.5px;
+      line-height: 1.5;
+      color: var(--ink);
       background: var(--raised-2);
       border: 1px solid var(--line);
-      border-radius: 11px;
-      font-size: 14px; line-height: 1.5; color: var(--ink-soft);
+      border-radius: 12px;
+      padding: 12px 14px;
     }
-    .heads-up span { color: var(--accent); }
+    textarea#message::placeholder { color: var(--ink-faint); }
+    textarea#message:disabled { opacity: 0.6; }
+    .btn-send {
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 15px;
+      font-weight: 600;
+      padding: 13px 20px;
+      flex: none;
+    }
+    .btn-send:not(:disabled):hover { background: var(--accent-hover); }
 
-    .account {
-      margin: 22px 0 6px;
-      padding: 20px 22px;
-      background: var(--accept-soft);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
+    /* --- the report column --------------------------------------------- */
+    .report-col {
+      flex: 1 1 40%;
+      min-width: 0;
+      max-width: 480px;
+      overflow-y: auto;
+      padding: 22px clamp(16px, 3vw, 28px) 40px;
     }
-    .account .who {
-      display: block; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
-      font-weight: 700; color: var(--ink-faint); margin-bottom: 8px;
-    }
-    .account-text {
-      margin: 0; font-family: var(--serif); font-size: 21px; line-height: 1.45; color: var(--ink);
-    }
-    .account-text::before { content: "\201C"; }
-    .account-text::after { content: "\201D"; }
+    @media (max-width: 880px) { .report-col { max-width: none; } }
 
-    .reassure {
-      margin: 28px auto 0; max-width: 52ch; text-align: center;
-      font-size: 14px; line-height: 1.55; color: var(--ink-faint);
+    .report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+    .report-head h2 {
+      font-family: var(--serif); font-weight: 600; font-size: 21px; margin: 0;
+    }
+
+    .report-empty {
+      margin-top: 14px;
+      color: var(--ink-faint);
+      font-size: 14.5px;
+      line-height: 1.6;
     }
 
     .bulk {
       display: flex; gap: 10px; align-items: center;
-      margin: 22px 0 8px;
-      padding: 14px 16px;
+      margin: 16px 0 4px;
+      padding: 12px 14px;
       background: var(--raised-2);
       border: 1px solid var(--line);
       border-radius: 12px;
     }
-    .bulk .count { flex: 1; font-size: 14px; color: var(--ink-soft); }
+    .bulk .count { flex: 1; font-size: 13.5px; color: var(--ink-soft); }
 
-    .cards { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+    .cards { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 
     .card {
       background: var(--raised);
       border: 1px solid var(--line);
-      border-radius: var(--radius);
+      border-radius: 14px;
       box-shadow: var(--shadow-soft);
-      padding: 20px 22px;
-      animation: rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      padding: 16px 18px;
+      animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
     }
     .card.settled { opacity: 0.62; }
     .card.conflict { border-color: var(--conflict-line); background: var(--conflict-bg); }
 
-    .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
     .kind {
       display: inline-flex; align-items: center; gap: 7px;
-      font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
       color: var(--ink-soft);
     }
-    .kind .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); }
+    .kind .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
     .kind.created .dot { background: var(--accept); }
     .kind.modified .dot { background: #c6902f; }
     .kind.deleted .dot { background: var(--discard); }
     .kind.renamed .dot { background: #5b83b0; }
 
-    .card h2 {
+    .card h3 {
       font-family: var(--serif);
       font-weight: 600;
-      font-size: 20px;
-      line-height: 1.3;
+      font-size: 16.5px;
+      line-height: 1.35;
       margin: 2px 0 0;
     }
-    .card h2 .name { font-family: var(--mono); font-size: 16.5px; font-weight: 600; }
+    .card h3 .name { font-family: var(--mono); font-size: 14.5px; font-weight: 600; }
 
     .claim {
-      margin: 12px 0 0;
-      font-size: 15px;
-      line-height: 1.55;
+      margin: 8px 0 0;
+      font-size: 13.5px;
+      line-height: 1.5;
       color: var(--ink-soft);
     }
-    .claim .who { color: var(--ink-faint); font-size: 13px; display: block; margin-bottom: 2px; letter-spacing: 0.02em; }
+    .claim .who { color: var(--ink-faint); font-size: 11.5px; display: block; margin-bottom: 2px; letter-spacing: 0.02em; }
 
     .conflict-note {
-      margin: 14px 0 0;
-      padding: 12px 14px;
-      background: rgba(0,0,0,0.02);
+      margin: 10px 0 0;
+      padding: 10px 12px;
       border: 1px solid var(--conflict-line);
       border-radius: 10px;
       color: var(--conflict);
-      font-size: 14.5px;
+      font-size: 13.5px;
       font-weight: 550;
       line-height: 1.5;
     }
 
     .card-actions {
-      display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-      margin-top: 18px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      margin-top: 12px;
     }
     .card-actions .spacer { flex: 1; }
 
     .btn-accept {
       background: var(--accept); color: var(--accent-ink);
-      font-size: 14.5px; font-weight: 600; padding: 10px 18px;
+      font-size: 13.5px; font-weight: 600; padding: 9px 15px;
     }
     .btn-accept:hover { background: var(--accent-hover); }
     .btn-discard {
       background: transparent; color: var(--discard);
       border-color: var(--line-strong);
-      font-size: 14.5px; font-weight: 600; padding: 10px 18px;
+      font-size: 13.5px; font-weight: 600; padding: 9px 15px;
     }
     .btn-discard:hover { border-color: var(--discard); background: var(--raised-2); }
     .btn-open {
       background: transparent; color: var(--ink-soft);
-      border-color: var(--line); font-size: 13.5px; font-weight: 550; padding: 9px 14px;
+      border-color: var(--line); font-size: 12.5px; font-weight: 550; padding: 8px 12px;
     }
     .btn-open:hover { color: var(--accent); border-color: var(--accent); }
 
     .verdict {
-      display: inline-flex; align-items: center; gap: 7px;
-      font-size: 14px; font-weight: 650;
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 13px; font-weight: 650;
     }
     .verdict.accepted { color: var(--accept); }
     .verdict.discarded { color: var(--ink-faint); }
-    .verdict .tick { font-size: 15px; }
-
-    .review-foot { margin-top: 30px; text-align: center; }
 
     .banner {
-      margin-top: 16px; padding: 12px 16px;
-      border-radius: 11px; font-size: 14px; line-height: 1.5;
+      margin-top: 14px; padding: 12px 14px;
+      border-radius: 11px; font-size: 13.5px; line-height: 1.5;
       background: var(--conflict-bg); border: 1px solid var(--conflict-line); color: var(--conflict);
       display: none;
     }
@@ -538,103 +554,62 @@
 <body>
   <main id="app">
 
-    <!-- ============ 1 · START ============ -->
+    <!-- ============ START: a folder picker, and nothing else ============ -->
     <section id="screen-start" class="screen active">
-      <div class="wrap stagger">
+      <div class="wrap">
         <div class="eyebrow">Synod</div>
-        <h1 class="title">Let's get a job done in one folder.</h1>
-        <p class="lede">Choose the folder to work in and say, in your own words, what
-          you'd like done. The assistant does the work; you review every change before
-          anything is kept.</p>
+        <h1 class="title">Let's work in a folder together.</h1>
+        <p class="lede">Choose the folder to work in. The assistant only reads and
+          changes files inside it, and everything it does can be put back.</p>
+        <button type="button" class="btn-primary" id="pick-folder">Choose a folder…</button>
+        <div id="start-error"></div>
+      </div>
+    </section>
 
-        <div class="panel">
-          <div style="margin-bottom: 22px;">
-            <label class="field-label" for="pick-folder">
-              <span class="step-num">1.</span>&nbsp; Choose the folder for this job
-              <span class="hint">The assistant only reads and changes files inside this one folder.</span>
-            </label>
-            <div class="chosen">
-              <span class="folder-icon" aria-hidden="true">📁</span>
-              <span class="path" id="folder-path"><span class="empty">No folder chosen yet</span></span>
-              <button type="button" class="btn-outline" id="pick-folder">Choose…</button>
+    <!-- ============ CONVERSATION ============ -->
+    <section id="screen-conversation" class="screen">
+      <div class="topbar">
+        <span class="folder" id="convo-folder"></span>
+        <span class="status" id="convo-status"></span>
+        <button type="button" class="btn-quiet" id="start-again">Start again</button>
+      </div>
+
+      <div class="layout">
+        <div class="convo-col">
+          <div class="transcript" id="transcript">
+            <p class="welcome">Say what you'd like done, in your own words — for example,
+              "file every invoice under the month it was sent." You can keep talking; the
+              assistant remembers this conversation until you start again.</p>
+          </div>
+
+          <details class="log">
+            <summary>Show details</summary>
+            <div class="log-body" id="log" aria-live="polite" aria-label="Progress and tool trace">
+              <div class="log-empty">Nothing yet.</div>
             </div>
-          </div>
+          </details>
 
-          <hr class="divider" />
-
-          <div>
-            <label class="field-label" for="task">
-              <span class="step-num">2.</span>&nbsp; What would you like done?
-              <span class="hint">Plain words are best — for example, file every invoice under the month it was sent.</span>
-            </label>
-            <textarea id="task" placeholder="Describe the job here…"></textarea>
-          </div>
-
-          <p class="heads-up">
-            <span aria-hidden="true">✎</span>
-            Please close any documents in this folder before you start. The assistant
-            changes the files directly as it works, and you can put anything back afterwards.
-          </p>
-
-          <div class="start-row">
-            <button type="button" class="btn-primary" id="start" disabled>Start the job</button>
-            <span class="note" id="start-note">Choose a folder and describe the job to begin.</span>
+          <div class="composer">
+            <textarea id="message" placeholder="What would you like done?" rows="1"></textarea>
+            <button type="button" class="btn-send" id="send" disabled>Send</button>
           </div>
         </div>
-      </div>
-    </section>
 
-    <!-- ============ 2 · WORKING ============ -->
-    <section id="screen-working" class="screen">
-      <div class="wrap">
-        <div class="breathing" aria-hidden="true">
-          <div class="ring"></div><div class="ring"></div><div class="ring"></div>
-          <div class="core"></div>
-        </div>
-        <h2 class="working-head">Working<span class="dots"></span></h2>
-        <p class="working-sub">The assistant is working through your files. This can take a little while.</p>
-        <p class="working-folder" id="working-folder"></p>
-
-        <details class="log">
-          <summary>Show details</summary>
-          <div class="log-body" id="log" aria-live="polite" aria-label="Details of what the assistant is doing">
-            <div class="log-empty">Waiting for the first steps…</div>
+        <div class="report-col">
+          <div class="report-head">
+            <h2>What's changed</h2>
           </div>
-        </details>
+          <p class="report-empty" id="report-empty">Nothing has changed in this folder yet.</p>
 
-        <div class="working-actions">
-          <button type="button" class="btn-outline" id="stop">Stop</button>
-        </div>
-      </div>
-    </section>
+          <div class="banner" id="review-banner"></div>
 
-    <!-- ============ 3 · REPORT & UNDO ============ -->
-    <section id="screen-review" class="screen">
-      <div class="wrap">
-        <div class="review-head">
-          <div>
-            <div class="eyebrow">The job is done</div>
-            <h1>Here's what the assistant did.</h1>
+          <div class="bulk" id="bulk" style="display: none;">
+            <span class="count" id="review-count"></span>
+            <button type="button" class="btn-outline" id="undo-all">Put everything back</button>
           </div>
-          <button type="button" class="btn-quiet" id="new-job">Start another job</button>
+
+          <div class="cards" id="cards"></div>
         </div>
-
-        <div class="account" id="account">
-          <span class="who">The assistant says</span>
-          <p class="account-text" id="account-text"></p>
-        </div>
-
-        <div class="banner" id="review-banner"></div>
-
-        <div class="bulk">
-          <span class="count" id="review-count"></span>
-          <button type="button" class="btn-outline" id="undo-all">Put everything back</button>
-        </div>
-
-        <div class="cards" id="cards"></div>
-
-        <p class="reassure">Nothing here is final. You can put any file — or the whole job — back
-          the way it was, at any time on this screen.</p>
       </div>
     </section>
 
@@ -648,88 +623,217 @@
     const invoke = TAURI ? TAURI.core.invoke : async () => { throw new Error("not running in the app"); };
     const listen = TAURI ? TAURI.event.listen : async () => () => {};
 
-    const state = { folder: null, task: "" };
-
     const $ = (id) => document.getElementById(id);
-    const screens = { start: $("screen-start"), working: $("screen-working"), review: $("screen-review") };
+    const screens = { start: $("screen-start"), conversation: $("screen-conversation") };
 
     function show(name) {
       for (const [key, el] of Object.entries(screens)) el.classList.toggle("active", key === name);
     }
 
-    // ---- Start screen --------------------------------------------------
-    function refreshStart() {
-      const ready = Boolean(state.folder) && state.task.trim().length > 0;
-      $("start").disabled = !ready;
-      $("start-note").textContent = ready
-        ? "Ready when you are."
-        : !state.folder
-          ? "Choose a folder to begin."
-          : "Describe the job to begin.";
+    const state = {
+      folder: null,
+      busy: false,   // an exchange is in flight
+      alive: false,  // the child process is currently running
+    };
+
+    // ---- Start screen ---------------------------------------------------
+    $("pick-folder").addEventListener("click", async () => {
+      $("start-error").classList.remove("show");
+      let chosen;
+      try {
+        chosen = await invoke("choose_folder");
+      } catch (err) {
+        $("start-error").textContent = String(err);
+        $("start-error").classList.add("show");
+        return;
+      }
+      if (chosen) enterConversation(chosen);
+    });
+
+    // ---- Conversation screen --------------------------------------------
+
+    // Wipe the window's own view of the conversation — the transcript, the
+    // details log, the change report — without touching the child process.
+    // Shared by the first folder pick (which then spawns the child) and a
+    // restart (whose child is already spawned by the time this runs: the
+    // window must never spawn a second one on top of it).
+    function resetTranscript(folder) {
+      state.folder = folder;
+      $("convo-folder").textContent = folder;
+      $("transcript").innerHTML =
+        '<p class="welcome">Say what you\'d like done, in your own words — for example, ' +
+        '"file every invoice under the month it was sent." You can keep talking; the ' +
+        "assistant remembers this conversation until you start again.</p>";
+      $("log").innerHTML = '<div class="log-empty">Nothing yet.</div>';
+      report = { summary: "", files: [] };
+      renderReport();
+      show("conversation");
     }
 
-    $("pick-folder").addEventListener("click", async () => {
-      const chosen = await invoke("choose_folder");
-      if (chosen) {
-        state.folder = chosen;
-        $("folder-path").textContent = chosen;
-        refreshStart();
-      }
-    });
+    function enterConversation(folder) {
+      resetTranscript(folder);
+      startChild(folder);
+    }
 
-    $("task").addEventListener("input", (e) => {
-      state.task = e.target.value;
-      refreshStart();
-    });
-
-    $("start").addEventListener("click", async () => {
-      const logEl = $("log");
-      logEl.innerHTML = '<div class="log-empty">Waiting for the first steps…</div>';
-      narrative = "";
-      $("working-folder").textContent = state.folder;
-      show("working");
+    async function startChild(folder) {
+      setStatus("Starting…");
       try {
-        await invoke("start_job", { folder: state.folder, task: state.task.trim() });
+        await invoke("start_conversation", { folder });
+        state.alive = true;
       } catch (err) {
-        appendLog(String(err), "err");
+        addSystemMessage(String(err));
+        state.alive = false;
       }
-    });
+      // Not "busy": the input's own disabled state already follows
+      // `state.alive`, so a failed start leaves it correctly unusable
+      // without a stray "Working…" status.
+      setBusy(false);
+    }
 
-    // ---- Working screen ------------------------------------------------
-    function appendLog(line, stream) {
+    function setStatus(text) {
+      const el = $("convo-status");
+      el.textContent = "";
+      if (!text) return;
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      el.append(spinner, text);
+    }
+
+    function setBusy(busy) {
+      state.busy = busy;
+      $("message").disabled = busy || !state.alive;
+      $("send").disabled = busy || !state.alive;
+      setStatus(busy ? "Working…" : "");
+    }
+
+    let currentAssistantBubble = null;
+
+    function addUserMessage(text) {
+      const msg = document.createElement("div");
+      msg.className = "msg user";
+      msg.innerHTML = '<div class="who">You</div>';
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = text;
+      msg.appendChild(bubble);
+      appendMessage(msg);
+    }
+
+    function beginAssistantMessage() {
+      const msg = document.createElement("div");
+      msg.className = "msg assistant";
+      msg.innerHTML = '<div class="who">Assistant</div>';
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      msg.appendChild(bubble);
+      appendMessage(msg);
+      currentAssistantBubble = bubble;
+    }
+
+    function addSystemMessage(text) {
+      const msg = document.createElement("div");
+      msg.className = "msg system";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = text;
+      msg.appendChild(bubble);
+      appendMessage(msg);
+    }
+
+    function appendMessage(msg) {
+      const t = $("transcript");
+      const welcome = t.querySelector(".welcome");
+      if (welcome) welcome.remove();
+      t.appendChild(msg);
+      t.scrollTop = t.scrollHeight;
+    }
+
+    function appendLog(line) {
       const logEl = $("log");
       const empty = logEl.querySelector(".log-empty");
       if (empty) empty.remove();
       const div = document.createElement("div");
-      div.className = "log-line" + (stream === "err" ? " err" : "");
+      div.className = "log-line";
       div.textContent = line;
       logEl.appendChild(div);
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // The assistant's own words arrive on stdout; the run's progress and
-    // tool trace on stderr.  The stdout side accumulates as the account
-    // shown on the report screen — it is genuinely the assistant's text,
-    // so the quotation marks there stay honest.
-    let narrative = "";
-
-    listen("job-log", (event) => {
-      const { line, stream } = event.payload;
+    // The assistant's own narration arrives on stdout, one line at a time
+    // (a paragraph with no line break inside it arrives as a single line
+    // once it is complete); everything else — progress, tool trace — is on
+    // stderr and goes to the details fold, except the exchange-settled
+    // signal, which the host already turns into its own event.
+    listen("synod-log", (event) => {
+      const { line, stream } = event.payload || {};
       if (line === undefined) return;
-      if (stream === "out" && line.trim()) narrative += (narrative ? "\n" : "") + line;
-      appendLog(line, stream);
+      if (stream === "out") {
+        if (!currentAssistantBubble) beginAssistantMessage();
+        currentAssistantBubble.textContent += (currentAssistantBubble.textContent ? "\n" : "") + line;
+        $("transcript").scrollTop = $("transcript").scrollHeight;
+      } else {
+        appendLog(line);
+      }
     });
 
-    listen("job-finished", async () => {
-      await enterReport();
+    listen("exchange-done", async () => {
+      currentAssistantBubble = null;
+      setBusy(false);
+      await refreshReport();
     });
 
-    $("stop").addEventListener("click", async () => {
-      $("stop").disabled = true;
-      try { await invoke("stop_job"); } catch (err) { appendLog(String(err), "err"); }
+    listen("synod-ended", (event) => {
+      const { stopped } = event.payload || {};
+      state.alive = false;
+      currentAssistantBubble = null;
+      setBusy(false); // input disables on `state.alive` alone; nothing is "working"
+      if (!stopped) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
     });
 
-    // ---- Report & undo screen -----------------------------------------
+    function submit() {
+      const field = $("message");
+      const text = field.value.trim();
+      if (!text || state.busy || !state.alive) return;
+      addUserMessage(text);
+      field.value = "";
+      setBusy(true);
+      invoke("send_message", { message: text }).catch((err) => {
+        addSystemMessage(String(err));
+        setBusy(false);
+      });
+    }
+
+    $("send").addEventListener("click", submit);
+    $("message").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        submit();
+      }
+    });
+
+    $("start-again").addEventListener("click", async () => {
+      if (!confirm("Start again? This begins a fresh conversation; nothing already " +
+        "changed in your folder is undone by this.")) return;
+      $("start-again").disabled = true;
+      // `restart_conversation` already ends the old child and spawns the
+      // new one server-side; the window only ever resets its own view —
+      // calling `startChild` again here would spawn a second, orphaned
+      // child on top of the one this just started.
+      resetTranscript(state.folder);
+      try {
+        await invoke("restart_conversation", { folder: state.folder });
+        state.alive = true;
+      } catch (err) {
+        state.alive = false;
+        addSystemMessage(String(err));
+      } finally {
+        setBusy(false);
+        $("start-again").disabled = false;
+      }
+    });
+
+    // ---- The change-report panel ----------------------------------------
     const KINDS = {
       created: { cls: "created", verb: "Created" },
       modified: { cls: "modified", verb: "Modified" },
@@ -737,21 +841,18 @@
       renamed: { cls: "renamed", verb: "Renamed" },
     };
 
-    // The report the window is showing.  Server commands (job_report,
-    // undo_file, undo_all) replace it wholesale; "Keep your version" at a
-    // conflict is a local acknowledgement, so it mutates this copy directly.
+    // Server commands (job_report, undo_file, undo_all) replace this
+    // wholesale; "Keep your version" at a conflict is a local
+    // acknowledgement, so it mutates this copy directly.
     let report = { summary: "", files: [] };
 
-    async function enterReport() {
-      $("stop").disabled = false;
+    async function refreshReport() {
       try {
         report = await invoke("job_report", { folder: state.folder });
-        renderReport();
-        show("review");
       } catch (err) {
-        showBanner(String(err));
-        show("review");
+        report = { summary: "", files: [] };
       }
+      renderReport();
     }
 
     function showBanner(text) {
@@ -768,7 +869,7 @@
     }
 
     function headline(file) {
-      const h = document.createElement("h2");
+      const h = document.createElement("h3");
       const k = KINDS[file.kind] || { verb: "Changed" };
       if (file.kind === "renamed" && file.renameFrom) {
         h.append("Renamed ", strong(file.renameFrom, true), " to ", strong(file.path, true));
@@ -779,11 +880,10 @@
     }
 
     function renderReport() {
-      const account = report.summary || narrative.trim();
-      $("account-text").textContent = account;
-      $("account").style.display = account ? "" : "none";
       const files = report.files || [];
+      $("report-empty").style.display = files.length === 0 ? "" : "none";
       const inPlace = files.filter((f) => f.status === "applied").length;
+      $("bulk").style.display = files.length === 0 ? "none" : "";
       $("review-count").textContent = inPlace === 0
         ? "Everything has been put back the way it was."
         : inPlace === 1 ? "1 change is in place" : inPlace + " changes are in place";
@@ -842,8 +942,7 @@
       if (putBack) {
         const v = document.createElement("span");
         v.className = "verdict discarded";
-        const tick = document.createElement("span"); tick.className = "tick"; tick.textContent = "↩";
-        v.append(tick, "Put back");
+        v.append("↩ Put back");
         actions.appendChild(v);
       } else if (conflicted) {
         actions.appendChild(actionButton("Keep your version", "btn-accept", () => keepMine(file.id)));
@@ -872,10 +971,10 @@
       return b;
     }
 
-    // Put a file (or the whole job) back — a server round trip, so the
+    // Put a file (or everything) back — a server round trip, so the
     // returned report is the new truth.  `force` is the explicit "put back
     // the older one" choice at a conflict; a plain undo asks gently and a
-    // file the user edited since the job comes back marked conflicted.
+    // file the user edited since the exchange comes back marked conflicted.
     async function undo(cmd, id, force) {
       try {
         const args = { folder: state.folder, force: Boolean(force) };
@@ -887,20 +986,13 @@
 
     // Keep the user's own version at a conflict: leave the file exactly as
     // it is and simply clear the conflict on the card.  Nothing to undo, so
-    // this stays local.
+    // this stays local until the next report refresh re-derives it.
     function keepMine(id) {
       const file = report.files.find((f) => f.id === id);
       if (file) { file.conflict = false; renderReport(); }
     }
 
     $("undo-all").addEventListener("click", () => undo("undo_all", null, false));
-
-    $("new-job").addEventListener("click", () => {
-      $("review-banner").classList.remove("show");
-      show("start");
-    });
-
-    refreshStart();
   </script>
 </body>
 </html>

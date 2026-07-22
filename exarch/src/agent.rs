@@ -18,7 +18,10 @@
 //! every fork), and parking out of `interactive`/the registry's engagement
 //! read via `park_mode`.  A child's single result is delivered up its
 //! parent's mailbox by the spawn site, not here, so `drive` itself is
-//! identical for all.
+//! identical for all.  [`Agent::drive_queued`] is the one exception: a
+//! converse session's bounded, per-exchange twin, sharing every per-turn
+//! step with `drive` ([`Agent::step_turn`]) rather than looping the
+//! round-trip a second way.
 
 pub mod cancel;
 pub mod digest;
@@ -357,6 +360,15 @@ pub enum TurnOutcome {
     /// emitting a tool-call-free reply.  Terminal: it carries no nudge
     /// (re-driving would just spend another `MAX_STEPS`).
     Capped,
+}
+
+/// What [`Agent::step_turn`] tells its caller's loop to do next: `Break`
+/// on a `/quit` or a terminal `reply`, `Continue` for everything else —
+/// shared by [`Agent::drive`]'s forever loop and [`Agent::drive_queued`]'s
+/// bounded one, which differ only in how they pull the next [`Turn`].
+enum StepFlow {
+    Continue,
+    Break,
 }
 
 /// Hard ceiling on provider round-trips in one [`Agent::apply`].  The
@@ -1406,105 +1418,16 @@ impl Agent {
             let Some(turn) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
                 break;
             };
-            // Generation admission: a worker delivers before it retires, so a
-            // result that settled across a `/clear` can reach this queue; it
-            // is dropped here, before it can reset latches or enter the log.
-            if !self.admits(&turn) {
-                continue;
-            }
-            // A genuine turn boundary resets the nudge latches and clears the
-            // sticky cancel token, so a prior turn's Esc cannot carry into this
-            // one.  A self-nudge is the same turn continuing and resets neither.
-            if turn.resets_turn() {
-                self.nudges.reset();
-                self.cancel.reset();
-            }
-            // Agent-affecting slash commands run against the owned agent,
-            // never the model.
-            if let Turn::Command(raw) = &turn {
-                match control.command(raw, self, emit) {
-                    ControlFlow::Quit => break,
-                    ControlFlow::Continue => continue,
-                }
-            }
-            announce(&turn, emit);
-            // Read the provider in force for this turn; a `/model` swap on this
-            // agent lands here next turn, never mid-turn.
-            let active = self.provider.current();
-            let token = self.cancel.clone();
-            let prompt = Some(turn.text());
-            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.apply(&active, prompt, &token, emit)
-            }));
-            let outcome = match attempt {
-                Ok(o) => o,
-                Err(p) => {
-                    // A host-side panic — provider transport, surface decode,
-                    // render, digest.  The shell needs no attention here: an
-                    // eval-side panic is caught at the engine's own turn door
-                    // (`Shell::run_turn`), which rolls the dynamic state back
-                    // and reports a failed turn, so it never unwinds this far.
-                    let msg = panic_msg(&p);
-                    self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
-                    digest = (
-                        AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
-                        None,
-                    );
-                    if !self.log.lock().is_ready() {
-                        self.log.lock().quiesce(QuiesceReason::Aborted);
-                    }
-                    continue;
-                }
-            };
-            // A provider error or step cap can leave the session
-            // mid-protocol (e.g. AwaitingAssistantAfterToolResults).
-            // The post-loop guard does the same but only on loop exit;
-            // quiesce per-iteration so the next prompt — nudge or user —
-            // is admissible (turn-ends-ready invariant, X12).
-            if !self.log.lock().is_ready() {
-                self.log.lock().quiesce(QuiesceReason::Aborted);
-            }
-            digest = agent_digest(&outcome);
-            let waiting_on_children = self.has_live_children();
-            let ctx = nudge::NudgeCtx {
-                // Every returning agent (a sub-agent or a headless trunk) hands
-                // its value back through `reply`; an un-replied finish is
-                // re-nudged within budget, then fails.  Only the interactive
-                // trunk, which converses and never returns, is exempt — and so,
-                // transiently, is any agent with live children: an un-replied
-                // finish there is not a dropped return but a legitimate wait on
-                // its fleet, and `park_mode` holds it (`HeldByChildren`) until a
-                // child's result wakes it.  Nagging it toward `reply` now would
-                // push it to return before its agents land; once they have all
-                // settled the nudge resumes and insists on `reply` as before.
-                must_reply: self.returns() && !waiting_on_children,
-                pinned: self.pinned_digest(),
-                waiting_on_children,
-                is_headless_root: self.parent.is_none() && !self.interactive,
-            };
-            let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
-            let nudge_msg = self
-                .nudges
-                .react(&outcome, &ctx, emit, &mut self.log.lock());
-            if let Some(msg) = &nudge_msg {
-                self.inbox
-                    .push(InboxMsg::Nudge(msg.clone()))
-                    .expect("Nudge is idempotent and never rejects");
-            }
-            // `reply` hard-terminates: end the drive loop regardless of
-            // engagement or a self-armed schedule — the agent returns its
-            // value and is gone.
-            // Unless the nudge layer just turned this very `reply` back for
-            // self-verification (a headless root's first call), in which case
-            // `nudge_msg` carries that reminder and the loop must keep running
-            // to deliver it.
-            if replied && nudge_msg.is_none() {
+            if matches!(
+                self.step_turn(&turn, control, emit, &mut digest),
+                StepFlow::Break
+            ) {
                 break;
             }
         }
-        // Safety net: per-iteration quiescing (above) handles mid-loop
-        // errors, but a `break` from `Replied` or a future exit path could
-        // still bypass it.  This catch-all ensures the turn-ends-ready
+        // Safety net: per-iteration quiescing (inside `step_turn`) handles
+        // mid-loop errors, but a `break` from `Replied` or a future exit path
+        // could still bypass it.  This catch-all ensures the turn-ends-ready
         // invariant holds regardless of how the loop exits.
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
@@ -1520,6 +1443,159 @@ impl Agent {
             self.agents.deregister(self.id);
         }
         digest
+    }
+
+    /// The converse primitive's per-exchange half of [`Self::drive`]:
+    /// process every turn already queued — the message
+    /// [`exarch::converse`](crate::headless::converse) just seeded, and
+    /// whatever nudge continuations it raises — to the next park, then
+    /// return, instead of blocking for the next message the way `drive`
+    /// does.  Shares [`Self::step_turn`] with `drive` rather than looping
+    /// the round-trip a second way; the only difference is the non-blocking
+    /// pull ([`Inbox::drain_turn`]) in place of `drive`'s parking one.  Safe
+    /// because a converse session's trunk starts no children (`fuel: 0`)
+    /// and arms no self-schedule (`allow_schedule: false`), so an empty
+    /// queue always means *this* exchange is answered, never a wait on
+    /// something still to arrive. No [`Control`]: a slash-shaped user
+    /// message still reaches the model as ordinary text ([`Turn::Command`]
+    /// only ever arises from a frontend that posts one itself, which
+    /// converse never does), so [`NoControl`] is correct here, not a
+    /// placeholder for one the caller forgot to supply.
+    pub(crate) fn drive_queued(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
+        let mut control = NoControl;
+        let mut digest = (AgentOutcome::Empty, None);
+        loop {
+            self.reconcile_service_pins(emit);
+            self.check_disk_warn(emit);
+            let Some(turn) = self.inbox.drain_turn() else {
+                break;
+            };
+            if matches!(
+                self.step_turn(&turn, &mut control, emit, &mut digest),
+                StepFlow::Break
+            ) {
+                break;
+            }
+        }
+        if !self.log.lock().is_ready() {
+            self.log.lock().quiesce(QuiesceReason::Aborted);
+        }
+        digest
+    }
+
+    /// Process one turn already drained from the inbox: generation
+    /// admission, the turn-boundary latch reset, a session command's
+    /// dispatch to `control`, the round-trip itself, and the nudge
+    /// reaction. The one per-turn step both [`Self::drive`]'s forever loop
+    /// and [`Self::drive_queued`]'s bounded one run — the two never repeat
+    /// this logic independently. `digest` carries the running
+    /// `(outcome, payload)` the caller reports once its own loop ends; a
+    /// turn this returns [`StepFlow::Continue`] for without reaching the
+    /// round-trip (an inadmissible generation, a command) leaves it
+    /// untouched.
+    fn step_turn(
+        &mut self,
+        turn: &Turn,
+        control: &mut dyn Control,
+        emit: &Emitter,
+        digest: &mut (AgentOutcome, Option<FOValue>),
+    ) -> StepFlow {
+        // Generation admission: a worker delivers before it retires, so a
+        // result that settled across a `/clear` can reach this queue; it
+        // is dropped here, before it can reset latches or enter the log.
+        if !self.admits(turn) {
+            return StepFlow::Continue;
+        }
+        // A genuine turn boundary resets the nudge latches and clears the
+        // sticky cancel token, so a prior turn's Esc cannot carry into this
+        // one.  A self-nudge is the same turn continuing and resets neither.
+        if turn.resets_turn() {
+            self.nudges.reset();
+            self.cancel.reset();
+        }
+        // Agent-affecting slash commands run against the owned agent,
+        // never the model.
+        if let Turn::Command(raw) = turn {
+            return match control.command(raw, self, emit) {
+                ControlFlow::Quit => StepFlow::Break,
+                ControlFlow::Continue => StepFlow::Continue,
+            };
+        }
+        announce(turn, emit);
+        // Read the provider in force for this turn; a `/model` swap on this
+        // agent lands here next turn, never mid-turn.
+        let active = self.provider.current();
+        let token = self.cancel.clone();
+        let prompt = Some(turn.text());
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.apply(&active, prompt, &token, emit)
+        }));
+        let outcome = match attempt {
+            Ok(o) => o,
+            Err(p) => {
+                // A host-side panic — provider transport, surface decode,
+                // render, digest.  The shell needs no attention here: an
+                // eval-side panic is caught at the engine's own turn door
+                // (`Shell::run_turn`), which rolls the dynamic state back
+                // and reports a failed turn, so it never unwinds this far.
+                let msg = panic_msg(&p);
+                self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
+                *digest = (
+                    AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
+                    None,
+                );
+                if !self.log.lock().is_ready() {
+                    self.log.lock().quiesce(QuiesceReason::Aborted);
+                }
+                return StepFlow::Continue;
+            }
+        };
+        // A provider error or step cap can leave the session
+        // mid-protocol (e.g. AwaitingAssistantAfterToolResults).
+        // The caller's post-loop guard does the same but only on loop exit;
+        // quiesce per-turn so the next prompt — nudge or user — is
+        // admissible (turn-ends-ready invariant, X12).
+        if !self.log.lock().is_ready() {
+            self.log.lock().quiesce(QuiesceReason::Aborted);
+        }
+        *digest = agent_digest(&outcome);
+        let waiting_on_children = self.has_live_children();
+        let ctx = nudge::NudgeCtx {
+            // Every returning agent (a sub-agent or a headless trunk) hands
+            // its value back through `reply`; an un-replied finish is
+            // re-nudged within budget, then fails.  Only the interactive
+            // trunk, which converses and never returns, is exempt — and so,
+            // transiently, is any agent with live children: an un-replied
+            // finish there is not a dropped return but a legitimate wait on
+            // its fleet, and `park_mode` holds it (`HeldByChildren`) until a
+            // child's result wakes it.  Nagging it toward `reply` now would
+            // push it to return before its agents land; once they have all
+            // settled the nudge resumes and insists on `reply` as before.
+            must_reply: self.returns() && !waiting_on_children,
+            pinned: self.pinned_digest(),
+            waiting_on_children,
+            is_headless_root: self.parent.is_none() && !self.interactive,
+        };
+        let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
+        let nudge_msg = self
+            .nudges
+            .react(&outcome, &ctx, emit, &mut self.log.lock());
+        if let Some(msg) = &nudge_msg {
+            self.inbox
+                .push(InboxMsg::Nudge(msg.clone()))
+                .expect("Nudge is idempotent and never rejects");
+        }
+        // `reply` hard-terminates: end the loop regardless of engagement or
+        // a self-armed schedule — the agent returns its value and is gone.
+        // Unless the nudge layer just turned this very `reply` back for
+        // self-verification (a headless root's first call), in which case
+        // `nudge_msg` carries that reminder and the loop must keep running
+        // to deliver it.
+        if replied && nudge_msg.is_none() {
+            StepFlow::Break
+        } else {
+            StepFlow::Continue
+        }
     }
 
     /// Run one turn: optionally commit `prompt`, then step the provider

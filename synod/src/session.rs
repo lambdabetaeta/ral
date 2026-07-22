@@ -1,4 +1,5 @@
-//! The run itself: one folder, one job, one agent.
+//! The conversation itself: one folder, one agent, and a message loop that
+//! runs until the window ends it.
 //!
 //! Synod's session is exarch's session with the developer removed.  The
 //! provider transport, the turn driver, and the card bus are exarch's
@@ -6,14 +7,22 @@
 //! differs is where the work happens (the machine's workspace, not the
 //! shell's cwd), what the agent may touch (the grant, not a capability
 //! base named on the command line), and what the user is told.
+//!
+//! This binary is never typed at.  Its whole surface is the window's own
+//! spawn contract: the folder on the command line once, at spawn
+//! ([`crate::cli`]); every message after that framed down stdin
+//! ([`read_message`]); the same events [`exarch::headless::run`] always
+//! streamed, on stdout and stderr, once per exchange; stdin's end ending
+//! the process.  Provider and model are never a flag — they resolve from
+//! whichever one account is set up on this computer, and its default
+//! model.
 
-use crate::cli::Cli;
 use crate::grant::Grant;
 use crate::workspace;
 use exarch::agent::Agent;
 use exarch::bootstrap::{self, Scratch};
-use exarch::provider::{self, Engine, Provider, ProviderId, credential::CredentialStore, models};
-use exarch::tui::SessionInfo;
+use exarch::provider::{self, Engine, Provider, ProviderId, credential::CredentialStore};
+use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use vm_manager::Machine;
 
@@ -23,6 +32,19 @@ use vm_manager::Machine;
 /// `synod-scratch-<pid>` for the working area.  A synod run must never
 /// write into an exarch run's logs, nor read its model selection.
 pub const SYNOD: bootstrap::App = bootstrap::App::new("synod");
+
+/// The exchange-settled signal.
+///
+/// synod writes this line to stderr the moment an exchange has settled and
+/// its report is ready to read — bracketed in a NUL byte on each side, one
+/// no live narration or tool trace is ever built out of, so the window's
+/// line reader can tell this line apart from everything else on the same
+/// stream without guessing. It carries no report of its own: the window
+/// already has a structured reader for that ([`crate::workspace::job_report`]),
+/// so this is purely the "go read it again" signal, not a second copy of
+/// the report in a second format. Part of the same internal spawn contract
+/// [`read_message`] documents the other half of.
+pub const EXCHANGE_DONE: &str = "\0synod:exchange-done\0";
 
 /// What the boundary *means for the user*, said after
 /// [`vm_manager::Boundary`]'s own sentence when there is no wall: their
@@ -40,26 +62,59 @@ at a time or all at once.  Please close any documents from this folder
 before starting: a document still open in Word or Excel can be
 overwritten while you have it on screen.";
 
-/// Run one job to completion in `machine`'s workspace under `grant`.
+/// Read one framed message from `stdin`.
+///
+/// Messages are multi-line free text, so the frame is a plain one: every
+/// line up to a line holding exactly `.` (a lone dot, the classic
+/// SMTP-`DATA` terminator) belongs to the message, and the dot itself does
+/// not — no ordinary sentence is a line on its own, so the window writes
+/// the frame trivially: the message's lines, then a line that is just `.`.
+///
+/// Returns `Ok(None)` only when the stream ends with nothing read at all —
+/// the window closed stdin between messages, which ends the session. A
+/// message the stream happens to end inside of, with no closing dot, is
+/// still returned in full: the window only ever closes stdin between
+/// messages, never mid-one, so a bare end-of-stream there is not a framing
+/// failure to reject.
 ///
 /// # Errors
-/// Returns `Err` if no job was given, if the workspace cannot be entered,
-/// if no model account is set up on this computer, if the provider or
-/// model cannot be resolved, if the scratch or log directories cannot be
-/// made, if the system prompt cannot be assembled, or if the run itself
-/// fails.
+/// Returns `Err` if reading a line from `stdin` fails.
+pub(crate) fn read_message(stdin: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut body = String::new();
+    let mut any = false;
+    loop {
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+        any = true;
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line == "." {
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+    }
+    Ok(any.then_some(body))
+}
+
+/// Hold the conversation over `machine`'s workspace under `grant` until
+/// stdin closes.
+///
+/// # Errors
+/// Returns `Err` if the workspace cannot be entered, if no model account is
+/// set up on this computer, if the account's default model cannot be
+/// resolved, if the scratch or log directories cannot be made, if the
+/// system prompt cannot be assembled, if a message cannot be read back from
+/// stdin, or if an exchange itself fails.
 ///
 /// # Panics
 /// Panics if the chosen provider is absent from the credential store — an
 /// invariant [`choose`] upholds by choosing only among available ones.
-pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), String> {
-    let job =
-        exarch::cli::load_seed(None, cli.job_file.clone(), cli.job.clone())?.ok_or_else(|| {
-            "please say what you would like done — for example: \
-             synod <folder> \"file every invoice under the month it was sent\""
-                .to_string()
-        })?;
-
+pub fn start(grant: &Grant, machine: &mut dyn Machine) -> Result<(), String> {
     // Said before any work happens, because it is about what is *about* to
     // happen to the user's own documents.  The boundary describes itself in
     // its own words; synod adds only what it means for the person reading.
@@ -94,17 +149,12 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), 
                 .into(),
         );
     }
-    let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
-    let (id, model) = choose(
-        cli.provider.as_deref(),
-        cli.model.as_deref(),
-        &available,
-        &mut catalog,
-    )?;
+    let (id, model) = choose(&available)?;
     let cred = store
         .get(&id)
         .expect("the chosen provider is one of the available ones")
         .clone();
+    eprintln!("Assistant: {} ({model}).", id.label());
 
     let scratch =
         Arc::new(Scratch::new(SYNOD).map_err(|e| format!("could not make a working area: {e}"))?);
@@ -115,7 +165,6 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), 
 
     let caps = grant.capabilities(scratch.path());
     let system = crate::prompt::assemble(&caps, &scratch, grant.root(), &config_dir)?;
-    let system_size = system.len();
 
     // A machine that hands back a control-plane stream is a real VM: the
     // agent's engine dials in from inside the guest, so the workspace is a
@@ -170,17 +219,19 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), 
             run_dir,
             model,
             provider_label: id.label().to_string(),
-            // Synod's agent may not schedule its own wakeups: an office job
-            // is asked for and answered, never left running on its own
-            // authority.
+            // Synod's agent may not schedule its own wakeups: a conversing
+            // office assistant still runs on nothing but the messages it
+            // is handed, never on its own authority.
             allow_schedule: false,
-            // A job is a job: the agent works until it has something to
-            // report, then returns.  There is no conversation to park in.
-            interactive: false,
+            // A conversation, not a job: the agent converses, withholding
+            // `reply` and parking between messages rather than returning
+            // once — [`exarch::headless::converse`] drives one exchange at
+            // a time over this same session.
+            interactive: true,
             chat: false,
             disk_warn_bytes,
-            // An office job is asked and answered, never a fleet: no
-            // sub-agent may ever start from it.
+            // A conversation is asked and answered, one message at a time,
+            // never a fleet: no sub-agent may ever start from it.
             fuel: 0,
         },
         root_seat,
@@ -188,9 +239,10 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), 
     )
     .map_err(|e| format!("could not start the assistant: {e}"))?;
 
-    // Checkpoint the folder before any work: the baseline the after-run
-    // report is judged against, and the state every undo returns to.
-    // Taken this late so a setup failure above costs no folder walk.
+    // Checkpoint the folder before any work: the baseline every exchange's
+    // report is judged against, and the state every undo returns to. Taken
+    // once, for the whole conversation — this late so a setup failure above
+    // costs no folder walk.
     let folder = workspace::measure(grant.root())?;
     if folder.bytes > workspace::LARGE_FOLDER_BYTES {
         let tenths = folder.bytes / 100_000_000;
@@ -206,88 +258,116 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine, cli: &Cli) -> Result<(), 
     let store = workspace::HistoryStore::open_for(grant.root())?;
     let baseline = store.capture(grant.root(), workspace::Moment::Before)?;
 
-    // The one-shot frontend is exarch's: it is the only *public* way to
-    // drive an agent to quiescence today (`Agent::seed`, `inbox`, and
-    // `transcript` are crate-private), and synod's real surface is the
-    // review UI of the design record, not a second terminal renderer.
-    // `SessionInfo` is exarch-flavoured; only `base` is read here.
-    let info = SessionInfo {
-        system_size,
-        system_files: &[],
-        base: "granted-folder",
-        extend_base: None,
-        restrict_files: &[],
-        scratch: scratch.path(),
-        cwd: &cwd,
-    };
-    let outcome = exarch::headless::run(
-        &mut session,
-        &info,
-        &provider,
-        Some(job),
-        exarch::headless::OutputFormat::Text,
-        engine,
-    );
-
-    // Checkpoint what the run left behind and report the difference in
-    // plain language.  Taken even after a failed run — whatever changed
-    // before the failure is still undoable.  If the run itself erred,
-    // its error outranks a capture error here.
-    match store.capture(grant.root(), workspace::Moment::After) {
-        Ok(after) => {
-            let report = workspace::JobReport {
-                folder: grant.root().to_string_lossy().into_owned(),
-                finished_at_ms: Some(after.taken_at_ms),
-                changes: workspace::ChangeSet::between(&baseline.manifest, &after.manifest),
-            };
-            eprintln!();
-            eprint!("{}", workspace::report::render(&report));
-        }
-        Err(e) => {
-            if outcome.is_ok() {
-                return Err(e);
+    let mut stdin = io::stdin().lock();
+    while let Some(message) =
+        read_message(&mut stdin).map_err(|e| format!("could not read the next message: {e}"))?
+    {
+        let outcome = exarch::headless::converse(&mut session, message, engine.clone());
+        // Checkpoint what this exchange left behind and report the
+        // cumulative difference from the baseline, in plain language.
+        // Taken even after a failed exchange — whatever changed before the
+        // failure is still undoable.  If the exchange itself erred, its
+        // error outranks a capture error here.
+        match store.capture(grant.root(), workspace::Moment::After) {
+            Ok(after) => {
+                let report = workspace::JobReport {
+                    folder: grant.root().to_string_lossy().into_owned(),
+                    finished_at_ms: Some(after.taken_at_ms),
+                    changes: workspace::ChangeSet::between(&baseline.manifest, &after.manifest),
+                };
+                eprintln!();
+                eprint!("{}", workspace::report::render(&report));
+                eprintln!("{EXCHANGE_DONE}");
+                let _ = io::stderr().flush();
+            }
+            Err(e) => {
+                if outcome.is_ok() {
+                    return Err(e);
+                }
             }
         }
+        outcome?;
     }
-    outcome
+    Ok(())
 }
 
-/// Choose the provider and model for this run: an explicit `--provider`,
-/// else whichever available provider offers `--model`, else the one
-/// account set up on this computer.
+/// The provider and model for this run: whichever one account is set up on
+/// this computer, and its default model.
 ///
-/// Synod has no model picker and remembers no choice, so a provider that
-/// advertises no default model is a question to the user rather than a
-/// blank to be filled in later.
-fn choose(
-    pinned: Option<&str>,
-    wanted: Option<&str>,
-    available: &[ProviderId],
-    catalog: &mut models::ModelCatalog<models::LiveSource>,
-) -> Result<(ProviderId, String), String> {
-    let id = match (pinned, wanted) {
-        (Some(name), _) => models::resolve_pinned_provider(name, available)?,
-        (None, Some(name)) => models::resolve_model_provider(name, available, catalog)?,
-        (None, None) => available[0].clone(),
-    };
-    let model = match wanted {
-        Some(name) => name.to_string(),
-        None => match id.famous() {
-            Some(kind) => kind.info().1.to_string(),
-            None => {
-                return Err(format!(
-                    "the account '{}' does not say which model to use — pass --model NAME",
-                    id.label()
-                ));
-            }
-        },
-    };
-    Ok((id, model))
+/// Synod has no model picker and remembers no choice, so an account that
+/// names no default model is a question for the user, refused in the same
+/// plain register as having no account at all — there is no flag left to
+/// answer it with.
+fn choose(available: &[ProviderId]) -> Result<(ProviderId, String), String> {
+    let id = available[0].clone();
+    let model = id.famous().map(|kind| kind.info().1.to_string());
+    model
+        .map(|model| (id.clone(), model))
+        .ok_or_else(|| {
+            format!(
+                "the account set up on this computer ('{}') does not say which model to \
+                 use — ask your IT department to set one up.",
+                id.label()
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::NO_BOUNDARY;
+    use super::*;
+    use std::io::Cursor;
+
+    /// A single dot ends the message; the dot itself is not part of it.
+    #[test]
+    fn a_lone_dot_ends_the_message() {
+        let mut stdin = Cursor::new(b"do the filing\n.\n".as_slice());
+        let message = read_message(&mut stdin).expect("reads").expect("a message arrived");
+        assert_eq!(message, "do the filing");
+    }
+
+    /// A multi-line body joins with newlines, exactly as typed — the whole
+    /// reason the frame is a terminator line rather than a blank line,
+    /// which ordinary prose uses between paragraphs.
+    #[test]
+    fn a_multi_line_body_keeps_its_blank_lines() {
+        let mut stdin = Cursor::new(b"Dear all,\n\nPlease find attached.\n.\n".as_slice());
+        let message = read_message(&mut stdin).expect("reads").expect("a message arrived");
+        assert_eq!(message, "Dear all,\n\nPlease find attached.");
+    }
+
+    /// The stream ending with nothing read at all is the session's own
+    /// end, not a message — the window closed stdin between messages.
+    #[test]
+    fn eof_with_nothing_read_ends_the_session() {
+        let mut stdin = Cursor::new(b"".as_slice());
+        assert_eq!(read_message(&mut stdin).expect("reads"), None);
+    }
+
+    /// A stream that ends mid-message, with no closing dot, still yields
+    /// the message read so far — the window only closes stdin between
+    /// messages, never inside one.
+    #[test]
+    fn eof_mid_message_still_returns_what_was_read() {
+        let mut stdin = Cursor::new(b"unfinished thought".as_slice());
+        let message = read_message(&mut stdin).expect("reads").expect("a message arrived");
+        assert_eq!(message, "unfinished thought");
+    }
+
+    /// Two messages read in sequence off one stream, then the session's
+    /// own end — the shape the loop in [`start`] actually relies on.
+    #[test]
+    fn messages_read_in_sequence_then_the_session_ends() {
+        let mut stdin = Cursor::new(b"first\n.\nsecond\n.\n".as_slice());
+        assert_eq!(
+            read_message(&mut stdin).expect("reads"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            read_message(&mut stdin).expect("reads"),
+            Some("second".to_string())
+        );
+        assert_eq!(read_message(&mut stdin).expect("reads"), None);
+    }
 
     /// The notice exists to be understood by someone who has never heard
     /// of a virtual machine.  If it ever acquires the vocabulary of the
