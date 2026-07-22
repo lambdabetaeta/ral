@@ -75,7 +75,7 @@ echo ">> [container] installing build tooling"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     curl ca-certificates build-essential musl-tools kmod \
-    cpio gzip zstd xz-utils file binutils e2fsprogs >/dev/null
+    cpio gzip zstd xz-utils file binutils e2fsprogs fakeroot >/dev/null
 
 # --- 1. Cross-build ral-daemon, exarch, ral-initramfs -----------------------
 # Same recipe as build-binaries.yml's build-exarch-linux-arm64 job: rustup +
@@ -186,14 +186,15 @@ KERNEL_PKG_VERSION=$(dpkg-deb -f /build/kernel-debs/"$IMAGE_PKG"_*.deb Version |
 # --- 3. Confirm the module set against the real kernel config ---------------
 # README.md's prose named a baseline; this is the pass that checks it against
 # what the pinned kernel package actually built. y = compiled in (nothing to
-# ship); m = a module this initramfs must carry and load; both virtio
-# transports are shipped if both are modules, since which one
-# Virtualization.framework attaches on is exactly what the smoke-boot (not
-# this non-booting pass) confirms.
+# ship); m = a module this initramfs must carry and load. This is the
+# arm64 image for Virtualization.framework, whose vsock transport is virtio;
+# the Hyper-V transport belongs to the separate x86_64 Windows image (§2),
+# so `CONFIG_HYPERV_VSOCKETS` is deliberately absent from the map below —
+# shipping it here would only load a driver that finds no device.
 {
   echo "# boot.img kernel config check — $KVER"
   for sym in CONFIG_VIRTIO CONFIG_VIRTIO_RING CONFIG_VIRTIO_MMIO CONFIG_VIRTIO_PCI \
-             CONFIG_VIRTIO_BLK CONFIG_VIRTIO_CONSOLE CONFIG_VSOCKETS \
+             CONFIG_VIRTIO_BLK CONFIG_VIRTIO_CONSOLE CONFIG_VIRTIO_FS CONFIG_VSOCKETS \
              CONFIG_VIRTIO_VSOCKETS CONFIG_HYPERV_VSOCKETS CONFIG_OVERLAY_FS \
              CONFIG_EXT4_FS CONFIG_DEVTMPFS CONFIG_DEVTMPFS_MOUNT; do
     grep -E "^$sym=" "$CONFIG_PATH" || echo "$sym is not set"
@@ -204,15 +205,15 @@ cat /out/kernel-config-check.txt
 # Logical driver name -> real module basename, for whichever of the above
 # are `m`. The vsock family's real names (confirmed against this kernel's
 # own modules.dep, not guessed from its Kconfig symbol): the virtio
-# transport is `vmw_vsock_virtio_transport`, not `virtio_vsock`; the
-# Hyper-V transport is `hv_sock`; both pull the core `vsock` module in
-# automatically via their own modules.dep line.
+# transport is `vmw_vsock_virtio_transport`, not `virtio_vsock`, and it
+# pulls the core `vsock` module in automatically via its own modules.dep
+# line.
 declare -A MODNAME=(
   [CONFIG_VIRTIO]=virtio [CONFIG_VIRTIO_RING]=virtio_ring
   [CONFIG_VIRTIO_MMIO]=virtio_mmio [CONFIG_VIRTIO_PCI]=virtio_pci
   [CONFIG_VIRTIO_BLK]=virtio_blk [CONFIG_VIRTIO_CONSOLE]=virtio_console
   [CONFIG_VSOCKETS]=vsock [CONFIG_VIRTIO_VSOCKETS]=vmw_vsock_virtio_transport
-  [CONFIG_HYPERV_VSOCKETS]=hv_sock [CONFIG_OVERLAY_FS]=overlay
+  [CONFIG_VIRTIO_FS]=virtiofs [CONFIG_OVERLAY_FS]=overlay
   [CONFIG_EXT4_FS]=ext4
 )
 NEEDED_MODULES=()
@@ -281,12 +282,16 @@ cp "$BIN/ral-daemon" /build/cpio/ral-daemon
 cp "$BIN/exarch" /build/cpio/engine
 chmod 0755 /build/cpio/init /build/cpio/ral-daemon /build/cpio/engine /build/cpio/sbin/mke2fs
 # The node the kernel opens as init's stdio; /init mounts devtmpfs over
-# /dev itself before it needs any device beyond the console.
-mkdir -p /build/cpio/dev
-mknod -m 600 /build/cpio/dev/console c 5 1
-
+# /dev itself before it needs any device beyond the console.  Rootless
+# podman has no CAP_MKNOD, so the node and the archive that records it are
+# both made under fakeroot, which fabricates the char device honestly
+# without privilege — the same tool dpkg uses to build device nodes.
 echo ">> [container] assembling initramfs.img"
-( cd /build/cpio && find . | cpio -o -H newc 2>/dev/null | gzip -9 ) > /out/initramfs.img
+fakeroot sh -c '
+  mkdir -p /build/cpio/dev
+  mknod -m 600 /build/cpio/dev/console c 5 1
+  cd /build/cpio && find . | cpio -o -H newc 2>/dev/null | gzip -9
+' > /out/initramfs.img
 
 ( cd /out && sha256sum kernel > kernel.sha256 && sha256sum initramfs.img > initramfs.img.sha256 )
 

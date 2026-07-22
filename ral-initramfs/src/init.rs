@@ -54,7 +54,10 @@ pub fn run() -> Result<Infallible, String> {
 /// needed driver in rather than as a module — a legitimate outcome, not a
 /// failure, so it is skipped rather than refused. A manifest that names a
 /// module this initramfs did not carry, or that the kernel refuses to load,
-/// is: nothing past this point can work without it.
+/// is: nothing past this point can work without it. The image carries only
+/// the modules its own hypervisor's transport needs (`build-boot.sh` ships
+/// virtio's for the arm64 image, Hyper-V's for the Windows one), so every
+/// module named here is required and any failure to load it is fatal.
 fn load_modules() -> Result<(), String> {
     let Ok(manifest) = fs::read_to_string(plan::MODULE_MANIFEST) else {
         return Ok(());

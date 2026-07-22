@@ -179,14 +179,20 @@ pub fn spawn(boot: &Boot, control: &OwnedFd) -> Result<Pid, String> {
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
-            // `dup2` always clears `CLOEXEC` on the descriptor it creates,
-            // which is precisely how the socket survives the `exec` that
-            // follows; the engine sets it again the instant it owns it.
-            if libc::dup2(socket, PROTOCOL_FD) < 0 {
-                return Err(io::Error::last_os_error());
-            }
             if socket != PROTOCOL_FD {
+                if libc::dup2(socket, PROTOCOL_FD) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
                 libc::close(socket);
+            }
+            // The socket is created `SOCK_CLOEXEC` and usually already sits
+            // on `PROTOCOL_FD`, where `dup2` is a no-op that leaves that flag
+            // set — so clear it explicitly, unconditionally, rather than
+            // leaning on `dup2`'s clear-on-copy. Without this the wire closes
+            // on `exec` and the engine adopts a dead fd. The engine sets
+            // `CLOEXEC` again the instant it owns the socket.
+            if libc::fcntl(PROTOCOL_FD, libc::F_SETFD, 0) < 0 {
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });
