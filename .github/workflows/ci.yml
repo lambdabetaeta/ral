@@ -60,8 +60,11 @@ jobs:
       - name: Render site
         run: uv run scripts/render-site.py
 
-      - name: Syntax-check examples, kit, and plugins
+      # plugins/*.ral are not checked here: the `_ed-*` builtins they call
+      # live only on the interactive shell's table, so batch `--check`
+      # cannot type them — the REPL checks each plugin as rc loads it.
+      - name: Syntax-check examples
         run: |
-          for f in examples/*.ral kit/*.ral plugins/*.ral; do
+          for f in examples/*/*.ral; do
             cargo run -p ral --quiet -- --check "$f"
           done

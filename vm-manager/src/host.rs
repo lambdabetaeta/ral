@@ -83,6 +83,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn there_is_no_control_plane_to_hand_back() {
         let dir = tempfile::tempdir().unwrap();
         let mut machine = Host.boot(&MachineSpec::for_folder(dir.path())).unwrap();

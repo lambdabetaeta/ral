@@ -748,7 +748,7 @@ pub(crate) fn register_prepared_group(
     prepared: PreparedGroup,
     child: &crate::process::ChildHandle,
 ) -> Option<Pgid> {
-    win_groups::register(prepared, child).map(Pgid)
+    win_groups::register(prepared, child).and_then(Pgid::from_raw)
 }
 
 // ── Job-table primitives ───────────────────────────────────────────────────
