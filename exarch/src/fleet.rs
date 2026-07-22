@@ -13,6 +13,7 @@
 //! disagree about what is shared.
 
 pub(crate) mod desk;
+pub mod egress;
 pub mod registry;
 pub mod schedule;
 

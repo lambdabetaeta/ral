@@ -522,6 +522,7 @@ mod tests {
                 chat: false,
                 disk_warn_bytes: None,
                 fuel: 0,
+                egress: crate::fleet::egress::Egress::for_test(),
             },
             RootSeat::Identity { scratch },
             Arc::new(Provider::scripted(

@@ -371,6 +371,7 @@ mod tests {
             nursery: Nursery::default(),
             generation: 0,
             disk_warn_bytes: None,
+            egress: crate::fleet::egress::Egress::for_test(),
         }
     }
 

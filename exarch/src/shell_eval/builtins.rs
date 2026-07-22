@@ -22,6 +22,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 
+mod egress;
 mod fff_index;
 mod harness;
 
@@ -52,6 +53,7 @@ pub fn host_surface() -> HostSurface {
         statics: vec![
             EXARCH_BUILTINS,
             harness::HARNESS_BUILTINS,
+            egress::EGRESS_BUILTINS,
             ral_core::builtins::SERVICE_BUILTIN,
         ],
         captured: Vec::new(),

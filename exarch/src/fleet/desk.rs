@@ -17,6 +17,7 @@
 
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
+use crate::fleet::egress;
 use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
 use crate::shell_eval::{self, PinDigests};
@@ -107,6 +108,10 @@ pub(crate) struct HostServices {
     /// child's own `Build` exactly as `Agent::fork_with` does — a host
     /// setting, not a per-agent choice.
     pub disk_warn_bytes: Option<u64>,
+    /// The IT-set fetch-url policy, audit ledger, and rate budget —
+    /// threaded verbatim into a spawned child exactly as `disk_warn_bytes`
+    /// is: a spawn shares its parent's egress policy, never a fresh one.
+    pub egress: egress::Egress,
 }
 
 /// The exarch enquiry desk: answers one [`FOValue`] enquiry against a
@@ -297,6 +302,7 @@ impl ExarchDesk {
             "schedule-list" => self.schedule_list(),
             "unschedule" => self.unschedule(payload),
             "reply" => self.reply(payload),
+            "fetch-url" => self.fetch_url(payload),
             other => Err(Error::new(
                 format!("unrecognised enquiry class `{other}`"),
                 1,
@@ -439,6 +445,7 @@ impl ExarchDesk {
             tool_enabled: true,
             agents: s.registry.clone(),
             disk_warn_bytes: s.disk_warn_bytes,
+            egress: s.egress.clone(),
         })
         .map_err(|e| Error::new(format!("could not assemble child session: {e}"), 1))?;
 
@@ -890,6 +897,80 @@ impl ExarchDesk {
         s.reply.set(value);
         Ok(FOValue::Unit)
     }
+
+    /// Validate the URL, check it against the IT allowlist, take a rate-
+    /// budget slot, then perform the capped GET — in that order, so a
+    /// refusal at any earlier step never reaches the network. Returns the
+    /// resolved host alongside the outcome (blank if the URL never parsed)
+    /// so the caller can audit and narrate a refusal even when there is no
+    /// fetch to describe.
+    fn resolve_and_fetch(&self, raw_url: &str) -> (String, Result<Vec<u8>, String>) {
+        let s = &self.services;
+        let parsed = match egress::validate_fetch_url(raw_url) {
+            Ok(url) => url,
+            Err(reason) => return (String::new(), Err(reason)),
+        };
+        let host = parsed.host_str().unwrap_or_default().to_string();
+        if !crate::org_policy::domain_allowed(&host, &s.egress.policy.allow) {
+            let reason = format!(
+                "'{host}' is not on the list of sites your IT department has approved for this \
+                 assistant to reach — ask your IT department to add it if you need this site"
+            );
+            return (host, Err(reason));
+        }
+        if !s.egress.limiter.try_take() {
+            let reason = "too many fetches in the last minute — wait a little and try again, \
+                 or ask your IT department to raise the limit"
+                .to_string();
+            return (host, Err(reason));
+        }
+        let client = egress::fetch_client();
+        let outcome = egress::fetch(&client, &parsed, s.egress.policy.max_response_bytes);
+        (host, outcome)
+    }
+
+    /// `` `fetch-url `` — the desk half of the `fetch-url` builtin: resolve,
+    /// allowlist-check, rate-check, and fetch (see [`Self::resolve_and_fetch`]),
+    /// recording exactly one audit line either way before answering — the
+    /// same act-row-after-the-fact discipline `agent_cancel`/`message` follow.
+    fn fetch_url(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let s = &self.services;
+        let items = payload_list(payload, "fetch-url", "[url]", 1)?;
+        let [url]: [FOValue; 1] = items
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let url = payload_string(url, "fetch-url", "url")?;
+
+        let (host, outcome) = self.resolve_and_fetch(&url);
+        let (ok, act_payload, content, body) = match outcome {
+            Ok(bytes) => (
+                true,
+                format!("{} bytes", bytes.len()),
+                format!("fetched {} bytes from {host}", bytes.len()),
+                Some(bytes),
+            ),
+            Err(reason) => (false, format!("refused: {reason}"), reason, None),
+        };
+        s.egress.audit.record(
+            &url,
+            &host,
+            ok,
+            body.as_ref()
+                .map(|b| u64::try_from(b.len()).unwrap_or(u64::MAX)),
+            (!ok).then_some(content.as_str()),
+        );
+        s.emit.emit(Kind::HarnessCall {
+            verb: "fetch-url",
+            subject: Some(url),
+            payload: act_payload,
+            failed: !ok,
+        });
+        s.emit.emit(Kind::HarnessResult(content.clone()));
+        match body {
+            Some(value) => Ok(FOValue::Bytes { value }),
+            None => Err(Error::new(content, 1)),
+        }
+    }
 }
 
 /// [`SurfaceApplier::live`]/[`SurfaceApplier::deferred`] apply one surfaced
@@ -997,7 +1078,9 @@ mod tests {
     use super::*;
     use crate::agent::event::AgentLog;
     use crate::bus::{BusReceiver, Inbox, channel};
+    use crate::fleet::egress::{AuditLog, Egress, FetchLimiter};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
+    use crate::org_policy::OrgPolicy;
     use crate::provider::{
         Provider, ProviderKind,
         scripted::{Reply, Script},
@@ -1067,6 +1150,7 @@ mod tests {
             nursery: Nursery::default(),
             generation: 0,
             disk_warn_bytes: None,
+            egress: Egress::for_test(),
         }
     }
 
@@ -2549,5 +2633,265 @@ mod tests {
         registry.cancel(id_b);
         let _ = wait_for_settle(&parent.inbox());
         handle_b.join().expect("worker thread must not panic");
+    }
+
+    // ── `fetch-url` ───────────────────────────────────────────────────────
+
+    /// A hand-rolled, minimal HTTP/1.1 server: binds an ephemeral port on
+    /// 127.0.0.1, accepts exactly one connection, and answers with the
+    /// pre-baked `response` bytes. No dev-dependency — the fetch-url tests
+    /// need nothing richer than real bytes over a real socket.
+    fn spawn_local_http_server(
+        response: Vec<u8>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let _ = std::io::Write::write_all(&mut stream, &response);
+            }
+        });
+        (addr, handle)
+    }
+
+    fn http_ok(body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn fetch_url_answer(desk: &ExarchDesk, url: &str) -> Result<FOValue, Error> {
+        desk.handle(FOValue::Variant {
+            label: "fetch-url".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String { value: url.into() }],
+            })),
+        })
+    }
+
+    /// The plain-English refusal register every refusal message below is
+    /// checked against — mirroring synod's own `NO_BOUNDARY` register test:
+    /// no implementation jargon, ever, in a message the model (and, via
+    /// transcripts, a person) may read.
+    const FETCH_URL_JARGON: &[&str] = &[
+        "VM",
+        "sandbox",
+        "capability",
+        "manifest",
+        "card",
+        "desk",
+        "transport",
+    ];
+
+    fn assert_plain_english(message: &str) {
+        for jargon in FETCH_URL_JARGON {
+            assert!(
+                !message.to_lowercase().contains(&jargon.to_lowercase()),
+                "refusal must not say '{jargon}', got: {message}"
+            );
+        }
+    }
+
+    /// The identity-seat half of the "one answering function, two seats"
+    /// claim: `ExarchDesk::handle` directly, no wire/engine involved. An
+    /// allowed domain's `fetch-url` returns the served bytes and the audit
+    /// ledger gains exactly one record.
+    #[test]
+    fn fetch_url_allowed_domain_returns_the_bytes_and_records_one_audit_line() {
+        let body = b"hello from the test server".to_vec();
+        let (addr, server) = spawn_local_http_server(http_ok(&body));
+        let audit_path = tmp("fetch-url-allowed-audit").join("audit.jsonl");
+        let desk = ExarchDesk {
+            services: HostServices {
+                egress: Egress {
+                    policy: Arc::new(OrgPolicy {
+                        allow: vec![addr.ip().to_string()],
+                        max_response_bytes: 1_048_576,
+                        rate_per_minute: 1_000,
+                    }),
+                    audit: AuditLog::for_test(&audit_path),
+                    limiter: FetchLimiter::new(1_000),
+                },
+                ..base_services()
+            },
+        };
+        let answer = fetch_url_answer(&desk, &format!("http://{addr}/"))
+            .expect("an allowed fetch-url must succeed");
+        match answer {
+            FOValue::Bytes { value } => assert_eq!(value, body),
+            other => panic!("expected FOValue::Bytes, got {other:?}"),
+        }
+        server.join().expect("server thread must not panic");
+        let logged = std::fs::read_to_string(&audit_path).expect("audit ledger readable");
+        assert_eq!(
+            logged.lines().count(),
+            1,
+            "exactly one audit record for the one fetch, got: {logged}"
+        );
+        assert!(logged.contains("\"allowed\":true"));
+    }
+
+    /// A domain absent from the allowlist is refused, naming the domain and
+    /// pointing at the IT department — and still gains an audit record
+    /// (`allowed: false`), recorded before the desk answers.
+    #[test]
+    fn fetch_url_blocked_domain_is_refused_and_still_records_an_audit_line() {
+        let audit_path = tmp("fetch-url-blocked-audit").join("audit.jsonl");
+        let desk = ExarchDesk {
+            services: HostServices {
+                egress: Egress {
+                    policy: Arc::new(OrgPolicy {
+                        allow: vec!["only-this-host.example".to_string()],
+                        max_response_bytes: 1_048_576,
+                        rate_per_minute: 1_000,
+                    }),
+                    audit: AuditLog::for_test(&audit_path),
+                    limiter: FetchLimiter::new(1_000),
+                },
+                ..base_services()
+            },
+        };
+        let err = fetch_url_answer(&desk, "https://not-on-the-list.example/")
+            .expect_err("a blocked domain must be refused");
+        assert!(
+            err.message.contains("not-on-the-list.example"),
+            "must name the blocked domain, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("IT department"),
+            "must point at IT, got: {}",
+            err.message
+        );
+        assert_plain_english(&err.message);
+        let logged = std::fs::read_to_string(&audit_path).expect("audit ledger readable");
+        assert_eq!(
+            logged.lines().count(),
+            1,
+            "the blocked fetch is still audited"
+        );
+        assert!(logged.contains("\"allowed\":false"));
+    }
+
+    /// A response larger than the policy's size cap is refused, naming the
+    /// over-cap message, without the client ever reading the whole body —
+    /// the cap is enforced by streaming through `.take(cap + 1)`, so an
+    /// oversized response is rejected the instant the limited read fills.
+    #[test]
+    fn fetch_url_over_cap_response_is_refused() {
+        let (addr, server) = spawn_local_http_server(http_ok(&[b'x'; 10_000]));
+        let audit_path = tmp("fetch-url-over-cap-audit").join("audit.jsonl");
+        let desk = ExarchDesk {
+            services: HostServices {
+                egress: Egress {
+                    policy: Arc::new(OrgPolicy {
+                        allow: vec![addr.ip().to_string()],
+                        max_response_bytes: 100,
+                        rate_per_minute: 1_000,
+                    }),
+                    audit: AuditLog::for_test(&audit_path),
+                    limiter: FetchLimiter::new(1_000),
+                },
+                ..base_services()
+            },
+        };
+        let err = fetch_url_answer(&desk, &format!("http://{addr}/"))
+            .expect_err("an over-cap response must be refused");
+        assert!(
+            err.message.contains("100-byte limit"),
+            "must name the size cap, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains(&addr.ip().to_string()),
+            "must name the host, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("IT department"),
+            "got: {}",
+            err.message
+        );
+        assert_plain_english(&err.message);
+        server.join().expect("server thread must not panic");
+    }
+
+    /// A rate-limited fetch is refused once the budget is exhausted.
+    #[test]
+    fn fetch_url_over_rate_cap_is_refused() {
+        let host = "rate-capped.example";
+        let desk = ExarchDesk {
+            services: HostServices {
+                egress: Egress {
+                    policy: Arc::new(OrgPolicy {
+                        allow: vec![host.to_string()],
+                        max_response_bytes: 1_048_576,
+                        rate_per_minute: 1,
+                    }),
+                    audit: AuditLog::for_test(&tmp("fetch-url-rate-audit").join("audit.jsonl")),
+                    limiter: FetchLimiter::new(1),
+                },
+                ..base_services()
+            },
+        };
+        // The first call still fails (nothing is listening at this host),
+        // but it consumes the one rate-budget slot before it fails on the
+        // network — resolve_and_fetch takes the slot before dialling.
+        let _ = fetch_url_answer(&desk, &format!("https://{host}/"));
+        let err = fetch_url_answer(&desk, &format!("https://{host}/"))
+            .expect_err("the second call within the window must be rate-capped");
+        assert!(
+            err.message.contains("too many fetches"),
+            "must name the rate cap, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("IT department"),
+            "must point at IT, got: {}",
+            err.message
+        );
+        assert_plain_english(&err.message);
+    }
+
+    /// A redirect answer is refused, never followed: following it would let
+    /// an allowed host bounce the fetch onto one the allowlist never
+    /// admitted.
+    #[test]
+    fn fetch_url_refuses_a_redirect_rather_than_following_it() {
+        let (addr, server) = spawn_local_http_server(
+            b"HTTP/1.1 302 Found\r\nLocation: http://not-on-the-list.example/\r\n\
+              Content-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        );
+        let audit_path = tmp("fetch-url-redirect-audit").join("audit.jsonl");
+        let desk = ExarchDesk {
+            services: HostServices {
+                egress: Egress {
+                    policy: Arc::new(OrgPolicy {
+                        allow: vec![addr.ip().to_string()],
+                        max_response_bytes: 1_048_576,
+                        rate_per_minute: 1_000,
+                    }),
+                    audit: AuditLog::for_test(&audit_path),
+                    limiter: FetchLimiter::new(1_000),
+                },
+                ..base_services()
+            },
+        };
+        let err = fetch_url_answer(&desk, &format!("http://{addr}/"))
+            .expect_err("a redirect must be refused, never followed");
+        assert!(
+            err.message.contains("redirect"),
+            "must name the redirect, got: {}",
+            err.message
+        );
+        assert_plain_english(&err.message);
+        server.join().expect("server thread must not panic");
     }
 }

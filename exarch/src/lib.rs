@@ -17,6 +17,7 @@ pub mod cli;
 pub mod config;
 pub mod fleet;
 pub mod headless;
+pub mod org_policy;
 pub mod policy;
 pub mod prompt;
 pub mod provider;
@@ -149,6 +150,9 @@ pub fn run() -> Result<(), String> {
     let custom = config::load()?;
     // The operator's disk-warn ceiling, if set — threaded to the trunk below.
     let disk_warn_bytes = config::disk_warn_bytes()?;
+    // The IT-set fetch-url policy, audit ledger, and rate budget — opened
+    // once here and threaded to the trunk below, exactly like disk_warn_bytes.
+    let egress = fleet::egress::Egress::open(bootstrap::EXARCH)?;
 
     // Auto-discover providers and resolve their keys into the in-memory
     // store, scrubbing every key var from the environment. The custom
@@ -281,6 +285,7 @@ pub fn run() -> Result<(), String> {
             chat: c.chat,
             disk_warn_bytes,
             fuel: agent::SPAWN_FUEL,
+            egress,
         },
         agent::RootSeat::Identity {
             scratch: Arc::clone(&scratch),

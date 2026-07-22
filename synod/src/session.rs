@@ -136,6 +136,9 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine) -> Result<(), String> {
     // from inside the machine, so no key ever crosses the boundary.
     let custom = exarch::config::load()?;
     let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
+    // The IT-set fetch-url policy, audit ledger, and rate budget — one file
+    // regardless of which front-end is running, opened once here.
+    let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
     // SAFETY: startup is still single-threaded here — the transport runtime
     // and the session's worker threads are created below — so no other
     // thread can race this env mutation.  This is the only credential scrub;
@@ -233,6 +236,7 @@ pub fn start(grant: &Grant, machine: &mut dyn Machine) -> Result<(), String> {
             // A conversation is asked and answered, one message at a time,
             // never a fleet: no sub-agent may ever start from it.
             fuel: 0,
+            egress,
         },
         root_seat,
         Arc::clone(&provider),

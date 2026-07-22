@@ -333,6 +333,10 @@ pub struct Agent {
     /// crossing, cleared once a later check finds the total back under, so
     /// the warning fires once per excursion, never once per boundary.
     disk_warn_latched: bool,
+    /// The IT-set `fetch-url` policy, audit ledger, and rate budget —
+    /// shared verbatim by every fork, exactly like [`Self::disk_warn_bytes`]:
+    /// a host setting, not a per-agent choice.
+    egress: crate::fleet::egress::Egress,
 }
 
 /// Outcome of one [`Agent::apply`].  Degenerate cases (`Empty`,
@@ -530,6 +534,10 @@ pub(crate) struct Build {
     /// at the trunk's construction and inherited verbatim by every fork — a
     /// host setting, not a per-agent choice.
     pub(crate) disk_warn_bytes: Option<u64>,
+    /// The IT-set `fetch-url` policy, audit ledger, and rate budget,
+    /// threaded from [`RootConfig::egress`] and inherited verbatim by every
+    /// fork — a host setting, not a per-agent choice.
+    pub(crate) egress: crate::fleet::egress::Egress,
 }
 
 /// The trunk's launch configuration.
@@ -555,6 +563,11 @@ pub struct RootConfig {
     /// Exarch's own launch sites pass [`SPAWN_FUEL`]; synod passes `0` — an
     /// office job is asked and answered, never a fleet.
     pub fuel: u32,
+    /// The IT-set `fetch-url` policy, audit ledger, and rate budget —
+    /// opened once at launch ([`crate::fleet::egress::Egress::open`]) and
+    /// threaded into every fork verbatim, a host setting like
+    /// `disk_warn_bytes` above.
+    pub egress: crate::fleet::egress::Egress,
 }
 
 /// Where the trunk's engine lives — the one construction-time choice
@@ -595,6 +608,7 @@ impl Agent {
             tool_enabled,
             agents,
             disk_warn_bytes,
+            egress,
         } = b;
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
@@ -627,6 +641,7 @@ impl Agent {
             disk_warn_bytes,
             disk_check_epoch: 0,
             disk_warn_latched: false,
+            egress,
         })
     }
 
@@ -691,6 +706,7 @@ impl Agent {
             chat,
             disk_warn_bytes,
             fuel,
+            egress,
         } = cfg;
         // Index resolution reads only the compiled-in builtin table, which
         // an identity seat's own shell and a wire seat's boot recipe dress
@@ -759,6 +775,7 @@ impl Agent {
             tool_enabled: !chat,
             agents: AgentRegistry::new(),
             disk_warn_bytes,
+            egress,
         })?;
         agent.register_self();
         Ok(agent)
@@ -904,6 +921,9 @@ impl Agent {
             // A host setting, not a per-agent choice: every fork shares the
             // trunk's ceiling verbatim.
             disk_warn_bytes: self.disk_warn_bytes,
+            // Likewise a host setting: every fork shares the trunk's IT
+            // policy, audit ledger, and rate budget verbatim.
+            egress: self.egress.clone(),
         })
     }
 
@@ -1021,6 +1041,7 @@ impl Agent {
             // Unconfigured by default: a test that wants to exercise the
             // disk-warn check sets `session.disk_warn_bytes` directly.
             disk_warn_bytes: None,
+            egress: crate::fleet::egress::Egress::for_test(),
         })?;
         agent.register_self();
         Ok(agent)
@@ -2286,6 +2307,7 @@ impl Agent {
             nursery,
             generation: self.agents.generation(),
             disk_warn_bytes: self.disk_warn_bytes,
+            egress: self.egress.clone(),
         }
     }
 
@@ -2886,6 +2908,7 @@ mod tests {
                 chat: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
+                egress: crate::fleet::egress::Egress::for_test(),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -2947,6 +2970,7 @@ mod tests {
                 chat: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
+                egress: crate::fleet::egress::Egress::for_test(),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -3083,6 +3107,7 @@ mod tests {
                 chat: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
+                egress: crate::fleet::egress::Egress::for_test(),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -4893,5 +4918,21 @@ mod tests {
             .handle
             .cancel
             .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// A spawned child's egress bundle — the IT policy, the audit ledger,
+    /// and the rate budget — is the same `Arc`-backed instance as its
+    /// parent's, never a fresh one of its own: `agent-start`'s fork spine
+    /// (mirrored here by `branch`, the in-thread fork path) shares its
+    /// parent's host setting exactly as it shares `disk_warn_bytes`.
+    #[test]
+    fn fork_inherits_the_same_egress_instance_as_its_parent() {
+        let dir = tmp("fork-inherits-egress");
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        let child = parent.branch().expect("branch child");
+        assert!(
+            parent.egress == child.egress,
+            "a fork must share its parent's egress bundle, not a fresh one"
+        );
     }
 }
