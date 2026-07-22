@@ -9,6 +9,7 @@ members = [
     "synod/app",
     "vm-manager",
     "ral-daemon",
+    "ral-initramfs",
     "prompt-editor",
     "vendor/ripgrep-core",
 ]

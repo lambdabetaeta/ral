@@ -5510,6 +5510,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ral-initramfs"
+version = "0.1.0"
+dependencies = [
+ "ral-daemon",
+ "rustix",
+]
+
+[[package]]
 name = "ral-ripgrep-core"
 version = "15.1.0+ral.0"
 dependencies = [
@@ -5837,6 +5845,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

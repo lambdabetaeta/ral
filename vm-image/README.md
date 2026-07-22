@@ -239,28 +239,98 @@ verify-by-shared-sha256 story above — the recipe would additionally need:
 These are **notes, not implemented here** — the current build targets the live
 archive for reliability and records versions in the manifest.
 
-## Still open: boot.img (documented, NOT built here)
+## `boot.img`: Ubuntu's own kernel, plus this repo's own initramfs
 
-`rootfs.img` is only the userland. To boot, the guest also needs `boot.img`,
-which is **out of scope for this directory** (it ships with the synod app,
-versioned with it — §7). What it will need:
+`rootfs.img` is only the userland; to boot, the guest also needs `boot.img` —
+still **built by a different script** (`build-boot.sh`, this directory) since
+it ships with the synod app rather than being downloaded like `rootfs.img`
+(§7), but resolved here because the two pipelines share one pinned suite and
+one native-arm64 container.
 
-- **An arm64 kernel** (macOS boots it directly via `VZLinuxBootLoader`; Windows
-  wraps the *same* kernel as a Gen-2 UEFI unified kernel image — §2).
-- **virtio guest drivers** for the Apple Virtualization.framework path
-  (`virtio-blk`/`virtio-console`/`virtio-vsock`, etc.) **and Hyper-V guest
-  drivers** for the Windows path (`hv_vmbus`, `hv_storvsc`, `hv_netvsc` — unused
-  since there is no NIC, and crucially `hv_sock` so `AF_HYPERV` ↔ guest
-  `AF_VSOCK` works). The guest-side vsock API is identical on both hypervisors;
-  only the transport underneath differs (§2).
-- **overlayfs** (RO `rootfs.img` lower + RW `session.img` upper — §7) and **ext4**
-  built into the kernel.
-- The **ral-daemon (PID 1)** and the **ral engine**, both static musl Rust (§7).
+**The kernel is Ubuntu's stock `linux-generic` arm64 build, unmodified —
+not a custom kernel.** It is already built, signed, and validated by
+Canonical's own pipeline across the exact virtio + Hyper-V (`CONFIG_HYPERV`,
+`CONFIG_HYPERV_VSOCKETS`) + overlayfs + ext4 feature set both hypervisor
+paths need, so lifting it trades zero engineering cost for a small boot-time
+module-load cost that a from-scratch kernel config and rebuild would only
+marginally improve — while creating a liability (kernel config maintenance,
+security patch tracking) this project would then own forever. `build-boot.sh`
+extracts `vmlinuz` and the needed `.ko` set straight from the pinned suite's
+own `linux-image-generic` arm64 package, inside the same native-arm64
+container that builds `rootfs.img`, so kernel and userland share one pinned
+suite and mirror — and unwraps `vmlinuz` (a unified-image PE, an EFI zboot
+PE, and a compressed payload, nested per suite) down to the raw ARM64
+`Image`, the only form `VZLinuxBootLoader` boots on Apple silicon.
 
-Ubuntu 26.04's stock **`linux-generic` arm64 kernel already provides all of
-this**:
-virtio and Hyper-V (`CONFIG_HYPERV`, `CONFIG_HYPERV_VSOCKETS`) drivers, overlayfs,
-and ext4 are all in the generic config, mostly as modules. So `boot.img` can lift
-Ubuntu's generic kernel (or build a slim custom one with these as built-ins to
-skip an initramfs). Choosing generic-kernel-plus-initramfs versus a custom
-built-in kernel is the real open question there — it does not affect this image.
+**Neither `ral-daemon` nor the engine live in `rootfs.img`** (this directory's
+own build never puts them there). What makes `boot.img`'s "kernel +
+ral-daemon + ral engine as one artifact" true is a small hand-written
+initramfs, `ral-initramfs` (a workspace crate, `libc` + `rustix` only, the
+same dependency shape as `ral-daemon`): its job is fixed and narrow enough —
+two known virtio-blk disks in vm-manager's own fixed attach order, one
+overlay, one binary-install step, one `switch_root` — that a general-purpose
+tool like dracut or mkinitramfs would be solving a hardware-discovery problem
+this guest does not have. On every boot it:
+
+1. mounts the kernel's device nodes at `/dev` (claimed, not assumed from a
+   devtmpfs automount) and loads whichever kernel modules the pinned kernel
+   build needs for the two disks, the overlay, and vsock (a manifest
+   `build-boot.sh` writes from the real `CONFIG_*` the kernel package ships,
+   not a hardcoded guess);
+2. `mke2fs`-formats the session disk unconditionally — it always arrives as
+   a bare zero-filled sparse file (`vm-manager`'s `create_session_image`);
+3. mounts `rootfs.img` read-only and the freshly formatted session disk
+   read-write as an overlay's lower and upper;
+4. **copies the embedded `ral-daemon` and `exarch` binaries onto that
+   writable upper**, at `/sbin/ral-daemon` and `/usr/libexec/ral/engine` —
+   the mechanism behind the "one artifact" claim: the binaries are installed
+   fresh into the session overlay every boot, never baked into the read-only
+   rootfs;
+5. `switch_root`s into the assembled overlay and execs `/sbin/ral-daemon` as
+   the new pid 1.
+
+Both `ral-daemon` and `exarch` are cross-built for `aarch64-unknown-linux-musl`
+*inside* the same native-arm64 container (rustup + `musl-tools`, the recipe
+`build-binaries.yml`'s `build-exarch-linux-arm64` job already uses — no
+`cross-rs` container needed, since neither binary pulls `jemalloc-sys` or a C
+dependency). `mke2fs` is the one non-Rust piece the initramfs carries: it is
+vendored from the container's own `e2fsprogs` package together with every
+shared library `ldd` reports, resolved in the same pinned container so glibc
+versions match exactly — the technique every distro's own initramfs tooling
+already uses internally.
+
+`vm-manager/src/vz.rs`'s `BootArtifact { kernel, initramfs, rootfs }` and
+`kernel_command_line()` need no changes for any of this: the command line
+already never sets `ral.engine=`, so as long as `build-boot.sh` installs the
+engine at `ral-daemon`'s own `DEFAULT_ENGINE` path, the existing contract
+holds untouched.
+
+Run it (`vm-image/build-boot.sh`); outputs land in `vm-image/out/boot/`:
+`kernel`, `initramfs.img`, a `.sha256` for each, `boot-manifest.txt` (the
+kernel package version plus the git commit hash of the ral-daemon/exarch
+source built in — recording the hash only here, not in a `build.rs`, is the
+whole of the version-stamping decision), `kernel-config-check.txt` (the real
+`CONFIG_*` values the config-grep pass found), `verify.txt`, and `build.log`.
+
+**Smoke-boot is human-in-the-loop, not CI**: build `rootfs.img` and
+`boot.img`, run `dev/scripts/sign-virtualization.sh` against the debug
+`vm-manager`/`synod` binaries (macOS invalidates the ad-hoc signature on every
+rebuild), then boot via `vm-manager/examples/boot-smoke.rs` with the three
+real artifacts, and confirm on stdout `ral-daemon`'s own `eprintln` lines
+(`guest filesystems up`, `engine running as pid`), that `announce_root()`
+reports the session overlay rather than a fallback, and that the guest dials
+the host's vsock control port within `vz.rs`'s 30s `BOOT_TIMEOUT`.
+
+### Open past this point
+
+- **Exact module set vs. the real kernel config**: `build-boot.sh`'s
+  config-grep pass records what the pinned kernel package actually built
+  (`kernel-config-check.txt`); which virtio transport
+  (`virtio_mmio`/`virtio_pci`) Virtualization.framework actually attaches on
+  is confirmed only by the smoke-boot above, not by this non-booting pass —
+  both are shipped if both are modules, so whichever it is, is already
+  loaded.
+- **Windows boot path**: the same kernel wrapped as a Gen-2 UEFI unified
+  kernel image, and an initramfs equivalent for the Hyper-V transport
+  (`hv_storvsc`, `hv_sock`) — parked until the fleet has a Windows box to
+  validate against (§10).
