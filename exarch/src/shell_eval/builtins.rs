@@ -909,7 +909,7 @@ fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         return Settled::Ok(Value::String(format!("skill not found: {name}")));
     }
     let cwd = shell.cwd();
-    let config_dir = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
+    let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     for root in skill::skill_roots(&cwd, &config_dir) {
         let dir = root.join(&name);
         let sk_md = dir.join("SKILL.md");
@@ -950,7 +950,7 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
 )]
 fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let cwd = shell.cwd();
-    let config_dir = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
+    let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let all = skill::discover_all(&cwd, &config_dir);
     let mut out = String::new();
     for (name, dir) in &all {

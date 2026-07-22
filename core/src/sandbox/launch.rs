@@ -268,10 +268,12 @@ pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     Some(127)
 }
 
-/// Off-macOS the `--ral-sandbox-exec` tail is never emitted (Linux
-/// expands the host target into the bwrap argv directly; Windows confines
-/// at the parent's spawn via the LowBox token, with no child re-entry),
-/// so the hook is a no-op that always declines.
+/// Off-macOS the `--ral-sandbox-exec` tail is never emitted, so the hook
+/// is a no-op that always declines.
+///
+/// Linux expands the host target into the bwrap argv directly; Windows
+/// confines at the parent's spawn via the `LowBox` token, with no child
+/// re-entry.
 #[cfg(not(target_os = "macos"))]
 pub fn serve_sandbox_exec(_args: &[String]) -> Option<u8> {
     None

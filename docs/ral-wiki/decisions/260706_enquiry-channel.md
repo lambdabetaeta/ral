@@ -567,6 +567,19 @@ in two:
   closures, which law §6.6 forbids on every channel. Lifecycle frames carry
   ids and nothing else.
 
+  > **Corrected 2026-07-22.** The rejection above holds only for the
+  > *host-mediated* shape — a snapshot round-tripped through the front-end,
+  > which law §6.6 rightly forbids. A parent engine spawning its fork as a
+  > child engine process *inside the guest* ships the snapshot same-binary,
+  > kernel-to-kernel — the domain `SerialValue` already serves — and never
+  > touches the seam; and a process per sub-agent is the same move a ral
+  > pipeline already makes per helper, buying kernel-enforced isolation,
+  > cancel, and teardown. The multi-session engine this paragraph
+  > motivated was built and rejected before shipping; the engine is
+  > single-session, the connection is the session, and fork and clear
+  > never became session frames:
+  > [[decisions/260722_session-is-a-process|session-is-a-process]].
+
 ### 6 — Two-machine robustness, as laws
 
 The design criterion is the REPL/exarch on a host, the engine in a VM. The

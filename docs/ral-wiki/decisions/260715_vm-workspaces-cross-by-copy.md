@@ -9,6 +9,14 @@ no host directory is mounted, and no guest change reaches the granted tree
 without validation, a witness check, and explicit publication.** The VM is a
 place to execute hostile code, not a second view of the host filesystem.
 
+Scope: this position governs **exarch's** VM workspaces, where the workload is
+hostile code. Synod, the office product over the same boundary, deliberately
+departs — its agent works in the granted folder directly (a live mount under a
+hardware boundary), with a baseline checkpoint before the work and
+conflict-checked undo after it in place of any accept gate. Its workload is
+the user's own documents, and its threat model is *wrong*, not *hostile*; the
+design record `dev/docs/VM/SYNOD.md` carries synod's side of this line.
+
 ## Decision
 
 The boundary has two virtual-socket planes:
@@ -58,9 +66,10 @@ provider credentials remain host-owned.
 - Build I/O stays on guest ext4; the host filesystem is absent by topology.
 - A separate daemon may own init, supervision, and bulk transfer, while the
   existing ral/exarch multicall binary remains the engine.
-- Seam Phase C must provide multi-session multiplexing, per-session
-  cancellation, engine-side durability, bounded decoding, and a strict frame
-  automaton before the VM backend is coherent.
+- Seam Phase C must provide engine-side durability, bounded decoding, and a
+  strict frame automaton before the VM backend is coherent. Sessions multiply
+  as engine processes, one connection each, never as multiplexed frames
+  ([[decisions/260722_session-is-a-process|session-is-a-process]]).
 - A guest crash loses unacknowledged guest state; the host retains the last
   acknowledged private checkpoint.
 - Private dependency credentials, PTY forwarding, server ingress, lazy huge

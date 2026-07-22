@@ -2373,13 +2373,21 @@ mod tests {
 
     // ── settled retention (the epoch sweep) ──────────────────────────────
 
+    /// Tick the registry clock `n` times, as `n` source dispatches would.
+    fn tick(shell: &Shell, n: u64) {
+        for _ in 0..n {
+            shell.local.workers.tick_epoch();
+        }
+    }
+
     /// The retention ledger in integers: a settled, unclaimed entry is
     /// stamped at the first sweep that observes it settled, kept while
     /// `epoch − stamp < retention`, and expired — one `Retention` notice
-    /// carrying its facts — at the call the bound is met.
+    /// carrying its facts — at the sweep the bound is met.
     #[test]
     fn retention_stamps_then_expires_an_unclaimed_settled_entry() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.arm_worker_retention(2);
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &shell,
@@ -2391,7 +2399,8 @@ mod tests {
         .expect("spawn must succeed");
         wait_settled(&handle);
 
-        shell.advance_worker_epoch(5, 256);
+        tick(&shell, 5);
+        shell.local.workers.sweep_retention();
         let stamped = shell.local.workers.snapshot();
         assert_eq!(stamped.len(), 1, "a swept settled entry lingers");
         assert_eq!(
@@ -2400,22 +2409,88 @@ mod tests {
             "stamped at the first sweep that observes it settled"
         );
 
-        shell.advance_worker_epoch(260, 256);
-        assert_eq!(shell.local.workers.count(), 1, "260 − 5 < 256: retained");
+        tick(&shell, 1);
+        shell.local.workers.sweep_retention();
+        assert_eq!(shell.local.workers.count(), 1, "6 − 5 < 2: retained");
         assert_eq!(
             shell.local.workers.snapshot()[0].settled_epoch,
             Some(5),
             "the stamp is first-observed-settled, never re-stamped"
         );
 
-        shell.advance_worker_epoch(261, 256);
-        assert_eq!(shell.local.workers.count(), 0, "261 − 5 ≥ 256: expired");
+        tick(&shell, 1);
+        shell.local.workers.sweep_retention();
+        assert_eq!(shell.local.workers.count(), 0, "7 − 5 ≥ 2: expired");
         let notices = shell.take_worker_reap_notices();
         assert_eq!(notices.len(), 1, "one notice per retention expiry");
         assert_eq!(notices[0].id, stamped[0].id);
         assert_eq!(notices[0].cmd, stamped[0].cmd);
         assert_eq!(notices[0].class, stamped[0].class);
         assert_eq!(notices[0].cause, ReapCause::Retention);
+    }
+
+    /// A session's workers die with the session's shell: dropping the
+    /// shell cancels every registered worker's scope through
+    /// `LocalState`'s teardown — no host call site required.
+    #[test]
+    fn dropping_a_shell_cancels_its_workers() {
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let _handle = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<gated>",
+            move |_c| {
+                gate_rx.recv().unwrap();
+                Ok(Value::Unit)
+            },
+        )
+        .expect("spawn must succeed");
+
+        let entry = shell
+            .local
+            .workers
+            .snapshot()
+            .pop()
+            .expect("the spawn registered its worker");
+        assert!(!entry.handle.cancel.is_cancelled());
+
+        drop(shell);
+        assert!(
+            entry.handle.cancel.is_cancelled(),
+            "the dropped shell must cancel its registered workers"
+        );
+
+        // Release the gated thread so the test leaves nothing parked.
+        gate_tx.send(()).unwrap();
+    }
+
+    /// An unarmed registry's sweep is a no-op: nothing is stamped, nothing
+    /// expires — the REPL's "retain indefinitely" behavior, structural.
+    #[test]
+    fn unarmed_sweep_retains_settled_entries_indefinitely() {
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let handle = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<kept>",
+            |_child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+        wait_settled(&handle);
+
+        tick(&shell, 1_000);
+        shell.local.workers.sweep_retention();
+        let snapshot = shell.local.workers.snapshot();
+        assert_eq!(snapshot.len(), 1, "an unarmed sweep expires nothing");
+        assert_eq!(
+            snapshot[0].settled_epoch, None,
+            "an unarmed sweep does not even stamp"
+        );
     }
 
     /// Observation beats retention: an entry the sweep has stamped is
@@ -2435,7 +2510,9 @@ mod tests {
         .expect("spawn must succeed");
         wait_settled(&handle);
 
-        shell.advance_worker_epoch(1, 256);
+        shell.arm_worker_retention(256);
+        tick(&shell, 1);
+        shell.local.workers.sweep_retention();
         assert_eq!(shell.local.workers.snapshot()[0].settled_epoch, Some(1));
 
         builtin_poll(&[Value::Handle(handle)], &mut shell).expect("poll ok");
@@ -2445,7 +2522,8 @@ mod tests {
             "a settled poll claims the entry"
         );
 
-        shell.advance_worker_epoch(400, 256);
+        tick(&shell, 400);
+        shell.local.workers.sweep_retention();
         assert!(
             shell.take_worker_reap_notices().is_empty(),
             "a claimed result leaves no retention notice"
@@ -2473,8 +2551,11 @@ mod tests {
         )
         .expect("spawn must succeed");
 
-        shell.advance_worker_epoch(5, 0);
-        shell.advance_worker_epoch(1_000_000, 0);
+        shell.arm_worker_retention(0);
+        tick(&shell, 5);
+        shell.local.workers.sweep_retention();
+        tick(&shell, 1_000_000);
+        shell.local.workers.sweep_retention();
         let snapshot = shell.local.workers.snapshot();
         assert_eq!(snapshot.len(), 1, "live work is never expired");
         assert_eq!(

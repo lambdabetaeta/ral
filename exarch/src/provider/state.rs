@@ -3,7 +3,7 @@
 //!
 //! The selected provider+model is *runtime state*, not config: the picker
 //! writes it, startup loads it, and it sticks until changed. It lives in
-//! the per-project directory [`crate::bootstrap::project_dir`]
+//! the per-project directory [`crate::bootstrap::App::project_dir`]
 //! (`$XDG_STATE_HOME/exarch/<project>/state.json`), beside that project's
 //! session logs — keyed by where exarch was launched, so the memory is
 //! per-project without scattering a dotfile into the working tree. Because
@@ -17,7 +17,7 @@ use crate::provider::{ProviderId, ReasoningEffort, Tuning};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The state file name within a project's [`crate::bootstrap::project_dir`].
+/// The state file name within a project's [`crate::bootstrap::App::project_dir`].
 const STATE_FILE: &str = "state.json";
 
 /// The persisted runtime state: the model selection plus its tuning.

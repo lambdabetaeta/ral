@@ -39,7 +39,7 @@ pub const CHAT_SYSTEM: &str = ".";
 ///    progressive-disclosure index (see [`builtin_index`]). This function
 ///    bakes in a *placeholder* for the index, not the index itself: the
 ///    real, per-agent list — filtered to the verbs that agent actually
-///    holds — is resolved by [`resolve_builtin_index`] once
+///    holds — is resolved by [`BuiltinIndexes::apply`] once
 ///    [`crate::agent::Agent::assemble`] has the agent's own `returns` and
 ///    `allow_schedule` bits in reach. Every other section is agent-invariant
 ///    and stands as rendered here.
@@ -64,7 +64,7 @@ pub const CHAT_SYSTEM: &str = ".";
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
-    scratch: &Path,
+    scratch: &crate::bootstrap::Scratch,
     cwd: &Path,
     config_dir: &Path,
     headless: bool,
@@ -112,7 +112,7 @@ pub fn assemble(
 }
 
 /// [`assemble`]'s stand-in for the per-agent builtin index — never sent to a
-/// model, always resolved by [`resolve_builtin_index`] before an [`Agent`
+/// model, always resolved by [`BuiltinIndexes::apply`] before an [`Agent`
 /// ](crate::agent::Agent) is fully constructed.  A template holds this
 /// placeholder rather than the index itself precisely because the index is
 /// no longer agent-invariant: `assemble` bakes the rest of the prompt once,
@@ -174,25 +174,43 @@ fn builtin_index(shell: &Shell, returns: bool, allow_schedule: bool) -> String {
     )
 }
 
-/// Resolve [`assemble`]'s [`BUILTIN_INDEX_PLACEHOLDER`] into the real,
-/// per-agent [`builtin_index`] — the one substitution every constructed
-/// [`Agent`](crate::agent::Agent) performs on its own `system` text, reading
-/// `shell`'s own installed builtins and keyed on the same construction-fixed
-/// bits the desk reads for the refusal itself (`returns` for `reply`,
-/// `allow_schedule` for the self-wakeup family), so a fresh model never sees
-/// a verb the desk will certainly refuse. A no-op on text that never held
-/// the placeholder (a `--system` override, a test fixture), so it is safe
-/// to run unconditionally.
-pub(crate) fn resolve_builtin_index(
-    template: &str,
-    shell: &Shell,
-    returns: bool,
-    allow_schedule: bool,
-) -> String {
-    template.replace(
-        BUILTIN_INDEX_PLACEHOLDER,
-        &builtin_index(shell, returns, allow_schedule),
-    )
+/// The four renderings of the builtin index (`returns` ×
+/// `allow_schedule`), resolved once at construction from a booted shell's
+/// installed surface — the surface is installer-fixed per product, so no
+/// later prompt resolution ever needs a live `Shell` again, on either side
+/// of the host seam. Shared by every agent in a fleet
+/// (`Arc` on `Build`/`HostServices`); a fork or desk spawn applies its own
+/// bits against the same table its parent resolved from.
+pub(crate) struct BuiltinIndexes {
+    /// Indexed by `returns as usize | (allow_schedule as usize) << 1`.
+    by_bits: [String; 4],
+}
+
+impl BuiltinIndexes {
+    pub(crate) fn resolve(shell: &Shell) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            by_bits: [
+                builtin_index(shell, false, false),
+                builtin_index(shell, true, false),
+                builtin_index(shell, false, true),
+                builtin_index(shell, true, true),
+            ],
+        })
+    }
+
+    /// Substitute [`BUILTIN_INDEX_PLACEHOLDER`] with the index for exactly
+    /// these bits — the one substitution every constructed
+    /// [`Agent`](crate::agent::Agent) performs on its own `system` text,
+    /// keyed on the same construction-fixed bits the desk reads for the
+    /// refusal itself (`returns` for `reply`, `allow_schedule` for the
+    /// self-wakeup family), so a fresh model never sees a verb the desk
+    /// will certainly refuse. A no-op on text that never held the
+    /// placeholder (a `--system` override, a test fixture), so it is safe
+    /// to run unconditionally.
+    pub(crate) fn apply(&self, template: &str, returns: bool, allow_schedule: bool) -> String {
+        let slot = usize::from(returns) | (usize::from(allow_schedule) << 1);
+        template.replace(BUILTIN_INDEX_PLACEHOLDER, &self.by_bits[slot])
+    }
 }
 
 /// Discover the `AGENTS.md` instruction files to inject, outermost first so
@@ -266,7 +284,7 @@ fn read_files(files: &[PathBuf]) -> Result<String, String> {
 /// Render the section list.  Headed sections get a `# heading` line;
 /// unheaded sections are emitted verbatim.  Bodies are trimmed and
 /// joined by a blank line.
-fn render(sections: &[(Option<&str>, String)]) -> String {
+pub fn render(sections: &[(Option<&str>, String)]) -> String {
     sections
         .iter()
         .map(|(h, body)| match h {
@@ -279,10 +297,20 @@ fn render(sections: &[(Option<&str>, String)]) -> String {
 }
 
 /// The `Host` section body: the environment snapshot ([`host::snapshot`]) and
-/// the live grant, one under the other.  Where the agent stands and when "now"
-/// is, then the authority it holds — the facts of its situation, read together.
-fn host_section(caps: &Capabilities, scratch: &Path) -> String {
-    let state = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::State);
+/// the live grant, one under the other.
+///
+/// Where the agent stands and when "now" is, then the authority it holds —
+/// the facts of its situation, read together.
+/// Takes the [`Scratch`](crate::bootstrap::Scratch) rather than its path
+/// because both products render this section: the scratch knows which
+/// [`App`](crate::bootstrap::App) it belongs to, and so which state
+/// directory to describe and which variable name the shell was actually
+/// seeded with.  Spelling either one literally here would tell a synod
+/// session about exarch's.
+pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
+    let state = scratch
+        .app()
+        .xdg_dir(ral_core::path::basedir::XdgKind::State);
     format!(
         "{}\n{}",
         host::snapshot(&state),
@@ -296,7 +324,7 @@ fn host_section(caps: &Capabilities, scratch: &Path) -> String {
 /// "unrestricted" (no attenuation at this layer); empty containers
 /// are "(none)".  One effect per line so the agent can scan its
 /// authority at a glance and avoid burning turns on denied ops.
-fn grant_summary(caps: &Capabilities, scratch: &Path) -> String {
+fn grant_summary(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
     // Ambient authority (e.g. the `dangerous` profile): nothing is
     // attenuated, so the denial-notation legend describes a runtime event
     // that cannot occur here. Collapse the whole section to one line plus
@@ -305,8 +333,9 @@ fn grant_summary(caps: &Capabilities, scratch: &Path) -> String {
     if ambient {
         return format!(
             "Ambient authority: every command, path, and network call is permitted; \
-the sandbox is the trust boundary.\n\n- scratch: `$EXARCH_SCRATCH` = {}\n",
-            scratch.display()
+the sandbox is the trust boundary.\n\n- scratch: `${}` = {}\n",
+            scratch.var(),
+            scratch.path().display()
         );
     }
     let mut s = String::from(include_str!("../data/grant-legend.md").trim_end());
@@ -336,7 +365,12 @@ the sandbox is the trust boundary.\n\n- scratch: `$EXARCH_SCRATCH` = {}\n",
             Some(false) => "deny",
         }
     );
-    let _ = writeln!(s, "- scratch: `$EXARCH_SCRATCH` = {}", scratch.display());
+    let _ = writeln!(
+        s,
+        "- scratch: `${}` = {}",
+        scratch.var(),
+        scratch.path().display()
+    );
     s
 }
 
@@ -492,13 +526,14 @@ mod tests {
         assert!(!n.contains("unschedule"));
     }
 
-    /// [`resolve_builtin_index`] substitutes the placeholder with exactly
+    /// [`BuiltinIndexes::apply`] substitutes the placeholder with exactly
     /// [`builtin_index`]'s own output for the given bits.
     #[test]
-    fn resolve_builtin_index_substitutes_the_placeholder() {
+    fn builtin_indexes_apply_substitutes_the_placeholder() {
         let shell = crate::bootstrap::boot_shell();
+        let indexes = BuiltinIndexes::resolve(&shell);
         let template = format!("before\n\n{BUILTIN_INDEX_PLACEHOLDER}\n\nafter");
-        let resolved = resolve_builtin_index(&template, &shell, false, true);
+        let resolved = indexes.apply(&template, false, true);
         assert_eq!(
             resolved,
             format!("before\n\n{}\n\nafter", builtin_index(&shell, false, true))
@@ -507,13 +542,13 @@ mod tests {
     }
 
     /// Text that never held the placeholder resolves as a no-op — the
-    /// property [`resolve_builtin_index`]'s doc relies on to run safely on
+    /// property [`BuiltinIndexes::apply`]'s doc relies on to run safely on
     /// a `--system` override or a bare test fixture.
     #[test]
-    fn resolve_builtin_index_is_a_noop_without_the_placeholder() {
+    fn builtin_indexes_apply_is_a_noop_without_the_placeholder() {
         let shell = crate::bootstrap::boot_shell();
         assert_eq!(
-            resolve_builtin_index("plain text", &shell, true, true),
+            BuiltinIndexes::resolve(&shell).apply("plain text", true, true),
             "plain text"
         );
     }

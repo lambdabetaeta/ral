@@ -27,6 +27,17 @@ pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prel
 #[cfg(unix)]
 pub(crate) const ENGINE_INSTALLER_TAG: &str = "repl";
 
+/// The REPL's engine boot recipe: the baked prelude over the empty host
+/// surface — the honest absence above, as a full shell.
+#[cfg(unix)]
+fn engine_boot_shell() -> ral_core::Shell {
+    ral_core::driver::boot_shell(
+        ral_core::io::TerminalState::default(),
+        &PRELUDE,
+        &ral_core::HostSurface::default(),
+    )
+}
+
 fn main() -> ExitCode {
     #[cfg(windows)]
     ral_core::io::enable_virtual_terminal_processing();
@@ -40,8 +51,7 @@ fn main() -> ExitCode {
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
             tag: ENGINE_INSTALLER_TAG,
-            prelude: &PRELUDE,
-            surface: ral_core::HostSurface::default,
+            boot: engine_boot_shell,
         }]);
     }
 

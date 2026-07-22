@@ -852,10 +852,8 @@ mod chokepoint_tests {
         top_level(&mut shell, "let prune_x = 1").expect("define");
         idle_spin(&mut shell, 2);
 
-        let (notices, _snapshot) = shell
-            .prune_idle_bindings()
-            .expect("prune_x must be idle enough to prune");
-        assert_eq!(notices.len(), 1);
+        let notices = shell.prune_idle_bindings();
+        assert_eq!(notices.len(), 1, "prune_x must be idle enough to prune");
         assert_eq!(notices[0].name, "prune_x");
         assert_eq!(notices[0].kind, "Int");
         assert!(shell.scope_lookup("prune_x").is_none());
@@ -909,7 +907,7 @@ mod chokepoint_tests {
         assert_eq!(handle_state(&shell, "h_pin"), HandleState::Running);
 
         assert!(
-            shell.prune_idle_bindings().is_none(),
+            shell.prune_idle_bindings().is_empty(),
             "a running handle must not be pruned"
         );
         assert!(shell.scope_lookup("h_pin").is_some());
@@ -927,10 +925,8 @@ mod chokepoint_tests {
         // h_pin; idle it back out before pruning again.
         idle_spin(&mut shell, 2);
 
-        let (notices, _snapshot) = shell
-            .prune_idle_bindings()
-            .expect("a settled handle must now prune");
-        assert_eq!(notices[0].name, "h_pin");
+        let notices = shell.prune_idle_bindings();
+        assert_eq!(notices[0].name, "h_pin", "a settled handle must now prune");
     }
 
     /// A handle that settles on its own (never pinned at all) is ordinary
@@ -949,24 +945,27 @@ mod chokepoint_tests {
         }
         idle_spin(&mut shell, 2);
 
-        let (notices, _snapshot) = shell
-            .prune_idle_bindings()
-            .expect("a settled handle prunes like any scratch");
+        let notices = shell.prune_idle_bindings();
+        assert!(
+            !notices.is_empty(),
+            "a settled handle prunes like any scratch"
+        );
         assert_eq!(notices[0].name, "h_settled");
         assert_eq!(notices[0].kind, "Handle");
     }
 
     /// A ledger entry whose install a panic rollback undid — simulated here
-    /// with the same public checkpoint/restore pair exarch's panic recovery
-    /// uses — is dropped silently at the next prune: no notice, no error.
+    /// with the same mobile install/restore motion the turn door's own
+    /// rollback performs — is dropped silently at the next prune: no
+    /// notice, no error.
     #[test]
     fn orphan_entry_dropped_silently() {
         let mut shell = armed_shell(2);
-        let pre = shell.mobile_snapshot();
+        let pre = shell.mobile();
         top_level(&mut shell, "let orphan_x = 1").expect("define");
         assert!(is_leased(&shell, "orphan_x"));
 
-        shell.restore_mobile(pre);
+        shell.install_mobile(pre);
         assert!(
             shell.scope_lookup("orphan_x").is_none(),
             "the rollback must remove it from scope"
@@ -979,7 +978,7 @@ mod chokepoint_tests {
         idle_spin(&mut shell, 2);
         let result = shell.prune_idle_bindings();
         assert!(
-            result.is_none(),
+            result.is_empty(),
             "an orphan-only sweep drops the entry silently and yields no notice"
         );
         assert!(!is_leased(&shell, "orphan_x"), "the orphan must be gone");
@@ -1022,46 +1021,24 @@ mod chokepoint_tests {
 
         shell.mobile.scope.push_scope();
         assert!(
-            shell.prune_idle_bindings().is_none(),
+            shell.prune_idle_bindings().is_empty(),
             "a mid-frame caller must be refused, not partially served"
         );
         shell.mobile.scope.pop_scope();
 
         assert!(
-            shell.prune_idle_bindings().is_some(),
+            !shell.prune_idle_bindings().is_empty(),
             "back at session scope, the same idle name prunes normally"
-        );
-    }
-
-    /// The snapshot the prune verb returns is post-prune: restoring it
-    /// later — even after further turns run — must not resurrect the
-    /// pruned name. This is the structural half of panic-recovery safety:
-    /// a caller cannot obtain the notices without the checkpoint that
-    /// makes them permanent.
-    #[test]
-    fn checkpoint_restores_post_prune_state() {
-        let mut shell = armed_shell(2);
-        top_level(&mut shell, "let checkpoint_x = 1").expect("define");
-        idle_spin(&mut shell, 2);
-
-        let (_notices, post_prune) = shell.prune_idle_bindings().expect("must prune");
-        assert!(shell.scope_lookup("checkpoint_x").is_none());
-
-        top_level(&mut shell, "let after_prune_y = 2").expect("further turns run");
-        shell.restore_mobile(post_prune);
-        assert!(
-            shell.scope_lookup("checkpoint_x").is_none(),
-            "the returned checkpoint is post-prune — restoring it cannot resurrect the name"
         );
     }
 
     /// Nothing idle enough yet: the verb is a clean no-op.
     #[test]
-    fn nothing_expired_returns_none() {
+    fn nothing_expired_prunes_nothing() {
         let mut shell = armed_shell(64);
         top_level(&mut shell, "let fresh_z = 1").expect("define");
         assert!(
-            shell.prune_idle_bindings().is_none(),
+            shell.prune_idle_bindings().is_empty(),
             "nothing is idle enough to prune yet"
         );
     }

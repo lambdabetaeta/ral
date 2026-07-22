@@ -476,7 +476,7 @@ impl ModelCatalog<LiveSource> {
 /// resolves (`$HOME` unset and no absolute override) — the catalog then
 /// runs memo-only.
 fn cache_path() -> Option<PathBuf> {
-    let dir = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Cache);
+    let dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Cache);
     dir.is_absolute().then(|| dir.join("models.json"))
 }
 

@@ -22,7 +22,7 @@ use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_dura
 use crate::shell_eval::{self, PinDigests};
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
-use ral_core::transport::{Event, EventReceiver, Frame};
+use ral_core::transport::{Event, EventReceiver};
 use ral_core::types::{Capabilities, EnquiryDesk, Error, Nursery, NurseryId};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use std::time::Duration;
 /// every [`crate::agent::Agent::run_shell`] install
 /// (`crate::agent::Agent::host_services`) so a handler never reaches back
 /// through `&mut Agent`/`&mut Shell` to get it. Mirrors
-/// [`crate::agent::Build`] minus the shell, plus the handles the harness
+/// [`crate::agent::Build`] minus the seat, plus the handles the harness
 /// verbs need that `Build` has no reason to carry (the registry, the
 /// parent's mailbox, the nursery, …).
 ///
@@ -42,6 +42,8 @@ use std::time::Duration;
 pub(crate) struct HostServices {
     /// The fleet's shared agent registry — `agents.clone()`.
     pub registry: AgentRegistry,
+    /// The session scratch a spawned child's seat shares with its parent.
+    pub scratch: Arc<crate::bootstrap::Scratch>,
     /// This turn's agent: the child's upward edge for `agent-start`'s
     /// receipt and the descendant check `message`/`agent-cancel` enforce.
     pub parent: AgentId,
@@ -87,6 +89,9 @@ pub(crate) struct HostServices {
     /// resolves it into the child's own [`Agent::system`] from the child's
     /// own `returns`/`allow_schedule`.
     pub system_template: String,
+    /// The fleet-shared builtin-index table the spawned child's own
+    /// `system` resolves from — no live `Shell` needed at the desk.
+    pub indexes: std::sync::Arc<crate::prompt::BuiltinIndexes>,
     /// Whether a human is attached to the fleet, inherited by every spawn.
     pub interactive: bool,
     /// The adoption end of this turn's body-side session forks
@@ -381,12 +386,7 @@ impl ExarchDesk {
         // unresolved template's raw length — and `Build` carries the same
         // string on to become the child's own `Agent::system`.
         let child_id = crate::agent::fresh_id();
-        let system_prompt = crate::prompt::resolve_builtin_index(
-            &s.system_template,
-            &shell,
-            true,
-            s.allow_schedule,
-        );
+        let system_prompt = s.indexes.apply(&s.system_template, true, s.allow_schedule);
         let child_log = {
             let parent_log = s.log.lock();
             let mut child_log = parent_log
@@ -409,11 +409,13 @@ impl ExarchDesk {
         // with the adopted shell and forked log standing in for
         // `fork_session`'s fresh ones.
         let fuel = s.fuel - 1;
+        let seat = crate::agent::seat::Seat::identity(shell, s.scratch.clone(), &child_log);
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,
+            indexes: s.indexes.clone(),
             caps: child_caps,
-            shell,
+            seat,
             log: child_log,
             parent: Some(s.parent),
             fuel,
@@ -925,43 +927,18 @@ impl SurfaceApplier {
     }
 }
 
-/// The inert desk `Agent::run_shell` installs once its own real desk's call
-/// is done, so nothing keeps that call's `Emitter` (and the rest of its
-/// `HostServices` capture) alive past the call that owns it — `engine.desk`
-/// is unobservable between calls, since nothing dispatches without
-/// `run_shell` installing a fresh real desk first. Answers the same honest
-/// absence `Shell::enquire` itself gives when no desk is installed at all,
-/// in the unreachable case something reads it directly.
+/// The inert desk the turn guard ([`crate::agent::seat::TurnGuard`])
+/// installs once a call's real desk retires, so nothing keeps that call's
+/// `Emitter` (and the rest of its `HostServices` capture) alive past the
+/// call that owns it — `engine.desk` is unobservable between calls, since
+/// nothing dispatches without a fresh real desk installed first. Answers
+/// the same honest absence `Shell::enquire` itself gives when no desk is
+/// installed at all, in the unreachable case something reads it directly.
 pub(crate) struct AbsentDesk;
 
 impl EnquiryDesk for AbsentDesk {
     fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
         Err(Error::new("this host answers no enquiries", 1))
-    }
-}
-
-/// Retires the installed desk when dropped: [`AbsentDesk`] back onto the
-/// transport, nursery cleared. `Agent::run_shell` holds one across its eval
-/// so the teardown runs on *every* exit — including a panic `drive`'s
-/// `catch_unwind` recovers from, where straight-line teardown would leave
-/// the real desk installed for the rest of the session.
-///
-/// Why the teardown matters at all: `engine.desk` is unobservable between
-/// calls (nothing dispatches without `run_shell` installing a fresh real
-/// desk first), but the installed [`DeskBinding`] holds its call's
-/// `Emitter` clone — leaving it in place would keep that clone (and the
-/// rest of its `HostServices` capture) alive until the *next* `ral` call
-/// ever replaces it, which a session that makes no further calls never
-/// does. The nursery clear is the symmetric half: it holds nothing once
-/// the turn guard has emptied it, but a hypothetical `fork_into_nursery`
-/// between calls must answer the honest absence error rather than find a
-/// stale nursery still installed.
-pub(crate) struct RetireDeskOnDrop<'t>(pub(crate) &'t ral_core::transport::IdentityTransport);
-
-impl Drop for RetireDeskOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.set_desk(Arc::new(AbsentDesk));
-        self.0.clear_nursery();
     }
 }
 
@@ -987,10 +964,10 @@ pub(crate) struct DeskBinding {
 
 impl EnquiryDesk for DeskBinding {
     fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
-        while let Some(frame) = self.events.try_recv() {
-            match frame {
-                Frame::Event(_, Event::Surface(val)) => self.apply.live(val),
-                Frame::Event(_, Event::DeferredSurface(batch)) => self.apply.deferred(batch),
+        while let Some((_, event)) = self.events.try_recv() {
+            match event {
+                Event::Surface(val) => self.apply.live(val),
+                Event::DeferredSurface(batch) => self.apply.deferred(batch),
                 _ => {}
             }
         }
@@ -1050,6 +1027,13 @@ mod tests {
         let (emit, _rx) = dummy_emitter();
         HostServices {
             registry: AgentRegistry::new(),
+            scratch: Arc::new(
+                crate::bootstrap::Scratch::for_test(
+                    crate::bootstrap::EXARCH,
+                    &format!("desk-{}", crate::agent::fresh_id()),
+                )
+                .expect("scratch dir"),
+            ),
             parent: 0,
             mailbox: Inbox::new().mailbox(),
             emit,
@@ -1063,6 +1047,9 @@ mod tests {
             schedules: ScheduleRegistry::new(),
             log: LogCell::new(fresh_log()),
             system_template: String::new(),
+            indexes: crate::prompt::BuiltinIndexes::resolve(&ral_core::Shell::new(
+                ral_core::io::TerminalState::default(),
+            )),
             interactive: false,
             nursery: Nursery::default(),
             generation: 0,
@@ -1113,8 +1100,7 @@ mod tests {
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: crate::agent::cancel::Token::new(),
-            eval_root: None,
-            turn_scope: None,
+            reach: None,
             mailbox: parent_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
         });
@@ -1422,6 +1408,9 @@ mod tests {
         desk.services.provider.swap(provider);
 
         let root = root_shell();
+        // The production seam: the fleet's index table is resolved from the
+        // same booted surface the parked child shells fork from.
+        desk.services.indexes = crate::prompt::BuiltinIndexes::resolve(&root);
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
 
@@ -1470,17 +1459,11 @@ mod tests {
             })
             .expect("the receipt must carry the child's log directory");
 
-        // The parked `shell` was already adopted into the spawned child by
-        // this point; a fresh fork off the same `root` carries an identical
-        // builtin table to stand in for it here.
-        let expected_shell = forkable_child_shell(&root);
-        let expected = crate::prompt::resolve_builtin_index(
-            &template,
-            &expected_shell,
-            true,
-            desk.services.allow_schedule,
-        )
-        .len();
+        let expected = desk
+            .services
+            .indexes
+            .apply(&template, true, desk.services.allow_schedule)
+            .len();
         assert_eq!(
             recorded_system_prompt_bytes(std::path::Path::new(&log_dir)),
             expected,
@@ -1809,8 +1792,7 @@ mod tests {
                 name: name.to_string(),
                 log_dir: PathBuf::from(format!("/tmp/{id}")),
                 cancel: crate::agent::cancel::Token::new(),
-                eval_root: None,
-                turn_scope: None,
+                reach: None,
                 mailbox: Inbox::new().mailbox(),
                 provider: ProviderHandle::new(scripted_provider()),
             });
@@ -2336,8 +2318,7 @@ mod tests {
                 name: name.to_string(),
                 log_dir: child.log_dir(),
                 cancel: child.cancel_token().clone(),
-                eval_root: Some(child.eval_root()),
-                turn_scope: Some(child.turn_scope()),
+                reach: Some(child.seat.eval_reach()),
                 mailbox: child.mailbox(),
                 provider: child.provider_handle(),
             })
@@ -2392,8 +2373,7 @@ mod tests {
             name: format!("keepalive-{parent_id}"),
             log_dir: log_dir.to_path_buf(),
             cancel: crate::agent::cancel::Token::new(),
-            eval_root: None,
-            turn_scope: None,
+            reach: None,
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
         });

@@ -61,7 +61,7 @@ enum Backend {
 
 impl Provider {
     /// Build a live provider selection on a shared engine.
-    pub(crate) fn build(
+    pub fn build(
         engine: Arc<Engine>,
         id: &ProviderId,
         model: String,

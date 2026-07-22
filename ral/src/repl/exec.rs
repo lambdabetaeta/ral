@@ -182,8 +182,8 @@ pub(super) fn execute_input(
                     None
                 }
                 Err(break_) => match break_ {
-                    transport::Break::Error(msg) => {
-                        eprint!("{msg}");
+                    transport::Break::Error { rendered, .. } => {
+                        eprint!("{rendered}");
                         None
                     }
                     transport::Break::Exit(code) => Some(crate::platform::exit_byte(code)),

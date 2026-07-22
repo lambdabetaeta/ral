@@ -22,7 +22,7 @@
 //! is one locked operation — remove the entry, and only if it was present,
 //! push the notice — so the reap-vs-observation race is benign: an entry an
 //! eliminator observed away first yields no notice. And the retention sweep
-//! ([`WorkerRegistry::advance_epoch`], driven by the host's ral-call
+//! ([`WorkerRegistry::sweep_retention`], driven by the registry's own ral-call
 //! epoch): a settled entry is where an unclaimed result waits, and one
 //! nobody claims within the retention bound is removed with a
 //! [`ReapCause::Retention`] notice. The host drains the
@@ -113,7 +113,7 @@ pub enum ReapCause {
     /// Older than the lease's `backstop`, observation notwithstanding.
     Backstop,
     /// A settled entry whose unclaimed result outlived the retention bound
-    /// — swept by [`WorkerRegistry::advance_epoch`], counted in ral calls
+    /// — swept by [`WorkerRegistry::sweep_retention`], counted in ral calls
     /// since the sweep first observed the entry settled.
     Retention,
 }
@@ -151,7 +151,8 @@ pub struct WorkerEntry {
     /// display-only.
     pub started: SystemTime,
     pub class: LeaseClass,
-    /// The host's ral-call epoch at which [`WorkerRegistry::advance_epoch`]
+    /// The registry's ral-call epoch at which
+    /// [`WorkerRegistry::sweep_retention`]
     /// first observed this entry settled — `None` while it runs. The
     /// retention clock is ral-calls-since-first-observed-settled, so a
     /// worker that settles mid-quiet-period starts its retention at the
@@ -228,6 +229,14 @@ struct RegistryInner {
     /// admission measure, so a birth-in-progress occupies its seat before
     /// it has anything registered to show for it.
     reserved: usize,
+    /// The registry's own ral-call clock: one tick per source dispatch
+    /// ([`Shell::run_turn`](super::Shell::run_turn)'s Source arm), the same
+    /// cadence the binding-lease ledger keeps.
+    epoch: u64,
+    /// The armed settled-entry retention, in ral calls. `None` — no host
+    /// ever armed it (the REPL) — retains settled entries indefinitely:
+    /// [`WorkerRegistry::sweep_retention`] is then a no-op.
+    retention: Option<u64>,
 }
 
 /// Cheap-clonable, per-[`Shell`](super::Shell) directory of every worker
@@ -363,18 +372,32 @@ impl WorkerRegistry {
         });
     }
 
-    /// Advance the registry to the host's ral-call `epoch`, sweeping
-    /// settled entries against `retention` — the settled entry's own lease,
-    /// where the lease chain governs running workers. Per entry, under one
-    /// registry lock:
+    /// Arm the settled-entry retention bound, in ral calls. Idempotent by
+    /// replacement, like the binding lease's arm door: a re-arm swaps the
+    /// bound; already-stamped entries are measured against the new one at
+    /// the next sweep.
+    pub(crate) fn arm_retention(&self, retention: u64) {
+        self.0.lock().unwrap().retention = Some(retention);
+    }
+
+    /// Advance the registry's own ral-call clock by one. Ticked at the turn
+    /// door's Source arm, beside the binding ledger's tick, so the two
+    /// ledgers read one logical clock.
+    pub(crate) fn tick_epoch(&self) {
+        self.0.lock().unwrap().epoch += 1;
+    }
+
+    /// Sweep settled entries against the armed retention — the settled
+    /// entry's own lease, where the lease chain governs running workers. A
+    /// no-op unarmed. Per entry, under one registry lock:
     ///
     /// - still `Running`: untouched — retention never applies to live work.
     /// - settled and unstamped: stamp `settled_epoch = Some(epoch)`. The
     ///   retention clock is ral-calls-since-first-observed-settled, so a
     ///   worker that settles mid-quiet-period starts its retention at the
     ///   next call, never retroactively.
-    /// - stamped `Some(s)` with `epoch − s >= retention` (saturating — a
-    ///   host-supplied epoch must never panic core): remove the entry and
+    /// - stamped `Some(s)` with `epoch − s >= retention` (saturating):
+    ///   remove the entry and
     ///   push a [`ReapCause::Retention`] notice, atomic with the removal
     ///   like every reap here.
     ///
@@ -388,8 +411,12 @@ impl WorkerRegistry {
     /// `lease_fire`'s if-condition temporary, `builtin_cancel`'s copied-out
     /// read, and the worker exit mark each drop their guard before any
     /// registry call.
-    pub(crate) fn advance_epoch(&self, epoch: u64, retention: u64) {
+    pub(crate) fn sweep_retention(&self) {
         let mut inner = self.0.lock().unwrap();
+        let Some(retention) = inner.retention else {
+            return;
+        };
+        let epoch = inner.epoch;
         let mut i = 0;
         while i < inner.entries.len() {
             let running = *inner.entries[i].handle.state.lock().unwrap() == HandleState::Running;
@@ -452,14 +479,23 @@ impl WorkerRegistry {
     /// an empty one; the cancels fire only after the guard drops, per the
     /// module's lock discipline — never calling out while holding the lock.
     pub(crate) fn cancel_all(&self) -> usize {
-        let taken = std::mem::take(&mut *self.0.lock().unwrap());
-        for entry in &taken.entries {
+        let (entries, _notices) = {
+            let mut inner = self.0.lock().unwrap();
+            // Entries and pending notices reset together; the armed
+            // retention policy and the epoch clock are configuration, not
+            // roster, and survive the wipe.
+            (
+                std::mem::take(&mut inner.entries),
+                std::mem::take(&mut inner.reap_notices),
+            )
+        };
+        for entry in &entries {
             entry
                 .handle
                 .cancel
                 .cancel(crate::process::CancelCause::Explicit);
         }
-        taken.entries.len()
+        entries.len()
     }
 }
 

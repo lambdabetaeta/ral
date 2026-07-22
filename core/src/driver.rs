@@ -384,6 +384,15 @@ fn arm_turn_wall(
     effective.map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d))
 }
 
+/// The message of a recovered panic payload, for either string shape.
+fn panic_text(payload: &dyn std::any::Any) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&'static str>().map(|s| (*s).into()))
+        .unwrap_or_else(|| "non-string payload".into())
+}
+
 impl Shell {
     /// Run one whole [`Turn`] under `req`, synchronously, and return one
     /// flat [`TurnReport`]. The single turn door: the turn's
@@ -399,15 +408,44 @@ impl Shell {
     /// disconnecting. A deferred worker may hold a clone of the surface sink
     /// forever; it changes nothing, because nothing waits on that sink to
     /// decide the turn is over.
-    pub fn run_turn(&mut self, mut req: TurnRequest<'_>) -> TurnReport {
+    ///
+    /// The turn door is also the durability boundary
+    /// (`decisions/260706_enquiry-channel` §5): the shell checkpoints its
+    /// [`Mobile`](crate::types::Mobile) at entry and a panic anywhere in the
+    /// turn — compile, eval, hook body, desk handler, ready-boundary
+    /// housekeeping — restores it, so a panicked turn reports as a failed
+    /// turn with the shell already rolled back. State-owner rollback, one
+    /// mechanism for every transport and host; a snapshot never crosses the
+    /// seam.
+    pub fn run_turn(&mut self, req: TurnRequest<'_>) -> TurnReport {
+        let checkpoint = self.mobile.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch_turn(req))) {
+            Ok(report) => report,
+            Err(payload) => {
+                self.mobile = checkpoint;
+                TurnReport::Static {
+                    diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
+                        format!("turn panicked: {}", panic_text(payload.as_ref())),
+                        101,
+                    )),
+                }
+            }
+        }
+    }
+
+    /// [`Self::run_turn`]'s body, separated so the durability wrapper above
+    /// is the only way through the door.
+    fn dispatch_turn(&mut self, mut req: TurnRequest<'_>) -> TurnReport {
         match req.turn.program {
             Program::Source(ref src) => {
-                // The binding-lease ledger's committed-turn clock: one tick
+                // The two session ledgers' committed-turn clock: one tick
                 // per source dispatch, whether or not it goes on to compile —
-                // a failed turn ages the ledger's scratch without renewing it
-                // (`decisions/260629_agent-binding-reaping`). A no-op when
-                // unarmed, so the REPL/batch pay one branch and nothing else.
+                // a failed turn ages the ledgers' scratch without renewing it
+                // (`decisions/260629_agent-binding-reaping`). No-ops when
+                // unarmed, so the REPL/batch pay two branches and nothing
+                // else.
                 self.local.bindings.tick();
+                self.local.workers.tick_epoch();
 
                 // Mint the turn's foreground scope and arm its wall *before*
                 // compiling, so the limit bounds the whole turn — compile and

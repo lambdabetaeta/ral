@@ -19,7 +19,6 @@ use crossterm::event::{
 
 use crate::{
     agent::{Agent, Control, ControlFlow, cancel},
-    bootstrap::Scratch,
     bus::{AgentId, Emitter, FleetBus, Inbox, InboxMsg, Pass, drain_pass},
     fleet::{Fleet, registry::AgentRegistry},
     provider::{
@@ -70,11 +69,9 @@ impl Tui {
 /// Only the trunk drives with this `Control` (a sub-agent uses
 /// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
 /// the trunk's own context and provider.
-pub struct ReplControl<'a> {
-    scratch: &'a Scratch,
-}
+pub struct ReplControl;
 
-impl Control for ReplControl<'_> {
+impl Control for ReplControl {
     fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
         let trimmed = raw.trim();
         let (head, rest) = commands::split_head(trimmed);
@@ -91,7 +88,7 @@ impl Control for ReplControl<'_> {
         }
         match trimmed {
             "/clear" => {
-                let _ = session.clear(self.scratch);
+                let _ = session.clear();
                 ControlFlow::Continue
             }
             "/compact" => {
@@ -130,7 +127,6 @@ pub fn run(
     info: &banner::SessionInfo<'_>,
     store: &mut CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
-    scratch: &Scratch,
     run_dir: &Path,
     seed: Option<String>,
     vi: bool,
@@ -170,7 +166,7 @@ pub fn run(
     // loop alongside it.  The trunk drives on its own provider handle.
     let done = AtomicBool::new(false);
     let done_ref = &done;
-    let mut control = ReplControl { scratch };
+    let mut control = ReplControl;
     // The worker captures the trunk's emitter, not `&fleet.bus`: `FleetBus` is
     // not `Sync` (its `Receiver` is single-consumer), so the receiver stays on
     // the UI thread. The emitter is `Send` and is all the worker needs.  It
@@ -541,8 +537,7 @@ mod tests {
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
-        let scratch = Scratch::for_test("resources-route").expect("scratch dir");
-        let mut control = ReplControl { scratch: &scratch };
+        let mut control = ReplControl;
         let _ = session.drive(&mut control, &emit);
 
         let event = rx

@@ -1,6 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["core", "ral", "ral-sh", "exarch", "prompt-editor", "vendor/ripgrep-core"]
+members = [
+    "core",
+    "ral",
+    "ral-sh",
+    "exarch",
+    "synod",
+    "synod/app",
+    "vm-manager",
+    "ral-daemon",
+    "prompt-editor",
+    "vendor/ripgrep-core",
+]
 
 # Shared third-party versions.  Member crates point at these with
 # `dep = { workspace = true }` so a version bump happens in one place.

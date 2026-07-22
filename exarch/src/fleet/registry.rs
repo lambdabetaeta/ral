@@ -34,14 +34,14 @@
 //!   * a **per-turn interrupt**, distinct from the terminate cascade above:
 //!     [`AgentRegistry::interrupt`] unwinds exactly one entry's in-flight
 //!     turn through [`interrupt_entry`], which cancels the [`Token`] *and*
-//!     whatever [`ForegroundScope`](ral_core::process::ForegroundScope) the
-//!     entry's [`TurnScope`] cell currently holds — the scope `exarch`'s own
-//!     transport captures fresh at the start of every turn
-//!     ([`crate::agent::Agent::turn_scope`]). Cancelling that scope reaches
-//!     an in-flight eval exactly as cancelling `eval_root` would, but the
-//!     *next* turn mints an entirely new scope from the untouched durable
-//!     root, so an interrupt never poisons a later turn.  `eval_root` stays
-//!     the terminate cascade's alone;
+//!     interrupts through the entry's [`EvalReach`] — which cancels whatever
+//!     [`ForegroundScope`](ral_core::process::ForegroundScope) the
+//!     [`TurnScope`] cell currently holds, the scope `exarch`'s own
+//!     transport captures fresh at the start of every turn. Cancelling that
+//!     scope reaches an in-flight eval exactly as terminating would, but
+//!     the *next* turn mints an entirely new scope from the untouched
+//!     durable root, so an interrupt never poisons a later turn.  The
+//!     terminate layer stays [`EvalReach::terminate`]'s alone;
 //!   * an **idle lease** (children only), armed on the shared
 //!     `process::reaper` as a self-re-arming `Run` deadline against the
 //!     agent's exchange clock, so an abandoned child — never engaged, or
@@ -79,6 +79,51 @@ use std::time::{Duration, Instant};
 /// dispatch that may run for the turn's whole duration.  `None` until the
 /// agent's first turn runs.
 pub(crate) type TurnScope = Arc<Mutex<Option<ForegroundScope>>>;
+
+/// How the registry reaches one agent's running eval, per seat kind — the
+/// eval-layer half of every cancel path, beside the cooperative [`Token`]
+/// each entry also carries.  Two distinct motions, both seat-shaped:
+/// [`Self::terminate`] ends the agent's eval for good, [`Self::interrupt`]
+/// unwinds exactly the in-flight turn and leaves every later turn clean.
+pub(crate) enum EvalReach {
+    /// The in-process reach: the durable root of the agent's own `Shell`
+    /// (the terminate cascade's handle — cancelling it also reaches the
+    /// agent's detached workers through the cancel-scope ancestor chain),
+    /// and the turn-scope cell its transport refreshes each turn (the
+    /// interrupt's handle — cancelling the held scope unwinds the in-flight
+    /// turn alone, since the next turn mints a fresh scope from the
+    /// untouched root).
+    Identity {
+        eval_root: DurableRoot,
+        turn_scope: TurnScope,
+    },
+}
+
+impl EvalReach {
+    /// Unwind the in-flight turn without ending the agent: cancel whatever
+    /// [`ForegroundScope`] the turn-scope cell currently holds.  Never
+    /// touches the durable root — the next turn is born uncancelled.
+    pub(crate) fn interrupt(&self) {
+        let Self::Identity { turn_scope, .. } = self;
+        if let Some(scope) = turn_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            scope.cancel(CancelCause::Interrupt);
+        }
+    }
+
+    /// End the agent's eval: cancel its session's durable root, so an
+    /// in-flight `ral` eval unwinds at the evaluator's poll points rather
+    /// than running to its timeout wall.  Permanently poisons the root by
+    /// design — every caller is ending the agent, so there is no later turn
+    /// for a poisoned root to break.
+    pub(crate) fn terminate(&self, cause: CancelCause) {
+        let Self::Identity { eval_root, .. } = self;
+        eval_root.cancel(cause);
+    }
+}
 
 /// A child's idle lease: the wall-clock span since its last human exchange
 /// (birth is the epoch) before its whole subtree is reaped.
@@ -119,8 +164,11 @@ pub struct Registration {
     pub name: String,
     pub log_dir: PathBuf,
     pub cancel: Token,
-    pub eval_root: Option<DurableRoot>,
-    pub turn_scope: Option<TurnScope>,
+    /// The eval-layer cancel reach for this agent's seat, or `None` for the
+    /// trunk, whose session outlives any cancel — an Esc cancels its
+    /// *turn*, delivered through the published foreground slot, never its
+    /// eval layer.
+    pub(crate) reach: Option<EvalReach>,
     pub mailbox: Mailbox,
     pub provider: ProviderHandle,
 }
@@ -151,22 +199,16 @@ struct Entry {
     log_dir: PathBuf,
     started: Instant,
     cancel: Token,
-    /// The eval-layer cancel handle — the durable root of the agent's own
-    /// `Shell`.  A tripped [`Token`] alone cannot stop an in-flight `ral`
-    /// tool call (the drive loop reads it only between steps, and
-    /// `run_shell` blocks until the engine reports), so the cascade also
-    /// cancels the agent's session root: the eval unwinds at the
-    /// evaluator's own poll points.  `None` for the trunk, whose session
-    /// outlives any cancel — an Esc cancels its *turn*, delivered through
-    /// the published foreground slot, never its root.
-    eval_root: Option<DurableRoot>,
-    /// The current-turn foreground scope [`AgentRegistry::interrupt`]
-    /// cancels, distinct from `eval_root`: refreshed every turn by the
-    /// agent's own transport, so cancelling it unwinds the in-flight turn
-    /// alone — the next turn mints a fresh scope from the untouched
-    /// `eval_root`.  `None` for the trunk, whose Esc routes through the
-    /// published foreground slot instead.
-    turn_scope: Option<TurnScope>,
+    /// The eval-layer cancel reach ([`EvalReach`]).  A tripped [`Token`]
+    /// alone cannot stop an in-flight `ral` tool call (the drive loop reads
+    /// it only between steps, and `run_shell` blocks until the engine
+    /// reports), so the cascade also [`terminate`](EvalReach::terminate)s
+    /// through this reach, and a per-tab interrupt
+    /// [`interrupt`](EvalReach::interrupt)s through it.  `None` for the
+    /// trunk, whose session outlives any cancel — an Esc cancels its
+    /// *turn*, delivered through the published foreground slot, never its
+    /// eval layer.
+    reach: Option<EvalReach>,
     /// The agent's inbox sender.  A human exchange delivers through
     /// [`AgentRegistry::steer`], the registry's one steering door; the
     /// `message` tool delivers a marked peer note by id through
@@ -259,8 +301,8 @@ impl AgentRegistry {
     /// detached worker must be reaped); a branch is a parented child
     /// *without* one (a conversation must not lose a turn at the hour mark);
     /// a root never had one.  A `parent`-set agent still carries its
-    /// `eval_root` and `turn_scope` so the cascade and an interrupt each
-    /// reach its running eval.
+    /// [`EvalReach`] so the cascade and an interrupt each reach its running
+    /// eval.
     ///
     /// # Errors
     /// Returns [`RegisterError::SessionDead`] when `parent` is `Some` and is
@@ -295,8 +337,7 @@ impl AgentRegistry {
             name,
             log_dir,
             cancel,
-            eval_root,
-            turn_scope,
+            reach,
             mailbox,
             provider,
         } = reg;
@@ -330,8 +371,7 @@ impl AgentRegistry {
                 log_dir,
                 started: Instant::now(),
                 cancel,
-                eval_root,
-                turn_scope,
+                reach,
                 mailbox,
                 provider,
                 lease,
@@ -581,7 +621,7 @@ impl AgentRegistry {
     /// without cascading to descendants or removing the entry. Esc/Ctrl-C on
     /// a focused sub-agent tab route here; the agent drops its turn and
     /// re-parks — its *next* turn runs uncancelled, since [`interrupt_entry`]
-    /// never touches `eval_root`.
+    /// never touches the terminate layer.
     pub fn interrupt(&self, id: AgentId) {
         let g = self.lock();
         if let Some(e) = g.entries.get(&id) {
@@ -772,31 +812,24 @@ fn renew_entry(e: &mut Entry) {
 
 /// Cancel one entry across both terminate-class layers: the cooperative
 /// [`Token`] the drive loop polls between steps, and — for a parented
-/// agent — its session's durable root, so an in-flight eval unwinds at the
-/// evaluator's poll points rather than running to its timeout wall. This
-/// entry's `eval_root` is permanently poisoned by design: every caller of
-/// this function is ending the agent (or reaping it as abandoned), so there
-/// is no later turn for a poisoned root to break.
+/// agent — its eval layer through [`EvalReach::terminate`], so an in-flight
+/// eval unwinds at the evaluator's poll points rather than running to its
+/// timeout wall.
 fn terminate_entry(e: &Entry, cause: CancelCause) {
     e.cancel.cancel(cause);
-    if let Some(root) = &e.eval_root {
-        root.cancel(cause);
+    if let Some(reach) = &e.reach {
+        reach.terminate(cause);
     }
 }
 
 /// Unwind one entry's in-flight turn without ending the agent: cancel the
-/// [`Token`] and whatever [`ForegroundScope`] its `turn_scope` cell currently
-/// holds. Never touches `eval_root` — the next turn mints a fresh scope from
-/// that untouched root regardless of what this call cancels.
+/// [`Token`] and interrupt through the entry's [`EvalReach`], which never
+/// touches the terminate layer — the next turn is born clean regardless of
+/// what this call cancels.
 fn interrupt_entry(e: &Entry) {
     e.cancel.cancel(CancelCause::Interrupt);
-    if let Some(cell) = &e.turn_scope
-        && let Some(scope) = cell
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-    {
-        scope.cancel(CancelCause::Interrupt);
+    if let Some(reach) = &e.reach {
+        reach.interrupt();
     }
 }
 
@@ -835,8 +868,10 @@ mod tests {
             name: format!("a{id}"),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
-            eval_root: parent.map(|_| DurableRoot::default()),
-            turn_scope: parent.map(|_| TurnScope::default()),
+            reach: parent.map(|_| EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
         })
@@ -870,8 +905,10 @@ mod tests {
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: branch_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -883,8 +920,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
-            eval_root: Some(worker_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: worker_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -934,8 +973,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: token.clone(),
-            eval_root: Some(eval_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: eval_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -967,8 +1008,7 @@ mod tests {
             name: "trunk".into(),
             log_dir: PathBuf::from("/tmp/trunk"),
             cancel: trunk_token.clone(),
-            eval_root: None,
-            turn_scope: None,
+            reach: None,
             mailbox: mb(),
             provider: provider(),
         });
@@ -980,8 +1020,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1030,8 +1072,10 @@ mod tests {
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp/branch"),
             cancel: branch_token.clone(),
-            eval_root: Some(branch_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: branch_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1042,8 +1086,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: child_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1099,8 +1145,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
-            eval_root: Some(child_root.clone()),
-            turn_scope: Some(child_turn_scope.clone()),
+            reach: Some(EvalReach::Identity {
+                eval_root: child_root.clone(),
+                turn_scope: child_turn_scope.clone(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1111,8 +1159,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: grandchild_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1166,8 +1216,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            eval_root: Some(eval_root.clone()),
-            turn_scope: Some(turn_scope.clone()),
+            reach: Some(EvalReach::Identity {
+                eval_root: eval_root.clone(),
+                turn_scope: turn_scope.clone(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1203,8 +1255,10 @@ mod tests {
             name: "lint".into(),
             log_dir: PathBuf::from("/log/7"),
             cancel: token.clone(),
-            eval_root: Some(eval_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: eval_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
         });
@@ -1235,8 +1289,7 @@ mod tests {
             name: "r".into(),
             log_dir: "/l".into(),
             cancel: r.clone(),
-            eval_root: None,
-            turn_scope: None,
+            reach: None,
             mailbox: mb(),
             provider: provider(),
         });
@@ -1247,8 +1300,10 @@ mod tests {
             name: "c".into(),
             log_dir: "/l".into(),
             cancel: c.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1259,8 +1314,10 @@ mod tests {
             name: "g".into(),
             log_dir: "/l".into(),
             cancel: g.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1271,8 +1328,10 @@ mod tests {
             name: "s".into(),
             log_dir: "/l".into(),
             cancel: sibling.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1310,8 +1369,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: inbox.mailbox(),
             provider: provider(),
         });
@@ -1374,8 +1435,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: inbox.mailbox(),
             provider: provider(),
         });
@@ -1400,8 +1463,10 @@ mod tests {
             name: "leaf".into(),
             log_dir: PathBuf::from("/tmp/1"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1413,8 +1478,10 @@ mod tests {
             name: "sibling".into(),
             log_dir: PathBuf::from("/tmp/2"),
             cancel: sibling_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1426,8 +1493,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: grandchild_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1480,8 +1549,10 @@ mod tests {
             name: "orphan".into(),
             log_dir: PathBuf::from("/tmp/orphan"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1510,8 +1581,10 @@ mod tests {
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: parent_token.clone(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1525,8 +1598,10 @@ mod tests {
             name: "late-child".into(),
             log_dir: PathBuf::from("/tmp/late-child"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1554,8 +1629,10 @@ mod tests {
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1568,8 +1645,10 @@ mod tests {
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper-2"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1607,8 +1686,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
-            eval_root: Some(eval_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: eval_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1657,8 +1738,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            eval_root: Some(eval_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: eval_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1696,8 +1779,10 @@ mod tests {
                 name: "child".into(),
                 log_dir: PathBuf::from("/tmp/child"),
                 cancel: token.clone(),
-                eval_root: Some(DurableRoot::default()),
-                turn_scope: None,
+                reach: Some(EvalReach::Identity {
+                    eval_root: DurableRoot::default(),
+                    turn_scope: TurnScope::default(),
+                }),
                 mailbox: mb(),
                 provider: provider(),
             })
@@ -1728,8 +1813,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            eval_root: Some(eval_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: eval_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1766,8 +1853,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: inbox.mailbox(),
             provider: provider(),
         });
@@ -1806,8 +1895,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            eval_root: Some(DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: inbox.mailbox(),
             provider: provider(),
         });

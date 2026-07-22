@@ -497,7 +497,6 @@ mod tests {
 
     use super::*;
     use crate::agent::Agent;
-    use crate::bootstrap::Scratch;
     use std::sync::Mutex;
 
     /// Both tests touch process-global state (the escalation ladder and the
@@ -647,7 +646,6 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("exarch-clear-interrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let scratch = Scratch::for_test("clear-interrupt").expect("scratch directory");
         let mut session = Agent::for_test(&dir, "system").expect("test session");
 
         // Seed the ladder exactly as a delivered SIGTERM would: through
@@ -660,7 +658,7 @@ mod tests {
         );
 
         session
-            .clear(&scratch)
+            .clear()
             .expect("/clear should reboot despite a stale escalation tick");
         assert!(
             !ral_core::process::escalation_pending(),
@@ -677,7 +675,6 @@ mod tests {
 
         ral_core::process::clear();
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(scratch.path());
     }
 
     /// Drive the two `#[ignore]`d signal-delivery tests above in a child

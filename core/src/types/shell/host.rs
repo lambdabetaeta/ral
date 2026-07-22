@@ -8,7 +8,6 @@
 //! REPL and exarch actually need — while [`Shell::mobile`](super::Shell) stays
 //! the public embedding seam.
 
-use super::MobileSnapshot;
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
@@ -192,26 +191,16 @@ impl Shell {
         self.local.workers.take_reap_notices()
     }
 
-    /// Advance this shell's worker registry to the host's ral-call `epoch`,
-    /// sweeping settled entries against `retention` — stamp an entry first
-    /// observed settled, expire one whose unclaimed result has sat stamped
-    /// for `retention` or more calls (a
-    /// [`Retention`](crate::types::ReapCause::Retention) notice rides the
-    /// same drain as the lease chain's). The host calls
-    /// this once per ral call, after the evaluation returns; a host that
-    /// never calls it (the REPL) retains settled entries indefinitely.
-    pub fn advance_worker_epoch(&mut self, epoch: u64, retention: u64) {
-        self.local.workers.advance_epoch(epoch, retention);
-    }
-
-    /// Cancel every worker registered on this shell and reset the registry
-    /// wholesale, entries and pending reap notices alike. This is the
-    /// host's `/clear` arm: explicit destruction outranks every lease, the
-    /// durable class included, so a cleared shell starts with neither
-    /// stray running workers nor stale reap events. Returns how many
-    /// entries were cancelled.
-    pub fn cancel_workers(&mut self) -> usize {
-        self.local.workers.cancel_all()
+    /// Arm this shell's settled-worker retention, in ral calls — the boot
+    /// door beside [`Self::arm_binding_lease`]. The registry keeps its own
+    /// clock (one tick per source dispatch) and sweeps at each turn's ready
+    /// boundary — stamping an entry first observed settled, expiring one
+    /// whose unclaimed result has sat stamped a full `retention` of calls
+    /// (a [`Retention`](crate::types::ReapCause::Retention) notice rides
+    /// the same drain as the lease chain's). A host that never arms (the
+    /// REPL) retains settled entries indefinitely.
+    pub fn arm_worker_retention(&mut self, retention: u64) {
+        self.local.workers.arm_retention(retention);
     }
 
     /// Number of distinct lexical bindings visible in scope, a name
@@ -257,21 +246,24 @@ impl Shell {
     /// notices simply wait for a turn that does install one, exactly as
     /// they did before this turn ran.
     ///
-    /// The binding-lease ledger's *idle-prune* notice does not ride here: a
-    /// prune is a host-timed act, called between turns
-    /// ([`Self::prune_idle_bindings`] hands back the post-prune
-    /// [`MobileSnapshot`] a panic-recovery baseline needs, which cannot
-    /// itself cross the turn/surface/Report seam) — with no turn installed
-    /// at that call site, there is no live surface sink to push through
-    /// either. It stays the one notice a host composes itself from the
-    /// polled return.
+    /// The binding-lease ledger's *idle-prune* runs here too — engine-side
+    /// housekeeping at the engine's own ready boundary, its notice one more
+    /// pushed class. Durability makes this safe structurally: the panic
+    /// rollback checkpoint is taken at each turn's entry
+    /// ([`Shell::run_turn`]), after any prior boundary's prune, so a pruned
+    /// name can never be resurrected by a rollback.
     ///
-    /// The pushed shapes — `` `notice [kind: `reap, cmd, cause] `` and
-    /// `` `notice [kind: `large-binding, name, bytes] `` — are what the
+    /// The pushed shapes — `` `notice [kind: `reap, cmd, cause] ``,
+    /// `` `notice [kind: `large-binding, name, bytes] `` and
+    /// `` `notice [kind: `prune, names, idle-calls] `` — are what the
     /// exarch host decodes back (`card::value_to_notice`); `cause` travels
     /// as the same lowercase tag exarch's transcript writer already used, so
     /// the wire word and the forensic-record word are one word.
     pub(crate) fn emit_ready_boundary_notices(&mut self) {
+        // The retention sweep runs before the sink guard: expiry is a fact
+        // regardless of anyone listening, and its notice waits in the
+        // ledger for the next sinked turn either way.
+        self.local.workers.sweep_retention();
         if self.turn.surface.is_none() {
             return;
         }
@@ -323,6 +315,49 @@ impl Shell {
                 ]))),
             });
         }
+        let pruned = self.prune_idle_bindings();
+        if !pruned.is_empty() {
+            self.surface(&Value::Variant {
+                label: "notice".into(),
+                payload: Some(Box::new(Value::map(vec![
+                    (
+                        "kind".into(),
+                        Value::Variant {
+                            label: "prune".into(),
+                            payload: None,
+                        },
+                    ),
+                    (
+                        "names".into(),
+                        Value::list(
+                            pruned
+                                .iter()
+                                .map(|n| Value::String(n.name.clone()))
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "idle-calls".into(),
+                        Value::list(
+                            pruned
+                                .iter()
+                                .map(|n| {
+                                    Value::Int({
+                                        #[allow(
+                                            clippy::cast_possible_wrap,
+                                            reason = "an idle-call count is far below i64::MAX"
+                                        )]
+                                        {
+                                            n.idle_calls as i64
+                                        }
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ]))),
+            });
+        }
     }
 
     /// Arm this shell's binding-lease ledger and seal the boot baseline:
@@ -344,14 +379,15 @@ impl Shell {
 
     /// Prune every leased name idle past the armed lease's bound.
     ///
-    /// Returns `None` when the ledger is unarmed, when the shell is not at
-    /// session scope (a mid-frame caller — e.g. a lifecycle hook — is
-    /// refused rather than allowed to unset from a transient frame), or
-    /// when nothing was pruned. Otherwise returns the notices **and a
-    /// [`MobileSnapshot`] taken after the prune**: any durable checkpoint
-    /// the host holds is now stale, and the returned one replaces it — the
-    /// signature makes forgetting to refresh it a type error rather than a
-    /// reviewer's job (`decisions/260629_agent-binding-reaping`).
+    /// Returns the empty vec when the ledger is unarmed, when the shell is
+    /// not at session scope (a mid-frame caller — e.g. a lifecycle hook —
+    /// is refused rather than allowed to unset from a transient frame), or
+    /// when nothing was pruned. Engine-internal housekeeping: called at the
+    /// ready boundary by [`Self::emit_ready_boundary_notices`], which
+    /// pushes the notices as one `` `notice [kind: `prune] `` class. A
+    /// pruned name cannot be resurrected by a panic rollback — the rollback
+    /// checkpoint is taken at each turn's own entry ([`Shell::run_turn`]),
+    /// after any prune.
     ///
     /// One pass, in deterministic (sorted) name order, over every expired
     /// candidate: a name absent from scope (its install was rolled back by
@@ -364,9 +400,9 @@ impl Shell {
     /// still in the session's top scope a fresh lease starting now — this
     /// runs even on a pass that prunes nothing, self-healing a missed
     /// install path into "leased late" rather than "immortal".
-    pub fn prune_idle_bindings(&mut self) -> Option<(Vec<BindingPruneNotice>, MobileSnapshot)> {
+    pub(crate) fn prune_idle_bindings(&mut self) -> Vec<BindingPruneNotice> {
         if !self.local.bindings.armed() || !self.mobile.scope.at_session_scope() {
-            return None;
+            return Vec::new();
         }
         let mut notices = Vec::new();
         for (name, idle_calls) in self.local.bindings.expired() {
@@ -394,11 +430,7 @@ impl Shell {
         for name in top_scope_names {
             self.local.bindings.adopt(&name);
         }
-        if notices.is_empty() {
-            None
-        } else {
-            Some((notices, self.mobile_snapshot()))
-        }
+        notices
     }
 
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the

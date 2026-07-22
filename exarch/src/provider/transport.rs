@@ -102,7 +102,7 @@ pub struct Engine {
 
 impl Engine {
     /// Build the process engine and prime pricing.
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         let runtime = make_runtime();
         prime_pricing(&runtime);
         Arc::new(Self {

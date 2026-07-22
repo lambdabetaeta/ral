@@ -45,7 +45,6 @@ mod scope;
 pub(crate) mod workers;
 
 pub use host::TerminalLoan;
-pub use inherit::MobileSnapshot;
 pub(crate) use inherit::ThunkBody;
 
 use self::bindings::BindingLedger;
@@ -220,7 +219,7 @@ pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
 /// Identifier for a shell session parked in a [`Nursery`] by
 /// [`Shell::fork_into_nursery`], and redeemed once by [`Nursery::adopt`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NurseryId(pub u64);
 
 /// [`Nursery`]'s locked interior: the parked forks plus the monotonic
@@ -476,7 +475,6 @@ pub struct SessionState {
 
 /// Host-local scratch whose members carry their own flow rules — not a
 /// lifetime category, the residue left once turn and session state are named.
-#[derive(Default)]
 pub struct LocalState {
     /// Audit collector: the in-flight execution tree plus the current
     /// byte-capture policy.  Scope-introducing builtins (`grant`, `within`,
@@ -505,6 +503,37 @@ pub struct LocalState {
     /// `Shell`, i.e. one per agent; a sub-agent fork or spawned worker starts
     /// with a fresh, inert one — nothing shares it, nothing flows back.
     pub(crate) bindings: BindingLedger,
+    /// Whether this state owns its worker registry. True everywhere but a
+    /// [`Shell::spawn_thread`] child, which shares its *parent's* registry
+    /// by `Arc` clone — a worker's own shell dropping must not cancel its
+    /// parent's whole roster. Read by the [`Drop`] below: a session's
+    /// workers die when the session's shell is torn down, the ownership
+    /// edge the session-ledger ADR calls for, closed once here rather than
+    /// at every call site that can end a session's life.
+    pub(crate) workers_owned: bool,
+}
+
+impl Default for LocalState {
+    fn default() -> Self {
+        Self {
+            audit: Audit::default(),
+            repl: ReplScratch::default(),
+            workers: WorkerRegistry::default(),
+            bindings: BindingLedger::default(),
+            workers_owned: true,
+        }
+    }
+}
+
+/// A session's workers die with the session's shell: cancelling on drop
+/// covers every teardown path — an agent's ordinary end, a `/clear`'s shell
+/// replacement, a wire session's detach — without a host call site.
+impl Drop for LocalState {
+    fn drop(&mut self) {
+        if self.workers_owned {
+            self.workers.cancel_all();
+        }
+    }
 }
 
 /// The runtime, partitioned by lifetime.
@@ -514,11 +543,12 @@ pub struct LocalState {
 /// boundaries ([`Mobile`]), or stays as host scratch ([`LocalState`]).
 ///
 /// Every field is `pub(crate)`: the partition that encodes turn safety,
-/// capability attenuation, and mobile-snapshot framing is core's invariant,
-/// not a public API a host can reach past.  Hosts drive a session through the
-/// intent verbs — the [`mod@host`] accessors, the scope/context verbs, and the
-/// [`Shell::mobile_snapshot`] / [`Shell::restore_mobile`] durability pair — each
-/// of which is a complete operation rather than a raw field poke.
+/// capability attenuation, and mobile framing is core's invariant, not a
+/// public API a host can reach past.  Hosts drive a session through the
+/// intent verbs — the [`mod@host`] accessors and the scope/context verbs —
+/// each of which is a complete operation rather than a raw field poke.
+/// Durability is core's own: the turn door ([`Shell::run_turn`])
+/// checkpoints and rolls back the [`Mobile`] around every turn.
 pub struct Shell {
     pub(crate) mobile: Mobile,
     pub(crate) turn: TurnState,

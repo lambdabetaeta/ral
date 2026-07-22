@@ -43,8 +43,7 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
             tag: shell_eval::builtins::INSTALLER_TAG,
-            prelude: &shell_eval::PRELUDE,
-            surface: shell_eval::builtins::host_surface,
+            boot: bootstrap::engine_boot_shell,
         }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
@@ -170,7 +169,7 @@ pub fn run() -> Result<(), String> {
 
     let cwd =
         std::env::current_dir().map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
-    let state_dir = bootstrap::project_dir(&cwd);
+    let state_dir = bootstrap::EXARCH.project_dir(&cwd);
 
     // Resolve the initial selection: an explicit `--provider` pin, else an
     // explicit `--model` override, else the persisted selection (when its
@@ -218,7 +217,7 @@ pub fn run() -> Result<(), String> {
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
     // The model selection is exarch's own runtime state under the XDG state
-    // home (`bootstrap::project_dir`), outside the agent's cwd sandbox, so a
+    // home (`bootstrap::App::project_dir`), outside the agent's cwd sandbox, so a
     // tool call cannot reach it — no deny-list entry is needed.
     // RAL_DUMP_SANDBOX_PROFILE: emit the platform OS-sandbox profile
     // (Seatbelt SBPL, bwrap argv, or AppContainer summary) the launcher
@@ -231,9 +230,13 @@ pub fn run() -> Result<(), String> {
             ral_core::sandbox::dump_profile_if_requested(&projection);
         }
     }
-    let scratch = bootstrap::Scratch::new().map_err(|e| format!("scratch dir: {e}"))?;
-    let run_dir = bootstrap::log_run_dir(&cwd).map_err(|e| format!("log dir: {e}"))?;
-    let config_dir = bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
+    let scratch = Arc::new(
+        bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
+    );
+    let run_dir = bootstrap::EXARCH
+        .log_run_dir(&cwd)
+        .map_err(|e| format!("log dir: {e}"))?;
+    let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat mode registers no tools, so there is nothing for a system prompt to
     // describe: it is skipped entirely in favour of the minimal placeholder.
@@ -243,7 +246,7 @@ pub fn run() -> Result<(), String> {
         prompt::assemble(
             &c.system_files,
             &caps,
-            scratch.path(),
+            &scratch,
             &cwd_path,
             &config_dir,
             c.headless,
@@ -265,19 +268,23 @@ pub fn run() -> Result<(), String> {
         route,
     ));
     let mut session = Agent::root(
-        system,
-        caps,
-        &scratch,
-        &run_dir,
-        &model,
-        label,
-        c.allow_schedule,
-        // The interactive (TUI) trunk converses and parks for the human; a
-        // headless trunk terminates once its seeded work is idle.
-        !c.headless,
-        c.chat,
+        agent::RootConfig {
+            system,
+            caps,
+            run_dir: run_dir.clone(),
+            model,
+            provider_label: label.to_string(),
+            allow_schedule: c.allow_schedule,
+            // The interactive (TUI) trunk converses and parks for the human;
+            // a headless trunk terminates once its seeded work is idle.
+            interactive: !c.headless,
+            chat: c.chat,
+            disk_warn_bytes,
+        },
+        agent::RootSeat::Identity {
+            scratch: Arc::clone(&scratch),
+        },
         Arc::clone(&provider),
-        disk_warn_bytes,
     )
     .map_err(|e| format!("session init: {e}"))?;
 
@@ -306,7 +313,6 @@ pub fn run() -> Result<(), String> {
             &info,
             &mut store,
             &mut catalog,
-            &scratch,
             &run_dir,
             seed,
             c.vi,

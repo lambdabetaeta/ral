@@ -643,7 +643,9 @@ fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
 }
 
 fn token_path() -> PathBuf {
-    crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::State).join("oauth.json")
+    crate::bootstrap::EXARCH
+        .xdg_dir(ral_core::path::basedir::XdgKind::State)
+        .join("oauth.json")
 }
 
 #[cfg(unix)]

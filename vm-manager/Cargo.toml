@@ -1,0 +1,31 @@
+[package]
+name = "vm-manager"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "vm_manager"
+path = "src/lib.rs"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# The macOS backend ([`vz`]) speaks to Virtualization.framework through the
+# `objc2` family — the only maintained Rust binding to the framework (the
+# alternative the design record named, the `vz` crate, no longer wraps
+# Virtualization.framework at all). It is target-scoped because these classes
+# exist in no other SDK; on Linux the module is `#[cfg]`-ed out entirely.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2               = "0.6"
+objc2-foundation    = "0.3"
+objc2-virtualization = "0.3"
+block2              = "0.6"
+dispatch2           = { version = "0.3", features = ["block2"] }
+
+[dev-dependencies]
+tempfile = "3.27"

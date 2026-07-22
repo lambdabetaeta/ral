@@ -1,0 +1,22 @@
+[package]
+name = "ral-daemon"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "ral_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ral-daemon"
+path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["process", "mount", "fs", "system", "time"] }

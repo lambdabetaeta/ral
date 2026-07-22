@@ -825,4 +825,154 @@ mod tests {
             "the inherited sink must receive the turn's output"
         );
     }
+
+    // ── Turn-door durability ──────────────────────────────────────────
+    //
+    // The turn door is the durability boundary (`decisions/260706_
+    // enquiry-channel` §5): a panic anywhere in the turn reports as a
+    // failed turn with the shell's `Mobile` already rolled back to its
+    // turn-entry state. State-owner rollback — no host holds a snapshot.
+
+    /// A nullary builtin whose body panics — stands in for any Rust panic
+    /// the evaluator can raise mid-turn.
+    fn builtin_panic_now(
+        _args: &[crate::types::Value],
+        _shell: &mut Shell,
+    ) -> crate::types::Settled<crate::types::Value> {
+        panic!("turn-door test: deliberate mid-eval panic");
+    }
+
+    fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
+        use crate::typecheck::builtins::{mk_scheme, pure, thunk};
+        mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+    }
+
+    static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &[crate::types::BuiltinEntry {
+        name: std::borrow::Cow::Borrowed("core-panic-now"),
+        type_rule: crate::typecheck::builtins::BuiltinTypeRule::Scheme(Some(0), scheme_panic_now),
+        doc: "test-only: panic the evaluator mid-turn.",
+        body: crate::types::BuiltinBody::Static(builtin_panic_now),
+    }];
+
+    /// A mid-eval panic reports as a failed turn naming the panic, with the
+    /// panicking turn's own partial mutations rolled back, a pre-turn
+    /// binding intact, and the shell running the next turn cleanly.
+    #[test]
+    fn panicking_turn_reports_failed_and_rolls_back() {
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.install_builtins(PANIC_BUILTINS);
+
+        match shell.run_turn(capture_req("let pre_panic = 1")) {
+            TurnReport::Ran { result, .. } => assert!(result.is_ok()),
+            TurnReport::Static { .. } => panic!("the pre-turn binding must evaluate"),
+        }
+
+        match shell.run_turn(capture_req("let mid_panic = 2\ncore-panic-now")) {
+            TurnReport::Static {
+                diagnostics: StaticDiagnostics::Host(e),
+            } => {
+                assert!(
+                    e.message.contains("turn panicked"),
+                    "the report must name the panic, got {:?}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("deliberate mid-eval panic"),
+                    "the report must carry the panic payload, got {:?}",
+                    e.message
+                );
+            }
+            _ => panic!("a panicking turn must report Static{{Host}}"),
+        }
+
+        assert!(
+            shell.scope_lookup("pre_panic").is_some(),
+            "a pre-turn binding must survive a later turn's panic"
+        );
+        assert!(
+            shell.scope_lookup("mid_panic").is_none(),
+            "the panicking turn's own partial binding must be rolled back"
+        );
+
+        match shell.run_turn(capture_req("$pre_panic")) {
+            TurnReport::Ran { result, .. } => {
+                assert!(
+                    result.is_ok(),
+                    "the next turn must run clean on the same shell"
+                );
+            }
+            TurnReport::Static { .. } => panic!("the healed shell must still evaluate"),
+        }
+    }
+
+    /// A panic in a lifecycle hook — after evaluation, outside the
+    /// evaluator proper — is caught by the same door: the whole turn spine
+    /// is inside the checkpoint.
+    struct PanicInPostExec;
+    impl TurnLifecycle for PanicInPostExec {
+        fn post_exec(&mut self, _shell: &mut Shell, _src: &str, _status: i32) {
+            panic!("turn-door test: post_exec panic");
+        }
+    }
+
+    #[test]
+    fn lifecycle_panic_is_caught_at_the_door() {
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+
+        match shell.run_turn(TurnRequest {
+            lifecycle: Box::new(PanicInPostExec),
+            ..capture_req("let post_panic = 3")
+        }) {
+            TurnReport::Static {
+                diagnostics: StaticDiagnostics::Host(e),
+            } => assert!(e.message.contains("turn panicked")),
+            _ => panic!("a lifecycle panic must report Static{{Host}}"),
+        }
+        assert!(
+            shell.scope_lookup("post_panic").is_none(),
+            "a post-exec panic rolls the whole turn back — its binding included"
+        );
+    }
+
+    /// A desk handler that panics mid-enquiry unwinds through the turn and
+    /// is caught at the door like any other turn-time panic.
+    struct PanickingDesk;
+    impl crate::types::EnquiryDesk for PanickingDesk {
+        fn enquire(
+            &self,
+            _req: crate::serial::FOValue,
+        ) -> Result<crate::serial::FOValue, crate::types::Error> {
+            panic!("turn-door test: desk handler panic");
+        }
+    }
+
+    struct EnquireInPreExec;
+    impl TurnLifecycle for EnquireInPreExec {
+        fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
+            let _ = shell.enquire(crate::serial::FOValue::Unit);
+        }
+    }
+
+    #[test]
+    fn desk_handler_panic_is_caught_at_the_door() {
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+
+        match shell.run_turn(TurnRequest {
+            desk: Some(Arc::new(PanickingDesk)),
+            lifecycle: Box::new(EnquireInPreExec),
+            ..capture_req("let desk_panic = 4")
+        }) {
+            TurnReport::Static {
+                diagnostics: StaticDiagnostics::Host(e),
+            } => assert!(e.message.contains("turn panicked")),
+            _ => panic!("a desk-handler panic must report Static{{Host}}"),
+        }
+        assert!(
+            shell.scope_lookup("desk_panic").is_none(),
+            "the enquiring turn's binding must be rolled back with the rest"
+        );
+    }
 }

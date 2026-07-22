@@ -92,8 +92,9 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
 /// it raises an error, or if its terminal map fails to decode into
 /// [`CustomProvider`]s.
 pub fn load() -> Result<Vec<CustomProvider>, String> {
-    let path =
-        crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config).join(CONFIG_FILE);
+    let path = crate::bootstrap::EXARCH
+        .xdg_dir(ral_core::path::basedir::XdgKind::Config)
+        .join(CONFIG_FILE);
     let Some(source) = read_config(&path)? else {
         return Ok(Vec::new());
     };

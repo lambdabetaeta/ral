@@ -25,6 +25,7 @@ pub mod digest;
 pub mod event;
 pub mod nudge;
 pub mod resources;
+pub(crate) mod seat;
 pub mod transcript;
 
 use crate::agent::digest::{
@@ -32,6 +33,7 @@ use crate::agent::digest::{
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
 };
 use crate::agent::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
+use crate::agent::seat::{Seat, TurnInstall};
 use crate::agent::transcript::Transcript;
 use crate::bootstrap::Scratch;
 use crate::bus::{
@@ -44,11 +46,8 @@ use crate::provider::{
     CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
 };
 use crate::shell_eval;
-use crate::shell_eval::builtins;
-use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
-use ral_core::transport::Transport;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -182,6 +181,10 @@ pub struct Agent {
     /// resolves its own index from its own `returns`/`allow_schedule`,
     /// never its parent's.
     system_base: String,
+    /// The fleet-shared builtin-index table ([`crate::prompt::BuiltinIndexes`]),
+    /// resolved once at the trunk's construction and inherited by every
+    /// fork, so resolving a child's own index never needs a live `Shell`.
+    indexes: Arc<crate::prompt::BuiltinIndexes>,
     /// This session's canonical event log.  Its own lock, never the session
     /// lock, so a per-turn desk can capture it off `&mut Agent` — but
     /// [`LogCell::lock`] enforces the non-contention this buys as a checked
@@ -194,7 +197,10 @@ pub struct Agent {
     /// model view (`events.json`) is what the model saw; the transcript is
     /// what the agent did.
     transcript: Transcript,
-    transport: ral_core::transport::IdentityTransport,
+    /// Where this agent's engine lives and how the host reaches it: every
+    /// engine-side reach — per-call installs, `/clear`'s rebuild, the
+    /// registry's cancel reach — goes through seat methods.
+    pub(crate) seat: Seat,
     caps: ral_core::types::Capabilities,
     /// This agent's parent, or `None` for the **trunk**.  The sole structural
     /// distinction: the trunk publishes its cancel token for the OS-signal path
@@ -239,14 +245,6 @@ pub struct Agent {
     /// turn boundary, so an Esc on one turn never bleeds into the next; the
     /// trunk additionally [`publish`](cancel::publish)es it for OS signals.
     cancel: cancel::Token,
-    /// This agent's current-turn foreground scope cell, armed on
-    /// [`Self::transport`] via `observe_foreground` so it holds a fresh
-    /// [`ForegroundScope`](ral_core::process::ForegroundScope) for the whole
-    /// extent of every turn.  Registered in the fleet alongside `eval_root`
-    /// so [`AgentRegistry::interrupt`](crate::fleet::registry::AgentRegistry::interrupt)
-    /// can unwind exactly the in-flight turn without touching the durable
-    /// root a later turn would inherit.
-    turn_scope: crate::fleet::registry::TurnScope,
     /// Whether this agent's provider requests advertise the `ral` tool at
     /// all — read by `provider.complete` (advertisement) and [`Self::stage`]
     /// (dispatch), so the two can never disagree about whether a call was
@@ -281,14 +279,6 @@ pub struct Agent {
     /// one call's extent a fresh cell is harvested into, this is touched only
     /// by the drive thread under `&mut Agent`.
     reply: Option<FOValue>,
-    /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
-    /// shell as of the last clean tool-call boundary.  Refreshed inside
-    /// `run_shell` right before each dispatch, so it always holds the dynamic
-    /// context completed calls left behind.  Read by [`Self::drive`] after a
-    /// caught worker panic to roll the panicking call's dynamic-context
-    /// effects back; it lives on `Agent` precisely so it survives the
-    /// `catch_unwind` boundary.
-    durable: ral_core::types::MobileSnapshot,
     /// The **fleet's** agent registry — one shared map, cloned to every node,
     /// so "all live agents" is its contents.  Every agent registers itself here
     /// and registers its own children, so the registry is the spawn tree at any
@@ -492,7 +482,7 @@ pub(crate) struct Build {
     /// builtin index — kept as [`Agent::system_base`] for the constructed
     /// agent's own children to resolve from in turn.
     pub(crate) system: String,
-    /// `system` resolved by [`crate::prompt::resolve_builtin_index`] against
+    /// `system` resolved by [`crate::prompt::BuiltinIndexes::apply`] against
     /// this same `Build`'s shell, `returns`, and `allow_schedule` — what
     /// actually reaches the model as [`Agent::system`]. The caller resolves
     /// it because it needs the resolved length anyway, before this `Build`
@@ -501,8 +491,15 @@ pub(crate) struct Build {
     /// the construction site keeps the bookend and the prompt the model
     /// sees structurally the same string.
     pub(crate) system_prompt: String,
+    /// The fleet-shared builtin-index table `system_prompt` was resolved
+    /// from, carried on so the constructed agent's own forks resolve
+    /// theirs without a shell.
+    pub(crate) indexes: Arc<crate::prompt::BuiltinIndexes>,
     pub(crate) caps: ral_core::types::Capabilities,
-    pub(crate) shell: Shell,
+    /// The constructed agent's seat, already through its ceremony
+    /// ([`Seat::identity`]) — `assemble` seats no engines of its own, so
+    /// every construction site states which seat kind it builds.
+    pub(crate) seat: Seat,
     pub(crate) log: AgentLog,
     pub(crate) parent: Option<AgentId>,
     pub(crate) fuel: u32,
@@ -522,13 +519,44 @@ pub(crate) struct Build {
     pub(crate) disk_warn_bytes: Option<u64>,
 }
 
+/// The trunk's launch configuration.
+///
+/// Everything [`Agent::root`] needs that is not the seat choice or the
+/// provider, bundled so the construction site reads as named facts rather
+/// than a wall of positional arguments.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool sets an independent, orthogonal axis on the trunk (allow_schedule, interactive, chat); not a candidate for a combined enum"
+)]
+pub struct RootConfig {
+    pub system: String,
+    pub caps: ral_core::types::Capabilities,
+    pub run_dir: std::path::PathBuf,
+    pub model: String,
+    pub provider_label: String,
+    pub allow_schedule: bool,
+    pub interactive: bool,
+    pub chat: bool,
+    pub disk_warn_bytes: Option<u64>,
+}
+
+/// Where the trunk's engine lives — the one construction-time choice
+/// [`Agent::root`]'s caller makes.  Each variant carries exactly what that
+/// seat kind needs to boot.
+pub enum RootSeat {
+    /// In-process: the trunk boots its own shell from `scratch` and drives
+    /// it through an identity transport.
+    Identity { scratch: Arc<Scratch> },
+}
+
 impl Agent {
     pub(crate) fn assemble(b: Build) -> io::Result<Self> {
         let Build {
             system,
             system_prompt,
+            indexes,
             caps,
-            mut shell,
+            seat,
             log,
             parent,
             fuel,
@@ -540,32 +568,6 @@ impl Agent {
             agents,
             disk_warn_bytes,
         } = b;
-        seed_session_dir(&mut shell, &log);
-        // Arm the binding-lease ledger last, sealing everything just seeded
-        // (prelude, agent library, host vars, and — on a fork — the whole
-        // inherited scope) as permanently-exempt baseline, before the first
-        // durable snapshot is minted: seeding, arming, and checkpointing
-        // stay one visible sequence (`decisions/260629_agent-binding-reaping`).
-        shell.arm_binding_lease(ral_core::types::BindingLease {
-            idle_calls: shell_eval::BINDING_IDLE_CALLS,
-            large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
-        });
-        let durable = shell.mobile_snapshot();
-        let turn_scope: crate::fleet::registry::TurnScope = Arc::new(Mutex::new(None));
-        let mut transport = ral_core::transport::IdentityTransport::new(shell);
-        transport.observe_foreground(turn_scope.clone());
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        transport.attach(
-            ral_core::transport::TerminalEndpoint {
-                lease: None,
-                state: crate::bootstrap::probe_terminal(),
-            },
-            cwd,
-            std::path::PathBuf::from(&home),
-            None, // rc_path
-            builtins::INSTALLER_TAG.to_string(),
-        );
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
         let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
@@ -573,9 +575,10 @@ impl Agent {
             id: log.id(),
             system: system_prompt,
             system_base: system,
+            indexes,
             log: LogCell::new(log),
             transcript,
-            transport,
+            seat,
             caps,
             parent,
             fuel,
@@ -584,12 +587,10 @@ impl Agent {
             inbox: Inbox::new(),
             nudges: nudge::Registry::new(),
             cancel: cancel::Token::new(),
-            turn_scope,
             tool_enabled,
             returns,
             allow_schedule,
             reply: None,
-            durable,
             agents,
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             last_input: 0,
@@ -628,70 +629,59 @@ impl Agent {
             name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
-            eval_root: self.parent.map(|_| self.eval_root()),
-            turn_scope: self.parent.map(|_| self.turn_scope()),
+            reach: self.parent.map(|_| self.seat.eval_reach()),
             mailbox: self.inbox.mailbox(),
             provider: self.provider.clone(),
         });
     }
 
-    fn replace_shell(&mut self, shell: Shell) {
-        let mut shell = shell;
-        seed_session_dir(&mut shell, &self.log.lock());
-        // Re-arm and re-seal the rebuilt shell's binding-lease ledger — the
-        // `/clear` half of "arming happens where the shell is installed"
-        // (`decisions/260629_agent-binding-reaping`). The old ledger died
-        // with the old `Shell`; this one starts fresh.
-        shell.arm_binding_lease(ral_core::types::BindingLease {
-            idle_calls: shell_eval::BINDING_IDLE_CALLS,
-            large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
-        });
-        self.durable = shell.mobile_snapshot();
-        let mut transport = ral_core::transport::IdentityTransport::new(shell);
-        transport.observe_foreground(self.turn_scope.clone());
-        self.transport = transport;
-    }
-
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
     /// shared registry, wraps the initial `provider`, and registers itself, so
     /// the frontend builds its [`Fleet`](crate::fleet::Fleet) by reading these
-    /// handles back.  `interactive` makes it the *conversing* trunk (TUI); off
-    /// it, a one-shot headless trunk.
-    #[allow(clippy::too_many_arguments)] // launch config, threaded once at boot
-    pub(crate) fn root(
-        system: String,
-        caps: ral_core::types::Capabilities,
-        scratch: &Scratch,
-        run_dir: &std::path::Path,
-        model: &str,
-        provider_label: &str,
-        allow_schedule: bool,
-        interactive: bool,
-        chat: bool,
-        provider: Arc<Provider>,
-        disk_warn_bytes: Option<u64>,
-    ) -> io::Result<Self> {
-        let shell = boot_root_shell(scratch);
+    /// handles back.  `cfg.interactive` makes it the *conversing* trunk
+    /// (TUI); off it, a one-shot headless trunk.  `seat` states where the
+    /// trunk's engine lives — the caller's one construction-time choice of
+    /// seat kind.
+    ///
+    /// # Errors
+    /// Returns `Err` if the trunk's session directory cannot be created or
+    /// its event log cannot be opened.
+    pub fn root(cfg: RootConfig, seat: RootSeat, provider: Arc<Provider>) -> io::Result<Self> {
+        let RootConfig {
+            system,
+            caps,
+            run_dir,
+            model,
+            provider_label,
+            allow_schedule,
+            interactive,
+            chat,
+            disk_warn_bytes,
+        } = cfg;
+        let RootSeat::Identity { scratch } = seat;
+        let shell = seat::boot_root_shell(&scratch);
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
         // This agent's own builtin index, resolved from its own `returns`/
         // `allow_schedule` bits — once, here: the bookend records its
         // length (the log must exist before the agent it describes does)
         // and `Build` carries the same string on to become `Agent::system`.
-        let system_prompt =
-            crate::prompt::resolve_builtin_index(&system, &shell, !interactive, allow_schedule);
+        let indexes = crate::prompt::BuiltinIndexes::resolve(&shell);
+        let system_prompt = indexes.apply(&system, !interactive, allow_schedule);
         let log = AgentLog::root(
             &sessions_root,
             id,
-            model,
-            provider_label,
+            &model,
+            &provider_label,
             system_prompt.len(),
         )?;
+        let seat = Seat::identity(shell, scratch, &log);
         let agent = Self::assemble(Build {
             system,
             system_prompt,
+            indexes,
             caps,
-            shell,
+            seat,
             log,
             parent: None,
             fuel: SPAWN_FUEL,
@@ -724,19 +714,14 @@ impl Agent {
         self.provider.current()
     }
 
-    pub(crate) fn clear(&mut self, scratch: &Scratch) -> io::Result<()> {
-        // `boot_root_shell` owns the signal ceremony: stale ral interrupts
-        // are discarded before embedded library evaluation, and the exarch
-        // cancel chain is restored over ral's freshly installed handlers.
-        let shell = boot_root_shell(scratch);
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
         self.log.lock().clear(self.system.len())?;
-        // Cancel the outgoing shell's registered workers before it is
-        // replaced — `/clear` outranks every lease, the durable class
-        // included — while it is still unambiguously *this* shell reachable
-        // through the transport; once `replace_shell` swaps the transport
-        // below, there is no way back to it.
-        self.transport.shell_mut().shell.cancel_workers();
-        self.replace_shell(shell);
+        // The seat reboots its shell from its own scratch and re-runs the
+        // identity ceremony onto the same turn-scope cell; the outgoing
+        // shell's teardown cancels its registered workers — `/clear`
+        // outranks every lease, the durable class included, through the
+        // same ownership edge every other teardown path takes.
+        self.seat.clear(&self.log.lock());
         // A rebuilt context starts empty: drop the stale pressure reading so
         // the next turn's usage sets it afresh.
         self.last_input = 0;
@@ -797,33 +782,35 @@ impl Agent {
         // dropped here the way a hand-copied field once was.  Its capabilities
         // are supplied by the spawn site: the parent's verbatim, or the
         // parent's narrowed to a requested base (`parent ⊓ base`).
-        let shell = self.transport.shell_mut().shell.fork_session();
+        let shell = self.seat.shell_mut().shell.fork_session();
         let child_id = fresh_id();
         // The *child's* own builtin index, never `self.system`: `returns`
         // may differ from this agent's own (a `/branch` child withholds
         // `reply` however its creator's own bit reads), so the index is
-        // resolved from the template against the child's bits — once, here:
+        // applied to the template against the child's bits — once, here:
         // the bookend records its length (the log must exist before the
         // agent it describes does) and `Build` carries the same string on
         // to become the child's `Agent::system`.
-        let system_prompt = crate::prompt::resolve_builtin_index(
-            &self.system_base,
-            &shell,
-            returns,
-            self.allow_schedule,
-        );
+        let system_prompt = self
+            .indexes
+            .apply(&self.system_base, returns, self.allow_schedule);
         let log = self.log.lock().fork(child_id, system_prompt.len())?;
         // One less than the parent's — the child's ceiling on how many more
         // generations of delegation may descend from it before the depth
         // budget bottoms out.
         let fuel = self.fuel.saturating_sub(1);
+        // The child rides the same seat kind as its parent, sharing the
+        // session scratch (the forked shell already inherited its seeding).
+        let Seat::Identity { scratch, .. } = &self.seat;
+        let seat = Seat::identity(shell, scratch.clone(), &log);
         Self::assemble(Build {
             // The unresolved template: the child's own children resolve
             // their indices from it in turn.
             system: self.system_base.clone(),
             system_prompt,
+            indexes: self.indexes.clone(),
             caps,
-            shell,
+            seat,
             log,
             // The spawning agent is the child's parent — the tree edge that
             // makes the child a node at this depth and carries the cascade.
@@ -904,23 +891,6 @@ impl Agent {
         &self.cancel
     }
 
-    /// The eval-layer cancel handle on this agent's own `Shell` — registered
-    /// alongside the [`Token`](cancel::Token) so the subtree cascade can
-    /// unwind an in-flight `ral` eval, not merely flag a drive loop that
-    /// only reads its token between steps.
-    pub(crate) fn eval_root(&self) -> ral_core::process::DurableRoot {
-        self.transport.shell_mut().shell.cancel_handle()
-    }
-
-    /// This agent's current-turn foreground scope cell — registered
-    /// alongside [`Self::eval_root`] so
-    /// [`AgentRegistry::interrupt`](crate::fleet::registry::AgentRegistry::interrupt)
-    /// can unwind exactly the in-flight turn without touching the durable
-    /// root a later turn would inherit.
-    pub(crate) fn turn_scope(&self) -> crate::fleet::registry::TurnScope {
-        self.turn_scope.clone()
-    }
-
     /// Seed this session's inbox with its launch prompt — the spawn site calls
     /// it once on a freshly forked child, then drops its handle, so the only
     /// downward edge is this one write.
@@ -940,10 +910,19 @@ impl Agent {
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
         let shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
+        // A real per-test scratch, keyed by this agent's own fresh id so
+        // concurrent tests never contend on one dir.  The seat owns it —
+        // `clear` reboots from it — but the baked test shell above is not
+        // seeded from it, so probes read the same absence a bare boot has.
+        let scratch = Arc::new(Scratch::for_test(
+            crate::bootstrap::EXARCH,
+            &format!("agent-{id}"),
+        )?);
         // Resolved for the same `returns: true, allow_schedule: false` bits
         // `Build` below fixes for every `for_test` trunk, so the bookend
         // matches this agent's own `system` rather than the raw template.
-        let system_prompt = crate::prompt::resolve_builtin_index(system, &shell, true, false);
+        let indexes = crate::prompt::BuiltinIndexes::resolve(&shell);
+        let system_prompt = indexes.apply(system, true, false);
         let log = AgentLog::root(
             &dir.join("sessions"),
             id,
@@ -956,11 +935,13 @@ impl Agent {
             ProviderKind::Openai,
             crate::provider::scripted::Script::new(),
         )));
+        let seat = Seat::identity(shell, scratch, &log);
         let agent = Self::assemble(Build {
             system: system.to_string(),
             system_prompt,
+            indexes,
             caps: ral_core::types::Capabilities::default(),
-            shell,
+            seat,
             log,
             parent: None,
             fuel: SPAWN_FUEL,
@@ -1008,8 +989,7 @@ impl Agent {
     }
 
     /// Reconcile the host-owned `services` pin against the shell's live
-    /// worker registry, beside the binding-lease reap at the same
-    /// ready-boundary pass: one card lists every currently-running durable
+    /// worker registry at the drive loop's ready-boundary pass: one card lists every currently-running durable
     /// service, re-pinned whenever at least one is alive; the pin drops the
     /// moment none remain (cancelled, or settled and reaped). The model
     /// cannot write or clear this pin itself — `shell_eval::
@@ -1047,37 +1027,6 @@ impl Agent {
         });
     }
 
-    /// Prune this shell's idle top-level bindings — the binding-lease
-    /// ledger's one boundary drain site
-    /// (`decisions/260629_agent-binding-reaping`). Worker-reap and
-    /// large-binding notices reach the sink the ordinary way: core's engine
-    /// pushes both as `` `notice `` surface classes at a turn's ready
-    /// boundary (`decisions/260706_enquiry-channel` §4.2), decoded by
-    /// `shell_eval::decode_surface` into `Kind::Notice` at the emit seam.
-    ///
-    /// The prune half stays host-called and host-composed because
-    /// `prune_idle_bindings` hands back the post-prune
-    /// [`MobileSnapshot`](ral_core::types::MobileSnapshot) this agent's
-    /// panic-recovery baseline needs, and a snapshot cannot ride the
-    /// turn/surface/Report seam (`decisions/260706_enquiry-channel` §5
-    /// keeps durability off the wire). So the notice is built here, from the
-    /// polled return, as one compact `Kind::Notice` naming what fell, adopting
-    /// the verb's own post-prune snapshot as the durable checkpoint in the
-    /// same statement — the pairing the verb's signature enforces, so a later
-    /// panic rollback can never resurrect a pruned name.
-    fn reap_bindings(&mut self, emit: &Emitter) {
-        let Some((notices, checkpoint)) = self.transport.shell_mut().shell.prune_idle_bindings()
-        else {
-            return;
-        };
-        self.durable = checkpoint;
-        let names: Vec<String> = notices.iter().map(|n| n.name.clone()).collect();
-        let idle_calls: Vec<u64> = notices.iter().map(|n| n.idle_calls).collect();
-        let notice = crate::bus::card::Notice::Prune { names, idle_calls };
-        let card = crate::bus::card::notice_card(&notice);
-        emit.emit(Kind::Notice { notice, card });
-    }
-
     /// Warn once per excursion above the operator's disk-warn ceiling,
     /// through the operational-note vocabulary (`Kind::SystemNote`) — never
     /// rotates or deletes (`decisions/260705_leases-and-budgets`, "Disk:
@@ -1087,7 +1036,7 @@ impl Agent {
     /// [`Self::ral_epoch`] the settled-worker and binding-lease sweeps read)
     /// so the walk's cost — a full scan of the session log dir and scratch —
     /// is paid rarely, at the ready boundary both frontends share
-    /// ([`Self::drive`]), beside [`Self::reap_bindings`].
+    /// ([`Self::drive`]).
     fn check_disk_warn(&mut self, emit: &Emitter) {
         let Some(ceiling) = self.disk_warn_bytes else {
             return;
@@ -1251,7 +1200,7 @@ impl Agent {
         ));
 
         // ── the lexical scope ────────────────────────────────────────────
-        let probe_count = |label: &str| match self.transport.probe(FOValue::Variant {
+        let probe_count = |label: &str| match self.seat.transport().probe(FOValue::Variant {
             label: label.into(),
             payload: None,
         }) {
@@ -1282,18 +1231,9 @@ impl Agent {
                 shell_eval::BINDING_IDLE_CALLS
             )),
         ));
-        let largest_binding_bytes = self
-            .transport
-            .shell_mut()
-            .shell
-            .bindings()
-            .into_iter()
-            .map(|(_, v)| v.shallow_size() as u64)
-            .max()
-            .unwrap_or(0);
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            largest_binding_bytes,
+            probe_count("largest-binding-bytes"),
             Some(shell_eval::LARGE_BINDING_BYTES),
             "warn",
             Some("shallow estimate; a closure's captures are never chased".to_string()),
@@ -1358,9 +1298,10 @@ impl Agent {
     /// schedule holds it until cancelled; otherwise it terminates at
     /// quiescence.
     ///
-    /// Per-`apply` panic recovery lives here — the `catch_unwind` rolls the
-    /// dynamic context back to the last clean tool-call boundary and continues
-    /// the loop, so one crashing turn never sinks the agent.  Returns the
+    /// Per-`apply` panic recovery lives here — the `catch_unwind` records the
+    /// failure and continues the loop, so one crashing turn never sinks the
+    /// agent; eval-side state is already safe, rolled back at the engine's
+    /// own turn door (`Shell::run_turn`).  Returns the
     /// final turn's `(outcome, payload)` digest, where `payload` is the
     /// faithful [`FOValue`] a `reply` carried (else `None`); the
     /// interactive trunk ignores it, a child's spawn site renders it to text,
@@ -1399,12 +1340,6 @@ impl Agent {
             // The service ledger's sibling boundary drain: the `services`
             // pin is (re-)born or dies at this pass.
             self.reconcile_service_pins(emit);
-            // The binding-lease ledger's sibling boundary drain: a turn
-            // never begins over a scope about to be pruned, and the next
-            // `run_shell` refreshes `self.durable` again at its own entry,
-            // preserving "durable = last clean boundary" with the prune
-            // folded in.
-            self.reap_bindings(emit);
             // The disk-warn check's own sibling: amortized on the same ral
             // epoch, a no-op walk-wise when unconfigured.
             self.check_disk_warn(emit);
@@ -1449,16 +1384,11 @@ impl Agent {
             let outcome = match attempt {
                 Ok(o) => o,
                 Err(p) => {
-                    // A worker panic mid-eval: roll the dynamic state — grant
-                    // frames, env/cwd overrides, the handler stack, half-applied
-                    // bindings — back to the last clean tool-call boundary.
-                    // Completed calls' effects live in the snapshot and survive;
-                    // the panicking call's do not.  The IO frame self-heals in
-                    // ral_core's own run_turn guard; this is the dynamic half.
-                    self.transport
-                        .shell_mut()
-                        .shell
-                        .restore_mobile(self.durable.clone());
+                    // A host-side panic — provider transport, surface decode,
+                    // render, digest.  The shell needs no attention here: an
+                    // eval-side panic is caught at the engine's own turn door
+                    // (`Shell::run_turn`), which rolls the dynamic state back
+                    // and reports a failed turn, so it never unwinds this far.
                     let msg = panic_msg(&p);
                     self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
                     digest = (
@@ -2021,7 +1951,7 @@ impl Agent {
     }
 
     pub(crate) fn cwd(&self) -> std::path::PathBuf {
-        match self.transport.probe(FOValue::Variant {
+        match self.seat.transport().probe(FOValue::Variant {
             label: "cwd".into(),
             payload: None,
         }) {
@@ -2035,7 +1965,7 @@ impl Agent {
     /// read, never the live core `WorkerEntry` (a probe answer is data, not
     /// a handle: no live `Mutex`, no cancel scope).
     fn probe_workers(&self) -> Vec<ProbedWorker> {
-        let items = match self.transport.probe(FOValue::Variant {
+        let items = match self.seat.transport().probe(FOValue::Variant {
             label: "workers".into(),
             payload: None,
         }) {
@@ -2132,7 +2062,7 @@ impl Agent {
     /// [`Self::resource_rows`], the two pure reads of the dynamic env
     /// overlay left after the notice family moved to pushes.
     fn probe_env_var(&self, name: &str) -> Option<String> {
-        match self.transport.probe(FOValue::Variant {
+        match self.seat.transport().probe(FOValue::Variant {
             label: "env-var".into(),
             payload: Some(Box::new(FOValue::String {
                 value: name.to_string(),
@@ -2192,8 +2122,10 @@ impl Agent {
         nursery: ral_core::types::Nursery,
         reply: ReplyCell,
     ) -> desk::HostServices {
+        let Seat::Identity { scratch, .. } = &self.seat;
         desk::HostServices {
             registry: self.agents.clone(),
+            scratch: scratch.clone(),
             parent: self.id,
             mailbox: self.mailbox(),
             emit: emit.clone(),
@@ -2210,6 +2142,7 @@ impl Agent {
             // mode) always returns, which may differ from this agent's own
             // `returns`.
             system_template: self.system_base.clone(),
+            indexes: self.indexes.clone(),
             interactive: self.interactive,
             nursery,
             generation: self.agents.generation(),
@@ -2227,56 +2160,38 @@ impl Agent {
         // One ral call, one epoch tick — counted at entry so a call that
         // fails to evaluate still advances the retention clock.
         self.ral_epoch += 1;
-        // Refresh the durable snapshot at this clean boundary: the
-        // dynamic context here reflects every prior tool call that
-        // returned, and none that this one is about to mutate.  If the
-        // eval below panics, `drive` rebuilds the live context from
-        // this snapshot, rolling the panicking call's effects back.
-        self.durable = self.transport.shell_mut().shell.mobile_snapshot();
-        // The deferred-surface destination: a detached `spawn` worker flushes
-        // its buffered batch here at completion, posted into this session's
-        // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
-        // generation (so a `/clear` drops a stale batch).
-        self.transport
-            .set_deferred_sink(shell_eval::deferred_sink(emit, self.id, &self.agents));
-        // The enquiry desk and its nursery: fresh for every ral call, for the
-        // same reason as the deferred sink above — a handler's captured
-        // generation, fuel, caps, and grant must never go stale. The nursery
-        // is the adoption end of a desk handler's body-side session fork
-        // (`Shell::fork_into_nursery`); `set_desk` wraps the desk in the
-        // identity drain-then-handle adapter so a handler's own chrome can
-        // never jump ahead of the turn's own surface output still queued on
-        // the transport (`docs/ral-wiki/decisions/260706_enquiry-channel.md`,
-        // "Identity binding").
+        // The nursery is the adoption end of a desk handler's body-side
+        // session fork (`Shell::fork_into_nursery`) — shared between the
+        // seat install and the desk's own capture.
         let nursery = ral_core::types::Nursery::default();
-        self.transport.set_nursery(nursery.clone());
         // This call's own reply slot: fresh, never a clone of `self.reply`,
         // so a staged-then-abandoned reply from an earlier call can never
         // resurface here.  Held on to below so it can be harvested back once
         // the desk retires, the instant this call's one legitimate writer
         // (the `reply` desk handler) is gone.
         let reply_cell = ReplyCell::default();
+        // The desk and its whole capture set are fresh for every ral call —
+        // a handler's captured generation, fuel, caps, and grant must never
+        // go stale — and the guard retires them on every exit ([`seat::TurnGuard`]).
         let desk = Arc::new(desk::ExarchDesk {
-            services: self.host_services(emit, nursery, reply_cell.clone()),
+            services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
         });
-        self.transport.set_desk(Arc::new(desk::DeskBinding {
-            desk: desk.clone(),
-            events: self.transport.events_shared(),
-            apply: desk::SurfaceApplier {
-                emit: emit.clone(),
-                pins: Some(self.pins.clone()),
-            },
-        }));
-        // Retire the desk and nursery the moment the eval is done, on every
-        // exit — the guard's `Drop` covers a panic `drive`'s `catch_unwind`
-        // recovers from, where straight-line teardown would never run and
-        // the real desk (with this call's whole capture) would stay
-        // installed for the rest of the session. See `RetireDeskOnDrop`'s
-        // doc for why the capture must not outlive the call.
         let content = {
-            let _retire = desk::RetireDeskOnDrop(&self.transport);
+            let _guard = self.seat.install_turn(TurnInstall {
+                desk: desk.clone(),
+                apply: desk::SurfaceApplier {
+                    emit: emit.clone(),
+                    pins: Some(self.pins.clone()),
+                },
+                // A detached `spawn` worker flushes its buffered batch here
+                // at completion, posted into this session's own inbox (via
+                // `emit`'s mailbox) and guarded by the agent registry's
+                // generation (so a `/clear` drops a stale batch).
+                deferred: shell_eval::deferred_sink(emit, self.id, &self.agents),
+                nursery,
+            });
             match shell_eval::run_shell(
-                &self.transport,
+                self.seat.transport(),
                 &self.caps,
                 cmd,
                 timeout_secs,
@@ -2297,17 +2212,6 @@ impl Agent {
         if let Some(payload) = reply_cell.take() {
             self.reply = Some(payload);
         }
-        // Advance the settled-retention sweep to this call's epoch: stamp
-        // entries first observed settled, expire those whose unclaimed
-        // result has sat a full retention of calls.  Expiry notices ride
-        // core's own per-turn `` `notice `` push at the *next* dispatched
-        // turn's ready boundary — this call runs after the current turn's
-        // surface stream already closed, so there is no live sink to push
-        // through until then; no plumbing of their own either way.
-        self.transport
-            .shell_mut()
-            .shell
-            .advance_worker_epoch(self.ral_epoch, shell_eval::SETTLED_WORKER_RETENTION);
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }
@@ -2378,21 +2282,21 @@ impl Drop for Agent {
     /// The one place every teardown path funnels through, whatever got it
     /// here — a normal `reply`/settle, the subtree cascade, or the trunk's
     /// own `deregister` at end of `drive`. `/clear` never reaches this (it
-    /// rebuilds the shell in place through `replace_shell`), so it keeps its
-    /// own explicit `cancel_workers`/`schedules.clear` pair; every *other*
+    /// rebuilds the shell in place through `Seat::clear`), so it keeps its
+    /// own explicit `schedules.clear`; every *other*
     /// teardown has no such call site of its own, and a subtree cascade
     /// (`AgentRegistry::cancel`/`clear_subtree`) only ever cancels an
     /// agent's *eval root* — which reaches a still-running worker
     /// cooperatively through the cancel-scope ancestor chain, but leaves
     /// the registry entries and any armed self-schedule sitting there until
-    /// something drops them. This is that something: cancelling this
-    /// agent's own workers and clearing its own schedules unconditionally,
-    /// so a settled-but-never-cancelled agent (the ordinary `reply` case)
+    /// something drops them. This is that something: the agent's own
+    /// workers die when its seat (and so its shell) drops below, and
+    /// its schedules are cleared here unconditionally, so a
+    /// settled-but-never-cancelled agent (the ordinary `reply` case)
     /// leaks neither — the ownership edge the session-ledger ADR calls for,
     /// closed once here rather than at every call site that can end an
     /// agent's life.
     fn drop(&mut self) {
-        self.transport.shell_mut().shell.cancel_workers();
         self.schedules.clear();
         let _ = self.log.lock().record_session_ended();
     }
@@ -2490,21 +2394,6 @@ pub(crate) fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "non-string payload".into())
 }
 
-fn boot_root_shell(scratch: &Scratch) -> Shell {
-    let mut shell = crate::bootstrap::boot_shell();
-    scratch.install_into(&mut shell);
-    shell
-}
-
-/// Seed `EXARCH_SESSION_DIR` into `shell` from `log`'s directory.  Run
-/// at construction and again after [`Agent::clear`] rebuilds the
-/// shell, so the name always points at the live session's event-log
-/// directory.
-fn seed_session_dir(shell: &mut Shell, log: &AgentLog) {
-    let dir = log.dir().to_string_lossy().into_owned();
-    crate::bootstrap::seed_var(shell, "EXARCH_SESSION_DIR", &dir);
-}
-
 fn cancelled_result(id: String) -> SessionToolResult {
     SessionToolResult {
         id,
@@ -2561,15 +2450,17 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
-    //! Panic-recovery integrity (A4): a worker panic mid-tool-eval must
-    //! preserve the bindings completed tool calls left behind and leave the
-    //! dynamic context clean.  Driven through the scripted provider and the
-    //! shared `drive` loop — the real path: `drive` catches the unwind,
-    //! `ral_core`'s own frame guard self-heals the IO frame, and `drive`
-    //! rebuilds the live context from the durable snapshot.
+    //! Panic-recovery integrity (A4): a panic mid-tool-eval must preserve
+    //! the bindings completed tool calls left behind and leave the dynamic
+    //! context clean.  Driven through the scripted provider and the shared
+    //! `drive` loop — the real path: the engine's own turn door
+    //! (`Shell::run_turn`) catches the unwind, rolls the dynamic context
+    //! back, and reports the panicking call as a failed turn.
 
     use super::*;
+    use crate::fleet::registry::{EvalReach, TurnScope};
     use crate::provider::scripted::{Reply, Script};
+    use ral_core::Shell;
     use ral_core::Value;
     use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
@@ -2579,6 +2470,41 @@ mod tests {
     /// A scripted provider behind the `Arc` the turn driver threads.
     fn scripted(model: &str, script: Script) -> Arc<Provider> {
         Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
+    }
+
+    /// Boundary read of an Int-answering probe class — ticks no ledger.
+    fn probe_int(session: &Agent, class: &str) -> i64 {
+        match session.seat.transport().probe(FOValue::Variant {
+            label: class.into(),
+            payload: None,
+        }) {
+            Ok(FOValue::Int { value }) => value,
+            other => panic!("`{class} probe must answer an Int, got {other:?}"),
+        }
+    }
+
+    /// Whether `name` resolves in scope, observed through a real dispatched
+    /// eval (a `VALUE:` section vs an undefined-variable error).  The eval
+    /// ticks the ral epoch and the binding ledger like any call — a
+    /// lease-sensitive test must count it in its idle arithmetic.
+    fn scope_has(session: &mut Agent, name: &str) -> bool {
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        let content = session
+            .run_shell(format!("probe-{name}"), &format!("${name}"), 5, &emit)
+            .content;
+        // A non-transportable result (a closure-valued binding) still
+        // proves the name resolved — presence, not the value, is the
+        // question here.
+        if content.contains("VALUE:") || content.contains("not transportable across the host seam")
+        {
+            return true;
+        }
+        assert!(
+            content.contains(&format!("undefined variable: ${name}")),
+            "scope probe for `{name}` answered neither a VALUE nor an undefined-variable error: {content}"
+        );
+        false
     }
 
     /// A nullary builtin whose body panics — stands in for any Rust panic
@@ -2622,23 +2548,23 @@ mod tests {
         let dir = tmp("panic-recovery");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(PANIC_BUILTINS);
-        // Refresh `durable` so the snapshot reflects the just-installed
-        // builtin frame, matching the production boundary where the
-        // baseline is the booted shell.
-        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
-        let baseline_grant_depth = session.transport.shell_mut().shell.grant_depth();
+        let baseline_grant_depth = probe_int(&session, "grant-depth");
 
-        // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.  Both
-        // round-trips happen inside one `apply`; `drive` catches the unwind.
+        // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.  The
+        // panic is caught at the engine's own turn door (`Shell::run_turn`),
+        // which rolls the shell back and reports a failed turn — so the model
+        // sees an ordinary failed tool result and the batch continues to a
+        // third, closing reply.
         let provider = scripted(
             "test-model",
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("c1", "let a4_x = 7")]))
-                .then(Reply::tool_calls(vec![ral_call("c2", "a4-panic-now")])),
+                .then(Reply::tool_calls(vec![ral_call("c2", "a4-panic-now")]))
+                .then(Reply::text("recovered")),
         );
         session.provider = ProviderHandle::new(provider);
         session.seed("compute then crash".into());
@@ -2646,22 +2572,18 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         let _ = session.drive(&mut NoControl, &emit);
 
-        // The completed call's binding survives the panic.
-        assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("a4_x")
-                .is_some(),
-            "a binding from a completed tool call must survive a later call's panic"
-        );
         // The dynamic context is rolled back to the clean boundary: no
         // leaked grant frame from the panicking call's `with_capabilities`.
+        // (Read before the scope probe below, which is itself a call.)
         assert_eq!(
-            session.transport.shell_mut().shell.grant_depth(),
+            probe_int(&session, "grant-depth"),
             baseline_grant_depth,
             "the panicking call's grant frame must not leak into the next turn"
+        );
+        // The completed call's binding survives the panic.
+        assert!(
+            scope_has(&mut session, "a4_x"),
+            "a binding from a completed tool call must survive a later call's panic"
         );
         // The drive loop handed the session back ready for a fresh prompt.
         assert!(
@@ -2691,7 +2613,7 @@ mod tests {
         let session = Agent::for_test(&dir, "system").unwrap();
         assert!(
             session
-                .transport
+                .seat
                 .shell_mut()
                 .shell
                 .lookup_builtin("view-text")
@@ -2703,12 +2625,7 @@ mod tests {
             .expect("fork child session");
         for name in ["view-text", "grep-files", "edit-hash", "explore-dir"] {
             assert!(
-                child
-                    .transport
-                    .shell_mut()
-                    .shell
-                    .lookup_builtin(name)
-                    .is_some(),
+                child.seat.shell_mut().shell.lookup_builtin(name).is_some(),
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
@@ -2817,19 +2734,23 @@ mod tests {
             .file_name()
             .expect("tmp dir has a name")
             .to_string_lossy();
-        let scratch = Scratch::for_test(&tag).expect("scratch dir");
+        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, &tag).expect("scratch dir");
         Agent::root(
-            "system".into(),
-            ral_core::types::Capabilities::default(),
-            &scratch,
-            dir,
-            "test-model",
-            "test",
-            false,
-            interactive,
-            false,
+            RootConfig {
+                system: "system".into(),
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir.to_path_buf(),
+                model: "test-model".into(),
+                provider_label: "test".into(),
+                allow_schedule: false,
+                interactive,
+                chat: false,
+                disk_warn_bytes: None,
+            },
+            RootSeat::Identity {
+                scratch: Arc::new(scratch),
+            },
             scripted("test-model", Script::new()),
-            None,
         )
         .expect("root trunk")
     }
@@ -2867,23 +2788,29 @@ mod tests {
     #[test]
     fn builtin_index_resolves_per_agent_not_per_parent() {
         let dir = tmp("builtin-index-per-agent");
-        let scratch = Scratch::for_test("builtin-index-per-agent").expect("scratch dir");
+        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "builtin-index-per-agent")
+            .expect("scratch dir");
         let template = format!(
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
         );
         let root = Agent::root(
-            template,
-            ral_core::types::Capabilities::default(),
-            &scratch,
-            &dir,
-            "test-model",
-            "test",
-            false, // allow_schedule
-            true,  // interactive: the conversing trunk withholds `reply`
-            false, // chat
+            RootConfig {
+                system: template,
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir,
+                model: "test-model".into(),
+                provider_label: "test".into(),
+                allow_schedule: false,
+                // The conversing trunk withholds `reply`.
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+            },
+            RootSeat::Identity {
+                scratch: Arc::new(scratch),
+            },
             scripted("test-model", Script::new()),
-            None,
         )
         .expect("root trunk");
         assert!(
@@ -2931,7 +2858,7 @@ mod tests {
         );
         let agent = Agent::for_test(&dir, &template).expect("test agent");
 
-        let guard = agent.transport.shell_mut();
+        let guard = agent.seat.shell_mut();
         let prelude = ral_core::builtins::help::prelude_names()
             .into_iter()
             .map(str::to_string);
@@ -2996,23 +2923,29 @@ mod tests {
     #[test]
     fn fork_and_branch_bookend_record_the_childs_own_resolved_length() {
         let dir = tmp("bookend-resolved-length");
-        let scratch = Scratch::for_test("bookend-resolved-length").expect("scratch dir");
+        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "bookend-resolved-length")
+            .expect("scratch dir");
         let template = format!(
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
         );
         let root = Agent::root(
-            template,
-            ral_core::types::Capabilities::default(),
-            &scratch,
-            &dir,
-            "test-model",
-            "test",
-            false, // allow_schedule
-            true,  // interactive: withholds `reply`
-            false, // chat
+            RootConfig {
+                system: template,
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir,
+                model: "test-model".into(),
+                provider_label: "test".into(),
+                allow_schedule: false,
+                // interactive: withholds `reply`.
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+            },
+            RootSeat::Identity {
+                scratch: Arc::new(scratch),
+            },
             scripted("test-model", Script::new()),
-            None,
         )
         .expect("root trunk");
 
@@ -3068,8 +3001,7 @@ mod tests {
                 name: "child".into(),
                 log_dir: dir.join("child"),
                 cancel: child.cancel_token().clone(),
-                eval_root: Some(child.eval_root()),
-                turn_scope: Some(child.turn_scope()),
+                reach: Some(child.seat.eval_reach()),
                 mailbox: child.mailbox(),
                 provider: child.provider_handle(),
             })
@@ -3221,8 +3153,7 @@ mod tests {
                 name: "child".into(),
                 log_dir: dir.join("child"),
                 cancel: child.cancel_token().clone(),
-                eval_root: Some(child.eval_root()),
-                turn_scope: Some(child.turn_scope()),
+                reach: Some(child.seat.eval_reach()),
                 mailbox: child.mailbox(),
                 provider: child.provider_handle(),
             })
@@ -3234,8 +3165,10 @@ mod tests {
             name: "direct".into(),
             log_dir: dir.join("direct"),
             cancel: direct_token.clone(),
-            eval_root: Some(direct_root.clone()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: direct_root.clone(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
@@ -3246,8 +3179,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: dir.join("grandchild"),
             cancel: grandchild_token.clone(),
-            eval_root: Some(ral_core::process::DurableRoot::default()),
-            turn_scope: None,
+            reach: Some(EvalReach::Identity {
+                eval_root: ral_core::process::DurableRoot::default(),
+                turn_scope: TurnScope::default(),
+            }),
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
@@ -3260,8 +3195,10 @@ mod tests {
                 name: "sibling".into(),
                 log_dir: dir.join("sibling"),
                 cancel: sibling_token.clone(),
-                eval_root: Some(ral_core::process::DurableRoot::default()),
-                turn_scope: None,
+                reach: Some(EvalReach::Identity {
+                    eval_root: ral_core::process::DurableRoot::default(),
+                    turn_scope: TurnScope::default(),
+                }),
                 mailbox: Inbox::new().mailbox(),
                 provider: child.provider.clone(),
             })
@@ -3389,12 +3326,7 @@ mod tests {
         );
         // The binding from the completed tool call survived.
         assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("x12_a")
-                .is_some(),
+            scope_has(&mut session, "x12_a"),
             "a binding from a completed tool call must survive a later provider error"
         );
         // The second turn ran: the final outcome is the no-reply failure
@@ -3459,7 +3391,7 @@ mod tests {
         let dir = tmp("t2-cancel-mid-batch");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(T2_CANCEL_BUILTINS);
@@ -3721,7 +3653,7 @@ mod tests {
         let dir = tmp("clear-cancels-workers");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -3744,7 +3676,7 @@ mod tests {
             &emit,
         );
 
-        let entries = session.transport.shell_mut().shell.workers();
+        let entries = session.seat.shell_mut().shell.workers();
         assert_eq!(entries.len(), 2, "one ordinary worker, one service");
         let durable = entries
             .iter()
@@ -3758,8 +3690,7 @@ mod tests {
             );
         }
 
-        let scratch = Scratch::for_test("clear-cancels-workers").expect("scratch dir");
-        session.clear(&scratch).expect("clear must succeed");
+        session.clear().expect("clear must succeed");
 
         for entry in &entries {
             assert!(
@@ -3769,7 +3700,7 @@ mod tests {
             );
         }
         assert_eq!(
-            session.transport.shell_mut().shell.worker_count(),
+            probe_int(&session, "worker-count"),
             0,
             "the rebuilt shell's registry must start empty"
         );
@@ -3822,7 +3753,7 @@ mod tests {
         let parent = Agent::for_test(&dir, "system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -3834,8 +3765,7 @@ mod tests {
             name: "child".into(),
             log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),
-            eval_root: Some(child.eval_root()),
-            turn_scope: Some(child.turn_scope()),
+            reach: Some(child.seat.eval_reach()),
             mailbox: child.mailbox(),
             provider: child.provider_handle(),
         });
@@ -3844,7 +3774,7 @@ mod tests {
         let emit = Emitter::with_mailbox(tx, child.id, child.inbox.mailbox());
         let _ = child.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 
-        let entries = child.transport.shell_mut().shell.workers();
+        let entries = child.seat.shell_mut().shell.workers();
         assert_eq!(entries.len(), 1, "the child's own spawn must register");
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 
@@ -3872,7 +3802,7 @@ mod tests {
         let dir = tmp("drop-cancels-own-workers");
         let mut agent = Agent::for_test(&dir, "system").unwrap();
         agent
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -3881,7 +3811,7 @@ mod tests {
         let emit = Emitter::with_mailbox(tx, agent.id, agent.inbox.mailbox());
         let _ = agent.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 
-        let entries = agent.transport.shell_mut().shell.workers();
+        let entries = agent.seat.shell_mut().shell.workers();
         assert_eq!(entries.len(), 1, "the agent's own spawn must register");
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 
@@ -3935,7 +3865,7 @@ mod tests {
     fn dispatch_with_lease(session: &Agent, cmd: &str, lease: ral_core::types::WorkerLease) {
         use ral_core::transport::{DispatchId, Program, Turn};
         use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
-        session.transport.dispatch(
+        session.seat.transport().dispatch(
             DispatchId(0),
             Turn {
                 program: Program::Source(cmd.to_string()),
@@ -3964,7 +3894,7 @@ mod tests {
         let dir = tmp("drain-worker-reaps");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -3980,7 +3910,7 @@ mod tests {
 
         // Past the idle bound, unpolled: the lease chain reaps it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while session.transport.shell_mut().shell.worker_count() > 0 {
+        while probe_int(&session, "worker-count") > 0 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the unpolled worker must be reaped within the budget"
@@ -4032,7 +3962,7 @@ mod tests {
         let dir = tmp("reconcile-service-pins");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -4073,14 +4003,14 @@ mod tests {
         // Cancel the service through the ordinary `cancel` builtin — the
         // same edge a model reaches — and reconcile again: the row leaves.
         let entry = session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .workers()
             .pop()
             .expect("the service registered");
         let cancel_fn = session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .lookup_builtin("cancel")
@@ -4089,7 +4019,7 @@ mod tests {
             .body
             .call(
                 &[Value::Handle(entry.handle)],
-                &mut session.transport.shell_mut().shell,
+                &mut session.seat.shell_mut().shell,
             )
             .expect("cancel must succeed");
 
@@ -4151,56 +4081,62 @@ mod tests {
 
     /// Seed one idle binding (a tiny re-armed bound, for speed — every
     /// `Agent` is already armed with the production `BINDING_IDLE_CALLS` by
-    /// `assemble`), then drive the drain site directly: one `Kind::Notice`
-    /// carrying `Notice::Prune` names it, and a second drain — nothing left
-    /// idle — emits nothing.
+    /// `assemble`): the boundary prune fires inside a later call's own turn
+    /// and its `Kind::Notice` rides that turn's surface stream — one notice
+    /// naming the pruned binding, and no second notice once nothing is left
+    /// idle.
     #[test]
-    fn reap_bindings_emits_once_then_nothing() {
+    fn boundary_prune_notice_rides_the_turns_own_stream() {
         let dir = tmp("reap-bindings");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 2,
                 large_binding_bytes: u64::MAX,
             });
-        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
-
-        let (warmup_tx, _warmup_rx) = crate::bus::channel();
-        let warmup_emit = Emitter::new(warmup_tx, session.id);
-        session.run_shell("c0".into(), "let reap_me = 1", 5, &warmup_emit);
-        session.run_shell("c1".into(), "let _spin1 = 0", 5, &warmup_emit);
-        session.run_shell("c2".into(), "let _spin2 = 0", 5, &warmup_emit);
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.reap_bindings(&emit);
-        let event = rx
-            .try_recv()
-            .expect("the drain must emit exactly one prune event");
-        match event.kind {
-            Kind::Notice {
+        session.run_shell("c0".into(), "let reap_me = 1", 5, &emit);
+        session.run_shell("c1".into(), "$[0]", 5, &emit);
+        session.run_shell("c2".into(), "$[0]", 5, &emit);
+
+        let mut prunes = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Kind::Notice {
                 notice: crate::bus::card::Notice::Prune { names, idle_calls },
                 ..
-            } => {
-                assert_eq!(names, vec!["reap_me".to_string()]);
-                assert_eq!(idle_calls.len(), 1);
-                assert!(idle_calls[0] >= 2, "idle at least the armed bound");
+            } = event.kind
+            {
+                prunes.push((names, idle_calls));
             }
-            _ => panic!("expected Kind::Notice with Notice::Prune"),
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "the drain must emit exactly one event per prune pass"
+        assert_eq!(
+            prunes.len(),
+            1,
+            "exactly one prune notice rides a turn's surface stream"
         );
+        let (names, idle_calls) = &prunes[0];
+        assert_eq!(names, &vec!["reap_me".to_string()]);
+        assert_eq!(idle_calls.len(), 1);
+        assert!(idle_calls[0] >= 2, "idle at least the armed bound");
 
-        session.reap_bindings(&emit);
-        assert!(
-            rx.try_recv().is_err(),
-            "a second drain with nothing pruned must emit nothing"
-        );
+        session.run_shell("c3".into(), "$[0]", 5, &emit);
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(
+                    event.kind,
+                    Kind::Notice {
+                        notice: crate::bus::card::Notice::Prune { .. },
+                        ..
+                    }
+                ),
+                "nothing left idle — no second prune notice"
+            );
+        }
     }
 
     /// A session-scope install that meets the large-binding threshold
@@ -4215,14 +4151,13 @@ mod tests {
         let dir = tmp("reap-large-binding");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 1_000_000,
                 large_binding_bytes: 8,
             });
-        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
@@ -4374,30 +4309,29 @@ mod tests {
         );
     }
 
-    /// A prune that fires between two turns refreshes `Agent::durable` to
-    /// its post-prune state; a later call's panic then rolls back to that
-    /// same post-prune snapshot, so the pruned name cannot resurrect even
-    /// though the panic-recovery rollback runs after it. A completed call's
-    /// own binding, made after the prune, survives the panic exactly as
+    /// A prune that fires between two turns cannot be undone by a later
+    /// call's panic: the rollback checkpoint is taken at that call's own
+    /// turn entry, after the prune, so the pruned name cannot resurrect.
+    /// A completed call's own binding, made after the prune, survives the
+    /// panic exactly as
     /// `worker_panic_preserves_completed_bindings_and_clean_context` pins.
     #[test]
     fn panic_after_prune_does_not_resurrect_binding() {
         let dir = tmp("panic-after-prune");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(PANIC_BUILTINS);
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 2,
                 large_binding_bytes: u64::MAX,
             });
-        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
@@ -4405,16 +4339,11 @@ mod tests {
         session.run_shell("c1".into(), "let _spin1 = 0", 5, &emit);
         session.run_shell("c2".into(), "let _spin2 = 0", 5, &emit);
 
-        // The prune fires here, before any panic — and refreshes `durable`
-        // to this post-prune state in the same call.
-        session.reap_bindings(&emit);
+        // The prune fired at the last call's own ready boundary, before
+        // any panic.  (The probe is itself a call: it may prune the idle
+        // `_spin` names, which nothing below asserts on.)
         assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("panic_prune_x")
-                .is_none(),
+            !scope_has(&mut session, "panic_prune_x"),
             "panic_prune_x must already be pruned before the panicking call"
         );
 
@@ -4425,29 +4354,22 @@ mod tests {
                     "c3",
                     "let survives_y = 9",
                 )]))
-                .then(Reply::tool_calls(vec![ral_call("c4", "a4-panic-now")])),
+                .then(Reply::tool_calls(vec![ral_call("c4", "a4-panic-now")]))
+                .then(Reply::text("recovered")),
         );
         session.provider = ProviderHandle::new(provider);
         session.seed("compute then crash".into());
         let _ = session.drive(&mut NoControl, &emit);
 
+        // `survives_y` first: each probe ticks the armed idle bound (2), and
+        // reading it renews it, so the second probe's tick cannot prune it.
         assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("panic_prune_x")
-                .is_none(),
-            "the pruned name must not resurrect across the panic's mobile rollback"
+            scope_has(&mut session, "survives_y"),
+            "a completed call's binding must survive a later call's panic"
         );
         assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("survives_y")
-                .is_some(),
-            "a completed call's binding must survive a later call's panic"
+            !scope_has(&mut session, "panic_prune_x"),
+            "the pruned name must not resurrect across the panic's mobile rollback"
         );
     }
 
@@ -4461,35 +4383,32 @@ mod tests {
     fn clear_reseals_baseline_and_forgets_ledger() {
         let dir = tmp("clear-reseals-baseline");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = crate::bus::channel();
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
 
-        let scratch = Scratch::for_test("clear-reseals-baseline").expect("scratch dir");
-        session.clear(&scratch).expect("clear must succeed");
+        session.clear().expect("clear must succeed");
 
         assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("pre_clear_x")
-                .is_none(),
+            !scope_has(&mut session, "pre_clear_x"),
             "the pre-clear binding must not survive the rebuild"
         );
 
         for i in 0..5 {
             session.run_shell(format!("post{i}"), "let _post_spin = 0", 5, &emit);
         }
-        assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .prune_idle_bindings()
-                .is_none(),
-            "a freshly re-armed, re-sealed shell has nothing idle to prune yet"
-        );
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(
+                    event.kind,
+                    Kind::Notice {
+                        notice: crate::bus::card::Notice::Prune { .. },
+                        ..
+                    }
+                ),
+                "a freshly re-armed, re-sealed shell has nothing spuriously idle to prune"
+            );
+        }
     }
 
     /// `fork_session` snapshots the parent's whole scope into the child;
@@ -4509,12 +4428,7 @@ mod tests {
             .fork(ral_core::types::Capabilities::default())
             .expect("fork");
         assert!(
-            child
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("parent_scratch")
-                .is_some(),
+            scope_has(&mut child, "parent_scratch"),
             "fork_session snapshots the parent's whole scope"
         );
 
@@ -4523,7 +4437,7 @@ mod tests {
         // re-arming reseals identically, just faster to idle out for the
         // test) and idle it hard.
         child
-            .transport
+            .seat
             .shell_mut()
             .shell
             .arm_binding_lease(ral_core::types::BindingLease {
@@ -4536,22 +4450,9 @@ mod tests {
             child.run_shell(format!("child{i}"), "let _child_spin = 0", 5, &child_emit);
         }
         assert!(
-            child
-                .transport
-                .shell_mut()
-                .shell
-                .prune_idle_bindings()
-                .is_none(),
-            "inherited parent scratch is baseline in the child, never a lease candidate"
-        );
-        assert!(
-            child
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup("parent_scratch")
-                .is_some(),
-            "baseline names are never pruned"
+            scope_has(&mut child, "parent_scratch"),
+            "inherited parent scratch is baseline in the child — never pruned, however \
+             many boundary prunes the idle calls above ran"
         );
     }
 
@@ -4566,7 +4467,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
 
         let (boot_name, _) = session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .bindings()
@@ -4577,15 +4478,8 @@ mod tests {
         for i in 0..(shell_eval::BINDING_IDLE_CALLS + 5) {
             session.run_shell(format!("spin{i}"), "let _boot_spin = 0", 5, &emit);
         }
-        session.reap_bindings(&emit);
-
         assert!(
-            session
-                .transport
-                .shell_mut()
-                .shell
-                .scope_lookup(&boot_name)
-                .is_some(),
+            scope_has(&mut session, &boot_name),
             "a boot-seeded (baseline) name must survive past the idle bound"
         );
     }
@@ -4598,60 +4492,65 @@ mod tests {
         let dir = tmp("prune-events-json");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 1,
                 large_binding_bytes: u64::MAX,
             });
-        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
-        let (tx, _rx) = crate::bus::channel();
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
-        session.run_shell("c1".into(), "let _spin = 0", 5, &emit);
+        let after_bind = session.log.lock().event_count();
 
-        let before = session.log.lock().event_count();
-        session.reap_bindings(&emit);
+        // The prune fires at this call's own ready boundary (idle bound 1).
+        session.run_shell("c1".into(), "$[0]", 5, &emit);
+        let after_prune_call = session.log.lock().event_count();
+        let pruned = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(
+                event.kind,
+                Kind::Notice {
+                    notice: crate::bus::card::Notice::Prune { .. },
+                    ..
+                }
+            )
+        });
+        assert!(pruned, "the prune notice must have fired on the bus");
+
+        // A further identical call with nothing to prune grows the model
+        // view by exactly the same amount: the prune contributed nothing.
+        session.run_shell("c2".into(), "$[0]", 5, &emit);
+        let after_plain_call = session.log.lock().event_count();
         assert_eq!(
-            session.log.lock().event_count(),
-            before,
+            after_prune_call - after_bind,
+            after_plain_call - after_prune_call,
             "a binding prune must never write a model-view events.json entry"
         );
     }
 
-    /// The per-agent ral-call epoch: each `run_shell` bumps it once, the
-    /// post-eval sweep stamps a settled-but-unclaimed worker's entry with
-    /// it, and — the sweep fast-forwarded past the retention bound through
-    /// the same host door `run_shell` uses — the expiry surfaces at the
-    /// *next* dispatched turn as a `Retention`-cause `Kind::Notice`: the
-    /// sweep itself runs between turns (`advance_worker_epoch`, called
-    /// after the turn that owns `self.ral_epoch` returns), so there is no
-    /// live surface sink to push the notice through until a further turn
-    /// runs (`decisions/260706_enquiry-channel` §4.2).
+    /// The settled-worker retention ledger, end to end through the
+    /// engine's own clock: the registry ticks once per dispatched call,
+    /// its sweep runs at each call's ready boundary, and an expiry's
+    /// `Retention`-cause `Kind::Notice` rides a turn's own surface stream.
     #[test]
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
         let dir = tmp("ral-epoch-retention");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = crate::bus::channel();
+        // A tiny bound so the expiry is a couple of calls away (`assemble`
+        // armed the production constant; re-arming replaces it).
+        session.seat.shell_mut().shell.arm_worker_retention(1);
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
-        // Call 1: spawn an instant worker.  The call's own sweep races the
-        // worker's settling, so the stamp is asserted only after call 2,
-        // by which time settling is certain.
         session.run_shell("t1".into(), "spawn { return 1 }", 5, &emit);
         assert_eq!(session.ral_epoch, 1, "one call, one tick");
 
-        let entry = session
-            .transport
-            .shell_mut()
-            .shell
-            .workers()
-            .pop()
-            .expect("the spawn registered its worker");
+        // Settle observed through the probe rail — a boundary read that
+        // ticks nothing, so the retention arithmetic below stays exact.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Completed {
+        while !session.probe_workers().iter().any(|w| !w.running) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the instant worker must settle within the budget"
@@ -4659,54 +4558,39 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
-        // Call 2: a trivial eval; its sweep certainly observes the settled
-        // entry, so the stamp is whichever call's sweep saw it first.
-        session.run_shell("t2".into(), "let _x = 1", 5, &emit);
-        assert_eq!(session.ral_epoch, 2, "two calls, two ticks");
-        let stamped = session
-            .transport
-            .shell_mut()
-            .shell
-            .workers()
-            .pop()
-            .expect("the unclaimed entry lingers");
-        let s = stamped
-            .settled_epoch
-            .expect("the per-call sweep stamped the settled entry");
-        assert!(s == 1 || s == 2, "stamped by call 1's or call 2's sweep");
-
-        // Fast-forward the sweep past the retention bound, expiring the
-        // unclaimed entry...
-        session.transport.shell_mut().shell.advance_worker_epoch(
-            s + shell_eval::SETTLED_WORKER_RETENTION,
-            shell_eval::SETTLED_WORKER_RETENTION,
-        );
-        assert_eq!(session.transport.shell_mut().shell.worker_count(), 0);
-
-        // ...and the expiry surfaces at the next dispatched turn, on a
-        // fresh channel so the run_shell chatter above stays out of the
-        // assert.
-        let (tx2, rx2) = crate::bus::channel();
-        let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
-        session.run_shell("t3".into(), "return 1", 5, &emit2);
-        let mut notices = 0;
-        while let Ok(event) = rx2.try_recv() {
-            let Kind::Notice {
-                notice: crate::bus::card::Notice::Reap { cmd, cause },
-                ..
-            } = event.kind
-            else {
-                continue;
-            };
-            notices += 1;
-            assert_eq!(cmd, "<block>", "the reap names the spawned body");
-            assert_eq!(
-                cause,
-                ral_core::types::ReapCause::Retention,
-                "an unclaimed settled entry expires as Retention"
-            );
+        // Stamped at the first boundary sweep that observes it settled,
+        // expired once a later call's sweep finds it a full retention old —
+        // which call does which depends on when the worker settled, so
+        // drive calls until the notice lands (bounded).
+        let mut reaps = 0;
+        for i in 0..6 {
+            session.run_shell(format!("spin{i}"), "$[0]", 5, &emit);
+            while let Ok(event) = rx.try_recv() {
+                let Kind::Notice {
+                    notice: crate::bus::card::Notice::Reap { cmd, cause },
+                    ..
+                } = event.kind
+                else {
+                    continue;
+                };
+                assert_eq!(cmd, "<block>", "the reap names the spawned body");
+                assert_eq!(
+                    cause,
+                    ral_core::types::ReapCause::Retention,
+                    "an unclaimed settled entry expires as Retention"
+                );
+                reaps += 1;
+            }
+            if reaps > 0 {
+                break;
+            }
         }
-        assert_eq!(notices, 1, "exactly one notice per retention expiry");
+        assert_eq!(reaps, 1, "exactly one notice per retention expiry");
+        assert_eq!(
+            probe_int(&session, "worker-count"),
+            0,
+            "the expired entry left the registry"
+        );
     }
 
     // ── `/resources`: the probe fold's agent half ─────────────────────────
@@ -4731,7 +4615,7 @@ mod tests {
         let dir = tmp("resource-rows");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -4741,35 +4625,14 @@ mod tests {
         // One running worker, one settled-unclaimed worker.
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
         session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
-        let settled_entry = session
-            .transport
-            .shell_mut()
-            .shell
-            .workers()
-            .into_iter()
-            .find(|e| e.cmd == "<block>" && e.class == ral_core::types::LeaseClass::Worker)
-            .expect("both spawns registered");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            let any_settled = session
-                .transport
-                .shell_mut()
-                .shell
-                .workers()
-                .iter()
-                .any(|e| {
-                    *e.handle.state.lock().unwrap() == ral_core::types::HandleState::Completed
-                });
-            if any_settled {
-                break;
-            }
+        while !session.probe_workers().iter().any(|w| !w.running) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the instant worker must settle within the budget"
             );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let _ = settled_entry;
 
         // A binding is one more row in the count — measured across a `let`.
         let before = row(&session.resource_rows(), "bindings.count").current;
@@ -4845,7 +4708,7 @@ mod tests {
         );
 
         // End the blocked worker so the test does not leak a live thread.
-        let workers = session.transport.shell_mut().shell.workers();
+        let workers = session.seat.shell_mut().shell.workers();
         for entry in workers {
             entry
                 .handle
@@ -4863,7 +4726,7 @@ mod tests {
         let dir = tmp("resource-rows-no-renew");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -4872,7 +4735,7 @@ mod tests {
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 
         let entry = session
-            .transport
+            .seat
             .shell_mut()
             .shell
             .workers()

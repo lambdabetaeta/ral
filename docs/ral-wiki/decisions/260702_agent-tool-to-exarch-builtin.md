@@ -306,9 +306,11 @@ Two pieces of the original analysis survive verbatim:
   two-tool-call sequence does now. The forked session is parked engine-side
   and *adopted by id*: under the identity transport a turn-local **nursery**
   slot installed beside the desk (the turn guard drops an unadopted fork);
-  under the wire, the engine's session table — enquiry-channel §5's
-  multi-session direction, which `agent-start` therefore requires before it
-  rides the wire (the Phase B coherence gate makes that dependency loud). The
+  under the wire, a child engine
+  process the parent spawns guest-side, the snapshot crossing same-binary
+  over an inherited fd and the child dialling the host on its own connection
+  ([[decisions/260722_session-is-a-process|session-is-a-process]] — unbuilt
+  until exarch rides the wire at all). The
   *host half* — registry entry, mailbox, provider loop — is assembled in the
   handler from `HostServices` plus the adopted session.
 - **Registry, inbox, and reaper untouched.** The child still parents at the

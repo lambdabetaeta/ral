@@ -382,7 +382,7 @@ pub(crate) fn run_shell(
         }
         Report::Ran {
             result,
-            status: _status,
+            status,
             single_command,
             captured,
             timed_out,
@@ -400,61 +400,51 @@ pub(crate) fn run_shell(
                     (0, v)
                 }
                 Err(break_) => match break_ {
-                    ral_core::transport::Break::Error(msg) => {
-                        let e = if timed_out {
+                    ral_core::transport::Break::Error {
+                        rendered,
+                        command_exit,
+                    } => {
+                        if timed_out {
+                            // The wall fired: the model needs the remedy, not
+                            // the cancellation diagnostic — replace the
+                            // rendering wholesale, exit 124 by exarch's own
+                            // timeout convention.
                             let msg = format!(
-                                "ral tool: timed out after {timeout_secs}s. If the command is simply slow \
+                                "error: ral tool: timed out after {timeout_secs}s. If the command is simply slow \
                                  and there is nothing to overlap it with, retry with a higher `timeout_secs`. \
                                  If other work can run alongside it, defer it instead (`let h = defer {{ … }}`) \
                                  and let the turn return: the host notifies you at the next turn boundary when \
                                  it settles and renders its output on the rail, and `await $h` gives you its \
-                                 value record — you need not poll."
+                                 value record — you need not poll.\n"
                             );
-                            ral_core::types::Error::new(msg, 124)
+                            stderr_bytes.extend_from_slice(msg.as_bytes());
+                            (124, None)
                         } else {
-                            ral_core::types::Error::new(msg.clone(), 1)
-                        };
-
-                        // When using WireTransport, the shell is remote; fall back
-                        // to an empty source map for error formatting.
-                        // TODO Phase 2: include source map in Report.
-                        let sources = transport
-                            .as_any()
-                            .downcast_ref::<ral_core::transport::IdentityTransport>()
-                            .map(|t| t.shell_mut().shell.sources().clone())
-                            .unwrap_or_default();
-                        let exit = ral_core::diagnostic::report_runtime_error(
-                            &mut stderr_bytes,
-                            &sources,
-                            &e,
-                            single_command,
-                        );
-
-                        // Add recovery tip for command exits
-                        let is_cmd_exit = matches!(
-                            &e.status,
-                            ral_core::types::Status::Process(
-                                ral_core::process::CommandFailure::ExitCode(_)
-                            )
-                        );
-                        if is_cmd_exit {
-                            let mut tip = String::from(
-                                "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
-                                 signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
-                                 valgrind --error-exitcode=N), its stdout/stderr were captured — read them as \
-                                 data with `audit { … }`, which does not raise, or catch with \
-                                 `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
-                            );
-                            if !single_command {
-                                tip.push_str(
-                                    " A non-zero exit also aborts the rest of this command and discards earlier \
-                                     bindings; wrap risky tools in `audit`/`try`, or split them out.",
+                            // The seam already rendered the full diagnostic —
+                            // prefix, exit status, hint, caret — against the
+                            // engine's own source map; print it verbatim,
+                            // exactly as the REPL does, and take the engine's
+                            // once-computed status as the tool exit.
+                            stderr_bytes.extend_from_slice(rendered.as_bytes());
+                            if *command_exit {
+                                let mut tip = String::from(
+                                    "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
+                                     signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
+                                     valgrind --error-exitcode=N), its stdout/stderr were captured — read them as \
+                                     data with `audit { … }`, which does not raise, or catch with \
+                                     `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
                                 );
+                                if !single_command {
+                                    tip.push_str(
+                                        " A non-zero exit also aborts the rest of this command and discards earlier \
+                                         bindings; wrap risky tools in `audit`/`try`, or split them out.",
+                                    );
+                                }
+                                tip.push('\n');
+                                stderr_bytes.extend_from_slice(tip.as_bytes());
                             }
-                            tip.push('\n');
-                            stderr_bytes.extend_from_slice(tip.as_bytes());
+                            (status, None)
                         }
-                        (exit, None)
                     }
                     ral_core::transport::Break::Exit(code) => ((*code).clamp(0, 255), None),
                     #[cfg(unix)]
@@ -1450,6 +1440,68 @@ keep-bottom
         assert!(
             stderr.contains("timeout_secs"),
             "the timeout message names the `timeout_secs` knob; stderr was: {stderr}"
+        );
+    }
+
+    /// A failing external command surfaces the seam's rendering exactly
+    /// once — one `error:` prefix, never a host-side re-render on top — with
+    /// the command's true exit code as the tool exit (the engine computed it
+    /// once; the host must not collapse it to 1) and the recovery tip,
+    /// which fires only for a command's own non-zero exit.
+    #[cfg(unix)]
+    #[test]
+    fn command_exit_renders_once_with_true_code_and_tip() {
+        let mut shell = fresh_shell();
+        let (emit, _rx) = dummy_emitter();
+        let r = match run_shell_direct(
+            &mut shell,
+            &Capabilities::root(),
+            "/bin/sh -c 'exit 3'",
+            10,
+            &emit,
+        ) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert_eq!(
+            stderr.matches("error:").count(),
+            1,
+            "the seam's rendering appears exactly once; stderr was: {stderr}"
+        );
+        assert!(
+            stderr.contains("status 3"),
+            "the rendering names the true status; stderr was: {stderr}"
+        );
+        assert!(
+            stderr.contains("recovery:"),
+            "a command exit carries the recovery tip; stderr was: {stderr}"
+        );
+    }
+
+    /// A raised error — `fail`, not an external command's exit — carries no
+    /// command-exit recovery tip: the tip's advice (read the captured
+    /// output as data) is about tools that speak through exit codes, and
+    /// would be noise on an explicit failure.
+    #[test]
+    fn raised_error_carries_no_recovery_tip() {
+        let mut shell = fresh_shell();
+        let (emit, _rx) = dummy_emitter();
+        let r = match run_shell_direct(&mut shell, &Capabilities::root(), "fail 7", 10, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(r.exit, 7, "the raised error's status is the tool exit");
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert_eq!(
+            stderr.matches("error:").count(),
+            1,
+            "one rendering; stderr was: {stderr}"
+        );
+        assert!(
+            !stderr.contains("recovery:"),
+            "a raised error is not a command exit; stderr was: {stderr}"
         );
     }
 

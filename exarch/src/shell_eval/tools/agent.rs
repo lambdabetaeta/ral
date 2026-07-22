@@ -122,12 +122,11 @@ pub(crate) fn spawn_async(
     let log_dir = child.log_dir();
     let log_dir_str = log_dir.display().to_string();
     let cancel = child.cancel_token().clone();
-    // The child's eval-layer cancel handle, registered so the cascade can
+    // The child's eval-layer cancel reach, registered so the cascade can
     // unwind a `ral` eval already in flight when a terminate-class cancel
-    // lands; its turn-scope cell, registered so a per-tab interrupt can
-    // unwind just the in-flight turn without touching that root.
-    let eval_root = child.eval_root();
-    let turn_scope = child.turn_scope();
+    // lands, and a per-tab interrupt can unwind just the in-flight turn
+    // without touching the root a later turn would inherit.
+    let reach = child.seat.eval_reach();
     // The child's inbox sender, registered so the frontend can steer or
     // wake this tab.  Cheap-clone, taken off `child` before it moves into
     // the worker thread (alongside the one the streaming `child_emit`
@@ -147,8 +146,7 @@ pub(crate) fn spawn_async(
         name: name.clone(),
         log_dir: log_dir.clone(),
         cancel,
-        eval_root: Some(eval_root),
-        turn_scope: Some(turn_scope),
+        reach: Some(reach),
         mailbox: child_mailbox,
         provider: child_provider,
     }) {

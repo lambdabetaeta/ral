@@ -88,8 +88,7 @@ pub use shell::hooks::{
 };
 pub use shell::{
     Context, DEFAULT_RECURSION_LIMIT, DeferredSink, Desk, EnquiryDesk, EventSink, LocalState,
-    Mobile, MobileSnapshot, Nursery, NurseryId, SessionState, Shell, SurfaceSink, TerminalLoan,
-    TurnState,
+    Mobile, Nursery, NurseryId, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};
 

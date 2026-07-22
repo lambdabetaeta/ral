@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- The one entitlement synod needs: permission to create virtual machines
+     with Virtualization.framework (the vz backend in vm-manager).  It works
+     under an ad-hoc signature, so local development never needs an Apple
+     Developer account; a Developer ID signature carries it identically when
+     the app ships.  Deliberately absent: com.apple.vm.networking — the
+     guest has no network device by design (SYNOD.md §6), and that
+     entitlement would need Apple's case-by-case approval anyway. -->
+<dict>
+    <key>com.apple.security.virtualization</key>
+    <true/>
+</dict>
+</plist>

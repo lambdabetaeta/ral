@@ -220,6 +220,15 @@ impl Shell {
         self.mobile.scope.all_bindings()
     }
 
+    /// The largest single lexical binding's shallow byte estimate — the
+    /// `` `largest-binding-bytes `` probe's reading
+    /// ([`answer_probe`](crate::transport::answer_probe)), measured by
+    /// reference: a probe that cloned the whole scope to size it would be
+    /// its own cautionary tale.
+    pub fn largest_binding_shallow_size(&self) -> usize {
+        self.mobile.scope.largest_shallow_size()
+    }
+
     /// Every bound name with its installed scheme, innermost binding
     /// wins — the scope half of [`Self::session_schemes`], surfaced on its
     /// own for the worksheet's type column.

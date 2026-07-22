@@ -919,15 +919,11 @@ pub enum Notice {
 /// Decode a `` `notice `` value into its [`Notice`].
 ///
 /// The shape is
-/// `` `notice [kind: `reap|`large-binding, …fields] `` where `kind` selects
-/// the fields read below — exactly the two classes core's
-/// `emit_ready_boundary_notices` pushes. [`Notice::Prune`] deliberately has
-/// no decode arm: the idle-prune notice is host-composed from
-/// `prune_idle_bindings`'s polled return (the migration's acknowledged
-/// residue) and never rides the surface rail; its arm arrives with the
-/// migration that pushes it. Anything else — an unrecognised `kind`, a
-/// missing field, a value that is not this variant at all — returns `None`,
-/// the same graceful degradation as [`value_to_done`].
+/// `` `notice [kind: `reap|`large-binding|`prune, …fields] `` where `kind`
+/// selects the fields read below — exactly the three classes core's
+/// `emit_ready_boundary_notices` pushes. Anything else — an unrecognised
+/// `kind`, a missing field, a value that is not this variant at all —
+/// returns `None`, the same graceful degradation as [`value_to_done`].
 pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
     let RalValue::Variant { label, payload } = v else {
         return None;
@@ -959,6 +955,39 @@ pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
                 name: str_field(m, "name")?,
                 bytes,
             }
+        }
+        "prune" => {
+            let RalValue::List(names) = m.get("names")? else {
+                return None;
+            };
+            let names: Vec<String> = names
+                .iter()
+                .map(|v| match v {
+                    RalValue::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            let RalValue::List(idle) = m.get("idle-calls")? else {
+                return None;
+            };
+            let idle_calls: Vec<u64> = idle
+                .iter()
+                .map(|v| match v {
+                    RalValue::Int(i) => {
+                        #[allow(
+                            clippy::cast_sign_loss,
+                            reason = "max(0) floors to a non-negative call count"
+                        )]
+                        let n = (*i).max(0) as u64;
+                        Some(n)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            if names.len() != idle_calls.len() {
+                return None;
+            }
+            Notice::Prune { names, idle_calls }
         }
         _ => return None,
     })

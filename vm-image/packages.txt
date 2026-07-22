@@ -1,0 +1,86 @@
+# Synod guest rootfs — package set (SYNOD.md §7: "a complete office userland").
+#
+# The guest has no network (§6), so the image IS the package manager: whatever
+# is not listed here does not exist at runtime. One package per line; comments
+# and blank lines are stripped by build.sh. Groups mirror §7's rationale.
+#
+# Universe components are required (csvkit, ripgrep, tesseract language data,
+# the metric-compatible fonts, some python3-* bindings); build.sh enables
+# main,universe. Nothing here pulls a compiler — verified against the manifest.
+
+# --- LibreOffice, headless (docx/xlsx/pptx read + write + convert) ---
+# There is no "libreoffice-core-nogui" package (spec name corrected): headless
+# is a runtime flag (soffice --headless), not a build. We install the three
+# app filter sets plus core and deliberately OMIT libreoffice-gtk3 /
+# libreoffice-gnome, so with Recommends off no desktop/X integration is pulled.
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress
+libreoffice-core
+
+# --- Document toolchain ---
+pandoc
+poppler-utils
+qpdf
+ocrmypdf
+tesseract-ocr
+# English + the major Western-European language packs (eng also comes via the
+# tesseract-ocr dependency, listed for intent).
+tesseract-ocr-eng
+tesseract-ocr-fra
+tesseract-ocr-deu
+tesseract-ocr-spa
+tesseract-ocr-ita
+tesseract-ocr-por
+tesseract-ocr-nld
+
+# --- Python 3 document stack, from apt only (no pip at build or run time) ---
+# SPEC CORRECTION: §7 lists python-pptx, but there is NO python3-pptx package in
+# Ubuntu 24.04 (universe included). It is dropped here to keep the image apt-pure
+# and reproducible. pptx read/write is NOT lost — LibreOffice headless handles it
+# via --convert-to; only the Python binding is absent. See README (§ Corrections)
+# for the optional build-time pip fallback if a native binding is later required.
+python3
+python3-pandas
+python3-openpyxl
+python3-docx
+python3-pypdf
+python3-pil
+
+# --- Images, tabular data, text tooling ---
+imagemagick
+csvkit
+ripgrep
+# GNU text toolbox: most are essential/required, but pin the ones that are not
+# guaranteed by the minbase variant so office scripting always has them.
+gawk
+sed
+grep
+findutils
+diffutils
+coreutils
+unzip
+zip
+gzip
+tar
+file
+# iconv ships in libc-bin (§7 note).
+libc-bin
+
+# --- Fonts: metric-compatible MS substitutes + wide Unicode coverage ---
+# Carlito == Calibri, Caladea == Cambria: a converted university letter must
+# render in the reader's own metrics, not tofu or reflowed substitutes.
+fonts-crosextra-carlito
+fonts-crosextra-caladea
+fonts-liberation2
+fonts-dejavu
+fonts-noto-core
+fonts-noto-extra
+fonts-noto-ui-core
+fonts-noto-cjk
+fonts-noto-color-emoji
+
+# --- Locales: full set, pre-generated ---
+# locales-all ships every locale already compiled, so no locale-gen step and
+# no post-install configuration is needed in an image with no network.
+locales-all

@@ -180,6 +180,18 @@ impl Env {
         result
     }
 
+    /// The largest single binding's shallow byte estimate across the
+    /// chain, the innermost occurrence of a shadowed name measured —
+    /// [`Self::all_bindings`]'s view of the scope, without cloning any
+    /// value. `0` on an empty chain.
+    pub fn largest_shallow_size(&self) -> usize {
+        self.fold_innermost_wins(|b| b.value.shallow_size())
+            .into_iter()
+            .map(|(_, size)| size)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// All bindings across all scopes, innermost wins.
     pub fn all_bindings(&self) -> Vec<(String, Value)> {
         self.fold_innermost_wins(|b| b.value.clone())
