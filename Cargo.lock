@@ -6769,22 +6769,12 @@ dependencies = [
  "ral-core",
  "serde",
  "serde_json",
- "tokio",
- "vm-manager",
-]
-
-[[package]]
-name = "synod-app"
-version = "0.1.0"
-dependencies = [
- "exarch",
- "serde",
- "serde_json",
- "synod",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tokio",
+ "vm-manager",
 ]
 
 [[package]]

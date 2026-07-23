@@ -14,10 +14,12 @@
 //!   virtual machine, walled off from the rest of the computer;
 //! - **the surface** — plain language, no git vocabulary anywhere.
 //!
-//! Synod is a library, not a binary: `synod-app`, the GUI, is the one
-//! process — an agent itself, in the sense that it starts a machine and
-//! talks to it, in-process, over [`session::Conversation`].  There is no
-//! command line and nothing here is ever typed at directly.
+//! Synod is one crate in two halves: the library modules here — the engine
+//! anyone could drive — and the desktop shell (the binary's `shell` module,
+//! rooted at `main.rs`) that is the only thing that drives it.  The shell is
+//! an agent itself, in the sense that it starts a machine and talks to it,
+//! in-process, over [`session::Conversation`].  There is no command line and
+//! nothing here is ever typed at directly.
 //!
 //! The design record is `dev/docs/VM/SYNOD.md`.
 #![allow(

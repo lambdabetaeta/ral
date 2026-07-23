@@ -5,8 +5,8 @@
 # .github/workflows/ci.yml; kept in lock-step with that file.
 #
 # Windows is cross-checked here too (`cargo check`, which never links)
-# against the shipping x86_64-pc-windows-msvc ABI — exarch (and synod
-# and synod-app, which sit atop it) is excluded because its rustls ->
+# against the shipping x86_64-pc-windows-msvc ABI — exarch (and synod,
+# which sits atop it) is excluded because its rustls ->
 # aws-lc-sys dependency compiles C against Windows system headers,
 # impossible from a Unix host.  Only *test
 # execution* on real Windows still needs the windows-check CI job
@@ -16,7 +16,7 @@
 #   1. cargo build --workspace --all-targets   (RUSTFLAGS=-D warnings)
 #   2. cargo test --workspace
 #   3. cargo check --workspace --exclude exarch --exclude synod
-#        --exclude synod-app --all-targets
+#        --all-targets
 #        --target x86_64-pc-windows-msvc
 #   4. uv run scripts/render-site.py
 #   5. for f in examples/*/*.ral: cargo run -p ral -- --check $f
@@ -53,8 +53,8 @@ within [dir: $repo_root] {
         # intrinsics instead of hunting for ml64.exe.  Scoped to this
         # one step; shipped builds never set this variable.
         within [env: [CC_x86_64_pc_windows_msvc: 'cc-absent-use-blake3-pure-fallback']] {
-            step 'cargo check --workspace --exclude exarch/synod/synod-app --target x86_64-pc-windows-msvc' {
-                cargo check --workspace --exclude exarch --exclude synod --exclude synod-app --all-targets --target x86_64-pc-windows-msvc
+            step 'cargo check --workspace --exclude exarch/synod --target x86_64-pc-windows-msvc' {
+                cargo check --workspace --exclude exarch --exclude synod --all-targets --target x86_64-pc-windows-msvc
             }
         }
     }

@@ -192,7 +192,7 @@ pub fn open_earlier(app: AppHandle, folder: String, path: String) -> Result<(), 
             }
             std::fs::write(&dest, bytes)
                 .map_err(|e| format!("Could not set out the earlier version: {e}"))?;
-            crate::commands::open_with_default(&app, &dest.to_string_lossy())
+            super::commands::open_with_default(&app, &dest.to_string_lossy())
         }
         Some(_) => Err(format!(
             "{path} was a folder before the job, so there is no earlier document to open."

@@ -5,7 +5,7 @@
 //! None of this is stubbed.  The folder picker is the platform's own; the
 //! conversation is a [`synod::session::Conversation`] driven on its own
 //! worker thread for as long as the window wants it, with its narration
-//! streamed into the window as [`crate::sink::SynodEvent`]s and messages
+//! streamed into the window as [`super::sink::SynodEvent`]s and messages
 //! handed across an in-process channel; opening a file hands the path to
 //! the user's default application through the opener plugin.
 //!
@@ -61,7 +61,7 @@ struct ConversationEnded {
     /// True only when the conversation ran its whole life and shut its
     /// machine down cleanly.
     success: bool,
-    /// True when synod-app ended it on purpose rather than it failing on
+    /// True when the shell ended it on purpose rather than it failing on
     /// its own.
     stopped: bool,
 }
@@ -353,7 +353,7 @@ fn converse(
     choice: Option<Choice>,
     receiver: &mpsc::Receiver<String>,
 ) -> ConversationEnded {
-    let mut sink = crate::sink::TauriSink::new(app.clone());
+    let mut sink = super::sink::TauriSink::new(app.clone());
 
     let credentials = app.state::<crate::Credentials>();
     let store = credentials
@@ -364,7 +364,7 @@ fn converse(
     let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
         Ok(begun) => begun,
         Err(e) => {
-            let _ = app.emit("synod-event", crate::sink::SynodEvent::Failure { message: e });
+            let _ = app.emit("synod-event", super::sink::SynodEvent::Failure { message: e });
             return ConversationEnded {
                 success: false,
                 stopped: false,
@@ -384,7 +384,7 @@ fn converse(
 
     while let Ok(message) = receiver.recv() {
         if let Err(e) = conversation.exchange(message, &mut sink) {
-            let _ = app.emit("synod-event", crate::sink::SynodEvent::Failure { message: e });
+            let _ = app.emit("synod-event", super::sink::SynodEvent::Failure { message: e });
         }
         // Announced even after a failed exchange: the after-checkpoint ran
         // regardless, and whatever changed before the failure is already in
@@ -407,7 +407,7 @@ fn guard(slot: &Arc<Mutex<Option<Handle>>>) -> std::sync::MutexGuard<'_, Option<
 }
 
 /// Hand `path` to the user's default application for that file.  Also the
-/// way [`review::open_earlier`](crate::review::open_earlier) opens the
+/// way [`review::open_earlier`](super::review::open_earlier) opens the
 /// version it sets out from history.
 pub(crate) fn open_with_default(app: &AppHandle, path: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;

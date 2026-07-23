@@ -6,7 +6,6 @@ members = [
     "ral-sh",
     "exarch",
     "synod",
-    "synod/app",
     "vm-manager",
     "ral-daemon",
     "ral-initramfs",

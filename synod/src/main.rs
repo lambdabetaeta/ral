@@ -14,17 +14,18 @@
 //! for its whole life — the assistant's own account of what it has done so
 //! far, and a way to put any file (or everything) back the way it was.
 //!
-//! This crate is the *host* half of that shell — and, unlike a shell over
+//! This binary is the *host* half of that shell — and, unlike a shell over
 //! a separate program, it IS the agent: it hosts the conversation
 //! in-process, starts a machine over the chosen folder, and talks to it
 //! directly.  The frontend is hand-written HTML/CSS/JS under
 //! [`ui/`](../ui), embedded at build time (there is no bundler and no web
-//! server); the Rust side is a thin set of commands the window calls:
+//! server); the Rust side is a thin set of commands the window calls, all
+//! under [`shell`]:
 //!
 //! - the folder picker, the model menu, the conversation itself, sending it
 //!   messages, starting again, and opening files with the user's own
-//!   applications, in [`commands`];
-//! - the change report and the undo actions, in [`review`], over the
+//!   applications, in [`shell::commands`];
+//! - the change report and the undo actions, in [`shell::review`], over the
 //!   workspace vocabulary in `synod::workspace` — the checkpoint, the
 //!   change set, and the conflict-checked restore.
 //!
@@ -38,16 +39,16 @@
 )]
 #![allow(
     clippy::disallowed_methods,
-    reason = "synod-app is a desktop application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline, which this crate is nowhere near"
+    reason = "synod's binary is a desktop application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline, which this crate is nowhere near"
 )]
 #![allow(
     clippy::needless_pass_by_value,
     reason = "a `#[tauri::command]` handler receives its deserialized arguments and its injected State/AppHandle by value — the command ABI does not admit borrowed parameters — so the pass-by-value is the framework's shape, not ours to tighten"
 )]
 
-mod commands;
-mod review;
-mod sink;
+mod shell;
+
+use shell::{commands, review};
 
 use exarch::provider::credential::CredentialStore;
 use exarch::provider::models::{LiveSource, ModelCatalog};
