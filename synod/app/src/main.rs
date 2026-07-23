@@ -47,6 +47,7 @@
 
 mod commands;
 mod review;
+mod sink;
 
 use exarch::provider::credential::CredentialStore;
 use exarch::provider::models::{LiveSource, ModelCatalog};

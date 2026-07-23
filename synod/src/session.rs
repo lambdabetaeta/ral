@@ -30,7 +30,6 @@ use exarch::provider::{
     pricing,
 };
 use std::collections::HashSet;
-use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use vm_manager::Machine;
@@ -461,7 +460,7 @@ impl Conversation {
                 allow_schedule: false,
                 // A conversation, not a job: the agent converses,
                 // withholding `reply` and parking between messages rather
-                // than returning once — [`exarch::headless::converse_on`]
+                // than returning once — [`exarch::headless::converse_sink`]
                 // drives one exchange at a time over this same session.
                 interactive: true,
                 chat: false,
@@ -515,9 +514,10 @@ impl Conversation {
         ))
     }
 
-    /// Drive one message through the conversation, streaming the same
-    /// events [`exarch::headless::converse_on`] always does to `out` and
-    /// `err`.
+    /// Drive one message through the conversation, streaming the bus's
+    /// events into the caller's `sink` in order — the same events
+    /// [`exarch::headless::converse_sink`] always drives one exchange
+    /// through.
     ///
     /// Checkpoints what this exchange left behind, cumulatively from the
     /// baseline — taken even after a failed exchange, since whatever
@@ -528,14 +528,13 @@ impl Conversation {
     /// Returns `Err` if the exchange itself fails; if the exchange
     /// succeeded but the after-checkpoint could not be taken, that error
     /// is returned instead.
-    pub fn exchange(
+    pub fn exchange<S: exarch::bus::Sink>(
         &mut self,
         message: String,
-        out: &mut (dyn io::Write + Send),
-        err: &mut (dyn io::Write + Send),
+        sink: &mut S,
     ) -> Result<(), String> {
         let outcome =
-            exarch::headless::converse_on(&mut self.agent, message, self.engine.clone(), out, err);
+            exarch::headless::converse_sink(&mut self.agent, message, self.engine.clone(), sink);
         match self
             .history
             .capture(self.grant.root(), workspace::Moment::After)

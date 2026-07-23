@@ -5,16 +5,15 @@
 //! None of this is stubbed.  The folder picker is the platform's own; the
 //! conversation is a [`synod::session::Conversation`] driven on its own
 //! worker thread for as long as the window wants it, with its narration
-//! streamed into the window line by line and messages handed across an
-//! in-process channel; opening a file hands the path to the user's default
-//! application through the opener plugin.
+//! streamed into the window as [`crate::sink::SynodEvent`]s and messages
+//! handed across an in-process channel; opening a file hands the path to
+//! the user's default application through the opener plugin.
 //!
 //! The credential store is resolved once, at startup, before this module
 //! ever runs — see [`crate::Credentials`] — so every command here either
 //! finds it already settled or surfaces its one failure as a plain
 //! sentence.
 
-use std::io::{self, Write};
 use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,19 +54,6 @@ pub(crate) struct Handle {
     join: Option<JoinHandle<()>>,
 }
 
-/// One line of the conversation's narration, sent to the window as it
-/// arrives.  The text is developer-flavoured for now — the window tucks it
-/// into a "details" fold under the assistant's own narration — so `stream`
-/// marks which channel it came from without asking the window to interpret
-/// it.
-#[derive(Clone, Serialize)]
-struct OutputLine {
-    /// `"out"` for the assistant's own narration, `"err"` for the run's
-    /// progress and tool trace.
-    stream: &'static str,
-    line: String,
-}
-
 /// The conversation has ended, one way or another — a failure, or a
 /// deliberate stop (a restart, or the window closing).
 #[derive(Clone, Serialize)]
@@ -78,6 +64,18 @@ struct ConversationEnded {
     /// True when synod-app ended it on purpose rather than it failing on
     /// its own.
     stopped: bool,
+}
+
+/// The conversation's opening, once — the folder, the boundary, the
+/// assistant, and the large-folder warning, if any — emitted as
+/// `synod-opening` the moment [`Conversation::begin`] succeeds.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpeningEvent {
+    folder: String,
+    boundary_line: String,
+    assistant_line: String,
+    large_folder_line: Option<String>,
 }
 
 /// Open the native folder picker and return the chosen folder, or `None`
@@ -160,9 +158,10 @@ pub fn list_models(
 }
 
 /// Start the conversation: open `folder` on its own worker thread and hold
-/// it open, ready for [`send_message`], its narration streamed to the
-/// window as `synod-log` events, and — however it ends — a single
-/// `synod-ended` event.
+/// it open, ready for [`send_message`], its opening announced as one
+/// `synod-opening` event, its narration streamed to the window as
+/// `synod-event` events, and — however it ends — a single `synod-ended`
+/// event.
 ///
 /// This returns as soon as the thread is spawned; the conversation plays
 /// out over the events from here on.
@@ -339,8 +338,7 @@ fn converse(
     choice: Option<Choice>,
     receiver: &mpsc::Receiver<String>,
 ) -> ConversationEnded {
-    let mut out = LineWriter::new(app.clone(), "out");
-    let mut err = LineWriter::new(app.clone(), "err");
+    let mut sink = crate::sink::TauriSink::new(app.clone());
 
     let credentials = app.state::<crate::Credentials>();
     let store = credentials
@@ -351,7 +349,7 @@ fn converse(
     let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
         Ok(begun) => begun,
         Err(e) => {
-            let _ = writeln!(err, "{e}");
+            let _ = app.emit("synod-event", crate::sink::SynodEvent::Failure { message: e });
             return ConversationEnded {
                 success: false,
                 stopped: false,
@@ -359,18 +357,19 @@ fn converse(
         }
     };
 
-    let _ = writeln!(err, "Working in {}", opening.folder);
-    let _ = writeln!(err, "{}", opening.boundary_line);
-    let _ = writeln!(err);
-    let _ = writeln!(err, "{}", opening.assistant_line);
-    if let Some(large_folder_line) = &opening.large_folder_line {
-        let _ = writeln!(err, "{large_folder_line}");
-    }
-    let _ = err.flush();
+    let _ = app.emit(
+        "synod-opening",
+        OpeningEvent {
+            folder: opening.folder,
+            boundary_line: opening.boundary_line,
+            assistant_line: opening.assistant_line,
+            large_folder_line: opening.large_folder_line,
+        },
+    );
 
     while let Ok(message) = receiver.recv() {
-        if let Err(e) = conversation.exchange(message, &mut out, &mut err) {
-            let _ = writeln!(err, "{e}");
+        if let Err(e) = conversation.exchange(message, &mut sink) {
+            let _ = app.emit("synod-event", crate::sink::SynodEvent::Failure { message: e });
         }
         // Announced even after a failed exchange: the after-checkpoint ran
         // regardless, and whatever changed before the failure is already in
@@ -390,64 +389,6 @@ fn converse(
 fn guard(slot: &Arc<Mutex<Option<Handle>>>) -> std::sync::MutexGuard<'_, Option<Handle>> {
     slot.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Buffers written bytes to whole lines and emits each as its own
-/// `synod-log` event; a trailing partial line — no closing `\n` yet — is
-/// flushed as its own event on [`Write::flush`] or drop, so nothing
-/// written is ever lost between exchanges.
-struct LineWriter {
-    app: AppHandle,
-    stream: &'static str,
-    buffer: String,
-}
-
-impl LineWriter {
-    fn new(app: AppHandle, stream: &'static str) -> Self {
-        Self {
-            app,
-            stream,
-            buffer: String::new(),
-        }
-    }
-}
-
-impl io::Write for LineWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buffer.push_str(&String::from_utf8_lossy(buf));
-        while let Some(pos) = self.buffer.find('\n') {
-            let line = self.buffer[..pos].to_string();
-            let _ = self.app.emit(
-                "synod-log",
-                OutputLine {
-                    stream: self.stream,
-                    line,
-                },
-            );
-            self.buffer.drain(..=pos);
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            let _ = self.app.emit(
-                "synod-log",
-                OutputLine {
-                    stream: self.stream,
-                    line,
-                },
-            );
-        }
-        Ok(())
-    }
-}
-
-impl Drop for LineWriter {
-    fn drop(&mut self) {
-        let _ = self.flush();
-    }
 }
 
 /// Hand `path` to the user's default application for that file.  Also the
