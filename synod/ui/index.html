@@ -320,19 +320,18 @@
       flex-direction: row;
     }
     @media (max-width: 880px) {
-      .layout { flex-direction: column; overflow-y: auto; }
+      .layout { flex-direction: column; }
     }
 
     /* --- the conversation column -------------------------------------- */
+    /* The changed-files pane carries the divider on its right edge, so the
+       conversation column (to its right) needs none. */
     .convo-col {
       flex: 1 1 60%;
       min-width: 0;
+      min-height: 0;
       display: flex;
       flex-direction: column;
-      border-right: 1px solid var(--line);
-    }
-    @media (max-width: 880px) {
-      .convo-col { border-right: none; border-bottom: 1px solid var(--line); }
     }
 
     .transcript {
@@ -342,9 +341,6 @@
       display: flex;
       flex-direction: column;
       gap: 18px;
-    }
-    @media (max-width: 880px) {
-      .transcript { max-height: 60vh; }
     }
 
     .msg { max-width: 74ch; animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
@@ -737,15 +733,24 @@
     }
     .btn-send:not(:disabled):hover { background: var(--accent-hover); }
 
-    /* --- the report column --------------------------------------------- */
+    /* --- the report column, now on the left ---------------------------- */
     .report-col {
       flex: 1 1 40%;
       min-width: 0;
       max-width: 480px;
       overflow-y: auto;
+      border-right: 1px solid var(--line);
       padding: 22px clamp(16px, 3vw, 28px) 40px;
     }
-    @media (max-width: 880px) { .report-col { max-width: none; } }
+    @media (max-width: 880px) {
+      .report-col {
+        max-width: none;
+        flex: none;
+        max-height: 38vh;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+    }
 
     .report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
     .report-head h2 {
@@ -903,19 +908,6 @@
       </div>
 
       <div class="layout">
-        <div class="convo-col">
-          <div class="transcript" id="transcript">
-            <p class="welcome">Say what you'd like done, in your own words — for example,
-              "file every invoice under the month it was sent." You can keep talking; the
-              assistant remembers this conversation until you start again.</p>
-          </div>
-
-          <div class="composer">
-            <textarea id="message" placeholder="What would you like done?" rows="1"></textarea>
-            <button type="button" class="btn-send" id="send" disabled>Send</button>
-          </div>
-        </div>
-
         <div class="report-col">
           <div class="report-head">
             <h2>What's changed</h2>
@@ -930,6 +922,19 @@
           </div>
 
           <div class="cards" id="cards"></div>
+        </div>
+
+        <div class="convo-col">
+          <div class="transcript" id="transcript">
+            <p class="welcome">Say what you'd like done, in your own words — for example,
+              "file every invoice under the month it was sent." You can keep talking; the
+              assistant remembers this conversation until you start again.</p>
+          </div>
+
+          <div class="composer">
+            <textarea id="message" placeholder="What would you like done?" rows="1"></textarea>
+            <button type="button" class="btn-send" id="send" disabled>Send</button>
+          </div>
         </div>
       </div>
     </section>
@@ -974,6 +979,19 @@
       busy: false,   // an exchange is in flight
       alive: false,  // the assistant is currently running
     };
+
+    // The transcript is its own scroll region — a chat-only scrollbar,
+    // separate from the change report's. It sticks to the foot as tokens
+    // and cards stream in, and lets go the moment the reader scrolls up to
+    // look back, re-engaging once they return to the bottom.
+    const transcriptEl = $("transcript");
+    let stickToBottom = true;
+    transcriptEl.addEventListener("scroll", () => {
+      stickToBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight < 40;
+    });
+    function pinTranscript() {
+      if (stickToBottom) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
 
     // ---- Start screen ---------------------------------------------------
 
@@ -1188,7 +1206,7 @@
     // than append to one that conversationally already passed.
     let currentDial = null;
 
-    // Rung 0 needs no label: its tip already reads "Show details — <intent>".
+    // Rung 0 needs no label: its tip already names the latest intent.
     const RUNG_LABELS = ["", "all steps", "all scripts"];
 
     function ensureDial() {
@@ -1239,15 +1257,14 @@
     }
 
     function dialHeaderText(dial) {
-      if (dial.rung !== 0) return "Details";
       const latest = dial.entries[dial.entries.length - 1];
-      if (latest && latest.intent) return "Show details — " + latest.intent;
+      if (latest && latest.intent) return latest.intent;
       // A dial opened by a warn/bad note alone has no intent to show: put the
       // note itself in the collapsed tip so a retry or provider error is never
       // silent, even before the body is dialed open.
       const note = dial.notes[dial.notes.length - 1];
-      if (note) return "Show details — " + note.text;
-      return "Show details";
+      if (note) return note.text;
+      return "";
     }
 
     function renderDial(dial) {
@@ -1260,7 +1277,7 @@
       if (dial.rung === 1) renderDialIntents(dial);
       else if (dial.rung === 2) renderDialFull(dial);
 
-      $("transcript").scrollTop = $("transcript").scrollHeight;
+      pinTranscript();
     }
 
     function renderDialIntents(dial) {
@@ -1400,7 +1417,7 @@
       const welcome = t.querySelector(".welcome");
       if (welcome) welcome.remove();
       t.appendChild(msg);
-      t.scrollTop = t.scrollHeight;
+      pinTranscript();
     }
 
     function capitalize(text) {
@@ -1471,7 +1488,7 @@
           currentAssistantBubble.innerHTML = renderAssistantMarkdown(currentAssistantRaw);
           currentDial = null;
           setStatus("Working…");
-          $("transcript").scrollTop = $("transcript").scrollHeight;
+          pinTranscript();
           break;
         case "thinking":
           setStatus("Thinking…");
