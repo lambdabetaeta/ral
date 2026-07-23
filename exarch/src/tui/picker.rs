@@ -73,26 +73,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-/// One background fetch's state, generic over the loaded payload — a
-/// provider's model list ([`ModelsState`]) or a model's serving-provider list
-/// ([`EndpointsState`]).
-pub enum FetchState<T> {
-    /// The background fetch is in flight — the row reads "loading…".
-    Loading,
-    /// A usable value (from cache or a completed fetch).
-    Loaded(T),
-    /// The fetch failed with this reason.
-    Failed(String),
-}
-
-/// One provider's model-list fetch state. `Failed`: the provider still
-/// accepts a manual model entry.
-pub type ModelsState = FetchState<Vec<String>>;
-
-/// One model's serving-provider (`OpenRouter` `/endpoints`) fetch state. Keyed by
-/// model id, fetched intent-driven when the provider control is focused on it.
-/// `Failed`: the route stays `auto` (`OpenRouter` decides).
-pub type EndpointsState = FetchState<Vec<ProviderEndpoint>>;
+pub use crate::provider::listing::{EndpointsState, FetchState, ModelsState};
 
 /// The chosen serving provider together with the model it was chosen for. The
 /// control shows it (and [`Picker::apply`] emits it) only while that model is

@@ -178,8 +178,10 @@ pub fn run() -> Result<(), String> {
     // Resolve the initial selection: an explicit `--provider` pin, else an
     // explicit `--model` override, else the persisted selection (when its
     // provider is available), else the first available provider's default model.
-    let mut catalog =
-        provider::models::ModelCatalog::new(provider::models::LiveSource::new(&store));
+    let mut catalog = provider::models::ModelCatalog::new(
+        provider::models::LiveSource::new(&store),
+        bootstrap::EXARCH,
+    );
     let (id, model, mut tuning, route) = resolve_initial_selection(
         c.provider.as_deref(),
         c.model.as_deref(),

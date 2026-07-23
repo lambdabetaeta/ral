@@ -8,6 +8,7 @@
 pub mod credential;
 mod error;
 mod identity;
+pub mod listing;
 pub mod models;
 pub mod oauth;
 pub mod pricing;
@@ -24,7 +25,7 @@ pub use error::ProviderError;
 pub(crate) use error::error_object;
 pub(crate) use identity::provider_label;
 pub use identity::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind, Subscription};
-pub use request::Tuning;
+pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label};
 #[allow(
     unused_imports,
     reason = "crate-private facade path retained for tls rustdoc and subsystem callers"

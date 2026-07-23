@@ -9,8 +9,9 @@
 //!
 //! All network I/O sits behind the [`ModelSource`] trait so `cargo test`
 //! drives the resolution logic and the in-memory memo against a fake and
-//! never touches the network. The tests run `in_memory` (no `cache_path`),
-//! so the disk cache and the TTL-staleness path are not exercised by them.
+//! never touches the network. The tests run [`ModelCatalog::memo_only`] (no
+//! `cache_path`), so the disk cache and the TTL-staleness path are not
+//! exercised by them.
 
 use crate::provider::credential::{Credential, CredentialStore};
 use crate::provider::oauth;
@@ -343,21 +344,21 @@ pub struct ModelCatalog<S: ModelSource> {
 }
 
 impl<S: ModelSource> ModelCatalog<S> {
-    /// A catalog backed by `source`, persisting to the standard XDG cache
-    /// path when one resolves.
-    pub fn new(source: S) -> Self {
+    /// A catalog backed by `source`, persisting to `app`'s standard XDG
+    /// cache path when one resolves.
+    pub fn new(source: S, app: crate::bootstrap::App) -> Self {
         Self {
             source,
-            cache_path: cache_path(),
+            cache_path: cache_path(app),
             memo: BTreeMap::new(),
             endpoints_memo: BTreeMap::new(),
         }
     }
 
-    /// A catalog with no disk cache — the in-memory memo only. Used by
-    /// tests so a suite never reads or writes the user's cache dir.
-    #[cfg(test)]
-    fn in_memory(source: S) -> Self {
+    /// A catalog with no disk cache — the in-memory memo only. Tests, and
+    /// any caller that must never touch a user's cache dir, take this
+    /// instead of [`Self::new`].
+    pub fn memo_only(source: S) -> Self {
         Self {
             source,
             cache_path: None,
@@ -472,11 +473,11 @@ impl ModelCatalog<LiveSource> {
     }
 }
 
-/// `$XDG_CACHE_HOME/exarch/models.json`, or `None` when no cache base
+/// `$XDG_CACHE_HOME/<app>/models.json`, or `None` when no cache base
 /// resolves (`$HOME` unset and no absolute override) — the catalog then
 /// runs memo-only.
-fn cache_path() -> Option<PathBuf> {
-    let dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Cache);
+fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
+    let dir = app.xdg_dir(ral_core::path::basedir::XdgKind::Cache);
     dir.is_absolute().then(|| dir.join("models.json"))
 }
 
@@ -659,7 +660,7 @@ mod tests {
             fam(ProviderKind::Anthropic),
             &["claude-opus-4", "claude-haiku-4"],
         ));
-        let mut cat = ModelCatalog::in_memory(source);
+        let mut cat = ModelCatalog::memo_only(source);
         match cat.list(&fam(ProviderKind::Anthropic)) {
             Some(m) => assert_eq!(m, vec!["claude-opus-4", "claude-haiku-4"]),
             None => panic!("expected a list"),
@@ -707,7 +708,7 @@ mod tests {
             }]),
         );
         let source = FakeSource::new(BTreeMap::new()).with_endpoints(endpoints);
-        let mut cat = ModelCatalog::in_memory(source);
+        let mut cat = ModelCatalog::memo_only(source);
         assert!(cat.cached_endpoints(model).is_none());
         let fetched = cat.source().endpoints(model).unwrap();
         cat.record_endpoints(model, fetched.clone());
@@ -720,7 +721,7 @@ mod tests {
     fn custom_provider_lists_through_catalog() {
         let id = custom("local-llama");
         let source = FakeSource::new(one(id.clone(), &["llama-3", "llama-3-instruct"]));
-        let mut cat = ModelCatalog::in_memory(source);
+        let mut cat = ModelCatalog::memo_only(source);
         assert_eq!(
             cat.list(&id),
             Some(vec!["llama-3".to_string(), "llama-3-instruct".to_string()])
@@ -734,7 +735,7 @@ mod tests {
     fn failed_fetch_is_none_with_reason_at_the_source() {
         let mut lists = BTreeMap::new();
         lists.insert(fam(ProviderKind::Deepseek), Err("network down".to_string()));
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
         assert!(cat.list(&fam(ProviderKind::Deepseek)).is_none());
         assert!(
             cat.source()
@@ -756,7 +757,7 @@ mod tests {
             fam(ProviderKind::Deepseek),
             Ok(vec!["deepseek-chat".into()]),
         );
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
         let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
         assert_eq!(
             resolve_model_provider("deepseek-chat", &available, &mut cat).unwrap(),
@@ -775,7 +776,7 @@ mod tests {
             Ok(vec!["claude-opus-4".into()]),
         );
         lists.insert(llama.clone(), Ok(vec!["llama-3".into()]));
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
         let available = [fam(ProviderKind::Anthropic), llama.clone()];
         assert_eq!(
             resolve_model_provider("llama-3", &available, &mut cat).unwrap(),
@@ -786,7 +787,7 @@ mod tests {
     /// A `vendor/model` slug falls back to `OpenRouter` when no list matches.
     #[test]
     fn resolve_slug_falls_back_to_openrouter() {
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Openrouter)];
         assert_eq!(
             resolve_model_provider("x-ai/grok-9", &available, &mut cat).unwrap(),
@@ -798,7 +799,7 @@ mod tests {
     /// does not contain it — a scripted run need not name the provider.
     #[test]
     fn resolve_bare_name_to_sole_provider() {
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let available = [fam(ProviderKind::Anthropic)];
         assert_eq!(
             resolve_model_provider("claude-future", &available, &mut cat).unwrap(),
@@ -810,7 +811,7 @@ mod tests {
     /// clearly rather than guessing.
     #[test]
     fn resolve_unknown_with_many_providers_errors() {
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
         let err = resolve_model_provider("mystery", &available, &mut cat).unwrap_err();
         assert!(err.contains("not listed"), "got: {err}");
@@ -819,7 +820,7 @@ mod tests {
     /// No available provider is a clear error, not a panic.
     #[test]
     fn resolve_with_no_providers_errors() {
-        let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let err = resolve_model_provider("anything", &[], &mut cat).unwrap_err();
         assert!(err.contains("no provider available"), "got: {err}");
     }

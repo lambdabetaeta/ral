@@ -28,6 +28,69 @@ impl Tuning {
     }
 }
 
+/// The effort ladder, ascending, shared by every front-end that offers a
+/// discrete reasoning-effort control.
+///
+/// Exarch's `/model` overlay draws it as a rung ramp, synod's menu reads it
+/// as a plain list. `auto` first (the default, no option sent); then
+/// genai's keyword rungs from `none` up to `max`. `XHigh`'s keyword is
+/// `xhigh`; `Budget`/`Minimal` are intentionally omitted (the former carries
+/// a raw token count with no place on an ordered ladder, the latter is a
+/// legacy pre-gpt-5 alias for `low`).
+pub const EFFORT_LADDER: &[(&str, Option<ReasoningEffort>)] = &[
+    ("auto", None),
+    ("none", Some(ReasoningEffort::None)),
+    ("low", Some(ReasoningEffort::Low)),
+    ("med", Some(ReasoningEffort::Medium)),
+    ("high", Some(ReasoningEffort::High)),
+    ("xhigh", Some(ReasoningEffort::XHigh)),
+    ("max", Some(ReasoningEffort::Max)),
+];
+
+/// Resolve a ladder label to its effort, strictly — an unrecognised label is
+/// a caller error (a typo'd `--effort`, a stale menu choice), not a silent
+/// fallback to `auto`.
+///
+/// # Errors
+/// Returns `Err` naming `label` and listing the valid ladder labels when it
+/// matches none of them.
+pub fn effort_by_label(label: &str) -> Result<Option<ReasoningEffort>, String> {
+    EFFORT_LADDER
+        .iter()
+        .find(|(candidate, _)| *candidate == label)
+        .map(|(_, effort)| effort.clone())
+        .ok_or_else(|| {
+            let valid = EFFORT_LADDER
+                .iter()
+                .map(|(candidate, _)| *candidate)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("invalid effort '{label}' — expected one of: {valid}")
+        })
+}
+
+/// The ladder label whose effort matches [`Tuning::initial`].
+///
+/// The rung a freshly-opened control should land on, read off the ladder
+/// itself rather than restated as a literal that could drift out of step
+/// with it.
+///
+/// # Panics
+/// Panics if no ladder entry's effort matches [`Tuning::initial`]'s — a
+/// broken invariant of this module, not a condition a caller can trigger.
+pub fn default_effort_label() -> &'static str {
+    let initial = Tuning::initial().effort;
+    let (label, _) = EFFORT_LADDER
+        .iter()
+        .find(|(_, effort)| match (effort, &initial) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.variant_name() == b.variant_name(),
+            _ => false,
+        })
+        .expect("Tuning::initial()'s effort must appear on the effort ladder");
+    label
+}
+
 impl PartialEq for Tuning {
     fn eq(&self, other: &Self) -> bool {
         let key =
@@ -159,5 +222,26 @@ mod tests {
                 "provider": { "order": ["deepinfra"], "allow_fallbacks": false }
             }))
         );
+    }
+
+    #[test]
+    fn default_effort_label_is_medium() {
+        assert_eq!(default_effort_label(), "med");
+    }
+
+    #[test]
+    fn effort_by_label_resolves_every_ladder_rung() {
+        for (label, effort) in EFFORT_LADDER {
+            let resolved = effort_by_label(label).unwrap();
+            let key = |e: &Option<ReasoningEffort>| e.as_ref().map(ReasoningEffort::variant_name);
+            assert_eq!(key(&resolved), key(effort));
+        }
+    }
+
+    #[test]
+    fn effort_by_label_rejects_an_unknown_label() {
+        let err = effort_by_label("extreme").unwrap_err();
+        assert!(err.contains("extreme"), "got: {err}");
+        assert!(err.contains("xhigh"), "got: {err}");
     }
 }
