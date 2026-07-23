@@ -62,7 +62,7 @@ use super::line;
 use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
 use crate::provider::Subscription;
 use crate::provider::models::ProviderEndpoint;
-use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};
+use crate::provider::{EFFORT_LADDER, ProviderId, ProviderKind, Tuning};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::Frame;
@@ -132,59 +132,17 @@ const FOCUS_ORDER: &[Focus] = &[
     Focus::TopP,
 ];
 
-/// One rung of the effort ladder: its short label, its ramp glyph (an
-/// ascending block, so the ladder *grows* left-to-right), and the genai
-/// [`ReasoningEffort`] it sends — `None` for "auto" (the option is not set and
-/// the adapter's default stands). `auto` wears a dot rather than a block so it
+/// The effort ladder's ramp glyphs, one per [`EFFORT_LADDER`] rung in the same
+/// order — an ascending block, so the ladder *grows* left-to-right as the
+/// glyph both heightens and, in the rendered row, brightens through a colour
+/// mix keyed by the same index. `auto` wears a dot rather than a block so it
 /// reads as "no setting" rather than "the smallest setting".
-struct Rung {
-    label: &'static str,
-    glyph: &'static str,
-    effort: Option<ReasoningEffort>,
-}
+const GLYPHS: &[&str] = &["·", "▁", "▂", "▄", "▆", "▇", "█"];
 
-/// The effort ladder, ascending. `auto` first (the default, no option sent);
-/// then genai's keyword rungs from `none` up to `max`. `XHigh`'s keyword is
-/// `xhigh`; `Budget`/`Minimal` are intentionally omitted (the former carries a
-/// raw token count with no place on an ordered ladder, the latter is a legacy
-/// pre-gpt-5 alias for `low`).
-const LADDER: &[Rung] = &[
-    Rung {
-        label: "auto",
-        glyph: "·",
-        effort: None,
-    },
-    Rung {
-        label: "none",
-        glyph: "▁",
-        effort: Some(ReasoningEffort::None),
-    },
-    Rung {
-        label: "low",
-        glyph: "▂",
-        effort: Some(ReasoningEffort::Low),
-    },
-    Rung {
-        label: "med",
-        glyph: "▄",
-        effort: Some(ReasoningEffort::Medium),
-    },
-    Rung {
-        label: "high",
-        glyph: "▆",
-        effort: Some(ReasoningEffort::High),
-    },
-    Rung {
-        label: "xhigh",
-        glyph: "▇",
-        effort: Some(ReasoningEffort::XHigh),
-    },
-    Rung {
-        label: "max",
-        glyph: "█",
-        effort: Some(ReasoningEffort::Max),
-    },
-];
+const _: () = assert!(
+    GLYPHS.len() == EFFORT_LADDER.len(),
+    "one glyph per effort-ladder rung"
+);
 
 /// Temperature bounds and step. genai accepts `0.0..=2.0`; the overlay steps
 /// by tenths and treats "below zero" as a return to auto (unset).
@@ -379,7 +337,7 @@ pub struct Picker {
     /// chosen for (see [`Route`]). Active — shown and emitted — only while that
     /// model is highlighted; `None` is "auto" (`OpenRouter` decides).
     route: Option<Route>,
-    /// Index into [`LADDER`] — the chosen effort rung.
+    /// Index into [`EFFORT_LADDER`] — the chosen effort rung.
     effort_idx: usize,
     /// The chosen temperature, or `None` for auto (unset).
     temperature: Option<f64>,
@@ -409,9 +367,9 @@ impl Picker {
             .iter()
             .map(|id| (id.clone(), ModelsState::Loading))
             .collect();
-        let effort_idx = LADDER
+        let effort_idx = EFFORT_LADDER
             .iter()
-            .position(|r| match (&r.effort, &initial.effort) {
+            .position(|(_, effort)| match (effort, &initial.effort) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.variant_name() == b.variant_name(),
                 _ => false,
@@ -442,16 +400,6 @@ impl Picker {
             .copied()
             .unwrap_or(Subscription::Metered);
         crate::provider::provider_label(subscription, id.label())
-    }
-
-    /// The providers whose lists are not yet known — the REPL spawns a
-    /// background fetch for each on open.
-    pub fn loading_providers(&self) -> Vec<ProviderId> {
-        self.providers
-            .iter()
-            .filter(|id| matches!(self.models.get(id), Some(ModelsState::Loading)))
-            .cloned()
-            .collect()
     }
 
     /// Record a provider's resolved (or failed) list. Clamps the selection
@@ -553,7 +501,7 @@ impl Picker {
         Tuning {
             effort: self
                 .supports(rows, "reasoning")
-                .then(|| LADDER[self.effort_idx].effort.clone())
+                .then(|| EFFORT_LADDER[self.effort_idx].1.clone())
                 .flatten(),
             temperature: self
                 .supports(rows, "temperature")
@@ -690,7 +638,7 @@ impl Picker {
                     return;
                 }
                 self.effort_idx = if up {
-                    (self.effort_idx + 1).min(LADDER.len() - 1)
+                    (self.effort_idx + 1).min(EFFORT_LADDER.len() - 1)
                 } else {
                     self.effort_idx.saturating_sub(1)
                 };
@@ -1106,9 +1054,9 @@ impl Picker {
         }
         let focused = self.focus == Focus::Effort;
         #[allow(clippy::cast_precision_loss, reason = "const slice length")]
-        let last = LADDER.len().saturating_sub(1).max(1) as f32;
+        let last = GLYPHS.len().saturating_sub(1).max(1) as f32;
         let mut spans = vec![self.field_label("effort", Focus::Effort)];
-        for (i, rung) in LADDER.iter().enumerate() {
+        for (i, glyph) in GLYPHS.iter().enumerate() {
             #[allow(
                 clippy::cast_precision_loss,
                 reason = "enumerate index over a small const-length slice"
@@ -1121,9 +1069,9 @@ impl Picker {
             if i == self.effort_idx {
                 style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
             }
-            spans.push(Span::styled(rung.glyph, style));
+            spans.push(Span::styled(*glyph, style));
         }
-        let chosen = LADDER[self.effort_idx].label;
+        let chosen = EFFORT_LADDER[self.effort_idx].0;
         let label_style = if focused {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
         } else {
@@ -1256,7 +1204,7 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ProviderKind;
+    use crate::provider::{ProviderKind, ReasoningEffort};
     use ratatui::crossterm::event::KeyCode;
 
     /// A famous provider's id — the common case in these tests.
@@ -1516,7 +1464,7 @@ mod tests {
         // Up the ladder twice: auto → none → low.
         p.key(KeyCode::Right);
         p.key(KeyCode::Right);
-        assert_eq!(LADDER[p.effort_idx].label, "low");
+        assert_eq!(EFFORT_LADDER[p.effort_idx].0, "low");
 
         p.key(KeyCode::Tab);
         assert_eq!(p.focus, Focus::Temperature);
@@ -1631,7 +1579,7 @@ mod tests {
             },
             caps_unknown,
         );
-        assert_eq!(LADDER[p.effort_idx].label, "med");
+        assert_eq!(EFFORT_LADDER[p.effort_idx].0, "med");
         assert_eq!(p.temperature, Some(0.5));
         assert_eq!(p.top_p, Some(0.9));
     }
@@ -1691,7 +1639,7 @@ mod tests {
         // Its effort arrows are inert.
         p.key(KeyCode::Tab); // Effort
         p.key(KeyCode::Left);
-        assert_eq!(LADDER[p.effort_idx].label, "high", "rung unchanged");
+        assert_eq!(EFFORT_LADDER[p.effort_idx].0, "high", "rung unchanged");
 
         // Back on the reasoning model the setting returns.
         p.key(KeyCode::Tab); // Temperature

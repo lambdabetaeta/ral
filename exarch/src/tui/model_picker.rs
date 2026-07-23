@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::bus::Kind;
 use crate::provider::credential::CredentialStore;
+use crate::provider::listing::{Fetches, Listing};
 use crate::provider::models::{LiveSource, ModelCatalog, ModelSource, ProviderEndpoint};
 use crate::provider::state;
 use crate::provider::{self, Provider};
@@ -13,12 +14,6 @@ use crate::provider::{self, Provider};
 use super::app::Overlay;
 use super::picker::{self, Picker};
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
-
-type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
-
-/// Channel carrying `(model, fetched serving providers or failure)` from the
-/// per-model background endpoint-fetch threads back to the picker loop.
-type EndpointRx = std::sync::mpsc::Receiver<(String, Result<Vec<ProviderEndpoint>, String>)>;
 
 pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     // A shared reborrow: `pick_model` only reads the store (`/login`'s
@@ -52,42 +47,31 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         .map(|p| p.current().tuning().clone())
         .unwrap_or_default();
     let mut picker = Picker::new(
-        available,
+        available.clone(),
         subscription,
         &initial_tuning,
         crate::provider::pricing::caps_or_default,
     );
-    // Seed each provider from the catalog's cache instantly; spawn a background
-    // fetch for the rest so the UI shows "loading…" rather than freezing on the
-    // network. API-key providers list through genai; ChatGPT subscriptions list
-    // through the Codex backend. Both paths share the same cache and result
-    // channel, so provider kind does not leak into the picker.
-    let mut rx = None;
-    let to_fetch: Vec<_> = picker
-        .loading_providers()
-        .into_iter()
-        .filter(|id| match ctx.catalog.cached(id) {
-            Some(models) => {
-                picker.set_models(id, picker::ModelsState::Loaded(models));
-                false
+    // Open every available provider's model listing: a provider already
+    // cached in the catalog seeds `Loaded` with no network touched; a miss
+    // seeds `Loading` and spawns its background fetch through the catalog's
+    // `ModelSource`, so the overlay opens instantly and the misses fill in as
+    // `drive_picker` pumps them. `Picker::new` already seeded every row
+    // `Loading`, so only the already-settled rows need forwarding here.
+    let listing = Listing::open(available, ctx.catalog);
+    for (id, state) in listing.states() {
+        match state {
+            picker::ModelsState::Loaded(models) => {
+                picker.set_models(id, picker::ModelsState::Loaded(models.clone()));
             }
-            None => true,
-        })
-        .collect();
-    if !to_fetch.is_empty() {
-        let (tx, recv) = std::sync::mpsc::channel();
-        for id in to_fetch {
-            let source = ctx.catalog.source().clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let result = source.list(&id);
-                let _ = tx.send((id, result));
-            });
+            picker::ModelsState::Failed(reason) => {
+                picker.set_models(id, picker::ModelsState::Failed(reason.clone()));
+            }
+            picker::ModelsState::Loading => {}
         }
-        rx = Some(recv);
     }
     tui.app.overlay = Some(Overlay::Picker(picker));
-    let outcome = drive_picker(tui, store, ctx.catalog, rx.as_ref());
+    let outcome = drive_picker(tui, store, ctx.catalog, listing);
     tui.app.overlay = None;
     if let Some((id, model, tuning, route)) = outcome {
         apply_model_switch(tui, ctx, &id, &model, &tuning, route.as_ref());
@@ -101,7 +85,7 @@ fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
-    rx: Option<&FetchRx>,
+    mut listing: Listing,
 ) -> Option<(
     provider::ProviderId,
     String,
@@ -109,34 +93,32 @@ fn drive_picker(
     Option<String>,
 )> {
     // The serving-provider fetch is intent-driven and spawned from inside the
-    // loop, so its channel lives for the loop's whole duration (unlike the
-    // model-list `rx`, whose fetches are all kicked off before the loop). The
-    // sender's payload type follows from the receiver alias.
-    let (endpoint_tx, endpoint_rx): (_, EndpointRx) = std::sync::mpsc::channel();
+    // loop, so this pump lives for the loop's whole duration (unlike
+    // `listing`, whose fetches are all kicked off before the loop by
+    // `pick_model`).
+    let mut endpoints: Fetches<String, Vec<ProviderEndpoint>> = Fetches::new();
     loop {
-        // Fold any landed fetch results into the picker (and the catalog's
-        // caches), on this thread, so the disk write stays single-threaded.
-        if let Some(rx) = rx {
-            fold_fetch(
-                rx,
-                |id, models| catalog.record(id, models),
-                |id, state| {
-                    if let Some(p) = tui.app.picker_mut() {
-                        p.set_models(id, state);
-                    }
-                },
-            );
+        // Fold any landed model-list results into the picker; `Listing::pump`
+        // itself records each success into the catalog, on this thread, so
+        // the disk write stays single-threaded.
+        for id in listing.pump(catalog) {
+            if let (Some(state), Some(p)) = (listing.state(&id), tui.app.picker_mut()) {
+                p.set_models(&id, cloned_state(state));
+            }
         }
         // Fold any landed serving-provider results the same way.
-        fold_fetch(
-            &endpoint_rx,
-            |model, endpoints| catalog.record_endpoints(model, endpoints),
-            |model, state| {
-                if let Some(p) = tui.app.picker_mut() {
-                    p.set_endpoints(model, state);
+        for (model, result) in endpoints.landed() {
+            let state = match result {
+                Ok(list) => {
+                    catalog.record_endpoints(&model, list.clone());
+                    picker::EndpointsState::Loaded(list)
                 }
-            },
-        );
+                Err(reason) => picker::EndpointsState::Failed(reason),
+            };
+            if let Some(p) = tui.app.picker_mut() {
+                p.set_endpoints(&model, state);
+            }
+        }
         // When the provider control is focused on an OpenRouter model whose
         // serving providers we have not fetched, seed it from the catalog memo
         // or spawn a background fetch. Seeding the state first dedups: the next
@@ -146,20 +128,16 @@ fn drive_picker(
             .picker_mut()
             .and_then(|p| p.focused_or_model_needing_endpoints());
         if let Some(model) = needed {
-            if let Some(endpoints) = catalog.cached_endpoints(&model) {
+            if let Some(list) = catalog.cached_endpoints(&model) {
                 if let Some(p) = tui.app.picker_mut() {
-                    p.set_endpoints(&model, picker::EndpointsState::Loaded(endpoints));
+                    p.set_endpoints(&model, picker::EndpointsState::Loaded(list));
                 }
             } else {
                 if let Some(p) = tui.app.picker_mut() {
                     p.set_endpoints(&model, picker::EndpointsState::Loading);
                 }
                 let source = catalog.source().clone();
-                let endpoint_tx = endpoint_tx.clone();
-                std::thread::spawn(move || {
-                    let result = source.endpoints(&model);
-                    let _ = endpoint_tx.send((model.clone(), result));
-                });
+                endpoints.spawn(model.clone(), move || source.endpoints(&model));
             }
         }
         match overlay_tick(tui) {
@@ -190,25 +168,16 @@ fn drive_picker(
     }
 }
 
-/// Fold every fetch result currently queued on `rx` into the picker via
-/// `set`, recording each success into the catalog via `record` first (so the
-/// on-disk cache stays authoritative for the next open). Shared by the
-/// model-list and serving-provider pumps in [`drive_picker`] — they differ
-/// only in their key, payload, and where each callback writes.
-fn fold_fetch<K, T: Clone>(
-    rx: &std::sync::mpsc::Receiver<(K, Result<T, String>)>,
-    mut record: impl FnMut(&K, T),
-    mut set: impl FnMut(&K, picker::FetchState<T>),
-) {
-    while let Ok((key, result)) = rx.try_recv() {
-        let state = match result {
-            Ok(value) => {
-                record(&key, value.clone());
-                picker::FetchState::Loaded(value)
-            }
-            Err(reason) => picker::FetchState::Failed(reason),
-        };
-        set(&key, state);
+/// Clone a fetch state's payload into a fresh state for the picker's own
+/// view — [`Listing`] and [`Fetches`] hold the authoritative copy (behind the
+/// catalog, or in flight on a worker thread); the picker keeps this one for
+/// rendering, exactly as [`Picker::set_models`](picker::Picker::set_models)
+/// and [`Picker::set_endpoints`](picker::Picker::set_endpoints) expect.
+fn cloned_state<T: Clone>(state: &picker::FetchState<T>) -> picker::FetchState<T> {
+    match state {
+        picker::FetchState::Loading => picker::FetchState::Loading,
+        picker::FetchState::Loaded(value) => picker::FetchState::Loaded(value.clone()),
+        picker::FetchState::Failed(reason) => picker::FetchState::Failed(reason.clone()),
     }
 }
 
