@@ -49,6 +49,9 @@ mod commands;
 mod review;
 
 use exarch::provider::credential::CredentialStore;
+use exarch::provider::models::{LiveSource, ModelCatalog};
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use tauri::Manager;
 
 /// The credential scrub's outcome, resolved once here — while the process
@@ -58,17 +61,48 @@ use tauri::Manager;
 /// failure rather than re-running or second-guessing it.
 struct Credentials(Result<CredentialStore, String>);
 
+/// The model catalog [`commands::list_models`] seeds its instant menu from
+/// and refreshes in the background — [`None`] exactly when [`Credentials`]
+/// resolved `Err`, since there is then no [`CredentialStore`] to build a
+/// [`LiveSource`] from, and every command that would have read this state
+/// already refuses on the credential failure first.  Built once here,
+/// beside the credentials, and held as Tauri state for the app's whole
+/// life; the [`Mutex`] is [`synod::session::menu`] and
+/// [`synod::session::refresh_menu`]'s own — both take it locked only
+/// briefly, never across a network call.
+struct Catalog(Option<Mutex<ModelCatalog<LiveSource>>>);
+
+/// Whether this run has already started its one background model refresh.
+///
+/// [`commands::list_models`] swaps this `false` → `true` and spawns the
+/// refresh only on the swap that lands it `true`, so calling the command
+/// again — a second picker open, a restart's own menu — can never race a
+/// second fetch against the first.  One refresh per run is all the catalog
+/// is worth: its disk cache already carries its own day-long freshness
+/// window, so a run that has fetched once has nothing left to gain from
+/// fetching again.
+struct RefreshGate(AtomicBool);
+
 fn main() {
     if let Some(code) = exarch::dispatch_pre_main() {
         std::process::exit(i32::from(code));
     }
     let credentials = Credentials(synod::session::prepare());
+    let catalog = Catalog(match &credentials.0 {
+        Ok(store) => Some(Mutex::new(ModelCatalog::new(
+            LiveSource::new(store),
+            synod::session::SYNOD,
+        ))),
+        Err(_) => None,
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(commands::Running::default())
         .manage(credentials)
+        .manage(catalog)
+        .manage(RefreshGate(AtomicBool::new(false)))
         .manage(review::Review::default())
         .invoke_handler(tauri::generate_handler![
             commands::choose_folder,

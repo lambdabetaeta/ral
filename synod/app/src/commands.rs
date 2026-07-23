@@ -24,7 +24,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde::Serialize;
-use synod::session::Conversation;
+use synod::session::{Choice, Conversation};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The live conversation, if one is running — reached by [`send_message`],
@@ -103,17 +103,60 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 /// The provider/model menu the window offers before starting: one entry
 /// per account this computer has credentials for.
 ///
+/// Answers instantly from whatever [`crate::Catalog`] already has cached —
+/// a fresh disk entry carried over from an earlier run, or nothing at all
+/// — and, the first time this run calls it, kicks off a background fetch
+/// of the complete listing: a `std::thread` that reaches the same managed
+/// state through `app` (the pattern [`converse`] already uses to reach
+/// [`crate::Credentials`] from its own worker thread), calls
+/// [`synod::session::refresh_menu`], and emits the result as
+/// `models-refreshed` unconditionally — even when it turns out to equal
+/// this instant menu — so the window is never left waiting on a refresh
+/// that silently agreed with what it already showed.  [`crate::RefreshGate`]
+/// makes sure at most one such fetch is ever in flight for the run.
+///
 /// # Errors
 /// Returns the credential scrub's own failure, if startup could not
 /// resolve one.
 #[tauri::command]
 pub fn list_models(
+    app: AppHandle,
     credentials: State<'_, crate::Credentials>,
+    catalog: State<'_, crate::Catalog>,
+    gate: State<'_, crate::RefreshGate>,
 ) -> Result<synod::session::ModelMenu, String> {
-    match &credentials.0 {
-        Ok(store) => Ok(synod::session::menu(store)),
-        Err(e) => Err(e.clone()),
+    let store = match &credentials.0 {
+        Ok(store) => store,
+        Err(e) => return Err(e.clone()),
+    };
+    let catalog_mutex = catalog.0.as_ref().expect(
+        "crate::Catalog is Some whenever crate::Credentials resolved Ok, which this arm has \
+         already confirmed",
+    );
+    let instant = {
+        let mut guard = catalog_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        synod::session::menu(store, &mut guard)
+    };
+
+    if !gate.0.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(move || {
+            let credentials = app.state::<crate::Credentials>();
+            let Ok(store) = &credentials.0 else {
+                return;
+            };
+            let catalog = app.state::<crate::Catalog>();
+            let catalog_mutex = catalog.0.as_ref().expect(
+                "crate::Catalog is Some whenever crate::Credentials resolved Ok, which this \
+                 arm has already confirmed",
+            );
+            let menu = synod::session::refresh_menu(store, catalog_mutex);
+            let _ = app.emit("models-refreshed", menu);
+        });
     }
+
+    Ok(instant)
 }
 
 /// Start the conversation: open `folder` on its own worker thread and hold
@@ -132,7 +175,7 @@ pub fn start_conversation(
     state: State<'_, Running>,
     credentials: State<'_, crate::Credentials>,
     folder: String,
-    choice: Option<(String, String)>,
+    choice: Option<Choice>,
 ) -> Result<(), String> {
     if let Err(e) = &credentials.0 {
         return Err(e.clone());
@@ -185,7 +228,7 @@ pub fn restart_conversation(
     state: State<'_, Running>,
     credentials: State<'_, crate::Credentials>,
     folder: String,
-    choice: Option<(String, String)>,
+    choice: Option<Choice>,
 ) -> Result<(), String> {
     if let Err(e) = &credentials.0 {
         return Err(e.clone());
@@ -235,7 +278,7 @@ fn spawn_conversation(
     app: AppHandle,
     slot: Arc<Mutex<Option<Handle>>>,
     folder: String,
-    choice: Option<(String, String)>,
+    choice: Option<Choice>,
 ) {
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -268,7 +311,7 @@ fn run_conversation(
     slot: Arc<Mutex<Option<Handle>>>,
     generation: u64,
     folder: String,
-    choice: Option<(String, String)>,
+    choice: Option<Choice>,
     receiver: mpsc::Receiver<String>,
 ) {
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -293,7 +336,7 @@ fn run_conversation(
 fn converse(
     app: &AppHandle,
     folder: &str,
-    choice: Option<(String, String)>,
+    choice: Option<Choice>,
     receiver: &mpsc::Receiver<String>,
 ) -> ConversationEnded {
     let mut out = LineWriter::new(app.clone(), "out");

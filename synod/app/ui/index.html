@@ -193,7 +193,7 @@
       color: var(--ink-soft);
       margin-bottom: 6px;
     }
-    #assistant-select {
+    #assistant-select, #effort-select {
       width: 100%;
       font-family: var(--sans);
       font-size: 14.5px;
@@ -204,7 +204,8 @@
       padding: 10px 14px;
       cursor: pointer;
     }
-    #assistant-select:hover { border-color: var(--accent); }
+    #assistant-select:hover, #effort-select:hover { border-color: var(--accent); }
+    #effort-select:disabled { cursor: default; opacity: 0.5; }
     #start-error {
       margin-top: 18px;
       padding: 12px 16px;
@@ -589,6 +590,10 @@
           <label for="assistant-select" class="field-label">Assistant</label>
           <select id="assistant-select"></select>
         </div>
+        <div class="field" id="effort-field" style="display: none;">
+          <label for="effort-select" class="field-label">Thinking</label>
+          <select id="effort-select"></select>
+        </div>
         <button type="button" class="btn-primary" id="pick-folder">Choose a folder…</button>
         <div id="start-error"></div>
       </div>
@@ -660,36 +665,49 @@
 
     const state = {
       folder: null,
-      choice: null,  // [key, model] picked on the start screen, or null for the default
+      choice: null,  // { provider, model, effort } picked on the start screen, or null for the default
       busy: false,   // an exchange is in flight
       alive: false,  // the assistant is currently running
     };
 
     // ---- Start screen ---------------------------------------------------
 
-    // The assistant picker: one option per provider×model, built once from
-    // `list_models`. Left absent when there is nothing to choose between —
-    // no providers, or a single option — so `currentChoice()` returns null
-    // and the backend's own default applies.
-    let assistantOptions = [];  // [{ key, model, label }]
+    // The assistant picker: one option per provider×model, rebuilt every
+    // time a menu arrives — the instant `list_models` reply, and the later
+    // `models-refreshed` event once the live listing is in. Left hidden
+    // when there is nothing to choose between, so `currentChoice()` can
+    // fall back to the backend's own default.
+    let assistantOptions = [];  // [{ key, model, label, reasoning }]
+    let defaultEffortLabel = "";
 
-    async function initAssistantPicker() {
-      let providers = [];
-      try {
-        const res = await invoke("list_models");
-        providers = (res && res.providers) || [];
-      } catch (err) {
-        providers = [];
-      }
+    // The assistant currently selected, before a render clears and rebuilds
+    // `assistantOptions` out from under it — read back afterward to decide
+    // whether the pick survived the rebuild.
+    function currentAssistantSelection() {
+      if (assistantOptions.length === 0) return null;
+      const opt = assistantOptions[Number($("assistant-select").value)];
+      return opt ? { key: opt.key, model: opt.model } : null;
+    }
+
+    // The picker's one render path: every menu payload — the instant reply
+    // and every later refresh alike — is shaped into the assistant and
+    // effort selects through here, preserving whichever (provider, model)
+    // pair is already chosen when it still exists in the fresh list rather
+    // than always resetting to the default.
+    function renderPicker(menu) {
+      const providers = (menu && menu.providers) || [];
+      const efforts = (menu && menu.efforts) || [];
+      defaultEffortLabel = (menu && menu.default_effort) || defaultEffortLabel;
+
+      const previousAssistant = currentAssistantSelection();
+      const previousEffort = assistantOptions.length ? $("effort-select").value : null;
 
       assistantOptions = [];
       for (const p of providers) {
         for (const m of p.models || []) {
-          assistantOptions.push({ key: p.key, model: m, label: p.label + " — " + m });
+          assistantOptions.push({ key: p.key, model: m.name, label: p.label + " — " + m.name, reasoning: m.reasoning });
         }
       }
-
-      if (assistantOptions.length < 2) return;
 
       const select = $("assistant-select");
       select.innerHTML = "";
@@ -700,23 +718,85 @@
         select.appendChild(el);
       });
 
-      const first = providers[0];
+      const survivedIdx = previousAssistant
+        ? assistantOptions.findIndex((o) => o.key === previousAssistant.key && o.model === previousAssistant.model)
+        : -1;
       let preselect = 0;
-      if (first && first.default_model) {
-        const idx = assistantOptions.findIndex((o) => o.key === first.key && o.model === first.default_model);
-        if (idx >= 0) preselect = idx;
+      if (survivedIdx >= 0) {
+        preselect = survivedIdx;
+      } else {
+        const first = providers[0];
+        if (first && first.default_model) {
+          const idx = assistantOptions.findIndex((o) => o.key === first.key && o.model === first.default_model);
+          if (idx >= 0) preselect = idx;
+        }
       }
-      select.value = preselect;
+      if (assistantOptions.length > 0) select.value = preselect;
 
-      $("assistant-field").style.display = "";
+      // Never hide the picker mid-interaction if the current pick
+      // survives: hide only when there is nothing left to choose between
+      // AND the survivor, if any, is just the default rather than a
+      // deliberate pick.
+      const selectedBeyondDefault = survivedIdx > 0;
+      $("assistant-field").style.display =
+        assistantOptions.length >= 2 || selectedBeyondDefault ? "" : "none";
+
+      const effortSelect = $("effort-select");
+      effortSelect.innerHTML = "";
+      efforts.forEach((label) => {
+        const el = document.createElement("option");
+        el.value = label;
+        el.textContent = label;
+        effortSelect.appendChild(el);
+      });
+      effortSelect.value = efforts.includes(previousEffort) ? previousEffort : defaultEffortLabel;
+
+      // The effort control is offered whenever there is any account to
+      // offer it for, regardless of how many models that account lists.
+      $("effort-field").style.display = providers.length > 0 ? "" : "none";
+
+      updateEffortDisabled();
+    }
+
+    // The effort control is disabled, not hidden, once the currently
+    // selected model is positively known not to take one — re-checked here
+    // on every render and every change to the assistant select.
+    function updateEffortDisabled() {
+      const hidden = $("assistant-field").style.display === "none";
+      const idx = hidden ? 0 : Number($("assistant-select").value);
+      const opt = assistantOptions[idx];
+      $("effort-select").disabled = Boolean(opt) && !opt.reasoning;
+    }
+
+    $("assistant-select").addEventListener("change", updateEffortDisabled);
+
+    async function initAssistantPicker() {
+      let menu = null;
+      try {
+        menu = await invoke("list_models");
+      } catch (err) {
+        menu = null;
+      }
+      renderPicker(menu);
+      listen("models-refreshed", (event) => renderPicker(event.payload));
     }
 
     initAssistantPicker();
 
+    // The assistant field can be hidden while still holding the one option
+    // there was to offer (a single account, a single model): a hidden
+    // field is not an absent choice, so its option and whatever effort was
+    // picked for it still have to reach the backend. Only a genuinely
+    // empty menu — no provider at all — falls back to `null`, the old,
+    // choice-less behaviour.
     function currentChoice() {
-      if ($("assistant-field").style.display === "none") return null;
-      const opt = assistantOptions[Number($("assistant-select").value)];
-      return opt ? [opt.key, opt.model] : null;
+      if (assistantOptions.length === 0) return null;
+      const hidden = $("assistant-field").style.display === "none";
+      const idx = hidden ? 0 : Number($("assistant-select").value);
+      const opt = assistantOptions[idx];
+      if (!opt) return null;
+      const effort = $("effort-field").style.display === "none" ? defaultEffortLabel : $("effort-select").value;
+      return { provider: opt.key, model: opt.model, effort };
     }
 
     $("pick-folder").addEventListener("click", async () => {
