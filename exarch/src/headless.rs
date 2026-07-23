@@ -10,9 +10,10 @@
 //! only [`Sink::handle`] is custom.
 //!
 //! This frontend is a *display* — it projects the bus onto a pair of
-//! writers.  [`converse_on`] takes them explicitly, so a non-CLI host (a
-//! GUI process, say) gets the same token/card projection any other caller
-//! does, byte for byte; [`converse`] and [`run`] are the CLI's own
+//! writers.  A non-CLI host (a GUI process, say) can take that same
+//! projection via [`converse_on`], byte for byte, or skip it and drive
+//! [`converse_sink`] with its own [`Sink`], receiving the bus's `Kind`
+//! events unflattened; [`converse`] and [`run`] are the CLI's own
 //! convenience wrappers wired to the process's real stdout/stderr.  The
 //! durable record is not this module's concern: each session writes its own
 //! `transcript.jsonl` (operational view) and `events.json` (model view)
@@ -499,6 +500,10 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
 /// with the one [`run`] and the TUI both drive forever, rather than
 /// running a second loop of its own.
 ///
+/// A thin wrapper over [`converse_sink`], which carries the seeding and
+/// park contract; this layer only builds the [`Headless`] sink and closes
+/// off the trailing newline on success.
+///
 /// # Errors
 /// Returns `Err` if the drive worker panics or the sink's drive fails.
 pub fn converse_on(
@@ -509,6 +514,27 @@ pub fn converse_on(
     err: &mut (dyn Write + Send),
 ) -> Result<(), String> {
     let mut sink = Headless::new(false, session.id, out, err);
+    let outcome = converse_sink(session, message, engine, &mut sink);
+    if outcome.is_ok() && !sink.ended_with_newline {
+        let _ = writeln!(sink.out);
+    }
+    outcome
+}
+
+/// One exchange of a converse session, projected onto any [`Sink`].
+///
+/// The structured twin of [`converse_on`]: same seeding and park contract
+/// (see there), but the caller supplies the sink, so a host that wants the
+/// bus's own `Kind` events — a GUI process, say — receives them unflattened.
+///
+/// # Errors
+/// Returns `Err` if the drive worker panics or the sink's drive fails.
+pub fn converse_sink<S: Sink>(
+    session: &mut Agent,
+    message: String,
+    engine: Arc<Engine>,
+    sink: &mut S,
+) -> Result<(), String> {
     let root_transcript = session.transcript();
     // Per-exchange, like headless's own per-turn bus: this call's channel
     // closes when the exchange parks, so draining it can never block on a
@@ -520,16 +546,11 @@ pub fn converse_on(
     );
     session.seed(message);
     let root_id = session.id;
-    let outcome = pump(&mut sink, &fleet.bus, root_id, root_transcript, |emit| {
+    let outcome = pump(sink, &fleet.bus, root_id, root_transcript, |emit| {
         session.drive_queued(emit)
     });
     match outcome {
-        Ok(Some(_)) => {
-            if !sink.ended_with_newline {
-                let _ = writeln!(sink.out);
-            }
-            Ok(())
-        }
+        Ok(Some(_)) => Ok(()),
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
     }
@@ -793,6 +814,37 @@ mod tests {
             String::from_utf8_lossy(&err).contains("[step"),
             "step breadcrumbs must land on `err`: {:?}",
             String::from_utf8_lossy(&err)
+        );
+    }
+
+    /// `converse_sink` hands a host its own `Sink` the bus's `Kind` events
+    /// unflattened, rather than projecting them through `Headless`'s
+    /// token/card writer split: a collecting sink sees the reply as a
+    /// `Kind::Token` and the turn boundary as a `Kind::Step`.
+    #[test]
+    fn converse_sink_delivers_structured_events() {
+        struct Collecting(Vec<Kind>);
+        impl Sink for Collecting {
+            fn handle(&mut self, e: Event) {
+                self.0.push(e.kind);
+            }
+        }
+
+        let mut session = converse_trunk("sink", Script::new().then(Reply::text("hi there")));
+        let engine = Engine::new();
+        let mut sink = Collecting(Vec::new());
+        converse_sink(&mut session, "hello".into(), engine, &mut sink)
+            .expect("a conversing trunk never fails for want of a reply");
+
+        assert!(
+            sink.0.iter().any(|k| matches!(k, Kind::Token(t) if t.contains("hi there"))),
+            "reply text must arrive as a Kind::Token among {} events",
+            sink.0.len()
+        );
+        assert!(
+            sink.0.iter().any(|k| matches!(k, Kind::Step { .. })),
+            "the turn boundary must arrive as a Kind::Step among {} events",
+            sink.0.len()
         );
     }
 }
