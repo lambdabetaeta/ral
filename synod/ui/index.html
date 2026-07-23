@@ -129,7 +129,7 @@
     }
 
     /* --- shell ------------------------------------------------------ */
-    #app { min-height: 100%; }
+    #app { height: 100%; }
 
     .screen { display: none; }
     .screen.active { display: flex; }
@@ -479,11 +479,15 @@
       text-align: center;
     }
 
-    /* --- the dial: one per gap between prose bubbles. A single header
-       rotates through three rungs on click — last intent, all intents,
-       everything (scripts, cards, telemetry) — rather than a plain
-       expand/collapse. -------------------------------------------------- */
+    /* --- the dial: one per gap between prose bubbles. Surfaced result
+       cards are always visible; a single header rotates through three
+       rungs on click over the *process* around them — cards alone, then
+       + step intents, then + scripts & telemetry. --------------------- */
     .dial {
+      /* `overflow: hidden` zeroes a flex item's automatic minimum size, so
+         without this the transcript column would squish the dial (clipping
+         its cards) instead of scrolling. */
+      flex: none;
       max-width: 74ch;
       align-self: flex-start;
       background: var(--raised-2);
@@ -536,10 +540,7 @@
       flex-direction: column;
       gap: 10px;
     }
-    .dial[data-rung="0"] .dial-body { display: none; }
-
-    .dial-item { font-size: 13px; color: var(--ink-soft); }
-    .dial-item.failed { color: var(--danger); }
+    .dial.empty-body .dial-body { display: none; }
 
     .dial-entry { display: flex; flex-direction: column; gap: 6px; }
     .dial-entry-head { font-size: 12.5px; font-weight: 600; color: var(--ink); }
@@ -581,7 +582,7 @@
       display: flex;
       flex-direction: column;
       gap: 10px;
-      background: var(--raised-2);
+      background: var(--raised);
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 12px 14px;
@@ -1200,13 +1201,20 @@
     let currentAssistantRaw = "";
 
     // The dial: one per gap between prose bubbles. Tool calls, harness
-    // calls, and their result cards land here, in true temporal order, as
-    // a growing list of `entries`; telemetry folds in as `notes`. `null`
-    // whenever the next call/harness/card should open a fresh dial rather
-    // than append to one that conversationally already passed.
+    // calls, their result cards, and warn/bad notes land here, in true
+    // temporal order, as a growing list of `entries`; muted telemetry
+    // folds in as `notes`. `null` whenever the next entry should open a
+    // fresh dial rather than append to one that conversationally already
+    // passed.
+    //
+    // Surfaced result cards show at every rung — they are the work's
+    // output, not process to be dialed for. The rungs only reveal the
+    // process around them: nothing (cards alone), the step intents, then
+    // the scripts and telemetry too.
     let currentDial = null;
 
-    // Rung 0 needs no label: its tip already names the latest intent.
+    // Rung 0 needs no label: its tip already names the latest intent, and
+    // the surfaced cards below it speak for themselves.
     const RUNG_LABELS = ["", "all steps", "all scripts"];
 
     function ensureDial() {
@@ -1256,15 +1264,12 @@
       renderDial(dial);
     }
 
+    // The collapsed tip names the latest happening — a step's intent, or a
+    // warn/bad note's own text when that is the newest fact — so a retry or
+    // provider error is never silent, even before the body is dialed open.
     function dialHeaderText(dial) {
-      const latest = dial.entries[dial.entries.length - 1];
-      if (latest && latest.intent) return latest.intent;
-      // A dial opened by a warn/bad note alone has no intent to show: put the
-      // note itself in the collapsed tip so a retry or provider error is never
-      // silent, even before the body is dialed open.
-      const note = dial.notes[dial.notes.length - 1];
-      if (note) return note.text;
-      return "";
+      const latest = dial.entries.findLast((e) => e.intent || e.text);
+      return latest ? latest.intent || latest.text : "";
     }
 
     function renderDial(dial) {
@@ -1274,57 +1279,69 @@
       dial.rungLabel.textContent = RUNG_LABELS[dial.rung];
 
       dial.body.innerHTML = "";
-      if (dial.rung === 1) renderDialIntents(dial);
-      else if (dial.rung === 2) renderDialFull(dial);
+      for (const entry of dial.entries) {
+        const item = renderDialEntry(entry, dial.rung);
+        if (item) dial.body.appendChild(item);
+      }
+      if (dial.rung === 2 && dial.notes.length) {
+        dial.body.appendChild(renderDialNotes(dial.notes));
+      }
 
+      // The body carries no chrome of its own when it has nothing to show
+      // — a rung-0 gap of pure calls, or a dial opened by a lone note.
+      dial.el.classList.toggle("empty-body", dial.body.childElementCount === 0);
       pinTranscript();
     }
 
-    function renderDialIntents(dial) {
-      for (const entry of dial.entries) {
-        const line = document.createElement("div");
-        line.className = "dial-item" + (entry.kind === "harness" && entry.failed ? " failed" : "");
-        line.textContent = entry.intent || "Result";
-        dial.body.appendChild(line);
-      }
+    // One entry's contribution at the given rung: its cards always, the
+    // step intent from rung 1, the script from rung 2. A warn/bad note
+    // entry shows at every rung — like a card, it is a fact of the
+    // exchange, not process to be dialed for. Returns null when the entry
+    // has nothing to show at this rung (e.g. a card-less call at rung 0)
+    // so the body stays free of empty rows.
+    function renderDialEntry(entry, rung) {
+      if (entry.kind === "note") return noteLine(entry);
+      const children = [
+        rung >= 1 && entry.intent ? entryHeading(entry) : null,
+        rung >= 2 ? entryScript(entry) : null,
+        ...entry.cards.map(renderMarkCard),
+      ].filter(Boolean);
+      if (!children.length) return null;
+      const item = document.createElement("div");
+      item.className = "dial-entry";
+      item.append(...children);
+      return item;
     }
 
-    function renderDialFull(dial) {
-      for (const entry of dial.entries) {
-        const item = document.createElement("div");
-        item.className = "dial-entry";
+    function entryHeading(entry) {
+      const heading = document.createElement("div");
+      heading.className = "dial-entry-head" + (entry.kind === "harness" && entry.failed ? " failed" : "");
+      heading.textContent = entry.intent;
+      return heading;
+    }
 
-        if (entry.intent) {
-          const heading = document.createElement("div");
-          heading.className = "dial-entry-head" + (entry.kind === "harness" && entry.failed ? " failed" : "");
-          heading.textContent = entry.intent;
-          item.appendChild(heading);
-        }
+    // The script an entry ran, or null for one that carries none.
+    function entryScript(entry) {
+      const script = entry.kind === "harness" ? entry.detail : entry.script;
+      if (!script) return null;
+      const pre = document.createElement("pre");
+      pre.className = "dial-script";
+      pre.textContent = script;
+      return pre;
+    }
 
-        const script = entry.kind === "harness" ? entry.detail : entry.script;
-        if (script) {
-          const pre = document.createElement("pre");
-          pre.className = "dial-script";
-          pre.textContent = script;
-          item.appendChild(pre);
-        }
+    function renderDialNotes(notes) {
+      const box = document.createElement("div");
+      box.className = "dial-notes";
+      box.append(...notes.map(noteLine));
+      return box;
+    }
 
-        for (const marks of entry.cards) item.appendChild(renderMarkCard(marks));
-
-        dial.body.appendChild(item);
-      }
-
-      if (dial.notes.length) {
-        const notes = document.createElement("div");
-        notes.className = "dial-notes";
-        for (const note of dial.notes) {
-          const line = document.createElement("div");
-          line.className = "dial-note" + (note.cls ? " " + note.cls : "");
-          line.textContent = note.text;
-          notes.appendChild(line);
-        }
-        dial.body.appendChild(notes);
-      }
+    function noteLine(note) {
+      const line = document.createElement("div");
+      line.className = "dial-note" + (note.cls ? " " + note.cls : "");
+      line.textContent = note.text;
+      return line;
     }
 
     function dialAddCall(p) {
@@ -1346,9 +1363,10 @@
     }
 
     function dialAddCard(marks) {
+      if (!marks.length) return; // an empty card would render as bare chrome
       const dial = ensureDial();
       const last = dial.entries[dial.entries.length - 1];
-      if (last) last.cards.push(marks);
+      if (last && last.cards) last.cards.push(marks);
       else dial.entries.push({ kind: "card", intent: null, cards: [marks] });
       renderDial(dial);
     }
@@ -1356,13 +1374,17 @@
     // Muted telemetry (usage, steps, stop reasons) has no trigger of its own
     // — it only folds into a dial a call/harness/card already opened in this
     // gap, and is dropped when there is none, since it has nothing to say on
-    // its own. A warn/bad note (a retry, a provider error) is never dropped:
-    // it opens a dial so the fact reaches the transcript even between prose,
-    // where no call yet has.
+    // its own; it shows only at the last rung. A warn/bad note (a retry, a
+    // provider error) is never swallowed: it joins the entries in temporal
+    // order, visible at every rung, and opens a dial when none is — a nudge
+    // that reruns a step would otherwise double the step's cards with
+    // nothing between them saying why.
     function dialAddNote(text, cls) {
-      const dial = cls === "warn" || cls === "bad" ? ensureDial() : currentDial;
+      const urgent = cls === "warn" || cls === "bad";
+      const dial = urgent ? ensureDial() : currentDial;
       if (!dial) return;
-      dial.notes.push({ text, cls: cls || "" });
+      if (urgent) dial.entries.push({ kind: "note", text, cls });
+      else dial.notes.push({ text, cls: cls || "" });
       renderDial(dial);
     }
 
@@ -1483,6 +1505,10 @@
     function onSynodEvent(p) {
       switch (p.type) {
         case "token":
+          // A whitespace-only exhale before any prose opens no bubble and
+          // closes no dial — it would leave an empty pill in the transcript
+          // and split the gap's work across two dials for nothing.
+          if (!currentAssistantBubble && !p.text.trim()) break;
           if (!currentAssistantBubble) beginAssistantMessage();
           currentAssistantRaw += p.text;
           currentAssistantBubble.innerHTML = renderAssistantMarkdown(currentAssistantRaw);
