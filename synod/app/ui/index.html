@@ -146,12 +146,24 @@
       color: var(--ink);
     }
 
-    .eyebrow {
-      font-size: 12.5px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--ink-faint);
-      font-weight: 600;
+    /* The wordmark: block letters set in the mono face, gradient-tinted
+       ink-to-accent and lit with a soft accent glow. The clamp keeps 44
+       monospace columns inside the 480px .wrap at any window size the app
+       allows (minWidth 560); overflow-x is a last-resort guard beneath it. */
+    .synod-banner {
+      margin: 0 0 20px;
+      font-family: var(--mono);
+      font-size: clamp(10px, 3.25vw, 16px);
+      line-height: 1;
+      white-space: pre;
+      overflow-x: auto;
+      text-align: center;
+      user-select: none;
+      background: linear-gradient(180deg, var(--ink) 0%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      text-shadow: 0 0 26px color-mix(in srgb, var(--accent) 35%, transparent);
     }
 
     /* --- start screen: a folder picker, and nothing else ------------ */
@@ -763,7 +775,12 @@
     <!-- ============ START: a folder picker, and nothing else ============ -->
     <section id="screen-start" class="screen active">
       <div class="wrap">
-        <div class="eyebrow">Synod</div>
+        <pre class="synod-banner" role="img" aria-label="Synod">███████╗██╗   ██╗███╗   ██╗ ██████╗ ██████╗
+██╔════╝╚██╗ ██╔╝████╗  ██║██╔═══██╗██╔══██╗
+███████╗ ╚████╔╝ ██╔██╗ ██║██║   ██║██║  ██║
+╚════██║  ╚██╔╝  ██║╚██╗██║██║   ██║██║  ██║
+███████║   ██║   ██║ ╚████║╚██████╔╝██████╔╝
+╚══════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝</pre>
         <h1 class="title">Let's work in a folder together.</h1>
         <p class="lede">Choose the folder to work in. The assistant only reads and
           changes files inside it, and everything it does can be put back.</p>
