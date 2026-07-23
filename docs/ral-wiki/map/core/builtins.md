@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -73,8 +73,10 @@ Bodies are grouped by concern, one submodule each:
   and every `await`/`race` sweep renews the handle's `last_observed` cell,
   under an absolute `backstop` no polling extends; a worker that finished
   ends the chain silently, its entry lingering as an unclaimed result. A
-  reap removes the registry entry, records a `ReapNotice` the host drains
-  (`Shell::take_worker_reap_notices`), and cancels the worker's scope with
+  reap removes the registry entry, records a `ReapNotice` the engine
+  pushes at the next settled turn's ready boundary as a `` `notice ``
+  surface event (`emit_ready_boundary_notices`; exarch decodes it back via
+  `card::value_to_notice`), and cancels the worker's scope with
   `Deadline` — never detaching the handle, so a later `poll`/`await` still
   observes the partial output and failure. The class decides the chain at
   the spawn door: `spawn_child` takes a `LeaseClass`, and only a `Worker`
@@ -90,12 +92,16 @@ Bodies are grouped by concern, one submodule each:
   registered entry, so a racing sibling birth never sees a filling seat as
   free (`workers` is retired — [[map/exarch/builtins|builtins]]); settled
   entries lingering under retention hold no seat. A
-  settled entry's own lease is retention: the host's per-call epoch sweep
-  (`Shell::advance_worker_epoch`) stamps an entry at the first sweep that
-  observes it settled and expires it — a `Retention`-cause `ReapNotice` on
-  the same drain — once its unclaimed result has sat a full retention of
-  ral calls; the eliminators still remove entries the moment a result is
-  claimed, so the sweep only catches what nobody claimed.
+  settled entry's own lease is retention, armed once at boot
+  (`Shell::arm_worker_retention`, beside the binding lease): the registry
+  keeps its own clock — one `tick_epoch` per source dispatch — and the
+  engine sweeps at each settled turn's ready boundary (`sweep_retention`,
+  engine housekeeping), stamping an entry at the first sweep that
+  observes it settled and expiring it — a `Retention`-cause `ReapNotice` on
+  the same drain — once its unclaimed result has sat stamped a full
+  retention of ral calls. An unarmed registry (the REPL) retains settled
+  entries indefinitely; the eliminators still remove entries the moment a
+  result is claimed, so the sweep only catches what nobody claimed.
   A worker runs its thunk on a fresh
   `std::thread` via `Shell::spawn_thread` ([[map/core/shell-state|shell-state]]),
   which inherits a snapshot of the parent's mobile state; the body is evaluated

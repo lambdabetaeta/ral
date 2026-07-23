@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293 -->
+<!-- verified_at_commit: fc49779 -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -1433,7 +1433,8 @@ grant.  There is therefore **no in-process gate** for `net` — unlike
 action, a `net: false` is enforced *solely* by the OS sandbox (§11.8),
 all-or-nothing, with no endpoint-level policy.  On a platform without
 an OS sandbox backend a `net`-restricting grant therefore fails closed
-(§11.8) rather than running unconfined.
+(§11.8) rather than running unconfined.  Inside a guest there is no
+network device at all, so `net` has nothing to govern (§11.8).
 
 ### 11.4  `audit`
 
@@ -1635,6 +1636,17 @@ denial surfaces only as `ERROR_ACCESS_DENIED` on the confined child,
 so a sandboxed failure there gets a fixed, pathless hint pointing at
 the grant's `fs:`/`net:` keys instead of a scraped kernel line — it
 never fabricates a path it does not have.
+
+**Guests.**  Inside a guest (§15.2) the per-command OS backend above
+is not engaged at all: guest boot disables the unprivileged user
+namespaces bubblewrap requires, and every spawn already runs in the
+guest's spawn jail — a throwaway uid under `NO_NEW_PRIVS` in a
+transient cgroup, killed whole on cancel or settle.  The in-process
+`exec` and `fs` gates apply unchanged; OS-level confinement is the
+VM boundary plus the jail, deliberately without seccomp.  `net` has
+nothing to govern there — the guest has no network device, its only
+channel to the host being vsock — so a `net`-restricting grant
+neither wraps a spawn nor fails closed.
 
 ### 11.9  Capability profiles (`.ral` files)
 
@@ -2153,6 +2165,42 @@ prompt, not in syntax highlighting, and not as a cursor-position
 query that will never be answered.  The language itself is unchanged
 across modes: scripts run identically under any of them.
 
+### 15.2  Guest execution: the spawn jail
+
+Inside a guest — a virtual machine whose PID 1 is `ral-daemon`; the
+daemon's closed engine environment sets `RAL_GUEST`, and that
+variable is the entire signal, so every boot recipe is jailed alike —
+every external command, bundled tools included, runs in a spawn
+jail.  Each spawn drops, between fork and exec, to a fresh
+unprivileged uid/gid allocated from a counter (one per exec, so no
+two spawns share an identity), clears its supplementary groups, sets
+`NO_NEW_PRIVS`, and lands in a transient per-exec cgroup under
+`/sys/fs/cgroup/ral-exec` carrying memory, pid-count, and CPU-quota
+limits.  On cancel and on settle the tree is killed whole through
+`cgroup.kill`, which reaches a grandchild that `setsid()`'d out of
+the tracked process group — the graceful-signal phase stays
+pgid-addressed, but every unconditional final kill is cgroup-wide —
+and the transient cgroup is removed once its processes are dead.  A
+jailed child cannot move itself out: changing cgroups needs write
+permission on `cgroup.procs`, which the throwaway uid does not have.
+
+The jail is session state on the shell, inherited exactly as the
+builtin table is (§13.1): a spawned worker, a pipeline stage, and a
+session fork all share the installing shell's jail, so concurrent
+spawns from sibling shells still mint distinct uids and cgroups off
+the same counter.  Before the engine — or anything it spawns — runs,
+the daemon turns unprivileged user namespaces off
+(`user.max_user_namespaces = 0`): a jailed process that could still
+`unshare(CLONE_NEWUSER)` would be "root" enough in its own namespace
+to attach a ptrace to a sibling, defeating the cross-uid isolation
+the jail exists for.  That same facility is what bubblewrap
+requires, so where the jail stands, bwrap does not (§11.8): the VM
+plus the jail is the guest's sandbox, deliberately without seccomp —
+cross-uid ptrace is already impossible, and a syscall policy would
+be maintained complexity buying nothing the uid and the cgroup do
+not.  On an ordinary host run no jail exists and nothing in this
+section applies.
+
 ## 16  Builtins
 
 Most builtins are registered with their clean names directly and are
@@ -2205,6 +2253,7 @@ act that sources it.
 | `has` | Test map membership |
 | `ask` | `/dev/tty` prompt; fails on EOF |
 | `cwd` | Current directory as `String` |
+| `resolve-path`, `absolute-path` | Absolutise a path against the logical cwd (honouring `within [dir: …]`), expanding `~`/`xdg:`: `resolve-path` canonicalises through the filesystem — symlinks resolved, the path must exist, and the read is gated as a filesystem query; `absolute-path` is its lexical sibling (zsh `:a`) — `.`/`..` fold by pure string math, symlinks stay as written, the path need not exist, and no filesystem gate applies because nothing is touched |
 | `help` | Arity 0; print an overview of the invoking shell's own scope — its builtin table, the prelude, and, when the session carries library docs, a `Library:` section listing them |
 | `explain` | Arity 1; doc, type signature, and source location for one name — a prelude name's signature is read from the shell's own prelude scope (the baked `Bind` nodes carry the checker's schemes), and a library name resolves through the session-held docs |
 | `clear`, `reset` | Arity 0 terminal control, returning `Unit`; an argument is an arity error |
@@ -2467,11 +2516,12 @@ bound.  Every unmodified key except `f1`..`f12` carries a ral-owned
 built-in editing action and requires a `guard`; an unguarded binding
 on such a key is a load-time error.  Modified chords (`ctrl-…`,
 `alt-…`) and function keys may be bound unguarded.  A binding shadowed
-by an earlier same-chord binding, in load order, loads with a warning
-naming the shadower.  A `guard`, when present, is a regex matched
-against the text left of the cursor; the binding claims the key only
-on a match, and otherwise the key falls through to the next entry in
-dispatch order.
+by an earlier *unguarded* same-chord binding, in load order, loads
+with a warning naming the shadower; guarded same-chord bindings
+compose rather than shadow.  A `guard`, when present, is a regex
+matched against the text left of the cursor; the binding claims the
+key only on a match, and otherwise the key falls through to the next
+entry in dispatch order.
 
 **Plugins run with host authority.**  A `capabilities:` key in the
 manifest is a load-time error: plugins execute with whatever

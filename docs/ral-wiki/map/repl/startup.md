@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92a
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -23,8 +23,9 @@ uniform). The chain is two-staged around the sandbox:
 
 - **Engine entry** (Unix) — `--engine` hands the process to
   `ral_core::engine::run_engine` before anything else: the wire-engine child
-  boots the real shell itself, and the REPL's installer tag
-  (`ENGINE_INSTALLER_TAG = "repl"`) maps to the empty `HostSurface`, since the
+  boots the real shell itself through the installer's boot recipe — the REPL's
+  tag (`ENGINE_INSTALLER_TAG = "repl"`) carries `engine_boot_shell`, the baked
+  prelude over the empty `HostSurface`, since the
   captured host builtins are boot-time closures a child cannot construct.
 - **Helper trampolines** — `try_run_pipeline_stage_helper` (the parent re-execs
   `current_exe()` to run one pipeline stage in a fresh subprocess) and

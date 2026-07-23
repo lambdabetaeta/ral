@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [core/src/prelude.ral]
 ---
 

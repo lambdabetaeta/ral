@@ -1,6 +1,6 @@
 ---
-generated_at_commit: caa853f2ddce6abeeafda69239711a1b284706ca
-generated_at_date: 2026-07-21
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -47,9 +47,12 @@ before surrendering the exit code.
   drops the system prompt and all tools), composes the capability lattice
   (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the trunk
-  [[map/exarch/agent|`Agent`]] + `Provider`, and hands off to one frontend — the
-  inline TUI or, under `--headless`, the pipe-friendly headless runner — which
-  wraps the trunk's shared handles in a [[map/exarch/agent|`Fleet`]].
+  [[map/exarch/agent|`Agent`]] via `Agent::root(RootConfig, RootSeat, provider)`
+  — the ral binary seats it on `RootSeat::Identity`; a wire seat drives a
+  remote engine instead, and synod reuses the same construction — and hands
+  off to one frontend — the inline TUI or, under `--headless`, the
+  pipe-friendly headless runner — which wraps the trunk's shared handles in
+  a [[map/exarch/agent|`Fleet`]].
 
 ## Accounts
 
@@ -98,25 +101,34 @@ can inherit a live key.**
 
 `bootstrap.rs` holds the once-per-process pieces; nothing here is per-turn.
 
-- **`boot_shell`** — the one constructor that may boot a session shell: clear
-  stale ral interrupts, install ral's handlers, chain exarch's cancel over them,
-  call core's [[map/repl/startup|`ral_core::driver::boot_shell`]] with exarch's
+- **`boot_shell`** — the identity seat's constructor: clear stale ral
+  interrupts, install ral's handlers, chain exarch's cancel over them, then
+  dress the shell via the shared `exarch_shell` — core's
+  [[map/repl/startup|`ral_core::driver::boot_shell`]] with exarch's
   host surface (`builtins::host_surface()`) so the host builtins ride
-  construction, then source the `agent.ral` library,
-  suppress ANSI colour at the source, and seed the exit hints.
+  construction, the `agent.ral` library, ANSI colour suppressed at the
+  source, the exit hints. Its sibling **`engine_boot_shell`** is the wire
+  engine's boot recipe (`EngineInstaller::boot`, run engine-side at
+  Attach): `exarch_shell` plus an engine-local `Scratch` and
+  **`arm_session_ledgers`** — the one policy site arming the binding lease
+  and settled-worker retention for both seats — with no signal ceremony
+  (a cancel arrives as a `Control` frame) and no terminal probe.
 - **Machine probing** — `host::snapshot` formats the live machine into the
   prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
   `user`, `home`, `git`, `exarch logs`), best-effort: a missing value drops its line.
-- **`Scratch`** — the disposable per-session directory exposed as
-  `$EXARCH_SCRATCH`, with the legacy build-tool homes (`CARGO_HOME`, …) redirected
+- **`Scratch`** — the disposable per-session directory, exposed under its
+  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with the
+  legacy build-tool homes (`CARGO_HOME`, …) redirected
   into it so a write lands inside the grant rather than in a denied real cache.
-- **`log_run_dir`** — the durable per-run [[map/exarch/frontend|session-log]]
-  directory at `$XDG_STATE_HOME/exarch/<project>/<run>/`, keyed by a slug of the
-  project cwd (`project_slug`), so logs survive an abnormal exit. The persisted
-  model selection (`state.json`) lives under the same per-project `project_dir`.
-- **`xdg_app_dir`** — the one spelling of the `$XDG_<kind>_HOME/exarch/` convention
-  that `project_dir` (state), the model cache (cache), and the trusted config home
-  all build on ([[design/exarch-config-dir|exarch-config-dir]]).
+- **`App`** — the product identity (`EXARCH`; synod names its own) that owns
+  the directory conventions as methods: `App::xdg_dir` is the one spelling of
+  `$XDG_<kind>_HOME/<app>/` that the project state, model cache, and trusted
+  config home all build on ([[design/exarch-config-dir|exarch-config-dir]]);
+  `App::project_dir` keys per-project state by a slug of the launch cwd
+  (`project_slug`), holding the persisted model selection (`state.json`); and
+  `App::log_run_dir` is the durable per-run
+  [[map/exarch/frontend|session-log]] directory
+  `$XDG_STATE_HOME/<app>/<project>/<run>/`, so logs survive an abnormal exit.
 
 ## System prompt
 
@@ -139,7 +151,11 @@ uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`, `Tasks`,
   ([[design/hash-addressed-editing|hash-addressed-editing]]).
 - **`Builtins`** (`builtin_index`) lists every builtin and prelude function by
   *name only* — a progressive-disclosure index the agent expands at runtime with
-  `help`/`explain`, so the prompt cannot drift.
+  `help`/`explain`, so the prompt cannot drift. `assemble` bakes a
+  *placeholder* here: the real per-agent list — filtered to the harness verbs
+  that agent holds — is resolved by `BuiltinIndexes::apply` once the agent's
+  own `returns` and `allow_schedule` bits are in reach, without a live
+  `Shell`; every other section is agent-invariant.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
   a nervous probe — define then query, parameterised blocks, records for knobs,

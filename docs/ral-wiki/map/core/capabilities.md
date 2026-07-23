@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -104,6 +104,14 @@ re-execs the in-process check never sees (`sh -c`, `find -exec`), while bwrap on
 Linux and the AppContainer on Windows have no path-exec filter so there the
 in-process gate stands alone (on Windows the deny-by-default fs projection
 still bounds which images a child can *read*, and so load, at all).
+
+Inside a *guest* — a VM whose engine runs under `ral-daemon`, signalled by
+`RAL_GUEST` — the per-command OS backend is not engaged at all: every spawn
+is already confined by the [[map/core/io-process|spawn jail]] (a fresh
+unprivileged uid and a per-exec cgroup), the daemon disables the
+unprivileged user namespaces bwrap needs, and the guest has no network
+device for `net` to govern; the in-process gates apply unchanged
+(`docs/SPEC.md` §11.8, §15.2).
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
   `SANDBOX_SELF`, on Unix enters the OS sandbox for a per-command

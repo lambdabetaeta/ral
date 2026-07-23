@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
-covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
+covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/egress.rs, exarch/src/org_policy.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
@@ -30,10 +30,13 @@ prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 
 `EXARCH_BUILTINS` is the largest set on `builtins::host_surface()` — the one
 `HostSurface` value declaring exarch's builtins beyond core's, alongside the
-harness verbs and core's host-selected `SERVICE_BUILTIN`. Core's `boot_shell`
+harness verbs, the `fetch-url` egress set, and core's host-selected
+`SERVICE_BUILTIN`. Core's `boot_shell`
 takes the surface and installs it at construction (a half-dressed production
-shell is unrepresentable), and the same `host_surface` is named as the wire
-engine child's builtin surface (`INSTALLER_TAG`).
+shell is unrepresentable), and the wire engine boots the same dressing
+through its `EngineInstaller` *boot recipe*
+(`bootstrap::engine_boot_shell`), named on the wire by `INSTALLER_TAG` in
+`Frame::Attach`.
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 
@@ -93,10 +96,11 @@ splits by class instead:
 - A `service`-born worker (`class: Durable`) is bound only by legibility, so
   that bound is structural: the host reconciles a protected `services` pin —
   one row per live service, keyed by id and its birth description, born and
-  retired at the same ready-boundary pass `reap_bindings` runs at
+  retired at the drive loop's ready-boundary pass
   (`Agent::reconcile_service_pins`, `card::services_pin_card`). The pin is
-  unwritable by the program
-  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
+  the one host-owned, write-protected register slot — unwritable by the
+  program
+  ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
 
 `service <desc> <thunk>` → `Handle`. The durable-birth verb: an ordinary
 buffered spawn registered under the durable class, which arms no lease chain
@@ -196,10 +200,27 @@ error with no room for a didactic message.
 
 Receipts and listings are ral records the model can bind, filter, and fan out
 over, rather than stringly-typed JSON it re-parses — the composability the
-retired tool form lacked. Acting verbs keep `Kind::HarnessCall`/
-`HarnessResult` rail chrome (a spawn additionally derives a child tab);
+retired tool form lacked. Acting verbs render as *acts* — the
+`Kind::HarnessCall`/`HarnessResult` rail pair
+([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; a spawn
+additionally derives a child tab);
 listings stay silent, since their value *is* the returned record.
 [[map/exarch/tools|tools]] is what remains a tool.
+
+## The web door — `fetch-url`
+
+`fetch-url <url>` → `F Bytes` (`shell_eval/builtins/egress.rs`,
+`EGRESS_BUILTINS`): the model's one action onto the outbound network, a
+sibling of the harness family kept separate — no launch spine, no grant to
+hold, one `shell.enquire(`` `fetch-url `` `…)` crossing per call. The desk's
+`fetch_url` arm answers under the IT-set `Egress` policy (`fleet/egress.rs`,
+opened once at launch — `org_policy`'s baked `default-policy.ral` or the
+operator's own — and inherited verbatim by every fork,
+[[map/exarch/agent|agent]]): approved domains only, redirects refused, a
+per-response size cap, a rate budget, and every fetch — allowed or refused —
+on the audit record. A refusal names the site and points at the IT policy;
+the success is `Bytes` the script decodes itself (`to-string`,
+`from-json`, …).
 
 ## Where to look
 

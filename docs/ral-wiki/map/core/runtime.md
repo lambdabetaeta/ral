@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -120,11 +120,21 @@ guards
   kernel-backed at *external dispatch*: when a projection is active,
   `command::build_command` obtains a confined `process::Launch` via
   `projection_enforceable` / `sandboxed_command` — per-command Seatbelt /
-  bwrap confinement on Unix; on Windows the LowBox token of the session's
-  one AppContainer profile, so the OS layer there enforces the union of the
-  session's projections — and net/fs fail-closed fires when a child is
+  bwrap confinement on Unix; on Windows the LowBox token of the
+  projection's own AppContainer profile
+  ([[decisions/260713_projection-keyed-appcontainer|projection-keyed]]) —
+  and net/fs fail-closed fires when a child is
   actually spawned, not at grant-body entry
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
+  Inside a *guest*, `build_command` takes neither projection branch:
+  `shell.guest_jail()` marks every spawn as already confined by the spawn
+  jail — a fresh unprivileged uid and a per-exec cgroup,
+  `process/jail.rs` ([[map/core/io-process|io-process]]) — since bwrap
+  needs the user namespaces the guest boot disables; the in-process gates
+  apply unchanged, and `child.rs` tracks the per-exec `JailCgroup`, so
+  cancel and settle kill the whole tree through `cgroup.kill` (a
+  `setsid`'d grandchild cannot leave its cgroup) while the grace phase
+  stays pgid-addressed (`docs/SPEC.md` §15.2).
 - `core/src/child_eval.rs` (crate root, beside the wire layer it rides, *not*
   under `runtime/`) — the one re-exec'd-child eval runner the pipeline stage
   helper drives, `run_child_eval(request, upstream, force_output)`

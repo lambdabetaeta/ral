@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92a
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs]
 ---
 
@@ -46,8 +46,10 @@ dumb terminals whatever was asked):
   iteration runs `run_buffer_change_hooks` and reads back the fish-style ghost
   suggestion and highlight spans (overlaid as ratatui cells via
   `highlight_style::style_ratatui`), accepts the ghost on right-arrow at buffer end,
-  and matches `keybinding_chords` against the keypress. A matched chord breaks
-  the loop to a `Composed::Keybinding` outcome — no new `Read` variant — tears
+  and resolves each keypress through a snapshot of the shared
+  [[map/repl/plugins|`KeyRouter`]] (`Resolution::Default` falls into the
+  surface's own built-in key arms). A claimed binding breaks the loop to a
+  `Composed::Keybinding` outcome — no new `Read` variant — tears
   down the viewport and raw mode, then runs `dispatch_keybinding`, so an
   `_ed-tui` handler (fzf, zoxide) gets the terminal exactly as the rustyline path
   dispatches only after leaving `readline`; an `_ed-push` buffer is popped when

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92a
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -92,23 +92,38 @@ boundary so plugin code never handles UTF-8.
 
 `plugin.rs::PluginRuntime` is the `Arc<Mutex<…>>` threaded between the loop,
 rustyline's `Hinter`/`Highlighter` callbacks, the structural surface's per-tick
-loop, and keybinding dispatch. It holds the canonical plugin list and the
-`keybindings_dirty` flag directly and partitions the rest into `EditorHooks`,
+loop, and keybinding dispatch. It holds the canonical plugin list, the
+`KeyRouter`, and the `keybindings_dirty` flag directly and partitions the rest into `EditorHooks`,
 `Keybindings`, and `DeferredDiagnostics` so each call site reaches only its
 slice. The load-bearing rule: editor callbacks may hold the mutex, the
 evaluator must not — every hook releases the lock before running ral code so
 re-entrant `_ed-*` calls can re-acquire it.
 
-The frontend-neutral key vocabulary lets both backends share this runtime
-without seeing each other's event types: `Keymap` (`Emacs` / `Vi`) reduces
-rustyline's `EditMode`, and `parse_key_notation` yields a `KeyChord`/`KeyName`
-that rustyline adapts to its `KeyEvent` (`chord_to_key_event`) while the
-structural surface matches it against crossterm's.
+The frontend-neutral key vocabulary lives in `plugin/router.rs`:
+`parse_key_notation` yields a `KeyChord`/`KeyName` that rustyline adapts to its
+`KeyEvent` (`chord_to_key_event`) while the structural surface matches
+crossterm's against it; `Keymap` (`Emacs` / `Vi`) reduces rustyline's
+`EditMode`. **Keybinding dispatch is one ordered router**: `KeyRouter` — held
+on the runtime, rebuilt by `keybindings_changed` whenever the plugin list
+changes — flattens every binding in load order (manifest order within a
+plugin), and `resolve` returns the first entry whose chord matches and whose
+`guard` regex (matched against the text left of the cursor) allows.
+`Resolution::Claimed` names the owning plugin and binding index;
+`Resolution::Default` is the editor's built-in tail, which each backend
+realises natively (rustyline's per-chord `RouterKeyHandler` returns `None`,
+the structural surface falls into its own key arms) — precedence is decided
+once, so the frontends cannot disagree.
 
 - `plugin/manifest.rs` — a manifest is the Map a plugin's top-level block
   returns; the parser extracts hook handlers (`pre-exec`, `post-exec`, `chpwd`,
   `prompt`, `buffer-change`), keybindings, and alias thunks into a
-  `LoadedPlugin`. A `capabilities:` key is a load error, not silent confinement
+  `LoadedPlugin`. A `KeyBinding` is fully validated at load — chord parsed,
+  optional `guard:` regex compiled: `ctrl-c`/`ctrl-d` are reserved outright
+  (`reserved_action`, the session's escape hatches), and an unguarded binding
+  on a chord carrying a ral-owned built-in action (`builtin_action` — every
+  unmodified key except F1–F12) is a load error, so same-chord bindings compose
+  as an ordered match with the built-in as the final arm. A `capabilities:` key
+  is a load error, not silent confinement
   — plugins run with host authority; to attenuate, wrap the invocation in
   `grant { … }`.
 - `plugin/load.rs` — resolves a plugin under `~/.config/ral/plugins/` or
@@ -130,9 +145,11 @@ structural surface matches it against crossterm's.
   runtime `Vec` — `unload_plugin` compacts that vector, so a runtime index
   would address the wrong plugin after an unload; a resolution miss re-edits
   the line unchanged. `sync_plugins` reconciles rustyline's binding table by
-  full unbind-then-rebind, dropping the sequences a removed plugin owned;
-  `keybinding_chords` is the neutral counterpart a frontend matching keys
-  itself reads instead.
+  full unbind-then-rebind, registering one `RouterKeyHandler` per distinct
+  bound chord (`bound_chords`) that consults the live router on each press; a
+  frontend matching keys itself snapshots the `KeyRouter` instead. Loading also
+  runs the shadow lint: a binding `dead_entries` flags (an earlier unguarded
+  entry owns its chord) is warned about, not rejected.
 
 ## Captured session commands
 

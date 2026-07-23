@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [ral/src/]
 ---
 
@@ -50,8 +50,10 @@ REPL makes that state the thing the loop threads.
   highlight table
   (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`, `worksheet.rs`,
   `cursor.rs`, `highlight_style.rs`).
-- [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins, and
-  the captured job/plugin commands; plugin hooks run inside a framed turn
+- [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins,
+  the captured job/plugin commands, and the one ordered keybinding router
+  (chord, guard, first match, built-in tail) every frontend dispatches
+  through; plugin hooks run inside a framed turn
   (`ral/src/repl/plugin*`, `plugin_ed_builtins.rs`, `host_handlers.rs`,
   `keybinding.rs`).
 - [[map/repl/jobs|jobs]] — process-group job control (`ral/src/jobs.rs`).

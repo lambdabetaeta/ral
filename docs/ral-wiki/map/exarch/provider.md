@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6b953ce7c41c3f4897ac01596772fd1d09141944
-generated_at_date: 2026-07-21
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -10,9 +10,11 @@ covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/mode
 scripted `Backend`, and OpenRouter route admission. The transcript owns
 history; the provider only sends bytes and parses replies. Invariants are
 local below the facade: `provider/identity.rs` owns selectable identity,
-`request.rs` wire shaping, `transport.rs` credential binding and caching,
+`request.rs` wire shaping (including `Tuning` and the `EFFORT_LADDER` rungs;
+the TUI keeps only the glyphs), `transport.rs` credential binding and caching,
 `stream.rs` completion and summary execution, `retry.rs` recovery timing,
-`usage.rs` accounting, and `error.rs` fault classification. The public facade
+`usage.rs` accounting, `error.rs` fault classification, and `listing.rs`
+model-list fetch orchestration. The public facade
 re-exports their established types; sibling modules meet through narrow
 methods on `Engine` and `Transport`, not visible fields.
 
@@ -83,12 +85,16 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 - ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
   their live OAuth cell after the common stale-token check.
 - `/login` admits an account mid-session through
-  `CredentialStore::add_oauth`; that operation returns the exact shared
-  `Credential` which `ModelCatalog<LiveSource>::add_credential` admits through
+  `CredentialStore::add_oauth`; that operation returns the id and the exact
+  shared `Credential`, which `ModelCatalog::add_credential` admits through
   its narrow live-source seam. Re-login updates the cell in place, including
   when a changed account label rekeys its `ProviderId`.
 - OpenRouter serving endpoints remain a separate, intent-driven request after
   a model is selected.
+- `listing.rs` states the picker-side orchestration once for every front-end
+  (the `/model` overlay and synod's window alike): the `FetchState` vocabulary,
+  a keyed background-fetch pump (`Fetches`), and the per-provider `Listing`
+  that seeds from the catalog's cache and fills misses in as they land.
 
 ## The streaming and summary paths
 

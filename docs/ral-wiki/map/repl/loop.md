@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92a
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -104,7 +104,8 @@ It matches the one flat `Report`:
 - `Ran` — a compiled turn. `Ok` prints via `print_result` (and, on a
   `structural` build, records the bind into the worksheet);
   `Break::Exit` ends the loop (clamped through `platform::exit_byte`);
-  `Break::Error` renders a runtime diagnostic; `Break::Stopped` (Unix)
+  `Break::Error` prints the diagnostic already rendered at the transport
+  seam; `Break::Stopped` (Unix)
   parks the pipeline in the [[map/repl/jobs|job table]].
 
 The mobile-state install on every outcome is core's contract — a top-level

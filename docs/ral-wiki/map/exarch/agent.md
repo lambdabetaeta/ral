@@ -1,16 +1,21 @@
 ---
-generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
-generated_at_date: 2026-07-19
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs]
 ---
 
 # Map: exarch / agent
 
 `agent.rs` is the turn driver. An `Agent` is the **uniform node** of a run: the
-canonical [[map/exarch/frontend|event log]] (`AgentLog`), the persistent
-[[map/core/shell-state|`Shell`]] behind its own `IdentityTransport` (the
-canonical turn and probe vocabulary,
-[[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
+canonical [[map/exarch/frontend|event log]] (`AgentLog`), a **seat**
+(`agent/seat.rs`) carrying the transport its turns run through —
+`Seat::Identity`, the persistent in-process [[map/core/shell-state|`Shell`]]
+behind an `IdentityTransport` (plus the session `Scratch`, the re-seed cwd,
+and the turn-scope cell the registry interrupts through), or `Seat::Wire`, a
+`WireTransport` driving a remote engine, one process per session
+([[decisions/260722_session-is-a-process|session-is-a-process]]) — the
+canonical turn and probe vocabulary either way
+([[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
 `Capabilities`, its own inbox, nudger, `cancel::Token`, an owned
 hot-swappable `ProviderHandle`, and the inherited
 `interactive` flag. What every node *shares* — the registry, the one
@@ -21,7 +26,14 @@ read from `parent: Option<AgentId>` together with `interactive` and the
 registry's own engagement state. Output
 caps are fixed `agent/digest.rs` constants, not per-agent state.
 
-The **trunk** is the parent-less node (`parent = None`). An `interactive` node
+The **trunk** is the parent-less node (`parent = None`), built by
+`Agent::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
+prompt, caps, `fuel` (exarch's launch sites pass `SPAWN_FUEL`; synod passes
+`0`), and the IT-set `fetch-url` `Egress` — opened once at launch and
+inherited verbatim by every fork — while `RootSeat` picks the seat kind
+(`Identity` boots its own shell from `scratch`; `Wire` adopts a built
+transport whose engine lives elsewhere, and refuses sub-agent forks at the
+desk). An `interactive` node
 built to converse — the interactive trunk, and every `/branch` tab
 ([[decisions/260705_branch-minimal|branch-minimal]]) — withholds `reply` and
 parks for its human, but both behaviours fall out of construction and position,
@@ -80,14 +92,14 @@ Three nested loops, the same for trunk and child alike:
   prompt back through `quiesce` so the next `append_user` is always admissible
   ([[invariants/turn-ends-ready|turn-ends-ready]]); the trunk then deregisters
   itself (a child is removed by its spawn site through `settle`), so the fleet
-  empties when the last agent leaves. On a caught worker panic (`pump` →
-  `Ok(None)`) it rebuilds the live shell's dynamic context from the
-  `durable: Mobile` snapshot the worker refreshed at the last clean tool-call
-  boundary, rolling the panicking call's grant/env/cwd/handler effects back while
-  completed calls' bindings survive
-  ([[decisions/260612_exarch-panic-recovery|panic-recovery]]; the IO half is
-  core's `TurnGuard`, restored when the turn unwinds —
-  [[internals/a-turn-end-to-end|a turn, end to end]]).
+  empties when the last agent leaves. A panic caught around `apply` is a
+  *host-side* fault (provider transport, surface decode, render, digest),
+  reported as a failed turn; an eval-side panic never unwinds this far —
+  the engine's own turn door (`Shell::run_turn`) checkpoints the `Mobile`
+  at entry, rolls it back, and reports the failed turn, durability being
+  engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
+  The per-call desk install retires on *every* exit, panic included, via
+  `seat::TurnGuard`.
 - `apply` — one provider round-trip loop over the agent's *own* provider
   (`self.provider.current()`, read once at the top of the turn so a `/model` swap
   lands next turn, never mid-turn): render the transcript, stream a reply through
@@ -133,38 +145,35 @@ observed away. Transcript and TUI only — the rendered one-liner is
 model-facing, since delivery of a reap to the model itself is deferred.
 What `drive`'s
 top still runs, each pass its own ready boundary: `reconcile_service_pins`
-(the protected `services` pin is (re-)born or dies here), `reap_bindings`
-(below), and `check_disk_warn`.
+(the protected `services` pin is (re-)born or dies here) and
+`check_disk_warn`.
 
-The retention clock is the agent's **ral-call epoch** (`Agent::ral_epoch`):
-incremented once at the top of every `run_shell` call — a failed eval is
-still a call — and swept into the registry right after the evaluation
-returns (`Shell::advance_worker_epoch` with
-[[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`), which
-stamps entries first observed settled and expires the unclaimed. The counter
-starts at 0, a fork's child starts its own at 0, and `/clear` does not
-rewind it — the cleared registry is empty anyway, and a monotone counter is
-the one the binding-lease ledger's own committed-turn clock coincides with
-one-to-one (`decisions/260629_agent-binding-reaping`) — two ticks of the
-same drum, read by two different ledgers. Retention notices need no
-plumbing of their own: they ride the same drain above.
+The retention clock itself is core's: the engine ticks the worker registry
+once per source dispatch and sweeps it at each settled turn's ready
+boundary ([[map/core/shell-state|shell-state]]), armed with
+[[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`. The
+agent keeps its own mirror of the same drum — `Agent::ral_epoch`,
+incremented once at the top of every `run_shell` call, a failed eval still
+a call — which `/resources` reads to render nearest time-to-reap and
+`check_disk_warn` reads for its amortisation; the two clocks coincide
+one-to-one (`decisions/260629_agent-binding-reaping`). The counter starts
+at 0, a fork's child starts its own at 0, and `/clear` does not rewind it.
+Retention notices need no plumbing of their own: they ride the same drain
+above.
 
-**The binding-lease ledger** is armed at the same two places that mint the
-first durable `MobileSnapshot` — `Agent::assemble` (the trunk, every fork,
-and `for_test`) and `Agent::replace_shell` (`/clear`) — each calling
-`Shell::arm_binding_lease` with [[map/exarch/shell-eval|shell-eval]]'s
-`BINDING_IDLE_CALLS` (256) and `LARGE_BINDING_BYTES` (1 MiB) right after
-`seed_session_dir` and right before `shell.mobile_snapshot()`, so seeding,
-arming, and checkpointing stay one visible sequence. The large-binding
-residency nudge rides the pushed `` `notice `` channel above.
-`Agent::reap_bindings`, called at the drive loop's top, keeps the prune half
-host-called: `Shell::prune_idle_bindings` prunes idle top-level names and
-hands back the post-prune `MobileSnapshot` (a snapshot cannot ride the
-surface seam), which the agent adopts as `Agent::durable` in the same
-statement it emits one compact `Notice::Prune` `Kind::Notice` naming what
-fell — transcript and TUI only, the same posture as a reap notice. The
-verb's signature pairs the notices with the checkpoint, so a later panic
-rollback can never resurrect a name this pass just pruned.
+**The binding-lease ledger** is armed by `bootstrap::arm_session_ledgers` —
+the one policy site, run by the identity seat's ceremony right after the
+session-dir seeding (seeding then arming stay one visible sequence) and by
+the wire engine's own boot (`engine_boot_shell`) — with
+[[map/exarch/shell-eval|shell-eval]]'s `BINDING_IDLE_CALLS` (256) and
+`LARGE_BINDING_BYTES` (1 MiB), beside `arm_worker_retention`. The
+large-binding residency nudge rides the pushed `` `notice `` channel above,
+and the prune half is engine housekeeping too: idle top-level names fall at
+the engine's own ready boundary, announced as a pushed
+`` `notice [kind: `prune] `` class the host decodes into the same
+transcript-and-TUI `Kind::Notice` posture as a reap. The engine's
+turn-entry checkpoint orders after any prior boundary's prune, so a later
+panic rollback can never resurrect a name a pass just pruned.
 
 `/resources` is the probe fold over the same accumulators
 ([[invariants/probe-convention|probe-convention]]): routed exactly as
@@ -271,9 +280,13 @@ advancing the global generation, and `clear_subtree(root)` reaps a subtree and
 bumps the generation, so a late result or deferred surface batch from a cleared
 generation is still dropped. Each cancelled node is stopped **across both
 layers**: its cooperative `Token` (read by the drive loop between steps and
-raced by the provider's mid-stream cancel) *and* its own session's durable root
-(`eval_root: Option<DurableRoot>` on the entry, minted from
-`Shell::cancel_handle` at registration), so a `ral` eval already in flight
+raced by the provider's mid-stream cancel) *and* the eval layer through the
+entry's `reach: Option<EvalReach>` (`fleet/registry.rs`, minted from the
+seat at registration) — `EvalReach::Identity` holds the session's durable
+root (`Shell::cancel_handle`) for `terminate` and the turn-scope cell for
+`interrupt`, while `EvalReach::Wire`'s only host-reachable primitive is
+`Control::Cancel` on the in-flight dispatch, so both motions resolve to it
+— and a `ral` eval already in flight
 unwinds at the evaluator's poll points instead of grinding to its
 `timeout_secs` wall. The trunk registers no eval-root — its session outlives
 any cancel; Esc reaches its turn through the published foreground slot
@@ -309,15 +322,17 @@ so the child inherits the model in force at spawn and may diverge afterward.
 ## Lifecycle: clear, compact, fork
 
 `clear` rebuilds the focused agent without carrying cancellation residue forward:
-it obtains a fresh shell from `boot_root_shell` (the scratch-seeding wrapper
-around `bootstrap::boot_shell`, where stale-interrupt discard and cancel
-re-chaining live), truncates and restarts the event log, clears the schedule
-registry, and cascades cancel to its subtree. Before the outgoing shell is
-replaced, `clear` cancels every worker still registered on it
-(`Shell::cancel_workers`) — explicit destruction outranks every lease, the
-durable class included — reaching it through the transport while it is still
-unambiguously *this* shell, since there is no way back to it once the
-transport is swapped. A worker settling after the cancel still tries to flush
+it re-runs the seat's ceremony (`Seat::clear`) — the identity seat reboots a
+fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
+scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
+turn-scope cell; a wire session instead clears by killing its engine
+process and booting a fresh one from the same recipe, so no caller routes
+`/clear` to that seat — truncates and restarts the event log, clears the
+schedule registry, and cascades cancel to its subtree. Replacing the
+transport drops the outgoing shell, whose `LocalState` teardown cancels
+every worker still registered on it — explicit destruction outranks every
+lease, the durable class included, with no host call site to forget
+([[map/core/shell-state|shell-state]]). A worker settling after the cancel still tries to flush
 its deferred `done` batch through the boundary it captured before the clear;
 the same generation guard (`deferred_sink`'s admission check,
 [[map/exarch/shell-eval|shell-eval]]) that already drops a stale agent result

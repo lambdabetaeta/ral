@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ca2674822c667e858a566d84301a3c29c48012b7
-generated_at_date: 2026-07-19
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
@@ -32,11 +32,14 @@ through. `shell_eval/tools.rs` shrinks to:
 
 The harness verbs are answered by the `ExarchDesk` (`exarch/src/fleet/desk.rs`),
 installed per `ral` call and reached through `shell.enquire(...)` from the
-builtin's body; acting verbs keep `Kind::HarnessCall`/`HarnessResult` rail
-chrome (spawns additionally derive a child tab), listings stay silent since
+builtin's body; acting verbs emit `Kind::HarnessCall`/`HarnessResult`,
+rendered as **acts** — verb, subject, payload rows that never fold into an
+observation run
+([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; spawns
+additionally derive a child tab) — while listings stay silent since
 their value *is* the returned record. There is no `Gate`/`tools_for` axis any
 more — a fresh model never even sees a verb the desk would certainly refuse:
 `reply` is dropped from the per-agent builtin index when `!returns`, and the
-self-wakeup family when the agent lacks the schedule grant
-(`prompt::resolve_builtin_index`), while authority itself is still enforced
-only at the desk, never by omission.
+self-wakeup family when the agent lacks the schedule grant (`prompt.rs`'s
+`BuiltinIndexes`, resolved once against the boot shell), while authority
+itself is still enforced only at the desk, never by omission.

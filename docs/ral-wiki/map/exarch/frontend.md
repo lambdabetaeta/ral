@@ -1,6 +1,6 @@
 ---
-generated_at_commit: caa853f2ddce6abeeafda69239711a1b284706ca
-generated_at_date: 2026-07-21
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [exarch/src/bus.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -73,7 +73,7 @@ the filesystem itself.
 
 Two `Sink` implementations:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,surface,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,surface,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
  a memoised flatten of those blocks into wrapped visual rows. A tool call is
@@ -199,9 +199,13 @@ Two `Sink` implementations:
   label from the flow rather than reconstructing it in the view. Closing the
   overlay sets its relaxed cancellation flag; browser accept polls it directly,
   while device polling checks it before each bounded request.
-- `headless.rs` — one-shot pipe: assistant tokens to stdout (or, under
+- `headless.rs` — one-shot pipe: assistant tokens to `out` (or, under
   `--output-format json`, one result object built from the root's `reply`),
-  every other event condensed to one line on stderr, exit after one seed turn.
+  every other event condensed to one line on `err`, exit after one seed turn.
+  The sink projects onto an explicit writer pair: `run`/`converse` are the
+  CLI's wrappers over the process's real stdout/stderr, and `converse_on`
+  hands the same projection to a non-CLI host (synod's GUI) one exchange at a
+  time on a parked interactive trunk.
   Takes the default `Sink::drive` and a per-turn bus, so its async children stay
   muted. It is a display only — the durable `transcript.jsonl` / `events.json`
   are written by each session's own `agent/transcript.rs` / `agent/event.rs`
@@ -259,4 +263,5 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/status.rs` — status line: `StatusReadout`, `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, `tab_bar`, justified row projection, `step_cells`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues)
-        - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`
+        - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
+        - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`

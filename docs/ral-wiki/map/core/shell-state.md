@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -55,7 +55,9 @@ field name *is* the invariant** — joined by `Shell`
 
 - **`Mobile`** — the persistable computation state (lexical `scope` +
   `ControlState` + dynamic `Context`) that crosses evaluation boundaries and
-  thread spawns. `mobile` is the public embedding seam.
+  thread spawns. `mobile` is the public embedding seam. The turn door
+  checkpoints and rolls back the `Mobile` around every turn, so a
+  panicking turn reports as a failed turn instead of corrupting the store.
 - **`TurnState`** — the dynamic frame a top-level turn installs and restores on
   teardown: the pipeline-stage `Io`, the `surface` sink, the `deferred` sink
   (a detached worker's completion delivery — `None` outside an agent host),
@@ -74,8 +76,9 @@ field name *is* the invariant** — joined by `Shell`
   true only for the one signal-facing session per process), the `sources`
   registry rendered against after a turn returns (reset and reseeded at each
   turn start), the `exit_hints` table, the host-installed
-  `builtins` with the session's `library_docs`, and the session's
-  `terminal_lease`.
+  `builtins` with the session's `library_docs`, the session's
+  `terminal_lease`, and the `guest_jail` (`Some` only inside a VM guest —
+  the spawn jail's shared uid counter, [[map/core/io-process|io-process]]).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger); the
   residue once turn and session state are named. The worker registry
@@ -85,17 +88,22 @@ field name *is* the invariant** — joined by `Shell`
   parent), but a sub-agent fork or pipeline stage starts with a fresh, empty
   one. Beside the entries it keeps the `ReapNotice` ledger the reap policies
   write — one compact record per entry removed by policy, atomic with the
-  removal under the registry's one lock — drained by the host through
-  `Shell::take_worker_reap_notices`. A settled entry carries a
-  `settled_epoch` stamp: `Shell::advance_worker_epoch`, the host's per-call
-  sweep, stamps it at the first advance that observes the entry settled and
-  expires it (a `Retention` notice) once its unclaimed result has sat a
-  full retention of ral calls — a host that never sweeps (the REPL) retains
-  settled entries indefinitely. `Shell::cancel_workers` is the other
-  worker operation on `host.rs`'s surface: the host's `/clear` arm, it fires
-  every entry's cancel scope and resets both ledgers wholesale — entries and
-  pending notices alike — since explicit destruction outranks every lease,
-  the durable class included.
+  removal under the registry's one lock — pushed by the engine as
+  `` `notice `` surface events at each settled turn's ready boundary
+  (`emit_ready_boundary_notices`; `take_worker_reap_notices` is
+  crate-private, that push its one caller). A settled entry carries a
+  `settled_epoch` stamp: retention is armed once at boot
+  (`Shell::arm_worker_retention`, beside the binding lease), the
+  registry's own clock ticks once per source dispatch (`tick_epoch`), and
+  the ready-boundary sweep (`sweep_retention`) stamps an entry at the
+  first sweep that observes it settled and expires it (a `Retention`
+  notice) once its unclaimed result has sat a full retention of ral calls
+  — a host that never arms (the REPL) retains settled entries
+  indefinitely. Worker teardown is structural: dropping the shell cancels
+  every registered worker's scope through `LocalState`'s teardown, so a
+  session's workers die with its store — a host's `/clear`, which replaces
+  the outgoing shell wholesale, needs no cancel call site, and explicit
+  destruction outranks every lease, the durable class included.
   `WorkerEntry` also implements the small `Resident` signature
   (`types/resident.rs`, [[design/residency|residency]]) — designator,
   population, capability kind, lease row, state label, cancel — so the
@@ -128,9 +136,11 @@ field name *is* the invariant** — joined by `Shell`
   `Lambda`/`Block`/`Handle` a small fixed constant, never descended) meets it
   queues a `LargeBindingNotice` regardless of baseline status or idle age —
   residency and lifetime are independent axes.
-  `Shell::leased_binding_count`
-  and `Shell::take_large_binding_notices` round out the accessor surface, the
-  first a probe figure, the second a boundary drain.
+  `Shell::leased_binding_count` rounds out the accessor surface — a probe
+  figure, like the `` `largest-binding-bytes `` probe's
+  `largest_binding_shallow_size`; large-binding notices ride the same
+  ready-boundary `` `notice `` push as the reap ledger's
+  (`take_large_binding_notices` is crate-private).
 
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn
 safety are not a public API. Hosts drive a session through the narrow accessors
@@ -189,7 +199,9 @@ Methods on `Shell` live by concern, one submodule each:
 - `checks.rs` — forwarders to the
   [[map/core/capabilities|`capability::check_*(&Context, …)`]] decisions,
   splitting the disjoint context/audit borrow for the audit-bearing checks;
-- `cwd.rs` (`Cwd`), `inherit.rs` (the flow matrix, below), `modules.rs`,
+- `cwd.rs` (`Cwd`; `seed_cwd` lets an in-process front end whose working
+  directory is not the process cwd state it directly), `inherit.rs` (the
+  flow matrix, below), `modules.rs`,
   `control.rs`, `hooks.rs` (the session-lived hook table of named turn-entry
   points — prompt render, startup, plugin hooks — resolved by the turn door's
   hook-program arm), `repl.rs` (`ReplScratch`, owned by the [[map/repl|REPL]]
@@ -234,5 +246,7 @@ default for a store that is not the session's:
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
   specialisation of `child_from`. See [[map/exarch/agent|agent]].
 
-Every genuine fork copies `session.builtins` (the dispatch table), so dispatch
-reaches the child; the same-thread β-step shares it by identity.
+Every genuine fork copies `session.builtins` (the dispatch table) and shares
+`session.guest_jail`, so dispatch reaches the child and a guest's workers,
+stages, and forks share one jail counter; the same-thread β-step shares both
+by identity.

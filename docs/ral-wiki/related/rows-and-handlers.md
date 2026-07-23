@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1cff92a
-verified_at_date: 2026-07-20
+verified_at_commit: fc49779
+verified_at_date: 2026-07-23
 against: [design/effects-handlers, design/row-types, design/types, design/scoping]
 ---
 

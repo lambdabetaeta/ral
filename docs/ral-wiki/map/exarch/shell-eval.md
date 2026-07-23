@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -9,8 +9,10 @@ covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exar
 `shell_eval.rs` runs one tool call as a ral top-level turn against the
 persistent [[map/core/shell-state|`Shell`]]. **`run_shell` is a pure *request
 supplier*: it builds a transport-level `Source` `Turn`, dispatches it through
-`ral_core::transport::dispatch_to_report` against the agent's
-`IdentityTransport`, and renders the terminal `Report` that comes back** — the
+`ral_core::transport::dispatch_to_report` against the agent's seat transport —
+the in-process `IdentityTransport`, or a wire engine's `WireTransport`
+([[map/exarch/agent|agent]]) — and renders the terminal `Report` that comes
+back** — the
 transport is the canonical turn vocabulary
 ([[decisions/260706_enquiry-channel|enquiry-channel]];
 [[internals/a-turn-end-to-end|a turn, end to end]];
@@ -67,8 +69,9 @@ and `run_shell` owns only the turn it builds and the outcome it formats:
   `await`/`cancel`) while 64 workers of any class still run; settled
   entries lingering under retention hold no seat. Its sibling
   constant `SETTLED_WORKER_RETENTION` (256 ral calls, matching the binding
-  lease's scratch expiry) is not on the request at all — it parameterises
-  the [[map/exarch/agent|agent]]'s per-call `advance_worker_epoch` sweep;
+  lease's scratch expiry) is not on the request at all — it is armed once
+  through `Shell::arm_worker_retention`, and the sweep it parameterises is
+  engine housekeeping;
 Surface delivery is not a `Turn` field: `dispatch_to_report` takes the live and
 deferred-batch sink closures directly (below, both routed through
 `fleet::desk::SurfaceApplier`), plus an enquiry handler answering through the
@@ -77,13 +80,13 @@ a desk-less dispatch gets an honest `EnquiryError`.
 
 `BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
 lease constant this module owns but does not put on the request: it is not
-per-turn policy, it is per-*shell* policy, armed once — `Agent::assemble`
-and `Agent::replace_shell` call `Shell::arm_binding_lease` with it at the
-two places an agent's shell is installed
+per-turn policy, it is per-*shell* policy, armed once by
+`bootstrap::arm_session_ledgers` — the one ledger-policy site, applied by
+the identity seat's ceremony and the wire engine's boot recipe alike
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
-(1 MiB) rides the same `BindingLease` on the same two arm calls — a
+(1 MiB) rides the same `BindingLease` at the same arming site — a
 residency threshold, not a lifetime one, so the install chokepoint checks it
 independently of idle age or baseline status.
 
@@ -136,9 +139,10 @@ parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.
 
 `shell_eval/builtins.rs` registers exarch's resident host atoms — `view-text`, the
-`grep-files` search, and the hash-addressed `edit-hash`/`edit-replace`, whose
+`grep-files` search, the hash-addressed `edit-hash`/`edit-replace`, whose
 file I/O happens in Rust, below the redirect frame
-([[map/exarch/io-surface|io-surface]]) — and sources the small embedded
+([[map/exarch/io-surface|io-surface]]), and the `fetch-url` egress builtin,
+which crosses the desk seam as one enquiry — and sources the small embedded
 `data/agent.ral` helper library (`view-text-around`, the tasks kit) into the
 shell at boot ([[map/exarch/builtins|builtins]]). The one `host_surface()`
 value declaring these sets rides core's `boot_shell` at construction and is

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: be40775f432a5cb0d3eea709624d4220add0d939
-generated_at_date: 2026-07-21
+generated_at_commit: fc49779
+generated_at_date: 2026-07-23
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -133,6 +133,19 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `Interrupt < Explicit < Deadline < Terminate < RootAbort`
   order — is narrated in
   [[internals/cancellation|cancellation]].
+- `jail.rs` — the *guest spawn jail*'s decision layer: `GuestJail::plan`
+  mints each exec a fresh unprivileged uid/gid off an atomic counter and a
+  fresh transient cgroup under `JailLimits` (memory / pids / CPU), with no
+  syscall in the plan; `jail/linux.rs` is the thin platform edge that
+  realises a `JailPlan` — the cgroup mkdir and limit writes, the pre-exec
+  supplementary-group clear / `setresgid` / `setresuid` / `NO_NEW_PRIVS`,
+  kill-whole via `cgroup.kill`, and `EBUSY`-polled removal. `JailCgroup`
+  is plain data `RunningChild` carries uniformly (`None` off a real
+  guest). The jail itself is session state (`session.guest_jail`),
+  inherited exactly like the builtin table so workers, pipeline stages,
+  and forks share one counter; only a guest engine (`RAL_GUEST`) installs
+  it, and there it replaces the per-command OS projection
+  ([[map/core/runtime|runtime]], `docs/SPEC.md` §15.2).
 
 Spawning an external command is capability-gated; that gate lives in
 [[map/core/capabilities|capabilities]], and the command/pipeline dispatch that
