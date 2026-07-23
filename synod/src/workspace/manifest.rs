@@ -85,30 +85,6 @@ impl Manifest {
     }
 }
 
-/// How much a folder holds, counted without reading file contents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Measure {
-    pub files: u64,
-    pub bytes: u64,
-}
-
-/// Size up `root` cheaply, ahead of the real checkpoint.
-///
-/// # Errors
-/// A plain sentence when something in the folder cannot be read.
-pub fn measure(root: &Path) -> Result<Measure, String> {
-    let mut files = 0;
-    let mut bytes = 0;
-    Manifest::of_folder_via(root, &mut |path| {
-        let meta = std::fs::symlink_metadata(path)
-            .map_err(|e| format!("Synod could not look at {}: {e}.", path.display()))?;
-        files += 1;
-        bytes += meta.len();
-        Ok((meta.len(), ContentHash(String::new())))
-    })?;
-    Ok(Measure { files, bytes })
-}
-
 /// Hash a file's bytes, streaming.
 ///
 /// # Errors
@@ -235,18 +211,6 @@ mod tests {
                 target: "nowhere/at-all".into(),
             })
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn measure_counts_files_and_bytes() {
-        let dir = workshop("measure");
-        std::fs::write(dir.join("a.txt"), b"12345").expect("fixture");
-        std::fs::create_dir(dir.join("sub")).expect("fixture");
-        std::fs::write(dir.join("sub").join("b.txt"), b"123").expect("fixture");
-
-        let measure = measure(&dir).expect("an ordinary folder measures");
-        assert_eq!((measure.files, measure.bytes), (2, 8));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

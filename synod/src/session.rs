@@ -326,8 +326,9 @@ impl Conversation {
     /// the folder cannot be granted, if no model account is set up (or a
     /// named one has vanished), if the chosen effort names no rung on
     /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
-    /// be made, if the system prompt cannot be assembled, or if the agent
-    /// cannot be started.
+    /// be made, if the system prompt cannot be assembled, if the agent
+    /// cannot be started, or if the before-checkpoint — the safety copy
+    /// every undo returns to — cannot be taken.
     ///
     /// # Panics
     /// Panics if the chosen provider is absent from `store` — an invariant
@@ -341,178 +342,209 @@ impl Conversation {
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
         let hypervisor = vm_manager::detect(crate::boot_media())?;
-        #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
-            format!(
-                "could not start a machine for {}: {e}",
-                grant.root().display()
-            )
-        })?;
 
-        // Said before any work happens, because it is about what is
-        // *about* to happen to the user's own documents.
-        let boundary_line = format!("Protection: {HARDWARE_PROTECTION}.");
+        // The two slow arms of an opening wait on different things
+        // entirely: the boot on a guest kernel coming up, the
+        // before-checkpoint on every byte of the folder being read and
+        // kept.  Neither needs the other, and nothing touches the folder
+        // until the first exchange, so they run side by side and the
+        // conversation opens when the slower one finishes.  A failure on
+        // this thread still waits for the walk before reporting — the
+        // scope leaks no running walk — a rare slower failure traded for
+        // an always-faster start.
+        std::thread::scope(|scope| {
+            let checkpoint = {
+                let root = grant.root().to_path_buf();
+                scope.spawn(move || {
+                    let history = workspace::HistoryStore::open_for(&root)?;
+                    let before = history.capture(&root, workspace::Moment::Before)?;
+                    Ok::<_, String>((history, before))
+                })
+            };
 
-        // The agent works where the machine put the folder: the guest's
-        // `/work`.
-        let workspace = machine.workspace_path().to_path_buf();
-        let cwd = workspace.to_string_lossy().into_owned();
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
+                format!(
+                    "could not start a machine for {}: {e}",
+                    grant.root().display()
+                )
+            })?;
 
-        let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
-        // The IT-set fetch-url policy, audit ledger, and rate budget — one
-        // file regardless of which front-end is running, opened once here.
-        let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
+            // Said before any work happens, because it is about what is
+            // *about* to happen to the user's own documents.
+            let boundary_line = format!("Protection: {HARDWARE_PROTECTION}.");
 
-        let available = store.available();
-        if available.is_empty() {
-            return Err(
-                "no model account is set up on this computer — ask your IT department \
+            // The agent works where the machine put the folder: the guest's
+            // `/work`.
+            let workspace = machine.workspace_path().to_path_buf();
+            let cwd = workspace.to_string_lossy().into_owned();
+
+            let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
+            // The IT-set fetch-url policy, audit ledger, and rate budget — one
+            // file regardless of which front-end is running, opened once here.
+            let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
+
+            let available = store.available();
+            if available.is_empty() {
+                return Err(
+                    "no model account is set up on this computer — ask your IT department \
                         to set a provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
-                    .into(),
-            );
-        }
-        let (id, model, effort) = if let Some(Choice {
-            provider,
-            model,
-            effort,
-        }) = choice
-        {
-            (
-                resolve_pinned_provider(&provider, &available)?,
+                        .into(),
+                );
+            }
+            let (id, model, effort) = if let Some(Choice {
+                provider,
                 model,
                 effort,
-            )
-        } else {
-            let (id, model) = choose(&available)?;
-            (id, model, None)
-        };
-        let cred = store
-            .get(&id)
-            .expect("the chosen provider is one of the available ones")
-            .clone();
-        let assistant_line = format!("Assistant: {} ({model}).", id.label());
-        let tuning = resolve_tuning(effort, &model)?;
+            }) = choice
+            {
+                (
+                    resolve_pinned_provider(&provider, &available)?,
+                    model,
+                    effort,
+                )
+            } else {
+                let (id, model) = choose(&available)?;
+                (id, model, None)
+            };
+            let cred = store
+                .get(&id)
+                .expect("the chosen provider is one of the available ones")
+                .clone();
+            let assistant_line = format!("Assistant: {} ({model}).", id.label());
+            let tuning = resolve_tuning(effort, &model)?;
 
-        let run_dir = SYNOD
-            .log_run_dir(&cwd)
-            .map_err(|e| format!("could not make a log folder: {e}"))?;
-        let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
+            let run_dir = SYNOD
+                .log_run_dir(&cwd)
+                .map_err(|e| format!("could not make a log folder: {e}"))?;
+            let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
 
-        // Everything the agent is told, and everything it is allowed, is in
-        // the guest's namespace: the engine lives there, and the host path
-        // of the folder names nothing inside it.
-        let caps = grant.capabilities();
-        let system = crate::prompt::assemble(&caps, &workspace, &grant.name(), &config_dir)?;
+            // Everything the agent is told, and everything it is allowed, is in
+            // the guest's namespace: the engine lives there, and the host path
+            // of the folder names nothing inside it.
+            let caps = grant.capabilities();
+            let system = crate::prompt::assemble(&caps, &workspace, &grant.name(), &config_dir)?;
 
-        // The agent's engine dials in from inside the guest, so the
-        // workspace is a guest path — never a directory this host process
-        // could `chdir` into; the trunk drives it over the wire the
-        // machine hands back.
-        #[cfg(unix)]
-        let root_seat = {
-            let fd = machine.take_control();
-            exarch::agent::RootSeat::Wire {
-                transport: Box::new(
-                    ral_core::transport::WireTransport::adopt(
-                        std::os::unix::net::UnixStream::from(fd),
-                        ral_core::transport::Liveness::default(),
-                    )
-                    .map_err(|e| format!("could not take control of the machine: {e}"))?,
-                ),
-                cwd: workspace,
-                // Home is the guest scratch, not the workspace: `$HOME` is
-                // where XDG-defaulting tools drop caches and dotfiles, and
-                // pointed at `/work` that litter would land among the
-                // user's own documents — and in every change report.
-                home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
-            }
-        };
-        // `WireTransport` is unix-only, and so is every seat that can drive
-        // one: there is no non-unix way to reach the machine's control
-        // plane, so a build for this platform can only refuse honestly.
-        #[cfg(not(unix))]
-        let root_seat: exarch::agent::RootSeat = {
-            return Err(
-                "synod reaches its virtual machine over a socket this operating \
+            // The agent's engine dials in from inside the guest, so the
+            // workspace is a guest path — never a directory this host process
+            // could `chdir` into; the trunk drives it over the wire the
+            // machine hands back.
+            #[cfg(unix)]
+            let root_seat = {
+                let fd = machine.take_control();
+                exarch::agent::RootSeat::Wire {
+                    transport: Box::new(
+                        ral_core::transport::WireTransport::adopt(
+                            std::os::unix::net::UnixStream::from(fd),
+                            ral_core::transport::Liveness::default(),
+                        )
+                        .map_err(|e| format!("could not take control of the machine: {e}"))?,
+                    ),
+                    cwd: workspace,
+                    // Home is the guest scratch, not the workspace: `$HOME` is
+                    // where XDG-defaulting tools drop caches and dotfiles, and
+                    // pointed at `/work` that litter would land among the
+                    // user's own documents — and in every change report.
+                    home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
+                }
+            };
+            // `WireTransport` is unix-only, and so is every seat that can drive
+            // one: there is no non-unix way to reach the machine's control
+            // plane, so a build for this platform can only refuse honestly.
+            #[cfg(not(unix))]
+            let root_seat: exarch::agent::RootSeat = {
+                return Err(
+                    "synod reaches its virtual machine over a socket this operating \
                          system does not provide — synod cannot run here"
-                    .to_string(),
-            );
-        };
+                        .to_string(),
+                );
+            };
 
-        let engine = Engine::new();
-        let provider = Arc::new(Provider::build(
-            engine.clone(),
-            &id,
-            model.clone(),
-            &cred,
-            None,
-            tuning,
-            None,
-        ));
-        let agent = Agent::root(
-            exarch::agent::RootConfig {
-                system,
-                caps,
-                run_dir,
-                model,
-                provider_label: id.label().to_string(),
-                // Synod's agent may not schedule its own wakeups: a
-                // conversing office assistant still runs on nothing but
-                // the messages it is handed, never on its own authority.
-                allow_schedule: false,
-                // A conversation, not a job: the agent converses,
-                // withholding `reply` and parking between messages rather
-                // than returning once — [`exarch::headless::converse_sink`]
-                // drives one exchange at a time over this same session.
-                interactive: true,
-                chat: false,
-                disk_warn_bytes,
-                // A conversation is asked and answered, one message at a
-                // time, never a fleet: no sub-agent may ever start from it.
-                fuel: 0,
-                egress,
-            },
-            root_seat,
-            Arc::clone(&provider),
-        )
-        .map_err(|e| format!("could not start the assistant: {e}"))?;
+            let engine = Engine::new();
+            let provider = Arc::new(Provider::build(
+                engine.clone(),
+                &id,
+                model.clone(),
+                &cred,
+                None,
+                tuning,
+                None,
+            ));
+            let agent = Agent::root(
+                exarch::agent::RootConfig {
+                    system,
+                    caps,
+                    run_dir,
+                    model,
+                    provider_label: id.label().to_string(),
+                    // Synod's agent may not schedule its own wakeups: a
+                    // conversing office assistant still runs on nothing but
+                    // the messages it is handed, never on its own authority.
+                    allow_schedule: false,
+                    // A conversation, not a job: the agent converses,
+                    // withholding `reply` and parking between messages rather
+                    // than returning once — [`exarch::headless::converse_sink`]
+                    // drives one exchange at a time over this same session.
+                    interactive: true,
+                    chat: false,
+                    disk_warn_bytes,
+                    // A conversation is asked and answered, one message at a
+                    // time, never a fleet: no sub-agent may ever start from it.
+                    fuel: 0,
+                    egress,
+                },
+                root_seat,
+                Arc::clone(&provider),
+            )
+            .map_err(|e| format!("could not start the assistant: {e}"))?;
 
-        // Checkpoint the folder before any work: the baseline every
-        // exchange's report is judged against, and the state every undo
-        // returns to.  Taken once, for the whole conversation — this late
-        // so a setup failure above costs no folder walk.
-        let folder_measure = workspace::measure(grant.root())?;
-        let large_folder_line = (folder_measure.bytes > workspace::LARGE_FOLDER_BYTES).then(|| {
-            let tenths = folder_measure.bytes / 100_000_000;
-            format!(
-                "This folder holds about {}.{} GB across {} files.  Synod keeps a \
+            // The checkpoint the walk took while the machine booted: the
+            // baseline every exchange's report is judged against, and the
+            // state every undo returns to.  Taken once, for the whole
+            // conversation.  Its manifest already knows every file's size, so
+            // the large-folder warning costs no walk of its own.
+            let (history, before) = checkpoint.join().map_err(|_| {
+                "Synod could not finish its safety copy of the folder.".to_string()
+            })??;
+            let (files, bytes) =
+                before
+                    .manifest
+                    .entries
+                    .values()
+                    .fold((0u64, 0u64), |(files, bytes), entry| match entry {
+                        workspace::EntryKind::File { size, .. } => (files + 1, bytes + size),
+                        _ => (files, bytes),
+                    });
+            let large_folder_line = (bytes > workspace::LARGE_FOLDER_BYTES).then(|| {
+                let tenths = bytes / 100_000_000;
+                format!(
+                    "This folder holds about {}.{} GB across {} files.  Synod keeps a \
                  copy of everything before starting, which can take a while — \
                  possibly minutes on a shared drive.",
-                tenths / 10,
-                tenths % 10,
-                folder_measure.files
-            )
-        });
-        let history = workspace::HistoryStore::open_for(grant.root())?;
-        history.capture(grant.root(), workspace::Moment::Before)?;
+                    tenths / 10,
+                    tenths % 10,
+                    files
+                )
+            });
 
-        let opening = Opening {
-            folder: grant.root().to_string_lossy().into_owned(),
-            boundary_line,
-            assistant_line,
-            large_folder_line,
-        };
+            let opening = Opening {
+                folder: grant.root().to_string_lossy().into_owned(),
+                boundary_line,
+                assistant_line,
+                large_folder_line,
+            };
 
-        Ok((
-            Self {
-                grant,
-                machine,
-                agent,
-                engine,
-                history,
-            },
-            opening,
-        ))
+            Ok((
+                Self {
+                    grant,
+                    machine,
+                    agent,
+                    engine,
+                    history,
+                },
+                opening,
+            ))
+        })
     }
 
     /// Drive one message through the conversation, streaming the bus's
