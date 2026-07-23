@@ -6769,6 +6769,7 @@ dependencies = [
  "ral-core",
  "serde",
  "serde_json",
+ "tokio",
  "vm-manager",
 ]
 

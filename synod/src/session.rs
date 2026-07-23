@@ -23,12 +23,16 @@ use crate::workspace;
 use exarch::agent::Agent;
 use exarch::bootstrap::{self, Scratch};
 use exarch::provider::{
-    self, Engine, Provider, ProviderId, credential::CredentialStore,
-    models::resolve_pinned_provider,
+    self, Engine, Provider, ProviderId,
+    credential::CredentialStore,
+    listing::Listing,
+    models::{ModelCatalog, ModelSource, resolve_pinned_provider},
+    pricing,
 };
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vm_manager::Machine;
 
 /// Synod's own directories.
@@ -60,6 +64,23 @@ pub fn prepare() -> Result<CredentialStore, String> {
     Ok(CredentialStore::resolve_and_scrub(custom))
 }
 
+/// One model offered for a provider, and whether it takes a reasoning-effort
+/// control.
+///
+/// `reasoning` reads `true` whenever the pricing catalog has not positively
+/// said otherwise — before [`pricing::ensure_loaded`] completes, or for a
+/// model the catalog's fetch never listed, [`pricing::caps_or_default`]
+/// returns an empty capability record and [`pricing::ModelCaps::supports`]
+/// treats that as permission rather than refusal. This is the same
+/// only-gray-on-positive-absence rule exarch's own `/model` picker applies:
+/// absence of information is never evidence that a model lacks the
+/// capability, so the effort control stays offered until told otherwise.
+#[derive(serde::Serialize, Clone)]
+pub struct ModelChoice {
+    pub name: String,
+    pub reasoning: bool,
+}
+
 /// One provider the window can offer, and the models known for it.
 #[derive(serde::Serialize, Clone)]
 pub struct ProviderChoice {
@@ -69,33 +90,199 @@ pub struct ProviderChoice {
     /// [`ProviderId::label`].
     pub label: String,
     pub default_model: Option<String>,
-    /// Whatever the static catalog honestly knows for this provider — at
-    /// minimum the default, never a network fetch.
-    pub models: Vec<String>,
+    /// Whatever the catalog honestly knows for this provider — at minimum
+    /// the famous default, never blocking on a network fetch to build.
+    pub models: Vec<ModelChoice>,
 }
 
-/// The provider picker: one entry per available account.
+/// The provider picker: one entry per available account, plus the shared
+/// effort ladder every entry's models offer a rung from.
 #[derive(serde::Serialize, Clone)]
 pub struct ModelMenu {
     pub providers: Vec<ProviderChoice>,
+    /// [`provider::EFFORT_LADDER`]'s labels, ascending — the rungs
+    /// [`Choice::effort`] may name.
+    pub efforts: Vec<String>,
+    /// [`provider::default_effort_label`] — the rung a freshly-opened
+    /// control should land on.
+    pub default_effort: String,
 }
 
-/// List the providers `store` has credentials for.
-pub fn menu(store: &CredentialStore) -> ModelMenu {
-    let providers = store
-        .available()
-        .into_iter()
-        .map(|id| {
-            let default_model = id.famous().map(|kind| kind.info().1.to_string());
-            ProviderChoice {
-                key: id.label().to_string(),
-                label: id.label().to_string(),
-                models: default_model.iter().cloned().collect(),
-                default_model,
-            }
-        })
+/// The provider picker as it can be shown the instant the window opens.
+///
+/// No network touched: each provider's models come from whatever `catalog`
+/// already has cached — a fresh disk entry carried over from an earlier
+/// session, or nothing at all — merged with the famous default so a
+/// provider with no cache still offers its one well-known model.
+/// [`refresh_menu`] is the complete listing, fetched live; this is the
+/// instant one the window shows while that runs.
+pub fn menu<S>(store: &CredentialStore, catalog: &mut ModelCatalog<S>) -> ModelMenu
+where
+    S: ModelSource,
+{
+    menu_from(&store.available(), catalog)
+}
+
+/// The complete provider picker: every available provider's live model
+/// list, fetched from the network wherever the catalog has nothing cached.
+///
+/// Locks `catalog` only twice, and only briefly — once to open the
+/// [`Listing`] (seeding from cache, spawning a background fetch per miss),
+/// once to fold the fetches' results back in — never while
+/// [`Listing::settle`] blocks on the network in between, so a concurrent
+/// instant [`menu`] call is never held up behind this one's fetches.
+pub fn refresh_menu<S>(store: &CredentialStore, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
+where
+    S: ModelSource + Clone + Send + 'static,
+{
+    let available = store.available();
+    refresh_menu_for(&available, catalog)
+}
+
+/// [`refresh_menu`]'s body, over a provider list rather than a store — so
+/// the fetch/fold/shape logic is exercised directly, with a fake
+/// [`ModelSource`] and no [`CredentialStore`] to stand up.
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the guard is deliberately held from the fold-in loop through menu_from's read of the same catalog — one lock for both, not one per use"
+)]
+fn refresh_menu_for<S>(available: &[ProviderId], catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
+where
+    S: ModelSource + Clone + Send + 'static,
+{
+    let listing = {
+        let mut catalog = lock(catalog);
+        Listing::open(available.to_owned(), &mut catalog)
+    };
+    let results = listing.settle();
+
+    // Best effort, and off the lock: the [`ModelChoice::reasoning`] flags
+    // [`menu_from`] computes below read this catalog, so it should be
+    // loaded before that runs wherever loading it is possible at all.
+    ensure_pricing_loaded();
+
+    let mut catalog = lock(catalog);
+    for (id, result) in results {
+        if let Ok(models) = result {
+            catalog.record(&id, models);
+        }
+    }
+    menu_from(available, &mut catalog)
+}
+
+/// Shape `available` into a [`ModelMenu`], reading each provider's model
+/// list from `catalog` without ever fetching — the part [`menu`] and
+/// [`refresh_menu_for`] share once each has decided what belongs in the
+/// catalog.
+fn menu_from<S>(available: &[ProviderId], catalog: &mut ModelCatalog<S>) -> ModelMenu
+where
+    S: ModelSource,
+{
+    let providers = available
+        .iter()
+        .map(|id| provider_choice(id, catalog))
         .collect();
-    ModelMenu { providers }
+    ModelMenu {
+        providers,
+        efforts: provider::EFFORT_LADDER
+            .iter()
+            .map(|(label, _)| label.to_string())
+            .collect(),
+        default_effort: provider::default_effort_label().to_string(),
+    }
+}
+
+/// One provider's entry: its cached models (if any) merged with its famous
+/// default, each carrying whether the pricing catalog knows it reasons.
+fn provider_choice<S>(id: &ProviderId, catalog: &mut ModelCatalog<S>) -> ProviderChoice
+where
+    S: ModelSource,
+{
+    let default_model = id.famous().map(|kind| kind.info().1.to_string());
+    let cached = catalog.cached(id).unwrap_or_default();
+    let models = merged_models(default_model.as_deref(), cached)
+        .into_iter()
+        .map(to_model_choice)
+        .collect();
+    ProviderChoice {
+        key: id.label().to_string(),
+        label: id.label().to_string(),
+        default_model,
+        models,
+    }
+}
+
+/// `default`, first, then `cached` in its own order — deduplicated so the
+/// default never appears twice, whether because `cached` already listed it
+/// or because it was merged in on an earlier call over the same catalog
+/// entry.
+fn merged_models(default: Option<&str>, cached: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(cached.len() + 1);
+    if let Some(default) = default {
+        seen.insert(default.to_string());
+        out.push(default.to_string());
+    }
+    for model in cached {
+        if seen.insert(model.clone()) {
+            out.push(model);
+        }
+    }
+    out
+}
+
+fn to_model_choice(name: String) -> ModelChoice {
+    let reasoning = pricing::caps_or_default(&name).supports("reasoning");
+    ModelChoice { name, reasoning }
+}
+
+/// Lock `catalog`, recovering the guard even if a prior holder panicked —
+/// the codebase's established pattern for a lock whose data outlives any
+/// one thread's confusion about it.
+fn lock<S: ModelSource>(
+    catalog: &Mutex<ModelCatalog<S>>,
+) -> std::sync::MutexGuard<'_, ModelCatalog<S>> {
+    catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Load exarch's `OpenRouter` pricing/capability catalog, if this process
+/// has not already — best effort, on a throwaway current-thread runtime,
+/// the same shape [`exarch::provider::models::LiveSource`]'s own network
+/// calls use rather than holding one open for a picker's whole lifetime.
+///
+/// Every [`ModelChoice::reasoning`] flag and [`Conversation::begin`]'s
+/// effort mask read this catalog through [`pricing::caps_or_default`];
+/// before it loads (or if even building a runtime fails) that read comes
+/// back empty, which the same function already treats as "unknown", not
+/// "unsupported" — so a caller here never blocks a selection, only misses
+/// the mask it would otherwise have applied.
+fn ensure_pricing_loaded() {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    runtime.block_on(pricing::ensure_loaded());
+}
+
+/// One provider, model, and (optionally) reasoning effort, chosen from
+/// [`menu`] or [`refresh_menu`]'s listing and handed to
+/// [`Conversation::begin`].
+///
+/// `effort`'s absence and `effort: Some("auto")` are deliberately distinct:
+/// leaving it unset carries [`provider::Tuning::initial`]'s thinking-on
+/// default forward untouched, exactly as an unspecified choice always has;
+/// naming `"auto"` is a request to send no reasoning option on the wire at
+/// all, landing on `effort: None` the same way, but *chosen* rather than
+/// defaulted.
+#[derive(serde::Deserialize, Clone)]
+pub struct Choice {
+    pub provider: String,
+    pub model: String,
+    pub effort: Option<String>,
 }
 
 /// What the window says before the first message: the folder, the
@@ -128,16 +315,21 @@ impl Conversation {
     /// Open `folder`, boot the best machine this computer can hold it in,
     /// and start the agent over it.
     ///
-    /// `choice` names a provider and model from [`menu`]'s listing; `None`
-    /// reproduces the old behaviour — whichever one account is set up on
-    /// this computer, and its default model.
+    /// `choice` names a provider, model, and effort from [`menu`]'s or
+    /// [`refresh_menu`]'s listing; `None` reproduces the old behaviour —
+    /// whichever one account is set up on this computer, its default model,
+    /// and [`provider::Tuning::initial`]'s thinking-on effort. A chosen
+    /// effort that [`provider::pricing::caps_or_default`] positively knows
+    /// the model does not take is masked to `None` regardless of what was
+    /// asked for — the model would otherwise refuse the request outright.
     ///
     /// # Errors
     /// Returns `Err` if this computer cannot start a virtual machine at all
     /// — the wrong platform, missing boot media, or an unsigned build — if
     /// the folder cannot be granted, if no model account is set up (or a
-    /// named one has vanished), if the scratch or log directories cannot be
-    /// made, if the system prompt cannot be assembled, or if the agent
+    /// named one has vanished), if the chosen effort names no rung on
+    /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
+    /// be made, if the system prompt cannot be assembled, or if the agent
     /// cannot be started.
     ///
     /// # Panics
@@ -148,7 +340,7 @@ impl Conversation {
     pub fn begin(
         folder: &Path,
         store: &CredentialStore,
-        choice: Option<(String, String)>,
+        choice: Option<Choice>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
         let hypervisor = vm_manager::detect(crate::boot_media())?;
@@ -182,15 +374,27 @@ impl Conversation {
                     .into(),
             );
         }
-        let (id, model) = match choice {
-            Some((key, model)) => (resolve_pinned_provider(&key, &available)?, model),
-            None => choose(&available)?,
+        let (id, model, effort) = if let Some(Choice {
+            provider,
+            model,
+            effort,
+        }) = choice
+        {
+            (
+                resolve_pinned_provider(&provider, &available)?,
+                model,
+                effort,
+            )
+        } else {
+            let (id, model) = choose(&available)?;
+            (id, model, None)
         };
         let cred = store
             .get(&id)
             .expect("the chosen provider is one of the available ones")
             .clone();
         let assistant_line = format!("Assistant: {} ({model}).", id.label());
+        let tuning = resolve_tuning(effort, &model)?;
 
         let scratch = Arc::new(
             Scratch::new(SYNOD).map_err(|e| format!("could not make a working area: {e}"))?,
@@ -227,9 +431,11 @@ impl Conversation {
         // plane, so a build for this platform can only refuse honestly.
         #[cfg(not(unix))]
         let root_seat: exarch::agent::RootSeat = {
-            return Err("synod reaches its virtual machine over a socket this operating \
+            return Err(
+                "synod reaches its virtual machine over a socket this operating \
                          system does not provide — synod cannot run here"
-                .to_string());
+                    .to_string(),
+            );
         };
 
         let engine = Engine::new();
@@ -239,7 +445,7 @@ impl Conversation {
             model.clone(),
             &cred,
             None,
-            provider::Tuning::initial(),
+            tuning,
             None,
         ));
         let agent = Agent::root(
@@ -365,13 +571,11 @@ impl Conversation {
     }
 }
 
-/// The provider and model for this run: whichever one account is set up on
-/// this computer, and its default model.
-///
-/// Synod has no model picker and remembers no choice, so an account that
-/// names no default model is a question for the user, refused in the same
-/// plain register as having no account at all — there is no flag left to
-/// answer it with.
+/// The provider and model for a run whose [`Choice`] left both unnamed:
+/// whichever one account is set up on this computer, and its default
+/// model. An account that names no default model is a question for the
+/// user, refused in the same plain register as having no account at all —
+/// there is no menu entry left to answer it with.
 fn choose(available: &[ProviderId]) -> Result<(ProviderId, String), String> {
     let id = available[0].clone();
     let model = id.famous().map(|kind| kind.info().1.to_string());
@@ -382,4 +586,236 @@ fn choose(available: &[ProviderId]) -> Result<(ProviderId, String), String> {
             id.label()
         )
     })
+}
+
+/// The tuning [`Choice::effort`] resolves to, masked against what the
+/// pricing catalog positively knows `model` supports.
+///
+/// An absent `effort` carries [`provider::Tuning::initial`]'s thinking-on
+/// default forward untouched; `Some(label)` resolves strictly against
+/// [`provider::EFFORT_LADDER`] — `"auto"` lands on `effort: None`
+/// deliberately, distinct from the absent case landing on
+/// [`provider::Tuning::initial`]'s `Some(Medium)`. Loads the pricing
+/// catalog first (best effort — see [`ensure_pricing_loaded`]), then masks
+/// the resolved effort to `None` when [`pricing::caps_or_default`]
+/// positively reports the model does not take reasoning at all; before the
+/// catalog loads, or on a lookup miss, that call reads the model as
+/// reasoning-capable and no masking happens.
+///
+/// # Errors
+/// Returns `Err` if `effort` names no rung on [`provider::EFFORT_LADDER`].
+fn resolve_tuning(effort: Option<String>, model: &str) -> Result<provider::Tuning, String> {
+    let tuning = match effort {
+        None => provider::Tuning::initial(),
+        Some(label) => provider::Tuning {
+            effort: provider::effort_by_label(&label)?,
+            temperature: None,
+            top_p: None,
+        },
+    };
+    ensure_pricing_loaded();
+    Ok(mask_unsupported_effort(
+        tuning,
+        pricing::caps_or_default(model).supports("reasoning"),
+    ))
+}
+
+/// Force `tuning.effort` to `None` when `reasoning` is `false`, leaving
+/// every other field untouched — the actual masking step
+/// [`resolve_tuning`] applies once it has learned whether the model takes a
+/// reasoning control at all. Split out from that lookup so the masking
+/// itself has a seam a test can reach without needing the pricing
+/// catalog's own network-fetched, process-global snapshot to have loaded a
+/// model that positively lacks the parameter.
+fn mask_unsupported_effort(mut tuning: provider::Tuning, reasoning: bool) -> provider::Tuning {
+    if !reasoning {
+        tuning.effort = None;
+    }
+    tuning
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exarch::provider::models::ProviderEndpoint;
+    use exarch::provider::{ChatGptAccount, ProviderKind, ReasoningEffort};
+    use std::collections::BTreeMap;
+
+    /// A famous provider's id — the common case in these tests.
+    fn fam(kind: ProviderKind) -> ProviderId {
+        ProviderId::Famous(kind)
+    }
+
+    /// A signed-in `ChatGPT` account's id — [`ProviderId::famous`] reads
+    /// `None` for it, so it names no famous default and stands in for
+    /// every provider kind [`menu_from`] cannot fall back on.
+    fn chatgpt(label: &str) -> ProviderId {
+        ProviderId::ChatGpt(Arc::new(ChatGptAccount {
+            account_id: label.to_string(),
+            label: label.to_string(),
+        }))
+    }
+
+    type Lists = BTreeMap<ProviderId, Result<Vec<String>, String>>;
+
+    /// A fake [`ModelSource`] whose list is shared (not forked) across a
+    /// clone, so a background-fetch thread run by [`Listing::open`] serves
+    /// the same lists the test set up.
+    #[derive(Clone)]
+    struct FakeSource {
+        lists: Arc<Mutex<Lists>>,
+    }
+
+    impl FakeSource {
+        fn new(lists: Lists) -> Self {
+            Self {
+                lists: Arc::new(Mutex::new(lists)),
+            }
+        }
+    }
+
+    impl ModelSource for FakeSource {
+        fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
+            lock_lists(&self.lists)
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| Err("no fake list".into()))
+        }
+
+        fn endpoints(&self, _model: &str) -> Result<Vec<ProviderEndpoint>, String> {
+            Err("not exercised by these tests".into())
+        }
+    }
+
+    fn lock_lists(lists: &Arc<Mutex<Lists>>) -> std::sync::MutexGuard<'_, Lists> {
+        lists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn one(id: ProviderId, models: &[&str]) -> Lists {
+        let mut m = BTreeMap::new();
+        m.insert(id, Ok(models.iter().map(ToString::to_string).collect()));
+        m
+    }
+
+    fn model_names(choice: &ProviderChoice) -> Vec<String> {
+        choice.models.iter().map(|m| m.name.clone()).collect()
+    }
+
+    #[test]
+    fn menu_with_nothing_cached_offers_the_famous_default_alone() {
+        let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
+        let available = [fam(ProviderKind::Anthropic)];
+
+        let menu = menu_from(&available, &mut catalog);
+
+        assert_eq!(menu.providers.len(), 1);
+        assert_eq!(
+            model_names(&menu.providers[0]),
+            vec![ProviderKind::Anthropic.info().1.to_string()]
+        );
+        assert_eq!(menu.efforts.first().map(String::as_str), Some("auto"));
+        assert_eq!(menu.default_effort, "med");
+    }
+
+    #[test]
+    fn menu_with_a_cached_list_puts_the_default_first_and_dedupes_it() {
+        let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
+        let default = ProviderKind::Anthropic.info().1.to_string();
+        catalog.record(
+            &fam(ProviderKind::Anthropic),
+            vec!["claude-haiku-4".to_string(), default.clone()],
+        );
+
+        let menu = menu_from(&[fam(ProviderKind::Anthropic)], &mut catalog);
+
+        assert_eq!(
+            model_names(&menu.providers[0]),
+            vec![default, "claude-haiku-4".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_chatgpt_style_provider_with_no_famous_default_starts_empty() {
+        let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
+        let id = chatgpt("work-account");
+
+        let menu = menu_from(std::slice::from_ref(&id), &mut catalog);
+
+        assert!(menu.providers[0].default_model.is_none());
+        assert!(model_names(&menu.providers[0]).is_empty());
+    }
+
+    #[test]
+    fn refresh_menu_folds_fetched_lists_in_and_serves_them() {
+        let id = chatgpt("work-account");
+        let source = FakeSource::new(one(id.clone(), &["gpt-5.5-codex"]));
+        let catalog = Mutex::new(ModelCatalog::memo_only(source));
+
+        let menu = refresh_menu_for(std::slice::from_ref(&id), &catalog);
+
+        assert_eq!(
+            model_names(&menu.providers[0]),
+            vec!["gpt-5.5-codex".to_string()]
+        );
+        assert_eq!(
+            lock(&catalog).cached(&id),
+            Some(vec!["gpt-5.5-codex".to_string()])
+        );
+    }
+
+    #[test]
+    fn refresh_menu_leaves_a_failed_fetch_uncached_but_still_shows_the_default() {
+        let mut lists = Lists::new();
+        lists.insert(fam(ProviderKind::Deepseek), Err("network down".to_string()));
+        let catalog = Mutex::new(ModelCatalog::memo_only(FakeSource::new(lists)));
+
+        let menu = refresh_menu_for(&[fam(ProviderKind::Deepseek)], &catalog);
+
+        assert_eq!(
+            model_names(&menu.providers[0]),
+            vec![ProviderKind::Deepseek.info().1.to_string()]
+        );
+        assert_eq!(lock(&catalog).cached(&fam(ProviderKind::Deepseek)), None);
+    }
+
+    #[test]
+    fn resolve_tuning_with_no_effort_keeps_the_thinking_on_default() {
+        let tuning = resolve_tuning(None, "claude-opus-4").unwrap();
+        assert_eq!(tuning, provider::Tuning::initial());
+    }
+
+    #[test]
+    fn resolve_tuning_rejects_an_unknown_effort_label() {
+        let err = resolve_tuning(Some("extreme".into()), "claude-opus-4").unwrap_err();
+        assert!(err.contains("extreme"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_tuning_auto_is_a_deliberate_none_not_an_absence() {
+        let tuning = resolve_tuning(Some("auto".into()), "claude-opus-4").unwrap();
+        assert!(tuning.effort.is_none());
+        assert_ne!(
+            tuning,
+            provider::Tuning::initial(),
+            "an explicit 'auto' must not read back as the thinking-on default"
+        );
+    }
+
+    #[test]
+    fn mask_unsupported_effort_clears_only_the_effort() {
+        let tuning = provider::Tuning {
+            effort: Some(ReasoningEffort::Medium),
+            temperature: Some(0.5),
+            top_p: None,
+        };
+
+        let masked = mask_unsupported_effort(tuning.clone(), false);
+        assert!(masked.effort.is_none());
+        assert_eq!(masked.temperature, Some(0.5));
+
+        let kept = mask_unsupported_effort(tuning, true);
+        assert!(matches!(kept.effort, Some(ReasoningEffort::Medium)));
+    }
 }
