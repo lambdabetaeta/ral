@@ -300,31 +300,38 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// the live grant, one under the other.
 ///
 /// Where the agent stands and when "now" is, then the authority it holds —
-/// the facts of its situation, read together.
-/// Takes the [`Scratch`](crate::bootstrap::Scratch) rather than its path
-/// because both products render this section: the scratch knows which
-/// [`App`](crate::bootstrap::App) it belongs to, and so which state
-/// directory to describe and which variable name the shell was actually
-/// seeded with.  Spelling either one literally here would tell a synod
-/// session about exarch's.
+/// the facts of its situation, read together.  Every line is a *host*
+/// truth, which is why this composition is exarch's alone: exarch's engine
+/// — identity seat or spawned `--engine` child — lives on the same machine
+/// and filesystem as this process.  Synod's engine lives inside a guest VM
+/// where none of these lines hold, so it composes its own Host section
+/// from guest facts around the shared [`grant_summary`].
 pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
     let state = scratch
         .app()
         .xdg_dir(ral_core::path::basedir::XdgKind::State);
+    let scratch_line = format!("`${}` = {}", scratch.var(), scratch.path().display());
     format!(
         "{}\n{}",
         host::snapshot(&state),
-        grant_summary(caps, scratch)
+        grant_summary(caps, &scratch_line)
     )
 }
 /// Render the live grant: a static legend (`data/grant-legend.md`)
-/// followed by the live bullet list.  The legend trains the model to
+/// followed by the live bullet list.
+///
+/// The legend trains the model to
 /// read the notation and to recognise the runtime denial string; the
 /// bullets carry the actual capabilities.  `None` fields are
 /// "unrestricted" (no attenuation at this layer); empty containers
 /// are "(none)".  One effect per line so the agent can scan its
 /// authority at a glance and avoid burning turns on denied ops.
-fn grant_summary(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
+///
+/// `scratch_line` is the right-hand side of the `- scratch:` bullet,
+/// rendered by the caller because the two products name different working
+/// areas: exarch its seeded env var and host path, synod the guest's own
+/// tmpfs.  Public for exactly that second caller.
+pub fn grant_summary(caps: &Capabilities, scratch_line: &str) -> String {
     // Ambient authority (e.g. the `dangerous` profile): nothing is
     // attenuated, so the denial-notation legend describes a runtime event
     // that cannot occur here. Collapse the whole section to one line plus
@@ -333,9 +340,7 @@ fn grant_summary(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> St
     if ambient {
         return format!(
             "Ambient authority: every command, path, and network call is permitted; \
-the sandbox is the trust boundary.\n\n- scratch: `${}` = {}\n",
-            scratch.var(),
-            scratch.path().display()
+the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
         );
     }
     let mut s = String::from(include_str!("../data/grant-legend.md").trim_end());
@@ -365,12 +370,7 @@ the sandbox is the trust boundary.\n\n- scratch: `${}` = {}\n",
             Some(false) => "deny",
         }
     );
-    let _ = writeln!(
-        s,
-        "- scratch: `${}` = {}",
-        scratch.var(),
-        scratch.path().display()
-    );
+    let _ = writeln!(s, "- scratch: {scratch_line}");
     s
 }
 

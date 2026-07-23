@@ -2,10 +2,12 @@
 //!
 //! The shape is exarch's: an ordered list of `(heading, body)` pairs walked
 //! by one renderer, so the Vec built in [`assemble`] *is* the prompt.  Synod
-//! borrows the renderer itself ([`exarch::prompt::render`]) and the live
-//! situation report ([`exarch::prompt::host_section`]) rather than growing a
+//! borrows the renderer itself ([`exarch::prompt::render`]) and the grant
+//! rendering ([`exarch::prompt::grant_summary`]) rather than growing a
 //! second copy of either; what it does not borrow is the *voice*, which is
-//! the whole difference between a coding agent and an office one.
+//! the whole difference between a coding agent and an office one — nor the
+//! situation report, whose every line is a host truth this agent, alone in
+//! its own machine, must never be told.
 
 use ral_core::types::Capabilities;
 use std::path::Path;
@@ -40,16 +42,25 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    peripheral capability.
 /// 4. **Toolbox** (`data/toolbox.md`) — how office work is actually done
 ///    with the image's userland.  This section is what makes synod capable.
-/// 5. **The folder** (`data/folder.md`) — the workspace contract, plus the
-///    granted `root` itself.  Edits land in the user's real documents at
+/// 5. **The folder** (`data/folder.md`) — the workspace contract, plus
+///    where the folder stands: mounted at `workspace` (the guest path,
+///    the only one that names anything in the machine the agent runs in)
+///    and called `folder_name` by the user, which is how the agent must
+///    speak of it.  The host path appears nowhere: a model handed one
+///    will use it in programs, and inside the guest it names nothing.
+///    Edits land in the user's real documents at
 ///    once; `SYNOD.md` §4 has no accept gate by design, and its safety net
 ///    — checkpoint before, undo after — is the host's business, never the
 ///    model's.  So this section must never suggest a change is pending
 ///    review or reversible: a model that believes in a gate is a model
 ///    that overwrites originals cheerfully.
 /// 6. **No network** (`data/no-network.md`) — absent, not denied.
-/// 7. **Host** — [`exarch::prompt::host_section`], unchanged: where the
-///    agent stands, when now is, and the authority it holds.
+/// 7. **Host** — [`host_section`], synod's own: guest truths only.
+///    Exarch's section reports this process's cwd, user, `$HOME` and git
+///    state — host facts that are all false inside the machine the agent
+///    actually works in — so synod composes when now is, where the agent
+///    stands, and the scratch space around the shared grant summary
+///    ([`exarch::prompt::grant_summary`]).
 /// 8. **House rules** (optional) — `<config_dir>/house-rules.md`.
 /// 9. **Talking to the user** (`data/surface.md`) — the card grammar and
 ///    the register to write in.  Last, where its recency carries.
@@ -58,8 +69,8 @@ const HOUSE_RULES: &str = "house-rules.md";
 /// Returns `Err` if `<config_dir>/house-rules.md` exists but cannot be read.
 pub fn assemble(
     caps: &Capabilities,
-    scratch: &exarch::bootstrap::Scratch,
-    root: &Path,
+    workspace: &Path,
+    folder_name: &str,
     config_dir: &Path,
 ) -> Result<String, String> {
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
@@ -80,16 +91,16 @@ pub fn assemble(
     sections.push((
         Some("The folder"),
         format!(
-            "{}\nThe folder granted for this session is `{}`. Every path you read or write is under it; nothing above it exists.\n",
+            "{}\nThe folder granted for this session is mounted at `{}`; outside it there is only the scratch space named under Host. To the user this folder is `{folder_name}` — speak of it by that name, never by its mounted path.\n",
             include_str!("../data/folder.md"),
-            root.display()
+            workspace.display()
         ),
     ));
     sections.push((
         Some("No network"),
         include_str!("../data/no-network.md").into(),
     ));
-    sections.push((Some("Host"), exarch::prompt::host_section(caps, scratch)));
+    sections.push((Some("Host"), host_section(caps, workspace)));
     let rules = config_dir.join(HOUSE_RULES);
     if ral_core::path::exists(&rules.to_string_lossy()) {
         sections.push((
@@ -102,6 +113,32 @@ pub fn assemble(
         include_str!("../data/surface.md").into(),
     ));
     Ok(exarch::prompt::render(&sections))
+}
+
+/// Synod's `Host` section: guest truths only, around the shared grant
+/// summary.
+///
+/// The agent runs inside the machine, so the facts of its situation are
+/// the machine's — the image's Linux userland, the mount point it starts
+/// in, and the disposable [`GUEST_SCRATCH`](crate::grant::GUEST_SCRATCH)
+/// tmpfs.  Only `now` is taken from the host, because the machine's clock
+/// is set from it and a letter must carry today's date.
+fn host_section(caps: &Capabilities, workspace: &Path) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "- os: Linux (Ubuntu userland)");
+    if let Some(now) = ral_core::host::now() {
+        let _ = writeln!(s, "- now: {now}");
+    }
+    let _ = writeln!(s, "- cwd: {}", workspace.display());
+    let scratch_line = format!(
+        "`{}` — this machine's own temporary space, gone when the conversation ends",
+        crate::grant::GUEST_SCRATCH
+    );
+    format!(
+        "{s}\n{}",
+        exarch::prompt::grant_summary(caps, &scratch_line)
+    )
 }
 
 #[cfg(test)]
@@ -135,12 +172,10 @@ mod tests {
     ];
 
     fn prompt() -> String {
-        let scratch = exarch::bootstrap::Scratch::for_test(crate::session::SYNOD, "prompt")
-            .expect("scratch dir");
         assemble(
             &Capabilities::root(),
-            &scratch,
             Path::new("/work"),
+            "Admissions",
             Path::new("/nonexistent-config"),
         )
         .expect("no house rules to read")
@@ -177,15 +212,41 @@ mod tests {
     }
 
     /// The folder section states the v1 contract: a mounted folder, written
-    /// for real, with no gate behind it.
+    /// for real, with no gate behind it — named to the model by its guest
+    /// mount and to the user by its own name.
     #[test]
     fn assemble_states_the_mounted_folder_and_claims_no_accept_gate() {
         let p = prompt().to_lowercase();
         assert!(p.contains("it is mounted"));
         assert!(p.contains("nothing is pending"));
         assert!(p.contains("`/work`"), "the granted root is named");
+        assert!(
+            p.contains("`admissions`"),
+            "the user's name for the folder is given"
+        );
         for claim in GATE_CLAIMS {
             assert!(!p.contains(claim), "prompt claims a review gate: {claim:?}");
+        }
+    }
+
+    /// The Host section carries guest truths: the guest scratch, the mount
+    /// point as cwd — and none of this process's own host facts, whose
+    /// leakage is exactly how a model ends up addressing paths that name
+    /// nothing inside the machine.
+    #[test]
+    fn assemble_hosts_the_guest_not_the_host() {
+        let p = prompt();
+        assert!(
+            p.contains("- scratch: `/tmp`"),
+            "the guest scratch is named"
+        );
+        assert!(p.contains("- cwd: /work"));
+        let home = ral_core::path::home_from_env();
+        if !home.is_empty() {
+            assert!(
+                !p.contains(&home),
+                "the host home directory must not leak into the guest's prompt"
+            );
         }
     }
 
@@ -210,9 +271,7 @@ mod tests {
             "Letters are signed by the Registrar.",
         )
         .expect("write house rules");
-        let scratch = exarch::bootstrap::Scratch::for_test(crate::session::SYNOD, "house-rules")
-            .expect("scratch dir");
-        let p = assemble(&Capabilities::root(), &scratch, Path::new("/work"), &dir)
+        let p = assemble(&Capabilities::root(), Path::new("/work"), "Admissions", &dir)
             .expect("house rules read");
         std::fs::remove_dir_all(&dir).expect("clean up");
         assert!(p.contains("# House rules"));

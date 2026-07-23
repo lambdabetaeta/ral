@@ -16,13 +16,15 @@
 //! ## Namespace
 //!
 //! [`Grant::root`] is a **host** path: the folder as the user picked it,
-//! and [`Grant::capabilities`] is expressed over that same host path, so
-//! the grant is coherent in one namespace and the caller supplies a
-//! scratch directory from the same one.  The folder appears to the *engine*
-//! at [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
-//! instead, and the fs prefixes must be minted over that mount point — one
-//! substitution, in one function, which is why the construction lives here
-//! and is not scattered across the session.
+//! for everything that happens on this side of the wall — the mount, the
+//! checkpoints, the window's own words.  The *engine* lives inside the
+//! guest, where the folder appears at
+//! [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
+//! and the working space is the guest's own [`GUEST_SCRATCH`] tmpfs, so
+//! [`Grant::capabilities`] is minted over those guest paths: the value
+//! rides every turn into the guest and is enforced there, where a host
+//! path names nothing.  One substitution, in one function, which is why
+//! the construction lives here and is not scattered across the session.
 
 use ral_core::path::NormalizedPrefix;
 use ral_core::types::{Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, ShellPolicy};
@@ -142,6 +144,13 @@ const TOOLBOX: &[&str] = &[
     "gunzip",
 ];
 
+/// The guest's disposable working space: the tmpfs `ral-daemon` mounts at
+/// `/tmp` (its mount plan, beside the `/work` mount itself), born with the
+/// machine and gone when it stops.  The engine's own scratch lands under
+/// it, and the prompt names it as the place for intermediate files, so the
+/// grant admits it whole.
+pub(crate) const GUEST_SCRATCH: &str = "/tmp";
+
 /// One folder, opened as a session's whole authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
@@ -250,6 +259,17 @@ impl Grant {
         &self.root
     }
 
+    /// The folder's name as the user sees it in Finder or Explorer — the
+    /// word the prompt hands the model to speak, never the full path.
+    /// Always the final component: [`Self::open`] refuses the disk root,
+    /// the only canonical path without one.
+    pub fn name(&self) -> String {
+        self.root.file_name().map_or_else(
+            || self.root.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    }
+
     /// What to boot to hold this folder: the granted folder, writable,
     /// on a machine sized for the heaviest thing the toolbox does —
     /// converting a document with the office suite running headless.  That is
@@ -266,14 +286,18 @@ impl Grant {
     /// The hardware boundary is the first lock — the guest can reach only
     /// the granted folder and the control socket — and this value is the
     /// second: every claim below is enforced by ral's own gate inside the
-    /// guest, on top of the wall around it.
+    /// guest, on top of the wall around it.  Because the gate runs *there*,
+    /// the paths are guest paths: the folder at its mount point, never the
+    /// host path the user picked, which names nothing inside the machine.
     ///
-    /// - **fs** — the granted folder and `scratch`, read and write.
-    ///   Nothing else: not `$HOME`, not the xdg config roots, not the
-    ///   user's other folders.  Where exarch's profiles read a developer's
-    ///   whole tool configuration so `git` and `cargo` behave, an office
-    ///   session has no configuration to find; every byte it needs is in
-    ///   the folder it was handed.
+    /// - **fs** — the granted folder at
+    ///   [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
+    ///   and the guest's [`GUEST_SCRATCH`] tmpfs, read and write.
+    ///   Nothing else: not the guest's own rootfs, and no host path at
+    ///   all.  Where exarch's profiles read a developer's whole tool
+    ///   configuration so `git` and `cargo` behave, an office session has
+    ///   no configuration to find; every byte it needs is in the folder it
+    ///   was handed.
     /// - **net** — off, flatly.  §6 gives the guest no network device at
     ///   all, so this is the policy agreeing with the topology rather
     ///   than substituting for it.  The web arrives, when it arrives, as
@@ -297,11 +321,11 @@ impl Grant {
     /// `audit` is on: synod's entire product is a review surface, and a
     /// reported change is easier to trust beside the record of what the
     /// agent was allowed to do while producing it.
-    pub fn capabilities(&self, scratch: &Path) -> Capabilities {
+    pub fn capabilities(&self) -> Capabilities {
         let prefixes = || {
             vec![
-                NormalizedPrefix::from_surface(&self.root),
-                NormalizedPrefix::from_surface(scratch),
+                NormalizedPrefix::from_surface(vm_manager::MachineSpec::GUEST_WORKSPACE),
+                NormalizedPrefix::from_surface(GUEST_SCRATCH),
             ]
         };
         Capabilities {
@@ -415,52 +439,52 @@ mod tests {
         )
         .expect("an ordinary folder must open");
         assert_eq!(grant.root(), admissions);
+        assert_eq!(grant.name(), "Admissions");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Fixture: a granted folder and a scratch dir, siblings under one
-    /// workshop, so the workshop itself is a path *outside* the grant.
-    fn granted(tag: &str) -> (PathBuf, Grant, PathBuf) {
+    /// Fixture: a granted folder under a private workshop, so paths
+    /// beside it are host paths *outside* the grant.
+    fn granted(tag: &str) -> (PathBuf, Grant) {
         let dir = workshop(tag);
         let root = dir.join("Admissions");
-        let scratch = dir.join("scratch");
         std::fs::create_dir(&root).expect("granted folder");
-        std::fs::create_dir(&scratch).expect("scratch");
         let grant = Grant::open(&root).expect("fixture folder must open");
-        (dir, grant, scratch)
+        (dir, grant)
     }
 
-    /// The point of the whole file: the value really denies a path
-    /// outside the folder and admits one inside, judged by ral's own
+    /// The point of the whole file: the value admits the guest namespace —
+    /// the mount point and the guest scratch — and denies the host one,
+    /// the granted folder's own host path included.  Judged by ral's own
     /// point-of-use gate rather than by reading the struct's fields.
     #[test]
-    fn the_policy_admits_inside_and_denies_outside() {
-        let (dir, grant, scratch) = granted("fs");
-        let caps = grant.capabilities(&scratch);
-
-        let inside = grant.root().join("letter.docx");
-        let in_scratch = scratch.join("draft.docx");
-        let outside = dir.join("elsewhere.txt");
+    fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
+        let (dir, grant) = granted("fs");
+        let caps = grant.capabilities();
 
         let mut shell = Shell::default();
         shell.with_capabilities(caps, |sh| {
-            for admitted in [&inside, &in_scratch] {
-                let path = sh.resolve(&admitted.to_string_lossy());
+            for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {
+                let path = sh.resolve(admitted);
                 sh.check_fs_read(&path)
-                    .unwrap_or_else(|_| panic!("{} must be readable", admitted.display()));
-                let path = sh.resolve(&admitted.to_string_lossy());
+                    .unwrap_or_else(|_| panic!("{admitted} must be readable"));
+                let path = sh.resolve(admitted);
                 sh.check_fs_write(&path)
-                    .unwrap_or_else(|_| panic!("{} must be writable", admitted.display()));
+                    .unwrap_or_else(|_| panic!("{admitted} must be writable"));
             }
-            let path = sh.resolve(&outside.to_string_lossy());
+            // The folder's host path names nothing inside the guest; a
+            // grant that admitted it would strand the agent in exactly
+            // the namespace confusion the mount exists to end.
+            let host = grant.root().join("letter.docx");
+            let path = sh.resolve(&host.to_string_lossy());
             assert!(
                 sh.check_fs_read(&path).is_err(),
-                "a path outside the granted folder must not be readable"
+                "the granted folder's host path must not be readable"
             );
-            let path = sh.resolve(&outside.to_string_lossy());
+            let path = sh.resolve(&host.to_string_lossy());
             assert!(
                 sh.check_fs_write(&path).is_err(),
-                "a path outside the granted folder must not be writable"
+                "the granted folder's host path must not be writable"
             );
         });
         let _ = std::fs::remove_dir_all(&dir);
@@ -470,14 +494,14 @@ mod tests {
     /// folder inside it — the case §8's "topology as policy" is about.
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
-        let (dir, grant, scratch) = granted("home-unreachable");
+        let (dir, grant) = granted("home-unreachable");
         let home = ral_core::path::home_from_env();
         if home.is_empty() {
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
         let mut shell = Shell::default();
-        shell.with_capabilities(grant.capabilities(&scratch), |sh| {
+        shell.with_capabilities(grant.capabilities(), |sh| {
             let path = sh.resolve(&format!("{home}/.ssh/id_ed25519"));
             assert!(
                 sh.check_fs_read(&path).is_err(),
@@ -489,8 +513,8 @@ mod tests {
 
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
-        let (dir, grant, scratch) = granted("exec");
-        let caps = grant.capabilities(&scratch);
+        let (dir, grant) = granted("exec");
+        let caps = grant.capabilities();
         let mut shell = Shell::default();
         shell.with_capabilities(caps, |sh| {
             for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
@@ -512,9 +536,9 @@ mod tests {
 
     #[test]
     fn the_guest_has_no_network() {
-        let (dir, grant, scratch) = granted("net");
+        let (dir, grant) = granted("net");
         assert_eq!(
-            grant.capabilities(&scratch).net,
+            grant.capabilities().net,
             Some(false),
             "SYNOD.md §6: the guest has no network at all"
         );
@@ -523,7 +547,7 @@ mod tests {
 
     #[test]
     fn the_machine_holds_exactly_the_granted_folder() {
-        let (dir, grant, _scratch) = granted("machine");
+        let (dir, grant) = granted("machine");
         let spec = grant.machine_spec();
         assert_eq!(spec.workspace.host_path, grant.root());
         assert_eq!(

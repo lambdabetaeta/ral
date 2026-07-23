@@ -21,7 +21,7 @@
 use crate::grant::Grant;
 use crate::workspace;
 use exarch::agent::Agent;
-use exarch::bootstrap::{self, Scratch};
+use exarch::bootstrap;
 use exarch::provider::{
     self, Engine, Provider, ProviderId,
     credential::CredentialStore,
@@ -36,9 +36,10 @@ use vm_manager::Machine;
 
 /// Synod's own directories.
 ///
-/// `$XDG_STATE_HOME/synod/<folder>/` for the run logs,
-/// `synod-scratch-<pid>` for the working area.  A synod run must never
-/// write into an exarch run's logs, nor read its model selection.
+/// `$XDG_STATE_HOME/synod/<folder>/` for the run logs.  A synod run must
+/// never write into an exarch run's logs, nor read its model selection.
+/// The agent's working area is not among these: it is the guest's own
+/// scratch tmpfs ([`crate::grant::GUEST_SCRATCH`]), no host directory.
 pub const SYNOD: bootstrap::App = bootstrap::App::new("synod");
 
 /// "Protection: {this}." — true of every machine synod boots, since the
@@ -305,9 +306,6 @@ pub struct Conversation {
     agent: Agent,
     engine: Arc<Engine>,
     history: workspace::HistoryStore,
-    /// The working area, held for Drop: no seat holds a clone of it, and it
-    /// must outlive the conversation it was assembled for.
-    _scratch: Arc<Scratch>,
 }
 
 impl Conversation {
@@ -395,16 +393,16 @@ impl Conversation {
         let assistant_line = format!("Assistant: {} ({model}).", id.label());
         let tuning = resolve_tuning(effort, &model)?;
 
-        let scratch = Arc::new(
-            Scratch::new(SYNOD).map_err(|e| format!("could not make a working area: {e}"))?,
-        );
         let run_dir = SYNOD
             .log_run_dir(&cwd)
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
 
-        let caps = grant.capabilities(scratch.path());
-        let system = crate::prompt::assemble(&caps, &scratch, grant.root(), &config_dir)?;
+        // Everything the agent is told, and everything it is allowed, is in
+        // the guest's namespace: the engine lives there, and the host path
+        // of the folder names nothing inside it.
+        let caps = grant.capabilities();
+        let system = crate::prompt::assemble(&caps, &workspace, &grant.name(), &config_dir)?;
 
         // The agent's engine dials in from inside the guest, so the
         // workspace is a guest path — never a directory this host process
@@ -421,8 +419,12 @@ impl Conversation {
                     )
                     .map_err(|e| format!("could not take control of the machine: {e}"))?,
                 ),
-                cwd: workspace.clone(),
-                home: workspace,
+                cwd: workspace,
+                // Home is the guest scratch, not the workspace: `$HOME` is
+                // where XDG-defaulting tools drop caches and dotfiles, and
+                // pointed at `/work` that litter would land among the
+                // user's own documents — and in every change report.
+                home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
             }
         };
         // `WireTransport` is unix-only, and so is every seat that can drive
@@ -508,7 +510,6 @@ impl Conversation {
                 agent,
                 engine,
                 history,
-                _scratch: scratch,
             },
             opening,
         ))
