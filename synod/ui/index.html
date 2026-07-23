@@ -491,10 +491,10 @@
       text-align: center;
     }
 
-    /* --- the dial: one per gap between prose bubbles. Surfaced result
-       cards are always visible; a single header rotates through three
-       rungs on click over the *process* around them — cards alone, then
-       + step intents, then + scripts & telemetry. --------------------- */
+    /* --- the dial: one per gap between prose bubbles. It holds process
+       only — a single header rotates through three rungs on click:
+       nothing, then the step intents, then the scripts, process cards &
+       telemetry. Surfaced cards stand in the transcript, not here. ---- */
     .dial {
       /* `overflow: hidden` zeroes a flex item's automatic minimum size, so
          without this the transcript column would squish the dial (clipping
@@ -604,6 +604,9 @@
       padding: 12px 14px;
       font-size: 13.5px;
     }
+    /* A surfaced card stands in the transcript at the assistant's rank and
+       wears its shadow; a process card inside a dial stays flat. */
+    .msg .mark-card { box-shadow: var(--shadow-soft); }
 
     .mark-text { margin: 0; line-height: 1.55; }
     .role-plain { color: var(--ink); }
@@ -621,7 +624,17 @@
       gap: 10px;
       font-size: 13px;
     }
-    .measure-label { color: var(--ink-soft); flex: none; }
+    /* The label absorbs all give (ellipsized, never wrapped), so the meter
+       and readout hold a fixed position at the row's right edge — the
+       magnitude mark never drifts, and never flows past the margin. */
+    .measure-label {
+      color: var(--ink-soft);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .measure-readout { font-family: var(--mono); color: var(--ink); flex: none; }
     .meter {
       display: inline-block;
@@ -639,15 +652,23 @@
       background: var(--accent);
     }
 
+    /* The label column takes its natural width up to half the card, then
+       ellipsizes — a long path never pushes the value column past the
+       card's edge. */
     .fields {
       display: grid;
-      grid-template-columns: max-content 1fr;
+      grid-template-columns: fit-content(50%) minmax(0, 1fr);
       column-gap: 12px;
       row-gap: 6px;
       font-size: 13px;
     }
-    .f-label { color: var(--ink-faint); }
-    .f-value { color: var(--ink); }
+    .f-label {
+      color: var(--ink-faint);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .f-value { color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
 
     .diff {
       font-family: var(--mono);
@@ -1207,7 +1228,8 @@
     // ---- The chat document ------------------------------------------------
 
     // The transcript's single source of truth: an append-only list of plain
-    // data blocks — user, assistant, system, and notice prose, and dials.
+    // data blocks — user, assistant, system, and notice prose, surfaced
+    // cards, and dials.
     // Everything under #transcript is a projection of this list; no block
     // holds an element, and no handler writes to the transcript directly.
     // An assistant block keeps the raw markdown of its whole bubble, so each
@@ -1253,18 +1275,28 @@
       pushBlock({ kind: "notice", text });
     }
 
+    // A surfaced card is the work's output — a deliberate act that stands
+    // in the transcript at the assistant's rank. It closes both streams:
+    // the next token opens a fresh bubble below it, the next call a fresh
+    // dial, so blocks keep true temporal order.
+    function addCardBlock(marks) {
+      if (!marks.length) return; // an empty card would render as bare chrome
+      streamingProse = null;
+      openDial = null;
+      pushBlock({ kind: "card", marks });
+    }
+
     // The dial: one per gap between prose bubbles. Tool calls, harness
-    // calls, their result cards, and warn/bad notes land in it, in true
+    // calls, their process cards, and warn/bad notes land in it, in true
     // temporal order, as a growing list of `entries`; muted telemetry
     // folds in as `notes`.
     //
-    // Surfaced result cards show at every rung — they are the work's
-    // output, not process to be dialed for. The rungs only reveal the
-    // process around them: nothing (cards alone), the step intents, then
-    // the scripts and telemetry too.
+    // The dial holds process only — surfaced cards stand in the transcript
+    // as blocks of their own. The rungs reveal the process by degree:
+    // nothing (the tip alone), the step intents, then the scripts, process
+    // cards, and telemetry too.
 
-    // Rung 0 needs no label: its tip already names the latest intent, and
-    // the surfaced cards below it speak for themselves.
+    // Rung 0 needs no label: its tip already names the latest intent.
     const RUNG_LABELS = ["", "all steps", "all scripts"];
 
     // Open a dial for this gap, or hand back the one already open. A fresh
@@ -1341,18 +1373,18 @@
       return el;
     }
 
-    // One entry's contribution at the given rung: its cards always, the
-    // step intent from rung 1, the script from rung 2. A warn/bad note
-    // entry shows at every rung — like a card, it is a fact of the
-    // exchange, not process to be dialed for. Returns null when the entry
-    // has nothing to show at this rung (e.g. a card-less call at rung 0)
-    // so the body stays free of empty rows.
+    // One entry's contribution at the given rung: the step intent from
+    // rung 1, the script and process cards from rung 2. A warn/bad note
+    // entry shows at every rung — it is a fact of the exchange, not
+    // process to be dialed for. Returns null when the entry has nothing to
+    // show at this rung (e.g. any call at rung 0) so the body stays free
+    // of empty rows.
     function renderDialEntry(entry, rung) {
       if (entry.kind === "note") return noteLine(entry);
       const children = [
         rung >= 1 && entry.intent ? entryHeading(entry) : null,
         rung >= 2 ? entryScript(entry) : null,
-        ...entry.cards.map(renderMarkCard),
+        ...(rung >= 2 ? entry.cards.map(renderMarkCard) : []),
       ].filter(Boolean);
       if (!children.length) return null;
       const item = document.createElement("div");
@@ -1410,13 +1442,17 @@
       bump(dial);
     }
 
-    function dialAddCard(marks) {
-      if (!marks.length) return; // an empty card would render as bare chrome
-      const dial = ensureDial();
-      const last = dial.entries[dial.entries.length - 1];
+    // A process card dresses work the dial already narrates — an exec's io,
+    // a worker's settling, housekeeping — so it folds into the entry that
+    // did the work and shows only at the deepest rung, beside the scripts.
+    // Like muted telemetry it has no trigger of its own: with no dial open
+    // in this gap it is dropped, not surfaced.
+    function dialAddProcessCard(marks) {
+      if (!marks.length || !openDial) return;
+      const last = openDial.entries[openDial.entries.length - 1];
       if (last && last.cards) last.cards.push(marks);
-      else dial.entries.push({ kind: "card", intent: null, cards: [marks] });
-      bump(dial);
+      else openDial.entries.push({ kind: "card", intent: null, cards: [marks] });
+      bump(openDial);
     }
 
     // Muted telemetry (usage, steps, stop reasons) has no trigger of its own
@@ -1425,7 +1461,7 @@
     // its own; it shows only at the last rung. A warn/bad note (a retry, a
     // provider error) is never swallowed: it joins the entries in temporal
     // order, visible at every rung, and opens a dial when none is — a nudge
-    // that reruns a step would otherwise double the step's cards with
+    // that reruns a step would otherwise double the step's entries with
     // nothing between them saying why.
     function dialAddNote(text, cls) {
       const urgent = cls === "warn" || cls === "bad";
@@ -1508,6 +1544,15 @@
         case "notice": {
           const { msg, bubble } = messageShell("msg system info");
           bubble.textContent = block.text;
+          return msg;
+        }
+        // A surfaced card wears the `msg` wrap for its transcript standing
+        // — width, entrance, left alignment — but no who-label and no
+        // bubble: the mark-card is its own chrome.
+        case "card": {
+          const msg = document.createElement("div");
+          msg.className = "msg";
+          msg.appendChild(renderMarkCard(block.marks));
           return msg;
         }
         case "dial":
@@ -1627,7 +1672,10 @@
           dialAddHarness(p);
           break;
         case "card":
-          dialAddCard(p.marks || []);
+          addCardBlock(p.marks || []);
+          break;
+        case "process_card":
+          dialAddProcessCard(p.marks || []);
           break;
         case "usage":
           dialAddNote(formatUsage(p), "muted");
@@ -1697,15 +1745,21 @@
       return p;
     }
 
+    // A measure standing alone names itself; one in a fields row does not
+    // — the row's label column already names it, exactly the distinction
+    // the TUI's `measure_value_spans` draws.
     function renderMeasureMark(m) {
       const row = document.createElement("div");
       row.className = "measure-row";
-
       const label = document.createElement("span");
       label.className = "measure-label";
       label.textContent = m.label;
-      row.appendChild(label);
+      row.append(label, ...measureValue(m));
+      return row;
+    }
 
+    // The meter and readout, without the measure's own label.
+    function measureValue(m) {
       const meter = document.createElement("span");
       meter.className = "meter";
       const fill = document.createElement("span");
@@ -1715,14 +1769,11 @@
         : Math.min(100, 100 * Math.log2(m.value + 1) / 32);
       fill.style.width = pct + "%";
       meter.appendChild(fill);
-      row.appendChild(meter);
 
       const readout = document.createElement("span");
       readout.className = "measure-readout";
-      readout.textContent = String(m.value) + (m.max ? "/" + m.max : "") + (m.unit || "");
-      row.appendChild(readout);
-
-      return row;
+      readout.textContent = String(m.value) + (m.max ? "/" + m.max : "") + (m.unit ? " " + m.unit : "");
+      return [meter, readout];
     }
 
     function renderFieldsMark(m) {
@@ -1739,7 +1790,10 @@
         if (row.value && row.value.inline) {
           for (const span of row.value.inline) value.appendChild(roleSpan(span));
         } else if (row.value && row.value.measure) {
-          value.appendChild(renderMeasureMark(row.value.measure));
+          const bare = document.createElement("div");
+          bare.className = "measure-row";
+          bare.append(...measureValue(row.value.measure));
+          value.appendChild(bare);
         }
         grid.appendChild(value);
       }

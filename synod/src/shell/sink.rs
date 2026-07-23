@@ -73,6 +73,10 @@ pub enum SynodEvent {
         failed: bool,
     },
     Card { marks: Vec<MarkDto> },
+    /// The rendered face of a structural fact — an exec's io, a worker's
+    /// settling, housekeeping, a probe.  Process, not output: the window
+    /// folds it into the dial's deepest rung, never the transcript.
+    ProcessCard { marks: Vec<MarkDto> },
     Usage {
         input: u64,
         output: u64,
@@ -96,11 +100,13 @@ pub enum SynodEvent {
 /// for a `Kind` the window has no use for.
 ///
 /// `Step`'s `tuning` is dropped: the window narrates turns, not the
-/// provider's effort dial.  `Card`/`Io`/`Done`/`Notice`/`Resources` all
-/// collapse to the one `Card` event, mirroring Headless's own collapse
-/// (`exarch::headless`, around its `card_stderr` call) — the raw structural
-/// fact behind each still lands in `transcript.jsonl`; only the rendering
-/// reaches the window.
+/// provider's effort dial.  The card-carrying kinds split by intent:
+/// [`Kind::Card`] is a deliberate user-facing act and projects to `Card`,
+/// which the window stands in the transcript; `Io`/`Done`/`Notice`/
+/// `Resources` are raw-fact pairings whose card is a presentation of
+/// process, so they collapse to `ProcessCard` and stay inside the dial.
+/// Either way the raw structural fact still lands in `transcript.jsonl`;
+/// only the rendering reaches the window.
 pub fn project(kind: Kind) -> Option<SynodEvent> {
     Some(match kind {
         Kind::Token(text) => SynodEvent::Token { text },
@@ -119,11 +125,13 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
             payload,
             failed,
         },
-        Kind::Card(card)
-        | Kind::Io { card, .. }
+        Kind::Card(card) => SynodEvent::Card {
+            marks: marks_dto(card),
+        },
+        Kind::Io { card, .. }
         | Kind::Done { card, .. }
         | Kind::Notice { card, .. }
-        | Kind::Resources { card, .. } => SynodEvent::Card {
+        | Kind::Resources { card, .. } => SynodEvent::ProcessCard {
             marks: marks_dto(card),
         },
         Kind::Usage(u) => SynodEvent::Usage {
@@ -228,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn io_done_notice_resources_all_collapse_to_card() {
+    fn io_done_notice_resources_all_collapse_to_process_card() {
         let io = Kind::Io {
             event: IoEvent::Read {
                 path: "f.rs".to_string(),
@@ -251,8 +259,8 @@ mod tests {
             card: Card(vec![]),
         };
         for kind in [io, done, notice, resources] {
-            let Some(SynodEvent::Card { marks }) = project(kind) else {
-                panic!("expected a Card event");
+            let Some(SynodEvent::ProcessCard { marks }) = project(kind) else {
+                panic!("expected a ProcessCard event");
             };
             assert!(marks.is_empty());
         }
@@ -308,6 +316,16 @@ mod tests {
                 }],
             })
         );
+
+        let io = project(Kind::Io {
+            event: IoEvent::Read {
+                path: "f.rs".to_string(),
+            },
+            card: Card(vec![]),
+        })
+        .expect("io projects");
+        let io_value = serde_json::to_value(&io).expect("io serialises");
+        assert_eq!(io_value["type"], "process_card");
 
         let call = SynodEvent::ToolCall {
             tool: "ral",
