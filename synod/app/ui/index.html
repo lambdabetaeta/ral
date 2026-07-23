@@ -139,31 +139,24 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
-    .wordmark {
-      font-family: var(--serif);
-      font-weight: 600;
-      letter-spacing: 0.01em;
-      color: var(--ink);
-    }
-
-    /* The wordmark: block letters set in the mono face, gradient-tinted
-       ink-to-accent and lit with a soft accent glow. The clamp keeps 44
-       monospace columns inside the 480px .wrap at any window size the app
-       allows (minWidth 560); overflow-x is a last-resort guard beneath it. */
+    /* The wordmark: solid block letters set in the mono face, gradient-tinted
+       ink-to-accent down their height and lit with a soft accent glow. The
+       clamp keeps 48 monospace columns inside the 480px .wrap at any window
+       size the app allows; overflow-x is a last-resort guard beneath it. */
     .synod-banner {
-      margin: 0 0 20px;
+      margin: 0 0 22px;
       font-family: var(--mono);
-      font-size: clamp(10px, 3.25vw, 16px);
+      font-size: clamp(8px, 3vw, 14px);
       line-height: 1;
       white-space: pre;
       overflow-x: auto;
       text-align: center;
       user-select: none;
-      background: linear-gradient(180deg, var(--ink) 0%, var(--accent) 100%);
+      background: linear-gradient(175deg, var(--ink) 15%, var(--accent) 115%);
       -webkit-background-clip: text;
       background-clip: text;
       color: transparent;
-      text-shadow: 0 0 26px color-mix(in srgb, var(--accent) 35%, transparent);
+      text-shadow: 0 2px 20px color-mix(in srgb, var(--accent) 22%, transparent);
     }
 
     /* --- start screen: a folder picker, and nothing else ------------ */
@@ -794,12 +787,13 @@
     <!-- ============ START: a folder picker, and nothing else ============ -->
     <section id="screen-start" class="screen active">
       <div class="wrap">
-        <pre class="synod-banner" role="img" aria-label="Synod">███████╗██╗   ██╗███╗   ██╗ ██████╗ ██████╗
-██╔════╝╚██╗ ██╔╝████╗  ██║██╔═══██╗██╔══██╗
-███████╗ ╚████╔╝ ██╔██╗ ██║██║   ██║██║  ██║
-╚════██║  ╚██╔╝  ██║╚██╗██║██║   ██║██║  ██║
-███████║   ██║   ██║ ╚████║╚██████╔╝██████╔╝
-╚══════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝</pre>
+        <pre class="synod-banner" role="img" aria-label="Synod"> ██████   ██    ██  ██    ██   ██████   ██████  
+██    ██  ██    ██  ███   ██  ██    ██  ██   ██ 
+██         ██  ██   ████  ██  ██    ██  ██    ██
+ ██████     ████    ██ ██ ██  ██    ██  ██    ██
+      ██     ██     ██  ████  ██    ██  ██    ██
+██    ██     ██     ██   ███  ██    ██  ██   ██ 
+ ██████      ██     ██    ██   ██████   ██████  </pre>
         <h1 class="title">Let's work in a folder together.</h1>
         <p class="lede">Choose the folder to work in. The assistant only reads and
           changes files inside it, and everything it does can be put back.</p>
@@ -1088,7 +1082,8 @@
     // than append to one that conversationally already passed.
     let currentDial = null;
 
-    const RUNG_LABELS = ["last intent", "all steps", "all scripts"];
+    // Rung 0 needs no label: its tip already reads "Show details — <intent>".
+    const RUNG_LABELS = ["", "all steps", "all scripts"];
 
     function ensureDial() {
       if (currentDial) return currentDial;
@@ -1140,7 +1135,13 @@
     function dialHeaderText(dial) {
       if (dial.rung !== 0) return "Details";
       const latest = dial.entries[dial.entries.length - 1];
-      return latest && latest.intent ? "Show details — " + latest.intent : "Show details";
+      if (latest && latest.intent) return "Show details — " + latest.intent;
+      // A dial opened by a warn/bad note alone has no intent to show: put the
+      // note itself in the collapsed tip so a retry or provider error is never
+      // silent, even before the body is dialed open.
+      const note = dial.notes[dial.notes.length - 1];
+      if (note) return "Show details — " + note.text;
+      return "Show details";
     }
 
     function renderDial(dial) {
@@ -1229,13 +1230,17 @@
       renderDial(dial);
     }
 
-    // Telemetry has no trigger of its own — it only ever folds into a dial
-    // a call/harness/card already opened in this gap; telemetry with
-    // nothing to attach to has nothing to say.
+    // Muted telemetry (usage, steps, stop reasons) has no trigger of its own
+    // — it only folds into a dial a call/harness/card already opened in this
+    // gap, and is dropped when there is none, since it has nothing to say on
+    // its own. A warn/bad note (a retry, a provider error) is never dropped:
+    // it opens a dial so the fact reaches the transcript even between prose,
+    // where no call yet has.
     function dialAddNote(text, cls) {
-      if (!currentDial) return;
-      currentDial.notes.push({ text, cls: cls || "" });
-      renderDial(currentDial);
+      const dial = cls === "warn" || cls === "bad" ? ensureDial() : currentDial;
+      if (!dial) return;
+      dial.notes.push({ text, cls: cls || "" });
+      renderDial(dial);
     }
 
     function addUserMessage(text) {
