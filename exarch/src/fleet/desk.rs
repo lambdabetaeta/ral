@@ -428,7 +428,7 @@ impl ExarchDesk {
                 1,
             ));
         };
-        let seat = crate::agent::seat::Seat::identity(shell, scratch, &child_log);
+        let seat = crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), &child_log);
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,

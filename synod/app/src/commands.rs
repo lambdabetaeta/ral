@@ -1,49 +1,65 @@
-//! The real commands the window calls: pick a folder, hold the assistant
-//! child open for the conversation, send it messages, start again, and
-//! open a file with the application the user already uses for it.
+//! The real commands the window calls: pick a folder, hold the in-process
+//! conversation open, send it messages, start again, and open a file with
+//! the application the user already uses for it.
 //!
 //! None of this is stubbed.  The folder picker is the platform's own; the
-//! conversation is the `synod` command-line program spawned once as a
-//! child and held open for as long as the window is, with its output
-//! streamed into the window line by line and messages written down its
-//! stdin; opening a file hands the path to the user's default application
-//! through the opener plugin.
+//! conversation is a [`synod::session::Conversation`] driven on its own
+//! worker thread for as long as the window wants it, with its narration
+//! streamed into the window line by line and messages handed across an
+//! in-process channel; opening a file hands the path to the user's default
+//! application through the opener plugin.
 //!
-//! The one thing that is *not* here is the agent itself.  Synod's shell
-//! never links the engine in-process — it drives a child process, so a
-//! crash in the run cannot take the window down with it.
+//! The credential store is resolved once, at startup, before this module
+//! ever runs — see [`crate::Credentials`] — so every command here either
+//! finds it already settled or surfaces its one failure as a plain
+//! sentence.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::io::{self, Write};
+use std::panic;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use synod::session::Conversation;
+use tauri::{AppHandle, Emitter, Manager, State};
 
-/// The child process for the running conversation, if one is running.
-///
-/// Held behind a shared lock so [`send_message`], [`restart_conversation`],
-/// and the window's own close handler can all reach it, and so the process
-/// monitor can clear it out from under them the moment it notices the
-/// child is gone on its own.
+/// The live conversation, if one is running — reached by [`send_message`],
+/// [`restart_conversation`], and the window's own close handler.
 #[derive(Default, Clone)]
-pub struct RunningChild(Arc<Mutex<Option<Child>>>);
+pub struct Running(Arc<Mutex<Option<Handle>>>);
 
-impl RunningChild {
+impl Running {
     /// The shared slot, for the window's own close handler to end the
-    /// conversation with — the one reach into this type from outside the
-    /// module.
-    pub(crate) fn slot(&self) -> Arc<Mutex<Option<Child>>> {
+    /// conversation with — the one reach into this module from outside it.
+    pub(crate) fn slot(&self) -> Arc<Mutex<Option<Handle>>> {
         self.0.clone()
     }
 }
 
-/// One line of the child's output, sent to the window as it arrives.  The
-/// text is developer-flavoured for now — the window tucks it into a
-/// "details" fold under the assistant's own narration — so `stream` marks
-/// which pipe it came from without asking the window to interpret it.
+/// One running conversation's worker thread and the channel that feeds it.
+///
+/// `generation` is this handle's own identity, unique for the app's whole
+/// life: a worker thread compares it against whatever handle currently
+/// occupies the slot before it announces its own end, so a conversation a
+/// restart has already superseded stays silent instead of reporting over
+/// the fresh one that replaced it.
+pub(crate) struct Handle {
+    generation: u64,
+    sender: mpsc::Sender<String>,
+    /// Attached once the thread exists.  Only [`end_conversation`] reaches
+    /// for it, to bound how long the window's close waits.
+    join: Option<JoinHandle<()>>,
+}
+
+/// One line of the conversation's narration, sent to the window as it
+/// arrives.  The text is developer-flavoured for now — the window tucks it
+/// into a "details" fold under the assistant's own narration — so `stream`
+/// marks which channel it came from without asking the window to interpret
+/// it.
 #[derive(Clone, Serialize)]
 struct OutputLine {
     /// `"out"` for the assistant's own narration, `"err"` for the run's
@@ -52,14 +68,15 @@ struct OutputLine {
     line: String,
 }
 
-/// The child has ended, one way or another — a crash, or a deliberate
-/// stop (a restart, or the window closing).
+/// The conversation has ended, one way or another — a failure, or a
+/// deliberate stop (a restart, or the window closing).
 #[derive(Clone, Serialize)]
-struct ChildEnded {
-    /// True only when the child exited on its own with a success status.
+struct ConversationEnded {
+    /// True only when the conversation ran its whole life and shut its
+    /// machine down cleanly.
     success: bool,
-    /// True when synod-app ended it on purpose rather than the process
-    /// dying by itself.
+    /// True when synod-app ended it on purpose rather than it failing on
+    /// its own.
     stopped: bool,
 }
 
@@ -68,8 +85,12 @@ struct ChildEnded {
 ///
 /// The title is the user's question, not ours: "Choose the folder for
 /// this job" is the whole of what synod is about to be given.
+///
+/// `async` so it runs off the main thread: the dialog blocks until the
+/// user answers, and the main thread is the one that must stay free to
+/// show it.
 #[tauri::command]
-pub fn choose_folder(app: AppHandle) -> Option<String> {
+pub async fn choose_folder(app: AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     app.dialog()
         .file()
@@ -79,83 +100,103 @@ pub fn choose_folder(app: AppHandle) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-/// Start the conversation: spawn `synod <folder>` and hold it open, its
-/// stdin ready for [`send_message`], its output streamed to the window as
-/// `synod-log` events, and (should it ever end on its own) a single
+/// The provider/model menu the window offers before starting: one entry
+/// per account this computer has credentials for.
+///
+/// # Errors
+/// Returns the credential scrub's own failure, if startup could not
+/// resolve one.
+#[tauri::command]
+pub fn list_models(
+    credentials: State<'_, crate::Credentials>,
+) -> Result<synod::session::ModelMenu, String> {
+    match &credentials.0 {
+        Ok(store) => Ok(synod::session::menu(store)),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+/// Start the conversation: open `folder` on its own worker thread and hold
+/// it open, ready for [`send_message`], its narration streamed to the
+/// window as `synod-log` events, and — however it ends — a single
 /// `synod-ended` event.
 ///
-/// This returns as soon as the child is spawned; the conversation plays
+/// This returns as soon as the thread is spawned; the conversation plays
 /// out over the events from here on.
 ///
 /// # Errors
-/// Returns a plain sentence if the `synod` program cannot be found beside
-/// this one, or if the child cannot be spawned at all.
+/// Returns a plain sentence if the credential scrub failed at startup.
 #[tauri::command]
 pub fn start_conversation(
     app: AppHandle,
-    child: State<'_, RunningChild>,
+    state: State<'_, Running>,
+    credentials: State<'_, crate::Credentials>,
     folder: String,
+    choice: Option<(String, String)>,
 ) -> Result<(), String> {
-    let mut spawned = spawn_child(&folder)?;
-    let pid = spawned.id();
-
-    // The two pipes are drained on their own threads so neither can wedge
-    // the conversation by filling its buffer, and so the window sees
-    // output as it happens rather than in one lump at the end.
-    let stdout = spawned.stdout.take().expect("stdout was requested as a pipe");
-    let stderr = spawned.stderr.take().expect("stderr was requested as a pipe");
-    stream_out(app.clone(), stdout);
-    stream_err(app.clone(), stderr);
-
-    let slot = child.0.clone();
-    *guard(&slot) = Some(spawned);
-    watch_for_end(app, slot, pid);
+    if let Err(e) = &credentials.0 {
+        return Err(e.clone());
+    }
+    spawn_conversation(app, state.slot(), folder, choice);
     Ok(())
 }
 
-/// Send one message down the running child's stdin, framed exactly as
-/// [`synod::session::read_message`] expects: the message's own lines,
-/// then a line holding just `.`.
+/// Send one message into the running conversation.
 ///
 /// # Errors
-/// Returns a plain sentence if there is no conversation running, or if the
-/// message could not be written.
+/// Returns a plain sentence if there is no conversation running, or if it
+/// has already finished and cannot take this message.
 #[tauri::command]
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the lock must stay held for `stdin`'s whole write-then-flush, not just the lookup"
+    reason = "the lock must stay held across the send, not just the lookup, so a restart cannot swap the handle out from under it"
 )]
-pub fn send_message(child: State<'_, RunningChild>, message: String) -> Result<(), String> {
-    let mut held = guard(&child.0);
-    let running = held
-        .as_mut()
+pub fn send_message(state: State<'_, Running>, message: String) -> Result<(), String> {
+    let slot = state.slot();
+    let held = guard(&slot);
+    let handle = held
+        .as_ref()
         .ok_or_else(|| "There is no conversation running to send this to.".to_string())?;
-    let stdin = running
-        .stdin
-        .as_mut()
-        .ok_or_else(|| "The assistant is not ready for a message yet.".to_string())?;
-    let could_not = |e| format!("Could not send the message: {e}");
-    for line in message.lines() {
-        writeln!(stdin, "{line}").map_err(could_not)?;
-    }
-    writeln!(stdin, ".").map_err(could_not)?;
-    stdin.flush().map_err(could_not)
+    handle
+        .sender
+        .send(message)
+        .map_err(|_| "The assistant has already finished; nothing was sent.".to_string())
 }
 
-/// "Start again": end the running child, if any, and spawn a fresh one
-/// over the same folder — a new conversation is a new process, never a
+/// "Start again": end the running conversation, if any, and start a fresh
+/// one over the same folder — a new conversation is a new machine, never a
 /// cleared one.
 ///
+/// Dropping the old handle's sender lets its thread finish the exchange it
+/// is mid-way through and shut its own machine down in its own time; there
+/// is no way to reach into an in-flight exchange and cancel it from here
+/// (the cancellation token [`exarch::agent::cancel`] threads through a
+/// turn is reached through the fleet registry, which
+/// [`synod::session::Conversation`] never hands out), so the old
+/// conversation is superseded rather than interrupted.  Its own
+/// `synod-ended`, whenever it eventually comes, is recognised as stale by
+/// generation and never reaches the window.
+///
 /// # Errors
-/// Returns a plain sentence if the fresh child cannot be spawned.
+/// Returns a plain sentence if the credential scrub failed at startup.
 #[tauri::command]
 pub fn restart_conversation(
     app: AppHandle,
-    child: State<'_, RunningChild>,
+    state: State<'_, Running>,
+    credentials: State<'_, crate::Credentials>,
     folder: String,
+    choice: Option<(String, String)>,
 ) -> Result<(), String> {
-    kill(&child.0);
-    start_conversation(app, child, folder)
+    if let Err(e) = &credentials.0 {
+        return Err(e.clone());
+    }
+    let slot = state.slot();
+    let superseded = guard(&slot).take();
+    if let Some(handle) = superseded {
+        drop(handle.sender);
+    }
+    spawn_conversation(app, slot, folder, choice);
+    Ok(())
 }
 
 /// Open a file as it is now, with the user's own application for that kind
@@ -168,133 +209,202 @@ pub fn open_file(app: AppHandle, path: String) -> Result<(), String> {
     open_with_default(&app, &path)
 }
 
-/// End the conversation cleanly: close the child's stdin — its own
-/// end-of-session signal — and give it a few seconds to take its final
-/// path (the closing report) and exit on its own before falling back to a
-/// kill, so a lost or hung child can never keep the window from closing.
+/// End the conversation cleanly: drop the message sender — the worker
+/// thread's own end-of-conversation signal — and give it a few seconds to
+/// take its final path (shutting its machine down) before giving up on the
+/// wait, so a wedged conversation can never keep the window from closing.
 /// Called from the window's own close handler, never the frontend.
-pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Child>>>) {
-    let Some(mut running) = guard(slot).take() else {
+pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
+    let Some(handle) = guard(slot).take() else {
         return;
     };
-    drop(running.stdin.take());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if matches!(running.try_wait(), Ok(Some(_))) {
-            return;
+    drop(handle.sender);
+    let Some(join) = handle.join else { return };
+    let (done, wait) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = join.join();
+        let _ = done.send(());
+    });
+    let _ = wait.recv_timeout(Duration::from_secs(5));
+}
+
+/// Bump the generation, register its handle in the slot before the thread
+/// can possibly outrun that registration, then let the conversation run to
+/// completion on its own thread.
+fn spawn_conversation(
+    app: AppHandle,
+    slot: Arc<Mutex<Option<Handle>>>,
+    folder: String,
+    choice: Option<(String, String)>,
+) {
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let (sender, receiver) = mpsc::channel();
+    *guard(&slot) = Some(Handle {
+        generation,
+        sender,
+        join: None,
+    });
+
+    let thread_slot = slot.clone();
+    let join = std::thread::spawn(move || {
+        run_conversation(app, thread_slot, generation, folder, choice, receiver);
+    });
+
+    if let Some(handle) = guard(&slot).as_mut()
+        && handle.generation == generation
+    {
+        handle.join = Some(join);
+    }
+}
+
+/// The worker thread's whole body: run the conversation to whatever end it
+/// reaches, then announce that end — unless a restart has since superseded
+/// this generation, in which case the window has already moved on and
+/// hears nothing.  A panicking conversation is reported the same as any
+/// other failure to start or run.
+fn run_conversation(
+    app: AppHandle,
+    slot: Arc<Mutex<Option<Handle>>>,
+    generation: u64,
+    folder: String,
+    choice: Option<(String, String)>,
+    receiver: mpsc::Receiver<String>,
+) {
+    let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        converse(&app, &folder, choice, &receiver)
+    }))
+    .unwrap_or(ConversationEnded {
+        success: false,
+        stopped: false,
+    });
+
+    let mut held = guard(&slot);
+    if held.as_ref().is_some_and(|h| h.generation == generation) {
+        *held = None;
+        drop(held);
+        let _ = app.emit("synod-ended", ended);
+    }
+}
+
+/// Open the folder, narrate the opening, then drive one exchange per
+/// message until the sender is dropped — a restart or the window closing —
+/// and shut the machine down.
+fn converse(
+    app: &AppHandle,
+    folder: &str,
+    choice: Option<(String, String)>,
+    receiver: &mpsc::Receiver<String>,
+) -> ConversationEnded {
+    let mut out = LineWriter::new(app.clone(), "out");
+    let mut err = LineWriter::new(app.clone(), "err");
+
+    let credentials = app.state::<crate::Credentials>();
+    let store = credentials
+        .0
+        .as_ref()
+        .expect("start_conversation and restart_conversation refuse before spawning this thread when the credential scrub failed");
+
+    let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
+        Ok(begun) => begun,
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            return ConversationEnded {
+                success: false,
+                stopped: false,
+            };
         }
-        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let _ = writeln!(err, "Working in {}", opening.folder);
+    let _ = writeln!(err, "{}", opening.boundary_line);
+    let _ = writeln!(err);
+    let _ = writeln!(err, "{}", opening.assistant_line);
+    if let Some(large_folder_line) = &opening.large_folder_line {
+        let _ = writeln!(err, "{large_folder_line}");
     }
-    let _ = running.kill();
-    let _ = running.wait();
-}
+    let _ = err.flush();
 
-/// End the conversation at once, with no grace period — "start again"'s
-/// own half; the fresh child that follows gets its own report from its
-/// own fresh `Before` checkpoint, so there is nothing to wait for here.
-fn kill(slot: &Arc<Mutex<Option<Child>>>) {
-    // Taken out from under the lock first, so the guard is released before
-    // the kill/wait rather than held across it.
-    let taken = guard(slot).take();
-    if let Some(mut running) = taken {
-        let _ = running.kill();
-        let _ = running.wait();
+    while let Ok(message) = receiver.recv() {
+        if let Err(e) = conversation.exchange(message, &mut out, &mut err) {
+            let _ = writeln!(err, "{e}");
+        }
+        // Announced even after a failed exchange: the after-checkpoint ran
+        // regardless, and whatever changed before the failure is already in
+        // the report the window will now re-read.
+        let _ = app.emit("exchange-done", ());
+    }
+
+    ConversationEnded {
+        success: conversation.end().is_ok(),
+        stopped: true,
     }
 }
 
-/// Spawn `synod <folder>` with its stdin, stdout, and stderr all piped —
-/// stdin for [`send_message`], the other two for the streamed narration.
-fn spawn_child(folder: &str) -> Result<Child, String> {
-    let program = locate_synod()
-        .ok_or_else(|| "Could not find the synod program on this computer.".to_string())?;
-    Command::new(&program)
-        .arg(folder)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Could not start the assistant: {e}"))
-}
-
-/// Lock the child slot, recovering the guard even if a thread panicked
-/// while holding it — a poisoned lock here means only that a reader thread
-/// unwound, which must not wedge the window.
-fn guard(slot: &Arc<Mutex<Option<Child>>>) -> std::sync::MutexGuard<'_, Option<Child>> {
+/// Lock the conversation slot, recovering the guard even if a thread
+/// panicked while holding it — a poisoned lock here means only that a
+/// reader thread unwound, which must not wedge the window.
+fn guard(slot: &Arc<Mutex<Option<Handle>>>) -> std::sync::MutexGuard<'_, Option<Handle>> {
     slot.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Drain the child's stdout on its own thread: pure narration, forwarded
-/// to the window line by line with no interpretation.
-fn stream_out(app: AppHandle, stream: impl Read + Send + 'static) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(stream).lines() {
-            let Ok(line) = line else { break };
-            let _ = app.emit("synod-log", OutputLine { stream: "out", line });
-        }
-    });
+/// Buffers written bytes to whole lines and emits each as its own
+/// `synod-log` event; a trailing partial line — no closing `\n` yet — is
+/// flushed as its own event on [`Write::flush`] or drop, so nothing
+/// written is ever lost between exchanges.
+struct LineWriter {
+    app: AppHandle,
+    stream: &'static str,
+    buffer: String,
 }
 
-/// Drain the child's stderr on its own thread.  Every line is progress
-/// and tool trace forwarded to the window as-is, except
-/// [`synod::session::EXCHANGE_DONE`] — the internal signal that an
-/// exchange has settled and its report is ready to re-read — which is
-/// consumed here and turned into its own `exchange-done` event instead of
-/// being shown as a line of narration.
-fn stream_err(app: AppHandle, stream: impl Read + Send + 'static) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(stream).lines() {
-            let Ok(line) = line else { break };
-            if line == synod::session::EXCHANGE_DONE {
-                let _ = app.emit("exchange-done", ());
-                continue;
-            }
-            let _ = app.emit("synod-log", OutputLine { stream: "err", line });
+impl LineWriter {
+    fn new(app: AppHandle, stream: &'static str) -> Self {
+        Self {
+            app,
+            stream,
+            buffer: String::new(),
         }
-    });
+    }
 }
 
-/// Watch the slot until the child bearing `pid` leaves it, one way or
-/// another, and announce how.
-///
-/// Polls rather than blocking on `wait`, so the shared slot stays free for
-/// [`send_message`] and a restart between ticks.  Tagged with the pid it
-/// was spawned to watch: a restart can replace the slot's occupant while
-/// this is still running, and a poll that finds a *different* child there
-/// belongs to that child's own, newer watcher — this one retires quietly
-/// rather than reporting on a process it was never asked to.
-fn watch_for_end(app: AppHandle, slot: Arc<Mutex<Option<Child>>>, pid: u32) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_millis(150));
-            let mut held = guard(&slot);
-            let outcome = match held.as_mut() {
-                Some(running) if running.id() == pid => match running.try_wait() {
-                    Ok(Some(status)) => Some(ChildEnded {
-                        success: status.success(),
-                        stopped: false,
-                    }),
-                    Ok(None) => None,
-                    Err(_) => Some(ChildEnded {
-                        success: false,
-                        stopped: false,
-                    }),
+impl io::Write for LineWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.push_str(&String::from_utf8_lossy(buf));
+        while let Some(pos) = self.buffer.find('\n') {
+            let line = self.buffer[..pos].to_string();
+            let _ = self.app.emit(
+                "synod-log",
+                OutputLine {
+                    stream: self.stream,
+                    line,
                 },
-                Some(_) => return, // superseded by a restart; its own watcher reports
-                None => Some(ChildEnded {
-                    success: false,
-                    stopped: true,
-                }),
-            };
-            let Some(outcome) = outcome else { continue };
-            if held.as_ref().is_some_and(|running| running.id() == pid) {
-                *held = None;
-            }
-            drop(held);
-            let _ = app.emit("synod-ended", outcome);
-            return;
+            );
+            self.buffer.drain(..=pos);
         }
-    });
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            let line = std::mem::take(&mut self.buffer);
+            let _ = self.app.emit(
+                "synod-log",
+                OutputLine {
+                    stream: self.stream,
+                    line,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LineWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
 }
 
 /// Hand `path` to the user's default application for that file.  Also the
@@ -305,37 +415,4 @@ pub(crate) fn open_with_default(app: &AppHandle, path: &str) -> Result<(), Strin
     app.opener()
         .open_path(path.to_string(), None::<&str>)
         .map_err(|e| format!("Could not open {path}: {e}"))
-}
-
-/// Find the `synod` command-line program.
-///
-/// It ships beside this one, so the common case is a sibling of the
-/// running binary — and because a development `cargo build` of the app and
-/// of the CLI land in the same profile directory, that same look also
-/// finds it during development.  The walk up to the workspace `target`
-/// directory afterwards covers only the odd case where the app was built
-/// but the CLI has not been yet, and tries both profiles.
-fn locate_synod() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "synod.exe" } else { "synod" };
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-
-    let sibling = dir.join(name);
-    if sibling.is_file() {
-        return Some(sibling);
-    }
-
-    let mut cursor = dir;
-    while let Some(parent) = cursor.parent() {
-        if parent.file_name().is_some_and(|n| n == "target") {
-            for profile in ["debug", "release"] {
-                let candidate = parent.join(profile).join(name);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-        cursor = parent;
-    }
-    None
 }

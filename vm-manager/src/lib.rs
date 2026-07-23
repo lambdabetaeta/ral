@@ -1,40 +1,37 @@
-//! One machine core for two agents.
+//! One machine core for synod.
 //!
-//! Synod (office work) and exarch (coding) both want the same thing from a
-//! machine: *give the agent a folder to work in, and tell me honestly what
-//! stands between that agent and the rest of this computer.*  This crate is
-//! that, and nothing more — [`detect`] picks a backend, [`Hypervisor::boot`]
-//! turns a [`MachineSpec`] into a [`Machine`], and [`Machine::boundary`]
-//! answers the honesty question.
+//! Synod (office work) wants one thing from a machine: give the agent a
+//! folder to work in, walled off from the rest of the computer.  This
+//! crate is that, and nothing more — [`detect`] finds the one backend this
+//! build can actually run, [`Hypervisor::boot`] turns a [`MachineSpec`]
+//! into a [`Machine`], and [`Machine::take_control`] hands over the wire
+//! the engine's turns run across.
 //!
 //! # What this crate does, stated plainly
 //!
 //! `dev/docs/VM/SYNOD.md` §4 has the agent work in the granted folder
-//! itself — shared into a guest under a hardware boundary, used in place
-//! under [`Host`](host::Host) — with a checkpoint before the job and
-//! conflict-checked undo after it.  That safety net is host-side product
-//! code (`synod::workspace`), and none of this crate's business: a machine
-//! here only *places* the folder and answers for the boundary around it.
+//! itself — shared into a guest under a hardware boundary — with a
+//! checkpoint before the job and conflict-checked undo after it.  That
+//! safety net is host-side product code (`synod::workspace`), and none of
+//! this crate's business: a machine here only *places* the folder and
+//! starts the guest around it.
 //!
-//! # The boundary is a question the caller may ask
+//! # A wall, not a policy
 //!
-//! A machine is not automatically a wall.  [`Boundary`] says which kind you
-//! got — [`Boundary::Hardware`] for a real virtual machine, [`Boundary::None`]
-//! when the folder is used in place and the only enforcement left is ral's
-//! capability gate plus whatever the operating system sandbox provides.  A
-//! caller can therefore tell its user the truth instead of implying a wall
-//! that is not there.  That is the entire point of the type; do not add a
-//! variant that means "sort of".
+//! Every machine this crate can start is a real virtual machine: the guest
+//! can reach the granted folder and the host's control socket, and nothing
+//! else — not because it is forbidden to, but because nothing else is
+//! there.  A synod that cannot boot one refuses to start rather than fall
+//! back to some weaker mode; [`detect`] is where that refusal is decided,
+//! and it says which of the wrong platform, the missing boot media, or the
+//! missing entitlement stood in the way.
 //!
 //! # Backends
 //!
-//! - [`host`] — no virtual machine, the granted folder used where it lies.
-//!   This is how synod runs on a Linux development box with no hypervisor,
-//!   and it is a real backend, not a stub.
-//! - [`vz`] — Apple's Virtualization.framework, macOS only.  Real code: it
-//!   builds, validates, and boots a configuration — but only from a signed
-//!   binary carrying the virtualization entitlement and holding a real boot
-//!   image, so [`detect`] does not return it yet.
+//! - [`vz`] — Apple's Virtualization.framework, macOS only.  It starts
+//!   machines only in a signed process carrying the virtualization
+//!   entitlement and handed real boot media, which is exactly what
+//!   [`detect`] checks before answering with it.
 
 use std::fmt;
 use std::io;
@@ -42,7 +39,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub mod host;
 #[cfg(target_os = "macos")]
 pub mod vz;
 
@@ -52,16 +48,9 @@ pub struct Workspace {
     /// The granted folder on this computer.
     pub host_path: PathBuf,
     /// Where that folder appears inside a guest — `/work`, by convention.
-    /// Ignored by backends whose boundary is [`Boundary::None`]: they have
-    /// no inside, so the folder keeps its own path.
     pub guest_path: PathBuf,
-    /// Ask that the agent may read the folder but not change it.
-    ///
-    /// A hardware boundary enforces this at the mount.  Under
-    /// [`Boundary::None`] there is no mount to enforce it with, so the
-    /// request travels on to ral's capability gate; the machine reports
-    /// [`Boundary::None`] precisely so the caller knows that enforcement is
-    /// now its own job.
+    /// Ask that the agent may read the folder but not change it, enforced
+    /// by the guest mount itself.
     pub read_only: bool,
 }
 
@@ -147,50 +136,29 @@ impl MachineSpec {
     }
 }
 
-/// What stands between the agent and the rest of the computer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Boundary {
-    /// A hardware virtual machine.  The guest can reach the granted folder
-    /// and the host's control socket, and nothing else — not because it is
-    /// forbidden to, but because nothing else is there.
-    Hardware,
-    /// No machine boundary at all: the folder is worked in where it lies.
-    /// What the agent may touch is decided entirely by ral's capability
-    /// gate and by the operating system's own sandbox.
-    None,
-}
-
-impl Boundary {
-    /// Whether a virtual machine, rather than software policy, is doing the
-    /// containing.
-    pub fn is_hardware(self) -> bool {
-        matches!(self, Self::Hardware)
-    }
-}
-
-impl fmt::Display for Boundary {
-    /// One sentence, fit to show the person who granted the folder.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Hardware => f.write_str(
-                "a separate virtual machine: the agent can reach the folder you granted and nothing else on this computer",
-            ),
-            Self::None => f.write_str(
-                "no separate machine: the agent works in the folder itself, and the only limits are the ones ral enforces in software",
-            ),
-        }
-    }
+/// The kernel, initramfs, and rootfs image a hardware machine boots from.
+///
+/// Not part of a [`MachineSpec`] — a spec says *what folder, how much
+/// machine*, not *which image* — and not this crate's to find: the media
+/// ships with the application, so the application hands it to [`detect`].
+/// The kernel and initramfs are `boot.img` of `dev/docs/VM/SYNOD.md` §7,
+/// versioned with the application; the rootfs is the pinned, read-only
+/// Ubuntu userland, downloaded and checksummed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BootArtifact {
+    /// The Linux kernel to boot directly.
+    pub kernel: PathBuf,
+    /// The initial ramdisk that assembles the overlay root and hands off to
+    /// the daemon.
+    pub initramfs: PathBuf,
+    /// The read-only rootfs image: the guest's `/dev/vda`.
+    pub rootfs: PathBuf,
 }
 
 /// Something that can start a machine.
 pub trait Hypervisor {
-    /// The backend's name, fit to show a user: `"this computer"`,
-    /// `"Virtualization.framework"`.
+    /// The backend's name, fit to show a user: `"Virtualization.framework"`.
     fn name(&self) -> &'static str;
-
-    /// The boundary every machine from this backend will have — askable
-    /// before booting, so a caller can warn or refuse first.
-    fn boundary(&self) -> Boundary;
 
     /// Start a machine for `spec`.
     ///
@@ -200,31 +168,31 @@ pub trait Hypervisor {
     fn boot(&self, spec: &MachineSpec) -> Result<Box<dyn Machine>, Error>;
 }
 
-/// A running machine holding one workspace.
+/// A running machine holding one workspace, walled off in a virtual
+/// machine.
 pub trait Machine {
-    /// Where the engine should work — the guest path under a real
-    /// hypervisor, the host folder itself under [`Host`](host::Host).
+    /// Where the engine should work — the guest path a real hypervisor
+    /// mounted the granted folder at.
     fn workspace_path(&self) -> &Path;
-
-    /// What stands between this machine's agent and the rest of the
-    /// computer.  Ask before promising a user anything.
-    fn boundary(&self) -> Boundary;
 
     /// The host end of this machine's control-plane connection — the stream
     /// the frame protocol of `dev/docs/VM/SYNOD.md` §3 runs over.
     ///
-    /// A hardware machine has exactly one, accepted when the guest's daemon
-    /// dialed it at boot; taking it transfers ownership away from the
-    /// machine, so it answers `Some` at most once.  The answer is `None`
-    /// under [`Boundary::None`]: there is no wire, because there is no
-    /// inside — the engine shares the host's address space, and whatever
-    /// would have travelled the frame protocol is a direct call instead.
+    /// A machine has exactly one, accepted when the guest's daemon dialed it
+    /// at boot; taking it transfers ownership away from the machine, so a
+    /// caller may ask for it no more than once.
     ///
     /// Unix only: a control plane here is an `AF_VSOCK` stream, named by its
     /// file descriptor.  The Windows Hyper-V backend will choose its own
     /// socket type once it exists; this signature does not presume it.
+    ///
+    /// # Panics
+    /// Implementations panic if asked twice — a caller's error, not a
+    /// machine's: the one caller in this crate's graph
+    /// (`synod::session::Conversation::begin`) takes it once, immediately
+    /// after boot.
     #[cfg(unix)]
-    fn take_control(&mut self) -> Option<std::os::fd::OwnedFd>;
+    fn take_control(&mut self) -> std::os::fd::OwnedFd;
 
     /// Stop the machine and release what it holds.
     ///
@@ -236,17 +204,62 @@ pub trait Machine {
     fn shutdown(self: Box<Self>) -> Result<(), Error>;
 }
 
-/// The best backend this computer can actually run today.
+/// Shown by [`detect`] on every platform this crate has no backend for at
+/// all — today, anything but an Apple Silicon Mac — whatever boot media it
+/// was given.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+const NOT_APPLE_SILICON: &str =
+    "this computer cannot run synod's virtual machine — it only starts on an Apple Silicon Mac";
+
+/// Shown by [`detect`] when the platform could run a machine, but this
+/// build shipped with no boot media to start one from.
+const NO_BOOT_MEDIA: &str = "synod could not find the virtual-machine image it ships with — \
+                              ask your IT department to reinstall it";
+
+/// Shown by [`detect`] when boot media is present but this process is not
+/// signed with the entitlement Virtualization.framework demands.
+const UNENTITLED: &str = "this copy of synod is not signed with the entitlement it needs to \
+                           start a virtual machine — ask your IT department for a properly \
+                           signed build";
+
+/// Start the one backend this build can actually run, given the boot media
+/// the application ships.
 ///
-/// "Best" means the strongest boundary that is *implemented and working
-/// here*, not the strongest one the platform could offer: on Linux that is
-/// [`host::Host`], and on macOS it is still [`host::Host`] — [`vz`] is real
-/// code, but it starts machines only from a signed, entitled binary holding
-/// a real boot image, and until that wiring exists the crate hands callers
-/// the backend that works everywhere.  Ask the result for its
-/// [`Hypervisor::boundary`] rather than assuming from the platform.
-pub fn detect() -> Box<dyn Hypervisor> {
-    Box::new(host::Host)
+/// There is no fallback: a synod that cannot boot a real machine refuses to
+/// start.
+///
+/// # Errors
+/// Returns a sentence for the person running synod — not a programmer —
+/// naming whichever of these stood in the way: this computer is not an
+/// Apple Silicon Mac ([`NOT_APPLE_SILICON`]); it is one, but `boot` is
+/// `None` ([`NO_BOOT_MEDIA`]); or it is one with media in hand, but this
+/// process is not signed with the virtualization entitlement
+/// ([`UNENTITLED`]).
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
+    let _ = boot;
+    Err(NOT_APPLE_SILICON.to_string())
+}
+
+/// Start the one backend this build can actually run, given the boot media
+/// the application ships.
+///
+/// On Apple Silicon macOS the platform check the other-platform overload
+/// makes always passes, so the only refusals left are [`NO_BOOT_MEDIA`] and
+/// [`UNENTITLED`].
+///
+/// # Errors
+/// Returns [`NO_BOOT_MEDIA`] if `boot` is `None`, or [`UNENTITLED`] if this
+/// process is not signed with the virtualization entitlement.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
+    let Some(artifact) = boot else {
+        return Err(NO_BOOT_MEDIA.to_string());
+    };
+    if !vz::entitled() {
+        return Err(UNENTITLED.to_string());
+    }
+    Ok(Box::new(vz::Vz::new(artifact, std::env::temp_dir())))
 }
 
 /// Why a machine could not be started.
@@ -320,6 +333,51 @@ impl std::error::Error for Error {
         match self {
             Self::FolderUnreadable { cause, .. } => Some(cause),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact() -> BootArtifact {
+        BootArtifact {
+            kernel: PathBuf::from("/boot/kernel"),
+            initramfs: PathBuf::from("/boot/initramfs"),
+            rootfs: PathBuf::from("/boot/rootfs.img"),
+        }
+    }
+
+    /// Off Apple Silicon, `detect` refuses outright — media or not, since
+    /// this crate has no backend for the platform at all.
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[test]
+    fn off_apple_silicon_detect_refuses_regardless_of_media() {
+        assert!(detect(None).is_err());
+        assert!(detect(Some(artifact())).is_err());
+    }
+
+    /// On the eligible platform, no media is its own refusal.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn without_media_detect_refuses_by_name() {
+        let message = detect(None).err().unwrap();
+        assert!(message.contains("could not find"), "{message}");
+    }
+
+    /// With media, the answer follows the process's own entitlement: a bare
+    /// `cargo test` binary is unentitled, while the same binary signed
+    /// through `dev/scripts/sign-virtualization.sh` is not — so the law
+    /// under test is agreement, not either fixed answer.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn with_media_detect_follows_the_entitlement() {
+        if vz::entitled() {
+            assert!(detect(Some(artifact())).is_ok());
+        } else {
+            let message = detect(Some(artifact())).err().unwrap();
+            assert!(message.contains("entitlement"), "{message}");
         }
     }
 }

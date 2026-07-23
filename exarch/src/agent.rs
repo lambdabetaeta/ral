@@ -575,8 +575,13 @@ pub struct RootConfig {
 /// seat kind needs to boot.
 pub enum RootSeat {
     /// In-process: the trunk boots its own shell from `scratch` and drives
-    /// it through an identity transport.
-    Identity { scratch: Arc<Scratch> },
+    /// it through an identity transport. `cwd` is the caller's own, stated
+    /// explicitly rather than read from the process: a GUI host has no
+    /// per-conversation process directory to chdir into.
+    Identity {
+        scratch: Arc<Scratch>,
+        cwd: std::path::PathBuf,
+    },
     /// Out-of-process: the trunk drives an already-built `transport` whose
     /// engine lives elsewhere — a spawned `--engine` child or, as synod uses
     /// it, an adopted control-plane stream into a guest VM. `cwd`/`home` are
@@ -716,7 +721,7 @@ impl Agent {
         // the boot recipe minus its engine-local scratch — stands in here
         // and is then discarded.
         let identity_shell = match &root_seat {
-            RootSeat::Identity { scratch } => Some(seat::boot_root_shell(scratch)),
+            RootSeat::Identity { scratch, cwd } => Some(seat::boot_root_shell(scratch, cwd.clone())),
             #[cfg(unix)]
             RootSeat::Wire { .. } => None,
         };
@@ -743,9 +748,10 @@ impl Agent {
             system_prompt.len(),
         )?;
         let seat = match root_seat {
-            RootSeat::Identity { scratch } => Seat::identity(
+            RootSeat::Identity { scratch, cwd } => Seat::identity(
                 identity_shell.expect("built above for an identity seat"),
                 scratch,
+                cwd,
                 &log,
             ),
             #[cfg(unix)]
@@ -883,10 +889,10 @@ impl Agent {
         // session scratch (the forked shell already inherited its seeding).
         // `shell_mut` above already panicked on a wire seat, so reaching
         // here means `self.seat` is an identity seat.
-        let Seat::Identity { scratch, .. } = &self.seat else {
+        let Seat::Identity { scratch, cwd, .. } = &self.seat else {
             unreachable!("shell_mut already panicked above for a wire seat")
         };
-        let seat = Seat::identity(shell, scratch.clone(), &log);
+        let seat = Seat::identity(shell, scratch.clone(), cwd.clone(), &log);
         Self::assemble(Build {
             // The unresolved template: the child's own children resolve
             // their indices from it in turn.
@@ -994,6 +1000,10 @@ impl Agent {
     ///
     /// # Errors
     /// Returns `Err` if creating the throwaway session log under `dir` fails.
+    ///
+    /// # Panics
+    /// Panics if the test process has no cwd (an environment fault, never a
+    /// real condition in a test run).
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
         let shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
@@ -1022,7 +1032,8 @@ impl Agent {
             ProviderKind::Openai,
             crate::provider::scripted::Script::new(),
         )));
-        let seat = Seat::identity(shell, scratch, &log);
+        let cwd = std::env::current_dir().expect("test process has a cwd");
+        let seat = Seat::identity(shell, scratch, cwd, &log);
         let agent = Self::assemble(Build {
             system: system.to_string(),
             system_prompt,
@@ -2912,6 +2923,7 @@ mod tests {
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
+                cwd: std::env::current_dir().expect("test process has a cwd"),
             },
             scripted("test-model", Script::new()),
         )
@@ -2974,6 +2986,7 @@ mod tests {
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
+                cwd: std::env::current_dir().expect("test process has a cwd"),
             },
             scripted("test-model", Script::new()),
         )
@@ -3111,6 +3124,7 @@ mod tests {
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
+                cwd: std::env::current_dir().expect("test process has a cwd"),
             },
             scripted("test-model", Script::new()),
         )

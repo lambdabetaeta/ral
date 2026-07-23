@@ -15,8 +15,8 @@
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use vm_manager::vz::{BootArtifact, Vz};
-    use vm_manager::{Hypervisor, MachineSpec};
+    use vm_manager::vz::Vz;
+    use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Ok([kernel, initramfs, rootfs, folder]) = <[String; 4]>::try_from(args) else {
@@ -40,7 +40,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("booted: the agent's boundary is {}", machine.boundary());
+    println!("booted: the agent can reach the granted folder and nothing else on this computer");
     println!("ral-daemon's own console lines print above as the guest runs.");
     println!("press enter to shut the machine down");
     let _ = std::io::stdin().read_line(&mut String::new());

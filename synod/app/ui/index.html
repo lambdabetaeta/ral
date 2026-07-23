@@ -181,6 +181,30 @@
       padding: 14px 26px;
     }
     .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
+    .field {
+      margin: 0 0 20px;
+      text-align: left;
+    }
+    .field-label {
+      display: block;
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--ink-soft);
+      margin-bottom: 6px;
+    }
+    #assistant-select {
+      width: 100%;
+      font-family: var(--sans);
+      font-size: 14.5px;
+      color: var(--ink);
+      background: var(--raised);
+      border: 1px solid var(--line-strong);
+      border-radius: 11px;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    #assistant-select:hover { border-color: var(--accent); }
     #start-error {
       margin-top: 18px;
       padding: 12px 16px;
@@ -561,6 +585,10 @@
         <h1 class="title">Let's work in a folder together.</h1>
         <p class="lede">Choose the folder to work in. The assistant only reads and
           changes files inside it, and everything it does can be put back.</p>
+        <div class="field" id="assistant-field" style="display: none;">
+          <label for="assistant-select" class="field-label">Assistant</label>
+          <select id="assistant-select"></select>
+        </div>
         <button type="button" class="btn-primary" id="pick-folder">Choose a folder…</button>
         <div id="start-error"></div>
       </div>
@@ -632,11 +660,65 @@
 
     const state = {
       folder: null,
+      choice: null,  // [key, model] picked on the start screen, or null for the default
       busy: false,   // an exchange is in flight
-      alive: false,  // the child process is currently running
+      alive: false,  // the assistant is currently running
     };
 
     // ---- Start screen ---------------------------------------------------
+
+    // The assistant picker: one option per provider×model, built once from
+    // `list_models`. Left absent when there is nothing to choose between —
+    // no providers, or a single option — so `currentChoice()` returns null
+    // and the backend's own default applies.
+    let assistantOptions = [];  // [{ key, model, label }]
+
+    async function initAssistantPicker() {
+      let providers = [];
+      try {
+        const res = await invoke("list_models");
+        providers = (res && res.providers) || [];
+      } catch (err) {
+        providers = [];
+      }
+
+      assistantOptions = [];
+      for (const p of providers) {
+        for (const m of p.models || []) {
+          assistantOptions.push({ key: p.key, model: m, label: p.label + " — " + m });
+        }
+      }
+
+      if (assistantOptions.length < 2) return;
+
+      const select = $("assistant-select");
+      select.innerHTML = "";
+      assistantOptions.forEach((opt, i) => {
+        const el = document.createElement("option");
+        el.value = i;
+        el.textContent = opt.label;
+        select.appendChild(el);
+      });
+
+      const first = providers[0];
+      let preselect = 0;
+      if (first && first.default_model) {
+        const idx = assistantOptions.findIndex((o) => o.key === first.key && o.model === first.default_model);
+        if (idx >= 0) preselect = idx;
+      }
+      select.value = preselect;
+
+      $("assistant-field").style.display = "";
+    }
+
+    initAssistantPicker();
+
+    function currentChoice() {
+      if ($("assistant-field").style.display === "none") return null;
+      const opt = assistantOptions[Number($("assistant-select").value)];
+      return opt ? [opt.key, opt.model] : null;
+    }
+
     $("pick-folder").addEventListener("click", async () => {
       $("start-error").classList.remove("show");
       let chosen;
@@ -647,16 +729,16 @@
         $("start-error").classList.add("show");
         return;
       }
-      if (chosen) enterConversation(chosen);
+      if (chosen) enterConversation(chosen, currentChoice());
     });
 
     // ---- Conversation screen --------------------------------------------
 
     // Wipe the window's own view of the conversation — the transcript, the
-    // details log, the change report — without touching the child process.
-    // Shared by the first folder pick (which then spawns the child) and a
-    // restart (whose child is already spawned by the time this runs: the
-    // window must never spawn a second one on top of it).
+    // details log, the change report — without touching the running
+    // assistant. Shared by the first folder pick (which then starts the
+    // assistant) and a restart (whose assistant is already started by the
+    // time this runs: the window must never start a second one on top of it).
     function resetTranscript(folder) {
       state.folder = folder;
       $("convo-folder").textContent = folder;
@@ -670,15 +752,16 @@
       show("conversation");
     }
 
-    function enterConversation(folder) {
+    function enterConversation(folder, choice) {
+      state.choice = choice;
       resetTranscript(folder);
-      startChild(folder);
+      startAssistant(folder, choice);
     }
 
-    async function startChild(folder) {
+    async function startAssistant(folder, choice) {
       setStatus("Starting…");
       try {
-        await invoke("start_conversation", { folder });
+        await invoke("start_conversation", { folder, choice });
         state.alive = true;
       } catch (err) {
         addSystemMessage(String(err));
@@ -816,13 +899,14 @@
       if (!confirm("Start again? This begins a fresh conversation; nothing already " +
         "changed in your folder is undone by this.")) return;
       $("start-again").disabled = true;
-      // `restart_conversation` already ends the old child and spawns the
+      // `restart_conversation` already ends the old assistant and starts a
       // new one server-side; the window only ever resets its own view —
-      // calling `startChild` again here would spawn a second, orphaned
-      // child on top of the one this just started.
+      // calling `startAssistant` again here would start a second, orphaned
+      // one on top of the one this just started. It reuses the selection
+      // made on the start screen for this conversation.
       resetTranscript(state.folder);
       try {
-        await invoke("restart_conversation", { folder: state.folder });
+        await invoke("restart_conversation", { folder: state.folder, choice: state.choice });
         state.alive = true;
       } catch (err) {
         state.alive = false;

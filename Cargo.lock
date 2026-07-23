@@ -6776,6 +6776,7 @@ dependencies = [
 name = "synod-app"
 version = "0.1.0"
 dependencies = [
+ "exarch",
  "serde",
  "serde_json",
  "synod",

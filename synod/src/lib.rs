@@ -10,9 +10,14 @@
 //! - **the prompt** ([`prompt`]) — an office persona over an office toolbox;
 //! - **the safety net** ([`workspace`]) — the folder is recorded before a
 //!   job, the changes reported after it, and anything can be put back;
-//! - **the machine** ([`vm_manager`]) — the folder is placed by a machine
-//!   that answers honestly for what stands around it;
+//! - **the machine** ([`vm_manager`]) — the folder is placed inside a real
+//!   virtual machine, walled off from the rest of the computer;
 //! - **the surface** — plain language, no git vocabulary anywhere.
+//!
+//! Synod is a library, not a binary: `synod-app`, the GUI, is the one
+//! process — an agent itself, in the sense that it starts a machine and
+//! talks to it, in-process, over [`session::Conversation`].  There is no
+//! command line and nothing here is ever typed at directly.
 //!
 //! The design record is `dev/docs/VM/SYNOD.md`.
 #![allow(
@@ -20,32 +25,50 @@
     reason = "synod is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
 )]
 
-pub mod cli;
 pub mod grant;
 pub mod prompt;
 pub mod session;
 pub mod workspace;
 
-/// The binary's entry point, lifted into the library so tests can link
-/// the whole crate.
+/// The boot media this build of synod ships, if this computer holds it: the
+/// kernel, initramfs, and rootfs the virtual machine boots
+/// (`dev/docs/VM/SYNOD.md` §7).
 ///
-/// Opens the granted folder, boots a machine to hold it, and hands the
-/// pair to [`session::start`], which then holds the conversation for the
-/// whole life of the process.
-///
-/// # Errors
-/// Returns `Err` if the folder cannot be granted, if no machine can be
-/// booted for it, or if the session itself fails.
-pub fn run() -> Result<(), String> {
-    let cli = cli::Cli::parse()?;
-    let grant = grant::Grant::open(&cli.folder)?;
-    let mut machine = vm_manager::detect()
-        .boot(&grant.machine_spec())
-        .map_err(|e| {
-            format!(
-                "could not start a machine for {}: {e}",
-                grant.root().display()
-            )
-        })?;
-    session::start(&grant, machine.as_mut())
+/// Two layouts are looked in, mirroring how the window finds its own
+/// bundle: the shipped bundle keeps all three under
+/// `Contents/Resources/boot/`, beside the binary's own `Contents/MacOS/`;
+/// a development build reaches the image pipeline's own output, found by
+/// walking up to the workspace `target` directory.  `None` — no media
+/// anywhere — is not an error this function raises: [`vm_manager::detect`]
+/// turns it into the refusal a synod with nothing to boot must give.
+pub(crate) fn boot_media() -> Option<vm_manager::BootArtifact> {
+    let media = |boot: &std::path::Path, rootfs: std::path::PathBuf| {
+        let artifact = vm_manager::BootArtifact {
+            kernel: boot.join("kernel"),
+            initramfs: boot.join("initramfs.img"),
+            rootfs,
+        };
+        let complete = [&artifact.kernel, &artifact.initramfs, &artifact.rootfs]
+            .into_iter()
+            .all(|file| file.is_file());
+        complete.then_some(artifact)
+    };
+
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    if let Some(found) = dir.parent().and_then(|contents| {
+        let boot = contents.join("Resources").join("boot");
+        media(&boot, boot.join("rootfs.img"))
+    }) {
+        return Some(found);
+    }
+    let mut cursor = dir;
+    while let Some(parent) = cursor.parent() {
+        if parent.file_name().is_some_and(|name| name == "target") {
+            let out = parent.parent()?.join("vm-image").join("out");
+            return media(&out.join("boot"), out.join("rootfs.img"));
+        }
+        cursor = parent;
+    }
+    None
 }

@@ -18,10 +18,8 @@
 //! [`Grant::root`] is a **host** path: the folder as the user picked it,
 //! and [`Grant::capabilities`] is expressed over that same host path, so
 //! the grant is coherent in one namespace and the caller supplies a
-//! scratch directory from the same one.  That is exactly right under
-//! [`vm_manager::Boundary::None`], where the folder is worked in where it
-//! lies.  Under a hardware boundary the folder appears to the engine at
-//! [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
+//! scratch directory from the same one.  The folder appears to the *engine*
+//! at [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
 //! instead, and the fs prefixes must be minted over that mount point — one
 //! substitution, in one function, which is why the construction lives here
 //! and is not scattered across the session.
@@ -258,22 +256,17 @@ impl Grant {
     /// [`MachineSpec::for_folder`](vm_manager::MachineSpec::for_folder)
     /// exactly, so synod takes it rather than restating it and drifting.
     ///
-    /// The folder is granted writable.  Under a hardware boundary the
-    /// mount enforces that; under [`vm_manager::Boundary::None`] there is
-    /// no mount, and the write authority that matters is the one
-    /// [`Self::capabilities`] hands the engine.
+    /// The folder is granted writable; the guest mount enforces that.
     pub fn machine_spec(&self) -> vm_manager::MachineSpec {
         vm_manager::MachineSpec::for_folder(self.root.clone())
     }
 
     /// The capabilities a session over this grant runs under.
     ///
-    /// Under [`vm_manager::Boundary::None`] — the backend that runs on a
-    /// machine with no hypervisor — this value is the *only* thing between
-    /// the agent and the rest of the computer.  There is no mount, no
-    /// guest, and no wall; every claim below is enforced by ral's own gate
-    /// or not at all.  It is written to be true in that world, so that the
-    /// hardware boundary is a second lock rather than the first.
+    /// The hardware boundary is the first lock — the guest can reach only
+    /// the granted folder and the control socket — and this value is the
+    /// second: every claim below is enforced by ral's own gate inside the
+    /// guest, on top of the wall around it.
     ///
     /// - **fs** — the granted folder and `scratch`, read and write.
     ///   Nothing else: not `$HOME`, not the xdg config roots, not the

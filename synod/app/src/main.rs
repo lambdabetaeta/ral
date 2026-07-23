@@ -14,21 +14,23 @@
 //! for its whole life — the assistant's own account of what it has done so
 //! far, and a way to put any file (or everything) back the way it was.
 //!
-//! This crate is the *host* half of that shell.  The frontend is
-//! hand-written HTML/CSS/JS under [`ui/`](../ui), embedded at build time
-//! (there is no bundler and no web server); the Rust side is a thin set of
-//! commands the window calls:
+//! This crate is the *host* half of that shell — and, unlike a shell over
+//! a separate program, it IS the agent: it hosts the conversation
+//! in-process, starts a machine over the chosen folder, and talks to it
+//! directly.  The frontend is hand-written HTML/CSS/JS under
+//! [`ui/`](../ui), embedded at build time (there is no bundler and no web
+//! server); the Rust side is a thin set of commands the window calls:
 //!
-//! - the folder picker, the conversation's child process, sending it
+//! - the folder picker, the model menu, the conversation itself, sending it
 //!   messages, starting again, and opening files with the user's own
 //!   applications, in [`commands`];
 //! - the change report and the undo actions, in [`review`], over the
 //!   workspace vocabulary in `synod::workspace` — the checkpoint, the
 //!   change set, and the conflict-checked restore.
 //!
-//! The conversation is driven by spawning the `synod` command-line program
-//! once as a child, holding it open, and streaming its output into the
-//! window; the shell never links the agent in-process.
+//! The conversation is a [`synod::session::Conversation`], held open on its
+//! own worker thread for as long as the window wants it, its narration
+//! streamed into the window as it works.
 
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
@@ -46,16 +48,31 @@
 mod commands;
 mod review;
 
+use exarch::provider::credential::CredentialStore;
 use tauri::Manager;
 
+/// The credential scrub's outcome, resolved once here — while the process
+/// is still single-threaded, [`synod::session::prepare`] requires — and
+/// held as Tauri state for the app's whole life.  Every command that needs
+/// a working model account surfaces the `Err` as its own plain-sentence
+/// failure rather than re-running or second-guessing it.
+struct Credentials(Result<CredentialStore, String>);
+
 fn main() {
+    if let Some(code) = exarch::dispatch_pre_main() {
+        std::process::exit(i32::from(code));
+    }
+    let credentials = Credentials(synod::session::prepare());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(commands::RunningChild::default())
+        .manage(commands::Running::default())
+        .manage(credentials)
         .manage(review::Review::default())
         .invoke_handler(tauri::generate_handler![
             commands::choose_folder,
+            commands::list_models,
             commands::start_conversation,
             commands::send_message,
             commands::restart_conversation,
@@ -66,13 +83,14 @@ fn main() {
             review::undo_all,
         ])
         // Closing the window ends the conversation cleanly rather than
-        // orphaning the child: hold the close, end the child on its own
-        // thread (stdin's EOF is its own final path — the closing report,
-        // then exit), and only then let the window actually close.
+        // orphaning its machine: hold the close, end the conversation on
+        // its own thread (dropping its sender is its own final path — the
+        // worker finishes its exchange, shuts its machine down, then
+        // exits), and only then let the window actually close.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let slot = window.state::<commands::RunningChild>().slot();
+                let slot = window.state::<commands::Running>().slot();
                 let window = window.clone();
                 std::thread::spawn(move || {
                     commands::end_conversation(&slot);

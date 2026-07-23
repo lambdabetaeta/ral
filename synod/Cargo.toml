@@ -11,10 +11,6 @@ workspace = true
 name = "synod"
 path = "src/lib.rs"
 
-[[bin]]
-name = "synod"
-path = "src/main.rs"
-
 [dependencies]
 ral-core   = { path = "../core", features = ["grep", "coreutils"] }
 exarch     = { path = "../exarch" }

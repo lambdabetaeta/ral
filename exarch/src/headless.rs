@@ -1,16 +1,20 @@
 //! One-shot frontend over the bus event stream.
 //!
 //! In text mode the root
-//! agent's assistant tokens stream to stdout as live narration; under
+//! agent's assistant tokens stream to `out` as live narration; under
 //! `--output-format json` they are dropped and a single result object —
 //! built from the root's deliberate `reply` value — is emitted at the end
 //! ([[decisions/260623_reply-terminates-returning-agents]]).  Every other
-//! event — and sub-agent activity, as breadcrumbs — goes to stderr; the
+//! event — and sub-agent activity, as breadcrumbs — goes to `err`; the
 //! process exits after one seed turn.  Takes the default [`Sink::drive`];
 //! only [`Sink::handle`] is custom.
 //!
-//! This frontend is a *display* — it projects the bus to stdout/stderr.
-//! The durable record is not its concern: each session writes its own
+//! This frontend is a *display* — it projects the bus onto a pair of
+//! writers.  [`converse_on`] takes them explicitly, so a non-CLI host (a
+//! GUI process, say) gets the same token/card projection any other caller
+//! does, byte for byte; [`converse`] and [`run`] are the CLI's own
+//! convenience wrappers wired to the process's real stdout/stderr.  The
+//! durable record is not this module's concern: each session writes its own
 //! `transcript.jsonl` (operational view) and `events.json` (model view)
 //! through the [`crate::agent::transcript`] and [`crate::agent::event`] seams, in headless
 //! exactly as in the TUI, for the root and every forked child alike.
@@ -36,7 +40,14 @@ pub enum OutputFormat {
     Json,
 }
 
-pub struct Headless {
+pub struct Headless<'a> {
+    /// Where token/narration text lands — `out` in [`converse_on`]'s
+    /// contract.  Every write on the token path goes here; nothing on this
+    /// path writes the process's own stdout directly.
+    out: &'a mut (dyn Write + Send),
+    /// Where every other projected line lands — cards, progress, trace —
+    /// `err` in [`converse_on`]'s contract.
+    err: &'a mut (dyn Write + Send),
     /// The run total, read once from the bus's [`UsageMeter`](crate::bus::UsageMeter)
     /// at the end of the run — the root plus every sub-agent, muted or live,
     /// since each tees its usage to the shared meter at the emit seam.  It is
@@ -75,15 +86,22 @@ pub struct Headless {
     /// here the JSON result would report a crashed turn as a clean, empty
     /// success.
     panicked: bool,
-    /// Whether the last stdout byte written in text mode was a newline, so
+    /// Whether the last byte written to `out` in text mode was a newline, so
     /// the closing newline is emitted only when the streamed reply did not
     /// already end with one.
     ended_with_newline: bool,
 }
 
-impl Headless {
-    fn new(json_mode: bool, root_id: AgentId) -> Self {
+impl<'a> Headless<'a> {
+    fn new(
+        json_mode: bool,
+        root_id: AgentId,
+        out: &'a mut (dyn Write + Send),
+        err: &'a mut (dyn Write + Send),
+    ) -> Self {
         Self {
+            out,
+            err,
             usage: Usage::default(),
             root_id,
             started: Instant::now(),
@@ -204,22 +222,21 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
         .unwrap_or_else(|_| String::from(r#"{"type":"result","is_error":true}"#))
 }
 
-impl Sink for Headless {
+impl Sink for Headless<'_> {
     #[allow(clippy::match_same_arms)]
     fn handle(&mut self, e: Event) {
         let id = e.id;
         match e.kind {
             // Only the root agent's tokens reach the user, and only in text
-            // mode — there they stream to stdout as live narration.  In json
+            // mode — there they stream to `out` as live narration.  In json
             // mode they are dropped: the `result` is the root's deliberate
             // `reply` value, captured from the drive digest, not whatever prose
             // happened to stream.  Sub-agent token streams would interleave
             // unreadably and are an internal detail of the root's turn; their
             // full transcript lives in that session's own log dir.
             Kind::Token(text) if id == self.root_id && !self.json_mode => {
-                let mut out = io::stdout();
-                let _ = out.write_all(text.as_bytes());
-                let _ = out.flush();
+                let _ = self.out.write_all(text.as_bytes());
+                let _ = self.out.flush();
                 if let Some(last) = text.as_bytes().last() {
                     self.ended_with_newline = *last == b'\n';
                 }
@@ -229,20 +246,20 @@ impl Sink for Headless {
             Kind::Step { n, .. } => {
                 if id == self.root_id {
                     self.turns += 1;
-                    eprintln!("[step {n}]");
+                    let _ = writeln!(self.err, "[step {n}]");
                 }
             }
             Kind::ToolCall {
                 tool, cmd, summary, ..
             } if id == self.root_id => {
-                eprintln!("[tool: {tool}]");
+                let _ = writeln!(self.err, "[tool: {tool}]");
                 if let Some(s) = &summary {
                     for line in s.lines() {
-                        eprintln!("  {line}");
+                        let _ = writeln!(self.err, "  {line}");
                     }
                 }
                 for line in cmd.lines() {
-                    eprintln!("  {line}");
+                    let _ = writeln!(self.err, "  {line}");
                 }
             }
             // A stderr line has no rail hue to carry identity and no column
@@ -255,12 +272,12 @@ impl Sink for Headless {
                 payload,
                 ..
             } if id == self.root_id => {
-                eprintln!("[tool: {verb}]");
+                let _ = writeln!(self.err, "[tool: {verb}]");
                 if let Some(s) = &subject {
-                    eprintln!("  {s}");
+                    let _ = writeln!(self.err, "  {s}");
                 }
                 for line in payload.lines() {
-                    eprintln!("  {line}");
+                    let _ = writeln!(self.err, "  {line}");
                 }
             }
             Kind::ToolCall { .. } | Kind::HarnessCall { .. } => {}
@@ -269,25 +286,31 @@ impl Sink for Headless {
                 if id == self.root_id {
                     self.last_stop = Some(raw.clone());
                 }
-                eprintln!("[stop: {raw}]");
+                let _ = writeln!(self.err, "[stop: {raw}]");
             }
             Kind::Error(msg) => {
                 if msg.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
                     self.panicked = true;
                 }
-                eprintln!("error: {msg}");
+                let _ = writeln!(self.err, "error: {msg}");
             }
-            Kind::SystemNote(text) => eprintln!("{text}"),
+            Kind::SystemNote(text) => {
+                let _ = writeln!(self.err, "{text}");
+            }
             Kind::Nudge {
                 used, max, cause, ..
-            } if id == self.root_id => eprintln!("[nudge {used}/{max}: {cause}]"),
+            } if id == self.root_id => {
+                let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
+            }
             Kind::Nudge { .. } => {}
-            Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
+            Kind::ProviderError(error) => {
+                let _ = writeln!(self.err, "provider error: {error:?}");
+            }
             // A surfaced render document, a structural I/O event paired with
             // the card composed from it, a detached worker's settlement, a
             // core-pushed ready-boundary notice (a reap, a binding prune, a
             // large-binding warning), or the `/resources` fold.  In headless
-            // we condense the card's marks to stderr lines generically; the
+            // we condense the card's marks to `err` lines generically; the
             // raw structural fact behind each is kept in `transcript.jsonl`
             // (the card is a rendering and is not).
             Kind::Card(card)
@@ -296,11 +319,11 @@ impl Sink for Headless {
             | Kind::Notice { card, .. }
             | Kind::Resources { card, .. } => {
                 for line in card_stderr(&card) {
-                    eprintln!("{line}");
+                    let _ = writeln!(self.err, "{line}");
                 }
             }
             // A sub-agent finished.  Headless keeps sub-agents off the
-            // main surface — their tokens never reach stdout — so this
+            // main surface — their tokens never reach `out` — so this
             // breadcrumb is the only live trace of the child.  The full
             // sub-agent transcript lives in its own session log dir.
             Kind::SubagentDone {
@@ -312,9 +335,12 @@ impl Sink for Headless {
                 let secs = elapsed.as_secs_f64();
                 match outcome.breadcrumb(&text).1 {
                     Some(reason) => {
-                        eprintln!("[agent: {name} failed in {secs:.1}s — {reason}]");
+                        let _ =
+                            writeln!(self.err, "[agent: {name} failed in {secs:.1}s — {reason}]");
                     }
-                    None => eprintln!("[agent: {name} done in {secs:.1}s]"),
+                    None => {
+                        let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
+                    }
                 }
             }
             // Boundary / Born / Died / UserPromptEcho are interactive-only;
@@ -363,7 +389,9 @@ pub fn run(
         info.base
     );
     let json = format == OutputFormat::Json;
-    let mut headless = Headless::new(json, session.id);
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    let mut headless = Headless::new(json, session.id, &mut stdout, &mut stderr);
     // The root's trace handle, attached to the emitter `pump` drives it
     // through; bound before `session` is borrowed into the worker closure.
     let root_transcript = session.transcript();
@@ -442,11 +470,24 @@ pub fn run(
     r
 }
 
+/// One exchange of a converse session, over the process's own stdout/stderr.
+///
+/// A thin wrapper over [`converse_on`] for the CLI's own use; see there for
+/// the full contract.
+///
+/// # Errors
+/// Returns `Err` if the drive worker panics or the sink's drive fails.
+pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Result<(), String> {
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    converse_on(session, message, engine, &mut stdout, &mut stderr)
+}
+
 /// One exchange of a converse session.
 ///
 /// Seed `message`, drive it (and any nudge continuations it raises) to the
 /// agent's next park, streaming the same events [`run`]'s text mode streams
-/// — tokens to stdout, everything else to stderr.  `session` must have been
+/// — tokens to `out`, everything else to `err`.  `session` must have been
 /// built with [`RootConfig::interactive`](crate::agent::RootConfig) set: a
 /// conversing trunk withholds `reply` and parks between messages instead of
 /// returning once, so — unlike `run` — there is no result to report at the
@@ -460,8 +501,14 @@ pub fn run(
 ///
 /// # Errors
 /// Returns `Err` if the drive worker panics or the sink's drive fails.
-pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Result<(), String> {
-    let mut sink = Headless::new(false, session.id);
+pub fn converse_on(
+    session: &mut Agent,
+    message: String,
+    engine: Arc<Engine>,
+    out: &mut (dyn Write + Send),
+    err: &mut (dyn Write + Send),
+) -> Result<(), String> {
+    let mut sink = Headless::new(false, session.id, out, err);
     let root_transcript = session.transcript();
     // Per-exchange, like headless's own per-turn bus: this call's channel
     // closes when the exchange parks, so draining it can never block on a
@@ -479,7 +526,7 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
     match outcome {
         Ok(Some(_)) => {
             if !sink.ended_with_newline {
-                println!();
+                let _ = writeln!(sink.out);
             }
             Ok(())
         }
@@ -524,7 +571,10 @@ mod tests {
                 fuel: 0,
                 egress: crate::fleet::egress::Egress::for_test(),
             },
-            RootSeat::Identity { scratch },
+            RootSeat::Identity {
+                scratch,
+                cwd: std::env::current_dir().expect("test process has a cwd"),
+            },
             Arc::new(Provider::scripted(
                 "test-model",
                 crate::provider::ProviderKind::Openai,
@@ -583,7 +633,9 @@ mod tests {
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
         let root: AgentId = 1;
-        let mut h = Headless::new(true, root);
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
         h.handle(Event {
             id: root,
             kind: Kind::Error(format!("{}boom", crate::bus::WORKER_PANIC_PREFIX)),
@@ -602,7 +654,9 @@ mod tests {
     fn num_turns_counts_root_steps_across_segments() {
         let root: AgentId = 1;
         let sub: AgentId = 2;
-        let mut h = Headless::new(true, root);
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
         // Two root segments whose per-segment indices reset (1..3, then
         // 1..2), with a sub-agent step interleaved that must be ignored.
         for n in [1, 2, 3, 1, 2] {
@@ -634,7 +688,9 @@ mod tests {
     #[test]
     fn structured_result_is_faithful_not_stringified() {
         let root: AgentId = 1;
-        let mut h = Headless::new(true, root);
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
         h.result = Some(serde_json::json!({ "files": ["a.rs", "b.rs"] }));
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
@@ -652,8 +708,10 @@ mod tests {
     #[test]
     fn no_reply_root_is_error_with_null_result() {
         let root: AgentId = 1;
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
         // `result` stays `None` — the run errored before producing a reply.
-        let h = Headless::new(true, root);
+        let h = Headless::new(true, root, &mut sink_out, &mut sink_err);
         let out = result_json(
             &h,
             &Err("ended without calling `reply`".to_string()),
@@ -671,7 +729,9 @@ mod tests {
     #[test]
     fn user_json_projected_result_keeps_a_string_reply_raw() {
         let root: AgentId = 1;
-        let mut h = Headless::new(true, root);
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
         let payload = ral_core::serial::FOValue::String {
             value: "plain text reply".into(),
         };
@@ -687,7 +747,9 @@ mod tests {
     #[test]
     fn user_json_projected_result_keeps_structure_ordinary_json() {
         let root: AgentId = 1;
-        let mut h = Headless::new(true, root);
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
         let payload = ral_core::serial::FOValue::Map {
             entries: vec![(
                 "files".to_string(),
@@ -708,5 +770,29 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert!(v["result"].is_object(), "{out}");
         assert_eq!(v["result"]["files"][0], serde_json::json!("a.rs"), "{out}");
+    }
+
+    /// `converse_on` projects the same stream `converse` does onto whatever
+    /// writers the caller supplies — a GUI host's own buffers, here a plain
+    /// `Vec<u8>` pair: the reply text lands on `out`, the step breadcrumb on
+    /// `err`, and neither touches the process's real stdout/stderr.
+    #[test]
+    fn converse_on_projects_into_the_given_writers() {
+        let mut session = converse_trunk("writers", Script::new().then(Reply::text("hi there")));
+        let engine = Engine::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        converse_on(&mut session, "hello".into(), engine, &mut out, &mut err)
+            .expect("a conversing trunk never fails for want of a reply");
+        assert!(
+            String::from_utf8_lossy(&out).contains("hi there"),
+            "reply text must land on `out`: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(
+            String::from_utf8_lossy(&err).contains("[step"),
+            "step breadcrumbs must land on `err`: {:?}",
+            String::from_utf8_lossy(&err)
+        );
     }
 }

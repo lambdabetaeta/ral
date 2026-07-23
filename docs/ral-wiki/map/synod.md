@@ -103,8 +103,11 @@ instead of implying a wall.
   answers `None`), and a second guest dial is refused. It starts
   machines only from a signed binary with the
   `com.apple.security.virtualization` entitlement and
-  a real boot image, so `detect()` still returns `Host` — the switch to `Vz`
-  is a deliberate later act, not a platform check.
+  a real boot image, and that is `detect()`'s exact question: handed the
+  application's `BootArtifact`, it answers `Vz` when `vz::entitled()` says
+  the process holds the grant (synod finds its media beside the binary —
+  the bundle's `Resources/boot/`, or `vm-image/out` in development), and
+  `Host` everywhere else — a process check, not a platform check.
 
 ## ral-daemon/ — the guest's PID 1
 

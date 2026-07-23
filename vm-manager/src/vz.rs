@@ -48,9 +48,8 @@
 //!   `dev/docs/VM/SYNOD.md` §7 describes;
 //! - a `VZVirtioFileSystemDeviceConfiguration` sharing the granted folder
 //!   under `WORKSPACE_TAG`, built from a `VZSingleDirectoryShare` over a
-//!   `VZSharedDirectory` carrying the spec's `read_only` flag — so here,
-//!   unlike under [`Host`](crate::host::Host), read-only is the mount's law
-//!   and not a matter of policy;
+//!   `VZSharedDirectory` carrying the spec's `read_only` flag, so read-only
+//!   is the mount's law and not a matter of policy;
 //! - a `VZVirtioSocketDevice` for the control plane, and **no network device
 //!   at all**: the guest's only way off the machine is the socket
 //!   (`dev/docs/VM/SYNOD.md` §6);
@@ -106,10 +105,9 @@
 //! nothing else.  Virtualization.framework is gated by
 //! `com.apple.security.virtualization`, which the kernel grants only to a
 //! code-signed binary that carries it.  A bare `cargo` test or debug binary
-//! carries no such entitlement — which is exactly why [`crate::detect`] still
-//! returns [`Host`](crate::host::Host) and never this backend: the switch to
-//! `Vz` is a later, deliberate act, taken once there is a real boot image
-//! *and* a signed host to run it in.
+//! carries no such entitlement — which is exactly why [`crate::detect`]
+//! answers with this backend only after [`entitled`] says the process holds
+//! the grant, and refuses outright otherwise.
 //!
 //! In the shipped product the entitlement rides on the synod application
 //! bundle: the `.app` is signed with a provisioning profile (or, for local
@@ -120,9 +118,10 @@
 //! error carried into [`Error::Unavailable`], and on stricter macOS releases
 //! as an abort at machine-creation time.  That failure path cannot be
 //! exercised here — this Mac's test binary is unentitled by construction — so
-//! it is documented rather than tested, and the live-machine code below is
-//! compiled but, on this checkout, unrun.
+//! it is documented rather than tested; the live-machine path is exercised by
+//! the signed `boot-smoke` and `boot-turn` examples, never by `cargo test`.
 
+use std::ffi::c_void;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -137,7 +136,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::NSArray;
-use objc2_foundation::{NSFileHandle, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_foundation::{NSFileHandle, NSNumber, NSObject, NSObjectProtocol, NSString, NSURL};
 use objc2_virtualization::{
     VZDiskImageStorageDeviceAttachment, VZFileHandleSerialPortAttachment, VZLinuxBootLoader,
     VZSharedDirectory, VZSingleDirectoryShare, VZStorageDeviceConfiguration,
@@ -147,7 +146,7 @@ use objc2_virtualization::{
     VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
 
-use crate::{Boundary, Error, Hypervisor, Machine, MachineSpec};
+use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec};
 
 /// The virtiofs tag under which the granted folder is exported to the guest.
 ///
@@ -180,31 +179,12 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How often the stop path looks to see whether the machine has come to rest.
 const STOP_PULSE: Duration = Duration::from_millis(50);
 
-/// The kernel, initramfs, and rootfs image a machine boots from.
-///
-/// These are not part of a [`MachineSpec`] — a spec says *what folder, how
-/// much machine*, not *which image* — so the backend carries them.  The
-/// kernel and initramfs are `boot.img` of `dev/docs/VM/SYNOD.md` §7, shipped
-/// and versioned with the application; the rootfs is the pinned, read-only
-/// Ubuntu userland, downloaded and checksummed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootArtifact {
-    /// The Linux kernel to boot directly.
-    pub kernel: PathBuf,
-    /// The initial ramdisk that assembles the overlay root and hands off to
-    /// the daemon.
-    pub initramfs: PathBuf,
-    /// The read-only rootfs image: the guest's `/dev/vda`.
-    pub rootfs: PathBuf,
-}
-
 /// The Virtualization.framework backend.
 ///
-/// Not returned by [`detect`](crate::detect): it starts a machine only on an
-/// entitled, signed binary with a real boot image, and until that is proven
-/// the crate hands callers the backend that works everywhere instead.  It is
-/// constructed explicitly, by macOS-side wiring that already holds the boot
-/// artifact and a directory to keep session images in.
+/// Returned by [`detect`](crate::detect) when this process is [`entitled`]
+/// and the application handed over real boot media; constructed explicitly
+/// by callers — the signed examples — that already hold the boot artifact
+/// and a directory to keep session images in.
 pub struct Vz {
     artifact: BootArtifact,
     session_dir: PathBuf,
@@ -221,13 +201,51 @@ impl Vz {
     }
 }
 
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn SecTaskCreateFromSelf(allocator: *const c_void) -> *mut c_void;
+    fn SecTaskCopyValueForEntitlement(
+        task: *const c_void,
+        entitlement: *const c_void,
+        error: *mut c_void,
+    ) -> *mut c_void;
+}
+
+/// Whether this process is signed with the one entitlement
+/// Virtualization.framework demands, `com.apple.security.virtualization`.
+///
+/// This is the question [`detect`](crate::detect) asks before it will
+/// answer with this backend.  A bare `cargo` binary says no; the signed
+/// application, or a binary run through
+/// `dev/scripts/sign-virtualization.sh`, says yes.
+pub fn entitled() -> bool {
+    let key = NSString::from_str("com.apple.security.virtualization");
+    // SAFETY: both Security calls follow the CF create/copy rule, so each
+    // non-null return is a +1 reference this function must balance.  CF and
+    // Objective-C share one runtime — a CF object is an object — so each is
+    // adopted into a `Retained`, whose drop releases it.  The rest is
+    // toll-free bridging: an `NSString` reference is a `CFStringRef`, and a
+    // boolean entitlement value comes back as a `CFBoolean`, which is an
+    // `NSNumber`.
+    unsafe {
+        let Some(task) = Retained::from_raw(SecTaskCreateFromSelf(std::ptr::null()).cast::<NSObject>())
+        else {
+            return false;
+        };
+        let value = SecTaskCopyValueForEntitlement(
+            (&raw const *task).cast(),
+            (&raw const *key).cast(),
+            std::ptr::null_mut(),
+        );
+        Retained::from_raw(value.cast::<NSObject>())
+            .and_then(|value| value.downcast::<NSNumber>().ok())
+            .is_some_and(|flag| flag.boolValue())
+    }
+}
+
 impl Hypervisor for Vz {
     fn name(&self) -> &'static str {
         "Virtualization.framework"
-    }
-
-    fn boundary(&self) -> Boundary {
-        Boundary::Hardware
     }
 
     /// Validate the spec, make the session disk, build and validate the
@@ -895,7 +913,8 @@ pub struct Guest {
     mount_path: PathBuf,
     /// The host end of the control-plane connection accepted at boot — the
     /// stream the frame protocol (`dev/docs/VM/SYNOD.md` §3) runs over.
-    /// Taken out by [`Machine::take_control`], and so answered at most once.
+    /// Taken out by [`Machine::take_control`], which may be called at most
+    /// once.
     control_socket: Option<OwnedFd>,
     control: Option<Control>,
 }
@@ -914,6 +933,12 @@ impl Guest {
     /// Idempotent through the `Option`: [`Machine::shutdown`] takes the
     /// control out, so the `Drop` that follows finds nothing left to do.
     fn stop(&mut self) -> Result<(), Error> {
+        // Close the host end of the wire first, if it was never taken: the
+        // guest's engine exits on EOF and the daemon powers the machine off
+        // from inside — the same inside-out shutdown the end of a session
+        // performs — so the grace window below normally observes a stop
+        // rather than forcing one.
+        self.control_socket = None;
         let Some(mut control) = self.control.take() else {
             return Ok(());
         };
@@ -943,16 +968,16 @@ impl Machine for Guest {
         &self.mount_path
     }
 
-    fn boundary(&self) -> Boundary {
-        Boundary::Hardware
-    }
-
     /// The host end of the control-plane connection the guest dialed at boot,
-    /// handed over once.  A hardware machine has exactly one such wire, so a
-    /// second ask finds nothing.
+    /// handed over once.
+    ///
+    /// # Panics
+    /// Panics if asked a second time: a machine has exactly one such wire.
     #[cfg(unix)]
-    fn take_control(&mut self) -> Option<OwnedFd> {
-        self.control_socket.take()
+    fn take_control(&mut self) -> OwnedFd {
+        self.control_socket
+            .take()
+            .expect("a machine's control plane is taken at most once")
     }
 
     /// Ask the guest daemon to shut down, wait for the machine to reach the
@@ -1099,27 +1124,39 @@ mod tests {
     }
 
     /// A machine has exactly one control-plane connection: [`take_control`]
-    /// hands its host end over once and then answers `None`.  Built here from
-    /// a socketpair rather than a boot, since the wire is all the law
-    /// concerns.
+    /// hands its host end over once.  Built here from a socketpair rather
+    /// than a boot, since the wire is all the law concerns.
     ///
     /// [`take_control`]: Machine::take_control
     #[test]
-    fn the_control_plane_is_handed_over_at_most_once() {
+    fn the_control_plane_is_handed_over_once() {
         let (host_end, _guest_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut guest = Guest {
             mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
             control_socket: Some(OwnedFd::from(host_end)),
             control: None,
         };
-        assert!(guest.take_control().is_some(), "the first ask gets the wire");
-        assert!(guest.take_control().is_none(), "there is only ever one");
+        let _fd = guest.take_control();
     }
 
-    /// The backend reports the wall it is: a hardware boundary, before and
-    /// after boot.
+    /// A second ask finds nothing left to hand over: it is a caller's own
+    /// error, so the machine panics rather than answer with a used-up wire.
     #[test]
-    fn the_backend_reports_a_hardware_boundary() {
+    #[should_panic(expected = "at most once")]
+    fn a_second_ask_for_the_control_plane_panics() {
+        let (host_end, _guest_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut guest = Guest {
+            mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
+            control_socket: Some(OwnedFd::from(host_end)),
+            control: None,
+        };
+        let _ = guest.take_control();
+        let _ = guest.take_control();
+    }
+
+    /// The backend names itself, for the greeting a user sees.
+    #[test]
+    fn the_backend_names_itself() {
         let vz = Vz::new(
             BootArtifact {
                 kernel: PathBuf::from("/boot/kernel"),
@@ -1128,8 +1165,6 @@ mod tests {
             },
             "/tmp",
         );
-        assert_eq!(vz.boundary(), Boundary::Hardware);
-        assert!(vz.boundary().is_hardware());
         assert_eq!(vz.name(), "Virtualization.framework");
     }
 }

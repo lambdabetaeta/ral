@@ -16,12 +16,14 @@ use std::sync::{Arc, Mutex};
 /// One agent's engine-side attachment.  A closed enum, not a trait object:
 /// the operations that differ per seat live off the `Transport` trait.
 pub(crate) enum Seat {
-    /// In-process: owns the session [`Scratch`] (`/clear` reboots from it)
-    /// and the turn-scope cell the registry interrupts through, which must
-    /// stay live across a `/clear` rebuild.
+    /// In-process: owns the session [`Scratch`] (`/clear` reboots from it),
+    /// the working directory the shell is re-seeded with on every such
+    /// reboot, and the turn-scope cell the registry interrupts through,
+    /// which must stay live across a `/clear` rebuild.
     Identity {
         transport: Box<IdentityTransport>,
         scratch: Arc<Scratch>,
+        cwd: std::path::PathBuf,
         turn_scope: TurnScope,
     },
     /// Out-of-process: the engine lives on the far end of `transport`, one
@@ -71,12 +73,18 @@ impl Seat {
     /// The identity ceremony — trunk construction, every fork, and the
     /// desk's spawn spine all route here; `/clear` re-runs it through
     /// [`Self::clear`] onto the same turn-scope cell.
-    pub(crate) fn identity(shell: Shell, scratch: Arc<Scratch>, log: &AgentLog) -> Self {
+    pub(crate) fn identity(
+        shell: Shell,
+        scratch: Arc<Scratch>,
+        cwd: std::path::PathBuf,
+        log: &AgentLog,
+    ) -> Self {
         let turn_scope: TurnScope = Arc::new(Mutex::new(None));
-        let transport = Box::new(identity_ceremony(shell, log, &turn_scope));
+        let transport = Box::new(identity_ceremony(shell, log, &turn_scope, cwd.clone()));
         Self::Identity {
             transport,
             scratch,
+            cwd,
             turn_scope,
         }
     }
@@ -181,8 +189,16 @@ impl Seat {
             Self::Identity {
                 transport,
                 scratch,
+                cwd,
                 turn_scope,
-            } => **transport = identity_ceremony(boot_root_shell(scratch), log, turn_scope),
+            } => {
+                **transport = identity_ceremony(
+                    boot_root_shell(scratch, cwd.clone()),
+                    log,
+                    turn_scope,
+                    cwd.clone(),
+                );
+            }
             #[cfg(unix)]
             Self::Wire { .. } => panic!(
                 "/clear has no meaning on a wire seat as a transport swap: session-is-a-process \
@@ -196,11 +212,13 @@ impl Seat {
     }
 }
 
-/// Boot a root session shell: the shared exarch boot plus the scratch's
-/// env/binding seeding.  Forks instead snapshot their parent through
-/// `Shell::fork_session`, inheriting the seeding.
-pub(crate) fn boot_root_shell(scratch: &Scratch) -> Shell {
+/// Boot a root session shell: the shared exarch boot plus `cwd` seeded as
+/// its logical working directory and the scratch's env/binding seeding.
+/// Forks instead snapshot their parent through `Shell::fork_session`,
+/// inheriting the seeding.
+pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> Shell {
     let mut shell = crate::bootstrap::boot_shell();
+    shell.seed_cwd(cwd);
     scratch.install_into(&mut shell);
     shell
 }
@@ -209,10 +227,14 @@ pub(crate) fn boot_root_shell(scratch: &Scratch) -> Shell {
 /// seeded (seeding then arming stay one visible sequence —
 /// `decisions/260629_agent-binding-reaping`), then seat the shell behind a
 /// fresh transport observing `turn_scope` and attach the host endpoint.
+/// `cwd` is the same directory [`boot_root_shell`] seeded onto the shell —
+/// restated here only because `attach`'s signature is shared with the wire
+/// transport, which does read its `cwd` argument.
 fn identity_ceremony(
     mut shell: Shell,
     log: &AgentLog,
     turn_scope: &TurnScope,
+    cwd: std::path::PathBuf,
 ) -> IdentityTransport {
     // `EXARCH_SESSION_DIR` must always point at the live session's
     // event-log directory, on construction and every `/clear` rebuild.
@@ -224,7 +246,6 @@ fn identity_ceremony(
     crate::bootstrap::arm_session_ledgers(&mut shell);
     let mut transport = IdentityTransport::new(shell);
     transport.observe_foreground(turn_scope.clone());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     transport.attach(
         ral_core::transport::TerminalEndpoint {

@@ -29,7 +29,10 @@ use std::path::PathBuf;
 /// `current = None` means "uninitialised"; readers fall back through
 /// [`process_cwd`]. Front ends call `Shell::seed_default_env_vars` at
 /// startup, which seeds `current` from the process cwd and `previous`
-/// from `$OLDPWD` if the launching shell exported one.
+/// from `$OLDPWD` if the launching shell exported one. A front end whose
+/// own working directory is not the process cwd — an in-process engine
+/// hosted by a caller that never `chdir`s — instead calls
+/// [`Shell::seed_cwd`] to state it directly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cwd {
     pub current: Option<PathBuf>,
@@ -62,6 +65,15 @@ impl Shell {
         #[allow(clippy::disallowed_methods)]
         let fallback = || PathBuf::from(".");
         process_cwd().unwrap_or_else(fallback)
+    }
+
+    /// Seed the shell's logical cwd from an explicit path, overriding
+    /// whatever [`Shell::seed_default_env_vars`] adopted from the process
+    /// cwd. The caller's stated directory is the source of truth when it
+    /// can diverge from the process cwd — an in-process engine hosted by a
+    /// caller that never `chdir`s the host process, for instance.
+    pub fn seed_cwd(&mut self, cwd: PathBuf) {
+        self.mobile.context.cwd.current = Some(cwd);
     }
 
     /// Change the shell's logical working directory, recording the prior

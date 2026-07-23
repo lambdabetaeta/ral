@@ -26,8 +26,8 @@ fn main() {
     use ral_core::io::TerminalState;
     use ral_core::types::Capabilities;
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
-    use vm_manager::vz::{BootArtifact, Vz};
-    use vm_manager::{Hypervisor, MachineSpec};
+    use vm_manager::vz::Vz;
+    use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Ok([kernel, initramfs, rootfs, folder]) = <[String; 4]>::try_from(args) else {
@@ -39,6 +39,10 @@ fn main() {
     // proof the granted folder crossed the virtiofs share, not just that a
     // turn ran.
     let sentinel = "boot-turn-was-here";
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: example scaffolding seeds the folder it then grants; no shell, no turn, no card"
+    )]
     std::fs::write(format!("{folder}/sentinel.txt"), sentinel).expect("seed the granted folder");
 
     let vz = Vz::new(
@@ -58,12 +62,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("booted: the agent's boundary is {}", machine.boundary());
+    println!("booted: the agent can reach the granted folder and nothing else on this computer");
 
     let workspace = machine.workspace_path().to_path_buf();
-    let control = machine
-        .take_control()
-        .expect("a hardware machine hands back its control plane");
+    let control = machine.take_control();
     let transport = WireTransport::adopt(UnixStream::from(control), Liveness::default())
         .expect("adopt the guest's control plane");
 
@@ -82,7 +84,7 @@ fn main() {
     let report = dispatch_to_report(
         &transport,
         Turn {
-            program: Program::Source(src.into()),
+            program: Program::Source(src),
             script_name: "<boot-turn>".into(),
             caps: Capabilities::root(),
             turn_limit: None,
@@ -103,12 +105,10 @@ fn main() {
         Report::Ran { result: Ok(_), captured: Some(c), .. }
             if String::from_utf8_lossy(&c.stdout).contains(sentinel)
     );
-    if let Report::Ran { captured: Some(c), .. } = &report {
-        if passed {
-            println!("turn ran in the guest; it read the granted folder back over the wire:");
-            println!("  {}", String::from_utf8_lossy(&c.stdout).trim());
-            println!("PASS: a turn crossed the wire and saw the workspace");
-        }
+    if passed && let Report::Ran { captured: Some(c), .. } = &report {
+        println!("turn ran in the guest; it read the granted folder back over the wire:");
+        println!("  {}", String::from_utf8_lossy(&c.stdout).trim());
+        println!("PASS: a turn crossed the wire and saw the workspace");
     }
     if !passed {
         eprintln!("FAIL: unexpected report {report:?}");

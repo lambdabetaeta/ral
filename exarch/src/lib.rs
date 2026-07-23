@@ -289,6 +289,7 @@ pub fn run() -> Result<(), String> {
         },
         agent::RootSeat::Identity {
             scratch: Arc::clone(&scratch),
+            cwd: cwd_path,
         },
         Arc::clone(&provider),
     )
