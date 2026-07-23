@@ -112,6 +112,7 @@ fn main() {
             commands::send_message,
             commands::restart_conversation,
             commands::open_file,
+            commands::open_url,
             review::open_earlier,
             review::job_report,
             review::undo_file,

@@ -251,6 +251,21 @@ pub fn open_file(app: AppHandle, path: String) -> Result<(), String> {
     open_with_default(&app, &path)
 }
 
+/// Open a link the assistant wrote in the user's own browser — a hyperlink
+/// in a rendered assistant message, handed here rather than followed inside
+/// the window, whose one document is the conversation and must never
+/// navigate away from it.
+///
+/// # Errors
+/// Returns a sentence naming the link if the system cannot open it.
+#[tauri::command]
+pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url.clone(), None::<&str>)
+        .map_err(|e| format!("Could not open {url}: {e}"))
+}
+
 /// End the conversation cleanly: drop the message sender — the worker
 /// thread's own end-of-conversation signal — and give it a few seconds to
 /// take its final path (shutting its machine down) before giving up on the
