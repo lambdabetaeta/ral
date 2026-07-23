@@ -42,6 +42,9 @@
       --danger-bg: #f7ded9;
       --danger-line: #e6b6a6;
 
+      --diff-add-bg: #e9f2ec;
+      --diff-del-bg: #f9e9e2;
+
       --shadow: 0 1px 2px rgba(60, 48, 32, 0.06), 0 8px 24px rgba(60, 48, 32, 0.08);
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
       --focus: var(--accent);
@@ -73,6 +76,9 @@
         --danger-bg: #34211a;
         --danger-line: #5a3526;
 
+        --diff-add-bg: #1f2c22;
+        --diff-del-bg: #2e211b;
+
         --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.35);
         --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
       }
@@ -87,6 +93,7 @@
       --accept: #2f6d5c; --accept-soft: #e7efe9; --discard: #9a6a52;
       --conflict: #a5641c; --conflict-bg: #f7ecd9; --conflict-line: #e6cfa6;
       --danger: #a5401c; --danger-bg: #f7ded9; --danger-line: #e6b6a6;
+      --diff-add-bg: #e9f2ec; --diff-del-bg: #f9e9e2;
       --shadow: 0 1px 2px rgba(60,48,32,0.06), 0 8px 24px rgba(60,48,32,0.08);
     }
     :root[data-theme="dark"] {
@@ -97,6 +104,7 @@
       --accept: #74c3aa; --accept-soft: #22322c; --discard: #c79a83;
       --conflict: #e0a85e; --conflict-bg: #34291a; --conflict-line: #5a4526;
       --danger: #e08a5e; --danger-bg: #34211a; --danger-line: #5a3526;
+      --diff-add-bg: #1f2c22; --diff-del-bg: #2e211b;
       --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
     }
 
@@ -371,6 +379,12 @@
       color: var(--danger);
       font-size: 14px;
     }
+    .msg.system.info .bubble {
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      color: var(--ink-soft);
+      font-size: 14px;
+    }
     .welcome {
       color: var(--ink-faint);
       font-size: 15px;
@@ -411,7 +425,174 @@
       line-height: 1.6;
     }
     .log-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-soft); }
+    .log-line.warn { color: var(--conflict); }
+    .log-line.bad { color: var(--danger); }
+    .log-line.muted { color: var(--ink-faint); }
     .log-empty { color: var(--ink-faint); font-family: var(--sans); font-size: 13px; }
+
+    /* --- the inline activity strip: tool calls, harness calls, cards --- */
+    .activity {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 74ch;
+      align-self: flex-start;
+      animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+
+    .act {
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .act > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 550;
+      color: var(--ink-soft);
+      user-select: none;
+    }
+    .act > summary::-webkit-details-marker { display: none; }
+    .act > summary::before { content: "▸ "; color: var(--ink-faint); }
+    .act[open] > summary::before { content: "▾ "; }
+    .act.failed > summary { color: var(--danger); }
+    .act.failed > summary::before { color: var(--danger); }
+    .act-body {
+      margin: 0;
+      border-top: 1px solid var(--line);
+      padding: 8px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--ink-soft);
+    }
+
+    /* --- the "a little Bertin-pilled" card: magnitude, category, text -- */
+    .mark-card {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 13.5px;
+    }
+
+    .mark-text { margin: 0; line-height: 1.55; }
+    .role-plain { color: var(--ink); }
+    .role-path { font-family: var(--mono); color: var(--accent); }
+    .role-code { font-family: var(--mono); color: var(--ink); }
+    .role-ok { color: var(--accept); }
+    .role-warn { color: var(--conflict); }
+    .role-bad { color: var(--danger); }
+    .role-muted { color: var(--ink-faint); }
+    .role-strong { font-weight: 650; color: var(--ink); }
+
+    .measure-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .measure-label { color: var(--ink-soft); flex: none; }
+    .measure-readout { font-family: var(--mono); color: var(--ink); flex: none; }
+    .meter {
+      display: inline-block;
+      width: 120px;
+      height: 6px;
+      border: 1px solid var(--line-strong);
+      border-radius: 3px;
+      background: var(--raised);
+      overflow: hidden;
+      flex: none;
+    }
+    .meter-fill {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      column-gap: 12px;
+      row-gap: 6px;
+      font-size: 13px;
+    }
+    .f-label { color: var(--ink-faint); }
+    .f-value { color: var(--ink); }
+
+    .diff {
+      font-family: var(--mono);
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .diff-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 12px;
+      background: var(--raised);
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .diff-counts { color: var(--ink-faint); }
+    .diff-row {
+      display: flex;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .diff-row.ctx { background: transparent; color: var(--ink-soft); }
+    .diff-row.add { background: var(--diff-add-bg); color: var(--ink); }
+    .diff-row.del { background: var(--diff-del-bg); color: var(--ink); }
+    .gutter {
+      flex: none;
+      width: 5ch;
+      text-align: right;
+      padding: 0 8px;
+      color: var(--ink-faint);
+      user-select: none;
+    }
+    .diff-segs { flex: 1; padding-right: 10px; }
+    .seg-emph {
+      font-style: normal;
+      font-weight: 650;
+      background: var(--line-strong);
+      border-radius: 2px;
+    }
+
+    .listing {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--raised);
+    }
+    .listing-row { display: flex; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .listing-row.muted { color: var(--ink-faint); }
+    .listing-row .gutter { border-right: 1px solid var(--line); }
+    .listing-text { flex: 1; padding: 0 10px; color: var(--ink); }
+
+    .raw-mark {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--ink-soft);
+    }
 
     .composer {
       flex: none;
@@ -872,6 +1053,23 @@
 
     let currentAssistantBubble = null;
 
+    // The inline activity strip: tool calls, harness calls, and cards land
+    // here, in between prose bubbles, in true temporal order. `null`
+    // whenever the next such event should open a fresh strip rather than
+    // append to one that conversationally already passed.
+    let currentActivityStrip = null;
+
+    function activityStrip() {
+      if (!currentActivityStrip) {
+        currentAssistantBubble = null;
+        const strip = document.createElement("div");
+        strip.className = "activity";
+        appendMessage(strip);
+        currentActivityStrip = strip;
+      }
+      return currentActivityStrip;
+    }
+
     function addUserMessage(text) {
       const msg = document.createElement("div");
       msg.className = "msg user";
@@ -904,6 +1102,19 @@
       appendMessage(msg);
     }
 
+    // A neutral notice, not a failure — e.g. the large-folder warning at
+    // conversation start. Same shape as a system message, raised tint
+    // instead of danger.
+    function addNoticeMessage(text) {
+      const msg = document.createElement("div");
+      msg.className = "msg system info";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = text;
+      msg.appendChild(bubble);
+      appendMessage(msg);
+    }
+
     function appendMessage(msg) {
       const t = $("transcript");
       const welcome = t.querySelector(".welcome");
@@ -912,36 +1123,353 @@
       t.scrollTop = t.scrollHeight;
     }
 
-    function appendLog(line) {
+    function logLine(text, cls) {
       const logEl = $("log");
       const empty = logEl.querySelector(".log-empty");
       if (empty) empty.remove();
       const div = document.createElement("div");
-      div.className = "log-line";
-      div.textContent = line;
+      div.className = "log-line" + (cls ? " " + cls : "");
+      div.textContent = text;
       logEl.appendChild(div);
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // The assistant's own narration arrives on stdout, one line at a time
-    // (a paragraph with no line break inside it arrives as a single line
-    // once it is complete); everything else — progress, tool trace — is on
-    // stderr and goes to the details fold, except the exchange-settled
-    // signal, which the host already turns into its own event.
-    listen("synod-log", (event) => {
-      const { line, stream } = event.payload || {};
-      if (line === undefined) return;
-      if (stream === "out") {
-        if (!currentAssistantBubble) beginAssistantMessage();
-        currentAssistantBubble.textContent += (currentAssistantBubble.textContent ? "\n" : "") + line;
-        $("transcript").scrollTop = $("transcript").scrollHeight;
-      } else {
-        appendLog(line);
+    function capitalize(text) {
+      return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+    }
+
+    function bodyText(value) {
+      if (value === undefined || value === null) return "";
+      return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
+
+    function addActivityChip(summaryText, body, failed) {
+      const strip = activityStrip();
+      const chip = document.createElement("details");
+      chip.className = "act" + (failed ? " failed" : "");
+      const summary = document.createElement("summary");
+      summary.textContent = summaryText;
+      chip.appendChild(summary);
+      const pre = document.createElement("pre");
+      pre.className = "act-body";
+      pre.textContent = bodyText(body);
+      chip.appendChild(pre);
+      strip.appendChild(chip);
+      $("transcript").scrollTop = $("transcript").scrollHeight;
+    }
+
+    function formatK(n) {
+      if (n === undefined || n === null) return "0";
+      return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+    }
+
+    function formatUsage(p) {
+      let s = formatK(p.input) + " in · " + formatK(p.output) + " out";
+      if (!p.unmetered && p.dollars !== undefined && p.dollars !== null) {
+        s += " · $" + Number(p.dollars).toFixed(2);
       }
-    });
+      return s;
+    }
+
+    // `record` is defensive: the boundary carries whatever fields serde put
+    // on that variant, and this renders the best available one-liner rather
+    // than assuming every field is present.
+    function formatProviderError(record) {
+      if (!record || typeof record !== "object") return "[provider error]";
+      const kind = record.kind || "error";
+      switch (kind) {
+        case "cancelled":
+          return "[provider: cancelled" + (record.where_ ? " at " + record.where_ : "") + "]";
+        case "transient":
+          return "[provider: transient" + (record.cause ? " — " + record.cause : "")
+            + (record.attempts !== undefined ? " (attempt " + record.attempts + ")" : "") + "]";
+        case "rate_limited":
+          return "[provider: rate limited"
+            + (record.retryAfterSecs !== undefined ? " — retry in " + record.retryAfterSecs + "s" : "")
+            + (record.cause ? " — " + record.cause : "") + "]";
+        case "api":
+          return "[provider: api " + (record.status !== undefined ? record.status + " " : "")
+            + (record.model ? record.model + " " : "") + (record.message || "") + "]";
+        case "truncated":
+          return "[provider: truncated" + (record.reason ? " — " + record.reason : "") + "]";
+        case "other":
+          return "[provider: " + (record.cause || "error") + "]";
+        default: {
+          const parts = Object.entries(record)
+            .filter(([k]) => k !== "kind")
+            .map(([k, v]) => k + "=" + v);
+          return "[provider: " + kind + (parts.length ? " " + parts.join(" ") : "") + "]";
+        }
+      }
+    }
+
+    function providerErrorClass(record) {
+      const kind = record && record.kind;
+      return kind === "api" || kind === "other" ? "bad" : "warn";
+    }
+
+    function onOpening(p) {
+      if (p.boundaryLine) logLine(p.boundaryLine);
+      if (p.assistantLine) logLine(p.assistantLine);
+      if (p.largeFolderLine) addNoticeMessage(p.largeFolderLine);
+    }
+
+    function onSynodEvent(p) {
+      switch (p.type) {
+        case "token":
+          if (!currentAssistantBubble) beginAssistantMessage();
+          currentAssistantBubble.textContent += p.text;
+          currentActivityStrip = null;
+          setStatus("Working…");
+          $("transcript").scrollTop = $("transcript").scrollHeight;
+          break;
+        case "thinking":
+          setStatus("Thinking…");
+          break;
+        case "phase":
+          setStatus(capitalize(p.label) + "…");
+          break;
+        case "step":
+          setStatus("Working… · step " + p.n);
+          logLine("[step " + p.n + "]");
+          break;
+        case "tool_call":
+          addActivityChip(p.summary || p.tool, p.cmd, false);
+          break;
+        case "harness_call":
+          addActivityChip(p.verb + (p.subject ? " " + p.subject : ""), p.payload, Boolean(p.failed));
+          break;
+        case "card":
+          activityStrip().appendChild(renderMarkCard(p.marks || []));
+          $("transcript").scrollTop = $("transcript").scrollHeight;
+          break;
+        case "usage":
+          logLine(formatUsage(p), "muted");
+          break;
+        case "stop_reason":
+          logLine("[stop: " + p.reason + "]", "muted");
+          break;
+        case "error":
+          logLine("error: " + p.message, "bad");
+          break;
+        case "system_note":
+          logLine(p.text, "muted");
+          break;
+        case "nudge":
+          logLine("[retry " + p.used + "/" + p.max + ": " + p.cause + "]", "warn");
+          break;
+        case "provider_error":
+          logLine(formatProviderError(p.record), providerErrorClass(p.record));
+          break;
+        case "failure":
+          addSystemMessage(p.message);
+          break;
+        default:
+          break;
+      }
+    }
+
+    // ---- The "a little Bertin-pilled" card renderer ---------------------
+    // Named `renderMarkCard` rather than `renderCard` because the report
+    // column below already owns that name for a file-change card — a
+    // different kind of card entirely.
+    function renderMarkCard(marks) {
+      const card = document.createElement("div");
+      card.className = "mark-card";
+      for (const m of marks || []) card.appendChild(renderMark(m));
+      return card;
+    }
+
+    function renderMark(m) {
+      switch (m.mark) {
+        case "text": return renderTextMark(m);
+        case "measure": return renderMeasureMark(m);
+        case "fields": return renderFieldsMark(m);
+        case "diff": return renderDiffMark(m);
+        case "listing": return renderListingMark(m);
+        case "raw": return renderRawMark(m);
+        default: {
+          const el = document.createElement("pre");
+          el.className = "raw-mark";
+          el.textContent = JSON.stringify(m);
+          return el;
+        }
+      }
+    }
+
+    function roleSpan(span) {
+      const el = document.createElement("span");
+      el.className = "role-" + (span.role || "plain");
+      el.textContent = span.text;
+      return el;
+    }
+
+    function renderTextMark(m) {
+      const p = document.createElement("p");
+      p.className = "mark-text";
+      for (const span of m.spans || []) p.appendChild(roleSpan(span));
+      return p;
+    }
+
+    function renderMeasureMark(m) {
+      const row = document.createElement("div");
+      row.className = "measure-row";
+
+      const label = document.createElement("span");
+      label.className = "measure-label";
+      label.textContent = m.label;
+      row.appendChild(label);
+
+      const meter = document.createElement("span");
+      meter.className = "meter";
+      const fill = document.createElement("span");
+      fill.className = "meter-fill";
+      const pct = m.max
+        ? Math.min(100, 100 * m.value / m.max)
+        : Math.min(100, 100 * Math.log2(m.value + 1) / 32);
+      fill.style.width = pct + "%";
+      meter.appendChild(fill);
+      row.appendChild(meter);
+
+      const readout = document.createElement("span");
+      readout.className = "measure-readout";
+      readout.textContent = String(m.value) + (m.max ? "/" + m.max : "") + (m.unit || "");
+      row.appendChild(readout);
+
+      return row;
+    }
+
+    function renderFieldsMark(m) {
+      const grid = document.createElement("div");
+      grid.className = "fields";
+      for (const row of m.rows || []) {
+        const label = document.createElement("div");
+        label.className = "f-label";
+        label.textContent = row.label;
+        grid.appendChild(label);
+
+        const value = document.createElement("div");
+        value.className = "f-value";
+        if (row.value && row.value.inline) {
+          for (const span of row.value.inline) value.appendChild(roleSpan(span));
+        } else if (row.value && row.value.measure) {
+          value.appendChild(renderMeasureMark(row.value.measure));
+        }
+        grid.appendChild(value);
+      }
+      return grid;
+    }
+
+    function renderDiffMark(m) {
+      const container = document.createElement("div");
+      container.className = "diff";
+
+      let adds = 0, dels = 0;
+      for (const hunk of m.hunks || []) {
+        for (const row of hunk.rows || []) {
+          if (row.tag === "add") adds++;
+          else if (row.tag === "del") dels++;
+        }
+      }
+
+      const head = document.createElement("div");
+      head.className = "diff-head";
+      const path = document.createElement("span");
+      path.className = "role-path";
+      path.textContent = m.path;
+      head.appendChild(path);
+      const counts = document.createElement("span");
+      counts.className = "diff-counts";
+      counts.textContent = "+" + adds + " −" + dels;
+      head.appendChild(counts);
+      container.appendChild(head);
+
+      for (const hunk of m.hunks || []) {
+        let oldNo = hunk.start;
+        let newNo = hunk.start;
+        for (const row of hunk.rows || []) {
+          const line = document.createElement("div");
+          line.className = "diff-row " + (row.tag === "add" ? "add" : row.tag === "del" ? "del" : "ctx");
+
+          const gutter = document.createElement("span");
+          gutter.className = "gutter";
+          if (row.tag === "del") {
+            gutter.textContent = oldNo + "−";
+            oldNo++;
+          } else if (row.tag === "add") {
+            gutter.textContent = newNo + "+";
+            newNo++;
+          } else {
+            gutter.textContent = oldNo + " ";
+            oldNo++;
+            newNo++;
+          }
+          line.appendChild(gutter);
+
+          const segs = document.createElement("span");
+          segs.className = "diff-segs";
+          for (const seg of row.segs || []) {
+            if (seg.emph) {
+              const em = document.createElement("em");
+              em.className = "seg-emph";
+              em.textContent = seg.text;
+              segs.appendChild(em);
+            } else {
+              segs.appendChild(document.createTextNode(seg.text));
+            }
+          }
+          line.appendChild(segs);
+          container.appendChild(line);
+        }
+      }
+      return container;
+    }
+
+    function renderListingMark(m) {
+      const block = document.createElement("div");
+      block.className = "listing";
+      const lines = (m.text || "").split("\n");
+      lines.forEach((lineText, i) => {
+        const row = document.createElement("div");
+        row.className = "listing-row";
+        const gutter = document.createElement("span");
+        gutter.className = "gutter";
+        gutter.textContent = String(i + 1);
+        row.appendChild(gutter);
+        const text = document.createElement("span");
+        text.className = "listing-text";
+        text.textContent = lineText;
+        row.appendChild(text);
+        block.appendChild(row);
+      });
+      if (m.more) {
+        const row = document.createElement("div");
+        row.className = "listing-row muted";
+        const gutter = document.createElement("span");
+        gutter.className = "gutter";
+        row.appendChild(gutter);
+        const text = document.createElement("span");
+        text.className = "listing-text";
+        text.textContent = "⋮";
+        row.appendChild(text);
+        block.appendChild(row);
+      }
+      return block;
+    }
+
+    function renderRawMark(m) {
+      const pre = document.createElement("pre");
+      pre.className = "raw-mark";
+      pre.textContent = m.text;
+      return pre;
+    }
+
+    listen("synod-opening", (event) => onOpening(event.payload || {}));
+    listen("synod-event", (event) => onSynodEvent(event.payload || {}));
 
     listen("exchange-done", async () => {
       currentAssistantBubble = null;
+      currentActivityStrip = null;
       setBusy(false);
       await refreshReport();
     });
@@ -950,6 +1478,7 @@
       const { stopped } = event.payload || {};
       state.alive = false;
       currentAssistantBubble = null;
+      currentActivityStrip = null;
       setBusy(false); // input disables on `state.alive` alone; nothing is "working"
       if (!stopped) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
     });
