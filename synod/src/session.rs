@@ -42,13 +42,6 @@ use vm_manager::Machine;
 /// scratch tmpfs ([`crate::grant::GUEST_SCRATCH`]), no host directory.
 pub const SYNOD: bootstrap::App = bootstrap::App::new("synod");
 
-/// "Protection: {this}." — true of every machine synod boots, since the
-/// only backend left is a real virtual machine.  Carried here, verbatim,
-/// from what was vm-manager's `Boundary::Hardware` sentence, before that
-/// type lost every other inhabitant and stopped being worth keeping.
-const HARDWARE_PROTECTION: &str = "a separate virtual machine: the agent can reach the folder \
-                                    you granted and nothing else on this computer";
-
 /// Resolve the credential store, once, at startup.
 ///
 /// # Errors
@@ -285,15 +278,15 @@ pub struct Choice {
     pub effort: Option<String>,
 }
 
-/// What the window says before the first message: the folder, the
-/// boundary, and who is answering.
+/// What the window shows before the first message: the folder, who is
+/// answering, and the ~2GiB warning when the folder is that large.
 pub struct Opening {
     /// The granted folder, display form.
     pub folder: String,
-    /// "Protection: {boundary}." — always [`HARDWARE_PROTECTION`].
-    pub boundary_line: String,
-    /// "Assistant: {label} ({model})."
-    pub assistant_line: String,
+    /// The account answering — the credential's label.
+    pub account: String,
+    /// The model that account is driving.
+    pub model: String,
     /// The ~2GiB warning sentence, when the folder is that large.
     pub large_folder_line: Option<String>,
 }
@@ -370,10 +363,6 @@ impl Conversation {
                 )
             })?;
 
-            // Said before any work happens, because it is about what is
-            // *about* to happen to the user's own documents.
-            let boundary_line = format!("Protection: {HARDWARE_PROTECTION}.");
-
             // The agent works where the machine put the folder: the guest's
             // `/work`.
             let workspace = machine.workspace_path().to_path_buf();
@@ -411,7 +400,8 @@ impl Conversation {
                 .get(&id)
                 .expect("the chosen provider is one of the available ones")
                 .clone();
-            let assistant_line = format!("Assistant: {} ({model}).", id.label());
+            let account = id.label().to_string();
+            let announced_model = model.clone();
             let tuning = resolve_tuning(effort, &model)?;
 
             let run_dir = SYNOD
@@ -529,8 +519,8 @@ impl Conversation {
 
             let opening = Opening {
                 folder: grant.root().to_string_lossy().into_owned(),
-                boundary_line,
-                assistant_line,
+                account,
+                model: announced_model,
                 large_folder_line,
             };
 

@@ -66,15 +66,15 @@ struct ConversationEnded {
     stopped: bool,
 }
 
-/// The conversation's opening, once — the folder, the boundary, the
-/// assistant, and the large-folder warning, if any — emitted as
-/// `synod-opening` the moment [`Conversation::begin`] succeeds.
+/// The conversation's opening, once — the folder, who is answering, and
+/// the large-folder warning, if any — emitted as `synod-opening` the
+/// moment [`Conversation::begin`] succeeds.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpeningEvent {
     folder: String,
-    boundary_line: String,
-    assistant_line: String,
+    account: String,
+    model: String,
     large_folder_line: Option<String>,
 }
 
@@ -376,8 +376,8 @@ fn converse(
         "synod-opening",
         OpeningEvent {
             folder: opening.folder,
-            boundary_line: opening.boundary_line,
-            assistant_line: opening.assistant_line,
+            account: opening.account,
+            model: opening.model,
             large_folder_line: opening.large_folder_line,
         },
     );

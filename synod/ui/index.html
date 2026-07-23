@@ -294,6 +294,18 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .topbar .model {
+      flex: none;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--ink-faint);
+      padding: 3px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+    }
+    .topbar .model:empty { display: none; }
     .topbar .status {
       font-size: 12.5px;
       font-weight: 600;
@@ -908,6 +920,7 @@
     <section id="screen-conversation" class="screen">
       <div class="topbar">
         <span class="folder" id="convo-folder"></span>
+        <span class="model" id="convo-model"></span>
         <span class="status" id="convo-status"></span>
         <button type="button" class="btn-quiet" id="start-again">Start again</button>
       </div>
@@ -1575,8 +1588,9 @@
     }
 
     function onOpening(p) {
-      const lines = [p.boundaryLine, p.assistantLine].filter(Boolean);
-      if (lines.length) addNoticeMessage(lines.join("\n"));
+      const model = $("convo-model");
+      model.textContent = p.model || "";
+      model.title = p.account ? p.account + " · " + (p.model || "") : "";
       if (p.largeFolderLine) addNoticeMessage(p.largeFolderLine);
     }
 
