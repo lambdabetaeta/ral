@@ -30,6 +30,12 @@
     "icon": [
       "icons/icon.png"
     ],
+    "resources": {
+      "../vm-image/out/boot/kernel": "boot/kernel",
+      "../vm-image/out/boot/initramfs.img": "boot/initramfs.img",
+      "../vm-image/out/rootfs.img.zst": "boot/rootfs.img.zst",
+      "../vm-image/out/rootfs.img.sha256": "boot/rootfs.img.sha256"
+    },
     "macOS": {
       "entitlements": "./Entitlements.plist",
       "signingIdentity": "-"

@@ -74,3 +74,15 @@ release *args:
 # Run the current source as `ral`, forwarding arguments, e.g. `just run examples/hello.ral`.
 run *args:
     cargo run -p ral --quiet -- {{args}}
+
+# Bundle synod into a runnable macOS .app (+ .dmg) under
+# target/release/bundle/.  Two prerequisites this recipe does not install
+# for you: the Tauri CLI (`cargo install tauri-cli`) and a built guest
+# image under `vm-image/out/` (the image pipeline's output) — the bundle
+# embeds that image's kernel, initramfs, and compressed rootfs.  Ad-hoc
+# signing (tauri.conf.json `signingIdentity` "-") carries the
+# virtualization entitlement, so the .app creates VMs locally with no
+# Apple Developer account; distributing it to other Macs additionally
+# needs a Developer ID signature and notarization.
+synod-app:
+    cd synod && cargo tauri build
