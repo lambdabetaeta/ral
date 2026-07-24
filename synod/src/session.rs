@@ -318,7 +318,10 @@ impl Conversation {
         choice: Option<Choice>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
-        let hypervisor = vm_manager::detect(crate::boot_media())?;
+        let boot = crate::boot::boot_media()
+            .map(crate::boot::BootPlan::realise)
+            .transpose()?;
+        let hypervisor = vm_manager::detect(boot)?;
 
         let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
         // The IT-set fetch-url policy, audit ledger, and rate budget — one
