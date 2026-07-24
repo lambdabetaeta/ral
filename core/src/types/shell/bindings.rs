@@ -437,6 +437,35 @@ mod chokepoint_tests {
         }
     }
 
+    /// Run one top-level turn capturing its streams, returning the turn's
+    /// stderr — where the ready boundary writes the large-binding warning.
+    fn top_level_stderr(shell: &mut Shell, source: &str) -> String {
+        match shell.run_turn(TurnRequest {
+            turn: Turn {
+                program: Program::Source(source.into()),
+                script_name: "<test>".into(),
+                caps: Capabilities::root(),
+                turn_limit: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: TurnIo::Capture,
+                terminal: RequestedTerminalAccess::Leased,
+                stdin: TurnStdin::Inherit,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            nursery: None,
+            lifecycle: Box::new(()),
+        }) {
+            TurnReport::Ran { captured, .. } => {
+                let captured = captured.expect("Capture must return buffers");
+                String::from_utf8_lossy(&captured.stderr).into_owned()
+            }
+            TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        }
+    }
+
     /// Whether `name` carries a ledger entry — a leased candidate.
     fn is_leased(shell: &Shell, name: &str) -> bool {
         shell
@@ -1045,46 +1074,44 @@ mod chokepoint_tests {
 
     // ── the large-binding warning (parcel 6) ────────────────────────────────
 
-    /// A session-scope install meeting the threshold queues exactly one
-    /// notice naming the binding and its estimate; draining leaves the
-    /// queue empty until the next offending install. A rebind that still
-    /// meets the threshold queues another notice — no de-duplication.
+    /// A session-scope install meeting the threshold writes exactly one
+    /// warning onto its turn's stderr, naming the binding and its byte
+    /// estimate. A rebind that still meets the threshold warns again — no
+    /// de-duplication.
     #[test]
-    fn large_binding_threshold_queues_one_notice() {
+    fn large_binding_threshold_warns_on_turn_stderr() {
         let mut shell = armed_shell_with(64, 8);
         let text = "this string is definitely over eight bytes long";
-        top_level(&mut shell, &format!("let large_x = '{text}'")).expect("define");
+        let stderr = top_level_stderr(&mut shell, &format!("let large_x = '{text}'"));
 
-        let notices = shell.take_large_binding_notices();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].name, "large_x");
-        assert_eq!(notices[0].bytes, text.len() as u64);
-
+        assert_eq!(
+            stderr.matches("large binding `large_x`").count(),
+            1,
+            "exactly one warning per offending install"
+        );
         assert!(
-            shell.take_large_binding_notices().is_empty(),
-            "the drain must emit exactly one notice per offending install"
+            stderr.contains(&format!("~{} bytes", text.len())),
+            "the warning names the byte estimate"
         );
 
         let text2 = "a different string that also clears eight bytes";
-        top_level(&mut shell, &format!("let large_x = '{text2}'")).expect("rebind");
-        let notices2 = shell.take_large_binding_notices();
+        let stderr2 = top_level_stderr(&mut shell, &format!("let large_x = '{text2}'"));
         assert_eq!(
-            notices2.len(),
+            stderr2.matches("large binding `large_x`").count(),
             1,
             "a rebind that still exceeds the threshold must warn again"
         );
-        assert_eq!(notices2[0].name, "large_x");
     }
 
-    /// An install whose estimate falls short of the threshold queues
-    /// nothing at all.
+    /// An install whose estimate falls short of the threshold warns not
+    /// at all.
     #[test]
-    fn sub_threshold_install_queues_nothing() {
+    fn sub_threshold_install_does_not_warn() {
         let mut shell = armed_shell_with(64, 1_000_000);
-        top_level(&mut shell, "let small_x = 1").expect("define");
+        let stderr = top_level_stderr(&mut shell, "let small_x = 1");
         assert!(
-            shell.take_large_binding_notices().is_empty(),
-            "an install under the threshold must queue no notice"
+            !stderr.contains("large binding"),
+            "an install under the threshold must write no warning"
         );
     }
 }

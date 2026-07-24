@@ -279,11 +279,12 @@ pub(crate) fn run_framed<'a>(
     lifecycle.post_exec(shell, src, status);
 
     // Push this turn's ready-boundary housekeeping — the lease chain's reap
-    // notices, the large-binding warning — as `` `notice `` surface classes
-    // while this turn's frame (and its surface sink) is still installed, so
-    // the notice rides this turn's own surface stream, ordered before its
-    // Report (`decisions/260706_enquiry-channel` §4.2). After `guard` drops
-    // below, `shell.turn` reverts and there is no sink left to push through.
+    // notices as `` `notice `` surface classes, the large-binding warning onto
+    // the turn's own stderr — while this turn's frame (its surface sink and
+    // capture streams) is still installed, so each rides this turn's own
+    // stream, ordered before its Report (`decisions/260706_enquiry-channel`
+    // §4.2). After `guard` drops below, `shell.turn` reverts and there is no
+    // sink left to push through.
     shell.emit_ready_boundary_notices();
 
     drop(guard);

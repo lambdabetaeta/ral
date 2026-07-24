@@ -200,9 +200,6 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
                     "bindings_pruned",
                     json!({ "names": names, "idle_calls": idle_calls }),
                 ),
-                Notice::LargeBinding { name, bytes } => {
-                    ("large_binding", json!({ "name": name, "bytes": bytes }))
-                }
             }
         }
         // The frontend's own rows are appended at render time and stay

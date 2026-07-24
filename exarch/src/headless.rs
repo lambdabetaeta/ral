@@ -309,8 +309,8 @@ impl Sink for Headless<'_> {
             }
             // A surfaced render document, a structural I/O event paired with
             // the card composed from it, a detached worker's settlement, a
-            // core-pushed ready-boundary notice (a reap, a binding prune, a
-            // large-binding warning), or the `/resources` fold.  In headless
+            // core-pushed ready-boundary notice (a reap or a binding prune),
+            // or the `/resources` fold.  In headless
             // we condense the card's marks to `err` lines generically; the
             // raw structural fact behind each is kept in `transcript.jsonl`
             // (the card is a rendering and is not).

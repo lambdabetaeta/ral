@@ -1245,14 +1245,11 @@ pub enum Kind {
     /// A ready-boundary housekeeping fact core's own engine pushed as a
     /// `` `notice `` surface class — a worker the lease chain reaped
     /// (unobserved past its idle bound, past its absolute backstop, or the
-    /// retention sweep expiring a settled entry's unclaimed result), a run
-    /// of idle top-level bindings the ledger pruned, or a session-scope
-    /// install past the large-binding threshold
-    /// (`decisions/260706_enquiry-channel` §4.2). Replaces the three
-    /// separately-*polled* `WorkerReaped`/`BindingsPruned`/`LargeBinding`
-    /// variants this used to be: core now emits the fact itself, at the
-    /// ready boundary, through the turn's surface sink, rather than a host
-    /// draining an accessor and composing the event from what it read.
+    /// retention sweep expiring a settled entry's unclaimed result), or a run
+    /// of idle top-level bindings the ledger pruned
+    /// (`decisions/260706_enquiry-channel` §4.2). Core emits the fact itself,
+    /// at the ready boundary, through the turn's surface sink, rather than a
+    /// host draining an accessor and composing the event from what it read.
     /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::bus::card::Notice)
     /// rides alongside the rendered `card` (the [`Kind::Io`] pattern) so
     /// `transcript.jsonl` keeps the structural fact the one-liner erases.

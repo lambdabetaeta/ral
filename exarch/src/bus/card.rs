@@ -898,8 +898,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 /// (`decisions/260706_enquiry-channel` §4.2).
 ///
 /// The notice names a worker the lease chain
-/// reaped, a run of idle top-level bindings the ledger pruned, or a
-/// session-scope install past the large-binding threshold.
+/// reaped or a run of idle top-level bindings the ledger pruned.
 /// Like
 /// [`DoneOutcome`], the raw record [`value_to_notice`] decodes once and
 /// [`notice_card`] composes the matching one-line card — core emits the
@@ -921,16 +920,13 @@ pub enum Notice {
         names: Vec<String>,
         idle_calls: Vec<u64>,
     },
-    /// A session-scope binding install met the large-binding soft
-    /// threshold — a residency nudge, never an eviction.
-    LargeBinding { name: String, bytes: u64 },
 }
 
 /// Decode a `` `notice `` value into its [`Notice`].
 ///
 /// The shape is
-/// `` `notice [kind: `reap|`large-binding|`prune, …fields] `` where `kind`
-/// selects the fields read below — exactly the three classes core's
+/// `` `notice [kind: `reap|`prune, …fields] `` where `kind`
+/// selects the fields read below — exactly the two surface classes core's
 /// `emit_ready_boundary_notices` pushes. Anything else — an unrecognised
 /// `kind`, a missing field, a value that is not this variant at all —
 /// returns `None`, the same graceful degradation as [`value_to_done`].
@@ -955,17 +951,6 @@ pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
                 _ => return None,
             },
         },
-        "large-binding" => {
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "max(0) floors to a non-negative byte size"
-            )]
-            let bytes = int_field(m, "bytes")?.max(0) as u64;
-            Notice::LargeBinding {
-                name: str_field(m, "name")?,
-                bytes,
-            }
-        }
         "prune" => {
             let RalValue::List(names) = m.get("names")? else {
                 return None;
@@ -1009,7 +994,6 @@ pub fn notice_card(notice: &Notice) -> Card {
     match notice {
         Notice::Reap { cmd, cause } => reap_card(cmd, *cause),
         Notice::Prune { names, idle_calls } => bindings_pruned_card(names, idle_calls),
-        Notice::LargeBinding { name, bytes } => large_binding_card(name, *bytes),
     }
 }
 
@@ -1050,24 +1034,6 @@ fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
         names.join(", "),
     );
     let spans = vec![Span::new(Role::Muted, phrase)];
-    Card(vec![Mark::Text { spans }])
-}
-
-/// Compose one large-binding notice into a [`Card`] — a dim one-liner
-/// naming the binding, its shallow-size estimate, and the file-path
-/// recommendation: writing a large result to disk and binding the path
-/// keeps residency shallow, since the binding itself is otherwise
-/// completely untouched (`decisions/260629_agent-binding-reaping`,
-/// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
-/// state plus host leases").
-fn large_binding_card(name: &str, bytes: u64) -> Card {
-    let spans = vec![Span::new(
-        Role::Warn,
-        format!(
-            "large binding: `{name}` — ~{bytes} bytes; consider writing it to a file \
-             and binding the path instead of the captured bytes"
-        ),
-    )];
     Card(vec![Mark::Text { spans }])
 }
 

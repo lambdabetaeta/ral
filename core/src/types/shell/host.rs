@@ -18,6 +18,7 @@ use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
 use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, WorkerId};
+use std::io::Write;
 use std::sync::Arc;
 
 /// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
@@ -240,20 +241,25 @@ impl Shell {
         self.local.bindings.take_large_binding_notices()
     }
 
-    /// Push this shell's ready-boundary housekeeping as `` `notice `` surface
-    /// events — a worker the lease chain reaped and a session-scope install
-    /// past the large-binding threshold — through the installed turn's own
-    /// surface sink, in the order the underlying ledgers accumulated them.
-    /// Called once per settled turn ([`crate::turn::run_framed`]), *before*
-    /// the turn's frame tears down, so the notice rides the same turn's
-    /// surface stream, ordered before its Report
+    /// Emit this shell's ready-boundary housekeeping. The large-binding
+    /// warning rides the turn's own stderr — it is model-facing feedback
+    /// about the install the model just made, on the same channel exarch's
+    /// timeout and command-exit tips use, so it reaches the model in its
+    /// tool result and never becomes a frontend card. The worker-reap and
+    /// idle-prune notices push as `` `notice `` surface events through the
+    /// installed turn's surface sink, in the order the ledgers accumulated
+    /// them. Called once per settled turn ([`crate::turn::run_framed`]),
+    /// *before* the turn's frame tears down, so both ride this turn's own
+    /// streams, ordered before its Report
     /// (`decisions/260706_enquiry-channel` §4.2).
     ///
-    /// A no-op — the ledgers are left untouched, not drained-and-dropped —
-    /// when no surface sink is installed (a bare REPL, or a host-embedding
-    /// test dispatching a raw `TurnRequest`): with nobody to push to, the
-    /// notices simply wait for a turn that does install one, exactly as
-    /// they did before this turn ran.
+    /// The surface half is a no-op — those ledgers left untouched, not
+    /// drained-and-dropped — when no surface sink is installed (a bare REPL,
+    /// or a host-embedding test dispatching a raw `TurnRequest`): with nobody
+    /// to push to, the notices simply wait for a turn that does install one.
+    /// The large-binding write is ungated: the turn's stderr is present
+    /// whether or not a surface sink is, so the warning always reaches the
+    /// install's own turn.
     ///
     /// The binding-lease ledger's *idle-prune* runs here too — engine-side
     /// housekeeping at the engine's own ready boundary, its notice one more
@@ -262,8 +268,7 @@ impl Shell {
     /// ([`Shell::run_turn`]), after any prior boundary's prune, so a pruned
     /// name can never be resurrected by a rollback.
     ///
-    /// The pushed shapes — `` `notice [kind: `reap, cmd, cause] ``,
-    /// `` `notice [kind: `large-binding, name, bytes] `` and
+    /// The pushed shapes — `` `notice [kind: `reap, cmd, cause] `` and
     /// `` `notice [kind: `prune, names, idle-calls] `` — are what the
     /// exarch host decodes back (`card::value_to_notice`); `cause` travels
     /// as the same lowercase tag exarch's transcript writer already used, so
@@ -273,6 +278,18 @@ impl Shell {
         // regardless of anyone listening, and its notice waits in the
         // ledger for the next sinked turn either way.
         self.local.workers.sweep_retention();
+        // The large-binding warning is model-directed diagnostics about the
+        // model's own install, so it rides the turn's stderr rather than the
+        // surface stream — drained ungated, above the sink guard, since the
+        // capture stream is present regardless of any frontend sink.
+        for notice in self.take_large_binding_notices() {
+            let line = format!(
+                "note: large binding `{}` (~{} bytes) held in session memory; consider \
+                 writing it to a file and binding the path instead of the captured bytes\n",
+                notice.name, notice.bytes,
+            );
+            let _ = self.turn.io.stderr.write_all(line.as_bytes());
+        }
         if self.turn.surface.is_none() {
             return;
         }
@@ -294,33 +311,6 @@ impl Shell {
                     ),
                     ("cmd".into(), Value::String(notice.cmd)),
                     ("cause".into(), Value::String(cause.into())),
-                ]))),
-            });
-        }
-        for notice in self.take_large_binding_notices() {
-            self.surface(&Value::Variant {
-                label: "notice".into(),
-                payload: Some(Box::new(Value::map(vec![
-                    (
-                        "kind".into(),
-                        Value::Variant {
-                            label: "large-binding".into(),
-                            payload: None,
-                        },
-                    ),
-                    ("name".into(), Value::String(notice.name)),
-                    (
-                        "bytes".into(),
-                        Value::Int({
-                            #[allow(
-                                clippy::cast_possible_wrap,
-                                reason = "u64 in-memory byte count is far below i64::MAX"
-                            )]
-                            {
-                                notice.bytes as i64
-                            }
-                        }),
-                    ),
                 ]))),
             });
         }

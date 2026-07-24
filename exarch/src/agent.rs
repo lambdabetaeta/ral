@@ -1429,11 +1429,10 @@ impl Agent {
         loop {
             // Every pass back to the loop top is a settled ready boundary
             // (the per-iteration quiesce below, or the invariant `drive` is
-            // entered under). The lease chain's reap notices and the
-            // large-binding warning no longer need draining here: core's
-            // own engine pushes both as `` `notice `` surface classes at
-            // the ready boundary of the turn that produced them
-            // (`decisions/260706_enquiry-channel` §4.2) — visible at the
+            // entered under). The lease chain's reap notices no longer need
+            // draining here: core's own engine pushes them as `` `notice ``
+            // surface classes at the ready boundary of the turn that produced
+            // them (`decisions/260706_enquiry-channel` §4.2) — visible at the
             // next dispatched turn rather than on every idle pass through
             // this loop, the one behavioural change the push migration
             // costs (a worker reaped while this agent sits fully idle
@@ -4317,15 +4316,14 @@ mod tests {
         }
     }
 
-    /// A session-scope install that meets the large-binding threshold
-    /// queues a notice at the chokepoint; core's engine now pushes it
-    /// itself, from inside the very turn that installed the binding
-    /// (`decisions/260706_enquiry-channel` §4.2) — unlike the idle-prune
-    /// notice, this one no longer waits on `Agent::reap_bindings` at all.
-    /// A further turn with nothing newly queued surfaces no second notice.
-    /// The two axes are independent: nothing here is idle enough to prune.
+    /// A session-scope install that meets the large-binding threshold writes
+    /// the warning onto the installing turn's own stderr — model-facing
+    /// feedback in the tool result, not a frontend card — from inside that
+    /// very turn (`decisions/260706_enquiry-channel` §4.2). A further turn
+    /// with no new session-scope install writes no warning. The two axes are
+    /// independent: nothing here is idle enough to prune.
     #[test]
-    fn large_binding_install_surfaces_a_notice_from_its_own_turn() {
+    fn large_binding_install_warns_on_its_own_turn_stderr() {
         let dir = tmp("reap-large-binding");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -4337,41 +4335,34 @@ mod tests {
                 large_binding_bytes: 8,
             });
 
-        let (tx, rx) = crate::bus::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.run_shell(
+        let result = session.run_shell(
             "c0".into(),
             "let large_binding_x = 'well over eight bytes long'",
             5,
             &emit,
         );
 
-        let mut notices = 0;
-        while let Ok(event) = rx.try_recv() {
-            let Kind::Notice {
-                notice: crate::bus::card::Notice::LargeBinding { name, bytes },
-                ..
-            } = event.kind
-            else {
-                continue;
-            };
-            notices += 1;
-            assert_eq!(name, "large_binding_x");
-            assert_eq!(bytes, "well over eight bytes long".len() as u64);
-        }
-        assert_eq!(notices, 1, "exactly one notice per offending install");
+        let warnings = result
+            .content
+            .matches("large binding `large_binding_x`")
+            .count();
+        assert_eq!(warnings, 1, "exactly one warning per offending install");
+        assert!(
+            result.content.contains("held in session memory"),
+            "the warning carries the file-path recommendation"
+        );
 
         // No new session-scope install this time (`return` binds nothing),
         // so nothing meets the threshold again.
-        let (tx2, rx2) = crate::bus::channel();
+        let (tx2, _rx2) = crate::bus::channel();
         let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
-        session.run_shell("c1".into(), "return 1", 5, &emit2);
-        while let Ok(event) = rx2.try_recv() {
-            assert!(
-                !matches!(event.kind, Kind::Notice { .. }),
-                "nothing newly queued must surface no notice"
-            );
-        }
+        let result2 = session.run_shell("c1".into(), "return 1", 5, &emit2);
+        assert!(
+            !result2.content.contains("large binding"),
+            "nothing newly installed must warn again"
+        );
     }
 
     /// Unconfigured (`disk_warn_bytes: None`) is a no-op by construction:

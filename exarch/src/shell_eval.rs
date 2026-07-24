@@ -139,7 +139,7 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 ///     `Map` tagged by its `io` field, decoded into a typed [`IoEvent`] and
 ///     paired with the [`Card`] composed from it ([`Kind::Io`]);
 ///   * a `` `notice `` core's own ready-boundary housekeeping pushes (a
-///     worker reap, an idle-binding prune, a large-binding warning),
+///     worker reap or an idle-binding prune),
 ///     decoded into a [`Notice`](crate::bus::card::Notice) and paired with its
 ///     card ([`Kind::Notice`]);
 ///   * a render document a ral kit composed (a `` `card `` variant of Bertin

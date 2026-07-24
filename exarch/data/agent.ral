@@ -127,7 +127,7 @@ let transition = { |ts id new-status|
 ## single plain-text card under the "goal" register key; call again to replace.
 
 let set-goal = { |text|
-  surface `pin [key: "goal", body: `card [`text [spans: [[role: "strong", text: "goal"], [role: "", text: $text]]]]]
+  surface `pin [key: "goal", body: `card [`text [spans: [[role: "strong", text: "goal"]]], `text [spans: [[role: "", text: $text]]]]]
 }
 
 ## Drop the goal pin — when the session's aim is met or abandoned.  Idempotent:

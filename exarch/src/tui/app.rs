@@ -515,9 +515,8 @@ impl App {
             // A detached worker settled (its one-line outcome card, never
             // through the diff-detection path above since it is always plain
             // text) or core's own ready-boundary housekeeping pushed a notice
-            // (a worker the lease chain reaped, idle bindings the ledger
-            // pruned, a large-binding residency nudge): either way the card
-            // lands as its own scrollback block.
+            // (a worker the lease chain reaped, or idle bindings the ledger
+            // pruned): either way the card lands as its own scrollback block.
             Kind::Done { card, .. } | Kind::Notice { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
