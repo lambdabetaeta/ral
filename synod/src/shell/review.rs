@@ -4,8 +4,9 @@
 //! The library speaks manifests, change sets, and restore outcomes; the
 //! window renders a flat list of cards and remembers nothing between
 //! calls.  This module translates one into the other, and holds the card
-//! list for the life of the window so a card the user has put back stays
-//! visibly put back when the report is re-read.
+//! list so an undo's outcome can be folded into the last report returned.
+//! Each finished exchange rebuilds the cards fresh from its own job
+//! report, so a card's status reflects that job, never a stale one.
 //!
 //! Conflicts surface where they matter.  An undo is first tried gently
 //! ([`Resolution::KeepCurrent`]): a file the user edited after the job
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::Serialize;
+use synod::workspace::restore::covers;
 use synod::workspace::{self, Change, EntryKind, HistoryStore, Resolution, RestoreOutcome};
 use tauri::{AppHandle, State};
 
@@ -53,9 +55,6 @@ pub struct ChangeFile {
     /// For a rename, the name it had before.
     pub rename_from: Option<String>,
     pub kind: ChangeKind,
-    /// The assistant's one-sentence claim about this file.  Empty until
-    /// the engine reports per-file claims; the window hides it when empty.
-    pub summary: String,
     pub status: ChangeStatus,
     /// True when putting this file back was refused because the user
     /// changed it after the job — the card becomes a choice.
@@ -71,9 +70,6 @@ pub struct ChangeFile {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowReport {
-    /// The assistant's account of the whole job.  Empty for now: the
-    /// window falls back to the run's own streamed narration.
-    pub summary: String,
     pub files: Vec<ChangeFile>,
 }
 
@@ -115,7 +111,6 @@ pub fn job_report(review: State<'_, Review>, folder: String) -> Result<WindowRep
                 rename_from: from,
                 path: shown,
                 kind,
-                summary: String::new(),
                 status: ChangeStatus::Applied,
                 conflict: false,
             }
@@ -123,10 +118,7 @@ pub fn job_report(review: State<'_, Review>, folder: String) -> Result<WindowRep
         .collect();
 
     *lock(&review) = Some(files.clone());
-    Ok(WindowReport {
-        summary: String::new(),
-        files,
-    })
+    Ok(WindowReport { files })
 }
 
 /// Put one file — or, through a rename, its pair of names — back the way
@@ -214,7 +206,7 @@ fn resolution(force: bool) -> Resolution {
 /// for a rename — was put back, removed, or conflicted, exactly or as a
 /// folder with the outcome's path inside it.  A conflict outranks being
 /// partly done: the card stays in place and asks.
-fn absorb(review: &State<'_, Review>, outcome: &RestoreOutcome) -> Result<WindowReport, String> {
+fn absorb(review: &Review, outcome: &RestoreOutcome) -> Result<WindowReport, String> {
     let mut held = lock(review);
     let files = held
         .as_mut()
@@ -225,23 +217,15 @@ fn absorb(review: &State<'_, Review>, outcome: &RestoreOutcome) -> Result<Window
         if let Some(from) = &file.rename_from {
             names.push(from.as_str());
         }
-        let covers = |path: &String| {
-            names.iter().any(|name| {
-                path == name
-                    || path
-                        .strip_prefix(name)
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-        };
-        if outcome.conflicts.iter().any(|c| covers(&c.path)) {
+        let touched = |path: &String| names.iter().any(|name| covers(path, name));
+        if outcome.conflicts.iter().any(touched) {
             file.conflict = true;
-        } else if outcome.put_back.iter().any(covers) || outcome.removed.iter().any(covers) {
+        } else if outcome.put_back.iter().any(touched) || outcome.removed.iter().any(touched) {
             file.status = ChangeStatus::PutBack;
             file.conflict = false;
         }
     }
     let report = WindowReport {
-        summary: String::new(),
         files: files.clone(),
     };
     drop(held);
@@ -251,7 +235,7 @@ fn absorb(review: &State<'_, Review>, outcome: &RestoreOutcome) -> Result<Window
 /// Lock the card list, recovering the guard even if a command thread
 /// panicked while holding it — the window should hear a sentence, not
 /// hang.
-fn lock<'a>(review: &'a State<'_, Review>) -> std::sync::MutexGuard<'a, Option<Vec<ChangeFile>>> {
+fn lock(review: &Review) -> std::sync::MutexGuard<'_, Option<Vec<ChangeFile>>> {
     review
         .0
         .lock()

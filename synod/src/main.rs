@@ -57,22 +57,16 @@ use std::sync::atomic::AtomicBool;
 use tauri::Manager;
 
 /// The credential scrub's outcome, resolved once here — while the process
-/// is still single-threaded, [`synod::session::prepare`] requires — and
-/// held as Tauri state for the app's whole life.  Every command that needs
-/// a working model account surfaces the `Err` as its own plain-sentence
-/// failure rather than re-running or second-guessing it.
-struct Credentials(Result<CredentialStore, String>);
-
-/// The model catalog [`commands::list_models`] seeds its instant menu from
-/// and refreshes in the background — [`None`] exactly when [`Credentials`]
-/// resolved `Err`, since there is then no [`CredentialStore`] to build a
-/// [`LiveSource`] from, and every command that would have read this state
-/// already refuses on the credential failure first.  Built once here,
-/// beside the credentials, and held as Tauri state for the app's whole
-/// life; the [`Mutex`] is [`synod::session::menu`] and
-/// [`synod::session::refresh_menu`]'s own — both take it locked only
+/// is still single-threaded, [`synod::session::prepare`] requires — paired
+/// with the model catalog built from it, and held as Tauri state for the
+/// app's whole life.  Every command that needs a working model account
+/// surfaces the `Err` as its own plain-sentence failure rather than
+/// re-running or second-guessing it; the pairing makes "no catalog without
+/// credentials" a type fact instead of a runtime invariant the two halves
+/// could drift out of sync on.  The [`Mutex`] is [`synod::session::menu`]
+/// and [`synod::session::refresh_menu`]'s own — both take it locked only
 /// briefly, never across a network call.
-struct Catalog(Option<Mutex<ModelCatalog<LiveSource>>>);
+struct Accounts(Result<(CredentialStore, Mutex<ModelCatalog<LiveSource>>), String>);
 
 /// Whether this run has already started its one background model refresh.
 ///
@@ -89,21 +83,19 @@ fn main() {
     if let Some(code) = exarch::dispatch_pre_main() {
         std::process::exit(i32::from(code));
     }
-    let credentials = Credentials(synod::session::prepare());
-    let catalog = Catalog(match &credentials.0 {
-        Ok(store) => Some(Mutex::new(ModelCatalog::new(
-            LiveSource::new(store),
+    let accounts = Accounts(synod::session::prepare().map(|store| {
+        let catalog = Mutex::new(ModelCatalog::new(
+            LiveSource::new(&store),
             synod::session::SYNOD,
-        ))),
-        Err(_) => None,
-    });
+        ));
+        (store, catalog)
+    }));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(commands::Running::default())
-        .manage(credentials)
-        .manage(catalog)
+        .manage(accounts)
         .manage(RefreshGate(AtomicBool::new(false)))
         .manage(review::Review::default())
         .invoke_handler(tauri::generate_handler![
@@ -111,7 +103,6 @@ fn main() {
             commands::list_models,
             commands::start_conversation,
             commands::send_message,
-            commands::restart_conversation,
             commands::open_file,
             commands::open_url,
             review::open_earlier,

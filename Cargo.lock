@@ -6764,7 +6764,6 @@ name = "synod"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "ctor 1.0.7",
  "exarch",
  "ral-core",
  "serde",

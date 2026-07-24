@@ -2,7 +2,7 @@
 //!
 //! The law here: nothing is ever silently overwritten, and nothing is
 //! ever destroyed.  A path whose bytes differ from what the job left
-//! behind was edited afterwards — that is a [`Conflict`] the caller
+//! behind was edited afterwards — that is a conflict the caller
 //! resolves, never a default.  And before a restore touches anything, the
 //! folder as it stands is checkpointed, so every byte an undo replaces or
 //! removes stays recoverable.
@@ -17,17 +17,11 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
-    /// Leave the newer version alone and report it as a [`Conflict`].
+    /// Leave the newer version alone and report it as a conflict.
     KeepCurrent,
     /// Put the older version back anyway.  The newer bytes are kept in
     /// the store first, so nothing is lost.
     PutBack,
-}
-
-/// A path left alone because it changed after the job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Conflict {
-    pub path: String,
 }
 
 /// What a restore did.
@@ -38,7 +32,17 @@ pub struct RestoreOutcome {
     /// Paths removed because they did not exist at the checkpoint.
     pub removed: Vec<String>,
     /// Paths left alone under [`Resolution::KeepCurrent`].
-    pub conflicts: Vec<Conflict>,
+    pub conflicts: Vec<String>,
+}
+
+/// Whether `name` covers `path`: the same path, or a folder `path` sits
+/// under.
+///
+/// The one folder-prefix-with-boundary rule the crate uses to resolve a
+/// report's names — a file, or a folder and everything under it —
+/// against the paths a manifest actually holds.
+pub fn covers(path: &str, name: &str) -> bool {
+    path == name || path.strip_prefix(name).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Put `root` back to `baseline`.
@@ -58,7 +62,7 @@ pub struct RestoreOutcome {
 /// # Errors
 /// A plain sentence when `only` names nothing known, or when reading or
 /// writing the folder fails partway.
-pub fn restore(
+pub(crate) fn restore(
     store: &HistoryStore,
     root: &Path,
     baseline: &Checkpoint,
@@ -69,16 +73,8 @@ pub fn restore(
     // The safety net: everything about to be touched is kept first.
     let current = store.capture(root, Moment::Undo)?;
 
-    let selected = |path: &str| {
-        only.is_none_or(|names| {
-            names.iter().any(|one| {
-                path == one
-                    || path
-                        .strip_prefix(one.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-        })
-    };
+    let selected =
+        |path: &str| only.is_none_or(|names| names.iter().any(|one| covers(path, one)));
     if let Some(names) = only {
         let known = baseline.manifest.entries.keys().any(|p| selected(p))
             || current.manifest.entries.keys().any(|p| selected(p));
@@ -112,7 +108,7 @@ pub fn restore(
         }
         let edited_after = run_left.is_none_or(|left| left.manifest.entries.get(path) != now);
         if edited_after && resolution == Resolution::KeepCurrent {
-            outcome.conflicts.push(Conflict { path: path.clone() });
+            outcome.conflicts.push(path.clone());
             continue;
         }
         match want {
@@ -124,7 +120,6 @@ pub fn restore(
     // Deepest first, so folders are empty by the time their turn comes.
     // A folder that will not empty holds something kept above — a
     // conflict, not an error.
-    to_remove.sort();
     for path in to_remove.iter().rev() {
         let target = root.join(path);
         let Ok(meta) = std::fs::symlink_metadata(&target) else {
@@ -133,9 +128,7 @@ pub fn restore(
         };
         if meta.file_type().is_dir() {
             if std::fs::remove_dir(&target).is_err() {
-                outcome.conflicts.push(Conflict {
-                    path: (*path).clone(),
-                });
+                outcome.conflicts.push((*path).clone());
                 continue;
             }
         } else {
@@ -146,7 +139,6 @@ pub fn restore(
     }
 
     // Shallowest first, so parents exist before their contents.
-    to_put.sort_by(|a, b| a.0.cmp(b.0));
     for (path, kind) in to_put {
         let target = root.join(path);
         if let Ok(meta) = std::fs::symlink_metadata(&target) {
@@ -154,7 +146,7 @@ pub fn restore(
                 (EntryKind::Folder, true) => {}
                 (_, true) => {
                     if std::fs::remove_dir(&target).is_err() {
-                        outcome.conflicts.push(Conflict { path: path.clone() });
+                        outcome.conflicts.push(path.clone());
                         continue;
                     }
                 }
@@ -170,7 +162,7 @@ pub fn restore(
                 std::fs::create_dir_all(&target)
                     .map_err(|e| format!("Synod could not put back {}: {e}.", target.display()))?;
             }
-            EntryKind::File { hash, .. } => store.place(hash, &target)?,
+            EntryKind::File { hash, mode, .. } => store.place(hash, *mode, &target)?,
             EntryKind::Link { target: text } => {
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
@@ -195,25 +187,14 @@ pub fn restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixture::granted_workshop as workshop;
     use crate::workspace::manifest::{ContentHash, Manifest};
-    use std::path::PathBuf;
-
-    /// A workshop holding a granted folder and a store, side by side.
-    fn workshop(tag: &str) -> (PathBuf, PathBuf, HistoryStore) {
-        let dir = std::env::temp_dir().join(format!("synod-restore-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let folder = dir.join("Admissions");
-        std::fs::create_dir_all(&folder).expect("temp workshop");
-        let store = HistoryStore::open_at(&dir.join("history")).expect("store opens");
-        let dir = std::fs::canonicalize(&dir).expect("temp workshop resolves");
-        (dir.clone(), dir.join("Admissions"), store)
-    }
 
     /// A whole-job undo puts modifications, deletions, and creations all
     /// back, and says so.
     #[test]
     fn a_full_undo_returns_the_folder_to_its_baseline() {
-        let (dir, folder, store) = workshop("full");
+        let (dir, folder, store) = workshop("restore-full");
         std::fs::write(folder.join("edited.txt"), b"original").expect("fixture");
         std::fs::write(folder.join("deleted.txt"), b"kept safe").expect("fixture");
         std::fs::create_dir(folder.join("emptied")).expect("fixture");
@@ -258,7 +239,7 @@ mod tests {
     /// overwritten, and forcing it keeps the newer bytes first.
     #[test]
     fn an_edit_after_the_job_is_a_conflict_and_never_destroyed() {
-        let (dir, folder, store) = workshop("conflict");
+        let (dir, folder, store) = workshop("restore-conflict");
         std::fs::write(folder.join("report.txt"), b"original").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::write(folder.join("report.txt"), b"the job's version").expect("job");
@@ -276,12 +257,7 @@ mod tests {
             Resolution::KeepCurrent,
         )
         .expect("restores");
-        assert_eq!(
-            outcome.conflicts,
-            vec![Conflict {
-                path: "report.txt".into(),
-            }]
-        );
+        assert_eq!(outcome.conflicts, ["report.txt"]);
         assert_eq!(
             std::fs::read(folder.join("report.txt")).expect("rereads"),
             b"my later edit",
@@ -315,7 +291,7 @@ mod tests {
     /// from a later edit, so everything differing conflicts.
     #[test]
     fn a_crashed_run_makes_every_difference_a_conflict() {
-        let (dir, folder, store) = workshop("crashed");
+        let (dir, folder, store) = workshop("restore-crashed");
         std::fs::write(folder.join("a.txt"), b"original").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::write(folder.join("a.txt"), b"changed by someone").expect("job");
@@ -337,7 +313,7 @@ mod tests {
     /// A one-file undo touches that file and nothing else.
     #[test]
     fn undoing_one_file_leaves_the_rest_of_the_job_standing() {
-        let (dir, folder, store) = workshop("one-file");
+        let (dir, folder, store) = workshop("restore-one-file");
         std::fs::write(folder.join("a.txt"), b"a original").expect("fixture");
         std::fs::write(folder.join("b.txt"), b"b original").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
@@ -369,7 +345,7 @@ mod tests {
 
     #[test]
     fn a_name_nobody_has_ever_seen_is_refused_plainly() {
-        let (dir, folder, store) = workshop("unknown");
+        let (dir, folder, store) = workshop("restore-unknown");
         std::fs::write(folder.join("a.txt"), b"x").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
         let after = store.capture(&folder, Moment::After).expect("after");

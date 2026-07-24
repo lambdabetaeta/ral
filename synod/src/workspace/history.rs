@@ -40,7 +40,6 @@ pub struct Checkpoint {
 }
 
 /// A folder's history on the host, durable across sessions.
-#[derive(Debug, Clone)]
 pub struct HistoryStore {
     dir: PathBuf,
 }
@@ -101,8 +100,11 @@ impl HistoryStore {
         };
         let text = serde_json::to_string(&checkpoint)
             .map_err(|e| format!("Synod could not write down what it saved: {e}."))?;
-        let path = self.dir.join("checkpoints").join(format!("{id}.json"));
-        std::fs::write(&path, text)
+        let checkpoints = self.dir.join("checkpoints");
+        let tmp = checkpoints.join(format!(".tmp-{id}"));
+        std::fs::write(&tmp, text)
+            .map_err(|e| format!("Synod could not write down what it saved: {e}."))?;
+        std::fs::rename(&tmp, checkpoints.join(format!("{id}.json")))
             .map_err(|e| format!("Synod could not write down what it saved: {e}."))?;
         Ok(checkpoint)
     }
@@ -113,20 +115,12 @@ impl HistoryStore {
     /// A plain sentence when a record cannot be read back.
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>, String> {
         let dir = self.dir.join("checkpoints");
-        let listing = std::fs::read_dir(&dir).map_err(|e| {
-            format!(
-                "Synod could not open its records at {}: {e}.",
-                dir.display()
-            )
-        })?;
+        let could_not =
+            |e| format!("Synod could not open its records at {}: {e}.", dir.display());
+        let listing = std::fs::read_dir(&dir).map_err(could_not)?;
         let mut found = Vec::new();
         for item in listing {
-            let item = item.map_err(|e| {
-                format!(
-                    "Synod could not open its records at {}: {e}.",
-                    dir.display()
-                )
-            })?;
+            let item = item.map_err(could_not)?;
             let path = item.path();
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
@@ -173,21 +167,25 @@ impl HistoryStore {
             .map_err(|e| format!("Synod no longer has a saved copy of that version: {e}."))
     }
 
-    /// Copy the kept bytes for `hash` to `dest`, replacing what is there.
+    /// Copy the kept bytes for `hash` to `dest`, and set its mode.
     ///
     /// # Errors
     /// A plain sentence when the version is missing or `dest` unwritable.
-    pub(crate) fn place(&self, hash: &ContentHash, dest: &Path) -> Result<(), String> {
+    pub(crate) fn place(&self, hash: &ContentHash, mode: u32, dest: &Path) -> Result<(), String> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Synod could not put back {}: {e}.", dest.display()))?;
         }
-        if std::fs::symlink_metadata(dest).is_ok() {
-            std::fs::remove_file(dest)
-                .map_err(|e| format!("Synod could not put back {}: {e}.", dest.display()))?;
-        }
         std::fs::copy(self.object_path(hash), dest)
             .map_err(|e| format!("Synod could not put back {}: {e}.", dest.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("Synod could not put back {}: {e}.", dest.display()))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
         Ok(())
     }
 
@@ -195,7 +193,9 @@ impl HistoryStore {
     ///
     /// The rare miss copies while re-hashing, so the stored bytes always
     /// match the name they are stored under even if the file changes
-    /// beneath us mid-capture.
+    /// beneath us mid-capture.  The tmp file is named per call, not per
+    /// content, since two ingests of identical bytes can run at once; a
+    /// failure past this point removes it rather than stranding it.
     fn ingest(&self, file: &Path) -> Result<(u64, ContentHash), String> {
         let (size, hash) = hash_file(file)?;
         if self.object_path(&hash).exists() {
@@ -203,27 +203,36 @@ impl HistoryStore {
         }
 
         let could_not = |e| format!("Synod could not keep a copy of {}: {e}.", file.display());
-        let tmp =
-            self.dir
-                .join("objects")
-                .join(format!(".tmp-{}-{}", std::process::id(), hash.as_str()));
         let mut src = std::fs::File::open(file).map_err(could_not)?;
+        let tmp = self.dir.join("objects").join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let mut out = std::fs::File::create(&tmp).map_err(could_not)?;
-        let mut hasher = blake3::Hasher::new();
-        let size = std::io::copy(&mut src, &mut Tee(&mut hasher, &mut out)).map_err(could_not)?;
-        drop(out);
 
-        let hash = ContentHash::from(hasher.finalize());
-        let dest = self.object_path(&hash);
-        if dest.exists() {
-            let _ = std::fs::remove_file(&tmp);
-        } else {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(could_not)?;
+        let result = (|| {
+            let mut hasher = blake3::Hasher::new();
+            let size =
+                std::io::copy(&mut src, &mut Tee(&mut hasher, &mut out)).map_err(could_not)?;
+            drop(out);
+
+            let hash = ContentHash::from(hasher.finalize());
+            let dest = self.object_path(&hash);
+            if dest.exists() {
+                let _ = std::fs::remove_file(&tmp);
+            } else {
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(could_not)?;
+                }
+                std::fs::rename(&tmp, &dest).map_err(could_not)?;
             }
-            std::fs::rename(&tmp, &dest).map_err(could_not)?;
+            Ok((size, hash))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        Ok((size, hash))
+        result
     }
 
     fn object_path(&self, hash: &ContentHash) -> PathBuf {
@@ -256,18 +265,8 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixture::granted_workshop as workshop;
     use crate::workspace::manifest::EntryKind;
-
-    /// A workshop holding a granted folder and a store, side by side.
-    fn workshop(tag: &str) -> (PathBuf, PathBuf, HistoryStore) {
-        let dir = std::env::temp_dir().join(format!("synod-history-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let folder = dir.join("Admissions");
-        std::fs::create_dir_all(&folder).expect("temp workshop");
-        let store = HistoryStore::open_at(&dir.join("history")).expect("store opens");
-        let dir = std::fs::canonicalize(&dir).expect("temp workshop resolves");
-        (dir.clone(), dir.join("Admissions"), store)
-    }
 
     fn object_count(dir: &Path) -> usize {
         let mut count = 0;
@@ -282,7 +281,7 @@ mod tests {
 
     #[test]
     fn a_capture_keeps_the_bytes_and_the_shape() {
-        let (dir, folder, store) = workshop("capture");
+        let (dir, folder, store) = workshop("history-capture");
         std::fs::write(folder.join("letter.txt"), b"dear all").expect("fixture");
         std::fs::create_dir(folder.join("empty")).expect("fixture");
 
@@ -304,7 +303,7 @@ mod tests {
 
     #[test]
     fn unchanged_bytes_are_never_stored_twice() {
-        let (dir, folder, store) = workshop("dedupe");
+        let (dir, folder, store) = workshop("history-dedupe");
         std::fs::write(folder.join("a.txt"), b"stable").expect("fixture");
         std::fs::write(folder.join("b.txt"), b"stable").expect("fixture");
 
@@ -321,7 +320,7 @@ mod tests {
 
     #[test]
     fn the_latest_job_pairs_before_with_its_after() {
-        let (dir, folder, store) = workshop("pairing");
+        let (dir, folder, store) = workshop("history-pairing");
         std::fs::write(folder.join("a.txt"), b"one").expect("fixture");
         let b1 = store.capture(&folder, Moment::Before).expect("captures");
         let a1 = store.capture(&folder, Moment::After).expect("captures");
@@ -345,7 +344,7 @@ mod tests {
     /// which is all a plain `find` would ever see.
     #[test]
     fn a_conversations_many_afters_pair_with_the_before_by_the_last_one() {
-        let (dir, folder, store) = workshop("many-afters");
+        let (dir, folder, store) = workshop("history-many-afters");
         std::fs::write(folder.join("a.txt"), b"one").expect("fixture");
         let before = store.capture(&folder, Moment::Before).expect("captures");
         store.capture(&folder, Moment::After).expect("exchange 1");
@@ -365,7 +364,7 @@ mod tests {
 
     #[test]
     fn checkpoints_come_back_oldest_first() {
-        let (dir, folder, store) = workshop("order");
+        let (dir, folder, store) = workshop("history-order");
         std::fs::write(folder.join("a.txt"), b"x").expect("fixture");
         let first = store.capture(&folder, Moment::Before).expect("captures");
         let second = store.capture(&folder, Moment::After).expect("captures");

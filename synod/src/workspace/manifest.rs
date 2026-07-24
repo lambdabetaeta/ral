@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fmt;
 use std::path::Path;
 
 /// Warn before checkpointing a folder bigger than this.
@@ -38,12 +37,6 @@ impl From<blake3::Hash> for ContentHash {
     }
 }
 
-impl fmt::Display for ContentHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// One entry in a [`Manifest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +44,10 @@ pub enum EntryKind {
     File {
         size: u64,
         hash: ContentHash,
+        /// The file's Unix permission bits, so a restore puts back the
+        /// same mode it recorded — not the object store's own default.
+        /// `0` on a non-Unix host, where no mode is ever read or applied.
+        mode: u32,
     },
     Folder,
     /// A symbolic link, recorded by its target text and never followed.
@@ -89,7 +86,7 @@ impl Manifest {
 ///
 /// # Errors
 /// A plain sentence when the file cannot be read.
-pub fn hash_file(path: &Path) -> Result<(u64, ContentHash), String> {
+pub(crate) fn hash_file(path: &Path) -> Result<(u64, ContentHash), String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| format!("Synod could not read {}: {e}.", path.display()))?;
     let mut hasher = blake3::Hasher::new();
@@ -98,17 +95,28 @@ pub fn hash_file(path: &Path) -> Result<(u64, ContentHash), String> {
     Ok((size, ContentHash::from(hasher.finalize())))
 }
 
+/// A file's Unix permission bits; `0` on a host with no such notion.
+#[cfg(unix)]
+fn file_mode(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn file_mode(_meta: &std::fs::Metadata) -> u32 {
+    0
+}
+
 fn walk(
     dir: &Path,
     rel: &str,
     entries: &mut BTreeMap<String, EntryKind>,
     file_entry: FileEntry<'_>,
 ) -> Result<(), String> {
-    let listing = std::fs::read_dir(dir)
-        .map_err(|e| format!("Synod could not look inside {}: {e}.", dir.display()))?;
+    let could_not = |e| format!("Synod could not look inside {}: {e}.", dir.display());
+    let listing = std::fs::read_dir(dir).map_err(could_not)?;
     for item in listing {
-        let item =
-            item.map_err(|e| format!("Synod could not look inside {}: {e}.", dir.display()))?;
+        let item = item.map_err(could_not)?;
         let name = item.file_name();
         let Some(name) = name.to_str() else {
             return Err(format!(
@@ -145,7 +153,14 @@ fn walk(
             walk(&path, &key, entries, file_entry)?;
         } else if meta.is_file() {
             let (size, hash) = file_entry(&path)?;
-            entries.insert(key, EntryKind::File { size, hash });
+            entries.insert(
+                key,
+                EntryKind::File {
+                    size,
+                    hash,
+                    mode: file_mode(&meta),
+                },
+            );
         } else {
             return Err(format!(
                 "{} is not an ordinary file, folder, or link, so synod could not \
@@ -160,33 +175,24 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    /// A private directory for one test, named after it so a failed run
-    /// leaves readable wreckage.
-    fn workshop(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("synod-manifest-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp workshop");
-        std::fs::canonicalize(&dir).expect("temp workshop resolves")
-    }
+    use crate::test_fixture::workshop;
 
     #[test]
     fn files_folders_and_empty_folders_are_all_recorded() {
-        let dir = workshop("record");
+        let dir = workshop("manifest-record");
         std::fs::write(dir.join("letter.txt"), b"dear all").expect("fixture");
         std::fs::create_dir(dir.join("sent")).expect("fixture");
         std::fs::write(dir.join("sent").join("a.txt"), b"gone").expect("fixture");
         std::fs::create_dir(dir.join("empty")).expect("fixture");
 
         let manifest = Manifest::of_folder(&dir).expect("an ordinary folder reads");
-        assert_eq!(
-            manifest.entries.get("letter.txt"),
-            Some(&EntryKind::File {
-                size: 8,
-                hash: ContentHash::of_bytes(b"dear all"),
-            })
-        );
+        match manifest.entries.get("letter.txt") {
+            Some(EntryKind::File { size, hash, .. }) => {
+                assert_eq!(*size, 8);
+                assert_eq!(*hash, ContentHash::of_bytes(b"dear all"));
+            }
+            other => panic!("expected a recorded file, got {other:?}"),
+        }
         assert_eq!(manifest.entries.get("sent"), Some(&EntryKind::Folder));
         assert!(manifest.entries.contains_key("sent/a.txt"));
         assert_eq!(
@@ -202,7 +208,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_link_is_recorded_as_its_target_and_never_followed() {
-        let dir = workshop("link");
+        let dir = workshop("manifest-link");
         std::os::unix::fs::symlink("nowhere/at-all", dir.join("dangling")).expect("fixture");
         let manifest = Manifest::of_folder(&dir).expect("a dangling link must not break the walk");
         assert_eq!(

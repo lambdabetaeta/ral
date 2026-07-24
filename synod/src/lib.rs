@@ -30,6 +30,8 @@
 pub mod grant;
 pub mod prompt;
 pub mod session;
+#[cfg(test)]
+pub(crate) mod test_fixture;
 pub mod workspace;
 
 /// The boot media this build of synod ships, if this computer holds it: the

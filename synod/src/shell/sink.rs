@@ -12,7 +12,6 @@ use exarch::agent::event::ProviderErrorRecord;
 use exarch::bus::card::{Card, Field, Hunk, Mark, Measure, Span};
 use exarch::bus::{Event, Kind, Sink};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 
 /// A shadow of [`Mark`] whose byte-carrying variants (`Listing`, `Raw`) hold
 /// lossy text instead of raw bytes.
@@ -58,7 +57,7 @@ fn marks_dto(card: Card) -> Vec<MarkDto> {
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum SynodEvent {
     Token { text: String },
-    Thinking { text: String },
+    Thinking,
     Step { n: u32 },
     Phase { label: String },
     ToolCall {
@@ -88,11 +87,11 @@ pub enum SynodEvent {
     SystemNote { text: String },
     Nudge { used: u32, max: u32, cause: String },
     ProviderError { record: ProviderErrorRecord },
-    /// A terminal conversation failure — `Conversation::begin` refused, or
-    /// `Conversation::exchange` returned `Err`.  `commands.rs` emits this
-    /// directly; [`project`] never produces it, since no [`Kind`] carries
-    /// this fact — the bus dies with the conversation, it does not report
-    /// on it.
+    /// A conversation failure, emitted directly by `commands.rs` — never by
+    /// [`project`], since no [`Kind`] carries this fact.  A
+    /// `Conversation::begin` refusal is terminal, and `synod-ended` follows;
+    /// a `Conversation::exchange` `Err` leaves the conversation open for the
+    /// next message.
     Failure { message: String },
 }
 
@@ -110,7 +109,7 @@ pub enum SynodEvent {
 pub fn project(kind: Kind) -> Option<SynodEvent> {
     Some(match kind {
         Kind::Token(text) => SynodEvent::Token { text },
-        Kind::Thinking(text) => SynodEvent::Thinking { text },
+        Kind::Thinking(_) => SynodEvent::Thinking,
         Kind::Step { n, .. } => SynodEvent::Step { n },
         Kind::Phase(label) => SynodEvent::Phase { label },
         Kind::ToolCall { tool, cmd, summary } => SynodEvent::ToolCall { tool, cmd, summary },
@@ -169,14 +168,15 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
 }
 
 /// The window's [`Sink`]: projects every bus event and emits it as
-/// `synod-event`, silently dropping whatever [`project`] has no use for.
+/// `synod-event` through the worker's own gated [`Emitter`](super::commands::Emitter),
+/// silently dropping whatever [`project`] has no use for.
 pub struct TauriSink {
-    app: AppHandle,
+    emitter: super::commands::Emitter,
 }
 
 impl TauriSink {
-    pub fn new(app: AppHandle) -> Self {
-        Self { app }
+    pub fn new(emitter: super::commands::Emitter) -> Self {
+        Self { emitter }
     }
 }
 
@@ -185,7 +185,7 @@ impl Sink for TauriSink {
         // `e.id` is ignored: synod's root runs with `fuel: 0`, so no
         // sub-agent ever emits on this bus — every event is the root's own.
         if let Some(dto) = project(e.kind) {
-            let _ = self.app.emit("synod-event", dto);
+            self.emitter.emit("synod-event", dto);
         }
     }
 }

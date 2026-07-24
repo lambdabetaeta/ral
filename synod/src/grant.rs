@@ -152,7 +152,7 @@ const TOOLBOX: &[&str] = &[
 pub(crate) const GUEST_SCRATCH: &str = "/tmp";
 
 /// One folder, opened as a session's whole authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Grant {
     /// The granted folder: absolute, symlink-resolved, known to exist
     /// and to be a readable directory at the moment of opening.
@@ -352,16 +352,8 @@ impl Grant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixture::workshop;
     use ral_core::types::Shell;
-
-    /// A private directory for one test, named after it so a failed run
-    /// leaves readable wreckage.
-    fn workshop(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("synod-grant-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp workshop");
-        std::fs::canonicalize(&dir).expect("temp workshop resolves")
-    }
 
     fn refusal(folder: &Path) -> String {
         Grant::open(folder).expect_err("this folder must be refused")
@@ -369,7 +361,7 @@ mod tests {
 
     #[test]
     fn a_missing_folder_is_refused_by_name() {
-        let dir = workshop("missing");
+        let dir = workshop("grant-missing");
         let message = refusal(&dir.join("Admissions"));
         assert!(
             message.contains("There is nothing at") && message.contains("picker"),
@@ -380,7 +372,7 @@ mod tests {
 
     #[test]
     fn a_file_is_not_a_folder() {
-        let dir = workshop("file");
+        let dir = workshop("grant-file");
         let letter = dir.join("letter.docx");
         std::fs::write(&letter, b"not a folder").expect("write fixture");
         let message = refusal(&letter);
@@ -428,7 +420,7 @@ mod tests {
     /// grant must not depend on how the picker spelled the path.
     #[test]
     fn an_ordinary_folder_opens_resolved() {
-        let dir = workshop("ordinary");
+        let dir = workshop("grant-ordinary");
         let admissions = dir.join("Admissions");
         std::fs::create_dir(&admissions).expect("fixture folder");
         let grant = Grant::open(
@@ -459,7 +451,7 @@ mod tests {
     /// point-of-use gate rather than by reading the struct's fields.
     #[test]
     fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
-        let (dir, grant) = granted("fs");
+        let (dir, grant) = granted("grant-fs");
         let caps = grant.capabilities();
 
         let mut shell = Shell::default();
@@ -494,7 +486,7 @@ mod tests {
     /// folder inside it — the case §8's "topology as policy" is about.
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
-        let (dir, grant) = granted("home-unreachable");
+        let (dir, grant) = granted("grant-home-unreachable");
         let home = ral_core::path::home_from_env();
         if home.is_empty() {
             let _ = std::fs::remove_dir_all(&dir);
@@ -513,7 +505,7 @@ mod tests {
 
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
-        let (dir, grant) = granted("exec");
+        let (dir, grant) = granted("grant-exec");
         let caps = grant.capabilities();
         let mut shell = Shell::default();
         shell.with_capabilities(caps, |sh| {
@@ -536,7 +528,7 @@ mod tests {
 
     #[test]
     fn the_guest_has_no_network() {
-        let (dir, grant) = granted("net");
+        let (dir, grant) = granted("grant-net");
         assert_eq!(
             grant.capabilities().net,
             Some(false),
@@ -547,7 +539,7 @@ mod tests {
 
     #[test]
     fn the_machine_holds_exactly_the_granted_folder() {
-        let (dir, grant) = granted("machine");
+        let (dir, grant) = granted("grant-machine");
         let spec = grant.machine_spec();
         assert_eq!(spec.workspace.host_path, grant.root());
         assert_eq!(

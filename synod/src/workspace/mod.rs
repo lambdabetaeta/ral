@@ -19,8 +19,8 @@ pub mod manifest;
 pub mod report;
 pub mod restore;
 
-pub use changes::{Change, ChangeSet};
-pub use history::{Checkpoint, HistoryStore, Moment};
-pub use manifest::{ContentHash, EntryKind, LARGE_FOLDER_BYTES, Manifest};
-pub use report::{JobReport, job_report, render, undo_all, undo_file};
-pub use restore::{Conflict, Resolution, RestoreOutcome, restore};
+pub use changes::Change;
+pub use history::{HistoryStore, Moment};
+pub use manifest::{EntryKind, LARGE_FOLDER_BYTES};
+pub use report::{job_report, undo_all, undo_file};
+pub use restore::{Resolution, RestoreOutcome};

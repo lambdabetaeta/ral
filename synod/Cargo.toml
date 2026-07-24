@@ -20,7 +20,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-ral-core   = { path = "../core", features = ["grep", "coreutils"] }
+ral-core   = { path = "../core" }
 exarch     = { path = "../exarch" }
 vm-manager = { path = "../vm-manager" }
 tauri      = { version = "2", features = [] }
@@ -30,6 +30,3 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = "1"
 tokio      = { version = "1", features = ["rt"] }
-
-[dev-dependencies]
-ctor = "1"

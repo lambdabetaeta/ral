@@ -33,7 +33,6 @@
       --accent-ink: #fbf8f1;
 
       --accept: #2f6d5c;
-      --accept-soft: #e7efe9;
       --discard: #9a6a52;
       --conflict: #a5641c;
       --conflict-bg: #f7ecd9;
@@ -45,10 +44,8 @@
       --diff-add-bg: #e9f2ec;
       --diff-del-bg: #f9e9e2;
 
-      --shadow: 0 1px 2px rgba(60, 48, 32, 0.06), 0 8px 24px rgba(60, 48, 32, 0.08);
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
       --focus: var(--accent);
-      --radius: 16px;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -67,7 +64,6 @@
         --accent-ink: #17201c;
 
         --accept: #74c3aa;
-        --accept-soft: #22322c;
         --discard: #c79a83;
         --conflict: #e0a85e;
         --conflict-bg: #34291a;
@@ -79,7 +75,6 @@
         --diff-add-bg: #1f2c22;
         --diff-del-bg: #2e211b;
 
-        --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.35);
         --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
       }
     }
@@ -90,22 +85,20 @@
       --ink: #292420; --ink-soft: #6d6459; --ink-faint: #988d7e;
       --line: #e5ddce; --line-strong: #d5cab6;
       --accent: #2f6d5c; --accent-hover: #275c4d; --accent-ink: #fbf8f1;
-      --accept: #2f6d5c; --accept-soft: #e7efe9; --discard: #9a6a52;
+      --accept: #2f6d5c; --discard: #9a6a52;
       --conflict: #a5641c; --conflict-bg: #f7ecd9; --conflict-line: #e6cfa6;
       --danger: #a5401c; --danger-bg: #f7ded9; --danger-line: #e6b6a6;
       --diff-add-bg: #e9f2ec; --diff-del-bg: #f9e9e2;
-      --shadow: 0 1px 2px rgba(60,48,32,0.06), 0 8px 24px rgba(60,48,32,0.08);
     }
     :root[data-theme="dark"] {
       --paper: #1e1b18; --raised: #2a2521; --raised-2: #241f1c;
       --ink: #efe7db; --ink-soft: #aca194; --ink-faint: #7e7466;
       --line: #38322c; --line-strong: #48413a;
       --accent: #74c3aa; --accent-hover: #86cfb8; --accent-ink: #17201c;
-      --accept: #74c3aa; --accept-soft: #22322c; --discard: #c79a83;
+      --accept: #74c3aa; --discard: #c79a83;
       --conflict: #e0a85e; --conflict-bg: #34291a; --conflict-line: #5a4526;
       --danger: #e08a5e; --danger-bg: #34211a; --danger-line: #5a3526;
       --diff-add-bg: #1f2c22; --diff-del-bg: #2e211b;
-      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
     }
 
     * { box-sizing: border-box; }
@@ -846,14 +839,6 @@
     }
     .card h3 .name { font-family: var(--mono); font-size: 14.5px; font-weight: 600; }
 
-    .claim {
-      margin: 8px 0 0;
-      font-size: 13.5px;
-      line-height: 1.5;
-      color: var(--ink-soft);
-    }
-    .claim .who { color: var(--ink-faint); font-size: 11.5px; display: block; margin-bottom: 2px; letter-spacing: 0.02em; }
-
     .conflict-note {
       margin: 10px 0 0;
       padding: 10px 12px;
@@ -876,12 +861,6 @@
       font-size: 13.5px; font-weight: 600; padding: 9px 15px;
     }
     .btn-accept:hover { background: var(--accent-hover); }
-    .btn-discard {
-      background: transparent; color: var(--discard);
-      border-color: var(--line-strong);
-      font-size: 13.5px; font-weight: 600; padding: 9px 15px;
-    }
-    .btn-discard:hover { border-color: var(--discard); background: var(--raised-2); }
     .btn-open {
       background: transparent; color: var(--ink-soft);
       border-color: var(--line); font-size: 12.5px; font-weight: 550; padding: 8px 12px;
@@ -892,7 +871,6 @@
       display: inline-flex; align-items: center; gap: 6px;
       font-size: 13px; font-weight: 650;
     }
-    .verdict.accepted { color: var(--accept); }
     .verdict.discarded { color: var(--ink-faint); }
 
     .banner {
@@ -1063,7 +1041,7 @@
       assistantOptions = [];
       for (const p of providers) {
         for (const m of p.models || []) {
-          assistantOptions.push({ key: p.key, model: m.name, label: p.label + " — " + m.name, reasoning: m.reasoning });
+          assistantOptions.push({ key: p.label, model: m.name, label: p.label + " — " + m.name, reasoning: m.reasoning });
         }
       }
 
@@ -1085,7 +1063,7 @@
       } else {
         const first = providers[0];
         if (first && first.default_model) {
-          const idx = assistantOptions.findIndex((o) => o.key === first.key && o.model === first.default_model);
+          const idx = assistantOptions.findIndex((o) => o.key === first.label && o.model === first.default_model);
           if (idx >= 0) preselect = idx;
         }
       }
@@ -1181,8 +1159,10 @@
       state.folder = folder;
       $("convo-folder").textContent = folder;
       blocks = [];
+      streamingProse = null;
+      openDial = null;
       render();
-      report = { summary: "", files: [] };
+      report = { files: [] };
       renderReport();
       show("conversation");
     }
@@ -1603,13 +1583,13 @@
       const kind = record.kind || "error";
       switch (kind) {
         case "cancelled":
-          return "[provider: cancelled" + (record.where_ ? " at " + record.where_ : "") + "]";
+          return "[provider: cancelled" + (record.where ? " at " + record.where : "") + "]";
         case "transient":
           return "[provider: transient" + (record.cause ? " — " + record.cause : "")
             + (record.attempts !== undefined ? " (attempt " + record.attempts + ")" : "") + "]";
         case "rate_limited":
           return "[provider: rate limited"
-            + (record.retryAfterSecs !== undefined ? " — retry in " + record.retryAfterSecs + "s" : "")
+            + (record.retry_after_secs != null ? " — retry in " + record.retry_after_secs + "s" : "")
             + (record.cause ? " — " + record.cause : "") + "]";
         case "api":
           return "[provider: api " + (record.status !== undefined ? record.status + " " : "")
@@ -1961,14 +1941,14 @@
       if (!confirm("Start again? This begins a fresh conversation; nothing already " +
         "changed in your folder is undone by this.")) return;
       $("start-again").disabled = true;
-      // `restart_conversation` already ends the old assistant and starts a
-      // new one server-side; the window only ever resets its own view —
-      // calling `startAssistant` again here would start a second, orphaned
-      // one on top of the one this just started. It reuses the selection
-      // made on the start screen for this conversation.
+      // `start_conversation` already supersedes any running assistant and
+      // starts a new one server-side; the window only ever resets its own
+      // view — calling `startAssistant` again here would start a second,
+      // orphaned one on top of the one this just started. It reuses the
+      // selection made on the start screen for this conversation.
       resetTranscript(state.folder);
       try {
-        await invoke("restart_conversation", { folder: state.folder, choice: state.choice });
+        await invoke("start_conversation", { folder: state.folder, choice: state.choice });
         state.alive = true;
       } catch (err) {
         state.alive = false;
@@ -1990,13 +1970,13 @@
     // Server commands (job_report, undo_file, undo_all) replace this
     // wholesale; "Keep your version" at a conflict is a local
     // acknowledgement, so it mutates this copy directly.
-    let report = { summary: "", files: [] };
+    let report = { files: [] };
 
     async function refreshReport() {
       try {
         report = await invoke("job_report", { folder: state.folder });
       } catch (err) {
-        report = { summary: "", files: [] };
+        report = { files: [] };
       }
       renderReport();
     }
@@ -2026,6 +2006,7 @@
     }
 
     function renderReport() {
+      $("review-banner").classList.remove("show");
       const files = report.files || [];
       $("report-empty").style.display = files.length === 0 ? "" : "none";
       const inPlace = files.filter((f) => f.status === "applied").length;
@@ -2057,14 +2038,6 @@
       card.appendChild(top);
 
       card.appendChild(headline(file));
-
-      if (file.summary) {
-        const claim = document.createElement("p");
-        claim.className = "claim";
-        const who = document.createElement("span"); who.className = "who"; who.textContent = "The assistant says";
-        claim.append(who, file.summary);
-        card.appendChild(claim);
-      }
 
       if (conflicted) {
         const note = document.createElement("p");

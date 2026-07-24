@@ -102,11 +102,10 @@ pub fn assemble(
     ));
     sections.push((Some("Host"), host_section(caps, workspace)));
     let rules = config_dir.join(HOUSE_RULES);
-    if ral_core::path::exists(&rules.to_string_lossy()) {
-        sections.push((
-            Some("House rules"),
-            std::fs::read_to_string(&rules).map_err(|e| format!("{}: {e}", rules.display()))?,
-        ));
+    match std::fs::read_to_string(&rules) {
+        Ok(text) => sections.push((Some("House rules"), text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", rules.display())),
     }
     sections.push((
         Some("Talking to the user"),

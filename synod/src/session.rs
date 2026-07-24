@@ -29,7 +29,6 @@ use exarch::provider::{
     models::{ModelCatalog, ModelSource, resolve_pinned_provider},
     pricing,
 };
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use vm_manager::Machine;
@@ -77,10 +76,9 @@ pub struct ModelChoice {
 /// One provider the window can offer, and the models known for it.
 #[derive(serde::Serialize, Clone)]
 pub struct ProviderChoice {
-    /// A stable identifier that round-trips through
-    /// [`Conversation::begin`]'s `choice`.
-    pub key: String,
-    /// [`ProviderId::label`].
+    /// [`ProviderId::label`] — the identifier that round-trips as
+    /// [`Choice::provider`] through [`Conversation::begin`], which resolves
+    /// it back to a [`ProviderId`] via [`resolve_pinned_provider`].
     pub label: String,
     pub default_model: Option<String>,
     /// Whatever the catalog honestly knows for this provider — at minimum
@@ -109,11 +107,11 @@ pub struct ModelMenu {
 /// provider with no cache still offers its one well-known model.
 /// [`refresh_menu`] is the complete listing, fetched live; this is the
 /// instant one the window shows while that runs.
-pub fn menu<S>(store: &CredentialStore, catalog: &mut ModelCatalog<S>) -> ModelMenu
+pub fn menu<S>(store: &CredentialStore, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
 where
     S: ModelSource,
 {
-    menu_from(&store.available(), catalog)
+    menu_from(&store.available(), &mut lock(catalog))
 }
 
 /// The complete provider picker: every available provider's live model
@@ -198,30 +196,20 @@ where
         .map(to_model_choice)
         .collect();
     ProviderChoice {
-        key: id.label().to_string(),
         label: id.label().to_string(),
         default_model,
         models,
     }
 }
 
-/// `default`, first, then `cached` in its own order — deduplicated so the
-/// default never appears twice, whether because `cached` already listed it
-/// or because it was merged in on an earlier call over the same catalog
-/// entry.
+/// `default` first, then `cached` in its own order — filtered so the
+/// default never appears twice when `cached` already lists it.
 fn merged_models(default: Option<&str>, cached: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::with_capacity(cached.len() + 1);
-    if let Some(default) = default {
-        seen.insert(default.to_string());
-        out.push(default.to_string());
-    }
-    for model in cached {
-        if seen.insert(model.clone()) {
-            out.push(model);
-        }
-    }
-    out
+    default
+        .map(str::to_string)
+        .into_iter()
+        .chain(cached.into_iter().filter(|m| Some(m.as_str()) != default))
+        .collect()
 }
 
 fn to_model_choice(name: String) -> ModelChoice {
@@ -229,15 +217,11 @@ fn to_model_choice(name: String) -> ModelChoice {
     ModelChoice { name, reasoning }
 }
 
-/// Lock `catalog`, recovering the guard even if a prior holder panicked —
-/// the codebase's established pattern for a lock whose data outlives any
-/// one thread's confusion about it.
-fn lock<S: ModelSource>(
-    catalog: &Mutex<ModelCatalog<S>>,
-) -> std::sync::MutexGuard<'_, ModelCatalog<S>> {
-    catalog
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Lock `m`, recovering the guard even if a prior holder panicked — the
+/// codebase's established pattern for a lock whose data outlives any one
+/// thread's confusion about it.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Load exarch's `OpenRouter` pricing/capability catalog, if this process
@@ -271,18 +255,18 @@ fn ensure_pricing_loaded() {
 /// naming `"auto"` is a request to send no reasoning option on the wire at
 /// all, landing on `effort: None` the same way, but *chosen* rather than
 /// defaulted.
-#[derive(serde::Deserialize, Clone)]
+#[derive(serde::Deserialize)]
 pub struct Choice {
     pub provider: String,
     pub model: String,
     pub effort: Option<String>,
 }
 
-/// What the window shows before the first message: the folder, who is
-/// answering, and the ~2GiB warning when the folder is that large.
+/// What the window shows before the first message: who is answering, and
+/// the ~2GiB warning when the folder is that large.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Opening {
-    /// The granted folder, display form.
-    pub folder: String,
     /// The account answering — the credential's label.
     pub account: String,
     /// The model that account is driving.
@@ -336,6 +320,46 @@ impl Conversation {
         let grant = Grant::open(folder)?;
         let hypervisor = vm_manager::detect(crate::boot_media())?;
 
+        let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
+        // The IT-set fetch-url policy, audit ledger, and rate budget — one
+        // file regardless of which front-end is running, opened once here.
+        let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
+
+        let available = store.available();
+        if available.is_empty() {
+            return Err(
+                "no model account is set up on this computer — ask your IT department \
+                    to set a provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
+                    .into(),
+            );
+        }
+        let (id, model, effort) = if let Some(Choice {
+            provider,
+            model,
+            effort,
+        }) = choice
+        {
+            (
+                resolve_pinned_provider(&provider, &available)?,
+                model,
+                effort,
+            )
+        } else {
+            let (id, model) = choose(&available)?;
+            (id, model, None)
+        };
+        let cred = store
+            .get(&id)
+            .expect("the chosen provider is one of the available ones");
+        let account = id.label().to_string();
+        let announced_model = model.clone();
+        let tuning = resolve_tuning(effort, &model)?;
+
+        let run_dir = SYNOD
+            .log_run_dir(&grant.root().to_string_lossy())
+            .map_err(|e| format!("could not make a log folder: {e}"))?;
+        let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
+
         // The two slow arms of an opening wait on different things
         // entirely: the boot on a guest kernel coming up, the
         // before-checkpoint on every byte of the folder being read and
@@ -366,48 +390,6 @@ impl Conversation {
             // The agent works where the machine put the folder: the guest's
             // `/work`.
             let workspace = machine.workspace_path().to_path_buf();
-            let cwd = workspace.to_string_lossy().into_owned();
-
-            let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
-            // The IT-set fetch-url policy, audit ledger, and rate budget — one
-            // file regardless of which front-end is running, opened once here.
-            let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
-
-            let available = store.available();
-            if available.is_empty() {
-                return Err(
-                    "no model account is set up on this computer — ask your IT department \
-                        to set a provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
-                        .into(),
-                );
-            }
-            let (id, model, effort) = if let Some(Choice {
-                provider,
-                model,
-                effort,
-            }) = choice
-            {
-                (
-                    resolve_pinned_provider(&provider, &available)?,
-                    model,
-                    effort,
-                )
-            } else {
-                let (id, model) = choose(&available)?;
-                (id, model, None)
-            };
-            let cred = store
-                .get(&id)
-                .expect("the chosen provider is one of the available ones")
-                .clone();
-            let account = id.label().to_string();
-            let announced_model = model.clone();
-            let tuning = resolve_tuning(effort, &model)?;
-
-            let run_dir = SYNOD
-                .log_run_dir(&cwd)
-                .map_err(|e| format!("could not make a log folder: {e}"))?;
-            let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
 
             // Everything the agent is told, and everything it is allowed, is in
             // the guest's namespace: the engine lives there, and the host path
@@ -455,7 +437,7 @@ impl Conversation {
                 engine.clone(),
                 &id,
                 model.clone(),
-                &cred,
+                cred,
                 None,
                 tuning,
                 None,
@@ -518,7 +500,6 @@ impl Conversation {
             });
 
             let opening = Opening {
-                folder: grant.root().to_string_lossy().into_owned(),
                 account,
                 model: announced_model,
                 large_folder_line,
@@ -558,18 +539,10 @@ impl Conversation {
     ) -> Result<(), String> {
         let outcome =
             exarch::headless::converse_sink(&mut self.agent, message, self.engine.clone(), sink);
-        match self
+        let after = self
             .history
-            .capture(self.grant.root(), workspace::Moment::After)
-        {
-            Ok(_) => {}
-            Err(e) => {
-                if outcome.is_ok() {
-                    return Err(e);
-                }
-            }
-        }
-        outcome
+            .capture(self.grant.root(), workspace::Moment::After);
+        outcome.and_then(|()| after.map(drop))
     }
 
     /// Shut the machine down, ending the conversation.
@@ -599,15 +572,16 @@ impl Conversation {
 /// user, refused in the same plain register as having no account at all —
 /// there is no menu entry left to answer it with.
 fn choose(available: &[ProviderId]) -> Result<(ProviderId, String), String> {
-    let id = available[0].clone();
-    let model = id.famous().map(|kind| kind.info().1.to_string());
-    model.map(|model| (id.clone(), model)).ok_or_else(|| {
-        format!(
-            "the account set up on this computer ('{}') does not say which model to \
-             use — ask your IT department to set one up.",
-            id.label()
-        )
-    })
+    let id = &available[0];
+    id.famous()
+        .map(|kind| (id.clone(), kind.info().1.to_string()))
+        .ok_or_else(|| {
+            format!(
+                "the account set up on this computer ('{}') does not say which model to \
+                 use — ask your IT department to set one up.",
+                id.label()
+            )
+        })
 }
 
 /// The tuning [`Choice::effort`] resolves to, masked against what the
@@ -698,7 +672,7 @@ mod tests {
 
     impl ModelSource for FakeSource {
         fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
-            lock_lists(&self.lists)
+            lock(&self.lists)
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake list".into()))
@@ -707,12 +681,6 @@ mod tests {
         fn endpoints(&self, _model: &str) -> Result<Vec<ProviderEndpoint>, String> {
             Err("not exercised by these tests".into())
         }
-    }
-
-    fn lock_lists(lists: &Arc<Mutex<Lists>>) -> std::sync::MutexGuard<'_, Lists> {
-        lists
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn one(id: ProviderId, models: &[&str]) -> Lists {

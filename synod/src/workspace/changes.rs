@@ -28,24 +28,6 @@ pub enum Change {
 }
 
 impl Change {
-    /// One plain line: "Modified invoices-2026.xlsx".
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Created {
-                path,
-                folder: false,
-            } => format!("Created {path}"),
-            Self::Created { path, folder: true } => format!("Created {path}/"),
-            Self::Modified { path } => format!("Modified {path}"),
-            Self::Deleted {
-                path,
-                folder: false,
-            } => format!("Deleted {path}"),
-            Self::Deleted { path, folder: true } => format!("Deleted {path}/"),
-            Self::Renamed { from, to } => format!("Renamed {from} to {to}"),
-        }
-    }
-
     /// The path this change is filed under, for ordering.
     fn key(&self) -> &str {
         match self {
@@ -119,10 +101,6 @@ impl ChangeSet {
         changes.sort_by(|a, b| a.key().cmp(b.key()));
         Self { changes }
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -134,6 +112,7 @@ mod tests {
         EntryKind::File {
             size: bytes.len() as u64,
             hash: ContentHash::of_bytes(bytes),
+            mode: 0o644,
         }
     }
 
@@ -191,23 +170,5 @@ mod tests {
                 to: "sent/offer.docx".into(),
             }]
         );
-    }
-
-    #[test]
-    fn a_change_describes_itself_in_plain_words() {
-        let modified = Change::Modified {
-            path: "invoices-2026.xlsx".into(),
-        };
-        let created = Change::Created {
-            path: "reminder-letters".into(),
-            folder: true,
-        };
-        let renamed = Change::Renamed {
-            from: "scan1.pdf".into(),
-            to: "smith-invoice.pdf".into(),
-        };
-        assert_eq!(modified.describe(), "Modified invoices-2026.xlsx");
-        assert_eq!(created.describe(), "Created reminder-letters/");
-        assert_eq!(renamed.describe(), "Renamed scan1.pdf to smith-invoice.pdf");
     }
 }

@@ -1,21 +1,18 @@
 //! The after-run report and the undo entry points.
 //!
 //! These are the calls the GUI makes: [`job_report`] for "what did the
-//! job change", [`undo_file`] and [`undo_all`] to put things back.  The
-//! headless run prints [`render`]'s text; the GUI consumes the types.
+//! job change", [`undo_file`] and [`undo_all`] to put things back.
 
 use crate::workspace::changes::{Change, ChangeSet};
-use crate::workspace::history::HistoryStore;
+use crate::workspace::history::{Checkpoint, HistoryStore};
 use crate::workspace::manifest::Manifest;
-use crate::workspace::restore::{Resolution, RestoreOutcome, restore};
+use crate::workspace::restore::{Resolution, RestoreOutcome, covers, restore};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// What the folder's most recent job changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobReport {
-    /// The granted folder, as a host path.
-    pub folder: String,
     /// When the job's closing checkpoint was taken; absent when the run
     /// died before taking it.
     pub finished_at_ms: Option<u64>,
@@ -30,18 +27,12 @@ pub struct JobReport {
 /// # Errors
 /// A plain sentence when no job has run here, or the records fail to read.
 pub fn job_report(store: &HistoryStore, folder: &Path) -> Result<JobReport, String> {
-    let Some((before, after)) = store.latest_job()? else {
-        return Err(format!(
-            "Synod has not finished a job in {} yet, so there is nothing to report.",
-            folder.display()
-        ));
-    };
+    let (before, after) = last_job(store, folder, "report")?;
     let (finished_at_ms, now) = match after {
         Some(checkpoint) => (Some(checkpoint.taken_at_ms), checkpoint.manifest),
         None => (None, Manifest::of_folder(folder)?),
     };
     Ok(JobReport {
-        folder: folder.to_string_lossy().into_owned(),
         finished_at_ms,
         changes: ChangeSet::between(&before.manifest, &now),
     })
@@ -56,7 +47,7 @@ pub fn undo_all(
     folder: &Path,
     resolution: Resolution,
 ) -> Result<RestoreOutcome, String> {
-    let (before, after) = last_job(store, folder)?;
+    let (before, after) = last_job(store, folder, "undo")?;
     restore(store, folder, &before, after.as_ref(), None, resolution)
 }
 
@@ -72,24 +63,12 @@ pub fn undo_file(
     path: &str,
     resolution: Resolution,
 ) -> Result<RestoreOutcome, String> {
-    let (before, after) = last_job(store, folder)?;
-    // A rename is one change with two names.  Undoing it must put the old
-    // name back AND take the new one away, so either name resolves to the
-    // pair — otherwise half the rename would stand.
+    let (before, after) = last_job(store, folder, "undo")?;
     let now = match &after {
         Some(checkpoint) => checkpoint.manifest.clone(),
         None => Manifest::of_folder(folder)?,
     };
-    let names = ChangeSet::between(&before.manifest, &now)
-        .changes
-        .iter()
-        .find_map(|change| match change {
-            Change::Renamed { from, to } if from == path || to == path => {
-                Some(vec![from.clone(), to.clone()])
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| vec![path.to_string()]);
+    let names = rename_closure(path, &ChangeSet::between(&before.manifest, &now));
     restore(
         store,
         folder,
@@ -100,37 +79,45 @@ pub fn undo_file(
     )
 }
 
-/// The report as plain text, for the headless run's output.
-pub fn render(report: &JobReport) -> String {
-    if report.changes.is_empty() {
-        return format!("The assistant changed nothing in {}.\n", report.folder);
+/// The names `path` resolves to, expanded to a fixpoint over `changes`'
+/// renames.  A rename is one change with two names; undoing it must put
+/// the old name back AND take the new one away, so a name covering
+/// either side — exactly, or as a folder over a file moved into or out of
+/// it — pulls in the other side too, or half the rename would stand.  The
+/// loop, not one pass, matters: an endpoint just pulled in can itself
+/// cover another rename's endpoint.
+fn rename_closure(path: &str, changes: &ChangeSet) -> Vec<String> {
+    let mut names = vec![path.to_string()];
+    loop {
+        let mut grew = false;
+        for change in &changes.changes {
+            let Change::Renamed { from, to } = change else {
+                continue;
+            };
+            if !names.iter().any(|n| covers(from, n) || covers(to, n)) {
+                continue;
+            }
+            for endpoint in [from, to] {
+                if !names.contains(endpoint) {
+                    names.push(endpoint.clone());
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            return names;
+        }
     }
-    let mut out = format!("What changed in {}:\n", report.folder);
-    for change in &report.changes.changes {
-        out.push_str("  ");
-        out.push_str(&change.describe());
-        out.push('\n');
-    }
-    out.push_str(
-        "\nEvery change above can be put back the way it was — \
-         one file at a time or all at once — from this folder's history in Synod.\n",
-    );
-    out
 }
 
 fn last_job(
     store: &HistoryStore,
     folder: &Path,
-) -> Result<
-    (
-        crate::workspace::history::Checkpoint,
-        Option<crate::workspace::history::Checkpoint>,
-    ),
-    String,
-> {
+    doing: &str,
+) -> Result<(Checkpoint, Option<Checkpoint>), String> {
     store.latest_job()?.ok_or_else(|| {
         format!(
-            "Synod has not run a job in {} yet, so there is nothing to undo.",
+            "Synod has not run a job in {} yet, so there is nothing to {doing}.",
             folder.display()
         )
     })
@@ -139,23 +126,12 @@ fn last_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixture::granted_workshop as workshop;
     use crate::workspace::history::Moment;
-    use std::path::PathBuf;
-
-    /// A workshop holding a granted folder and a store, side by side.
-    fn workshop(tag: &str) -> (PathBuf, PathBuf, HistoryStore) {
-        let dir = std::env::temp_dir().join(format!("synod-report-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let folder = dir.join("Admissions");
-        std::fs::create_dir_all(&folder).expect("temp workshop");
-        let store = HistoryStore::open_at(&dir.join("history")).expect("store opens");
-        let dir = std::fs::canonicalize(&dir).expect("temp workshop resolves");
-        (dir.clone(), dir.join("Admissions"), store)
-    }
 
     #[test]
-    fn the_report_names_each_change_and_the_way_back() {
-        let (dir, folder, store) = workshop("report");
+    fn the_report_names_each_change() {
+        let (dir, folder, store) = workshop("report-report");
         std::fs::write(folder.join("invoices-2026.xlsx"), b"v1").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::write(folder.join("invoices-2026.xlsx"), b"v2").expect("job");
@@ -164,32 +140,31 @@ mod tests {
 
         let report = job_report(&store, &folder).expect("reports");
         assert!(report.finished_at_ms.is_some());
-        let text = render(&report);
-        assert!(text.contains("Modified invoices-2026.xlsx"), "{text}");
-        assert!(text.contains("Created reminder-letters/"), "{text}");
-        assert!(
-            text.contains("put back"),
-            "the way back must be said: {text}"
-        );
+        assert!(report.changes.changes.contains(&Change::Modified {
+            path: "invoices-2026.xlsx".into(),
+        }));
+        assert!(report.changes.changes.contains(&Change::Created {
+            path: "reminder-letters".into(),
+            folder: true,
+        }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_quiet_job_says_so() {
-        let (dir, folder, store) = workshop("quiet");
+        let (dir, folder, store) = workshop("report-quiet");
         std::fs::write(folder.join("a.txt"), b"same").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         store.capture(&folder, Moment::After).expect("after");
 
         let report = job_report(&store, &folder).expect("reports");
-        assert!(report.changes.is_empty());
-        assert!(render(&report).contains("changed nothing"));
+        assert!(report.changes.changes.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn before_any_job_there_is_nothing_to_report_or_undo() {
-        let (dir, folder, store) = workshop("nothing");
+        let (dir, folder, store) = workshop("report-nothing");
         let message = job_report(&store, &folder).expect_err("no job yet");
         assert!(message.contains("nothing to report"), "{message}");
         let message = undo_all(&store, &folder, Resolution::KeepCurrent).expect_err("no job yet");
@@ -201,7 +176,7 @@ mod tests {
     /// name comes back and the new one goes away — never half a rename.
     #[test]
     fn undoing_a_rename_by_either_name_undoes_both_sides() {
-        let (dir, folder, store) = workshop("rename");
+        let (dir, folder, store) = workshop("report-rename");
         std::fs::write(folder.join("scan001.pdf"), b"the scan").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::rename(folder.join("scan001.pdf"), folder.join("enrolment.pdf")).expect("job");
@@ -216,9 +191,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Undoing the folder a file was renamed *into* must not strand the
+    /// file: both the folder's own creation and the rename that landed a
+    /// file inside it come back together, so the old name reappears
+    /// instead of the file simply vanishing with the folder.
+    #[test]
+    fn undoing_a_created_folder_also_undoes_a_rename_into_it() {
+        let (dir, folder, store) = workshop("report-rename-into-folder");
+        std::fs::write(folder.join("draft.docx"), b"the draft").expect("fixture");
+        store.capture(&folder, Moment::Before).expect("baseline");
+        std::fs::create_dir(folder.join("reports")).expect("job");
+        std::fs::rename(
+            folder.join("draft.docx"),
+            folder.join("reports").join("draft.docx"),
+        )
+        .expect("job");
+        store.capture(&folder, Moment::After).expect("after");
+
+        let outcome = undo_file(&store, &folder, "reports", Resolution::KeepCurrent)
+            .expect("undoing the folder undoes the rename into it too");
+        assert_eq!(outcome.put_back, ["draft.docx"]);
+        assert_eq!(outcome.removed, ["reports/draft.docx", "reports"]);
+        assert!(folder.join("draft.docx").exists());
+        assert!(!folder.join("reports").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mirror case: undoing a deleted folder a file was renamed *out
+    /// of* must also undo that rename, or the file ends up duplicated —
+    /// once under the restored folder, once at the name it was moved to.
+    #[test]
+    fn undoing_a_deleted_folder_also_undoes_a_rename_out_of_it() {
+        let (dir, folder, store) = workshop("report-rename-out-of-folder");
+        std::fs::create_dir(folder.join("archive")).expect("fixture");
+        std::fs::write(folder.join("archive").join("report.docx"), b"the report")
+            .expect("fixture");
+        store.capture(&folder, Moment::Before).expect("baseline");
+        std::fs::rename(
+            folder.join("archive").join("report.docx"),
+            folder.join("report.docx"),
+        )
+        .expect("job");
+        std::fs::remove_dir(folder.join("archive")).expect("job");
+        store.capture(&folder, Moment::After).expect("after");
+
+        let outcome = undo_file(&store, &folder, "archive", Resolution::KeepCurrent)
+            .expect("undoing the folder undoes the rename out of it too");
+        assert_eq!(outcome.put_back, ["archive", "archive/report.docx"]);
+        assert_eq!(outcome.removed, ["report.docx"]);
+        assert!(folder.join("archive").join("report.docx").exists());
+        assert!(!folder.join("report.docx").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn undo_all_and_undo_file_reach_the_driver() {
-        let (dir, folder, store) = workshop("undo");
+        let (dir, folder, store) = workshop("report-undo");
         std::fs::write(folder.join("a.txt"), b"a original").expect("fixture");
         std::fs::write(folder.join("b.txt"), b"b original").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
