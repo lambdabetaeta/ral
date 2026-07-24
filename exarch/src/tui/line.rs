@@ -561,14 +561,22 @@ fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'stat
         .max(3);
     for (i, h) in hunks[..shown].iter().enumerate() {
         if i > 0 {
-            ls.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("{:>gutter$} ", "⋮"), Style::default().fg(SLATE)),
-            ]));
+            ls.push(elision_row(gutter));
         }
         push_hunk(&mut ls, h, gutter);
     }
     ls
+}
+
+/// The trailing "there is more" gutter row: a bare `⋮` right-aligned to
+/// `gutter` — the elision glyph both [`diff_capped`]'s inter-hunk separator
+/// and [`render_listing`]'s cap marker share, so a write and a diff speak
+/// one vocabulary for "there is more below".
+fn elision_row(gutter: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{:>gutter$} ", "⋮"), Style::default().fg(SLATE)),
+    ])
 }
 
 /// The largest line number [`patch`] will render for `h`, used to size the
@@ -1112,10 +1120,7 @@ fn render_listing(bytes: &[u8], more: bool) -> Vec<Line<'static>> {
         }
     }
     if more {
-        ls.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{:>gutter$} ", "⋮"), Style::default().fg(SLATE)),
-        ]));
+        ls.push(elision_row(gutter));
     }
     ls
 }

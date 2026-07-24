@@ -161,9 +161,8 @@ pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
 /// threshold measures against, but takes no action of its own at this mark.
 pub const AGENT_DEMOTE_IDLE: Duration = Duration::from_mins(5);
 
-/// One live agent, by id, for the `agents` listing.
+/// One live agent, for the `agents` listing.
 pub struct AgentInfo {
-    pub id: AgentId,
     pub name: String,
     pub log_dir: PathBuf,
     pub elapsed: Duration,
@@ -247,6 +246,14 @@ struct Entry {
     /// the first one — `started` is the epoch until then.  The only writer
     /// is [`AgentRegistry::renew`].
     last_exchange: Option<Instant>,
+}
+
+impl Entry {
+    /// This entry's idle span: the wall-clock time since its last human
+    /// exchange, or since birth if it was never engaged.
+    fn idle(&self) -> Duration {
+        self.last_exchange.unwrap_or(self.started).elapsed()
+    }
 }
 
 impl Default for AgentRegistry {
@@ -360,10 +367,6 @@ impl AgentRegistry {
             mailbox,
             provider,
         } = reg;
-        if let Some(ttl) = lease {
-            let reg = self.clone();
-            process::arm_callback(ttl, move || lease_fire(&reg, id)).keep();
-        }
         let mut g = self.lock();
         if let Some(p) = parent
             && g.entries.get(&p).is_none_or(|e| e.cancel.terminated())
@@ -397,6 +400,13 @@ impl AgentRegistry {
                 last_exchange: None,
             },
         );
+        // Armed only now, after the entry exists: `lease_fire` re-reads the
+        // entry by id, so arming any earlier would let the reaper's very
+        // first fire find nothing and end the chain before it ever started.
+        if let Some(ttl) = lease {
+            let reg = self.clone();
+            process::arm_callback(ttl, move || lease_fire(&reg, id)).keep();
+        }
         Ok(g.generation)
     }
 
@@ -479,9 +489,7 @@ impl AgentRegistry {
     /// was never engaged.  `None` once the entry is gone.
     pub fn idle(&self, id: AgentId) -> Option<Duration> {
         let g = self.lock();
-        g.entries
-            .get(&id)
-            .map(|e| e.last_exchange.unwrap_or(e.started).elapsed())
+        g.entries.get(&id).map(Entry::idle)
     }
 
     /// The nearest time-to-reap across every live leased entry — `ttl -
@@ -494,8 +502,7 @@ impl AgentRegistry {
             .values()
             .filter_map(|e| {
                 let ttl = e.lease?;
-                let idle = e.last_exchange.unwrap_or(e.started).elapsed();
-                Some(ttl.saturating_sub(idle))
+                Some(ttl.saturating_sub(e.idle()))
             })
             .min()
     }
@@ -507,7 +514,7 @@ impl AgentRegistry {
     fn lease_state(&self, id: AgentId) -> Option<(Duration, Duration)> {
         self.lock().entries.get(&id).and_then(|e| {
             let ttl = e.lease?;
-            Some((e.last_exchange.unwrap_or(e.started).elapsed(), ttl))
+            Some((e.idle(), ttl))
         })
     }
 
@@ -623,14 +630,14 @@ impl AgentRegistry {
     /// Returns `Err(NotADescendant(target))` if `target` is live but is not
     /// a proper descendant of `caller`.
     pub fn cancel_scoped(&self, caller: AgentId, target: AgentId) -> Result<bool, NotADescendant> {
-        let live = {
+        let scoped = {
             let g = self.lock();
             if !g.entries.contains_key(&target) {
                 return Ok(false);
             }
             is_descendant_of(&g.entries, caller, target)
         };
-        if !live {
+        if !scoped {
             return Err(NotADescendant(target));
         }
         Ok(self.cancel(target))
@@ -653,28 +660,28 @@ impl AgentRegistry {
     /// the agent that started them.  `ancestor` itself is excluded: an agent
     /// lists the ones *it* spawned, not itself.
     pub fn list(&self, ancestor: AgentId) -> Vec<AgentInfo> {
-        let g = self.lock();
-        let mut v: Vec<AgentInfo> = descendants(&g.entries, ancestor, false)
-            .into_iter()
-            .filter_map(|id| {
-                g.entries.get(&id).map(|e| AgentInfo {
-                    id,
-                    name: e.name.clone(),
-                    log_dir: e.log_dir.clone(),
-                    elapsed: e.started.elapsed(),
+        let mut rows: Vec<(AgentId, AgentInfo)> = {
+            let g = self.lock();
+            descendants(&g.entries, ancestor, false)
+                .into_iter()
+                .filter_map(|id| {
+                    g.entries.get(&id).map(|e| {
+                        (
+                            id,
+                            AgentInfo {
+                                name: e.name.clone(),
+                                log_dir: e.log_dir.clone(),
+                                elapsed: e.started.elapsed(),
+                            },
+                        )
+                    })
                 })
-            })
-            .collect();
-        drop(g);
-        v.sort_by_key(|a| a.id);
-        v
+                .collect()
+        };
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        rows.into_iter().map(|(_, info)| info).collect()
     }
 
-    /// Look up one agent's name by id, if it is live.
-    pub fn name_for(&self, id: AgentId) -> Option<String> {
-        let g = self.lock();
-        g.entries.get(&id).map(|e| e.name.clone())
-    }
     /// `/clear` on `root`: cancel and reap `root`'s proper descendants — the
     /// subtree the rebuilt context no longer owns — and bump the generation so
     /// any late result or deferred surface batch from the old context is

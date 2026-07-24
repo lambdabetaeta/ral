@@ -147,11 +147,11 @@ pub fn run(
     // registry and transport engine.  Input, the queued-user strip, async-agent
     // results, and the worker's drive loop all read and write this one inbox,
     // already threaded into `tui.app` above.
-    let fleet = Fleet::new(
-        session.agents.clone(),
-        FleetBus::session(&session.inbox()),
+    let fleet = Fleet {
+        agents: session.agents.clone(),
+        bus: FleetBus::session(&session.inbox()),
         engine,
-    );
+    };
     if let Some(s) = seed {
         session.seed(s);
     }

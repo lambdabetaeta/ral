@@ -169,7 +169,7 @@ fn builtin_index(shell: &Shell, returns: bool, allow_schedule: bool) -> String {
     names.sort_unstable();
     names.dedup();
     format!(
-        "Every builtin and prelude function, by name — call `explain <name>` for any one'\''s signature and docs:\n\n{}",
+        "Every builtin and prelude function, by name — call `explain <name>` for any one's signature and docs:\n\n{}",
         names.join(", ")
     )
 }

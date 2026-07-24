@@ -956,9 +956,10 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let all = skill::discover_all(&cwd, &config_dir);
     let mut out = String::new();
     for (name, dir) in &all {
-        let rp = shell.resolve(&dir.join("SKILL.md").to_string_lossy());
+        let sk_md = dir.join("SKILL.md");
+        let rp = shell.resolve(&sk_md.to_string_lossy());
         if shell.check_fs_read(&rp).is_ok()
-            && let Some(s) = skill::parse_skill(&dir.join("SKILL.md"), name)
+            && let Some(s) = skill::parse_skill(dir, name)
         {
             if !out.is_empty() {
                 out.push('\n');

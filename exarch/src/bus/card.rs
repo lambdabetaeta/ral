@@ -104,6 +104,19 @@ pub struct Measure {
     pub unit: Option<String>,
 }
 
+impl Measure {
+    /// The `value[/max][unit]` readout, unlabelled — shared by
+    /// [`FieldVal::plain`] and [`summary_line`]'s `Mark::Measure` arm.
+    fn readout(&self) -> String {
+        let bound = self.max.map(|mx| format!("/{mx}")).unwrap_or_default();
+        format!(
+            "{}{bound}{}",
+            self.value,
+            self.unit.as_deref().unwrap_or("")
+        )
+    }
+}
+
 /// A value in a [`Mark::Fields`] row's shared value column: a run of inline
 /// spans (`text`) or a nested [`Measure`] — the one composability rule
 /// (marks nest in a field's value) at the field scale.
@@ -121,10 +134,7 @@ impl FieldVal {
     pub fn plain(&self) -> String {
         match self {
             Self::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
-            Self::Measure(m) => {
-                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
-                format!("{}{bound}{}", m.value, m.unit.as_deref().unwrap_or(""))
-            }
+            Self::Measure(m) => m.readout(),
         }
     }
 }
@@ -1107,15 +1117,7 @@ pub fn summary_line(card: &Card) -> String {
                     })
                     .collect::<String>(),
             ),
-            Mark::Measure(m) => {
-                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
-                format!(
-                    "{} {}{bound}{}",
-                    m.label,
-                    m.value,
-                    m.unit.as_deref().unwrap_or("")
-                )
-            }
+            Mark::Measure(m) => format!("{} {}", m.label, m.readout()),
             Mark::Fields { rows } => rows
                 .iter()
                 .map(|f| format!("{} {}", f.label, f.value.plain()))

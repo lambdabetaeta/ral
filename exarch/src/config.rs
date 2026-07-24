@@ -51,6 +51,10 @@ use ral_core::types::{Break, Capabilities, Value};
 /// The config file name under `$XDG_CONFIG_HOME/exarch/`.
 const CONFIG_FILE: &str = "config.ral";
 
+/// This module's error-message prefix, shared with the `read_optional_file`/
+/// `evaluate_no_authority` helpers below.
+const LABEL: &str = "exarch config";
+
 /// The operator-set disk-warn ceiling, in bytes, or `None` if unset.
 ///
 /// Absent means [`crate::agent::Agent::check_disk_warn`] never
@@ -95,45 +99,61 @@ pub fn load() -> Result<Vec<CustomProvider>, String> {
     let path = crate::bootstrap::EXARCH
         .xdg_dir(ral_core::path::basedir::XdgKind::Config)
         .join(CONFIG_FILE);
-    let Some(source) = read_config(&path)? else {
+    let Some(source) = read_optional_file(&path, LABEL)? else {
         return Ok(Vec::new());
     };
     let source = ral_core::source::normalize_source_text(source);
     let display = path.to_string_lossy().into_owned();
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     decode(
-        evaluate_no_authority(&mut shell, &source, &display)?,
+        evaluate_no_authority(&mut shell, &source, &display, LABEL)?,
         &display,
     )
 }
 
-/// Read the config file: `Ok(None)` when it is absent (a no-op), `Ok(Some)`
-/// with its text when present, and a hard error on a genuine IO failure
-/// (permission denied, say) — a present-but-unreadable config is never
+/// Read a trusted `.ral` config or policy file: `Ok(None)` when it is absent
+/// (a no-op for the caller to fall back from), `Ok(Some)` with its text when
+/// present, and a hard error prefixed with `label` on a genuine IO failure
+/// (permission denied, say) — a present-but-unreadable file is never
 /// silently treated as absent.
+///
+/// Shared by [`crate::org_policy::load`], which reads the IT-owned
+/// fetch-url policy the same way.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:provider-config] reads the unusual-provider config from the trusted XDG config home to configure transport; configuration loading at setup, not turn-time model data I/O."
+    reason = "[io-door:silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the IT-owned fetch-url policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
 )]
-fn read_config(path: &std::path::Path) -> Result<Option<String>, String> {
+pub(crate) fn read_optional_file(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("exarch config {}: {e}", path.display())),
+        Err(e) => Err(format!("{label} {}: {e}", path.display())),
     }
 }
 
 /// Evaluate `source` through the shared `evaluate_source` core under a
 /// [`Capabilities::deny_all`] frame, so the config can compute a value but
-/// reach no effect. Errors are surfaced with the file path for provenance.
-fn evaluate_no_authority(shell: &mut Shell, source: &str, display: &str) -> Result<Value, String> {
+/// reach no effect. Errors are surfaced with `label` and the file path for
+/// provenance.
+///
+/// Shared by [`crate::org_policy::load`], which evaluates the fetch-url
+/// policy through the identical no-authority mechanism.
+pub(crate) fn evaluate_no_authority(
+    shell: &mut Shell,
+    source: &str,
+    display: &str,
+    label: &str,
+) -> Result<Value, String> {
     shell
         .with_capabilities(Capabilities::deny_all(), |sh| {
             ral_core::builtins::modules::evaluate_source(sh, source, display)
         })
         .map_err(|e| match e {
-            Break::Error(err) => format!("exarch config {display}: {}", err.message),
-            other @ Break::Escape(_) => format!("exarch config {display}: {other:?}"),
+            Break::Error(err) => format!("{label} {display}: {}", err.message),
+            other @ Break::Escape(_) => format!("{label} {display}: {other:?}"),
         })
 }
 
@@ -240,7 +260,7 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
-            evaluate_no_authority(&mut shell, &source, "<test:config>")?,
+            evaluate_no_authority(&mut shell, &source, "<test:config>", LABEL)?,
             "<test:config>",
         )
     }

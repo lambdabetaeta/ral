@@ -148,7 +148,7 @@ impl GestureState {
                 && let Some(vp) = viewports.get(&focused)
             {
                 let text = vp.selection_text(a.min(b), a.max(b));
-                self.copy_toast = Some((text.len(), Instant::now()));
+                self.copy_toast = Some((text.chars().count(), Instant::now()));
                 let _ = osc52_copy(&text);
             }
         } else if let Some(idx) = press.block {

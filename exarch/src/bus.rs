@@ -139,17 +139,6 @@ impl AgentOutcome {
         }
     }
 
-    /// The synchronous `agent` `tool_result` text the parent sees in this turn.
-    pub fn reply(&self, text: &str) -> String {
-        match self {
-            Self::Complete => text.to_string(),
-            Self::Empty => "(child returned empty reply)".into(),
-            Self::Stopped(r) => format!("(child stopped: {r})"),
-            Self::Cancelled => "(child cancelled)".into(),
-            Self::Failed(e) => format!("call error: {e}"),
-        }
-    }
-
     /// The marked synthetic-turn text the model sees when an async result is
     /// drained, named with the child's tab label.
     pub fn marked_turn(&self, name: &str, text: &str) -> String {
@@ -433,13 +422,11 @@ fn surface_notice(values: &[Value]) -> String {
 /// The next deliverable a turn-boundary drain yields, carrying both the
 /// model-facing text *and* its source.
 ///
-/// `drain_turn` once collapsed every source to a bare `String`, so the
-/// driver could not tell a human prompt from a wakeup from an agent reply
-/// and rendered all three as the human's own prompt-echo.  Threading the
-/// source through lets each turn render in its honest medium — a human
-/// prompt echoes as the user's turn, a wakeup as marked chrome, an agent
-/// reply as the same `↘` block a synchronous child gets — while the model
-/// still receives [`Self::text`] unchanged.
+/// Each deliverable carries the source it came from, so the driver renders
+/// it in its honest medium — a human prompt echoes as the user's turn, a
+/// wakeup as marked chrome, an agent reply as the same `↘` block a
+/// synchronous child gets — while the model still receives [`Self::text`]
+/// unchanged.
 #[derive(Clone, Debug)]
 pub enum Turn {
     /// A coalesced run of human prompts (the old whole-queue join).  A
@@ -625,19 +612,6 @@ impl Shared {
         self.signal.notify_all();
         Ok(())
     }
-
-    /// Wake a parked consumer without enqueuing a message, so it re-evaluates
-    /// its park verdict.  Takes the queue lock first (dropping it before the
-    /// notify): [`Self::try_push`] gets its lost-wakeup safety for free by
-    /// pushing under the lock before it notifies, but a bare wake has no
-    /// message to push, so it must take the lock itself to get the same
-    /// guarantee — otherwise the notify can land in the gap between a parked
-    /// consumer checking its verdict and actually starting to wait on the
-    /// condvar, and go unheard until the next [`PARK_POLL`].
-    fn wake(&self) {
-        drop(self.lock());
-        self.signal.notify_all();
-    }
 }
 
 /// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes
@@ -783,35 +757,21 @@ impl Inbox {
     /// taken in one pass under the queue lock: nothing is drained,
     /// reordered, or woken — enumeration is not observation.
     pub fn source_depths(&self) -> Vec<(&'static str, u64)> {
-        let q = self.shared.lock();
-        let mut user = 0;
-        let mut schedule = 0;
-        let mut agent = 0;
-        let mut message = 0;
-        let mut nudge = 0;
-        let mut command = 0;
-        let mut surface = 0;
-        for msg in q.iter() {
-            match msg {
-                InboxMsg::UserSteering(_) => user += 1,
-                InboxMsg::ScheduledWakeup { .. } => schedule += 1,
-                InboxMsg::AgentResult(_) => agent += 1,
-                InboxMsg::AgentMessage(_) => message += 1,
-                InboxMsg::Nudge(_) => nudge += 1,
-                InboxMsg::Command(_) => command += 1,
-                InboxMsg::Surface { .. } => surface += 1,
+        let mut rows = vec![
+            ("user", 0u64),
+            ("schedule", 0),
+            ("agent", 0),
+            ("message", 0),
+            ("nudge", 0),
+            ("command", 0),
+            ("surface", 0),
+        ];
+        for msg in self.shared.lock().iter() {
+            if let Some(row) = rows.iter_mut().find(|(s, _)| *s == source_name(msg)) {
+                row.1 += 1;
             }
         }
-        drop(q);
-        vec![
-            ("user", user),
-            ("schedule", schedule),
-            ("agent", agent),
-            ("message", message),
-            ("nudge", nudge),
-            ("command", command),
-            ("surface", surface),
-        ]
+        rows
     }
 
     /// Pending user-authored steering prompts, oldest first, for the TUI's
@@ -875,22 +835,7 @@ impl Inbox {
         let mut turns = Vec::new();
         while q.front().is_some_and(|m| m.boundary() == Boundary::Tool) {
             if matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
-                // Coalesce the consecutive run of (non-slash) steering, as the
-                // turn-boundary drain does, so it lands as one human turn.
-                let mut text = String::new();
-                while let Some(InboxMsg::UserSteering(s)) = q.front() {
-                    if is_slash(s) {
-                        break;
-                    }
-                    let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
-                        unreachable!("front just checked to be user steering")
-                    };
-                    if !text.is_empty() {
-                        text.push_str("\n\n");
-                    }
-                    text.push_str(&s);
-                }
-                turns.push(Turn::Human(text));
+                turns.push(coalesce_steering(&mut q));
             } else {
                 let msg = q.pop_front().expect("front present and tool-boundary");
                 if let Some(turn) = to_turn(msg, epoch) {
@@ -941,9 +886,9 @@ impl Inbox {
     /// re-checks `cancel` every [`PARK_POLL`].
     ///
     /// Two orderings carry the loop's correctness.  The verdict runs *under
-    /// the queue mutex*, so a push or a bare [`wake`](Self::wake) can never
-    /// interleave between the verdict and the wait (the condvar releases the
-    /// lock atomically) — a lost wakeup is impossible.  And the verdict is
+    /// the queue mutex*, so a push can never interleave between the verdict
+    /// and the wait (the condvar releases the lock atomically) — a lost
+    /// wakeup is impossible.  And the verdict is
     /// computed *before* the pop, so a producer that both changes a verdict
     /// input and delivers a message need only deliver first
     /// (deliver-then-retire, the module's [lock order](self)): a `Quiesce`
@@ -994,12 +939,6 @@ impl Inbox {
         }
     }
 
-    /// Wake a parked [`next_or_idle`](Self::next_or_idle) without enqueuing a
-    /// message, so it re-evaluates its `park` verdict.
-    pub fn wake(&self) {
-        self.shared.wake();
-    }
-
     /// Drop every pending message — `/clear` rebuilds the agent, so neither
     /// queued user prompts nor stale non-human deliveries carry across.
     /// Runs each dropped message's drain side effect
@@ -1044,26 +983,36 @@ fn pop_turn(q: &mut VecDeque<InboxMsg>, epoch: u64) -> Option<Turn> {
                 };
                 return Some(Turn::Human(s));
             }
-            let mut text = String::new();
-            while let Some(InboxMsg::UserSteering(s)) = q.front() {
-                if is_slash(s) {
-                    break;
-                }
-                let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
-                    unreachable!("front just checked to be user steering")
-                };
-                if !text.is_empty() {
-                    text.push_str("\n\n");
-                }
-                text.push_str(&s);
-            }
-            return Some(Turn::Human(text));
+            return Some(coalesce_steering(q));
         }
         let msg = q.pop_front().expect("front checked present");
         if let Some(turn) = to_turn(msg, epoch) {
             return Some(turn);
         }
     }
+}
+
+/// Pop the leading run of consecutive, non-slash [`InboxMsg::UserSteering`]
+/// entries off `q` and join them with a blank line into one [`Turn::Human`] —
+/// the coalesce half of the never-merge rule ([`Shared::try_push`]), shared by
+/// [`Inbox::drain_tool`] and [`pop_turn`]. Both callers enter with a
+/// guaranteed non-slash steering at the front, so the loop always pops at
+/// least one entry.
+fn coalesce_steering(q: &mut VecDeque<InboxMsg>) -> Turn {
+    let mut text = String::new();
+    while let Some(InboxMsg::UserSteering(s)) = q.front() {
+        if is_slash(s) {
+            break;
+        }
+        let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
+            unreachable!("front just checked to be user steering")
+        };
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&s);
+    }
+    Turn::Human(text)
 }
 
 /// Convert one non-user-steering message into the [`Turn`] it delivers,
@@ -1357,14 +1306,14 @@ impl UsageMeter {
 // The bounded, coalescing transport
 // ---------------------------------------------------------------------------
 //
-// `Emitter`/`FleetBus` used to hold a bare `mpsc::Sender<Event>`/
-// `Receiver<Event>`: an unbounded channel, so a producer flood (a token
-// stream the renderer can't keep up with) grew heap without limit
-// (`decisions/260705_leases-and-budgets`, "the presentation bus is bounded
-// by class"). [`BusSender`]/[`BusReceiver`] replace the pair beneath the same
-// `Sender`/`Receiver`-shaped API (`send`, `try_recv`, `recv_timeout`, even
-// reusing `std::sync::mpsc`'s own error types) so [`drain_pass`]/[`Sink::drive`]
-// and every call site need only change the type name, not the logic.
+// `Emitter`/`FleetBus` carry events through [`BusSender`]/[`BusReceiver`]: a
+// bounded, coalescing queue, so a producer flood (a token stream the
+// renderer can't keep up with) is capped rather than growing heap without
+// limit (`decisions/260705_leases-and-budgets`, "the presentation bus is
+// bounded by class"). The pair exposes the same `Sender`/`Receiver`-shaped
+// API (`send`, `try_recv`, `recv_timeout`, even reusing `std::sync::mpsc`'s
+// own error types), so [`drain_pass`]/[`Sink::drive`] and every call site
+// need only name the type, not change the logic.
 //
 // THE MERGE RULE: pushing a coalescible [`Kind`] — `Token`/`Thinking`
 // (concatenate) or `Phase` (replace; its own doc already declares
@@ -1575,10 +1524,10 @@ impl Drop for BusSender {
             // The last sender is gone: wake a parked receiver so it observes
             // the disconnect instead of waiting out its timeout.  Taking the
             // queue lock first — even though there is nothing left to push —
-            // is what makes the notify reliable: it cannot land in the gap
-            // between a receiver checking `senders` and actually starting to
-            // wait on the condvar, the same lost-wakeup gap `Shared::wake`
-            // closes for the inbox's own bare wake.
+            // is what makes the notify reliable: a lock-then-notify always
+            // closes the gap between a receiver checking `senders` and
+            // actually starting to wait on the condvar, so the wake can
+            // never land unheard in between.
             drop(self.0.lock());
             self.0.signal.notify_all();
         }
@@ -2090,6 +2039,12 @@ where
         sink.drive(bus.rx(), done_ref)?;
         Ok(h.join().ok().flatten())
     })
+}
+
+#[cfg(test)]
+pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
+    let (tx, rx) = channel();
+    (Emitter::new(tx, 0), rx)
 }
 
 #[cfg(test)]

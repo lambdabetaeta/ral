@@ -101,12 +101,7 @@ impl CredentialStore {
         let mut accounts: Vec<(ProviderId, crate::provider::oauth::OAuthToken)> =
             crate::provider::oauth::load_all()
                 .into_iter()
-                .map(|tok| {
-                    (
-                        ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(&tok))),
-                        tok,
-                    )
-                })
+                .map(|tok| (chatgpt_id(&tok), tok))
                 .collect();
         accounts.sort_by(|(a, _), (b, _)| a.label().cmp(b.label()));
 

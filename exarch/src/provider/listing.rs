@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 /// One background fetch's state, generic over the loaded payload — a
 /// provider's model list ([`ModelsState`]) or a model's serving-provider list
 /// ([`EndpointsState`]).
+#[derive(Clone)]
 pub enum FetchState<T> {
     /// The background fetch is in flight — the row reads "loading…".
     Loading,

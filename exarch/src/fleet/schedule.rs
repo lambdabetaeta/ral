@@ -344,7 +344,6 @@ pub type ScheduleId = u64;
 
 /// A snapshot row for the `schedules` listing.
 pub struct ScheduleInfo {
-    pub id: ScheduleId,
     pub label: String,
     pub trigger: String,
     /// Seconds until the next fire, or `None` for a cron with no further
@@ -511,21 +510,25 @@ impl ScheduleRegistry {
 
     /// Snapshot the live schedules, ordered by id.
     pub fn list(&self) -> Vec<ScheduleInfo> {
-        let g = self.lock();
-        let mut v: Vec<ScheduleInfo> = g
-            .entries
-            .iter()
-            .map(|(id, e)| ScheduleInfo {
-                id: *id,
-                label: e.label.clone(),
-                trigger: e.trigger.describe(),
-                next_in: e.trigger.next_delay(),
-                fires: e.fires,
-            })
-            .collect();
-        drop(g);
-        v.sort_by_key(|s| s.id);
-        v
+        let mut rows: Vec<(ScheduleId, ScheduleInfo)> = {
+            let g = self.lock();
+            g.entries
+                .iter()
+                .map(|(&id, e)| {
+                    (
+                        id,
+                        ScheduleInfo {
+                            label: e.label.clone(),
+                            trigger: e.trigger.describe(),
+                            next_in: e.trigger.next_delay(),
+                            fires: e.fires,
+                        },
+                    )
+                })
+                .collect()
+        };
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        rows.into_iter().map(|(_, info)| info).collect()
     }
 
     /// `/clear`: drop every schedule (disarming each reaper deadline).  The

@@ -9,7 +9,7 @@
 use fff_search::file_picker::FilePicker;
 use fff_search::{
     FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
-    QueryTracker, SharedFilePicker, SharedFrecency, SharedQueryTracker,
+    SharedFilePicker, SharedFrecency,
 };
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -28,7 +28,6 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 /// hands out `&'static` borrows.
 pub(super) struct Index {
     picker: SharedFilePicker,
-    queries: SharedQueryTracker,
 }
 
 /// Process-global registry: one `Index` per canonical base path.
@@ -77,11 +76,6 @@ fn build_index(base: &Path) -> Result<Index, String> {
         .init(FrecencyTracker::open(db_root.join("frecency")).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
 
-    let queries = SharedQueryTracker::default();
-    queries
-        .init(QueryTracker::open(db_root.join("queries")).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-
     let picker = SharedFilePicker::default();
     FilePicker::new_with_shared_state(
         picker.clone(),
@@ -94,7 +88,7 @@ fn build_index(base: &Path) -> Result<Index, String> {
     )
     .map_err(|e| e.to_string())?;
     picker.wait_for_scan(SCAN_TIMEOUT);
-    Ok(Index { picker, queries })
+    Ok(Index { picker })
 }
 
 fn path_hash(p: &Path) -> u64 {
@@ -106,7 +100,7 @@ fn path_hash(p: &Path) -> u64 {
 /// Run one search against `idx` and return matching paths.
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the picker and query-tracker read guards must both span fuzzy_search and the result projection, which reads paths back through the picker"
+    reason = "the picker read guard must span both fuzzy_search and the result projection, which reads paths back through the picker"
 )]
 pub(super) fn search_paths(idx: &Index, query: &str, limit: usize) -> Result<Vec<String>, String> {
     let parser = QueryParser::default();
@@ -118,10 +112,9 @@ pub(super) fn search_paths(idx: &Index, query: &str, limit: usize) -> Result<Vec
     let picker = picker_guard
         .as_ref()
         .ok_or("fff index handle is empty (scan failed)")?;
-    let qt_guard = idx.queries.read().map_err(|e| e.to_string())?;
     let result = picker.fuzzy_search(
         &parsed,
-        qt_guard.as_ref(),
+        None,
         FuzzySearchOptions {
             pagination: PaginationArgs { offset: 0, limit },
             ..Default::default()

@@ -103,7 +103,9 @@ fn drive_picker(
         // the disk write stays single-threaded.
         for id in listing.pump(catalog) {
             if let (Some(state), Some(p)) = (listing.state(&id), tui.app.picker_mut()) {
-                p.set_models(&id, cloned_state(state));
+                // The picker keeps its own render copy; `listing` holds the
+                // authoritative one.
+                p.set_models(&id, state.clone());
             }
         }
         // Fold any landed serving-provider results the same way.
@@ -165,19 +167,6 @@ fn drive_picker(
                 }
             }
         }
-    }
-}
-
-/// Clone a fetch state's payload into a fresh state for the picker's own
-/// view — [`Listing`] and [`Fetches`] hold the authoritative copy (behind the
-/// catalog, or in flight on a worker thread); the picker keeps this one for
-/// rendering, exactly as [`Picker::set_models`](picker::Picker::set_models)
-/// and [`Picker::set_endpoints`](picker::Picker::set_endpoints) expect.
-fn cloned_state<T: Clone>(state: &picker::FetchState<T>) -> picker::FetchState<T> {
-    match state {
-        picker::FetchState::Loading => picker::FetchState::Loading,
-        picker::FetchState::Loaded(value) => picker::FetchState::Loaded(value.clone()),
-        picker::FetchState::Failed(reason) => picker::FetchState::Failed(reason.clone()),
     }
 }
 

@@ -169,11 +169,12 @@ impl PartialEq for FetchLimiter {
 /// The durable, append-only `fetch-url` ledger.
 ///
 /// One compact JSON object per line (NDJSON), never `AgentLog`'s
-/// pretty-printed multi-line JSON — a short line's one `write()` is atomic
-/// under POSIX (at most `PIPE_BUF` bytes), so concurrent exarch/synod
-/// processes sharing one machine can append to the same file without
-/// interleaving each other's records. Every fetch is recorded, allowed or
-/// refused, before the desk answers.
+/// pretty-printed multi-line JSON — an append-mode file's single `write()`
+/// places its bytes atomically at the file's current end, so concurrent
+/// exarch/synod processes sharing one machine can append to the same file
+/// without interleaving each other's records, provided each record is
+/// written in one syscall. Every fetch is recorded, allowed or refused,
+/// before the desk answers.
 #[derive(Clone)]
 pub struct AuditLog(Arc<Mutex<std::fs::File>>);
 
@@ -231,7 +232,7 @@ impl AuditLog {
         bytes: Option<u64>,
         note: Option<&str>,
     ) {
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "ts": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
@@ -242,9 +243,9 @@ impl AuditLog {
             "note": note,
         })
         .to_string();
+        line.push('\n');
         let Ok(mut f) = self.0.lock() else { return };
-        let _ = writeln!(f, "{line}");
-        let _ = f.flush();
+        let _ = f.write_all(line.as_bytes());
     }
 }
 

@@ -446,7 +446,7 @@ pub(crate) fn run_shell(
                             (status, None)
                         }
                     }
-                    ral_core::transport::Break::Exit(code) => ((*code).clamp(0, 255), None),
+                    ral_core::transport::Break::Exit(code) => (*code, None),
                     #[cfg(unix)]
                     ral_core::transport::Break::Stopped { .. } => (1, None),
                 },
@@ -585,7 +585,7 @@ mod tests {
     //! mobile-install contract.
 
     use super::*;
-    use crate::bus::{BusReceiver, Emitter, Inbox, channel};
+    use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::Shell;
     use ral_core::types::Capabilities;
@@ -617,14 +617,6 @@ mod tests {
         builtins::install_agent_library(&mut shell).expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);
         shell
-    }
-
-    /// Make an `Emitter` whose receiver is held alive locally so sends
-    /// don't fail.  Tests never assert on what was emitted — they only
-    /// need `run_shell` not to error on the send path.
-    fn dummy_emitter() -> (Emitter, BusReceiver) {
-        let (tx, rx) = channel();
-        (Emitter::new(tx, 0), rx)
     }
 
     /// Drive one tool call through the real `run_shell` entry point.
@@ -667,7 +659,7 @@ mod tests {
     /// turn."  Panics on a static (parse/type) failure, preserving the old
     /// helper's behaviour so the out-of-scope `witnesses` tests still panic.
     fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
@@ -696,11 +688,7 @@ mod tests {
     #[test]
     fn view_tags_lines_with_hash() {
         let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir().join(format!("exarch-view-tag-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
-        let path = tmp.join("alpha.txt");
-        std::fs::write(&path, "alpha\n").expect("write view fixture");
-        let path_str = display_no_trailing_sep(&path);
+        let (tmp, path_str) = scratch_file("view-tag", "alpha.txt", "alpha\n");
         let r = run_once(
             &mut shell,
             &format!(
@@ -829,8 +817,7 @@ mod tests {
     #[test]
     fn edit_window_hash_addresses_repeated_lines() {
         let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir().join(format!("exarch-window-edit-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
+        let tmp = scratch_dir("window-edit");
 
         // Two `target` lines, different context: distinguishable.
         let repeated = tmp.join("repeated.txt");
@@ -912,8 +899,7 @@ target
     #[test]
     fn edit_batch_is_atomic_and_non_interfering() {
         let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir().join(format!("exarch-batch-edit-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
+        let tmp = scratch_dir("batch-edit");
         let path = tmp.join("batch.txt");
         let original = "\
 keep-top
@@ -1094,14 +1080,11 @@ keep-bottom
 
         fn assert_round_trips(label: &str, content: &str) {
             let mut shell = fresh_shell();
-            let tmp = std::env::temp_dir().join(format!(
-                "exarch-numeric-witness-{}-{label}",
-                std::process::id()
-            ));
-            let _ = std::fs::create_dir_all(&tmp);
-            let path = tmp.join("fixture.txt");
-            std::fs::write(&path, format!("{content}\n")).expect("write witness fixture");
-            let path_str = display_no_trailing_sep(&path);
+            let (tmp, path_str) = scratch_file(
+                &format!("numeric-witness-{label}"),
+                "fixture.txt",
+                &format!("{content}\n"),
+            );
 
             // Read the witness exactly as the agent would: from `view-text`.
             let vr = run_once(
@@ -1127,7 +1110,7 @@ keep-bottom
                 &mut shell,
                 &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
             );
-            let after = std::fs::read_to_string(&path).unwrap_or_default();
+            let after = std::fs::read_to_string(tmp.join("fixture.txt")).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&tmp);
 
             assert_eq!(
@@ -1267,7 +1250,7 @@ keep-bottom
 
     #[test]
     fn model_surface_cannot_write_service_pins() {
-        let (emit, rx) = dummy_emitter();
+        let (emit, rx) = crate::bus::dummy_emitter();
         let protected = Kind::Pin {
             key: SERVICES_PIN_KEY.to_string(),
             card: crate::bus::card::Card(Vec::new()),
@@ -1279,7 +1262,7 @@ keep-bottom
             "expected protected-pin diagnostic"
         );
 
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let ordinary = Kind::Unpin {
             key: "tasks".into(),
         };
@@ -1363,7 +1346,7 @@ keep-bottom
     #[test]
     fn timeout_kills_external_subprocess_tree() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         // The grandchild prints its own pid so the test can prove it was
         // reaped, then sleeps far past the timeout; the `/bin/sh` leader
         // blocks in `wait`, holding the call open until the grandchild
@@ -1422,7 +1405,7 @@ keep-bottom
     #[test]
     fn timeout_message_names_budget_and_knob() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
             Outcome::Ran(r) => r,
@@ -1452,7 +1435,7 @@ keep-bottom
     #[test]
     fn command_exit_renders_once_with_true_code_and_tip() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let r = match run_shell_direct(
             &mut shell,
             &Capabilities::root(),
@@ -1487,7 +1470,7 @@ keep-bottom
     #[test]
     fn raised_error_carries_no_recovery_tip() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let r = match run_shell_direct(&mut shell, &Capabilities::root(), "fail 7", 10, &emit) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
@@ -1513,7 +1496,7 @@ keep-bottom
     #[test]
     fn timeout_kills_sandboxed_subprocess_tree() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = match run_shell_direct(&mut shell, &projecting_caps(), cmd, 2, &emit) {
@@ -1575,7 +1558,7 @@ keep-bottom
     fn root_cancel_unwinds_inflight_run_shell() {
         let mut shell = fresh_shell().fork_session();
         let handle = shell.cancel_handle();
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = std::thread::scope(|s| {
@@ -1676,9 +1659,7 @@ keep-bottom
     #[test]
     fn programmatic_todo_sweep_rewrites_every_match() {
         let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir().join(format!("exarch-todo-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("create temp tree");
+        let tmp = scratch_dir("todo-sweep");
         std::fs::write(
             tmp.join("a.txt"),
             "alpha [TODO] one\nplain\nbeta [TODO] two\n",
@@ -1731,12 +1712,11 @@ return !{{length $hits}}"
     #[test]
     fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
         let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir().join(format!("exarch-edit-replace-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        let file = tmp.join("config.txt");
-        std::fs::write(&file, "USE_OPENCV := 0\nUSE_LEVELDB := 1\n").expect("write fixture");
-        let file_str = display_no_trailing_sep(&file);
+        let (tmp, file_str) = scratch_file(
+            "edit-replace",
+            "config.txt",
+            "USE_OPENCV := 0\nUSE_LEVELDB := 1\n",
+        );
 
         let r = run_once(
             &mut shell,
@@ -1749,7 +1729,7 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
         assert_eq!(
-            std::fs::read_to_string(&file).expect("read after edit"),
+            std::fs::read_to_string(tmp.join("config.txt")).expect("read after edit"),
             "USE_OPENCV := 1\nUSE_LEVELDB := 1\n"
         );
 
@@ -1770,7 +1750,7 @@ return !{{length $hits}}"
             "a repeated match must error, not guess which one"
         );
         assert_eq!(
-            std::fs::read_to_string(&file).expect("read after failed edit"),
+            std::fs::read_to_string(tmp.join("config.txt")).expect("read after failed edit"),
             "USE_OPENCV := 1\nUSE_LEVELDB := 1\n",
             "a rejected batch must leave the file untouched"
         );
@@ -1898,14 +1878,20 @@ return !{{length $hits}}"
             .collect()
     }
 
-    /// Write `body` into a fresh per-test temp dir and return both the dir and
-    /// the display path of the file inside it (no trailing separator), the
-    /// fixture shape the redirect/exec coverage tests need.  Mirrors the
-    /// scratch-dir pattern the surrounding edit/grep tests already use.
-    fn scratch_file(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, String) {
+    /// Fresh, empty per-test temp dir named after `tag`.  Any stale dir from
+    /// a prior run is removed first.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("exarch-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// Write `body` into a fresh per-test temp dir and return both the dir and
+    /// the display path of the file inside it (no trailing separator), the
+    /// fixture shape the redirect/exec coverage tests need.
+    fn scratch_file(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, String) {
+        let dir = scratch_dir(tag);
         let path = dir.join(name);
         std::fs::write(&path, body).expect("write scratch fixture");
         let disp = display_no_trailing_sep(&path);
@@ -1952,9 +1938,7 @@ return !{{length $hits}}"
         use crate::bus::card::{IoEvent, WriteMode, WriteOutcome};
         let mut shell = fresh_shell();
         // A fresh dir with no fixture file: the write creates the target.
-        let dir = std::env::temp_dir().join(format!("exarch-cov-write-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let dir = scratch_dir("cov-write");
         let path = display_no_trailing_sep(&dir.join("b"));
 
         let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));

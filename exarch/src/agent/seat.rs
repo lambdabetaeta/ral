@@ -277,7 +277,7 @@ fn identity_ceremony(
 )]
 mod tests {
     use super::*;
-    use crate::bus::{AgentId, Emitter, Inbox, channel};
+    use crate::bus::{Emitter, Inbox};
     use crate::fleet::desk::{ExarchDesk, HostServices};
     use crate::fleet::registry::AgentRegistry;
     use crate::provider::{Provider, ProviderKind, scripted::Script};
@@ -396,11 +396,6 @@ mod tests {
         }
     }
 
-    fn dummy_emitter() -> (Emitter, crate::bus::BusReceiver) {
-        let (tx, rx) = channel();
-        (Emitter::new(tx, 0 as AgentId), rx)
-    }
-
     /// A wire-seat turn round-trips through a real engine child: dispatch,
     /// drain, and a live `` `surface `` value reaches `on_surface` in order
     /// before the terminal `Report`.
@@ -444,7 +439,7 @@ mod tests {
     #[test]
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
         let (seat, mut child) = wire_seat(Liveness::default());
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let registry = AgentRegistry::new();
         let desk = Arc::new(ExarchDesk {
             services: wire_host_services(&emit, &registry),
@@ -503,7 +498,10 @@ mod tests {
         });
         let (report, elapsed) = settled;
 
-        assert!(report.is_some(), "the engine must still answer with a Report");
+        assert!(
+            report.is_some(),
+            "the engine must still answer with a Report"
+        );
         assert!(
             elapsed < WAIT,
             "cancel must settle the turn well inside {WAIT:?} rather than run `sleep 30` to \

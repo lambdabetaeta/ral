@@ -328,6 +328,13 @@ pub(crate) fn remove(account: &str) -> Result<Option<String>, String> {
 // The storage core is a pure function of a path, so it is exercised in tests
 // against a temp file without mutating the process environment.
 
+/// Serializes `save_one_at` and `remove_at`'s load-modify-write against the
+/// store: two concurrent refreshes (one per stale account) that interleaved
+/// an unlocked read and write would each write back a stale copy of the
+/// *other* account, silently reverting it. `load_all_at` alone stays
+/// lock-free — a bare read is never part of a race.
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:token-read] reads the persisted OAuth tokens; credential store infra, not turn-time data I/O"
@@ -340,6 +347,9 @@ fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
 }
 
 fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut all = load_all_at(path);
     let replaced = if let Some(existing) = all.iter_mut().find(|t| t.account_id == token.account_id)
     {
@@ -354,6 +364,9 @@ fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, Strin
 }
 
 fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut all = load_all_at(path);
     let Some(pos) = all
         .iter()

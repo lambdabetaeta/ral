@@ -529,7 +529,7 @@ impl AgentLog {
     pub fn append_user(&mut self, text: String) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
             return Err(format!(
-                "tool results are pending; cannot accept new user prompt while session is in state {:?}",
+                "cannot accept a new user prompt while session is in state {:?}",
                 self.state
             ));
         }
@@ -631,9 +631,11 @@ impl AgentLog {
     /// reply — a user cancellation or a surfaced error.  `reason`
     /// selects the synthetic stub text and the optional breadcrumb.
     ///
-    /// # Panics
-    /// Panics if the synthesised tool results fail to match the pending ids,
-    /// which cannot occur since they are built directly from those ids.
+    /// Total: a disk-write failure while synthesising a stub event is
+    /// swallowed ([`Self::record_lossy`]) rather than left unresolved,
+    /// since the caller has no fallback state to quiesce *to* — the
+    /// in-memory mirror still advances so the state machine reaches
+    /// `ReadyForUser` regardless of `events.json`'s fate.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
         let already_ready = self.is_ready();
         let (tool_stub, assistant_stub, stop_label) = match reason {
@@ -664,13 +666,17 @@ impl AgentLog {
                             content: tool_stub.into(),
                         })
                         .collect();
-                    self.append_tool_results(results)
-                        .expect("synthetic results match pending ids");
+                    self.record_lossy(SessionEvent::ToolResults { results });
+                    self.state = State::AwaitingAssistantAfterToolResults;
                 }
                 State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults => {
-                    let msg = ChatMessage::assistant(assistant_stub);
-                    self.append_assistant(msg, vec![], Some(stop_label.into()))
-                        .expect("stub assistant is valid here");
+                    let message = ChatMessage::assistant(assistant_stub);
+                    self.record_lossy(SessionEvent::AssistantMessage {
+                        message,
+                        pending_tool_ids: vec![],
+                        stop_reason: Some(stop_label.into()),
+                    });
+                    self.state = State::ReadyForUser;
                 }
             }
         }
@@ -896,10 +902,17 @@ impl AgentLog {
         self.record(ev)
     }
 
-    fn record(&mut self, ev: SessionEvent) -> io::Result<()> {
-        serde_json::to_writer_pretty(&mut self.events_file, &ev).map_err(io::Error::other)?;
+    /// Append `ev` to `events.json` — the disk half of [`Self::record`],
+    /// factored out so [`Self::record_lossy`] can push to the in-memory
+    /// mirror even when this fails.
+    fn write_event(&mut self, ev: &SessionEvent) -> io::Result<()> {
+        serde_json::to_writer_pretty(&mut self.events_file, ev).map_err(io::Error::other)?;
         self.events_file.write_all(b"\n")?;
-        self.events_file.flush()?;
+        self.events_file.flush()
+    }
+
+    fn record(&mut self, ev: SessionEvent) -> io::Result<()> {
+        self.write_event(&ev)?;
         self.events.push(ev);
         Ok(())
     }
@@ -908,6 +921,16 @@ impl AgentLog {
     /// methods, which already plumb string errors back to the caller.
     fn record_or_string_err(&mut self, ev: SessionEvent) -> Result<(), String> {
         self.record(ev).map_err(|e| e.to_string())
+    }
+
+    /// Best-effort `record`: push to the in-memory mirror regardless of
+    /// whether the disk write succeeds.  Used only by [`Self::quiesce`],
+    /// which has no fallback state to leave the machine in — the
+    /// protocol must reach `ReadyForUser` even when `events.json` can't
+    /// be written.
+    fn record_lossy(&mut self, ev: SessionEvent) {
+        let _ = self.write_event(&ev);
+        self.events.push(ev);
     }
 
     /// Project an event slice into the `Vec<ChatMessage>` shape genai
@@ -1008,7 +1031,7 @@ mod tests {
         s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
             .unwrap();
         let err = s.append_user("next".into()).unwrap_err();
-        assert!(err.contains("tool results are pending"));
+        assert!(err.contains("cannot accept a new user prompt"));
     }
 
     #[test]

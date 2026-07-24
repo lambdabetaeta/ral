@@ -32,9 +32,11 @@ const VALUE_CAP: usize = 20_000;
 const STDOUT_CAP: usize = 10_000;
 const STDERR_CAP: usize = 10_000;
 
-/// Cap for an `Outcome::Static` blob (parse / type errors etc.) — a
-/// diagnostic the model reads in full and cannot query, so it gets the
-/// same room as stderr.
+/// Cap for an `Outcome::Static` blob (parse / type errors etc.).
+///
+/// A diagnostic the model reads in full and cannot query.  These are short:
+/// a blob that blows past a few KB is noise, not signal, so the cap sits
+/// well under the streamed sections' caps.
 pub const OPAQUE_CAP: usize = 3000;
 
 /// Cap for the payload a child agent returns through `reply` — a curated,

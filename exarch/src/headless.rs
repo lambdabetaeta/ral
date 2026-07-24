@@ -402,11 +402,11 @@ pub fn run(
     // Headless has no idle loop and no tabs, so the channel closes when
     // the worker finishes and async children stay muted *on the display* — but
     // each still records its own trace, the behaviour we want everywhere.
-    let fleet = Fleet::new(
-        session.agents.clone(),
-        FleetBus::per_turn(&session.inbox()),
+    let fleet = Fleet {
+        agents: session.agents.clone(),
+        bus: FleetBus::per_turn(&session.inbox()),
         engine,
-    );
+    };
     // Seed the launch prompt into that same inbox; the headless trunk is a
     // returning agent that does not park, so `drive` runs the seeded work and
     // returns once it is idle.
@@ -539,11 +539,11 @@ pub fn converse_sink<S: Sink>(
     // Per-exchange, like headless's own per-turn bus: this call's channel
     // closes when the exchange parks, so draining it can never block on a
     // later message the caller has not sent yet.
-    let fleet = Fleet::new(
-        session.agents.clone(),
-        FleetBus::per_turn(&session.inbox()),
+    let fleet = Fleet {
+        agents: session.agents.clone(),
+        bus: FleetBus::per_turn(&session.inbox()),
         engine,
-    );
+    };
     session.seed(message);
     let root_id = session.id;
     let outcome = pump(sink, &fleet.bus, root_id, root_transcript, |emit| {
@@ -571,7 +571,8 @@ mod tests {
     /// provider, under its own throwaway run dir — the fixture both new
     /// tests below share as their only setup.
     fn converse_trunk(tag: &str, script: Script) -> Agent {
-        let dir = std::env::temp_dir().join(format!("exarch-converse-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("exarch-converse-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp run dir");
         let scratch = Arc::new(
@@ -640,7 +641,10 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let (outcome, payload) = session.drive_queued(&emit);
-        assert!(payload.is_none(), "a conversing trunk carries no reply payload");
+        assert!(
+            payload.is_none(),
+            "a conversing trunk carries no reply payload"
+        );
         assert!(
             !matches!(outcome, AgentOutcome::Complete),
             "a conversing trunk never completes by returning a value: {outcome:?}"
@@ -837,7 +841,9 @@ mod tests {
             .expect("a conversing trunk never fails for want of a reply");
 
         assert!(
-            sink.0.iter().any(|k| matches!(k, Kind::Token(t) if t.contains("hi there"))),
+            sink.0
+                .iter()
+                .any(|k| matches!(k, Kind::Token(t) if t.contains("hi there"))),
             "reply text must arrive as a Kind::Token among {} events",
             sink.0.len()
         );

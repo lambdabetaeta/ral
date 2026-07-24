@@ -56,9 +56,9 @@ base64     = { workspace = true }
 sha2       = "0.11"
 getrandom  = "0.4"
 # Line-level structured diffing: `edit` computes one canonical whole-file
-# diff (original vs final) and emits a single grouped-hunk card.  Default
-# features only — `from_lines`/`grouped_ops`/`iter_changes` are line-level;
-# `inline`/`unicode`/`bytes` are not pulled in.
+# diff (original vs final) and emits a single grouped-hunk card. `inline`
+# and `unicode` are enabled and consumed by `whole_file_hunks`'
+# `iter_inline_changes`/`iter_strings_lossy` for the intra-line word diff.
 similar    = { version = "3", features = ["inline", "unicode"] }
 # Calendar arithmetic for scheduled-wakeup cron evaluation (next occurrence
 # in the host-local timezone, DST-aware).  Already compiled in transitively

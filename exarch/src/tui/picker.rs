@@ -73,7 +73,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-pub use crate::provider::listing::{EndpointsState, FetchState, ModelsState};
+pub use crate::provider::listing::{EndpointsState, ModelsState};
 
 /// The chosen serving provider together with the model it was chosen for. The
 /// control shows it (and [`Picker::apply`] emits it) only while that model is
@@ -480,6 +480,16 @@ impl Picker {
             .then_some(route.slug.as_str())
     }
 
+    /// The active-route index into `items` — the convention both the
+    /// provider control's cycling and its tag rendering must agree on:
+    /// index `0` is "auto", index `i+1` is the item whose slug (read off by
+    /// `slug_of`) matches [`Self::active_route`].
+    fn active_index<T>(&self, rows: &[Row], items: &[T], slug_of: impl Fn(&T) -> &str) -> usize {
+        self.active_route(rows)
+            .and_then(|s| items.iter().position(|it| slug_of(it) == s))
+            .map_or(0, |i| i + 1)
+    }
+
     /// Whether the highlighted model admits `param` (its catalog
     /// `supported_parameters`). Unknown models — a catalog miss, the manual
     /// row, or a still-loading list — read as supported, so the controls are
@@ -618,11 +628,7 @@ impl Picker {
                 if slugs.is_empty() {
                     return; // loading / failed / none — nothing to cycle yet
                 }
-                // Index 0 is "auto"; index i+1 is slugs[i].
-                let pos = self
-                    .active_route(rows)
-                    .and_then(|s| slugs.iter().position(|x| x == s))
-                    .map_or(0, |i| i + 1);
+                let pos = self.active_index(rows, &slugs, String::as_str);
                 let next = if up {
                     (pos + 1).min(slugs.len())
                 } else {
@@ -760,8 +766,8 @@ impl Picker {
         )]
         let failed = self.failed_lines(note_width).len() as u16;
         // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
-        //          + list(VISIBLE+border) + effort(1) + temp(1) + top-p(1)
-        //          + failed notes (wrapped)
+        //          + list(VISIBLE+border) + provider(1) + effort(1) + temp(1)
+        //          + top-p(1) + failed notes (wrapped)
         // Always reserve the provider row so the overlay size is stable; the
         // row reads "OpenRouter routing only" for a non-OpenRouter model.
         let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + failed;
@@ -993,11 +999,7 @@ impl Picker {
             Color::Rgb(110, 200, 200), // teal
             Color::Rgb(220, 140, 180), // rose
         ];
-        // Index 0 is `auto`; index i+1 is `endpoints[i]`.
-        let active = self
-            .active_route(rows)
-            .and_then(|slug| endpoints.iter().position(|e| e.slug == slug))
-            .map_or(0, |i| i + 1);
+        let active = self.active_index(rows, endpoints, |e| e.slug.as_str());
 
         let mut spans = vec![label, Span::styled(" auto ", auto_style(active == 0))];
         for (i, endpoint) in endpoints.iter().enumerate() {

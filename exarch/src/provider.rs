@@ -104,11 +104,6 @@ impl Provider {
         &self.tuning
     }
 
-    /// The selected `OpenRouter` serving-provider slug, if any.
-    pub fn route(&self) -> Option<&str> {
-        self.route.as_deref()
-    }
-
     /// The resolved model name.
     pub fn model(&self) -> &str {
         &self.model
@@ -196,7 +191,6 @@ mod tests {
         let mut provider =
             Provider::scripted("gpt-5.5", ProviderKind::Openai, scripted::Script::new());
         provider.route = Some("deepinfra".into());
-        assert_eq!(provider.route(), Some("deepinfra"));
         assert_eq!(provider.openrouter_route(), None);
 
         provider.id = ProviderId::Famous(ProviderKind::Openrouter);

@@ -5,7 +5,7 @@
 //! Read from a fixed system path (`/etc/exarch/fetch-policy.ral` — no XDG
 //! home, no per-user override), evaluated through the shared
 //! [`ral_core::builtins::modules::evaluate_source`] path under a
-//! [`Capabilities::deny_all`] grant, exactly as [`crate::config::load`]
+//! [`ral_core::types::Capabilities::deny_all`] grant, exactly as [`crate::config::load`]
 //! reads the user's own unusual-provider config — the same vetted shape,
 //! applied to a policy that is IT's rather than the user's. Absent, it
 //! falls back to a small built-in default (mirrors
@@ -17,13 +17,17 @@
 //! which one is running.
 
 use ral_core::Shell;
-use ral_core::types::{Break, Capabilities, Value};
+use ral_core::types::Value;
 
 /// The one fixed path every front-end reads — no XDG lookup, no
 /// per-invocation override: this is IT's ruleset, not the user's.
 const POLICY_PATH: &str = "/etc/exarch/fetch-policy.ral";
 
 const DEFAULT_POLICY_RAL: &str = include_str!("org_policy/default-policy.ral");
+
+/// This module's error-message prefix, passed to `crate::config`'s shared
+/// `read_optional_file`/`evaluate_no_authority` helpers.
+const LABEL: &str = "fetch-url policy";
 
 /// What `fetch-url` is allowed to reach, and how much of it.
 #[derive(Debug)]
@@ -47,7 +51,7 @@ pub struct OrgPolicy {
 /// [`OrgPolicy`].
 pub fn load() -> Result<OrgPolicy, String> {
     let path = std::path::Path::new(POLICY_PATH);
-    let (source, display) = match read_policy_file(path)? {
+    let (source, display) = match crate::config::read_optional_file(path, LABEL)? {
         Some(text) => (text, path.to_string_lossy().into_owned()),
         None => (
             DEFAULT_POLICY_RAL.to_string(),
@@ -57,39 +61,9 @@ pub fn load() -> Result<OrgPolicy, String> {
     let source = ral_core::source::normalize_source_text(source);
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     decode(
-        evaluate_no_authority(&mut shell, &source, &display)?,
+        crate::config::evaluate_no_authority(&mut shell, &source, &display, LABEL)?,
         &display,
     )
-}
-
-/// Read the policy file: `Ok(None)` when it is absent (fall back to the
-/// default), `Ok(Some)` with its text when present, and a hard error on a
-/// genuine IO failure — a present-but-unreadable policy is never silently
-/// treated as absent.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:fetch-policy] reads the IT-owned fetch-url allowlist from a fixed root-owned system path to configure network egress policy; configuration loading at setup, not turn-time model data I/O."
-)]
-fn read_policy_file(path: &std::path::Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("fetch-url policy {}: {e}", path.display())),
-    }
-}
-
-/// Evaluate `source` through the shared `evaluate_source` core under a
-/// [`Capabilities::deny_all`] frame, so the policy can compute a value but
-/// reach no effect.
-fn evaluate_no_authority(shell: &mut Shell, source: &str, display: &str) -> Result<Value, String> {
-    shell
-        .with_capabilities(Capabilities::deny_all(), |sh| {
-            ral_core::builtins::modules::evaluate_source(sh, source, display)
-        })
-        .map_err(|e| match e {
-            Break::Error(err) => format!("fetch-url policy {display}: {}", err.message),
-            other @ Break::Escape(_) => format!("fetch-url policy {display}: {other:?}"),
-        })
 }
 
 /// Require a present `Int`-valued field, naming the field on a miss.
@@ -193,7 +167,12 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
-            evaluate_no_authority(&mut shell, &source, "<test:fetch-policy>")?,
+            crate::config::evaluate_no_authority(
+                &mut shell,
+                &source,
+                "<test:fetch-policy>",
+                LABEL,
+            )?,
             "<test:fetch-policy>",
         )
     }

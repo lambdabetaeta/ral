@@ -721,7 +721,9 @@ impl Agent {
         // the boot recipe minus its engine-local scratch — stands in here
         // and is then discarded.
         let identity_shell = match &root_seat {
-            RootSeat::Identity { scratch, cwd } => Some(seat::boot_root_shell(scratch, cwd.clone())),
+            RootSeat::Identity { scratch, cwd } => {
+                Some(seat::boot_root_shell(scratch, cwd.clone()))
+            }
             #[cfg(unix)]
             RootSeat::Wire { .. } => None,
         };
@@ -732,13 +734,14 @@ impl Agent {
         // length (the log must exist before the agent it describes does)
         // and `Build` carries the same string on to become `Agent::system`.
         let throwaway_wire_shell;
-        let indexes = crate::prompt::BuiltinIndexes::resolve(if let Some(shell) = &identity_shell {
-            shell
-        } else {
-            throwaway_wire_shell =
-                crate::bootstrap::exarch_shell(ral_core::io::TerminalState::default());
-            &throwaway_wire_shell
-        });
+        let indexes =
+            crate::prompt::BuiltinIndexes::resolve(if let Some(shell) = &identity_shell {
+                shell
+            } else {
+                throwaway_wire_shell =
+                    crate::bootstrap::exarch_shell(ral_core::io::TerminalState::default());
+                &throwaway_wire_shell
+            });
         let system_prompt = indexes.apply(&system, !interactive, allow_schedule);
         let log = AgentLog::root(
             &sessions_root,
@@ -2147,14 +2150,18 @@ impl Agent {
                         .find(|(k, _)| k == key)
                         .map(|(_, v)| v.clone())
                 };
-                let id = match field("id") {
+                let int_field = |key: &str| match field(key) {
                     Some(FOValue::Int { value }) => {
-                        #[allow(clippy::cast_sign_loss, reason="probe workers.id is a non-negative WorkerId")]
-                        let id = value as u64;
-                        id
+                        #[allow(
+                            clippy::cast_sign_loss,
+                            reason = "probe integers (id, up-secs, idle-secs) are non-negative counters"
+                        )]
+                        let v = value as u64;
+                        v
                     }
-                    other => unreachable!("`workers row `id must be an Int, got {other:?}"),
+                    other => unreachable!("`workers row `{key} must be an Int, got {other:?}"),
                 };
+                let id = int_field("id");
                 let cmd = match field("cmd") {
                     Some(FOValue::String { value }) => value,
                     other => unreachable!("`workers row `cmd must be a String, got {other:?}"),
@@ -2173,27 +2180,16 @@ impl Agent {
                     Some(FOValue::Bool { value }) => value,
                     other => unreachable!("`workers row `running must be a Bool, got {other:?}"),
                 };
-                let up_secs = match field("up-secs") {
-                    Some(FOValue::Int { value }) => {
-                        #[allow(clippy::cast_sign_loss, reason="probe up-secs is a non-negative duration")]
-                        let up_secs = value as u64;
-                        up_secs
-                    }
-                    other => unreachable!("`workers row `up-secs must be an Int, got {other:?}"),
-                };
-                let idle_secs = match field("idle-secs") {
-                    Some(FOValue::Int { value }) => {
-                        #[allow(clippy::cast_sign_loss, reason="probe idle-secs is a non-negative duration")]
-                        let idle_secs = value as u64;
-                        idle_secs
-                    }
-                    other => unreachable!("`workers row `idle-secs must be an Int, got {other:?}"),
-                };
+                let up_secs = int_field("up-secs");
+                let idle_secs = int_field("idle-secs");
                 let settled_epoch = match field("settled-epoch") {
                     Some(FOValue::Variant { label, payload }) if label == "some" => {
                         match payload.as_deref() {
                             Some(FOValue::Int { value }) => {
-                                #[allow(clippy::cast_sign_loss, reason="probe settled-epoch is a non-negative unix epoch")]
+                                #[allow(
+                                    clippy::cast_sign_loss,
+                                    reason = "probe settled-epoch is a non-negative ral-call epoch"
+                                )]
                                 let epoch = *value as u64;
                                 Some(epoch)
                             }
@@ -2487,8 +2483,9 @@ struct Dispatch {
 /// continuation, a command never reaches the model.
 fn announce(turn: &Turn, emit: &Emitter) {
     match turn {
-        Turn::Human(s) | Turn::Wakeup(s) => emit.emit(Kind::UserPromptEcho(s.clone())),
-        Turn::Message(_) => emit.emit(Kind::UserPromptEcho(turn.text())),
+        Turn::Human(_) | Turn::Wakeup(_) | Turn::Message(_) => {
+            emit.emit(Kind::UserPromptEcho(turn.text()));
+        }
         Turn::Agent(r) => emit.emit(Kind::SubagentDone {
             name: r.name.clone(),
             outcome: r.outcome.clone(),
@@ -2503,7 +2500,7 @@ fn announce(turn: &Turn, emit: &Emitter) {
         // viewport.  The model is then woken with `turn.text()`'s notice.
         Turn::Surface { values, .. } => {
             for v in values {
-                if let Some(kind) = shell_eval::decode_surface(v) {
+                if let Some(kind) = shell_eval::accepted_surface(v, emit) {
                     emit.emit(kind);
                 }
             }

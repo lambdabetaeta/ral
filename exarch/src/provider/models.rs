@@ -125,6 +125,15 @@ impl LiveSource {
     }
 }
 
+/// A short-lived current-thread runtime for one blocking listing call.
+/// `what` names the caller in the build-failure message.
+fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("build {what} runtime: {e}"))
+}
+
 impl ModelSource for LiveSource {
     fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
         let credential = self
@@ -147,10 +156,7 @@ impl ModelSource for LiveSource {
                 })
                 .flatten()
         });
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build endpoints runtime: {e}"))?;
+        let runtime = blocking_runtime("endpoints")?;
         runtime.block_on(async {
             let mut request = crate::provider::tls::client().get(&url);
             if let Some(key) = key {
@@ -190,10 +196,7 @@ impl LiveSource {
             endpoint: id.endpoint().map(Endpoint::from_owned),
             auth: Some(AuthData::from_single(key.to_owned())),
         };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build listing runtime: {e}"))?;
+        let runtime = blocking_runtime("listing")?;
         runtime
             .block_on(
                 self.client
@@ -213,10 +216,7 @@ impl LiveSource {
         id: &ProviderId,
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
     ) -> Result<Vec<String>, String> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build subscription model-list runtime: {e}"))?;
+        let runtime = blocking_runtime("subscription model-list")?;
         runtime.block_on(async {
             oauth::refresh_cell_if_stale(cell)
                 .await

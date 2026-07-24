@@ -66,6 +66,9 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     if description.is_empty() {
         return Err("`description` must be non-empty".to_string());
     }
+    if description.contains('\n') {
+        return Err("`description` must be a single line (no newlines)".to_string());
+    }
     let description = if description.chars().count() > DESCRIPTION_MAX {
         description
             .chars()
@@ -75,9 +78,6 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     } else {
         description
     };
-    if description.contains('\n') {
-        return Err("`description` must be a single line (no newlines)".to_string());
-    }
     // `timeout_secs` is optional. Inspect the raw value directly rather than
     // a bare `as_u64` lookup: `as_u64` alone cannot tell absent (→ default)
     // from a present-but-invalid value (→ reject). Absent or `null` takes the

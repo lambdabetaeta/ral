@@ -12,8 +12,8 @@
 //! extension law's unrecognised-class error; this module now also carries
 //! Step 1, the agent family (`` `agent-start ``, `` `agent-list ``,
 //! `` `agent-cancel ``, `` `message ``), Step 2, the schedule family
-//! (`` `schedule ``, `` `schedule-list ``, `` `unschedule ``), and Step 3,
-//! `` `reply ``.
+//! (`` `schedule ``, `` `schedule-list ``, `` `unschedule ``), Step 3,
+//! `` `reply ``, and the egress family, `` `fetch-url ``.
 
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
@@ -125,10 +125,11 @@ pub(crate) struct ExarchDesk {
 }
 
 /// Convert a duration's whole seconds to a saturating `i64` — the
-/// convention every schedule's `next-s`, in both the `schedule` receipt and
-/// the `schedules` listing, shares: a schedule's seconds-to-next-fire never
-/// approaches `i64::MAX` in practice, but `unwrap_or` keeps the conversion
-/// total without an `as` cast's silent wraparound.
+/// convention any duration this desk answers (a schedule's `next-s` in both
+/// the `schedule` receipt and the `schedules` listing, and an agent's
+/// elapsed seconds in the `agents` listing) shares: none of them approaches
+/// `i64::MAX` in practice, but `unwrap_or` keeps the conversion total
+/// without an `as` cast's silent wraparound.
 fn secs_to_i64(d: Duration) -> i64 {
     i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
 }
@@ -136,13 +137,13 @@ fn secs_to_i64(d: Duration) -> i64 {
 /// Decode one enquiry payload as a fixed-length list, or a didactic error
 /// naming the expected shape — the host-side half of the both-ends
 /// validation law: a builtin's door already checked its own arguments, but
-/// the desk trusts nothing about what actually crossed the wire.
-fn payload_list(
+/// the desk trusts nothing about what actually crossed the wire. `N` is
+/// inferred from the caller's array pattern.
+fn payload_list<const N: usize>(
     payload: Option<Box<FOValue>>,
     class: &str,
     shape: &str,
-    n: usize,
-) -> Result<Vec<FOValue>, Error> {
+) -> Result<[FOValue; N], Error> {
     let Some(payload) = payload else {
         return Err(Error::new(
             format!("`{class}` requires a payload {shape}"),
@@ -155,16 +156,15 @@ fn payload_list(
             1,
         ));
     };
-    if items.len() != n {
-        return Err(Error::new(
+    <[FOValue; N]>::try_from(items).map_err(|items| {
+        Error::new(
             format!(
-                "`{class}` payload must have exactly {n} element(s) {shape}, got {}",
+                "`{class}` payload must have exactly {N} element(s) {shape}, got {}",
                 items.len()
             ),
             1,
-        ));
-    }
-    Ok(items)
+        )
+    })
 }
 
 fn payload_int(v: FOValue, class: &str, field: &str) -> Result<i64, Error> {
@@ -277,11 +277,11 @@ impl ExarchDesk {
     ///
     /// The agent family (`` `agent-start ``, `` `agent-list ``,
     /// `` `agent-cancel ``, `` `message ``), the schedule family
-    /// (`` `schedule ``, `` `schedule-list ``, `` `unschedule ``), and
-    /// `` `reply `` are answered here; an unrecognised class still answers
-    /// the extension law's error — never a silent default
-    /// (`docs/ral-wiki/decisions/260706_enquiry-channel.md`, "the extension
-    /// law").
+    /// (`` `schedule ``, `` `schedule-list ``, `` `unschedule ``),
+    /// `` `reply ``, and the egress family (`` `fetch-url ``) are answered
+    /// here; an unrecognised class still answers the extension law's error —
+    /// never a silent default (`docs/ral-wiki/decisions/260706_enquiry-channel.md`,
+    /// "the extension law").
     ///
     /// # Errors
     /// Returns `Err` if `req` is not a [`FOValue::Variant`], names a class
@@ -493,27 +493,14 @@ impl ExarchDesk {
     /// door (the `type` tag, the `grant` label the launch narrows against)
     /// and hand off to [`Self::launch`] for the spawn spine.
     fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let items = payload_list(
+        let [session, kind, prompt, name, grant] = payload_list(
             payload,
             "agent-start",
             "[session, kind, prompt, name, grant]",
-            5,
         )?;
-        let [session, kind, prompt, name, grant]: [FOValue; 5] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
         let session_id = payload_int(session, "agent-start", "session")?;
-        if session_id < 0 {
-            return Err(Error::new(
-                "`agent-start`: `session` must be a non-negative Int",
-                1,
-            ));
-        }
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "session_id checked non-negative above"
-        )]
-        let session_id = session_id as u64;
+        let session_id = u64::try_from(session_id)
+            .map_err(|_| Error::new("`agent-start`: `session` must be a non-negative Int", 1))?;
         let kind = payload_tag(kind, "agent-start", "kind")?;
         let mnemon = match kind.as_str() {
             "amnemon" => false,
@@ -549,11 +536,7 @@ impl ExarchDesk {
                 .list(s.parent)
                 .into_iter()
                 .map(|a| {
-                    // An agent's elapsed seconds never approaches i64::MAX;
-                    // `unwrap_or` never actually saturates in practice, but
-                    // keeps this door total without an `as` cast's silent
-                    // wraparound.
-                    let elapsed_s = i64::try_from(a.elapsed.as_secs()).unwrap_or(i64::MAX);
+                    let elapsed_s = secs_to_i64(a.elapsed);
                     FOValue::Map {
                         entries: vec![
                             ("name".to_string(), FOValue::String { value: a.name }),
@@ -576,40 +559,32 @@ impl ExarchDesk {
     /// `AgentRegistry::cancel_scoped` enforces.
     fn agent_cancel(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
-        let items = payload_list(payload, "agent-cancel", "[name]", 1)?;
-        let [name]: [FOValue; 1] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let [name] = payload_list(payload, "agent-cancel", "[name]")?;
         let name = payload_string(name, "agent-cancel", "name")?;
 
         // Resolve the name, then run the cancel and derive the act row from
         // what actually happened — a row claiming "cancelled" ahead of the
-        // call would assert an effect the world never saw. A name that
-        // resolves to nothing (never spawned, or already settled) is the same
-        // no-op as `Ok(false)` below — both mean "no live agent by that
-        // name", not an error.  `cancel` takes no argument, so its payload
-        // column carries the outcome: blank when the cancel landed.
-        let (payload, content, ok) = match s.registry.resolve_name(&name) {
-            None => (
+        // call would assert an effect the world never saw. `cancel` takes no
+        // argument, so its payload column carries the outcome: blank when
+        // the cancel landed.
+        let cancelled = s
+            .registry
+            .resolve_name(&name)
+            .map_or(Ok(false), |id| s.registry.cancel_scoped(s.parent, id));
+        let (payload, content, ok) = match cancelled {
+            Ok(true) => (String::new(), format!("cancelling agent '{name}'"), true),
+            Ok(false) => (
                 "no live agent by that name".to_string(),
                 format!("no live agent named '{name}'"),
                 true,
             ),
-            Some(id) => match s.registry.cancel_scoped(s.parent, id) {
-                Ok(true) => (String::new(), format!("cancelling agent '{name}'"), true),
-                Ok(false) => (
-                    "no live agent by that name".to_string(),
-                    format!("no live agent named '{name}'"),
-                    true,
+            Err(NotADescendant(_)) => (
+                "refused: not a descendant".to_string(),
+                format!(
+                    "agent '{name}' is not an agent you started; agent-cancel may only reach a descendant of yours"
                 ),
-                Err(NotADescendant(_)) => (
-                    "refused: not a descendant".to_string(),
-                    format!(
-                        "agent '{name}' is not an agent you started; agent-cancel may only reach a descendant of yours"
-                    ),
-                    false,
-                ),
-            },
+                false,
+            ),
         };
         s.emit.emit(Kind::HarnessCall {
             verb: "cancel",
@@ -632,10 +607,7 @@ impl ExarchDesk {
     /// descendant by name and send it a marked note.
     fn message(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
-        let items = payload_list(payload, "message", "[name, text]", 2)?;
-        let [name, text]: [FOValue; 2] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let [name, text] = payload_list(payload, "message", "[name, text]")?;
         let name = payload_string(name, "message", "name")?;
         let text = payload_string(text, "message", "text")?;
 
@@ -644,43 +616,40 @@ impl ExarchDesk {
         // the call would assert a delivery that a scope refusal or a full
         // inbox never made. Unlike `cancel`, an unresolved name is a refusal
         // here, not a no-op: `message` promises delivery, and there is
-        // nothing to deliver to.  A delivered message's payload is its text;
-        // a refused one's is why, since the text went nowhere.
+        // nothing to deliver to. A delivered message's payload is its text;
+        // a refused one's is why, since the text went nowhere. The target
+        // settling in the gap between resolving its name and this send is
+        // the same "no live agent" outcome as an unresolved name, just
+        // discovered one step later.
         let sent = text.clone();
-        let (payload, content, ok) = match s.registry.resolve_name(&name) {
-            None => (
+        let (payload, content, ok) = match s
+            .registry
+            .resolve_name(&name)
+            .map(|to| s.registry.message(s.parent, to, text))
+        {
+            None | Some(Err(MessageError::UnknownRecipient(_))) => (
                 "refused: no live agent by that name".to_string(),
                 format!("no live agent named '{name}'; did it finish already?"),
                 false,
             ),
-            Some(to) => match s.registry.message(s.parent, to, text) {
-                Ok(()) => (sent, format!("sent message to agent '{name}'"), true),
-                // The target settled in the gap between resolving its name
-                // and this send — the same "no live agent" outcome as an
-                // unresolved name above, just discovered one step later.
-                Err(MessageError::UnknownRecipient(_)) => (
-                    "refused: no live agent by that name".to_string(),
-                    format!("no live agent named '{name}'; did it finish already?"),
-                    false,
+            Some(Ok(())) => (sent, format!("sent message to agent '{name}'"), true),
+            Some(Err(MessageError::UnknownSender(n))) => (
+                "refused: sender is no longer live".to_string(),
+                format!("cannot send from agent {n}: it is no longer live"),
+                false,
+            ),
+            Some(Err(MessageError::NotADescendant(_))) => (
+                "refused: not a descendant".to_string(),
+                format!(
+                    "agent '{name}' is not an agent you started; message may only reach a descendant of yours"
                 ),
-                Err(MessageError::UnknownSender(n)) => (
-                    "refused: sender is no longer live".to_string(),
-                    format!("cannot send from agent {n}: it is no longer live"),
-                    false,
-                ),
-                Err(MessageError::NotADescendant(_)) => (
-                    "refused: not a descendant".to_string(),
-                    format!(
-                        "agent '{name}' is not an agent you started; message may only reach a descendant of yours"
-                    ),
-                    false,
-                ),
-                Err(MessageError::RecipientInboxFull(_, reject)) => (
-                    format!("refused: {reject}"),
-                    format!("agent '{name}' did not receive the message: {reject}"),
-                    false,
-                ),
-            },
+                false,
+            ),
+            Some(Err(MessageError::RecipientInboxFull(_, reject))) => (
+                format!("refused: {reject}"),
+                format!("agent '{name}' did not receive the message: {reject}"),
+                false,
+            ),
         };
         s.emit.emit(Kind::HarnessCall {
             verb: "message",
@@ -729,10 +698,8 @@ impl ExarchDesk {
         self.require_schedule_grant("schedule")?;
         let s = &self.services;
 
-        let items = payload_list(payload, "schedule", "[trigger, label, prompt]", 3)?;
-        let [trigger, label, prompt]: [FOValue; 3] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let [trigger, label, prompt] =
+            payload_list(payload, "schedule", "[trigger, label, prompt]")?;
         let trigger = payload_trigger(trigger, "schedule")?;
         let label = payload_label(label, "schedule")?;
         let prompt = payload_string(prompt, "schedule", "prompt")?;
@@ -827,10 +794,7 @@ impl ExarchDesk {
     fn unschedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         self.require_schedule_grant("unschedule")?;
         let s = &self.services;
-        let items = payload_list(payload, "unschedule", "[label]", 1)?;
-        let [label]: [FOValue; 1] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let [label] = payload_list(payload, "unschedule", "[label]")?;
         let label = payload_string(label, "unschedule", "label")?;
 
         // A no-op (no schedule bearing that label) is a successful call,
@@ -875,10 +839,7 @@ impl ExarchDesk {
                 1,
             ));
         }
-        let items = payload_list(payload, "reply", "[value]", 1)?;
-        let [value]: [FOValue; 1] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let [value] = payload_list(payload, "reply", "[value]")?;
         let display =
             shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
         // `reply` addresses no one it must name — the parent is the only
@@ -935,10 +896,7 @@ impl ExarchDesk {
     /// same act-row-after-the-fact discipline `agent_cancel`/`message` follow.
     fn fetch_url(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
-        let items = payload_list(payload, "fetch-url", "[url]", 1)?;
-        let [url]: [FOValue; 1] = items
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("payload_list already checked the length"));
+        let [url] = payload_list(payload, "fetch-url", "[url]")?;
         let url = payload_string(url, "fetch-url", "url")?;
 
         let (host, outcome) = self.resolve_and_fetch(&url);
@@ -1077,7 +1035,7 @@ impl EnquiryDesk for DeskBinding {
 mod tests {
     use super::*;
     use crate::agent::event::AgentLog;
-    use crate::bus::{BusReceiver, Inbox, channel};
+    use crate::bus::{Inbox, channel};
     use crate::fleet::egress::{AuditLog, Egress, FetchLimiter};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::org_policy::OrgPolicy;
@@ -1087,11 +1045,6 @@ mod tests {
     };
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Transport, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
-
-    fn dummy_emitter() -> (Emitter, BusReceiver) {
-        let (tx, rx) = channel();
-        (Emitter::new(tx, 0), rx)
-    }
 
     /// A session log under a scratch dir unique to this call — tests run in
     /// parallel, and every call in this module used to share one fixed
@@ -1120,7 +1073,7 @@ mod tests {
     /// tests are about, so growing [`HostServices`] means touching one
     /// literal, not three.
     fn base_services() -> HostServices {
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         HostServices {
             registry: AgentRegistry::new(),
             scratch: Some(Arc::new(
@@ -1338,7 +1291,7 @@ mod tests {
             },
         );
 
-        let (emit, rx) = dummy_emitter();
+        let (emit, rx) = crate::bus::dummy_emitter();
         let binding = DeskBinding {
             desk: Arc::new(desk()),
             events: transport.events_shared(),
@@ -2259,7 +2212,7 @@ mod tests {
     /// that landed ([[decisions/260720_harness-calls-are-acts]]).
     #[test]
     fn a_refused_schedule_tiers_its_act_row() {
-        let (emit, rx) = dummy_emitter();
+        let (emit, rx) = crate::bus::dummy_emitter();
         let mut desk = granted_desk();
         desk.services.emit = emit;
         let spec = || FOValue::List {
@@ -2321,7 +2274,7 @@ mod tests {
     /// empty.
     #[test]
     fn reply_refused_without_returns() {
-        let (emit, _rx) = dummy_emitter();
+        let (emit, _rx) = crate::bus::dummy_emitter();
         let mut d = desk();
         d.services.emit = emit;
         d.services.returns = false;
@@ -2349,7 +2302,7 @@ mod tests {
     /// and puts a subject-less `reply` act on the rail, carrying the value.
     #[test]
     fn reply_stages_the_payload_last_write_wins() {
-        let (emit, rx) = dummy_emitter();
+        let (emit, rx) = crate::bus::dummy_emitter();
         let mut d = desk();
         d.services.emit = emit;
 

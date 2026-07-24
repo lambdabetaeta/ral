@@ -80,38 +80,21 @@ impl ModelPricing {
 /// Fields we *don't* keep:
 /// - `pricing` legs other than prompt/completion/cache live in
 ///   [`ModelPricing`].
-/// - `architecture.input_modalities`, `top_provider.is_moderated`,
-///   `per_request_limits`, `canonical_slug`/`name`/`description`,
-///   `created` — none are wired to a current code path; add when a
-///   concrete consumer exists.
-// `tokenizer` is scraped from the catalog but has no consumer yet — it
-// exists so a future client-side token estimator doesn't need a second
-// pass over the schema.  `supported_parameters` is read by
-// [`ModelCaps::supports`].
-#[allow(dead_code)]
+/// - `top_provider`, `architecture`, `canonical_slug`/`name`/`description`,
+///   `created`, `per_request_limits` — none are wired to a current code
+///   path; add when a concrete consumer exists.
 #[derive(Clone, Default, Debug)]
 pub struct ModelCaps {
     /// Total context window in tokens (`context_length`).
     pub context_window: Option<u64>,
-    /// Per-turn output cap as published by the top provider entry
-    /// (`top_provider.max_completion_tokens`).
-    pub max_output_tokens: Option<u32>,
-    /// `architecture.tokenizer` (e.g. `"Claude"`, `"GPT"`,
-    /// `"Cohere"`).  Useful for any future client-side token estimate.
-    pub tokenizer: Option<String>,
     /// `supported_parameters` — list of names the model accepts on a
     /// request (e.g. `tools`, `reasoning`, `response_format`).  Empty
     /// when the catalog didn't surface one or the model is unlisted.
     /// Lets the caller fail fast on a model that doesn't admit
     /// `tools` rather than hitting a 4xx mid-stream.
     pub supported_parameters: Vec<String>,
-    /// `canonical_slug` from the catalog — the provider-prefixed
-    /// identifier (e.g. `anthropic/claude-opus-4-7`), often shorter
-    /// than the user-supplied alias.  Useful for banner display.
-    pub canonical_slug: Option<String>,
 }
 
-#[allow(dead_code)]
 impl ModelCaps {
     /// Does the model advertise `param` in its `supported_parameters`?
     /// Returns `true` when the list is empty (unknown / catalog miss):
@@ -119,11 +102,6 @@ impl ModelCaps {
     /// a parameter just because the catalog didn't surface the field.
     pub fn supports(&self, param: &str) -> bool {
         self.supported_parameters.is_empty() || self.supported_parameters.iter().any(|p| p == param)
-    }
-
-    /// Does the model advertise `tools` as a supported parameter?
-    pub fn supports_tools(&self) -> bool {
-        self.supports("tools")
     }
 }
 
@@ -272,9 +250,9 @@ pub fn caps(model: &str) -> Option<ModelCaps> {
 /// The miss is an unlisted native-provider model, or a lookup before the
 /// catalog loads.  The `OpenRouter` catalog backs every provider — OR
 /// republishes upstream cards, so a native Anthropic / `OpenAI` launch hits
-/// the same context-window / tokenizer / canonical-slug data as its
-/// OR-fronted equivalent.  A missing entry defaults every field so the banner
-/// renders `—` for what it cannot resolve.
+/// the same context-window / capability data as its OR-fronted equivalent.
+/// A missing entry defaults every field so the banner renders `—` for what
+/// it cannot resolve.
 pub fn caps_or_default(model: &str) -> ModelCaps {
     caps(model).unwrap_or_default()
 }
@@ -333,30 +311,14 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
         // Caps are independent of pricing: even an entry that failed
         // pricing parse can carry usable context-window info.
         let context_window = entry.context_length;
-        let max_output_tokens = entry
-            .top_provider
-            .as_ref()
-            .and_then(|tp| tp.max_completion_tokens);
-        let tokenizer = entry
-            .architecture
-            .as_ref()
-            .and_then(|a| a.tokenizer.clone());
         let supported_parameters = entry.supported_parameters.clone();
-        let canonical_slug = entry.canonical_slug.clone();
-        let any = context_window.is_some()
-            || max_output_tokens.is_some()
-            || tokenizer.is_some()
-            || !supported_parameters.is_empty()
-            || canonical_slug.is_some();
+        let any = context_window.is_some() || !supported_parameters.is_empty();
         if any {
             caps.insert(
                 entry.id,
                 ModelCaps {
                     context_window,
-                    max_output_tokens,
-                    tokenizer,
                     supported_parameters,
-                    canonical_slug,
                 },
             );
         }
@@ -458,13 +420,7 @@ struct ModelEntry {
     #[serde(default)]
     context_length: Option<u64>,
     #[serde(default)]
-    top_provider: Option<TopProvider>,
-    #[serde(default)]
-    architecture: Option<Architecture>,
-    #[serde(default)]
     supported_parameters: Vec<String>,
-    #[serde(default)]
-    canonical_slug: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -475,18 +431,6 @@ struct Pricing {
     input_cache_read: Option<String>,
     #[serde(default)]
     input_cache_write: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TopProvider {
-    #[serde(default)]
-    max_completion_tokens: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct Architecture {
-    #[serde(default)]
-    tokenizer: Option<String>,
 }
 
 #[cfg(test)]
@@ -549,24 +493,20 @@ mod tests {
         assert!(resp.data[1].pricing.input_cache_read.is_some());
     }
 
-    /// Capability fields (`context_length`, `top_provider.max_completion_tokens`,
-    /// architecture.tokenizer, `supported_parameters`, `canonical_slug`) must
-    /// all be `#[serde(default)]` so a missing field on any entry doesn't
-    /// nuke the whole catalog parse.
+    /// Capability fields (`context_length`, `supported_parameters`) must both
+    /// be `#[serde(default)]` so a missing field on any entry doesn't nuke
+    /// the whole catalog parse.
     #[test]
     fn deserialises_full_caps_payload() {
         let raw = r#"{
             "data": [
                 {
                     "id": "anthropic/claude-opus-4-7",
-                    "canonical_slug": "anthropic/claude-opus-4-7",
                     "context_length": 200000,
                     "pricing": {
                         "prompt": "0.000015",
                         "completion": "0.000075"
                     },
-                    "top_provider": { "max_completion_tokens": 32000 },
-                    "architecture": { "tokenizer": "Claude" },
                     "supported_parameters": ["tools", "reasoning", "temperature"]
                 }
             ]
@@ -574,21 +514,7 @@ mod tests {
         let resp: ModelsResponse = serde_json::from_str(raw).unwrap();
         let e = &resp.data[0];
         assert_eq!(e.context_length, Some(200_000));
-        assert_eq!(
-            e.top_provider
-                .as_ref()
-                .and_then(|t| t.max_completion_tokens),
-            Some(32_000)
-        );
-        assert_eq!(
-            e.architecture.as_ref().and_then(|a| a.tokenizer.clone()),
-            Some("Claude".into())
-        );
         assert!(e.supported_parameters.iter().any(|p| p == "tools"));
-        assert_eq!(
-            e.canonical_slug.as_deref(),
-            Some("anthropic/claude-opus-4-7")
-        );
     }
 
     /// Bare suffixes (`mercury-2`) must resolve when the catalog has a

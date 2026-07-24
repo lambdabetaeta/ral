@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TransportKey {
-    credential: String,
+    provider: String,
     fingerprint: CredFingerprint,
     adapter: AdapterKind,
 }
@@ -20,7 +20,7 @@ pub(crate) struct TransportKey {
 impl TransportKey {
     fn for_selection(id: &ProviderId, model: &str, credential: &Credential) -> Self {
         Self {
-            credential: id.label().to_string(),
+            provider: id.label().to_string(),
             fingerprint: CredFingerprint::of(credential),
             adapter: adapter_for_provider_model(id, model),
         }

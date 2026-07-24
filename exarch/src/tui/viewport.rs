@@ -601,13 +601,9 @@ impl Viewport {
     /// End a streaming step: commit whatever remains in `open`.
     pub(super) fn close_boundary(&mut self, context_floor: u8) {
         if !self.thinking.trim().is_empty() {
-            let preserve_scrollback = self.looking_at_pushed_thinking();
             let text = std::mem::take(&mut self.thinking);
             let answer_chars = self.current_answer_chars();
-            self.upsert_thinking(text, answer_chars);
-            if preserve_scrollback {
-                self.sticky = false;
-            }
+            self.commit_thinking(text, answer_chars);
         }
         self.flush_open(context_floor);
     }
@@ -675,7 +671,7 @@ impl Viewport {
         let mut kept = 0usize;
         let mut rows = 0usize;
         for entry in self.blocks.iter().rev() {
-            if kept == VIEWPORT_MAX_BLOCKS || rows + entry.rows > VIEWPORT_MAX_ROWS {
+            if kept == VIEWPORT_MAX_BLOCKS || (kept > 0 && rows + entry.rows > VIEWPORT_MAX_ROWS) {
                 break;
             }
             kept += 1;
@@ -719,20 +715,19 @@ impl Viewport {
             self.flat.dirty = true;
             return;
         }
-        // No existing thinking block for this turn: insert before the trailing
-        // markdown run, or push to the end if none.
-        let insert_at = self
-            .blocks
-            .iter()
-            .rposition(|e| !e.block.is_markdown() && !e.block.is_thinking())
-            .map_or(0, |i| i + 1);
-        let block = Block::thinking(text, answer_chars);
-        if insert_at < self.blocks.len() && self.blocks[insert_at].block.is_markdown() {
-            self.blocks.insert(insert_at, Entry { block, rows: 0 });
-            self.rewrite_log();
-            self.flat.dirty = true;
-        } else {
-            self.push_block(block);
+        match self.trailing_markdown_start() {
+            Some(at) => {
+                self.blocks.insert(
+                    at,
+                    Entry {
+                        block: Block::thinking(text, answer_chars),
+                        rows: 0,
+                    },
+                );
+                self.rewrite_log();
+                self.flat.dirty = true;
+            }
+            None => self.push_block(Block::thinking(text, answer_chars)),
         }
     }
 

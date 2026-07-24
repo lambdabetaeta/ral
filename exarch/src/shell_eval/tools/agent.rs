@@ -228,7 +228,10 @@ pub(crate) fn spawn_async(
                 // `/model` on either never disturbs the other.
                 child.drive(&mut crate::agent::NoControl, &child_emit)
             }))
-            .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
+            .unwrap_or_else(|_| {
+                child_emit.emit(Kind::Error("sub-agent panicked".into()));
+                (AgentOutcome::Failed("sub-agent panicked".into()), None)
+            });
             child_emit.emit(Kind::Died);
             // A returning sub-agent delivers its one result upward and then
             // self-settles; a branch converses, pushes nothing, and leaves its

@@ -126,15 +126,15 @@ fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
     (name == dir_name && valid_skill_name(&name)).then_some(Skill { name, description })
 }
 
-/// Read a `SKILL.md` and parse its frontmatter into a [`Skill`].  `dir_name` is
-/// the expected skill name (the parent directory).  Called at turn time by
-/// `skill-list`, gated by `check_fs_read` at the call site.
+/// Read `dir`'s `SKILL.md` and parse its frontmatter into a [`Skill`].
+/// `dir_name` is the expected skill name (the parent directory).  Called
+/// at turn time by `skill-list`, gated by `check_fs_read` at the call site.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
 )]
-pub(crate) fn parse_skill(path: &Path, dir_name: &str) -> Option<Skill> {
-    let raw = std::fs::read_to_string(path).ok()?;
+pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
+    let raw = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
     skill_from_frontmatter(&raw, dir_name)
 }
 
@@ -250,7 +250,7 @@ mod tests {
             "---\nname: my-skill\ndescription: does things\n---\n\n# Body\ncontent\n",
         )
         .unwrap();
-        let skill = parse_skill(&skill_dir.join("SKILL.md"), "my-skill").unwrap();
+        let skill = parse_skill(&skill_dir, "my-skill").unwrap();
         assert_eq!(skill.name, "my-skill");
         assert_eq!(skill.description, "does things");
     }
@@ -265,7 +265,7 @@ mod tests {
             "---\nname: wrong-name\ndescription: x\n---\n",
         )
         .unwrap();
-        assert!(parse_skill(&skill_dir.join("SKILL.md"), "my-skill").is_none());
+        assert!(parse_skill(&skill_dir, "my-skill").is_none());
     }
 
     #[test]

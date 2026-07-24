@@ -33,13 +33,3 @@ pub struct Fleet {
     /// The shared transport borrowed by every provider in the fleet.
     pub engine: Arc<provider::Engine>,
 }
-
-impl Fleet {
-    pub fn new(agents: AgentRegistry, bus: FleetBus, engine: Arc<provider::Engine>) -> Self {
-        Self {
-            agents,
-            bus,
-            engine,
-        }
-    }
-}

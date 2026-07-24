@@ -89,15 +89,12 @@ pub(crate) struct Registry {
     /// [`REMIND_EVERY`], then it returns to zero.  Unused while anything is
     /// pinned — that case is budget-free, see [`Self::react`].
     turns_since_no_pins_reminder: u32,
-    /// One-shot latch for the "nothing is pinned" reminder: at most once per
-    /// turn.
-    no_pins_reminded: bool,
     /// One-shot latch for the headless root's self-verification nudge: once
     /// its first `reply` has been turned back, every later `reply` — from
     /// this same run, regardless of turn boundaries — is honoured.  Unlike
-    /// [`Self::used`] and [`Self::no_pins_reminded`] this is never cleared by
-    /// [`Self::reset`]: the obligation is "verify once before the run's
-    /// result stands", not a per-turn accounting.
+    /// [`Self::used`] this is never cleared by [`Self::reset`]: the
+    /// obligation is "verify once before the run's result stands", not a
+    /// per-turn accounting.
     reply_verified: bool,
 }
 
@@ -106,7 +103,6 @@ impl Registry {
         Self {
             used: 0,
             turns_since_no_pins_reminder: 0,
-            no_pins_reminded: false,
             reply_verified: false,
         }
     }
@@ -121,7 +117,6 @@ impl Registry {
     pub fn reset(&mut self) {
         self.used = 0;
         self.turns_since_no_pins_reminder += 1;
-        self.no_pins_reminded = false;
     }
 
     /// The one decider.  Walks [`RULES`] against `attempt`, optionally
@@ -199,10 +194,7 @@ impl Registry {
                 if let Some(pinned) = ctx.pinned.as_deref() {
                     record_nudge(emit, log, self.used, "pinned-state reminder".into());
                     parts.push(format!("There is pinned state: {pinned}"));
-                } else if !self.no_pins_reminded
-                    && self.turns_since_no_pins_reminder >= REMIND_EVERY
-                {
-                    self.no_pins_reminded = true;
+                } else if self.turns_since_no_pins_reminder >= REMIND_EVERY {
                     self.turns_since_no_pins_reminder = 0;
                     record_nudge(emit, log, self.used, "no-pins reminder".into());
                     parts.push(
@@ -213,7 +205,6 @@ impl Registry {
                 }
             }
             if parts.is_empty() {
-                surface_provider_error(attempt, emit, log);
                 return None;
             }
             return Some(wrap_reminder(&parts.join(" ")));
