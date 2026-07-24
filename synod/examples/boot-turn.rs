@@ -19,11 +19,11 @@
 fn main() {
     use std::os::unix::net::UnixStream;
 
+    use ral_core::io::TerminalState;
     use ral_core::transport::{
         EnquiryError, Liveness, Program, Report, TerminalEndpoint, Transport, Turn, WireTransport,
         dispatch_to_report,
     };
-    use ral_core::io::TerminalState;
     use ral_core::types::Capabilities;
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
     use vm_manager::vz::Vz;
@@ -105,7 +105,11 @@ fn main() {
         Report::Ran { result: Ok(_), captured: Some(c), .. }
             if String::from_utf8_lossy(&c.stdout).contains(sentinel)
     );
-    if passed && let Report::Ran { captured: Some(c), .. } = &report {
+    if passed
+        && let Report::Ran {
+            captured: Some(c), ..
+        } = &report
+    {
         println!("turn ran in the guest; it read the granted folder back over the wire:");
         println!("  {}", String::from_utf8_lossy(&c.stdout).trim());
         println!("PASS: a turn crossed the wire and saw the workspace");

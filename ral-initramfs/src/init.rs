@@ -11,7 +11,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, mkdir, openat, stat, statat, unlinkat};
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, mkdir, openat, stat, statat, unlinkat,
+};
 use rustix::io::Errno;
 use rustix::mount::{mount, mount_move};
 use rustix::process::{chdir, chroot};
@@ -147,7 +149,9 @@ fn install_binary(install: &Install) -> Result<(), String> {
 /// available: deleting every file it holds, before the move makes it
 /// unreachable for good.
 fn switch_root() -> Result<Infallible, String> {
-    let root_dev = stat("/").map_err(|err| format!("could not stat /: {err}"))?.st_dev;
+    let root_dev = stat("/")
+        .map_err(|err| format!("could not stat /: {err}"))?
+        .st_dev;
     let root = openat(CWD, "/", OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty())
         .map_err(|err| format!("could not open /: {err}"))?;
     purge(root.as_fd(), root_dev)
@@ -158,8 +162,7 @@ fn switch_root() -> Result<Infallible, String> {
     // mount made over "/", so step into the new root first and let both the
     // move and the chroot name it as ".".
     chdir(plan::NEWROOT).map_err(|err| format!("could not enter {}: {err}", plan::NEWROOT))?;
-    mount_move(".", "/")
-        .map_err(|err| format!("could not move {} to /: {err}", plan::NEWROOT))?;
+    mount_move(".", "/").map_err(|err| format!("could not move {} to /: {err}", plan::NEWROOT))?;
     chroot(".").map_err(|err| format!("could not chroot into the new root: {err}"))?;
     chdir("/").map_err(|err| format!("could not chdir to /: {err}"))?;
 

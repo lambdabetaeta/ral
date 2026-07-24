@@ -302,7 +302,11 @@ impl Launch {
         Option<crate::process::jail::JailCgroup>,
     )> {
         let (child, pgid) = crate::process::spawn_with_pgid(&mut self.cmd, pgid)?;
-        Ok((crate::process::ChildHandle::from_std(child), pgid, self.jail.take()))
+        Ok((
+            crate::process::ChildHandle::from_std(child),
+            pgid,
+            self.jail.take(),
+        ))
     }
 }
 

@@ -42,7 +42,10 @@ pub struct RestoreOutcome {
 /// report's names — a file, or a folder and everything under it —
 /// against the paths a manifest actually holds.
 pub fn covers(path: &str, name: &str) -> bool {
-    path == name || path.strip_prefix(name).is_some_and(|rest| rest.starts_with('/'))
+    path == name
+        || path
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Put `root` back to `baseline`.
@@ -73,8 +76,7 @@ pub(crate) fn restore(
     // The safety net: everything about to be touched is kept first.
     let current = store.capture(root, Moment::Undo)?;
 
-    let selected =
-        |path: &str| only.is_none_or(|names| names.iter().any(|one| covers(path, one)));
+    let selected = |path: &str| only.is_none_or(|names| names.iter().any(|one| covers(path, one)));
     if let Some(names) = only {
         let known = baseline.manifest.entries.keys().any(|p| selected(p))
             || current.manifest.entries.keys().any(|p| selected(p));

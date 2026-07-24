@@ -228,7 +228,8 @@ pub fn entitled() -> bool {
     // boolean entitlement value comes back as a `CFBoolean`, which is an
     // `NSNumber`.
     unsafe {
-        let Some(task) = Retained::from_raw(SecTaskCreateFromSelf(std::ptr::null()).cast::<NSObject>())
+        let Some(task) =
+            Retained::from_raw(SecTaskCreateFromSelf(std::ptr::null()).cast::<NSObject>())
         else {
             return false;
         };
@@ -863,8 +864,8 @@ define_class!(
             // valid for the duration of this delegate call; `borrow_raw`
             // borrows it for no longer, and `try_clone_to_owned` dups it (with
             // `CLOEXEC`) into an `OwnedFd` that outlives the connection.
-            let dup =
-                (unsafe { BorrowedFd::borrow_raw(connection.fileDescriptor()) }).try_clone_to_owned();
+            let dup = (unsafe { BorrowedFd::borrow_raw(connection.fileDescriptor()) })
+                .try_clone_to_owned();
 
             // Only on a successful dup is the one-shot announce spent, and
             // only then is the connection accepted.

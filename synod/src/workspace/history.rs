@@ -115,8 +115,12 @@ impl HistoryStore {
     /// A plain sentence when a record cannot be read back.
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>, String> {
         let dir = self.dir.join("checkpoints");
-        let could_not =
-            |e| format!("Synod could not open its records at {}: {e}.", dir.display());
+        let could_not = |e| {
+            format!(
+                "Synod could not open its records at {}: {e}.",
+                dir.display()
+            )
+        };
         let listing = std::fs::read_dir(&dir).map_err(could_not)?;
         let mut found = Vec::new();
         for item in listing {
@@ -355,7 +359,9 @@ mod tests {
             store.latest_job().expect("reads").expect("a job exists");
         assert_eq!(paired_before.id, before.id);
         assert_eq!(
-            paired_after.expect("a conversation with three exchanges has an after").id,
+            paired_after
+                .expect("a conversation with three exchanges has an after")
+                .id,
             last.id,
             "the report must reflect the most recent exchange, not the first"
         );

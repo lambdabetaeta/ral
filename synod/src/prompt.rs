@@ -270,8 +270,13 @@ mod tests {
             "Letters are signed by the Registrar.",
         )
         .expect("write house rules");
-        let p = assemble(&Capabilities::root(), Path::new("/work"), "Admissions", &dir)
-            .expect("house rules read");
+        let p = assemble(
+            &Capabilities::root(),
+            Path::new("/work"),
+            "Admissions",
+            &dir,
+        )
+        .expect("house rules read");
         std::fs::remove_dir_all(&dir).expect("clean up");
         assert!(p.contains("# House rules"));
         assert!(p.contains("signed by the Registrar"));

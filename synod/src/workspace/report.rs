@@ -224,8 +224,7 @@ mod tests {
     fn undoing_a_deleted_folder_also_undoes_a_rename_out_of_it() {
         let (dir, folder, store) = workshop("report-rename-out-of-folder");
         std::fs::create_dir(folder.join("archive")).expect("fixture");
-        std::fs::write(folder.join("archive").join("report.docx"), b"the report")
-            .expect("fixture");
+        std::fs::write(folder.join("archive").join("report.docx"), b"the report").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::rename(
             folder.join("archive").join("report.docx"),

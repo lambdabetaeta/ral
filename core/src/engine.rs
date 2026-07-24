@@ -322,11 +322,13 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
             // exist.
             #[cfg(target_os = "linux")]
             if std::env::var("RAL_GUEST").is_ok() {
-                shell.install_guest_jail(std::sync::Arc::new(crate::process::jail::GuestJail::new(
-                    std::path::PathBuf::from("/sys/fs/cgroup/ral-exec"),
-                    100_000,
-                    crate::process::jail::JailLimits::default(),
-                )));
+                shell.install_guest_jail(std::sync::Arc::new(
+                    crate::process::jail::GuestJail::new(
+                        std::path::PathBuf::from("/sys/fs/cgroup/ral-exec"),
+                        100_000,
+                        crate::process::jail::JailLimits::default(),
+                    ),
+                ));
             }
             shell
         }

@@ -76,7 +76,10 @@ pub(crate) struct Emitter {
 
 impl Emitter {
     pub(crate) fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
-        if guard(&self.slot).as_ref().is_some_and(|h| h.generation == self.generation) {
+        if guard(&self.slot)
+            .as_ref()
+            .is_some_and(|h| h.generation == self.generation)
+        {
             let _ = self.app.emit(event, payload);
         }
     }
@@ -91,7 +94,10 @@ impl Emitter {
     )]
     fn ended(&self, payload: ConversationEnded) {
         let mut held = guard(&self.slot);
-        if held.as_ref().is_some_and(|h| h.generation == self.generation) {
+        if held
+            .as_ref()
+            .is_some_and(|h| h.generation == self.generation)
+        {
             held.take();
             let _ = self.app.emit("synod-ended", payload);
         }
@@ -281,7 +287,15 @@ fn spawn_conversation(
     let (sender, receiver) = mpsc::channel();
     let thread_slot = slot.clone();
     let join = std::thread::spawn(move || {
-        run_conversation(app, thread_slot, generation, superseded, folder, choice, receiver);
+        run_conversation(
+            app,
+            thread_slot,
+            generation,
+            superseded,
+            folder,
+            choice,
+            receiver,
+        );
     });
     *held = Some(Handle {
         generation,
@@ -310,7 +324,10 @@ fn run_conversation(
     if let Some(old) = superseded {
         let _ = old.join();
     }
-    if guard(&slot).as_ref().is_none_or(|h| h.generation != generation) {
+    if guard(&slot)
+        .as_ref()
+        .is_none_or(|h| h.generation != generation)
+    {
         return;
     }
 
@@ -347,7 +364,10 @@ fn converse(
     let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
         Ok(begun) => begun,
         Err(e) => {
-            emitter.emit("synod-event", super::sink::SynodEvent::Failure { message: e });
+            emitter.emit(
+                "synod-event",
+                super::sink::SynodEvent::Failure { message: e },
+            );
             return ConversationEnded { stopped: false };
         }
     };
@@ -356,7 +376,10 @@ fn converse(
 
     while let Ok(message) = receiver.recv() {
         if let Err(e) = conversation.exchange(message, &mut sink) {
-            emitter.emit("synod-event", super::sink::SynodEvent::Failure { message: e });
+            emitter.emit(
+                "synod-event",
+                super::sink::SynodEvent::Failure { message: e },
+            );
         }
         // Announced even after a failed exchange: the after-checkpoint ran
         // regardless, and whatever changed before the failure is already in

@@ -54,12 +54,22 @@ fn marks_dto(card: Card) -> Vec<MarkDto> {
 /// `synod-event` listener sees it — [`project`]'s codomain, plus
 /// [`Self::Failure`], which never comes from the bus.
 #[derive(Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum SynodEvent {
-    Token { text: String },
+    Token {
+        text: String,
+    },
     Thinking,
-    Step { n: u32 },
-    Phase { label: String },
+    Step {
+        n: u32,
+    },
+    Phase {
+        label: String,
+    },
     ToolCall {
         tool: &'static str,
         cmd: String,
@@ -71,28 +81,46 @@ pub enum SynodEvent {
         payload: String,
         failed: bool,
     },
-    Card { marks: Vec<MarkDto> },
+    Card {
+        marks: Vec<MarkDto>,
+    },
     /// The rendered face of a structural fact — an exec's io, a worker's
     /// settling, housekeeping, a probe.  Process, not output: the window
     /// folds it into the dial's deepest rung, never the transcript.
-    ProcessCard { marks: Vec<MarkDto> },
+    ProcessCard {
+        marks: Vec<MarkDto>,
+    },
     Usage {
         input: u64,
         output: u64,
         dollars: f64,
         unmetered: bool,
     },
-    StopReason { reason: String },
-    Error { message: String },
-    SystemNote { text: String },
-    Nudge { used: u32, max: u32, cause: String },
-    ProviderError { record: ProviderErrorRecord },
+    StopReason {
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
+    SystemNote {
+        text: String,
+    },
+    Nudge {
+        used: u32,
+        max: u32,
+        cause: String,
+    },
+    ProviderError {
+        record: ProviderErrorRecord,
+    },
     /// A conversation failure, emitted directly by `commands.rs` — never by
     /// [`project`], since no [`Kind`] carries this fact.  A
     /// `Conversation::begin` refusal is terminal, and `synod-ended` follows;
     /// a `Conversation::exchange` `Err` leaves the conversation open for the
     /// next message.
-    Failure { message: String },
+    Failure {
+        message: String,
+    },
 }
 
 /// Project one bus [`Kind`] into the event the window renders, or `None`
@@ -207,10 +235,7 @@ mod tests {
     fn listing_with_invalid_utf8_projects_to_lossy_text() {
         let bytes = vec![0xff, 0xfe];
         let expected = String::from_utf8_lossy(&bytes).into_owned();
-        let card = Card(vec![Mark::Listing {
-            bytes,
-            more: false,
-        }]);
+        let card = Card(vec![Mark::Listing { bytes, more: false }]);
         let Some(SynodEvent::Card { marks }) = project(Kind::Card(card)) else {
             panic!("expected a Card event");
         };
