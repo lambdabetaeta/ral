@@ -20,6 +20,7 @@
 mod browser;
 mod device;
 
+use crate::sync::LockExt;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
@@ -347,9 +348,7 @@ fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
 }
 
 fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
-    let _guard = STORE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = STORE_LOCK.lock_ignore_poison();
     let mut all = load_all_at(path);
     let replaced = if let Some(existing) = all.iter_mut().find(|t| t.account_id == token.account_id)
     {
@@ -364,9 +363,7 @@ fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, Strin
 }
 
 fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, String> {
-    let _guard = STORE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = STORE_LOCK.lock_ignore_poison();
     let mut all = load_all_at(path);
     let Some(pos) = all
         .iter()
@@ -478,9 +475,7 @@ pub(crate) async fn refresh_cell_if_stale(
     cell: &std::sync::Arc<std::sync::Mutex<OAuthToken>>,
 ) -> Result<(), String> {
     let current = {
-        let token = cell
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let token = cell.lock_ignore_poison();
         if !token.is_stale() {
             return Ok(());
         }
@@ -488,9 +483,7 @@ pub(crate) async fn refresh_cell_if_stale(
     };
     let fresh = refresh(&current).await?;
     let _ = save_one(&fresh);
-    *cell
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+    *cell.lock_ignore_poison() = fresh;
     Ok(())
 }
 

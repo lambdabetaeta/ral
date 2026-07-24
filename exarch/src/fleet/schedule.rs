@@ -17,6 +17,7 @@
 //! absorbed.
 
 use crate::bus::{InboxMsg, Mailbox};
+use crate::sync::LockExt;
 use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
 use ral_core::process::{Deadline, arm_callback};
@@ -599,9 +600,7 @@ impl ScheduleRegistry {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner.lock_ignore_poison()
     }
 }
 

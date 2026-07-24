@@ -186,6 +186,7 @@ impl Listing {
 mod tests {
     use super::*;
     use crate::provider::ProviderKind;
+    use crate::sync::LockExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -223,8 +224,7 @@ mod tests {
         fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.lists
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .lock_ignore_poison()
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake list".into()))

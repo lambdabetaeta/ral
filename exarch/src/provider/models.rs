@@ -16,6 +16,7 @@
 use crate::provider::credential::{Credential, CredentialStore};
 use crate::provider::oauth;
 use crate::provider::{ProviderId, ProviderKind};
+use crate::sync::LockExt;
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
 use serde::{Deserialize, Serialize};
@@ -221,10 +222,7 @@ impl LiveSource {
             oauth::refresh_cell_if_stale(cell)
                 .await
                 .map_err(|e| format!("refresh login for {}: {e}", id.label()))?;
-            let token = cell
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
+            let token = cell.lock_ignore_poison().clone();
             let url = format!(
                 "{CHATGPT_MODELS_URL}?client_version={}",
                 oauth::codex_client_version()

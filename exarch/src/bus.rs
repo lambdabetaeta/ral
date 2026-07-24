@@ -28,6 +28,7 @@ use crate::agent::transcript::Transcript;
 use crate::bus::card::{Card, IoEvent};
 use crate::fleet::schedule::ScheduleId;
 use crate::provider::{Tuning, Usage};
+use crate::sync::LockExt;
 use ral_core::Value;
 use std::collections::VecDeque;
 use std::io;
@@ -535,7 +536,7 @@ impl Shared {
     /// whole fleet.  The same policy as `ScheduleRegistry::lock`
     /// (`schedule.rs`).
     fn lock(&self) -> MutexGuard<'_, VecDeque<InboxMsg>> {
-        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+        self.queue.lock_ignore_poison()
     }
 
     /// Apply the inbox's push rule for one message, waking a parked consumer
@@ -1293,12 +1294,12 @@ pub struct UsageMeter(Arc<Mutex<Usage>>);
 impl UsageMeter {
     /// Fold one usage delta into the run total.
     pub fn add(&self, u: Usage) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) += u;
+        *self.0.lock_ignore_poison() += u;
     }
 
     /// The run total so far.
     pub fn total(&self) -> Usage {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *self.0.lock_ignore_poison()
     }
 }
 
@@ -1500,7 +1501,7 @@ impl BusShared {
     /// propagating the poison would deafen every future sender and receiver
     /// over one unrelated panic.
     fn lock(&self) -> MutexGuard<'_, BusQueue> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock_ignore_poison()
     }
 }
 

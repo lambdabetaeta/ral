@@ -65,6 +65,7 @@
 use crate::agent::ProviderHandle;
 use crate::agent::cancel::Token;
 use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
+use crate::sync::LockExt;
 use ral_core::process::{self, CancelCause, DurableRoot, ForegroundScope};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -117,11 +118,7 @@ impl EvalReach {
     pub(crate) fn interrupt(&self) {
         match self {
             Self::Identity { turn_scope, .. } => {
-                if let Some(scope) = turn_scope
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
+                if let Some(scope) = turn_scope.lock_ignore_poison().as_ref() {
                     scope.cancel(CancelCause::Interrupt);
                 }
             }
@@ -703,9 +700,7 @@ impl AgentRegistry {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner.lock_ignore_poison()
     }
 }
 

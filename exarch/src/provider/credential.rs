@@ -28,6 +28,7 @@
 //! `OPENAI_API_KEY` coexist as separate selectable providers.
 
 use crate::provider::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind};
+use crate::sync::LockExt;
 use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -225,9 +226,7 @@ impl CredentialStore {
             unreachable!("a ChatGpt ProviderId is always bound to an OAuth credential");
         };
         let cell = Arc::clone(cell);
-        *cell
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = token.clone();
+        *cell.lock_ignore_poison() = token.clone();
         let credential = Credential::OAuth(cell);
 
         if old_id.label() == token.label() {

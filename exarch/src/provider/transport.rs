@@ -3,6 +3,7 @@
 use super::credential::Credential;
 use super::identity::{ProviderId, Subscription, adapter_for_provider_model};
 use super::oauth;
+use crate::sync::LockExt;
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
@@ -119,8 +120,7 @@ impl Engine {
         credential: &Credential,
     ) -> Arc<Transport> {
         self.transports
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lock_ignore_poison()
             .entry(TransportKey::for_selection(id, model, credential))
             .or_insert_with(|| Transport::build(id, model, credential))
             .clone()
@@ -196,9 +196,7 @@ fn build_client(id: &ProviderId, model: &str, credential: &Credential) -> (Clien
 fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
     let auth = AuthResolver::from_resolver_fn(move |identity: ModelIden| {
         if identity.adapter_kind == AdapterKind::OpenAIResp {
-            let token = cell
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let token = cell.lock_ignore_poison();
             Ok(Some(AuthData::RequestOverride {
                 url: oauth::RESPONSES_URL.to_string(),
                 headers: Headers::from(oauth::request_headers(&token, "text/event-stream")),

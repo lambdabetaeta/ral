@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{grain_run, is_blank, plain, size_bar};
+use super::line::{self, is_blank, plain, size_bar};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
@@ -25,7 +25,6 @@ use crate::bus::AgentId;
 use crate::bus::card::{Card, Hunk, ObservationKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
-use ratatui::text::Span;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -980,14 +979,7 @@ impl Viewport {
         )]
         let think_lines = self.thinking.lines().count() as u32;
         let answer_chars = self.current_answer_chars();
-        vec![
-            Line::default(),
-            Line::from(vec![
-                grain_run(think_chars, answer_chars),
-                Span::raw(" "),
-                size_bar(think_lines),
-            ]),
-        ]
+        line::thinking_header(think_chars, think_lines, answer_chars)
     }
 
     fn trailing_markdown_start(&self) -> Option<usize> {
