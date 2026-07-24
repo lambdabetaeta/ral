@@ -16,6 +16,10 @@ pub struct Usage {
     pub unmetered: bool,
 }
 
+/// Merge two optional per-turn counts, keeping `None` only when *both*
+/// sides are `None` — so accumulation preserves "this provider never
+/// reports the metric" rather than folding it into a reported zero, the
+/// distinction [`Usage::parts`]'s cache-visibility check relies on.
 fn add_opt_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(x), Some(y)) => Some(x + y),
@@ -31,12 +35,19 @@ impl std::ops::AddAssign for Usage {
         self.cache_creation = add_opt_u64(self.cache_creation, rhs.cache_creation);
         self.cache_read = add_opt_u64(self.cache_read, rhs.cache_read);
         self.dollars += rhs.dollars;
+        // A running total (e.g. a session spanning a mid-run provider
+        // switch) reads unmetered if *any* folded-in turn was — `parts()`
+        // then shows "subscription" for the whole total, even one still
+        // carrying dollars accumulated from metered turns before the switch.
         self.unmetered = self.unmetered || rhs.unmetered;
     }
 }
 
 /// Humanise a token count with the one format shared by every surface.
 pub fn humanize_tokens(n: u64) -> String {
+    // The cutoff sits just below a full million so a count that would
+    // otherwise round to "1000.0k" in the thousands branch below instead
+    // reports "1.0m".
     if n >= 999_950 {
         #[allow(
             clippy::cast_precision_loss,
@@ -72,6 +83,9 @@ impl Usage {
             Some(n) => humanize_tokens(n),
             None => "—".into(),
         };
+        // `Some(0)` — the provider reports the metric but nothing happened
+        // this turn — hides the segment same as `None`, which means it
+        // doesn't report the metric at all.
         let show_cache = matches!(self.cache_creation, Some(n) if n > 0)
             || matches!(self.cache_read, Some(n) if n > 0);
         UsageParts {
@@ -100,6 +114,12 @@ impl fmt::Display for Usage {
     }
 }
 
+/// Build a turn's [`Usage`] from genai's raw counts, pricing it only when
+/// `metered` — a subscription/flat-rate turn still reports token counts but
+/// leaves `dollars` at `0.0`, so [`Usage::parts`] shows "subscription"
+/// rather than a fabricated cost. A raw count that fails to convert to
+/// `u64` (negative — a provider bug, never legitimate) clamps to `0` rather
+/// than panicking.
 pub(super) fn usage_from(
     model: &str,
     raw: &genai::chat::Usage,

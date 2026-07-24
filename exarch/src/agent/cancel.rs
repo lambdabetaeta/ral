@@ -234,6 +234,11 @@ fn raise(cause: CancelCause) {
     }
 }
 
+/// The trunk-only half of Esc/Ctrl-C: cancel the trunk's published token
+/// with `Interrupt` and unwind its current turn via [`deliver_interrupt`].
+/// Any other focused tab instead goes through `AgentRegistry::interrupt`,
+/// which reaches that agent's own token directly rather than the slot (see
+/// the module doc).
 pub fn raise_interrupt() {
     raise(CancelCause::Interrupt);
     deliver_interrupt();

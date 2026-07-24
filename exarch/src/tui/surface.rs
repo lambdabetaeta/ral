@@ -1,3 +1,15 @@
+//! Grouping accumulator for surfaced content that would otherwise land as
+//! many one-off blocks: [`PatchBuf`] coalesces consecutive same-`(id, path)`
+//! diff hunks into one `▎ diff` block, [`ObservationBuf`] buckets consecutive
+//! read/exec/grep events by kind.  Both are session-keyed, so a session
+//! change flushes the live buffer and opens a fresh one rather than merging
+//! across sessions.  Kept as two independent buffers, not one, since they
+//! group on different keys and flush in a fixed relative order
+//! ([`SurfaceBuffer::flush_surfaces`]).  Every other content path funnels
+//! through `with_viewport` (`app.rs`), which commits both before handing the
+//! caller a live [`Viewport`] — so a pending group always lands before
+//! whatever follows it on the rail.
+
 use std::collections::HashMap;
 
 use super::viewport::Viewport;

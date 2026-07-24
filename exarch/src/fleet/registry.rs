@@ -21,8 +21,8 @@
 //!     grinding to its timeout wall.  Cancelling that root is already the
 //!     whole story for the node's own detached `ral` workers, too: a
 //!     worker's cancel scope is a child of its shell's durable root
-//!     (`decisions/260705_session-ledger`'s one cascade law, "cancelling a
-//!     resident cancels what it owns"), and every `CancelScope::is_cancelled`
+//!     (the cascade law: "cancelling a resident cancels what it owns"), and
+//!     every `CancelScope::is_cancelled`
 //!     walks its ancestors, so the cascade reaches them with no extra edge
 //!     of its own. A node that is never cancelled — the ordinary `reply`/
 //!     settle path, or the trunk's own end-of-`drive` `deregister` — takes
@@ -104,9 +104,8 @@ pub(crate) enum EvalReach {
     /// [`Self::interrupt`] and [`Self::terminate`] resolve to the same
     /// [`ControlSender::cancel_in_flight`]. A wire-seated agent never
     /// actually has a child today (a wire session's `agent-start` is always
-    /// refused, `docs/ral-wiki/decisions/260722_session-is-a-process.md`),
-    /// so this variant is unreached in production but must still answer both
-    /// calls honestly.
+    /// refused), so this variant is unreached in production but must still
+    /// answer both calls honestly.
     #[cfg(unix)]
     Wire(ral_core::transport::ControlSender),
 }
@@ -144,11 +143,10 @@ impl EvalReach {
 /// A child's idle lease: the wall-clock span since its last human exchange
 /// (birth is the epoch) before its whole subtree is reaped.
 ///
-/// ([[concurrency-primitives-detached-vs-structured]]). A human message
-/// delivered to the agent renews the clock; nothing else does. A lease that
-/// is never renewed therefore fires at exactly this duration from birth —
-/// the fixed reap time is this lease's zero-renewal case, not a second
-/// bound.
+/// A human message delivered to the agent renews the clock; nothing else
+/// does. A lease that is never renewed therefore fires at exactly this
+/// duration from birth — the fixed reap time is this lease's zero-renewal
+/// case, not a second bound.
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
 
 /// How long a leased child may sit idle-and-parked before the frontend
@@ -725,7 +723,7 @@ pub enum MessageError {
     NotADescendant(AgentId),
     /// The recipient's inbox rejected the message at quota — surfaced to
     /// the `message` tool's caller as a user-facing error, never dropped
-    /// silently (`decisions/260705_leases-and-budgets`).
+    /// silently.
     RecipientInboxFull(AgentId, InboxReject),
 }
 

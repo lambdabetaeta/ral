@@ -125,7 +125,7 @@ impl LoginOverlay {
 }
 
 /// One station's rendered state on the fixed three-station phase track — the
-/// effort ladder's own glyph vocabulary (`picker.rs`'s `LADDER`), applied
+/// effort ladder's own glyph vocabulary (`picker.rs`'s `GLYPHS`), applied
 /// discretely rather than as a ramp: pending, active, or complete, never a
 /// value in between and never animated.
 #[derive(Clone, Copy)]
@@ -268,8 +268,8 @@ impl LoginOverlay {
     }
 
     /// The phase-specific detail row(s) below the track: the browser's
-    /// manual-open fallback (the alt-screen replacement for
-    /// `browser.rs`'s stderr fallback — it must be visible here or nowhere),
+    /// manual-open fallback (the alt-screen replacement for the CLI adapter's
+    /// [`LoginPhase::stderr_line`] — it must be visible here or nowhere),
     /// the device code and its static expiry text, or the failure reason.
     fn detail_lines(&self) -> Vec<Line<'static>> {
         match &self.mode {

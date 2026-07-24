@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
+/// The device-code poll deadline; the browser flow's own callback wait
+/// mirrors this value. Enforced client-side — the device-code response
+/// carries no `expires_in` of its own.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
 /// [`MAX_WAIT`] rendered for the user-facing sign-in messages, so the shown
@@ -94,8 +97,8 @@ async fn request_user_code(client: &reqwest::Client) -> Result<UserCode, String>
     super::json_or_error(resp, "device code request").await
 }
 
-/// Poll the token endpoint until the user authorises the code or 15 minutes
-/// elapse. A 403 or 404 means the user has not finished yet. `cancel` is
+/// Poll the token endpoint until the user authorises the code or [`MAX_WAIT`]
+/// elapses. A 403 or 404 means the user has not finished yet. `cancel` is
 /// checked before each request; an in-flight request remains bounded by the
 /// HTTP client's own timeout.
 async fn poll_for_code(

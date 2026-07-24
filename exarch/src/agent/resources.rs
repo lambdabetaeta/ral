@@ -1,21 +1,19 @@
 //! The `/resources` probe fold: one row per session-lived accumulator,
 //! rendered as one card.
 //!
-//! The probe convention ([[invariants/probe-convention]], per
-//! `decisions/260705_leases-and-budgets`): every session-lived accumulator
-//! registers a [`ProbeRow`] — its name, current size, cap, and pressure
-//! policy — and `/resources` is a *fold over the registered probes*, never
-//! a bespoke report. The fold is deliberately the inspector built before
-//! any enforcer: an accumulator whose cap lands later states its *decided*
+//! The probe convention: every session-lived accumulator registers a
+//! [`ProbeRow`] — its name, current size, cap, and pressure policy — and
+//! `/resources` is a *fold over the registered probes*, never a bespoke
+//! report. The fold is deliberately the inspector built before any enforcer:
+//! an accumulator whose cap lands later states its *decided*
 //! policy with `cap: None` and a note saying so, because a budget that
 //! cannot be inspected will be debugged by restarting the process.
 //!
 //! Probing never mutates and never renews a lease — enumeration is not
-//! observation, the same ledger law the `workers` listing obeys
-//! (`decisions/260705_session-ledger`). Residents (workers, agents,
-//! schedules — things a capability reaches) and mere accumulators (a
-//! viewport, the bus, an inbox) are both probed; only residents are
-//! listed, cancelled, and leased.
+//! observation, the same ledger law the `workers` listing obeys. Residents
+//! (workers, agents, schedules — things a capability reaches) and mere
+//! accumulators (a viewport, the bus, an inbox) are both probed; only
+//! residents are listed, cancelled, and leased.
 //!
 //! The fold has two halves, split by who may legally read what: the agent
 //! assembles its own rows on its drive thread (the shell's registry and
@@ -327,9 +325,9 @@ mod tests {
 
     /// The frontend half of the fold: every row wears its decided policy;
     /// the viewport window's two enforced caps (blocks, rows) show up as
-    /// real `cap`s now that the window has landed, while the accumulators
-    /// with no enforced number of their own (bytes, views, the bus) still
-    /// say so honestly rather than faking one.
+    /// real `cap`s, while the accumulators with no enforced number of their
+    /// own (bytes, views, the bus) still say so honestly rather than faking
+    /// one.
     #[test]
     fn frontend_rows_state_decided_policies_and_the_viewport_window_caps() {
         let rows = frontend_rows(

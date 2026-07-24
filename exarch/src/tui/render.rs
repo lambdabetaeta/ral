@@ -78,7 +78,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let area = Rect::new(0, 0, cols, rows);
     // The prompt box sizes to its draft; the `/model` picker floats as an
     // overlay above this whole layout (drawn last over a cleared centre),
-    // so it no longer claims the prompt region.
+    // so it never claims the prompt region.
     let text_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
     let prompt_h = app.prompt_state.height_hint(text_w, area.height);
     // The tab-bar/matrix choice: collapse to the plain one-line `tab_bar`

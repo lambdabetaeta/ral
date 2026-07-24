@@ -13,8 +13,7 @@
 //! [`Role`] (identity → hue/shape); a [`Measure`] or [`Mark::Diff`] carries
 //! a magnitude (ordered → size/value/grain).  The one binding table lives
 //! in the renderer, so the kit *cannot* put magnitude on hue: the encoding
-//! is correct by construction.  See
-//! `docs/ral-wiki/decisions/260619_surface-carries-documents.md`.
+//! is correct by construction.
 
 use ral_core::Value as RalValue;
 use serde::Serialize;
@@ -322,12 +321,14 @@ impl Row {
 /// Compute the whole-file line-level diff of `old` vs `new`, grouped into
 /// hunks with ±2 lines of context.  Each hunk's `start` is the 1-indexed
 /// original line of its first row, and its rows are the unified context /
-/// deletion / insertion list `similar` yields.  Shared by every diff-card
-/// producer: `edit-hash`/`edit-replace` (`shell_eval/builtins.rs`) feed it through a
-/// `` `diff `` value the model-facing `surface` builtin forwards; a
-/// committed `>` redirect that overwrote an existing file (the write-card
-/// preview below) calls it directly, with no `Value` round-trip, since it
-/// already sits in the rendering layer.
+/// deletion / insertion list `similar` yields.
+///
+/// The sole caller is [`write_preview`], so every committed write reaches
+/// this same diff through the one [`value_to_io`]/[`io_card`] decode,
+/// whatever wrote it: a `>` redirect (core composes the `` `io `` value
+/// itself) or `edit-hash`/`edit-replace` (`shell_eval/builtins.rs`'s
+/// `surface_write` composes the identical value by hand, since those
+/// builtins write below the redirect frame and so must self-report).
 pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);
@@ -341,11 +342,8 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
         let start = first.old_range().start as u32 + 1;
         let mut rows = Vec::new();
         for op in &group {
-            // The *inline* changes carry, per row, the intra-line word diff
-            // `similar` computes against the row's paired line: a run of
-            // `(emphasised, text)` segments, where the emphasised runs are the
-            // bits that actually differ.  A context row reduces to one
-            // unemphasised segment, exactly the old line-level shape.
+            // `iter_inline_changes` is what buys the per-row [`Seg`] shape:
+            // an `Equal` op still yields one whole (unemphasised) segment.
             for change in diff.iter_inline_changes(op) {
                 let mut segs: Vec<Seg> = change
                     .iter_strings_lossy()
@@ -355,9 +353,9 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
                     })
                     .collect();
                 // `from_lines` keeps a trailing `\n` on each row's final
-                // segment; strip exactly one so the row carries the bare line,
-                // the way `rows_of` splits the file, dropping a segment the
-                // strip empties.
+                // segment; strip it so the row carries a bare line, matching
+                // how `rows_of` splits the file.  If stripping leaves that
+                // segment empty (a line that was pure `\n`), drop it outright.
                 if let Some(last) = segs.last_mut() {
                     if let Some(bare) = last.text.strip_suffix('\n') {
                         last.text = bare.to_string();
@@ -425,7 +423,7 @@ impl WriteOutcome {
         })
     }
 
-    /// The word shown in a write card's outcome span, and its nominal role.
+    /// The word shown in a write card's outcome span.
     fn label(self) -> &'static str {
         match self {
             Self::Committed => "committed",
@@ -434,6 +432,7 @@ impl WriteOutcome {
         }
     }
 
+    /// The nominal role that spans `label` in the outcome span.
     fn role(self) -> Role {
         match self {
             Self::Committed => Role::Ok,
@@ -687,9 +686,9 @@ const WRITE_PREVIEW_LINES: usize = 10;
 /// Preview a committed write: a whole-file [`Mark::Diff`] against the prior
 /// content when `old` is present (core supplies it only for an atomic write
 /// that overwrote an existing file with neither side exceeding its read cap)
-/// and both sides are valid UTF-8 — the same diff `edit-hash`/`edit-replace` surface
-/// explicitly, here computed directly from the two snapshots since this
-/// already sits in the rendering layer.  Otherwise, the first
+/// and both sides are valid UTF-8 — the diff is computed here, once, for
+/// every committed write [`io_card`] renders, whatever wrote it (a `>`
+/// redirect, `edit-hash`, `edit-replace`).  Otherwise, the first
 /// [`WRITE_PREVIEW_LINES`] lines of `new` as one [`Mark::Listing`], `more` set
 /// when content continues past them — a plain preview of *what was written*,
 /// for a new file or content this can't safely diff (binary, or too large on
@@ -818,11 +817,11 @@ pub enum DoneOutcome {
 ///
 /// The shape is `` `done [cmd: "…", outcome: …] `` where
 /// `outcome` is the closed `` `ok ``/`` `err ``/`` `panic `` variant core mints;
-/// `err` carries the `{cmd, status, message, line, col}` error record.  The
-/// `cmd` field is no longer surfaced — the card names the worker generically —
-/// so only `outcome` is read.  Anything else returns `None`, the same graceful
-/// degradation as [`value_to_io`] and [`value_to_card`]; the decoder seam then
-/// drops it.
+/// `err` carries the `{cmd, status, message, line, col}` error record.  `cmd`
+/// rides the value but is not decoded here — [`done_card`] names the worker
+/// generically, not by which one it was, so only `outcome` is read.  Anything
+/// else returns `None`, the same graceful degradation as [`value_to_io`] and
+/// [`value_to_card`]; the decoder seam then drops it.
 pub fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
     let RalValue::Variant { label, payload } = v else {
         return None;
@@ -894,8 +893,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 // ── `notice`: core's own ready-boundary housekeeping, pushed ─────────────
 
 /// The decoded body of a `` `notice `` surface event core's own engine
-/// pushes at a turn's ready boundary
-/// (`decisions/260706_enquiry-channel` §4.2).
+/// pushes at a turn's ready boundary.
 ///
 /// The notice names a worker the lease chain
 /// reaped or a run of idle top-level bindings the ledger pruned.
@@ -1024,7 +1022,7 @@ fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
 /// (unused >= 256 calls)`. The displayed count is the *minimum* idle-call
 /// age across `idle_calls` — every pruned name was idle at least that
 /// long, so the figure is truthful even when a multi-name prune's
-/// individual ages differ (`decisions/260629_agent-binding-reaping`).
+/// individual ages differ.
 fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
     let min_idle = idle_calls.iter().min().copied().unwrap_or_default();
     let phrase = format!(

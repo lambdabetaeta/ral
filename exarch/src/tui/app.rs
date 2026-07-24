@@ -64,8 +64,8 @@ pub(super) enum Overlay {
 /// The main TUI application state.
 ///
 /// Owns one [`Viewport`] per session and a flat list of visible tabs.
-/// The currently focused tab'\''s committed lines flow into the host
-/// terminal'\''s native scrollback; off-focus tabs accumulate locally
+/// The currently focused tab's committed lines flow into the host
+/// terminal's native scrollback; off-focus tabs accumulate locally
 /// and replay in full when the user tabs to them.
 pub(crate) struct App {
     pub(super) tabs: Tabs,
@@ -85,7 +85,7 @@ pub(crate) struct App {
     /// sampled and pushed into the App each frame.
     agents: AgentRegistry,
     pub(super) total_usage: Usage,
-    /// Last turn'\''s prompt size (genai'\''s `prompt_tokens`, which already
+    /// Last turn's prompt size (genai's `prompt_tokens`, which already
     /// folds the cache-read and cache-creation counts in); drives the
     /// `ctx N%` gauge.  Overwritten, not accumulated.
     pub(super) last_input: u64,
@@ -113,9 +113,9 @@ pub(crate) struct App {
     pub(super) matrix_sort: MatrixSort,
     /// Set by [`Self::clear`] when the trunk viewport is blanked: drops leftover
     /// events from a turn cancelled in flight (`Token`, `Boundary`, ...) until
-    /// the next prompt genuinely begins.  Only the root needs guarding --
+    /// the next prompt genuinely begins.  Only the root needs guarding —
     /// retired sub-agent tabs are already dropped in [`Self::handle`] via the
-    /// `dying` linger window -- because the unbounded bus channel can still
+    /// `dying` linger window — because the unbounded bus channel can still
     /// carry tokens the worker emitted between the cancel and when the
     /// streaming select notices the flag (at most one `wait_for_cancel` poll).
     /// Disarmed when the next `UserPromptEcho` arrives.
@@ -327,7 +327,7 @@ impl App {
         }
         // While the trunk viewport is freshly cleared (`App::clear` armed
         // `root_clear_drain`), drop the straggler events the cancelled turn
-        // left in the unbounded bus -- the tokens and trailing chrome the
+        // left in the unbounded bus — the tokens and trailing chrome the
         // worker emitted before the streaming `select!` noticed the cancel
         // flag, at most one `wait_for_cancel` poll (~50 ms) of queued events.
         // The first `UserPromptEcho` is the genuine next prompt: disarm the
@@ -413,7 +413,7 @@ impl App {
             // A desk verb changed the world outside the turn, so it renders
             // as an act — its own block kind, its own rail shape, and a
             // barrier the coalescing projection never folds into a run of
-            // observations ([[decisions/260720_harness-calls-are-acts]]).
+            // observations.
             Kind::HarnessCall {
                 verb,
                 subject,
@@ -459,9 +459,10 @@ impl App {
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
             // Quiet on the rail; recorded in the trace at the emit seam.  An
-            // act's result joins them there: a desk result is one line, so
-            // the bar it used to stamp was constant ink, and the act row has
-            // already said everything the act has to say.
+            // act's result joins them there: a desk result is always one
+            // line, so the size bar a `ToolResult` stamps would be constant
+            // ink here, and the act row has already said everything the act
+            // has to say.
             Kind::Nudge { .. } | Kind::HarnessResult(_) => {}
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));

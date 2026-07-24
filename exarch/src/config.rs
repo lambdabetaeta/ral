@@ -40,8 +40,7 @@
 //! operator-set byte ceiling for the session log dir + scratch, read from an
 //! environment variable rather than the `.ral` file (there is no value to
 //! *compute* here, just a number to read once at boot). Absent means no
-//! walks and no warnings, ever
-//! (`decisions/260705_leases-and-budgets`, "Disk: report and warn only").
+//! walks and no warnings, ever.
 
 use crate::provider::CustomProvider;
 use genai::adapter::AdapterKind;
@@ -58,8 +57,7 @@ const LABEL: &str = "exarch config";
 /// The operator-set disk-warn ceiling, in bytes, or `None` if unset.
 ///
 /// Absent means [`crate::agent::Agent::check_disk_warn`] never
-/// walks the log/scratch dirs at all, no cost paid ever
-/// (`decisions/260705_leases-and-budgets`, "Disk: report and warn only").
+/// walks the log/scratch dirs at all, no cost paid ever.
 /// Read once at startup, like every other launch setting; there is
 /// deliberately no live-reload.
 ///

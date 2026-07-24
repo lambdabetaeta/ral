@@ -1,5 +1,12 @@
 //! Model picker overlay orchestration — the `/model` command handler and its
 //! event loop.
+//!
+//! [`picker::Picker`] is the component half of the component/orchestration
+//! split [`super::login`] mirrors: a pure display+input state machine, not a
+//! generic widget reused elsewhere — this module is its one caller. It owns
+//! the credential store and [`ModelCatalog`], seeds and pumps the picker's
+//! model/serving-provider fetches, and turns a resolved [`picker::PickAction`]
+//! into a live [`Provider`] swap plus persisted [`state::State`].
 
 use std::fmt::Write;
 use std::sync::Arc;

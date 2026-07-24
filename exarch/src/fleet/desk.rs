@@ -2,9 +2,8 @@
 //!
 //! [`HostServices`] is the capture set a desk handler is allowed to touch —
 //! everything [`crate::agent::Agent::host_services`] can hand off `&Agent`
-//! without lending `&mut Agent`/`&mut Shell`, since the reentrancy law
-//! (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3) bars a handler
-//! from ever taking the session lock. [`ExarchDesk`] answers one enquiry
+//! without lending `&mut Agent`/`&mut Shell`, since the reentrancy law bars a
+//! handler from ever taking the session lock. [`ExarchDesk`] answers one enquiry
 //! against that capture; [`DeskBinding`] is the identity-transport adapter
 //! that keeps a handler's own chrome from outrunning the turn's earlier
 //! surface output. Step 0 of `dev/docs/260715_tools_to_builtins.md` wired
@@ -119,7 +118,7 @@ pub(crate) struct HostServices {
 /// (`crate::agent::Agent::run_shell`), wrapped in [`DeskBinding`] for the
 /// identity transport and passed bare into `shell_eval::run_shell`'s
 /// `on_enquiry` binding for the wire-future path — one handler, two
-/// bindings, per `docs/ral-wiki/decisions/260706_enquiry-channel.md`.
+/// bindings.
 pub(crate) struct ExarchDesk {
     pub(crate) services: HostServices,
 }
@@ -280,8 +279,7 @@ impl ExarchDesk {
     /// (`` `schedule ``, `` `schedule-list ``, `` `unschedule ``),
     /// `` `reply ``, and the egress family (`` `fetch-url ``) are answered
     /// here; an unrecognised class still answers the extension law's error —
-    /// never a silent default (`docs/ral-wiki/decisions/260706_enquiry-channel.md`,
-    /// "the extension law").
+    /// never a silent default.
     ///
     /// # Errors
     /// Returns `Err` if `req` is not a [`FOValue::Variant`], names a class
@@ -419,8 +417,7 @@ impl ExarchDesk {
         let fuel = s.fuel - 1;
         // Only an identity seat's `agent-start` ever reaches this far: a
         // wire session's fuel is always 0 (step 2 above already refused
-        // it), since a guest-side spawn is not yet built
-        // (docs/ral-wiki/decisions/260722_session-is-a-process.md).
+        // it), since a guest-side spawn is not yet built.
         let Some(scratch) = s.scratch.clone() else {
             return Err(Error::new(
                 "agent-start refused: this session has no host-side scratch to fork an \
@@ -709,7 +706,7 @@ impl ExarchDesk {
         // reading as one that landed.  The subject stays the caller's own
         // label: the minted `sched-{id}` default is the registry's answer, not
         // something the caller named, so an unlabelled schedule leaves the cell
-        // blank ([[decisions/260720_harness-calls-are-acts]]).
+        // blank.
         let described = trigger.describe();
         let result = s
             .schedules
@@ -1005,9 +1002,7 @@ impl EnquiryDesk for AbsentDesk {
 /// handler's own chrome render ahead of the turn's earlier surface output.
 /// [`Self::enquire`] drains every frame already queued through `apply`
 /// before delegating to `desk`, so the identity path renders in the same
-/// order the wire path's live drain loop would
-/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md`, "Identity
-/// binding").
+/// order the wire path's live drain loop would.
 pub(crate) struct DeskBinding {
     pub(crate) desk: Arc<ExarchDesk>,
     pub(crate) events: Arc<EventReceiver>,
@@ -1047,9 +1042,9 @@ mod tests {
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
     /// A session log under a scratch dir unique to this call — tests run in
-    /// parallel, and every call in this module used to share one fixed
-    /// `sessions_root`/id-0 pair, racing `remove_dir_all` against a sibling
-    /// test's `create_dir_all` for the identical path.
+    /// parallel, so a shared fixed `sessions_root`/id-0 pair would race this
+    /// call's `remove_dir_all` against a sibling test's `create_dir_all` for
+    /// the identical path.
     fn fresh_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1258,10 +1253,8 @@ mod tests {
 
     /// `DeskBinding` drains every surface frame already queued on the
     /// transport's event channel before it hands the request to the inner
-    /// desk — the drain-then-handle adapter's law
-    /// (`docs/ral-wiki/decisions/260706_enquiry-channel.md`, "Identity
-    /// binding"): a handler's own chrome must never jump ahead of the
-    /// turn's earlier surface output.
+    /// desk — the drain-then-handle adapter's law: a handler's own chrome
+    /// must never jump ahead of the turn's earlier surface output.
     ///
     /// Dispatches a real turn through a real `IdentityTransport` that
     /// surfaces an `` `unpin `` event via the ground `surface` builtin —
@@ -1918,8 +1911,7 @@ mod tests {
 
     /// A desk handler observes the turn's earlier surfaced values already
     /// drained before it answers — the identity drain-then-handle adapter's
-    /// law (`docs/ral-wiki/decisions/260706_enquiry-channel.md`, "Identity
-    /// binding") — exercised here with a real `agent` spawn rather than
+    /// law — exercised here with a real `agent` spawn rather than
     /// the stub `probe` class `desk_binding_drains_pending_surfaces_before_handling`
     /// uses: the surfaced `` `unpin `` must reach the bus before the
     /// spawn's own `Kind::HarnessCall` chrome line.
@@ -2209,7 +2201,7 @@ mod tests {
     /// A schedule the registry refuses tiers its act row like any other act.
     /// The row is emitted after the registry call precisely so `failed` can
     /// carry the outcome — emitted before, every schedule would read as one
-    /// that landed ([[decisions/260720_harness-calls-are-acts]]).
+    /// that landed.
     #[test]
     fn a_refused_schedule_tiers_its_act_row() {
         let (emit, rx) = crate::bus::dummy_emitter();

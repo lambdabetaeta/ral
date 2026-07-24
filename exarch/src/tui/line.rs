@@ -89,6 +89,8 @@ pub(super) fn size_bar(magnitude: u32) -> Span<'static> {
     Span::styled(size_bar_text(magnitude), Style::default().fg(SLATE))
 }
 
+/// The bar's glyph run alone, unstyled — for a caller that paints it in its
+/// own hue rather than [`SLATE`] (the metadata matrix's per-agent bar).
 pub(super) fn size_bar_text(magnitude: u32) -> String {
     let filled = size_cells(magnitude);
     "█"
@@ -167,6 +169,11 @@ fn grain_cell(ratio: f32) -> char {
 /// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
 /// reasoning's own magnitude — "how dearly bought" and "how much thinking".
 /// The reasoning prose itself stays folded until the block is dialed.
+///
+/// The one renderer for this header: both the committed block
+/// ([`super::block::Block::body`]) and the live, still-streaming seat
+/// ([`super::viewport::Viewport::thinking_seat`]) call through here, so the
+/// provisional header can never drift from the one the block commits to.
 pub(super) fn thinking_header(
     think_chars: u32,
     think_lines: u32,
@@ -369,13 +376,13 @@ pub(super) const ACT_SUBJECT_W: usize = 20;
 /// A harness act's row: `verb`, `subject`, `payload`, in three columns whose
 /// first two are pinned ([`ACT_VERB_W`], [`ACT_SUBJECT_W`]).  An act changes
 /// the world outside the turn, so it carries no magnitude and wears no
-/// size-bar — the three fields are the whole of what it has
-/// ([[decisions/260720_harness-calls-are-acts]]).  A `failed` act tiers its
-/// payload — the short refusal — hot, on the row that names the attempt; the
-/// long form is the raise, and the raise is the model's.  `full` (L2/L3)
-/// wraps the payload under its own column; reduced (L1), it truncates into
-/// it with an `…`.  The `↗` / `◷` shape arrives via the lifted rail
-/// ([`super::block::Block::render_with`]), so this builder is rail-less.
+/// size-bar — the three fields are the whole of what it has.  A `failed` act
+/// tiers its payload — the short refusal — hot, on the row that names the
+/// attempt; the long form is the raise, and the raise is the model's.  `full`
+/// (L2/L3) wraps the payload under its own column; reduced (L1), it
+/// truncates into it with an `…`.  The `↗` / `◷` shape arrives via the
+/// lifted rail ([`super::block::Block::render_with`]), so this builder is
+/// rail-less.
 pub(super) fn act_row(
     verb: &str,
     subject: Option<&str>,
@@ -1133,9 +1140,9 @@ pub(super) fn note(s: &str) -> Vec<Line<'static>> {
     ))]
 }
 
-/// Bracketed stop-reason notice (e.g. `[stop: content_filter]`).  Uses [`note`] styling.
-/// model's normalised raw reason goes inside; render is the same
-/// styling as [`note`].
+/// Bracketed stop-reason notice (e.g. `[stop: content_filter]`) around the
+/// provider's own un-normalised reason string (`StopReason::raw`), styled
+/// like [`note`].
 pub(super) fn stop_reason(raw: &str) -> Vec<Line<'static>> {
     note(&format!("[stop: {raw}]"))
 }

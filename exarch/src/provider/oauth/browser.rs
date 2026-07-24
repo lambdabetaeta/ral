@@ -185,6 +185,8 @@ fn accept_callback(
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err(format!("sign-in failed: {error}"));
     }
+    // `state` is the CSRF guard on this public loopback listener: only a
+    // callback carrying the value minted for this flow is accepted.
     if state.as_deref() != Some(expected_state) {
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err("state mismatch".to_string());

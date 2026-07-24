@@ -176,8 +176,7 @@ fn a_dead_peer_fails_the_in_flight_turn_as_cancelled() {
     // peer interrupts is a genuinely in-flight turn, not a race with dispatch.
     std::thread::sleep(Duration::from_secs(1));
 
-    // Drop the transport: its Drop shuts the socket down, and the engine sees
-    // EOF on fd 3.
+    // The engine sees EOF on fd 3 once the transport drops.
     drop(transport);
 
     // The engine must cancel the in-flight `sleep 30` and exit well within a

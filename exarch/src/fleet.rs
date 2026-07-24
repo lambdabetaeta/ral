@@ -2,10 +2,9 @@
 //!
 //! Where an [`Agent`](crate::agent::Agent) is one uniform node, the `Fleet` is
 //! the thin object that holds what every node *shares* — the one agent
-//! registry, the one event bus, and the one transport engine
-//! ([[decisions/260624_uniform-agent-nodes]]).  It owns no turn logic: the
-//! trunk and each child drive themselves; the fleet is just where the frontend
-//! reads "all live agents" and "the bus to drain".
+//! registry, the one event bus, and the one transport engine.  It owns no
+//! turn logic: the trunk and each child drive themselves; the fleet is just
+//! where the frontend reads "all live agents" and "the bus to drain".
 //!
 //! It is built by the frontend ([`crate::tui::run`] / [`crate::headless::run`])
 //! from handles the trunk already minted at construction — the same registry

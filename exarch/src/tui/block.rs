@@ -107,10 +107,9 @@ pub(super) enum BlockKind {
     /// `schedule`, `unschedule`.  An act changes the world outside the turn,
     /// so it is not an observation: it never coalesces into a `ral` run, it
     /// carries no magnitude, and it renders as three columns — `verb`,
-    /// `subject`, `payload` — with `failed` tiering the payload hot
-    /// ([[decisions/260720_harness-calls-are-acts]]).  Dialable: reduced (L1)
-    /// the payload truncates into its column, revealed (L2/L3) it wraps in
-    /// full.
+    /// `subject`, `payload` — with `failed` tiering the payload hot.
+    /// Dialable: reduced (L1) the payload truncates into its column, revealed
+    /// (L2/L3) it wraps in full.
     Act {
         verb: &'static str,
         subject: Option<String>,

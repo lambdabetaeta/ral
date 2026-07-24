@@ -43,6 +43,9 @@ use genai::chat::ChatMessage;
 use std::sync::Arc;
 use transport::Transport;
 
+/// One resolved provider selection: the model, tuning, and routing chosen
+/// for a session, paired with where its requests actually run — see
+/// [`Backend`].
 pub struct Provider {
     backend: Backend,
     id: ProviderId,
@@ -52,6 +55,9 @@ pub struct Provider {
     route: Option<String>,
 }
 
+/// Where a `Provider`'s requests execute: a live transport over a shared
+/// [`Engine`], or a deterministic [`scripted::Script`] replay so agent-loop
+/// tests never touch the network.
 enum Backend {
     Live {
         engine: Arc<Engine>,
@@ -127,6 +133,12 @@ impl Provider {
         }
     }
 
+    /// Stream one assistant turn: `on_text`/`on_think` fire per chunk as
+    /// content and reasoning arrive, and the in-flight request is raced
+    /// against `cancel` so a mid-stream interrupt returns
+    /// [`ProviderError::Cancelled`] rather than waiting on the next network
+    /// chunk. `tool_enabled` gates whether tool definitions ride the request
+    /// at all.
     pub(crate) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         system: &str,

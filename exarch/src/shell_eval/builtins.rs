@@ -244,9 +244,9 @@ fn rows_of(body: &str) -> Vec<String> {
 }
 
 /// Surface the one `{io:"read", path}` card for a whole-file read.  `view-text`
-/// and `witnesses` read in Rust below the ral line (no `< path` redirect), so
-/// they raise their own read card — one logical surface per read, matching the
-/// shape the redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
+/// reads in Rust below the ral line (no `< path` redirect), so it raises its
+/// own read card — one logical surface per read, matching the shape the
+/// redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
 /// exception: they read silently and speak only their `write` event.
 fn surface_read(shell: &Shell, path: &str) {
     shell.surface(&Value::map(vec![
@@ -635,9 +635,9 @@ fn surface_write(shell: &Shell, path: &str, old: &str, new: &str) {
 
 /// Read a file as a UTF-8 string for the witness layer, gating the read through
 /// the active grant the way a `< path` redirect would.  The shared read door of
-/// `view-text`, `witnesses`, and `edit-hash`: in Rust, below the ral line, so it
+/// `view-text`, `edit-hash`, and `edit-replace`: in Rust, below the ral line, so it
 /// never reaches the redirect frame.  Each caller decides its own surface —
-/// `view-text`/`witnesses` raise one read card, `edit-hash`/`edit-replace` read silently
+/// `view-text` raises one read card, `edit-hash`/`edit-replace` read silently
 /// and speak only their `write` event.  A non-UTF-8 file is named (the witness
 /// layer cannot address it); `tool` puts the calling builtin's name on the error.
 #[allow(
@@ -721,6 +721,9 @@ fn relabel_string_replace(b: Break) -> Break {
     }
 }
 
+/// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) up to `DEPTH`,
+/// via the one sanctioned walk site ([`cancellable`]); a denied entry is
+/// skipped, not fatal, the same policy [`search_tree`] applies to its hits.
 fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "explore-dir")?;
     let depth: usize = match &args[0] {
@@ -768,7 +771,7 @@ fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                     .into_owned();
                 // Honour the grant's deny_paths, skipping a denied entry
                 // rather than aborting the whole walk, so one off-limits path
-                // doesn't blank the listing — the same policy `_search-files`
+                // doesn't blank the listing — the same policy `grep-files`
                 // applies to its hits.
                 if !readable(shell, &rel) {
                     continue;
@@ -999,9 +1002,9 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
 ///
 /// An id naming an ephemeral `spawn`/`watch` worker is refused exactly
 /// like an unknown one: an ephemeral spawn is lease-bounded and
-/// rediscovered through its binding, not by id — `decisions/260705_leases-
-/// and-budgets` carves out by-id re-acquisition for services alone, not a
-/// general control plane over every worker.
+/// rediscovered through its binding, not by id — by-id re-acquisition is
+/// carved out for services alone, not a general control plane over every
+/// worker.
 ///
 /// A bare top-level `service-handle N` result cannot cross the host seam —
 /// a `Handle` is not ground — by design: it exists to be composed with an
@@ -1201,7 +1204,7 @@ mod tests {
 
     /// A pre-cancelled scope aborts the search walk at its first poll,
     /// before any filesystem entry is processed, surfacing status 130.  The
-    /// `grep-files` builtin now owns that walk (`search_tree`).
+    /// `grep-files` builtin owns that walk (`search_tree`).
     #[test]
     fn search_files_honours_a_cancelled_scope() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1313,9 +1316,8 @@ mod tests {
         }
     }
 
-    /// A `service`-born worker registers under the durable class with its
-    /// birth description standing in for the old generic placeholder —
-    /// `class: Durable`, `cmd` the description verbatim.
+    /// A `service`-born worker registers under the durable class, its birth
+    /// description carried verbatim: `class: Durable`, `cmd` the description.
     #[test]
     fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1525,10 +1527,10 @@ mod tests {
     }
 
     /// `install_agent_library` sources the closures *and* installs their
-    /// docs into the same shell in one act (no process-global registry
-    /// left to reinstall) — so `help`'s output on an exarch-dressed shell
-    /// carries a `Library:` section naming the sourced helpers, while a
-    /// bare core shell that never sourced the library carries none.
+    /// docs into the same shell in one act — so `help`'s output on an
+    /// exarch-dressed shell carries a `Library:` section naming the sourced
+    /// helpers, while a bare core shell that never sourced the library
+    /// carries none.
     #[test]
     fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
         use ral_core::transport::{Program, Turn};

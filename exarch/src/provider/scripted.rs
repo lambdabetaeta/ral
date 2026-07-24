@@ -27,7 +27,8 @@ impl Reply {
         }
     }
 
-    /// A turn whose stream stalled after `text` rendered.
+    /// A turn whose stream stalled after `text` rendered, with a cause
+    /// string shaped like a real genai stream-timeout error.
     pub fn stalled(text: &str) -> Self {
         Self {
             text: text.to_string(),
@@ -84,7 +85,9 @@ impl Reply {
         }
     }
 
-    /// An empty assistant turn.
+    /// A reply with zero content parts — distinct from `text("")`, whose
+    /// `ChatMessage` still carries one empty text part.  For exercising the
+    /// driver's stub-substitution path on a truly empty assistant turn.
     pub fn empty() -> Self {
         Self {
             text: String::new(),
@@ -129,6 +132,15 @@ impl Script {
         self
     }
 
+    /// The `Backend::Scripted` counterpart to `Engine::complete`: there is
+    /// no real stream, so the whole reply fires through `on_text` once and
+    /// the queued outcome returns synchronously.  `on_think` is never
+    /// driven — a scripted `reasoning` rides directly on the outcome
+    /// instead of streaming incrementally.
+    ///
+    /// # Panics
+    /// Panics if the script is empty (a test drove more turns than it
+    /// scripted) or the mutex is poisoned.
     pub(super) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         _model: &str,

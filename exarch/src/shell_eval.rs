@@ -51,14 +51,13 @@ pub(crate) const LIVE_WORKER_CAP: usize = 64;
 /// Retention bound, in ral calls, on a settled worker's unclaimed result:
 /// the entry is swept this many calls after
 /// [`Agent::run_shell`](crate::agent::Agent)'s per-call epoch sweep first
-/// observes it settled.  256 matches the binding lease's scratch expiry
-/// (`decisions/260629_agent-binding-reaping`) — the two ledgers read the
-/// same ral-call clock.
+/// observes it settled.  256 matches the binding lease's scratch expiry —
+/// the two ledgers read the same ral-call clock.
 pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 
 /// Idle bound, in committed ral calls, on the binding-lease ledger armed on
 /// every agent shell: a top-level name unused for this many calls is
-/// pruned at the next ready boundary (`decisions/260629_agent-binding-reaping`).
+/// pruned at the next ready boundary.
 /// Reuses the settled-worker retention figure — one ral-call clock, read by
 /// both ledgers for their own idle policy.
 pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
@@ -66,9 +65,7 @@ pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
 /// Soft byte threshold on a session-scope install's shallow-size estimate
 /// (`Value::shallow_size`): meeting or exceeding this queues a
 /// `LargeBindingNotice` — a residency nudge, never an eviction, recommending
-/// a file path over captured bytes
-/// (`decisions/260705_leases-and-budgets` §"Shell residency is lexical
-/// state plus host leases").
+/// a file path over captured bytes.
 pub(crate) const LARGE_BINDING_BYTES: u64 = 1024 * 1024;
 
 /// The prelude baked into this binary at build time by `build.rs`.
@@ -240,8 +237,7 @@ struct InboxDeferred {
     /// (`Kind::Error`, recorded straight to the durable trace) — `deliver`
     /// has no caller to return a `Result` to (it runs on the spawn worker's
     /// own completion, not a synchronous tool call), so this is how the drop
-    /// stays visible rather than silent
-    /// (`decisions/260705_leases-and-budgets`). A `Transcript`, deliberately
+    /// stays visible rather than silent.  A `Transcript`, deliberately
     /// not a whole `Emitter`: this sink outlives the turn (installed once,
     /// flushed whenever the worker settles), and an `Emitter` carries a live
     /// bus sender whose lifetime would then wrongly extend with it — the
@@ -313,7 +309,6 @@ pub(crate) fn run_shell(
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    // Build the transport-level Turn.
     use ral_core::transport::{Program, Report, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
@@ -351,7 +346,7 @@ pub(crate) fn run_shell(
         // engine's `Event::Enquiry`, per `dispatch_to_report`'s own doc.
         // "One handler, two bindings": the identical `ExarchDesk::handle`
         // this closure calls is the one `DeskBinding` wraps for the
-        // identity path (`docs/ral-wiki/decisions/260706_enquiry-channel.md`).
+        // identity path.
         |req| match desk {
             Some(desk) => desk
                 .handle(req)
@@ -619,11 +614,6 @@ mod tests {
         shell
     }
 
-    /// Drive one tool call through the real `run_shell` entry point.
-    /// `Capabilities::root()` matches exarch's least-restricted default,
-    /// which lets every test source compile and run without exercising
-    /// the OS sandbox (that path is covered separately in
-    /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
     /// Run one tool turn through the **real** production [`run_shell`], so the
     /// test path can never drift from what a live tool call does.  The only
     /// thing the helper owns that production does not is the `&mut Shell`: it
@@ -655,9 +645,13 @@ mod tests {
     }
 
     /// Run one tool turn and return its [`ToolResult`], delegating to
-    /// [`run_shell_direct`] so there is exactly one definition of "run a tool
-    /// turn."  Panics on a static (parse/type) failure, preserving the old
-    /// helper's behaviour so the out-of-scope `witnesses` tests still panic.
+    /// [`run_shell_direct`] under `Capabilities::root()` — exarch's
+    /// least-restricted default, letting every test source here compile and
+    /// run without exercising the OS sandbox (covered separately by
+    /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).  Panics on
+    /// a static (parse/type) failure: every call site below treats the
+    /// return as a successful [`ToolResult`], never handling
+    /// [`Outcome::Static`] itself.
     fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
         let (emit, _rx) = crate::bus::dummy_emitter();
         match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
@@ -749,9 +743,9 @@ mod tests {
     }
 
     /// Single tool call: `let pre_x = 1; cat /nonexistent; let post_y = 2`.
-    /// The middle command fails, so the line fails; a follow-up call
-    /// must see `pre_x` defined and `post_y` undefined.  Locks in the
-    /// install-on-Error rule across the tool-call boundary.
+    /// The middle command fails, so the line fails; `pre_x` must be defined
+    /// and `post_y` must not be.  Locks in the install-on-Error rule across
+    /// the tool-call boundary.
     #[test]
     fn tool_call_partial_effects_persist_on_error() {
         let mut shell = fresh_shell();
@@ -764,13 +758,11 @@ mod tests {
             "the failing tool call must surface a non-zero exit"
         );
 
-        // Use a second tool call to check what survived: read both
-        // bindings via `try` so the test stays green regardless of
-        // which one was defined.  An undefined name elaborates to a
-        // type error (caught as Static), which is the wrong shape
-        // here; instead we materialise the pre-call env into the
-        // second call's bindings via the live shell and inspect
-        // `mobile.scope` directly.  Same observation, lower noise.
+        // Check survival directly against the live shell's scope rather than
+        // with a follow-up tool call: looking up an undefined name from ral
+        // elaborates to a type error (caught as Static), the wrong failure
+        // shape for a check that expects one name present and the other
+        // simply absent.
         assert!(
             shell.scope_lookup("pre_x").is_some(),
             "pre-failure `let` must persist into the next tool call"
@@ -1332,16 +1324,14 @@ keep-bottom
     /// be dead afterward — including a grandchild the direct child
     /// forked off.
     ///
-    /// The fixture is the `python runtests.py` shape that exposed the
-    /// bug: `/bin/sh` forks a `sleep` grandchild that holds the stdout
-    /// pipe open, then blocks in `wait`.  Before the fix the standalone
-    /// external spawned with `PgidPolicy::Inherit`, so the watchdog's
-    /// cancel could only `child.kill()` the `/bin/sh` leader by pid; the
-    /// orphaned `sleep` kept the pipe open and the stdout-pump `drain()`
-    /// join blocked for the full 30 s. With the external leading its own
-    /// process group, the cancel path SIGTERMs (then SIGKILLs) the whole
-    /// group, the grandchild dies, the pipe closes, and the call returns
-    /// at the 2 s timeout.
+    /// The fixture is the `python runtests.py` shape: `/bin/sh` forks a
+    /// `sleep` grandchild that holds the stdout pipe open, then blocks in
+    /// `wait`.  The standalone external leads its own process group rather
+    /// than inheriting the parent's, so the watchdog's cancel path can
+    /// SIGTERM (then SIGKILL) the whole group by pgid; `child.kill()`ing
+    /// only the `/bin/sh` leader by pid would leave the orphaned `sleep`
+    /// holding the pipe open and the stdout-pump `drain()` join blocked for
+    /// the full timeout window instead of returning at the 2 s wall.
     #[cfg(unix)]
     #[test]
     fn timeout_kills_external_subprocess_tree() {
@@ -1761,10 +1751,10 @@ return !{{length $hits}}"
     /// `edit-replace` writes through core's atomic door and surfaces the SAME
     /// structural `write` io event a committed `>` raises: the old and new
     /// snapshots ride as `old_bytes`/`new_bytes`, so the write card renders a
-    /// whole-file diff.  This is the forensic parity the old bare-diff-card
-    /// surface lacked — the effect (a committed write to PATH) is recorded, not
-    /// only its rendered diff — and the shared write door is what preserves the
-    /// target's mode/symlink/durability that a hand-rolled temp-file persist dropped.
+    /// whole-file diff.  The forensic record is the effect itself (a
+    /// committed write to PATH), not only its rendered diff — and going
+    /// through the shared write door is what preserves the target's
+    /// mode/symlink/durability across the edit.
     #[test]
     fn edit_replace_surfaces_a_write_io_event_with_diff() {
         use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
@@ -1813,10 +1803,10 @@ return !{{length $hits}}"
         );
     }
 
-    /// The Diamond half of the atomic fix: `edit-replace` writes through core's
-    /// mode-preserving atomic door, so editing an executable file leaves its
-    /// `0o755` mode intact — where a hand-rolled temp-file persist silently
-    /// narrowed it to tempfile's `0o600`, stripping the exec bit off a script.
+    /// `edit-replace` writes through core's mode-preserving atomic door, so
+    /// editing an executable file leaves its `0o755` mode intact — a plain
+    /// temp-file-then-rename persist would narrow it to the temp file's own
+    /// `0o600`, stripping the exec bit off a script.
     #[cfg(unix)]
     #[test]
     fn edit_replace_preserves_the_target_file_mode() {
@@ -1846,9 +1836,9 @@ return !{{length $hits}}"
     /// Drive one tool call through `run_shell` with a real bus `Emitter`,
     /// returning the result alongside every `Kind` event captured off the
     /// channel.  The end-to-end coverage harness: it exercises the whole
-    /// `core surface → decode_surface → Kind` path the gap tests assert on,
-    /// the same wiring `edit_emits_kind_card` and friends use, hoisted so the
-    /// coverage tests share it rather than re-threading the channel each time.
+    /// `core surface → decode_surface → Kind` path the io-door tests below
+    /// assert on, hoisted so they share one wiring rather than re-threading
+    /// the channel each time.
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, 0);

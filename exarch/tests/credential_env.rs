@@ -378,7 +378,6 @@ fn custom_provider_resolves_and_scrubs_its_key() {
                 std::env::var("LOCAL_LLAMA_KEY").is_err(),
                 "a custom provider's key var must be scrubbed too"
             );
-            // Famous first, then the custom provider.
             assert_eq!(store.available(), vec![fam(ProviderKind::Anthropic), id]);
         },
     );

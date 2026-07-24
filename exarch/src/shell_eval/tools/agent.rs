@@ -243,14 +243,17 @@ pub(crate) fn spawn_async(
                     .as_ref()
                     .map(crate::agent::render_reply)
                     .unwrap_or_default();
-                // Deliver, then retire.  The parent's park verdict reads child
-                // liveness (the registry) and delivery (its inbox) under two
-                // different locks, and pops its queue only after the verdict —
-                // so the push must come first: a parent that observes this
-                // entry gone is then guaranteed to find the result already
-                // queued, and cannot quiesce between the two facts and drop it.
-                // Staleness (this worker settling across a `/clear`) is decided
-                // at the consuming edge instead: the drive loop's generation
+                // Deliver, then retire: `crate::bus`'s module doc names this
+                // ordering "the pattern" for a producer whose settling both
+                // changes a verdict input and delivers a message.  The
+                // parent's park verdict reads child liveness (the registry)
+                // and delivery (its inbox) under two different locks, and
+                // pops its queue only after the verdict — so the push must
+                // come first: a parent that observes this entry gone is then
+                // guaranteed to find the result already queued, and cannot
+                // quiesce between the two facts and drop it.  Staleness
+                // (this worker settling across a `/clear`) is decided at the
+                // consuming edge instead: the drive loop's generation
                 // admission reads the birth `generation` stamped here.
                 let rejected = parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
                     id: agent_id,
@@ -264,8 +267,7 @@ pub(crate) fn spawn_async(
                 // No synchronous caller to return this to — the spawn's own
                 // tool_result already returned the "started" receipt — so the
                 // drop is reported through the child's own error vocabulary
-                // instead of silently vanishing
-                // (`decisions/260705_leases-and-budgets`).
+                // instead of silently vanishing.
                 if let Err(reject) = rejected {
                     child_emit.emit(Kind::Error(format!(
                         "the parent's inbox rejected this result: {reject}"

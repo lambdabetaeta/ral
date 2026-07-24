@@ -222,8 +222,7 @@ pub enum InboxMsg {
     ScheduledWakeup {
         /// The firing schedule's id — the inbox's dedupe key: a newer
         /// wakeup for the same schedule replaces a still-queued older one
-        /// rather than growing the queue (`decisions/260705_leases-and-budgets`,
-        /// "Inboxes get quotas without silent loss"). In practice the
+        /// rather than growing the queue. In practice the
         /// schedule's own overlap-skip (`pending`, below) already keeps at
         /// most one in flight per schedule; this is the inbox's own,
         /// independent guarantee of the same invariant.
@@ -350,8 +349,7 @@ fn source_name(msg: &InboxMsg) -> &'static str {
 /// Generous, so an ordinary burst never rejects, but a runaway producer
 /// cannot grow one source without bound. The idempotent sources (`user`,
 /// `schedule`, `nudge`) never count toward this cap at all — they coalesce
-/// instead (`decisions/260705_leases-and-budgets`, "Inboxes get quotas
-/// without silent loss") — so this and [`INBOX_TOTAL_CAP`] bound only the
+/// instead — so this and [`INBOX_TOTAL_CAP`] bound only the
 /// four quota-checked sources, not the inbox as a whole. `nudge` is itself
 /// bounded to one outstanding entry (see [`Shared::try_push`]); `schedule`
 /// is bounded only by how many schedules are concurrently armed — a count
@@ -1055,6 +1053,8 @@ fn to_turn(msg: InboxMsg, epoch: u64) -> Option<Turn> {
     })
 }
 
+/// One [`Kind`] stamped with the [`AgentId`] that produced it — the unit
+/// [`BusSender`]/[`BusReceiver`] carry and [`Sink::handle`] consumes.
 pub struct Event {
     pub id: AgentId,
     pub kind: Kind,
@@ -1090,6 +1090,11 @@ pub enum Kind {
     /// Accumulated by the frontend into a provisional deliberation seat until
     /// the final `Reasoning` event commits a real thinking block.
     Thinking(String),
+    /// Ends the current streaming step: the frontend flushes whatever
+    /// `Token`/`Thinking` text is still open into a committed block
+    /// (`viewport::close_boundary`) before the next step or turn begins.
+    /// Interactive-only chrome — no transcript record, since it carries no
+    /// content of its own.
     Boundary,
     /// The step's final model reasoning. The frontend commits `text` as a
     /// standalone dialable thinking block; `answer_chars` is the whole turn's
@@ -1100,6 +1105,10 @@ pub enum Kind {
     },
     Usage(Usage),
     Step {
+        /// Steps in the current segment: restarts at 1 each time this
+        /// drive loop resumes (e.g. after an async-spawned block settles),
+        /// so a run-wide step count is the consumer's own running tally
+        /// (`headless::Headless::turns`), not this field.
         n: u32,
         tuning: Tuning,
     },
@@ -1128,8 +1137,7 @@ pub enum Kind {
     /// `schedule`, `unschedule`.  An act changes the world *outside* the
     /// turn: it starts a process, fills another agent's inbox, arms a wakeup,
     /// ends a run.  A [`Kind::ToolCall`] only observes, so the two never
-    /// share a rendered shape
-    /// ([[decisions/260720_harness-calls-are-acts]]) — and an act's whole
+    /// share a rendered shape — and an act's whole
     /// information content is these three fields, never a host-authored
     /// sentence about them.
     HarnessCall {
@@ -1154,6 +1162,11 @@ pub enum Kind {
     /// refusal travels the raise.  Its one consumer is
     /// [`crate::agent::transcript`].
     HarnessResult(String),
+    /// The text of a turn as it enters context — a human prompt, a wakeup,
+    /// or a peer agent message alike (`agent::announce`), despite the name;
+    /// an agent result renders through [`Kind::SubagentDone`] instead.
+    /// Interactive-only: no transcript record, and the TUI disarms its
+    /// post-cancel drain guard on the first one after a clear.
     UserPromptEcho(String),
     StopReason(String),
     Error(String),
@@ -1207,7 +1220,7 @@ pub enum Kind {
     /// and paired with the one-line [`Card`] composed from it — the
     /// [`Kind::Io`] pattern, so `transcript.jsonl` records how the worker
     /// settled (a clean return, a raised error, a panic) rather than only
-    /// the card's ink (`decisions/260706_enquiry-channel` §4.1).
+    /// the card's ink.
     ///
     /// [`shell_eval`]: crate::shell_eval
     Done {
@@ -1246,16 +1259,16 @@ pub enum Kind {
     /// `` `notice `` surface class — a worker the lease chain reaped
     /// (unobserved past its idle bound, past its absolute backstop, or the
     /// retention sweep expiring a settled entry's unclaimed result), or a run
-    /// of idle top-level bindings the ledger pruned
-    /// (`decisions/260706_enquiry-channel` §4.2). Core emits the fact itself,
+    /// of idle top-level bindings the ledger pruned. Core emits the fact itself,
     /// at the ready boundary, through the turn's surface sink, rather than a
     /// host draining an accessor and composing the event from what it read.
     /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::bus::card::Notice)
     /// rides alongside the rendered `card` (the [`Kind::Io`] pattern) so
     /// `transcript.jsonl` keeps the structural fact the one-liner erases.
-    /// Never model-facing — no `events.json` twin, no inbox message;
-    /// model-visible reap delivery is deferred
-    /// (`decisions/260705_leases-and-budgets`).
+    /// Never model-facing — no `events.json` twin, no inbox message: the
+    /// idle-observation lease already bounds a forgotten worker's cost to at
+    /// most an hour of one seat in the per-agent cap, so nothing is gained
+    /// by also telling the model directly.
     Notice {
         notice: crate::bus::card::Notice,
         card: Card,
@@ -1269,7 +1282,7 @@ pub enum Kind {
     /// owns (viewports, views, the bus) to the card at render time; those
     /// stay frontend-side.  Never model-facing: no `events.json` twin, no
     /// inbox reply — probing is for the operator, and it mutates and
-    /// renews nothing (`decisions/260705_leases-and-budgets`).
+    /// renews nothing.
     Resources {
         rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
@@ -1307,8 +1320,7 @@ impl UsageMeter {
 // `Emitter`/`FleetBus` carry events through [`BusSender`]/[`BusReceiver`]: a
 // bounded, coalescing queue, so a producer flood (a token stream the
 // renderer can't keep up with) is capped rather than growing heap without
-// limit (`decisions/260705_leases-and-budgets`, "the presentation bus is
-// bounded by class"). The pair exposes the same `Sender`/`Receiver`-shaped
+// limit. The pair exposes the same `Sender`/`Receiver`-shaped
 // API (`send`, `try_recv`, `recv_timeout`, even reusing `std::sync::mpsc`'s
 // own error types), so [`drain_pass`]/[`Sink::drive`] and every call site
 // need only name the type, not change the logic.
@@ -1705,6 +1717,9 @@ impl Emitter {
         Self::with_mailbox(tx, id, Inbox::new().mailbox())
     }
 
+    /// [`Self::new`] with a caller-supplied mailbox instead of a throwaway
+    /// one — what the integration-test harness uses to wire its own inbox
+    /// through (see [`BusSender`]'s doc).
     pub fn with_mailbox(tx: BusSender, id: AgentId, mailbox: Mailbox) -> Self {
         Self {
             tx,
@@ -1752,6 +1767,10 @@ impl Emitter {
         }
     }
 
+    /// Record `kind` to this session's [`Transcript`], fold it into the run
+    /// [`UsageMeter`] if it is a [`Kind::Usage`], then send it — in that
+    /// order, so recording and accounting never depend on a live receiver
+    /// ([`Self::muted_child`]'s whole point).
     pub fn emit(&self, kind: Kind) {
         self.transcript.record(self.id, &kind);
         if let Kind::Usage(u) = &kind {

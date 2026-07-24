@@ -163,7 +163,10 @@ fn ends_with_blank_line(s: &str) -> bool {
     s.ends_with("\n\n") || s == "\n"
 }
 
-/// Drop trailing blank lines from a built line buffer.
+/// Drop trailing blank lines from a built line buffer.  Shared by
+/// [`Composer::finish`] and [`highlight_block`], so prose and fenced code
+/// normalize to the same no-trailing-blank baseline before their callers
+/// reason about spacing.
 fn trim_trailing_blanks(lines: &mut Vec<Line<'static>>) {
     while lines.last().is_some_and(is_blank) {
         lines.pop();

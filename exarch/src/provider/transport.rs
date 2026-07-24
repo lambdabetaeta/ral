@@ -11,6 +11,12 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
+/// Cache key for [`Engine::transport_for`]: one [`Transport`] per distinct
+/// provider label + credential + wire adapter, not per model. Two models
+/// under the same provider that resolve to the same [`AdapterKind`] share a
+/// client; the API-key `OpenAI` provider is the exception, where the model
+/// itself picks between the `OpenAI` and `OpenAIResp` adapters
+/// ([`adapter_for_provider_model`]), so those still split.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TransportKey {
     provider: String,
@@ -28,6 +34,12 @@ impl TransportKey {
     }
 }
 
+/// A credential's cache identity. An API key is fingerprinted by content, so
+/// a rotated key misses the cache and rebuilds a fresh [`Transport`]. An
+/// OAuth credential collapses to one variant regardless of the current
+/// token: the `Transport` holds the shared cell
+/// ([`Transport::token_cell`]), not a token value, so a mid-session refresh
+/// mutates that cell in place and never needs a new transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum CredFingerprint {
     ApiKey(u64),
@@ -52,6 +64,10 @@ impl CredFingerprint {
 pub(super) struct Transport {
     client: Client,
     adapter: AdapterKind,
+    /// Present only for an OAuth-backed transport; a refresh
+    /// ([`Engine::refresh_if_stale`]) mutates the token in place through
+    /// this shared cell, so the `Transport` itself never needs rebuilding
+    /// when the token rotates.
     token_cell: Option<Arc<Mutex<oauth::OAuthToken>>>,
     flat_rate: bool,
 }
@@ -97,6 +113,10 @@ impl Transport {
 /// The shared async runtime and credential-keyed transport cache.
 pub struct Engine {
     runtime: tokio::runtime::Runtime,
+    /// A process-unique id threaded into every request as the provider's
+    /// prompt-cache key ([`super::request::complete_options`]), so this
+    /// run's requests land on one cache lineage rather than colliding with
+    /// a concurrent or prior process's.
     cache_key: String,
     transports: Mutex<HashMap<TransportKey, Arc<Transport>>>,
 }
@@ -126,6 +146,11 @@ impl Engine {
             .clone()
     }
 
+    /// Best-effort refresh before every live request ([`super::stream`]'s
+    /// `complete`/`summarize` call this first). A no-op for an API-key
+    /// transport; for an OAuth transport a failed refresh only logs — the
+    /// stale token still rides the request, which then fails on its own
+    /// terms rather than this call blocking the turn on a refresh hiccup.
     pub(super) fn refresh_if_stale(&self, transport: &Transport) {
         let Some(cell) = &transport.token_cell else {
             return;
@@ -163,6 +188,10 @@ fn build_client(id: &ProviderId, model: &str, credential: &Credential) -> (Clien
         }
     };
     let adapter = adapter_for_provider_model(id, model);
+    // A custom/OpenAI-compatible endpoint needs a service-target resolver to
+    // repoint genai's request at `base_url`; a famous provider's default
+    // endpoint is already known to genai, so an auth resolver keyed on the
+    // adapter is enough.
     let client = if let Some(base_url) = id.endpoint() {
         let endpoint = Endpoint::from_owned(base_url);
         let resolver = ServiceTargetResolver::from_resolver_fn(move |target: ServiceTarget| {
@@ -193,6 +222,9 @@ fn build_client(id: &ProviderId, model: &str, credential: &Credential) -> (Clien
     (client, adapter)
 }
 
+/// A client whose auth resolver reads the token cell fresh on every request
+/// — so [`Engine::refresh_if_stale`]'s in-place update is visible to the
+/// very next call with no client rebuild.
 fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
     let auth = AuthResolver::from_resolver_fn(move |identity: ModelIden| {
         if identity.adapter_kind == AdapterKind::OpenAIResp {
@@ -212,6 +244,8 @@ fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
         .build()
 }
 
+/// Populate the pricing/caps cache before any turn needs it, so the first
+/// [`super::usage::usage_from`] lookup never pays the catalog fetch.
 fn prime_pricing(runtime: &tokio::runtime::Runtime) {
     runtime.block_on(super::pricing::ensure_loaded());
 }

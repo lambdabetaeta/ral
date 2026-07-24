@@ -125,8 +125,11 @@ pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 /// surface — `view-text`, `grep-files`, `edit-hash`, … — everything
 /// [`bootstrap::boot_shell`](crate::bootstrap::boot_shell) dresses the shell
 /// with before any agent is assembled), the documented prelude functions,
-/// and the agent library (`view-text-around`, which rides in as part of the
-/// prelude). Sorted and deduped, with `_`-prefixed internals filtered out —
+/// and the agent library (`view-text-around` and the task verbs — ral
+/// closures sourced from `agent.ral`, not registered builtins, so
+/// [`agent_library_docs`](crate::shell_eval::builtins::agent_library_docs)
+/// is what makes them as discoverable as the prelude). Sorted and deduped,
+/// with `_`-prefixed internals filtered out —
 /// note [`Shell::builtin_names`] does *not* drop the `_` names itself, only
 /// its callers do, so the filter lives here and covers all three sources.
 ///
@@ -282,8 +285,11 @@ fn read_files(files: &[PathBuf]) -> Result<String, String> {
 }
 
 /// Render the section list.  Headed sections get a `# heading` line;
-/// unheaded sections are emitted verbatim.  Bodies are trimmed and
-/// joined by a blank line.
+/// unheaded sections are emitted verbatim.  Bodies are `trim_end`ed
+/// before joining so the blank-line gap between sections is exactly one
+/// line regardless of whether a section's source (a `data/*.md`
+/// `include_str!`, or a caller-built `String`) already ends in blank
+/// lines.
 pub fn render(sections: &[(Option<&str>, String)]) -> String {
     sections
         .iter()
@@ -443,9 +449,10 @@ fn join_str<S: AsRef<str>>(v: &[S]) -> String {
     v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ")
 }
 
-/// Render the Skills section: one `name: description` line per skill,
-/// with a brief note telling the agent how to load full instructions
-/// and discover new skills mid-session.
+/// Render the Skills section: one `name: description` line per skill —
+/// the same progressive-disclosure shape as [`builtin_index`], full
+/// instructions loaded on demand rather than baked in — with a note on
+/// how to load one and how to discover skills added mid-session.
 fn skills_section(skills: &[skill::Skill]) -> String {
     let mut body =
         String::from("Available skills (call `skill <name>` to load, `skill-list` to refresh):\n");

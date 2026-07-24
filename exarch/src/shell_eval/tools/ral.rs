@@ -102,8 +102,8 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     })
 }
 
-/// JSON schema for `ral`'s input object.  Built once and cached inside the
-/// impl; cheap to call.
+/// JSON schema for `ral`'s input object.  Built once and cached in a
+/// `static`; cheap to call.
 fn schema() -> &'static Value {
     static S: OnceLock<Value> = OnceLock::new();
     S.get_or_init(|| {

@@ -44,8 +44,7 @@ pub struct ToolResult {
 
 /// A serialisable copy of [`crate::provider::Usage`].
 ///
-/// We can't derive
-/// `Serialize` on `Usage` itself without rippling the trait into the
+/// Deriving `Serialize` on `Usage` itself would ripple the trait into the
 /// provider module's public surface, so the event log holds its own
 /// shape and converts in/out.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -238,8 +237,10 @@ pub enum SessionEvent {
     /// [`ProviderErrorRecord`] so the on-screen render is fully
     /// reconstructable from events.json.
     ProviderError { error: ProviderErrorRecord },
-    /// Bookend at the tail.  Written when the owning [`AgentLog`] is
-    /// dropped (root session) or when a forked child completes.
+    /// Bookend at the tail.  Written by [`Agent`](crate::agent::Agent)'s
+    /// `Drop` impl, the one funnel every teardown path — a settled `reply`,
+    /// the subtree cascade, or the trunk's own end-of-`drive` teardown —
+    /// runs through.
     SessionEnded,
 }
 
@@ -268,9 +269,10 @@ impl SessionEvent {
     }
 }
 
-/// Transcript protocol phase.  Mirrors the prior `Transcript` state
-/// machine — moved here unchanged so the role-alternation invariant is
-/// still enforced at the event-log boundary.
+/// Transcript protocol phase.  Enforces the role-alternation invariant at
+/// the event-log boundary: the `append_*`/`quiesce` methods below admit only
+/// the transition each phase allows, so the model view can never carry a
+/// user/assistant/tool-result sequence out of order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum State {
     ReadyForUser,
@@ -336,11 +338,10 @@ pub struct AgentLog {
 /// the dropped prefix.
 ///
 /// The compaction invariant, authoritative here: `AgentLog::apply_compaction`
-/// physically drops the summarised prefix from `events`
-/// (`decisions/260705_leases-and-budgets`, "Compaction physically drops the
-/// model prefix in memory"), so `events` *is* the kept verbatim suffix from
-/// that point on — there is no cut index to carry. The model view is this
-/// summary followed by `events` in full ([`AgentLog::project`]).
+/// physically drops the summarised prefix from `events`, so `events` *is*
+/// the kept verbatim suffix from that point on — there is no cut index to
+/// carry. The model view is this summary followed by `events` in full
+/// ([`AgentLog::project`]).
 struct Compaction {
     summary: String,
 }
@@ -760,11 +761,10 @@ impl AgentLog {
     /// Commit a planned compaction: record the archival `Compacted`
     /// breadcrumb, then physically drop the summarised prefix
     /// (`events[..suffix_start]`) from the in-memory mirror — heap
-    /// reclamation, not just a narrower read-time view
-    /// (`decisions/260705_leases-and-budgets`, "Compaction physically drops
-    /// the model prefix in memory"). The durable `events.json` is untouched;
-    /// `events.len()` and `history_bytes()` both shrink to summary + suffix
-    /// on success, and nothing is dropped on the early-return failure path.
+    /// reclamation, not just a narrower read-time view. The durable
+    /// `events.json` is untouched; `events.len()` and `history_bytes()` both
+    /// shrink to summary + suffix on success, and nothing is dropped on the
+    /// early-return failure path.
     ///
     /// # Errors
     /// Returns `Err` if the session is not at a ready boundary (tool results
@@ -1176,9 +1176,7 @@ mod tests {
 
     /// A successful compaction physically drops the summarised prefix from
     /// the in-memory event mirror — `event_count`/`history_bytes` shrink to
-    /// summary + suffix, not just the read-time model view
-    /// (`decisions/260705_leases-and-budgets`, "Compaction physically drops
-    /// the model prefix in memory").
+    /// summary + suffix, not just the read-time model view.
     #[test]
     fn apply_compaction_physically_drops_the_prefix_from_the_event_mirror() {
         let mut s = fresh_root("compact-drops-prefix");
@@ -1216,8 +1214,7 @@ mod tests {
 
     /// The append-only durable files are untouched by compaction: everything
     /// written before the compaction survives as an exact prefix of what is
-    /// on disk afterward — reclamation is for heap, never history
-    /// (`decisions/260705_leases-and-budgets`).
+    /// on disk afterward — reclamation is for heap, never history.
     #[test]
     fn apply_compaction_leaves_the_durable_events_file_byte_for_byte_intact() {
         let mut s = fresh_root("compact-disk-untouched");

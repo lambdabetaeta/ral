@@ -144,13 +144,11 @@ pub enum LoginPhase {
 }
 
 impl LoginPhase {
-    /// The CLI adapter's stderr line for this phase, reproducing today's
-    /// messages exactly for the two common phases. `None` when the legacy
-    /// flow printed nothing at that point (the exchange has no message of its
-    /// own). The one exception is the browser launch-failure fallback: it no
-    /// longer carries the specific launcher error (`open`/`xdg-open`/…), since
-    /// that detail no longer crosses the flow/renderer seam — see
-    /// `browser::open_browser`.
+    /// The CLI adapter's stderr line for this phase; `None` for
+    /// `ExchangingCode`, which has nothing to print. The browser
+    /// launch-failure fallback never names the specific launcher error
+    /// (`open`/`xdg-open`/…): `browser::open_browser` discards it before it
+    /// reaches this seam.
     pub fn stderr_line(&self) -> Option<String> {
         match self {
             Self::AwaitingBrowser { opened: true, .. } => {
@@ -1020,11 +1018,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The CLI adapter's stderr text for each phase, guarding the refactor's
-    /// behaviour-preservation claim: the two common phases reproduce the
-    /// flows' legacy `eprintln!` text exactly (see `browser.rs`/`device.rs`
-    /// before this refactor); the exchange phase — which printed nothing —
-    /// stays silent.
+    /// Pins the CLI adapter's stderr text for each phase verbatim: this is
+    /// user-facing sign-in copy, so any change to it must be deliberate, not
+    /// incidental drift from touching `LoginPhase` or its callers.
     #[test]
     fn stderr_line_reproduces_legacy_messages() {
         assert_eq!(

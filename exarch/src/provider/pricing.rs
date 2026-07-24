@@ -114,11 +114,10 @@ static CATALOG: OnceCell<Snapshot> = OnceCell::const_new();
 /// Populate the `OpenRouter` pricing and capability caches from
 /// `/api/v1/models` if they haven't already been populated.
 ///
-/// Safe to
-/// call concurrently; only the first caller does the fetch.  On
+/// Safe to call concurrently; only the first caller does the fetch.  On
 /// failure (network down, `OpenRouter` changed the response shape, etc.)
 /// both caches initialise empty so [`lookup`] / [`caps`] return `None`
-/// and the renderer falls back to `—` exactly as it did before.
+/// and the renderer falls back to `—`, exactly as before any fetch.
 pub async fn ensure_loaded() {
     CATALOG
         .get_or_init(|| async { fetch().await.unwrap_or_default() })

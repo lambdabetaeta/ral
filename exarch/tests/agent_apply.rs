@@ -119,7 +119,6 @@ fn tool_call_then_completion() {
         Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "done"),
         other => panic!("expected Complete, got {other:?}"),
     }
-    // The tool call was dispatched and its result committed.
     assert!(
         kinds
             .iter()

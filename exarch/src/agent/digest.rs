@@ -89,10 +89,9 @@ pub fn compaction_due(used: u64, window: u64) -> bool {
 /// (oh-my-pi's `0.8 * reserve`).
 ///
 /// Clamped so a small window still allows a
-/// usable summary and a huge one does not invite a rambling one.
-/// exarch
-/// keeps a recent suffix verbatim, so the summary covers only the dropped
-/// prefix and stays concise.
+/// usable summary and a huge one does not invite a rambling one.  Exarch
+/// keeps a recent suffix verbatim ([`suffix_keep_budget`]), so the summary
+/// covers only the dropped prefix and stays concise.
 pub fn summary_cap_tokens(window: u64) -> u32 {
     const MIN: u64 = 4_096;
     const MAX: u64 = 32_768;

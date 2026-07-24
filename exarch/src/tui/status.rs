@@ -58,7 +58,7 @@ pub(super) fn rule_line(
     // `last_input / context_window` approaches 1.0, empty cells dim
     // slate.  The eye reads the fill level and notices the approach to
     // full; the `N%` digit stays as a precise readout after the bar.
-    // `context_window = None` → no ctx segment at all (as today).
+    // `context_window = None` → no ctx segment at all.
     if let Some(cap) = context_window
         && cap > 0
     {
@@ -76,9 +76,9 @@ pub(super) fn rule_line(
 
     // ── scroll position ───────────────────────────────────────────────
     // Where the window sits in the scrollback, as a fixed-position value —
-    // the deleted right-margin scrollbar's datum, re-encoded as a magnitude
-    // the doctrine permits.  `⇣ bot` at the tail, `⇣ N%` above it; absent
-    // when the whole buffer fits.
+    // standing in for a right-margin scrollbar, which the no-streaming-chrome
+    // doctrine forbids: scroll position is a magnitude, not a moving widget.
+    // `⇣ end` at the tail, `⇣ N%` above it; absent when the whole buffer fits.
     if let Some(pct) = scroll_pct {
         let text = if pct >= 100 {
             " · ⇣ end ".to_string()
@@ -150,8 +150,8 @@ pub(super) const PHASE_SLOT_W: usize = 16; // fixed phase-label slot: stops stat
 /// for the wait bar's colour: a normal sub-10s phase stays dim, a
 /// dragging one flares toward white past ~30s. Deliberately distinct
 /// from [`rail::value_step`], which is calibrated for line counts
-/// (4/20/80) — feeding that ramp milliseconds is what saturated the old
-/// duration ribbon to white on every turn.
+/// (4/20/80): feeding this bar's raw milliseconds through that ramp
+/// would saturate it to white on nearly every turn.
 pub(super) fn wait_step(secs: u64) -> u8 {
     match secs {
         0..=9 => 0,

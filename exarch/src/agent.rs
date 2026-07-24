@@ -2,10 +2,9 @@
 //! set, an owned hot-swappable provider, and the shared turn driver every node
 //! runs.
 //!
-//! An exarch run is a *fleet* of these arranged in a tree
-//! ([[decisions/260624_uniform-agent-nodes]]); the [`Fleet`](crate::fleet::Fleet)
-//! holds what is shared (the registry, the one event bus, the transport
-//! engine), and each `Agent` is one node.
+//! An exarch run is a *fleet* of these arranged in a tree; the
+//! [`Fleet`](crate::fleet::Fleet) holds what is shared (the registry, the one
+//! event bus, the transport engine), and each `Agent` is one node.
 //!
 //! [`Agent::apply`] runs one round-trip against the provider;
 //! [`Agent::drive`] is the one loop — every node alike — that pulls
@@ -76,8 +75,7 @@ pub(crate) struct ProbedWorker {
 /// desk's `reply` handler ([`Self::set`]) is the cell's only writer, running
 /// on the handler thread while the drive thread sits parked inside
 /// `run_shell`'s `shell_eval::run_shell` — the very window
-/// [`desk::HostServices`] as a whole depends on
-/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3).  The instant the
+/// [`desk::HostServices`] as a whole depends on.  The instant the
 /// desk is retired, `run_shell` harvests the cell by ownership
 /// ([`Self::take`]) into [`Agent::reply`], the plain field that then carries
 /// last-wins across the rest of the batch. `Arc`-shared for that one call's
@@ -132,8 +130,7 @@ impl ReplyCell {
 /// [`Agent::log`]'s lock: taken only by the drive thread between calls or by
 /// a desk handler while the drive thread sits parked inside
 /// [`Agent::run_shell`]'s `shell_eval::run_shell` — the same window
-/// [`ReplyCell`] and [`desk::HostServices`] as a whole depend on
-/// (`docs/ral-wiki/decisions/260706_enquiry-channel.md` §3).  Concurrent
+/// [`ReplyCell`] and [`desk::HostServices`] as a whole depend on.  Concurrent
 /// access from both threads at once is a scheduling bug, not a legitimate
 /// wait, so [`Self::lock`] `try_lock`s and panics didactically rather than
 /// blocking — this codebase's standing law that a violation panics, never
@@ -309,9 +306,9 @@ pub struct Agent {
     /// The agent's ral-call epoch: incremented once at the top of every
     /// [`Self::run_shell`] call — success or error alike, a failed eval is
     /// still a call.  The integer clock every per-call ledger reads: the
-    /// settled-worker retention sweep, the binding-lease ledger of
-    /// `decisions/260629_agent-binding-reaping`, and the disk-warn check's
-    /// amortization ([`Self::check_disk_warn`]) all read this same counter.
+    /// settled-worker retention sweep, the binding-lease ledger, and the
+    /// disk-warn check's amortization ([`Self::check_disk_warn`]) all read
+    /// this same counter.
     /// Starts at 0, and a fork's child starts its own at 0; deliberately NOT
     /// reset by `/clear` — the registry is emptied there anyway, and a
     /// monotone counter is simpler to reason about than one that rewinds.
@@ -319,9 +316,7 @@ pub struct Agent {
     /// The operator's disk-warn ceiling (`config::disk_warn_bytes`), shared
     /// verbatim by every fork — a host setting, not a per-agent choice.
     /// `None` means [`Self::check_disk_warn`] never walks the log/scratch
-    /// dirs at all: no configuration, no cost, ever
-    /// (`decisions/260705_leases-and-budgets`, "Disk: report and warn
-    /// only").
+    /// dirs at all: no configuration, no cost, ever.
     disk_warn_bytes: Option<u64>,
     /// The [`Self::ral_epoch`] at which the next disk-warn check is due;
     /// advances by [`DISK_WARN_CHECK_INTERVAL`] each time
@@ -397,8 +392,7 @@ pub(crate) const SPAWN_FUEL: u32 = 3;
 /// How many ral calls elapse between disk-warn ceiling checks, once
 /// `disk_warn_bytes` is configured — the walk's cost is real (a full scan of
 /// the session log dir and scratch) but rare enough at this cadence to run
-/// at the ready boundary rather than off a timer
-/// (`decisions/260705_leases-and-budgets`).
+/// at the ready boundary rather than off a timer.
 const DISK_WARN_CHECK_INTERVAL: u64 = 32;
 
 pub(crate) fn fresh_id() -> AgentId {
@@ -867,10 +861,12 @@ impl Agent {
         // host's `view-text`/`grep-files`/`edit` and the rest), and starts
         // fresh in control counters and per-agent state — its own inbox, its own
         // (fresh) cancellation token, no terminal authority, no flow-back.
-        // Core owns the flow matrix, so the builtin table can't be silently
-        // dropped here the way a hand-copied field once was.  Its capabilities
-        // are supplied by the spawn site: the parent's verbatim, or the
-        // parent's narrowed to a requested base (`parent ⊓ base`).
+        // `fork_session` carries the whole scope and builtin table across as
+        // one step because core, not this call site, owns the flow matrix —
+        // there is no hand-copied field here that could fall out of sync
+        // with it.  Its capabilities are supplied by the spawn site: the
+        // parent's verbatim, or the parent's narrowed to a requested base
+        // (`parent ⊓ base`).
         let shell = self.seat.shell_mut().shell.fork_session();
         let child_id = fresh_id();
         // The *child's* own builtin index, never `self.system`: `returns`
@@ -1131,8 +1127,7 @@ impl Agent {
 
     /// Warn once per excursion above the operator's disk-warn ceiling,
     /// through the operational-note vocabulary (`Kind::SystemNote`) — never
-    /// rotates or deletes (`decisions/260705_leases-and-budgets`, "Disk:
-    /// report and warn only"). A no-op by construction when unconfigured: no
+    /// rotates or deletes. A no-op by construction when unconfigured: no
     /// walk, no warning, ever. Amortized to once every
     /// [`DISK_WARN_CHECK_INTERVAL`] ral calls (tracked on the same
     /// [`Self::ral_epoch`] the settled-worker and binding-lease sweeps read)
@@ -1429,14 +1424,13 @@ impl Agent {
         loop {
             // Every pass back to the loop top is a settled ready boundary
             // (the per-iteration quiesce below, or the invariant `drive` is
-            // entered under). The lease chain's reap notices no longer need
-            // draining here: core's own engine pushes them as `` `notice ``
-            // surface classes at the ready boundary of the turn that produced
-            // them (`decisions/260706_enquiry-channel` §4.2) — visible at the
-            // next dispatched turn rather than on every idle pass through
-            // this loop, the one behavioural change the push migration
-            // costs (a worker reaped while this agent sits fully idle
-            // surfaces only once a turn next runs).
+            // entered under). A lease-chain reap between turns is not drained
+            // here: core's own engine pushes it as a `` `notice `` surface
+            // class at the ready boundary of the turn that produced it, so it
+            // becomes visible only at the next dispatched turn, not on every
+            // idle pass through this loop — a worker reaped while this agent
+            // sits fully idle surfaces once a turn next runs, not the
+            // instant the reap happens.
             //
             // The service ledger's sibling boundary drain: the `services`
             // pin is (re-)born or dies at this pass.
@@ -2115,6 +2109,12 @@ impl Agent {
         }
     }
 
+    /// This session's *live* working directory — read through the probe so
+    /// a prior `cd` is reflected. The seat's own `cwd` field (`Seat::Identity`)
+    /// is not this: it is fixed at construction and read only to reseed the
+    /// shell on `/clear`, so it never moves with the model's own `cd`s. The
+    /// one caller, [`Self::host_services`], needs exactly the live value: a
+    /// desk-spawned child should start where the model actually is now.
     pub(crate) fn cwd(&self) -> std::path::PathBuf {
         match self.seat.transport().probe(FOValue::Variant {
             label: "cwd".into(),
@@ -2216,9 +2216,9 @@ impl Agent {
     }
 
     /// The `` `env-var `` probe, decoded: `` `some [value] `` / `` `none ``
-    /// back to `Option<String>`. Shared by [`Self::check_disk_warn`] and
-    /// [`Self::resource_rows`], the two pure reads of the dynamic env
-    /// overlay left after the notice family moved to pushes.
+    /// back to `Option<String>`. The only two readers of this dynamic env
+    /// overlay are [`Self::check_disk_warn`] and [`Self::resource_rows`],
+    /// and both are pure: neither ticks a ledger.
     fn probe_env_var(&self, name: &str) -> Option<String> {
         match self.seat.transport().probe(FOValue::Variant {
             label: "env-var".into(),
@@ -2265,8 +2265,7 @@ impl Agent {
 
     /// Capture this agent's [`desk::HostServices`] snapshot for a fresh
     /// desk: everything a handler may read off `&Agent`, since the
-    /// reentrancy law (`docs/ral-wiki/decisions/260706_enquiry-channel.md`
-    /// §3) bars a handler from ever reaching back through
+    /// reentrancy law bars a handler from ever reaching back through
     /// `&mut Agent`/`&mut Shell` to get it. Built fresh at every
     /// [`Self::run_shell`] install, beside the deferred sink, so the
     /// generation, fuel, caps, and grant a handler captures can never go
@@ -3013,16 +3012,15 @@ mod tests {
         );
     }
 
-    /// The resolved index is exactly the live shell's own surface — the
-    /// drift the old `HOST_BUILTIN_SETS` chain in `prompt.rs` needed a
-    /// comment to promise is now true by construction, since
+    /// The resolved index is exactly the live shell's own surface: since
     /// [`crate::prompt::builtin_index`] reads `shell.builtin_names()`
-    /// directly rather than naming any static set. Recomputes the expected
-    /// name set independently of that function — `shell.builtin_names()`
-    /// plus the prelude and library sources, filtered exactly as
-    /// `builtin_index` filters them for a `for_test` agent's fixed
-    /// `returns: true, allow_schedule: false` — and compares it against the
-    /// names actually resolved into the assembled agent's own `system`.
+    /// directly rather than naming any static set, the two cannot drift
+    /// apart. Recomputes the expected name set independently of that
+    /// function — `shell.builtin_names()` plus the prelude and library
+    /// sources, filtered exactly as `builtin_index` filters them for a
+    /// `for_test` agent's fixed `returns: true, allow_schedule: false` —
+    /// and compares it against the names actually resolved into the
+    /// assembled agent's own `system`.
     #[test]
     fn builtin_index_equals_the_live_shells_own_surface() {
         let dir = tmp("builtin-index-equals-live-shell");
@@ -4060,12 +4058,11 @@ mod tests {
 
     /// Seed one lease-chain reap (an unpolled worker under a millisecond
     /// idle bound) with no turn running to push it — core's engine only
-    /// pushes a `` `notice `` from *inside* a turn's own surface stream
-    /// (`decisions/260706_enquiry-channel` §4.2), so a reap the background
-    /// lease chain performs between turns sits queued until one runs. The
-    /// next dispatched turn surfaces it as `Kind::Notice`, ordered before
-    /// that turn's own `Kind::ToolResult`; a further turn with nothing new
-    /// queued surfaces no second notice.
+    /// pushes a `` `notice `` from *inside* a turn's own surface stream, so a
+    /// reap the background lease chain performs between turns sits queued
+    /// until one runs. The next dispatched turn surfaces it as
+    /// `Kind::Notice`, ordered before that turn's own `Kind::ToolResult`; a
+    /// further turn with nothing new queued surfaces no second notice.
     #[test]
     fn ready_boundary_reap_notice_surfaces_at_the_next_turn() {
         let dir = tmp("drain-worker-reaps");
@@ -4319,9 +4316,9 @@ mod tests {
     /// A session-scope install that meets the large-binding threshold writes
     /// the warning onto the installing turn's own stderr — model-facing
     /// feedback in the tool result, not a frontend card — from inside that
-    /// very turn (`decisions/260706_enquiry-channel` §4.2). A further turn
-    /// with no new session-scope install writes no warning. The two axes are
-    /// independent: nothing here is idle enough to prune.
+    /// very turn. A further turn with no new session-scope install writes no
+    /// warning. The two axes are independent: nothing here is idle enough to
+    /// prune.
     #[test]
     fn large_binding_install_warns_on_its_own_turn_stderr() {
         let dir = tmp("reap-large-binding");

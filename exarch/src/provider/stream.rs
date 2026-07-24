@@ -70,6 +70,12 @@ impl Engine {
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
+                    // `idle_timeout` bounds only opening the stream (time to
+                    // first response); once `response.stream` exists below, a
+                    // connection gone silent is instead caught by the
+                    // transport's own per-read timeout
+                    // (`tls::STREAM_IDLE_TIMEOUT`), surfacing as an `Err`
+                    // from `stream.next()`.
                     let mut response = tokio::select! {
                         biased;
                         () = wait_for_cancel(cancel) => {
@@ -130,6 +136,15 @@ impl Engine {
                 }
                 .await;
 
+                // Once content has reached `on_text`/`on_think` there is no
+                // clean retry: re-issuing would resend the whole prompt and
+                // duplicate output already delivered live. A failure past
+                // that point is committed here as a `Stalled` step
+                // (`Attempt::Done`, ending the retry loop) instead of being
+                // retried — except a cancellation, which always propagates
+                // as failure regardless of streamed content: the caller
+                // discards the whole `StepOut` on `Cancelled` rather than
+                // committing a partial turn.
                 match attempt_result {
                     Ok(end) => {
                         Attempt::Done(step_out_from_end(model, end, transport.metered(), adapter))
@@ -178,6 +193,11 @@ impl Engine {
             cancel,
             async |attempt| {
                 let request = request_template.clone();
+                // Unlike `complete`'s streaming path, `exec_chat` only
+                // returns once the whole reply is in, so this timeout bounds
+                // the entire call rather than just its opening — there is no
+                // later per-byte read to fall back on for a stalled
+                // compaction request.
                 let result = tokio::select! {
                     biased;
                     () = wait_for_cancel(cancel) => {

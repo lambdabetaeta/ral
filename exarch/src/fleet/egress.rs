@@ -44,9 +44,8 @@ pub fn validate_fetch_url(raw: &str) -> Result<reqwest::Url, String> {
     }
 }
 
-/// A blocking client bound to exarch's bundled trust store.
-///
-/// ([`crate::provider::tls::config`]) with a total [`FETCH_TIMEOUT`] — never
+/// A blocking client bound to exarch's bundled trust store
+/// ([`crate::provider::tls::config`]), with a total [`FETCH_TIMEOUT`] — never
 /// the model-API transport's own client, whose idle-timeout-only liveness
 /// policy has no total cap and is the wrong shape for a bounded answer.
 ///

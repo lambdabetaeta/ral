@@ -1,7 +1,6 @@
 //! Coherent degradation: the epistemic signal a block carries.
 //!
-//! Move 7 of the "transcript as graphic" re-encoding
-//! ([[decisions/260618_tui-transcript-as-graphic]]) extends the per-`Block`
+//! Move 7 of the "transcript as graphic" re-encoding extends the per-`Block`
 //! variables past Bertin's planar set into the *epistemic* register: the
 //! medium should carry *how much to trust* a passage, not just what it
 //! says.  Two signals drive a per-block [`Fidelity`]:

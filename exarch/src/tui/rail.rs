@@ -15,10 +15,9 @@
 //! transcript is this". The human's prompt fence is the exception, wearing a
 //! neutral [`super::palette::PROMPT_INK`] so it never reads as an agent.
 //!
-//! The rail is the keystone of the "transcript as graphic" re-encoding
-//! ([[decisions/260618_tui-transcript-as-graphic]]): the variables live
-//! per-`Block` rather than woven into prose, so the session's shape
-//! reads at a glance and every later projection (matrix, codebase map)
+//! The rail is the keystone of the "transcript as graphic" re-encoding: the
+//! variables live per-`Block` rather than woven into prose, so the session's
+//! shape reads at a glance and every later projection (matrix, codebase map)
 //! composes on the same substrate.
 
 use super::block::AgentSlot;
@@ -52,8 +51,7 @@ pub(super) enum RailKind {
     /// An outbound fleet act — `spawn`, `cancel`, `message`, `reply`: the
     /// `↗` shape, the outbound twin of the `↘` a subagent's result lands
     /// under. An act changes the world outside the turn, so it wears its own
-    /// shape rather than a tool call's triangle
-    /// ([[decisions/260720_harness-calls-are-acts]]).
+    /// shape rather than a tool call's triangle.
     FleetAct,
     /// A time act — `schedule`, `unschedule`: the `◷` clock-face shape. Its
     /// effect lands not now but on a clock, which is the one thing that

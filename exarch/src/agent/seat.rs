@@ -27,8 +27,8 @@ pub(crate) enum Seat {
         turn_scope: TurnScope,
     },
     /// Out-of-process: the engine lives on the far end of `transport`, one
-    /// process per session (`docs/ral-wiki/decisions/260722_session-is-a-process.md`).
-    /// It holds nothing per call: a wire turn's desk and applier ride
+    /// process per session. It holds nothing per call: a wire turn's desk
+    /// and applier ride
     /// [`Agent::run_shell`](crate::agent::Agent::run_shell)'s own arguments
     /// into the drain loop's enquiry arm — the engine asks over
     /// `Event::Enquiry`, never a direct call, so there is no engine-side
@@ -224,9 +224,9 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> She
 }
 
 /// Seed the session-dir variable, arm the ledgers over everything just
-/// seeded (seeding then arming stay one visible sequence —
-/// `decisions/260629_agent-binding-reaping`), then seat the shell behind a
-/// fresh transport observing `turn_scope` and attach the host endpoint.
+/// seeded (seeding then arming stay one visible sequence), then seat the
+/// shell behind a fresh transport observing `turn_scope` and attach the
+/// host endpoint.
 /// `cwd` is the same directory [`boot_root_shell`] seeded onto the shell —
 /// restated here only because `attach`'s signature is shared with the wire
 /// transport, which does read its `cwd` argument.

@@ -3,8 +3,8 @@
 //! In text mode the root
 //! agent's assistant tokens stream to `out` as live narration; under
 //! `--output-format json` they are dropped and a single result object —
-//! built from the root's deliberate `reply` value — is emitted at the end
-//! ([[decisions/260623_reply-terminates-returning-agents]]).  Every other
+//! built from the root's deliberate `reply` value — is emitted at the end.
+//! Every other
 //! event — and sub-agent activity, as breadcrumbs — goes to `err`; the
 //! process exits after one seed turn.  Takes the default [`Sink::drive`];
 //! only [`Sink::handle`] is custom.
@@ -41,6 +41,9 @@ pub enum OutputFormat {
     Json,
 }
 
+/// The [`Sink`] behind [`run`] and [`converse_on`]: projects the bus onto
+/// `out`/`err` as the module doc describes, and accumulates the run's
+/// totals for the closing `[done]` line and the json `result`.
 pub struct Headless<'a> {
     /// Where token/narration text lands — `out` in [`converse_on`]'s
     /// contract.  Every write on the token path goes here; nothing on this
@@ -348,11 +351,12 @@ impl Sink for Headless<'_> {
             // Phase is a progress label — a rendering — so headless neither
             // prints it (it would clutter the stderr stream) nor records it
             // (the operational trace omits presentation events).  A message
-            // boundary is no longer scraped for the json `result`: that value
-            // is the root's deliberate `reply`, captured from the drive digest.
-            // Reasoning / thinking are TUI-only presentation blocks; the
-            // content already round-trips to the model on the assistant
-            // message, so headless neither prints nor records them.
+            // boundary carries no result value: `result` is the root's
+            // deliberate `reply`, captured from the drive digest, never read
+            // off the token stream.  Reasoning / thinking are TUI-only
+            // presentation blocks; the content already round-trips to the
+            // model on the assistant message, so headless neither prints nor
+            // records them.
             Kind::Boundary
             | Kind::Born { .. }
             | Kind::Died

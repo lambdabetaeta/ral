@@ -1,3 +1,9 @@
+//! The multi-agent status strip: one row per live session, rendered above
+//! the transcript by [`super::render`].  Like [`matrix_bar`], the whole
+//! module is a render-time projection over the `tabs`/`viewports` model
+//! [`super::tabs`] and [`super::viewport`] own — nothing here holds state;
+//! every row is recomputed each frame from that model.
+
 use super::line;
 use super::palette::{AGENT_HUES, CYAN, SLATE};
 use super::rail;

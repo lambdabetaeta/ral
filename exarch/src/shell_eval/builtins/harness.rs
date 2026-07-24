@@ -137,8 +137,9 @@ fn schedule_trigger(v: &Value) -> Settled<FOValue> {
 
 /// Decode a `schedule` spec's `label` field — `` `some '<name>' `` or
 /// `` `none `` — into the [`FOValue`] the desk expects, or a door error
-/// naming both legal shapes. The field's variant row is open, the same
-/// standard [`schedule_trigger`] and `permission_label` hold theirs to.
+/// naming both legal shapes. The field's variant row is open, for the
+/// same reason [`schedule_trigger`] and `permission_label` hold theirs
+/// open.
 fn schedule_label(v: &Value) -> Settled<FOValue> {
     match v {
         Value::Variant {
@@ -746,9 +747,8 @@ mod tests {
         );
     }
 
-    /// An invalid name errors engine-side naming the tab-bar contract,
-    /// before any enquiry crosses — the door check the JSON tool's silent
-    /// `sub-{N}` fallback used to paper over.
+    /// An invalid name errors engine-side, naming the tab-bar contract,
+    /// before any enquiry crosses.
     #[test]
     fn invalid_name_errors_before_any_enquiry_crosses() {
         let dir = tmp("invalid-name");
@@ -966,8 +966,7 @@ mod tests {
     /// A spec record missing a required field is a *static* error naming
     /// that field: the record literal infers a closed row, and unifying it
     /// against `scheme_schedule`'s closed record row reports exactly which
-    /// label is absent — the accurate diagnostic the closed-variant
-    /// experiment never got.
+    /// label is absent.
     #[test]
     fn missing_spec_field_errors_statically_naming_the_field() {
         let dir = tmp("missing-spec-field");

@@ -1,8 +1,8 @@
 //! Session/view lifecycle management.
 //!
 //! Owns the viewports, tab ordering, names, parent-child relationships,
-//! the presentation focus cursor, and the linger/age-out clock.  Extracted
-//! from [`super::App`] (Phase 4 of the TUI modularisation).
+//! the presentation focus cursor, and the linger/age-out clock, as
+//! [`super::App`]'s `tabs` field.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -21,7 +21,7 @@ use super::{LINGER, ROOT_NAME};
 /// Owns one [`Viewport`] per session and the tab bar that orders them.
 /// The currently focused tab is a plain id, purely presentational: `TAB`
 /// moves it and rendering reads it, but no agent-side lifecycle depends on
-/// it any more.  When it is stale (an expired tab), [`Self::focused`]
+/// it.  When it is stale (an expired tab), [`Self::focused`]
 /// resolves it to root.
 #[allow(clippy::struct_field_names)] // `tabs` is the natural name for the tab list.
 pub(super) struct Tabs {

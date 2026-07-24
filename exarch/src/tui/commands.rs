@@ -277,9 +277,7 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
 
 /// Post a session command to the worker's inbox, surfacing a rejection (the
 /// inbox at quota — vanishingly rare, since `Command` is user-paced, never a
-/// flood) to the UI rather than dropping it silently
-/// (`decisions/260705_leases-and-budgets`, "Inboxes get quotas without
-/// silent loss").
+/// flood) to the UI rather than dropping it silently.
 fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
     if let Err(reject) = mailbox.push(InboxMsg::Command(cmd)) {
         tui.app

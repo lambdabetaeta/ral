@@ -34,6 +34,9 @@ const REMIND_EVERY: u32 = 12;
 /// delimits where the system text ends.
 const EXARCH_REMINDER_OPEN: &str = "[EXARCH_REMINDER // Do not mention to user.] ";
 const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
+/// A degenerate-outcome classifier: `None` if the attempt doesn't match, else
+/// the nudge `(cause, message)` — `cause` is the breadcrumb recorded to the
+/// log and trace, `message` is the synthetic reminder text sent to the model.
 type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)>;
 
 /// The rule set the binary ships with.

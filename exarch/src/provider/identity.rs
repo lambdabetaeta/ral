@@ -152,6 +152,7 @@ impl ProviderId {
         match self {
             Self::Famous(kind) => kind.default_adapter(),
             Self::Custom(custom) => custom.adapter,
+            // The Codex backend a ChatGPT login talks to serves Responses only.
             Self::ChatGpt(_) => AdapterKind::OpenAIResp,
         }
     }
@@ -219,6 +220,15 @@ pub(crate) fn provider_label(subscription: Subscription, base: &str) -> String {
     }
 }
 
+/// The wire adapter for a specific `model` under `id`.
+///
+/// Only OpenAI is model-sensitive: some of its models still speak the classic
+/// Chat Completions API rather than Responses, and genai's
+/// [`AdapterKind::from_model`] name-sniffs across every vendor to guess which.
+/// A hit outside `OpenAI`/`OpenAIResp` means the name coincidentally matched
+/// another vendor's convention rather than OpenAI's own split, so it is
+/// discarded in favour of `OpenAIResp`. Every other provider is not
+/// model-sensitive and always serves through [`ProviderId::default_adapter`].
 pub(super) fn adapter_for_provider_model(id: &ProviderId, model: &str) -> AdapterKind {
     match id {
         ProviderId::Famous(ProviderKind::Openai) => {

@@ -167,15 +167,14 @@ mod tests {
         }
     }
 
-    /// C1 regression, Windows fixture: every bake-in carries Unix-only
-    /// absolute literals (`/tmp`, `/usr/local/bin/`, `/opt/homebrew/`,
-    /// …) — rooted paths with no drive letter.  Before the fix these
-    /// failed the freeze pass's absoluteness check and the *entire*
-    /// profile refused to load, leaving `dangerous` the only usable
-    /// Windows base.  Now they are dropped as dead grants at freeze
-    /// time and every base loads cleanly.  Windows-only: the freeze
-    /// pass's foreign-rooted branch only fires under a real
-    /// `cfg!(windows)`.
+    /// Windows fixture: every bake-in carries Unix-only absolute
+    /// literals (`/tmp`, `/usr/local/bin/`, `/opt/homebrew/`, …) —
+    /// rooted paths with no drive letter.  These must be dropped as
+    /// dead grants at freeze time rather than tripping the freeze
+    /// pass's absoluteness check, or the *entire* profile would refuse
+    /// to load, leaving `dangerous` the only usable Windows base.
+    /// Windows-only: the freeze pass's foreign-rooted branch only fires
+    /// under a real `cfg!(windows)`.
     #[cfg(windows)]
     #[test]
     fn bakeins_parse_on_windows() {
@@ -196,9 +195,9 @@ mod tests {
         }
     }
 
-    /// C1 regression, Windows fixture: the Unix-only `/tmp` fs literal
-    /// and the `/opt/homebrew/` exec-dir override in `minimal` are
-    /// both foreign-rooted on Windows and must be dropped rather than
+    /// Windows fixture: the Unix-only `/tmp` fs literal and the
+    /// `/opt/homebrew/` exec-dir override in `minimal` are both
+    /// foreign-rooted on Windows and must be dropped rather than
     /// carried forward as grants that can never match a real access —
     /// `policy show` should never advertise authority it can't back.
     #[cfg(windows)]
@@ -433,8 +432,8 @@ mod tests {
     }
 
     /// `cargo` invoked through rustup resolves to a binary under
-    /// `~/.rustup/toolchains/`.  Regression: this path was absent from
-    /// the exec map and was denied by the reasonable profile.
+    /// `~/.rustup/toolchains/`, a path shape easy to miss when
+    /// hand-enumerating exec roots.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_cargo_under_rustup_toolchain() {

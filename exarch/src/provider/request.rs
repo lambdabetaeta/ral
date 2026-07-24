@@ -91,6 +91,10 @@ pub fn default_effort_label() -> &'static str {
     label
 }
 
+/// Manual impl: genai's `ReasoningEffort` has no derived `PartialEq`, so
+/// this compares by [`ReasoningEffort::variant_name`] instead of
+/// structurally — coarser only for `Budget(u32)`, a variant
+/// [`EFFORT_LADDER`] never produces.
 impl PartialEq for Tuning {
     fn eq(&self, other: &Self) -> bool {
         let key =
@@ -101,6 +105,9 @@ impl PartialEq for Tuning {
     }
 }
 
+/// `OpenRouter`'s provider-routing extra body: pins the request to `slug`
+/// with fallbacks disabled, so a route the user chose explicitly errors
+/// out instead of silently landing on a different upstream.
 fn openrouter_extra_body(slug: &str) -> serde_json::Value {
     serde_json::json!({
         "provider": {
@@ -110,6 +117,10 @@ fn openrouter_extra_body(slug: &str) -> serde_json::Value {
     })
 }
 
+/// Assemble the per-request `ChatOptions`.  The four `capture_*` flags are
+/// forced on regardless of `tuning`: `step_out_from_end` in `stream.rs`
+/// reads usage, content, tool calls, and reasoning back off every
+/// `StreamEnd`, so none of them can be left off.
 pub(super) fn complete_options(
     cache_key: &str,
     max_tokens_override: Option<u32>,
@@ -140,6 +151,12 @@ pub(super) fn complete_options(
     options
 }
 
+/// Shape the transcript for prompt caching, routing the system prompt per
+/// adapter: `OpenAIResp` (Responses API) takes it via `with_system`'s bare
+/// `String` field, which can carry no cache breakpoint, so it bypasses the
+/// message path entirely; every other adapter gets a cache-marked system
+/// `ChatMessage` prepended instead.  The last message is marked too, so
+/// consecutive turns share the largest possible cached prefix.
 pub(super) fn build_cached_request(
     adapter: AdapterKind,
     system: &str,

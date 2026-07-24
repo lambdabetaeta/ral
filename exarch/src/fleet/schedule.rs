@@ -555,7 +555,8 @@ impl ScheduleRegistry {
     /// is safe.  The wakeup is posted only after this registry's guard
     /// drops: a park verdict reads `armed()` under the consumer's inbox
     /// mutex, so the process-wide lock order is inbox → registry (see
-    /// `bus`'s module docs) and a push must never run under this lock.
+    /// [`crate::bus`]'s module docs) and a push must never run under this
+    /// lock.
     ///
     /// Composing the message and posting it are two separate steps astride
     /// that drop, so a `/clear` can fall between them; the message is

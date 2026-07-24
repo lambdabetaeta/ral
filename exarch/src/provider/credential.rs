@@ -52,7 +52,10 @@ pub const NO_AUTH_PLACEHOLDER: &str = "no-auth";
 /// login held behind a shared cell: a turn reads the current access token
 /// through it, and a refresh (in [`crate::provider`]) writes a renewed token
 /// back into the same cell, so a session that outlives the access token keeps
-/// authenticating without rebuilding the provider.
+/// authenticating without rebuilding the provider. Each account owns a
+/// distinct cell, so refreshing one can never clobber a sibling account's
+/// in-memory token; the two accounts' refreshes only meet at the on-disk
+/// token store, where [`crate::provider::oauth`] serializes the writes.
 #[derive(Clone)]
 pub enum Credential {
     /// An API key read from the environment at startup.

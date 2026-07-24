@@ -33,9 +33,7 @@ use std::time::{Duration, Instant};
 
 /// Max scrollback blocks retained in heap per viewport; older blocks are
 /// already durable in `user.log`/`events.json` and are evicted oldest-first
-/// once the window is exceeded
-/// (`decisions/260705_leases-and-budgets`, "Viewport: cap by blocks and
-/// rendered rows; evict old blocks before retaining old dead-agent views").
+/// once the window is exceeded.
 pub(super) const VIEWPORT_MAX_BLOCKS: usize = 500;
 /// Max rendered rows retained — an eviction trigger alongside
 /// [`VIEWPORT_MAX_BLOCKS`], for the rarer oversized block (a huge diff, a
@@ -46,9 +44,7 @@ pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
 /// The three facts kept for a dead sub-agent view once its linger window
 /// elapses ([`super::LINGER`]): everything else — blocks, the flatten, the
 /// streaming buffers, the pinned register — is dropped. No reload-from-log
-/// machinery is built; the log stays readable outside the TUI
-/// (`decisions/260705_leases-and-budgets`, "Viewport eviction: a tombstone
-/// with the log path is enough").
+/// machinery is built; the log stays readable outside the TUI.
 pub(super) struct Tombstone {
     pub(super) id: AgentId,
     pub(super) error: bool,
@@ -369,9 +365,8 @@ impl Viewport {
     /// agent id, its final status (read off the last block before it is
     /// dropped, the same signal [`Self::last_is_error`] exposes), and the log
     /// path — the scrollback, flatten, streaming buffers, and pinned register
-    /// are already durable in `user.log` and are dropped, never re-read
-    /// (`decisions/260705_leases-and-budgets`). A no-op once already a
-    /// tombstone.
+    /// are already durable in `user.log` and are dropped, never re-read. A
+    /// no-op once already a tombstone.
     pub(super) fn evict_to_tombstone(&mut self, id: AgentId) {
         if self.tombstone.is_some() {
             return;
@@ -663,9 +658,9 @@ impl Viewport {
 
     /// Evict oldest-first once either window cap is crossed — the dropped
     /// blocks are already durable in `user.log`/`events.json` and are never
-    /// re-read from heap (`decisions/260705_leases-and-budgets`).  Walked
-    /// once from the tail to find the longest suffix satisfying both caps,
-    /// then the rest is dropped in a single `drain`.
+    /// re-read from heap.  Walked once from the tail to find the longest
+    /// suffix satisfying both caps, then the rest is dropped in a single
+    /// `drain`.
     fn enforce_window_caps(&mut self) {
         let mut kept = 0usize;
         let mut rows = 0usize;
@@ -1511,12 +1506,10 @@ mod tests {
         );
     }
 
-    /// Scrolling down while sticky must not over-scroll past `max_off`.
-    /// Before the fix, `scroll_down` left `sticky` set, so
-    /// [`Self::render_window`] kept pinning `offset` to the tail instead of
-    /// honouring the user's position, blanking the lower rows.  Clearing
-    /// `sticky` on every user scroll routes through the non-sticky clamp,
-    /// which bounds `offset` to `max_off`.
+    /// Scrolling down while sticky must not over-scroll past `max_off`:
+    /// [`Self::scroll_down`] clears `sticky`, so [`Self::render_window`]
+    /// takes the non-sticky clamp — bounding `offset` to `max_off` — rather
+    /// than pinning it to the tail.
     #[test]
     fn scroll_down_while_sticky_clamps_to_max_off() {
         let mut vp = viewport();

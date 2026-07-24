@@ -6,6 +6,9 @@
 use crate::headless::OutputFormat;
 use clap::{Parser, Subcommand};
 
+/// All flags are long-form only — short-letter aliases collide
+/// with each other in unhelpful ways and there are few enough
+/// flags that long names are fine.
 #[derive(Parser, Debug)]
 #[command(about = "Exarch — a delegate driving ral under a grant", long_about = None)]
 // clap flag struct: each bool is a distinct CLI switch, not a bundle-able group.
@@ -15,10 +18,6 @@ pub struct Cli {
     /// normal case — exarch starts a session governed by the flags below.
     #[command(subcommand)]
     pub command: Option<Command>,
-    /// All flags are long-form only — short-letter aliases collide
-    /// with each other in unhelpful ways and there are few enough
-    /// flags that long names are fine.
-    ///
     /// Optional initial-model override for headless/scripted use. Its
     /// provider is resolved as the available provider whose model list
     /// contains the name, or — for a `vendor/model` slug — `OpenRouter`,

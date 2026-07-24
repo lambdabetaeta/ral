@@ -1,5 +1,10 @@
-//! Drag-selection helpers: column-aware text extraction and
-//! character-range highlighting.
+//! Drag-selection helpers, shared by the two moments a selection is read:
+//! [`highlight_range`] reverse-videos it live as the mouse drags
+//! ([`super::render::paint_selection`]); [`plain_slice`] extracts the plain
+//! text once released, for the clipboard copy ([`super::viewport::Viewport::
+//! selection_text`]).  Both work in cell columns relative to the text area,
+//! with the leading [`RAIL_W`] rail gutter excluded from either end, so a
+//! selection never reaches into the glyph.
 use super::line::{plain, rail_skip};
 use super::palette::RAIL_W;
 use ratatui::{
