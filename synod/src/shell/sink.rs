@@ -273,9 +273,9 @@ mod tests {
             card: Card(vec![]),
         };
         let notice = Kind::Notice {
-            notice: Notice::LargeBinding {
-                name: "x".to_string(),
-                bytes: 0,
+            notice: Notice::Prune {
+                names: vec!["x".to_string()],
+                idle_calls: vec![0],
             },
             card: Card(vec![]),
         };
