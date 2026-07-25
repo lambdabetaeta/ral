@@ -214,7 +214,9 @@ impl WaitOutcome {
         match self {
             Self::Signaled(sig) => sig.is_sigpipe(),
             #[cfg(windows)]
-            Self::Exited(code) | Self::NativeCode(code) => (code as u32) == STATUS_PIPE_CLOSING,
+            Self::Exited(code) | Self::NativeCode(code) => {
+                code.cast_unsigned() == STATUS_PIPE_CLOSING
+            }
             _ => false,
         }
     }
@@ -396,7 +398,7 @@ mod tests {
         // STATUS_PIPE_CLOSING reaches us as an ordinary `Exited` code on
         // Windows; a non-final pipeline stage that died this way is the
         // SIGPIPE analogue and must be forgiven.
-        let outcome = WaitOutcome::Exited(STATUS_PIPE_CLOSING as i32);
+        let outcome = WaitOutcome::Exited(STATUS_PIPE_CLOSING.cast_signed());
         assert!(outcome.is_broken_pipe());
         assert_eq!(CommandFailure::from_outcome(outcome, true), None);
         assert!(CommandFailure::from_outcome(outcome, false).is_some());

@@ -124,16 +124,17 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         ral_core::source::Span::synthetic(),
     );
 
-    let (result, captured) = shell.with_preserved_status(|shell| {
-        match shell.run(prompt_run("__eval_prompt_test__")) {
-            RunReport::Ran {
-                result, captured, ..
-            } => (result, captured),
-            RunReport::Static { .. } => {
-                unreachable!("a thunk prompt body never compiles source")
-            }
-        }
-    });
+    let (result, captured) =
+        shell.with_preserved_status(
+            |shell| match shell.run(prompt_run("__eval_prompt_test__")) {
+                RunReport::Ran {
+                    result, captured, ..
+                } => (result, captured),
+                RunReport::Static { .. } => {
+                    unreachable!("a thunk prompt body never compiles source")
+                }
+            },
+        );
 
     prompt_text_from(result, captured)
 }

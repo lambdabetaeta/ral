@@ -119,7 +119,7 @@ fn collect_denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> 
     Some(build_hint(&denials))
 }
 
-/// Exit codes that plausibly indicate the AppContainer denied an access,
+/// Exit codes that plausibly indicate the `AppContainer` denied an access,
 /// gating the Windows hint the way the Unix hints are gated on an actual
 /// kernel denial line — without this, a confined child that simply exits
 /// nonzero for an unrelated reason (`diff` reporting a difference, a normal
@@ -135,7 +135,7 @@ fn collect_denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> 
 #[cfg(windows)]
 fn plausible_access_denied_exit(code: i32) -> bool {
     const ERROR_ACCESS_DENIED: i32 = 5;
-    const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32 as i32;
+    const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32.cast_signed();
     code == ERROR_ACCESS_DENIED || code == STATUS_ACCESS_DENIED
 }
 
@@ -383,7 +383,7 @@ mod tests {
     fn plausible_access_denied_exit_recognises_both_codes_and_rejects_ordinary_exits() {
         assert!(plausible_access_denied_exit(5), "ERROR_ACCESS_DENIED");
         assert!(
-            plausible_access_denied_exit(0xC000_0022_u32 as i32),
+            plausible_access_denied_exit(0xC000_0022_u32.cast_signed()),
             "STATUS_ACCESS_DENIED"
         );
         assert!(!plausible_access_denied_exit(0));

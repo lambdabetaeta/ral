@@ -285,11 +285,12 @@ fn read_files(files: &[PathBuf]) -> Result<String, String> {
 }
 
 /// Render the section list.  Headed sections get a `# heading` line;
-/// unheaded sections are emitted verbatim.  Bodies are `trim_end`ed
-/// before joining so the blank-line gap between sections is exactly one
-/// line regardless of whether a section's source (a `data/*.md`
-/// `include_str!`, or a caller-built `String`) already ends in blank
-/// lines.
+/// unheaded sections are emitted verbatim.
+///
+/// Bodies are `trim_end`ed before joining so the blank-line gap between
+/// sections is exactly one line regardless of whether a section's source
+/// (a `data/*.md` `include_str!`, or a caller-built `String`) already ends
+/// in blank lines.
 pub fn render(sections: &[(Option<&str>, String)]) -> String {
     sections
         .iter()

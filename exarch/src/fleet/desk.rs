@@ -2388,16 +2388,15 @@ mod tests {
                 .as_ref()
                 .map(crate::agent::render_reply)
                 .unwrap_or_default();
-            let _ =
-                parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
-                    id,
-                    name,
-                    outcome,
-                    text,
-                    log_dir,
-                    elapsed: Duration::default(),
-                    generation,
-                }));
+            let _ = parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
+                id,
+                name,
+                outcome,
+                text,
+                log_dir,
+                elapsed: Duration::default(),
+                generation,
+            }));
             registry.settle(id, generation);
         })
     }

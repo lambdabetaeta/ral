@@ -35,8 +35,8 @@ impl Channel {
     fn raw_handle(&self) -> std::os::windows::io::RawHandle {
         use std::os::windows::io::AsRawHandle;
         match self {
-            Channel::Reader(r) => r.as_raw_handle(),
-            Channel::Writer(w) => w.as_raw_handle(),
+            Self::Reader(r) => r.as_raw_handle(),
+            Self::Writer(w) => w.as_raw_handle(),
         }
     }
 }
@@ -44,8 +44,8 @@ impl Channel {
 impl Read for Channel {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            Channel::Reader(r) => r.read(buf),
-            Channel::Writer(_) => Err(std::io::Error::other(
+            Self::Reader(r) => r.read(buf),
+            Self::Writer(_) => Err(std::io::Error::other(
                 "pipeline channel: read from writer end",
             )),
         }
@@ -55,16 +55,16 @@ impl Read for Channel {
 impl Write for Channel {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            Channel::Writer(w) => w.write(buf),
-            Channel::Reader(_) => Err(std::io::Error::other(
+            Self::Writer(w) => w.write(buf),
+            Self::Reader(_) => Err(std::io::Error::other(
                 "pipeline channel: write to reader end",
             )),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Channel::Writer(w) => w.flush(),
-            Channel::Reader(_) => Ok(()),
+            Self::Writer(w) => w.flush(),
+            Self::Reader(_) => Ok(()),
         }
     }
 }

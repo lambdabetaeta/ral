@@ -55,6 +55,10 @@ pub fn validate_fetch_url(raw: &str) -> Result<reqwest::Url, String> {
 /// # Panics
 /// Panics if the preconfigured rustls client fails to build — unreachable
 /// in practice, since the TLS config is exarch's own known-good default.
+#[allow(
+    clippy::too_long_first_doc_paragraph,
+    reason = "the summary is one sentence with no interior stop: its only seam is an em dash, so a paragraph break there would leave rustdoc's item list an unterminated clause and open the next paragraph with a dangling dash"
+)]
 pub fn fetch_client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .use_preconfigured_tls(crate::provider::tls::config())

@@ -365,11 +365,12 @@ pub(crate) fn cancels_exchange(ctrl_type: u32) -> bool {
 #[cfg(windows)]
 static WIN_CTRL_HANDLER_INSTALLED: std::sync::Once = std::sync::Once::new();
 
-/// Register exarch's console-ctrl handler.  Must run after
-/// `ral_core::process::install_handlers` (see the module doc for why); the
-/// handler translates Ctrl-C/Ctrl-Break into an exchange-cancel via
-/// [`cancels_exchange`] and reports those two events as handled so ral's own
-/// escalating disposition never runs for them, deferring to it only for
+/// Register exarch's console-ctrl handler.
+///
+/// Must run after `ral_core::process::install_handlers` (see the module doc
+/// for why); the handler translates Ctrl-C/Ctrl-Break into an exchange-cancel
+/// via [`cancels_exchange`] and reports those two events as handled so ral's
+/// own escalating disposition never runs for them, deferring to it only for
 /// the genuine termination events.
 #[cfg(windows)]
 pub fn install() {

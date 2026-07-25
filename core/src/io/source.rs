@@ -93,8 +93,8 @@ impl std::os::unix::io::AsRawFd for SourceReader {
 impl std::os::windows::io::AsRawHandle for SourceReader {
     fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
         match self {
-            SourceReader::Pipe(r) => r.as_raw_handle(),
-            SourceReader::File(f) => f.as_raw_handle(),
+            Self::Pipe(r) => r.as_raw_handle(),
+            Self::File(f) => f.as_raw_handle(),
         }
     }
 }

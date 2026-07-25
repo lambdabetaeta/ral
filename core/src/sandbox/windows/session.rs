@@ -1,9 +1,9 @@
-//! Session-scoped AppContainer confinement state, with projection-keyed
+//! Session-scoped `AppContainer` confinement state, with projection-keyed
 //! authority.
 //!
 //! One shell session (the ral-core process) holds one [`SessionSandbox`]:
 //! a single session-scoped [`DaclManager`] (one ledger, one restore point)
-//! plus **one AppContainer profile per distinct fs projection** the session
+//! plus **one `AppContainer` profile per distinct fs projection** the session
 //! confines, each created lazily the first time its projection becomes
 //! enforceable. [`confine`] wires this into a [`Launch`]: it resolves the
 //! command's projection to its profile (minting one if the projection is
@@ -90,7 +90,7 @@ struct ProjectionKey {
     deny: Vec<String>,
 }
 
-/// One projection's confinement state: the AppContainer profile its
+/// One projection's confinement state: the `AppContainer` profile its
 /// confined children spawn under, and the memo of every `(path,
 /// access-kind)` already stamped for that profile's SID.
 struct ProjectionSandbox {
@@ -127,6 +127,10 @@ struct SessionSandbox {
 // lives until [`teardown`] frees it — projection entries are never removed
 // before then, and teardown runs only at session shutdown, never
 // concurrently with a spawn.
+#[allow(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the fields the lint names (`network_caps`, `projections`) are exactly the raw SIDs the SAFETY note above argues about: OS-owned process-global memory, not thread-affine state, reached only under [`cell`]'s mutex. The lint can see that a `PSID` is not `Send`; it cannot read the argument for why these ones are."
+)]
 unsafe impl Send for SessionSandbox {}
 
 fn cell() -> &'static Mutex<Option<SessionSandbox>> {
@@ -176,7 +180,7 @@ impl SessionSandbox {
 
 /// The network capability SID array, derived once per session on first
 /// request. For a `net: false` projection this is never called — the empty
-/// array *is* the enforcement (an AppContainer with no network capability
+/// array *is* the enforcement (an `AppContainer` with no network capability
 /// cannot open a socket).
 fn ensure_network_caps(slot: &mut Option<CapabilitySids>) -> Settled<&[SID_AND_ATTRIBUTES]> {
     if slot.is_none() {
@@ -197,7 +201,7 @@ fn profile_name(index: u32) -> String {
     format!("ral.sandbox.s{}.p{index}", std::process::id())
 }
 
-/// Confine `launch` under its projection's AppContainer: resolve the
+/// Confine `launch` under its projection's `AppContainer`: resolve the
 /// projection to this session's profile for it (minting one if the
 /// projection is new), stamp the projection's fs prefixes (plus the program
 /// image) for that profile's SID, and attach the `SECURITY_CAPABILITIES`
@@ -205,10 +209,10 @@ fn profile_name(index: u32) -> String {
 /// `CreateProcessW`.
 ///
 /// `program_image`, when `Some`, is the resolved path of the binary the child
-/// will execute; it is granted RO (read + execute) so the LowBox token can
+/// will execute; it is granted RO (read + execute) so the `LowBox` token can
 /// load the image — parity with the Linux backend binding the program path RO
 /// into the bwrap argv, since a user-installed image is otherwise unreadable
-/// to the AppContainer. `None` (a bare-name host program the caller could not
+/// to the `AppContainer`. `None` (a bare-name host program the caller could not
 /// resolve) leaves the image's readability to the fs read projection / the
 /// `ALL APPLICATION PACKAGES` system paths.
 ///
@@ -217,25 +221,37 @@ fn profile_name(index: u32) -> String {
 /// values into the attribute list it copies at spawn time.
 ///
 /// An `Unrestricted` fs projection stamps no projection prefixes (only the
-/// program image, if any) — the AppContainer is deny-by-default, so such a
+/// program image, if any) — the `AppContainer` is deny-by-default, so such a
 /// child otherwise reads only the `ALL APPLICATION PACKAGES` system paths.
 /// Every `Unrestricted` projection shares the one empty-key profile.
 ///
 /// Every `deny_path` gets an explicit deny-ACE (via
 /// [`DaclManager::add_deny_aces`]), unconditionally — there is no "already
-/// unreachable, skip it" case. An AppContainer token retains the `Everyone`
+/// unreachable, skip it" case. An `AppContainer` token retains the `Everyone`
 /// SID, and `ALL APPLICATION PACKAGES` grants are system-wide, so a
 /// `deny_path` that falls outside every read/write prefix *this* projection
 /// granted is not actually unreachable: it is reachable through whichever
 /// ambient system grant the token already carries. MXC stamps every
 /// `deny_path` the same way, with no containment filter
 /// (`dispatcher.rs`'s `build_t3_dacl`, 0e7c3dd).
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the session lock is deliberately held for the whole of `confine` — see the comment at the guard"
+)]
 pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
     program_image: Option<&Path>,
 ) -> Settled<()> {
-    let mut guard = cell().lock().unwrap_or_else(|e| e.into_inner());
+    // One critical section, on purpose: minting a projection's profile,
+    // stamping its ACEs, and reading back its SIDs must not interleave with
+    // another thread's confinement of the same session state — and
+    // `sandbox`/`proj` borrow out of the guard right up to the
+    // `security_capabilities` call, so clippy's suggested early `drop` would
+    // not even compile.
+    let mut guard = cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if guard.is_none() {
         *guard = Some(SessionSandbox::create()?);
     }
@@ -322,7 +338,7 @@ pub(crate) fn confine(
 }
 
 /// Reclaim what a crashed prior session left behind — stamped DACL grants
-/// and registered AppContainer profiles. Best-effort and idempotent —
+/// and registered `AppContainer` profiles. Best-effort and idempotent —
 /// logged, never fatal: a failed sweep must not stop a session from
 /// starting, and any ledger it cannot clear is retried on the next boot.
 pub(crate) fn boot_recover() {
@@ -348,10 +364,14 @@ pub(crate) fn boot_recover() {
 }
 
 /// Tear down the session sandbox: revert every stamped grant ACE, then
-/// delete every projection's AppContainer profile. Idempotent; a no-op when
+/// delete every projection's `AppContainer` profile. Idempotent; a no-op when
 /// no session state was ever created.
 pub(crate) fn teardown() {
-    let Some(sandbox) = cell().lock().unwrap_or_else(|e| e.into_inner()).take() else {
+    let Some(sandbox) = cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
         return;
     };
     let SessionSandbox {
@@ -411,7 +431,7 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 /// The pure half of the per-projection grant memo: drop every path already
 /// recorded in `granted` at `kind`. A free function so the memo's filtering
-/// logic is unit-testable without standing up a real AppContainer profile /
+/// logic is unit-testable without standing up a real `AppContainer` profile /
 /// DACL manager.
 fn filter_out_granted(
     granted: &HashSet<(PathBuf, GrantKind)>,

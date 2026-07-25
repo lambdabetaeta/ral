@@ -274,6 +274,10 @@ impl PipelineResources {
     }
 
     #[cfg(not(unix))]
+    #[allow(
+        clippy::unused_self,
+        reason = "the signature is the Unix arm's, which reads the group's leader pgid off `self`; off Unix there is no process group to signal"
+    )]
     fn signal_group(&self) {}
 }
 

@@ -9,9 +9,9 @@
 // `// after mxc <file>::<fn>` breadcrumb naming its upstream counterpart,
 // for future diffing against upstream.
 
-//! AppContainer profile lifecycle and LowBox spawn capabilities.
+//! `AppContainer` profile lifecycle and `LowBox` spawn capabilities.
 //!
-//! A shell session registers one AppContainer profile per distinct fs
+//! A shell session registers one `AppContainer` profile per distinct fs
 //! projection it confines (`session` owns the keying and naming), each
 //! created the first time its projection becomes enforceable and deleted at
 //! session end. This module owns the profile lifecycle primitives plus the
@@ -20,12 +20,12 @@
 //! [`crate::process::launch::Launch::security_capabilities`]. Filesystem
 //! grants (ACE stamping on host paths for the profile's SID) are `dacl`'s
 //! job, not this module's; net capability inclusion here is the entire
-//! enforcement of `net: false` — an AppContainer with neither
+//! enforcement of `net: false` — an `AppContainer` with neither
 //! `internetClient` nor `privateNetworkClientServer` cannot open a socket.
 //!
 //! Ported function-for-function from MXC's Tier 3 `AppContainerScriptRunner`
 //! where it fits our single-spawn-boundary design (breadcrumbs at each
-//! mirrored unit); the CreateProcessW / job-object / suspend-resume dance
+//! mirrored unit); the `CreateProcessW` / job-object / suspend-resume dance
 //! itself belongs to `process::launch`, not here — this module only builds
 //! the profile and the capability array those callers pass in.
 //!
@@ -79,11 +79,14 @@ use windows_sys::Win32::Foundation::LocalFree;
 // `AppContainerProfile::create_or_reuse` is this function's only non-test
 // caller; see the `impl AppContainerProfile` block below.
 const fn hresult_from_win32(code: u32) -> i32 {
-    ((code & 0x0000_FFFF) | (0x7 << 16) | 0x8000_0000) as i32
+    ((code & 0x0000_FFFF) | (0x7 << 16) | 0x8000_0000).cast_signed()
 }
 
 fn hresult_err(context: &str, hr: i32) -> io::Error {
-    io::Error::other(format!("{context} failed: hresult=0x{:08X}", hr as u32))
+    io::Error::other(format!(
+        "{context} failed: hresult=0x{:08X}",
+        hr.cast_unsigned()
+    ))
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -114,7 +117,7 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
     let mut out: *mut u16 = ptr::null_mut();
     // SAFETY: `sid` is a valid SID for the duration of the call; `out` is a
     // valid out-param.
-    let ok = unsafe { ConvertSidToStringSidW(sid, &mut out) };
+    let ok = unsafe { ConvertSidToStringSidW(sid, &raw mut out) };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -122,7 +125,7 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
     let s = unsafe { wide_ptr_to_string(out) };
     // SAFETY: freed exactly once, per the Win32 contract for this call.
     unsafe {
-        LocalFree(out as *mut _);
+        LocalFree(out.cast());
     }
     Ok(s)
 }
@@ -146,7 +149,7 @@ impl Drop for OwnedContainerSid {
     }
 }
 
-/// A registered AppContainer profile: one per distinct fs projection of a
+/// A registered `AppContainer` profile: one per distinct fs projection of a
 /// shell session, created the first time that projection becomes
 /// enforceable and deleted at session end.
 pub(crate) struct AppContainerProfile {
@@ -156,10 +159,10 @@ pub(crate) struct AppContainerProfile {
 
 impl AppContainerProfile {
     // after mxc appcontainer_runner.rs::AppContainerScriptRunner::create_app_container_sid (0e7c3dd)
-    /// Create the AppContainer profile named `name`, or — when a prior
+    /// Create the `AppContainer` profile named `name`, or — when a prior
     /// session of the same name crashed before deleting it — reuse it by
     /// deriving its SID from the name instead of failing. `name` must be a
-    /// valid AppContainer profile name (non-empty, at most 64 UTF-16 code
+    /// valid `AppContainer` profile name (non-empty, at most 64 UTF-16 code
     /// units); deriving that name from the shell session id is the caller's
     /// job, not this function's.
     pub(crate) fn create_or_reuse(name: &str) -> io::Result<Self> {
@@ -181,7 +184,7 @@ impl AppContainerProfile {
                 desc_wide.as_ptr(),
                 ptr::null(),
                 0,
-                &mut sid,
+                &raw mut sid,
             )
         };
 
@@ -195,7 +198,7 @@ impl AppContainerProfile {
             // SAFETY: `name_wide` is valid for the duration of the call;
             // `derived` is a valid out-param.
             let hr2 = unsafe {
-                DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut derived)
+                DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &raw mut derived)
             };
             if hr2 < 0 {
                 return Err(hresult_err(
@@ -242,7 +245,7 @@ impl AppContainerProfile {
 }
 
 // after mxc appcontainer_runner.rs::delete_app_container_profile (0e7c3dd)
-/// Delete the AppContainer profile registered as `name`, by name alone —
+/// Delete the `AppContainer` profile registered as `name`, by name alone —
 /// the orphan-recovery path, where no live [`AppContainerProfile`] value
 /// exists for a crashed session's ledgered profile. The ledger is written
 /// before the OS-level create, so a recorded name may never have been
@@ -285,10 +288,10 @@ impl OwnedCapabilitySid {
         unsafe {
             let ok = DeriveCapabilitySidsFromName(
                 wide_name.as_ptr(),
-                &mut group_sids,
-                &mut group_sid_count,
-                &mut capability_sids,
-                &mut capability_sid_count,
+                &raw mut group_sids,
+                &raw mut group_sid_count,
+                &raw mut capability_sids,
+                &raw mut capability_sid_count,
             );
             if ok == 0 {
                 return Err(io::Error::last_os_error());
@@ -298,10 +301,10 @@ impl OwnedCapabilitySid {
                 let sid = *group_sids.add(i as usize);
                 LocalFree(sid);
             }
-            LocalFree(group_sids as *mut _);
+            LocalFree(group_sids.cast());
 
             if capability_sid_count == 0 {
-                LocalFree(capability_sids as *mut _);
+                LocalFree(capability_sids.cast());
                 return Err(io::Error::other(format!(
                     "no capability SID returned for '{name}'"
                 )));
@@ -312,7 +315,7 @@ impl OwnedCapabilitySid {
                 let sid = *capability_sids.add(i as usize);
                 LocalFree(sid);
             }
-            LocalFree(capability_sids as *mut _);
+            LocalFree(capability_sids.cast());
 
             Ok(Self(result_sid))
         }
@@ -325,7 +328,7 @@ impl Drop for OwnedCapabilitySid {
             // SAFETY: `self.0` is a `LocalAlloc`'d SID from
             // `DeriveCapabilitySidsFromName`, released with `LocalFree`.
             unsafe {
-                LocalFree(self.0 as *mut _);
+                LocalFree(self.0.cast());
             }
         }
     }
@@ -354,7 +357,7 @@ impl CapabilitySids {
     /// Build the capability array: the network capabilities when
     /// `allow_network` is set, empty otherwise. An empty array is not a
     /// degenerate case — the withheld capabilities *are* the entire
-    /// enforcement of a `net: false` projection, since an AppContainer with
+    /// enforcement of a `net: false` projection, since an `AppContainer` with
     /// neither capability cannot open a socket.
     ///
     /// Unlike upstream, which logs a warning and continues when a
@@ -400,7 +403,10 @@ mod tests {
         // ERROR_ALREADY_EXISTS (183) wrapped in FACILITY_WIN32 is the
         // well-known 0x800700B7 -- verifies the reproduced macro against a
         // value anyone can check against `winerror.h`.
-        assert_eq!(hresult_from_win32(ERROR_ALREADY_EXISTS) as u32, 0x8007_00B7);
+        assert_eq!(
+            hresult_from_win32(ERROR_ALREADY_EXISTS).cast_unsigned(),
+            0x8007_00B7
+        );
     }
 
     #[test]

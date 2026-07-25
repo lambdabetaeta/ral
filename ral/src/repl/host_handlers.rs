@@ -221,10 +221,13 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                 jt.remove(id)
             };
             match removed {
-                Some(_job) => {
-                    #[cfg(windows)]
-                    ral_core::process::disown_pipeline_group(_job.pgid);
-                }
+                // Windows keeps its pipeline groups in a side registry, so
+                // disowning must let go of that entry too.  Elsewhere,
+                // dropping the row *is* the disown.
+                #[cfg(windows)]
+                Some(job) => ral_core::process::disown_pipeline_group(job.pgid),
+                #[cfg(not(windows))]
+                Some(_) => {}
                 None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
             }
             Ok(Value::Unit)

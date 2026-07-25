@@ -65,9 +65,10 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// Discover skills from both roots, filter by `caps` readability, and
-/// parse frontmatter — for the prompt's Skills section.  Called once at
-/// startup (pre-run); file reads here are `silent`, gated by the static
-/// capability set rather than a live shell.
+/// parse frontmatter — for the prompt's Skills section.
+///
+/// Called once at startup (pre-run); file reads here are `silent`, gated
+/// by the static capability set rather than a live shell.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by caps"

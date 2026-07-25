@@ -226,7 +226,7 @@ impl RunningChild {
         }
         #[cfg(windows)]
         match (self.group_owner, self.pgid) {
-            (GroupOwner::Standalone, Some(p)) | (GroupOwner::BorrowedByPipeline, Some(p)) => {
+            (GroupOwner::Standalone | GroupOwner::BorrowedByPipeline, Some(p)) => {
                 crate::process::kill_pipeline_group(p);
             }
             _ => {

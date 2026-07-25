@@ -716,6 +716,15 @@ mod windows_dacl {
     /// worth a whole extra `windows-sys` feature for one ABI constant.
     const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
+    /// `SECURITY_ATTRIBUTES`'s own byte count, as the `u32` its `nLength`
+    /// field is — a fixed three-field Win32 layout, so the narrowing from
+    /// `usize` cannot lose anything.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a fixed Win32 layout of 24 bytes; size_of is a compile-time constant nowhere near u32::MAX"
+    )]
+    const SECURITY_ATTRIBUTES_LENGTH: u32 = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+
     /// RAII wrapper closing a process token handle exactly once, so every
     /// early return below (a query failure, an ACL-build failure) doesn't
     /// need its own `CloseHandle` call.
@@ -737,13 +746,21 @@ mod windows_dacl {
     /// `TOKEN_USER` followed inline by its SID bytes, per
     /// `GetTokenInformation`'s contract): query once to size the buffer,
     /// once more to fill it.
-    fn current_process_owner() -> std::io::Result<Vec<u8>> {
+    ///
+    /// The buffer is `u64`, not `u8`, though the API counts bytes: the
+    /// caller reads a `TOKEN_USER` back out of it, and that struct leads
+    /// with a pointer, so it wants eight-byte alignment.  A `Vec<u8>` is
+    /// byte-aligned *as a type* — every allocator worth the name hands back
+    /// something stricter, but relying on that makes the read sound by luck
+    /// rather than by construction.  Counting in `u64` puts the guarantee
+    /// in the type.
+    fn current_process_owner() -> std::io::Result<Vec<u64>> {
         use windows_sys::Win32::Security::GetTokenInformation;
 
         let mut raw_token: HANDLE = std::ptr::null_mut();
         // SAFETY: `GetCurrentProcess` returns a pseudo-handle needing no
         // close; `raw_token` is an out-param this call fills on success.
-        let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) };
+        let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw_token) };
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -754,21 +771,21 @@ mod windows_dacl {
         // size a `GetTokenInformation` query; `needed` is filled with the
         // required size regardless of the (expected) failure.
         unsafe {
-            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
         }
         if needed == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let mut buf = vec![0u8; needed as usize];
-        // SAFETY: `buf` is sized exactly to `needed`, as just reported by
-        // the sizing call above.
+        let mut buf = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+        // SAFETY: `buf` holds at least `needed` bytes — the count the sizing
+        // call above reported, rounded up to whole `u64`s.
         let ok = unsafe {
             GetTokenInformation(
                 token.0,
                 TokenUser,
                 buf.as_mut_ptr().cast(),
                 needed,
-                &mut needed,
+                &raw mut needed,
             )
         };
         if ok == 0 {
@@ -787,8 +804,9 @@ mod windows_dacl {
     fn owner_only_acl() -> std::io::Result<*mut ACL> {
         let owner_buf = current_process_owner()?;
         // SAFETY: `owner_buf` holds a fully-populated `TOKEN_USER` from the
-        // successful `GetTokenInformation` call above; `owner_buf` outlives
-        // every use of the `PSID` it hands out below.
+        // successful `GetTokenInformation` call above, in a `u64` buffer and
+        // so aligned for it; `owner_buf` outlives every use of the `PSID` it
+        // hands out below.
         let owner_sid = unsafe { (*owner_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
 
         let trustee = TRUSTEE_W {
@@ -801,7 +819,7 @@ mod windows_dacl {
             // windows-sys, so the cast is a bit-preserving reinterpret (see
             // `core::sandbox::windows::dacl::trustee_for` for the same
             // pattern).
-            ptstrName: owner_sid as *mut u16,
+            ptstrName: owner_sid.cast::<u16>(),
         };
         let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: FILE_ALL_ACCESS,
@@ -814,9 +832,9 @@ mod windows_dacl {
         // SAFETY: `ea` outlives the call; passing a null prior ACL builds a
         // fresh ACL containing only this one entry — no merge with
         // whatever the parent directory would otherwise hand down.
-        let rc = unsafe { SetEntriesInAclW(1, &ea, std::ptr::null(), &mut acl) };
+        let rc = unsafe { SetEntriesInAclW(1, &raw const ea, std::ptr::null(), &raw mut acl) };
         if rc != ERROR_SUCCESS {
-            return Err(std::io::Error::from_raw_os_error(rc as i32));
+            return Err(std::io::Error::from_raw_os_error(rc.cast_signed()));
         }
         Ok(acl)
     }
@@ -858,7 +876,7 @@ mod windows_dacl {
             }
 
             let sa = SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                nLength: SECURITY_ATTRIBUTES_LENGTH,
                 lpSecurityDescriptor: sd_ptr,
                 bInheritHandle: FALSE,
             };
@@ -876,7 +894,7 @@ mod windows_dacl {
                     path_w.as_ptr(),
                     GENERIC_WRITE,
                     0,
-                    &sa,
+                    &raw const sa,
                     CREATE_ALWAYS,
                     FILE_ATTRIBUTE_NORMAL,
                     std::ptr::null_mut(),

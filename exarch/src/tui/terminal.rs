@@ -393,7 +393,7 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
             GetCurrentProcess(),
             log_handle,
             GetCurrentProcess(),
-            &mut crt_handle,
+            &raw mut crt_handle,
             0,
             FALSE,
             DUPLICATE_SAME_ACCESS,
@@ -494,6 +494,10 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
 /// same rationale as the Unix restore: any failure inside the TUI's drop
 /// has nowhere useful to surface.
 #[cfg(windows)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "consuming the backup is the contract: both redirections are undone from it, and the log handle it owns is closed here"
+)]
 pub(super) fn restore_stderr(backup: WindowsStderrBackup) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};

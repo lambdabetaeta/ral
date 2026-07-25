@@ -376,8 +376,7 @@ impl crate::run::RunReport {
                     Ok(v) => match FOValue::try_from(&v) {
                         Ok(fo) => Ok(fo),
                         Err(_) => Err(Break::Error {
-                            rendered: "run result is not transportable across the host seam"
-                                .into(),
+                            rendered: "run result is not transportable across the host seam".into(),
                             command_exit: false,
                         }),
                     },
@@ -743,6 +742,10 @@ impl ControlSender {
 
     /// # Panics
     /// Panics if the wire-channel mutex is poisoned.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the `#[cfg(unix)]` wire arm moves `ctrl` into the `Frame` it writes, and `Control` is not `Copy`; only the identity fallback below merely reads it"
+    )]
     pub fn send(&self, ctrl: Control) {
         #[cfg(unix)]
         if let Some(ch) = &self.wire {

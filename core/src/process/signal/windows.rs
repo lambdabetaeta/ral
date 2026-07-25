@@ -100,10 +100,12 @@ pub fn install_handlers() {
 
 /// Non-escalating exchange-cancel relay: cancels the current run's foreground
 /// scope and fans `CTRL_BREAK_EVENT` out to every live, non-detached
-/// pipeline group.  The Windows analogue of Unix's non-escalating
-/// `relay_handler` (`sigint_relay`) -- unlike the ladder [`install_handlers`]
-/// installs, this never ticks [`ESCALATION`] and never reaches a detached
-/// worker's group.  A frontend with its own exchange-cancel contract (exarch)
+/// pipeline group.
+///
+/// The Windows analogue of Unix's non-escalating `relay_handler`
+/// (`sigint_relay`) -- unlike the ladder [`install_handlers`] installs, this
+/// never ticks [`ESCALATION`] and never reaches a detached worker's group.
+/// A frontend with its own exchange-cancel contract (exarch)
 /// calls this directly, in-process, for a Ctrl-C/Ctrl-Break it has already
 /// decided to treat as an exchange-cancel, instead of re-injecting a console
 /// event that would re-enter `install_handlers`'s escalating disposition.
@@ -193,6 +195,21 @@ mod win_groups {
     /// and a linear walk is fine.
     pub(super) static GROUPS: Mutex<Vec<(i32, GroupState)>> = Mutex::new(Vec::new());
 
+    /// `size_of::<T>()` as the `u32` every `SetInformationJobObject` and
+    /// `QueryInformationJobObject` call wants for its length argument.
+    ///
+    /// The ABI makes this file narrow a `usize` four times over; the
+    /// information-class structs it narrows are fixed Win32 layouts of a
+    /// few dozen bytes, so the narrowing is a formality, and one written
+    /// here beats four unexplained ones at the calls.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "called only for Win32 information-class structs — fixed layouts of a few dozen bytes, so size_of is a compile-time constant nowhere near u32::MAX"
+    )]
+    const fn cb<T>() -> u32 {
+        std::mem::size_of::<T>() as u32
+    }
+
     /// Duplicate `child`'s OS handle into one that survives `Child::wait`
     /// and `Child::drop`.  The duplicate is closed by [`release`].  Null
     /// on failure — every consumer treats null as "no handle" and
@@ -220,8 +237,8 @@ mod win_groups {
             SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
-                &raw const info as *const _,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                (&raw const info).cast(),
+                cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
             );
         }
     }
@@ -238,13 +255,13 @@ mod win_groups {
                 return std::ptr::null_mut();
             }
             let mut assoc: JOBOBJECT_ASSOCIATE_COMPLETION_PORT = std::mem::zeroed();
-            assoc.CompletionKey = job as *mut _;
+            assoc.CompletionKey = job.cast();
             assoc.CompletionPort = port;
             let ok = SetInformationJobObject(
                 job,
                 JobObjectAssociateCompletionPortInformation,
-                &raw const assoc as *const _,
-                std::mem::size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+                (&raw const assoc).cast(),
+                cb::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>(),
             );
             if ok == 0 {
                 CloseHandle(port);
@@ -274,6 +291,10 @@ mod win_groups {
     // borrows raw Win32 handles; the handles themselves are kernel objects.
     unsafe impl Send for PreparedGroup {}
 
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the Join arm holds the registry guard across `DuplicateHandle` on purpose — see the comment there"
+    )]
     pub(super) fn prepare(policy: super::PgidPolicy) -> std::io::Result<PreparedGroup> {
         match policy {
             super::PgidPolicy::Inherit => Ok(PreparedGroup::None),
@@ -299,6 +320,9 @@ mod win_groups {
             }
             super::PgidPolicy::Join(group) => {
                 let leader = group.as_raw();
+                // `state.job` is the registry's handle, not ours: the lock is
+                // the only thing keeping `release` from closing it between the
+                // lookup and the `DuplicateHandle`.
                 let groups = GROUPS.lock().unwrap();
                 let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
                     return Err(std::io::Error::new(
@@ -327,6 +351,13 @@ mod win_groups {
         }
     }
 
+    /// Close a prepared group that never reached a child: the launch failed,
+    /// or the caller abandoned it.  Consumes the value precisely so no
+    /// caller can reach for handles this has already closed.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "by-value is the whole contract — `PreparedGroup`'s fields are `Copy` raw handles, so only taking ownership says the handles are dead on return"
+    )]
     pub(super) fn close_prepared(prepared: PreparedGroup) {
         unsafe {
             match prepared {
@@ -354,6 +385,14 @@ mod win_groups {
 
     /// Register a child that has already been placed in its Job Object before
     /// user code was allowed to run. Returns the leader pid as i32.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "by-value is the whole contract — the prepared group's handles either move into `GROUPS` or are closed here, so the value must not outlive the call"
+    )]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the Join arm holds the registry guard across `CloseHandle` on purpose — see the comment there"
+    )]
     pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> Option<i32> {
         let child_pid = child.id();
         let child_handle = child.raw_process_handle();
@@ -364,10 +403,9 @@ mod win_groups {
                 completion_port,
                 detached,
             } => {
-                let leader_pid = child_pid as i32;
+                let leader_pid = child_pid.cast_signed();
                 let leader_handle = duplicate_process_handle(child_handle);
-                let mut groups = GROUPS.lock().unwrap();
-                groups.push((
+                GROUPS.lock().unwrap().push((
                     leader_pid,
                     GroupState {
                         job,
@@ -382,6 +420,10 @@ mod win_groups {
                 Some(leader_pid)
             }
             PreparedGroup::Join { leader, job } => {
+                // The registry lock stays held across the `CloseHandle`
+                // below: the prepared duplicate may be the handle whose
+                // closing trips `KILL_ON_JOB_CLOSE`, and that must not be
+                // interleaved with a concurrent `release` of the same job.
                 let mut groups = GROUPS.lock().unwrap();
                 if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
                     let dup = duplicate_process_handle(child_handle);
@@ -447,7 +489,14 @@ mod win_groups {
     /// handle to a job created with `KILL_ON_JOB_CLOSE` terminates any
     /// still-alive members — that's the abort-path teardown, no
     /// explicit `TerminateJobObject` needed.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard is deliberately held across the CloseHandle teardown — see the comment inside"
+    )]
     pub(super) fn release(leader: i32) {
+        // Removal and teardown are one step under the lock: no other thread
+        // may see the group gone from the registry while the job that still
+        // owns its members — `KILL_ON_JOB_CLOSE` and all — is alive.
         let mut groups = GROUPS.lock().unwrap();
         if let Some(idx) = groups.iter().position(|(p, _)| *p == leader) {
             let (_, state) = groups.swap_remove(idx);
@@ -504,6 +553,16 @@ mod win_groups {
     /// Returns `true` when the job is fully done.  Latches the
     /// `all_done` flag in `GROUPS` so subsequent calls short-circuit.
     fn drain_completion_port(port: HANDLE, leader: i32, timeout_ms: u32) -> bool {
+        /// Remember that the job is over, so a later reap answers from the
+        /// registry instead of pumping a port whose work is already done.
+        /// No-op when the group has since been released.
+        fn latch_all_done(leader: i32) {
+            let mut groups = GROUPS.lock().unwrap();
+            if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
+                state.all_done = true;
+            }
+        }
+
         let deadline = if timeout_ms == INFINITE {
             None
         } else {
@@ -512,7 +571,7 @@ mod win_groups {
         loop {
             let remaining = match deadline {
                 Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
-                    Some(dur) => dur.as_millis().min(u32::MAX.into()) as u32,
+                    Some(dur) => u32::try_from(dur.as_millis()).unwrap_or(u32::MAX),
                     None => 0,
                 },
                 None => INFINITE,
@@ -536,10 +595,7 @@ mod win_groups {
                 return false;
             }
             if bytes == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
-                let mut groups = GROUPS.lock().unwrap();
-                if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
-                    state.all_done = true;
-                }
+                latch_all_done(leader);
                 return true;
             }
             // Other JOB_OBJECT_MSG_* messages (process new / process
@@ -561,7 +617,7 @@ mod win_groups {
         // The wait_job contract is to call only after ACTIVE_PROCESS_ZERO,
         // so a 259 / 0x103 here is a genuine user exit code, not the
         // STILL_ACTIVE still-running sentinel, and passes through as-is.
-        ReapStatus::Exited(code as i32)
+        ReapStatus::Exited(code.cast_signed())
     }
 
     /// Waits on the leader handle alone.  Strictly less correct than the
@@ -622,7 +678,14 @@ mod win_groups {
     /// Returns `true` when the limit was applied; `false` when the group
     /// is unknown or the underlying call failed (caller may then surface
     /// a diagnostic).
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard is deliberately held across the kernel call — see the comment inside"
+    )]
     pub(crate) fn apply_active_process_limit(leader: i32, limit: u32) -> bool {
+        // Held across `SetInformationJobObject`: the job belongs to the
+        // registry, so releasing the lock before the call would leave a
+        // window in which `release` closes the very handle we then configure.
         let groups = GROUPS.lock().unwrap();
         let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
             return false;
@@ -646,8 +709,8 @@ mod win_groups {
             SetInformationJobObject(
                 job,
                 JobObjectBasicLimitInformation,
-                &raw const info as *const _,
-                std::mem::size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() as u32,
+                (&raw const info).cast(),
+                cb::<JOBOBJECT_BASIC_LIMIT_INFORMATION>(),
             ) != 0
         }
     }
@@ -669,8 +732,8 @@ mod win_groups {
                     SetInformationJobObject(
                         state.job,
                         JobObjectExtendedLimitInformation,
-                        &raw const info as *const _,
-                        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                        (&raw const info).cast(),
+                        cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
                     );
                 }
             }
@@ -684,8 +747,9 @@ mod win_groups {
     }
 }
 
-/// Windows analogue of the Unix `PipelineRelay`: a no-op marker.  The
-/// live-pipelines set is `win_groups::GROUPS` itself, populated by
+/// Windows analogue of the Unix `PipelineRelay`: a no-op marker.
+///
+/// The live-pipelines set is `win_groups::GROUPS` itself, populated by
 /// `register_prepared_group` and cleaned up by [`release_win_group`] from
 /// `PipelineGroup::Drop`.  `install` exists only to keep the cross-platform
 /// call site in `pipeline.rs` free of cfg gates.
@@ -697,20 +761,21 @@ impl PipelineRelay {
     }
 }
 
-/// Release the Job Object backing the pipeline group identified by
-/// `leader`.  Closing the only handle terminates any still-alive members
-/// (the job was created with `KILL_ON_JOB_CLOSE`).  Idempotent: safe to
-/// call from `PipelineGroup::Drop` even when `PipelineRelay::Drop` already
-/// released.
+/// Release the Job Object backing the pipeline group identified by `leader`.
+///
+/// Closing the only handle terminates any still-alive members (the job was
+/// created with `KILL_ON_JOB_CLOSE`).  Idempotent: safe to call from
+/// `PipelineGroup::Drop` even when `PipelineRelay::Drop` already released.
 pub fn release_win_group(leader: i32) {
     win_groups::release(leader);
 }
 
 /// Apply `limit` to the active-process count of the pipeline group's
-/// Job Object.  Used by `sandbox::apply_child_limits` when a grant fires
-/// inside a pipeline: the child cannot be added to a second job, so the
-/// limit lands on the existing pipeline job instead.  Returns `true`
-/// when applied.
+/// Job Object.
+///
+/// Used by `sandbox::apply_child_limits` when a grant fires inside a
+/// pipeline: the child cannot be added to a second job, so the limit lands
+/// on the existing pipeline job instead.  Returns `true` when applied.
 pub fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
     win_groups::apply_active_process_limit(leader, limit)
 }
@@ -725,6 +790,13 @@ pub fn set_active_process_limit(job: windows_sys::Win32::Foundation::HANDLE, lim
 /// True when the leader is a known live pipeline group.  Used to decide
 /// between assigning a fresh per-child job (no group) and applying the
 /// limit to an existing group.
+///
+/// # Panics
+///
+/// Panics if the group registry's mutex is poisoned — that is, if a thread
+/// panicked while holding it.  Nothing under that lock can panic, so a
+/// poisoned registry means the invariants this file rests on are already
+/// gone, and inventing an answer here would be the worse failure.
 pub fn is_known_group(leader: i32) -> bool {
     let groups = win_groups::GROUPS.lock().unwrap();
     groups.iter().any(|(p, _)| *p == leader)
@@ -770,9 +842,10 @@ pub enum ReapStatus {
 }
 
 /// Block until the *whole* pipeline-group job completes
-/// (`JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`), returning the leader's exit
-/// code.  Used by `JobTable::wait_foreground` and `wait_foreground` on
-/// Windows.  Returns `Unknown` when the group is no longer tracked.
+/// (`JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`), returning the leader's exit code.
+///
+/// Used by `JobTable::wait_foreground` and `wait_foreground` on Windows.
+/// Returns `Unknown` when the group is no longer tracked.
 pub fn wait_leader_blocking(pgid: Pgid) -> ReapStatus {
     win_groups::wait_job_blocking(pgid.as_raw())
 }
@@ -789,8 +862,9 @@ pub fn kill_pipeline_group(pgid: Pgid) {
     win_groups::kill_group(pgid.as_raw());
 }
 
-/// `SIGTERM` analogue: `CTRL_BREAK_EVENT` to every member of the group,
-/// giving well-behaved children the chance to wind down on their own
+/// `SIGTERM` analogue: `CTRL_BREAK_EVENT` to every member of the group.
+///
+/// Gives well-behaved children the chance to wind down on their own
 /// before `JobTable::cleanup` escalates to [`kill_pipeline_group`] — the
 /// same grace Unix's `SIGTERM`-then-`SIGKILL` pair gives.  Idempotent.
 pub fn break_pipeline_group(pgid: Pgid) {
@@ -837,10 +911,11 @@ pub(super) fn try_wait_handling_stop(
 // ── Foreground ownership ───────────────────────────────────────────────────
 
 /// Windows shares one console across attached processes, so there is
-/// nothing to acquire and nothing to release.  Console programs (fzf,
-/// less, vim) talk to the Console API directly and work without any
-/// handoff from ral.  The internal-stage SIGTTIN deadlock that motivates
-/// the Mixed-pipeline gate on Unix simply does not exist here.
+/// nothing to acquire and nothing to release.
+///
+/// Console programs (fzf, less, vim) talk to the Console API directly and
+/// work without any handoff from ral.  The internal-stage SIGTTIN deadlock
+/// that motivates the Mixed-pipeline gate on Unix simply does not exist here.
 pub struct ForegroundGuard;
 
 impl ForegroundGuard {

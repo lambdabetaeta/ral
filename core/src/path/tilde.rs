@@ -88,6 +88,10 @@ pub fn get_user_home(username: &str) -> Option<String> {
 /// (they resolve against the caller-supplied `home`, i.e. `%USERPROFILE%`
 /// on Windows), so only `~user`/`~user/...` are affected.
 #[cfg(not(unix))]
+#[allow(
+    clippy::too_long_first_doc_paragraph,
+    reason = "the summary is one sentence with no interior stop: its only seam is an em dash, so a paragraph break there would leave rustdoc's item list an unterminated clause and open the next paragraph with a dangling dash"
+)]
 pub fn get_user_home(_username: &str) -> Option<String> {
     None
 }

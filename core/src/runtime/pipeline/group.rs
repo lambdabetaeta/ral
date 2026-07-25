@@ -98,6 +98,12 @@ impl PipelineGroup {
     }
 
     #[cfg(not(unix))]
+    #[allow(
+        clippy::unused_self,
+        clippy::needless_pass_by_ref_mut,
+        clippy::unnecessary_wraps,
+        reason = "the signature is the Unix arm's, where the anchor records itself in `self`, needs the shell to spawn, counts the stages, and may fail; the one caller is cross-platform and writes `group.prepare(shell, stages)?`"
+    )]
     pub(super) fn prepare(&mut self, _shell: &Shell, _stages: usize) -> Settled<()> {
         Ok(())
     }

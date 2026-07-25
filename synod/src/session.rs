@@ -745,9 +745,11 @@ fn control_seat(
     cwd: std::path::PathBuf,
 ) -> Result<exarch::agent::RootSeat, String> {
     drop((machine, cwd));
-    Err("synod cannot yet talk to a virtual machine on this kind of computer — the part \
+    Err(
+        "synod cannot yet talk to a virtual machine on this kind of computer — the part \
          of synod that would carry the conversation has not been built"
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// The provider and model for a run whose [`Choice`] left both unnamed:

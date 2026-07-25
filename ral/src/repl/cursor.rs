@@ -64,10 +64,15 @@ pub(super) fn query_cursor_col() -> Option<usize> {
             return None;
         }
         let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
-        if GetConsoleScreenBufferInfo(h, &mut info) == 0 {
+        if GetConsoleScreenBufferInfo(h, &raw mut info) == 0 {
             return None;
         }
-        Some(info.dwCursorPosition.X as usize + 1)
+        // A console column is never negative; `try_from` says so in the
+        // type rather than by assumption, and a negative one would
+        // read as "no answer" instead of an enormous column.
+        usize::try_from(info.dwCursorPosition.X)
+            .ok()
+            .map(|col| col + 1)
     }
 }
 

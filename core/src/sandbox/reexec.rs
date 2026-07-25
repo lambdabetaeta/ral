@@ -86,7 +86,7 @@ pub(super) fn self_exec_path_string() -> Option<String> {
         .map(|s| s.exec_path.to_string_lossy().into_owned())
 }
 
-/// The pinned self exec path (Windows), for granting the AppContainer read
+/// The pinned self exec path (Windows), for granting the `AppContainer` read
 /// access to the bundled-tool self-reexec image (`ral.exe`).  Falls back to
 /// the live `current_exe` when the binary was not pinned; `None` only if that
 /// also fails, in which case the image is left ungranted and its readability
@@ -109,7 +109,7 @@ enum Pin {
     /// macOS / other-Unix fallback: snapshot checked before each spawn.
     #[cfg(all(unix, not(target_os = "linux")))]
     Stat { dev: u64, ino: u64 },
-    /// Windows carries no swap guard: confinement applies the AppContainer
+    /// Windows carries no swap guard: confinement applies the `AppContainer`
     /// token to the parent's spawn rather than re-execing ral, so there is
     /// no parent-side self re-exec for a swap check to protect (the
     /// bundled-tool multicall uses the live `current_exe` and, being
@@ -179,7 +179,16 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     Some((pin, arg0.to_path_buf()))
 }
 
+/// Windows pinning cannot fail because it does nothing: there is no fd to
+/// open and no inode to snapshot, only the path to carry (see
+/// [`Pin::Unguarded`]).  The `Option` is the shape [`register_sandbox_self`]
+/// shares with the Unix `build_pin`s, where opening or stat-ing the binary
+/// genuinely can fail; dropping it here would fork the one caller in two.
 #[cfg(windows)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the Option is the cross-platform contract of build_pin, not a claim that this arm can fail — see the doc above"
+)]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     Some((Pin::Unguarded, arg0.to_path_buf()))
 }

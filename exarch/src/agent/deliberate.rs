@@ -32,9 +32,11 @@ use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, To
 use ral_core::serial::FOValue;
 use std::sync::Arc;
 
-/// Outcome of one [`Agent::deliberate`].  Degenerate cases ([`Self::Empty`],
-/// [`Self::Stopped`]) become nudges; [`Self::Cancelled`] and [`Self::Capped`] do not; hard
-/// failures travel through [`ProviderError`].
+/// Outcome of one [`Agent::deliberate`].
+///
+/// Degenerate cases ([`Self::Empty`], [`Self::Stopped`]) become nudges;
+/// [`Self::Cancelled`] and [`Self::Capped`] do not; hard failures travel
+/// through [`ProviderError`].
 #[derive(Debug)]
 pub enum Outcome {
     Complete(String),

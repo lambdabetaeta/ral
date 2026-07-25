@@ -6,12 +6,12 @@
 //!   fork-bomb mitigation, nothing more.  There is a brief window
 //!   between `CreateProcess` and `AssignProcessToJobObject` during which
 //!   the child is unconstrained — acceptable for this use case.
-//! - [`dump_profile_for_windows`] — renders what the AppContainer backend
+//! - [`dump_profile_for_windows`] — renders what the `AppContainer` backend
 //!   actually enforces for a projection, for `RAL_DUMP_SANDBOX_PROFILE`.
 //!
 //! This module owns the Job Object plumbing and the profile dump.  Its
-//! submodules carry the AppContainer backend: `appcontainer` (profile
-//! lifecycle + LowBox spawn capabilities), `dacl` (grant-ACE apply/restore
+//! submodules carry the `AppContainer` backend: `appcontainer` (profile
+//! lifecycle + `LowBox` spawn capabilities), `dacl` (grant-ACE apply/restore
 //! engine) — both imitating MXC's Tier-3 processcontainer backend
 //! (github.com/microsoft/mxc @ 0e7c3dd) — and `session`, which composes the
 //! two into projection-keyed confinement: one profile per distinct fs
@@ -20,6 +20,8 @@
 pub(crate) mod appcontainer;
 pub(crate) mod dacl;
 pub(crate) mod session;
+
+use std::fmt::Write as _;
 
 use crate::types::SandboxProjection;
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -50,9 +52,9 @@ pub(super) fn apply_job_limits(child: &crate::process::ChildHandle) {
     }
 }
 
-/// Render what the AppContainer backend enforces for `policy`, for
+/// Render what the `AppContainer` backend enforces for `policy`, for
 /// `RAL_DUMP_SANDBOX_PROFILE`.  Unlike the Seatbelt SBPL / bwrap argv dumps
-/// this describes real enforcement: the LowBox profile every confined child
+/// this describes real enforcement: the `LowBox` profile every confined child
 /// spawns under, the capability SIDs (network on/off), and the host prefixes
 /// stamped with an allow-ACE for the profile SID, read vs read-write.
 pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
@@ -65,15 +67,16 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
     );
     out.push_str("  fs: deny-by-default; the ALL APPLICATION PACKAGES group's\n");
     out.push_str("      system-path reads plus the allow-ACEs stamped below\n");
-    out.push_str(&format!(
-        "  net: {} -- {}\n",
+    let _ = writeln!(
+        out,
+        "  net: {} -- {}",
         if policy.net { "allow" } else { "deny" },
         if policy.net {
             "internetClient + privateNetworkClientServer capability SIDs granted"
         } else {
             "no network capability SID granted; the LowBox token cannot open a socket"
         }
-    ));
+    );
     out.push_str(
         "  program image: the confined child's binary is granted RO (read+execute)\n\
              \x20     so the LowBox token can load it (an absolute host path or the\n\
@@ -85,14 +88,14 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
     if let Some(fs) = policy.fs.as_policy() {
         out.push_str("    read-write (FILE_GENERIC_READ|WRITE|EXECUTE|DELETE):\n");
         for p in &fs.write_prefixes {
-            out.push_str(&format!("      {}\n", p.as_str()));
+            let _ = writeln!(out, "      {}", p.as_str());
         }
         out.push_str("    read-only (FILE_GENERIC_READ|EXECUTE):\n");
         for p in &fs.read_prefixes {
             if fs.write_prefixes.iter().any(|w| w == p) {
                 continue;
             }
-            out.push_str(&format!("      {}\n", p.as_str()));
+            let _ = writeln!(out, "      {}", p.as_str());
         }
         if !fs.deny_paths.is_empty() {
             out.push_str(
@@ -104,7 +107,7 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
                      \x20     exist, or this session already denied it):\n",
             );
             for p in &fs.deny_paths {
-                out.push_str(&format!("      {}\n", p.as_str()));
+                let _ = writeln!(out, "      {}", p.as_str());
             }
         }
     } else {

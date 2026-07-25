@@ -565,9 +565,9 @@ impl Shared {
         let mut q = self.lock();
         match msg {
             Post::ScheduledWakeup { id, .. } => {
-                let existing = q.iter().position(
-                    |m| matches!(m, Post::ScheduledWakeup { id: eid, .. } if *eid == id),
-                );
+                let existing = q
+                    .iter()
+                    .position(|m| matches!(m, Post::ScheduledWakeup { id: eid, .. } if *eid == id));
                 match existing {
                     Some(pos) => q[pos] = msg,
                     None => q.push_back(msg),
@@ -2070,9 +2070,9 @@ pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentMessage, Boundary, Emitter, Event, FleetBus, INBOX_SOURCE_CAP, Inbox, Post,
-        InboxReject, Item, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Sink, Transcript, channel,
-        drain_pass, pump,
+        AgentMessage, Boundary, Emitter, Event, FleetBus, INBOX_SOURCE_CAP, Inbox, InboxReject,
+        Item, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Post, Sink, Transcript, channel, drain_pass,
+        pump,
     };
     use crate::agent::cancel;
     use crate::provider::Tuning;

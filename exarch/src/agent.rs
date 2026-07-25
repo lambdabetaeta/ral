@@ -51,8 +51,8 @@ mod testkit;
 pub mod transcript;
 
 pub use attend::{Control, NoControl, Verdict};
-pub use build::{RootConfig, RootSeat};
 pub(crate) use build::{Build, fresh_id};
+pub use build::{RootConfig, RootSeat};
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};
 

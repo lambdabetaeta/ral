@@ -37,10 +37,10 @@ pub struct Launch {
 }
 
 /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload for a confined
-/// spawn: an AppContainer SID plus its capability-SID array. Kept as raw
-/// `windows-sys` FFI values rather than the AppContainer profile / capability
+/// spawn: an `AppContainer` SID plus its capability-SID array. Kept as raw
+/// `windows-sys` FFI values rather than the `AppContainer` profile / capability
 /// types that build them (`sandbox::windows::appcontainer`) — this module
-/// owns the spawn boundary and its attribute-list plumbing, not AppContainer
+/// owns the spawn boundary and its attribute-list plumbing, not `AppContainer`
 /// policy, so it only borrows the raw SID values the caller keeps alive.
 #[cfg(windows)]
 struct SecurityCapabilitiesAttr {
@@ -334,6 +334,10 @@ impl Launch {
     /// set on the incoming `Command` are dropped and must be re-set on the
     /// returned `Launch`. This is a documented contract, matching the
     /// non-Windows arm.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the non-Windows arm moves the `Command` into the launch it returns; both arms take it by value so the shared callers see one cross-platform signature"
+    )]
     pub fn from_command(cmd: std::process::Command) -> Self {
         let mut launch = Self::new(cmd.get_program());
         launch.args(cmd.get_args());
@@ -413,7 +417,7 @@ impl Launch {
     }
 
     /// Attach `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` to the spawn: an
-    /// AppContainer SID plus its capability-SID array (built by
+    /// `AppContainer` SID plus its capability-SID array (built by
     /// `sandbox::windows::appcontainer` — an `AppContainerProfile`'s SID and
     /// a `CapabilitySids`' entries). `app_container_sid` and every SID inside
     /// `capabilities` must stay valid until [`Self::spawn`] returns: this
@@ -476,11 +480,11 @@ mod windows_args {
     ) -> io::Result<Vec<u16>> {
         ensure_no_nuls(program)?;
         let mut cmd = Vec::new();
-        cmd.push(b'"' as u16);
+        cmd.push(u16::from(b'"'));
         cmd.extend(program.encode_wide());
-        cmd.push(b'"' as u16);
+        cmd.push(u16::from(b'"'));
         for arg in args {
-            cmd.push(b' ' as u16);
+            cmd.push(u16::from(b' '));
             append_arg(&mut cmd, arg)?;
         }
         cmd.push(0);
@@ -493,25 +497,25 @@ mod windows_args {
         let quote = units.is_empty()
             || units
                 .iter()
-                .any(|c| *c == b' ' as u16 || *c == b'\t' as u16);
+                .any(|c| *c == u16::from(b' ') || *c == u16::from(b'\t'));
         if quote {
-            cmd.push(b'"' as u16);
+            cmd.push(u16::from(b'"'));
         }
         let mut backslashes = 0usize;
         for unit in units {
-            if unit == b'\\' as u16 {
+            if unit == u16::from(b'\\') {
                 backslashes += 1;
             } else {
-                if unit == b'"' as u16 {
-                    cmd.extend(std::iter::repeat(b'\\' as u16).take(backslashes + 1));
+                if unit == u16::from(b'"') {
+                    cmd.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes + 1));
                 }
                 backslashes = 0;
             }
             cmd.push(unit);
         }
         if quote {
-            cmd.extend(std::iter::repeat(b'\\' as u16).take(backslashes));
-            cmd.push(b'"' as u16);
+            cmd.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
+            cmd.push(u16::from(b'"'));
         }
         Ok(())
     }
@@ -640,6 +644,17 @@ mod windows {
 
     static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
+    /// `STARTUPINFOEXW`'s own byte count, as the `u32` its `cb` field is.
+    ///
+    /// A fixed Win32 layout of a little over a hundred bytes, so the
+    /// narrowing from `usize` cannot lose anything — said here rather than
+    /// left as a bare `as` at the assignment.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a fixed Win32 layout; size_of is a compile-time constant of ~112, nowhere near u32::MAX"
+    )]
+    const STARTUPINFOEXW_CB: u32 = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+
     pub(super) fn spawn(
         launch: &mut Launch,
         policy: PgidPolicy,
@@ -713,7 +728,8 @@ mod windows {
             .map(|caps| SECURITY_CAPABILITIES {
                 AppContainerSid: caps.app_container_sid,
                 Capabilities: caps.capabilities.as_mut_ptr(),
-                CapabilityCount: caps.capabilities.len() as u32,
+                CapabilityCount: u32::try_from(caps.capabilities.len())
+                    .expect("a projection declares a handful of capability SIDs, not four billion"),
                 Reserved: 0,
             });
         if let Some(value) = security_caps_value.as_ref() {
@@ -721,7 +737,7 @@ mod windows {
         }
 
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
-        startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.cb = STARTUPINFOEXW_CB;
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         startup.StartupInfo.hStdInput = stdin.child;
         startup.StartupInfo.hStdOutput = stdout.child;
@@ -752,7 +768,7 @@ mod windows {
                 1,
                 flags,
                 env.as_mut_ptr() as *const _,
-                cwd.as_ref().map(|w| w.as_ptr()).unwrap_or(null()),
+                cwd.as_ref().map_or(null(), std::vec::Vec::as_ptr),
                 &raw const startup.StartupInfo,
                 &raw mut pi,
             )
@@ -989,7 +1005,7 @@ mod windows {
             let mut buf = vec![0; bytes];
             let ok = unsafe {
                 InitializeProcThreadAttributeList(
-                    buf.as_mut_ptr() as *mut _,
+                    buf.as_mut_ptr().cast(),
                     attribute_count,
                     0,
                     &raw mut bytes,
@@ -1002,7 +1018,7 @@ mod windows {
         }
 
         fn as_mut_ptr(&mut self) -> *mut std::ffi::c_void {
-            self.buf.as_mut_ptr() as *mut _
+            self.buf.as_mut_ptr().cast()
         }
 
         fn update_handle_list(&mut self, handles: &[HANDLE]) -> io::Result<()> {
@@ -1011,7 +1027,7 @@ mod windows {
                     self.as_mut_ptr(),
                     0,
                     PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                    handles.as_ptr() as *const _,
+                    handles.as_ptr().cast(),
                     std::mem::size_of_val(handles),
                     null_mut(),
                     null(),
@@ -1034,7 +1050,7 @@ mod windows {
                     self.as_mut_ptr(),
                     0,
                     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                    value as *const SECURITY_CAPABILITIES as *const _,
+                    std::ptr::from_ref::<SECURITY_CAPABILITIES>(value).cast(),
                     std::mem::size_of::<SECURITY_CAPABILITIES>(),
                     null_mut(),
                     null(),
@@ -1136,7 +1152,7 @@ mod windows {
             windows_args::ensure_no_nuls(&k.original)?;
             windows_args::ensure_no_nuls(&v)?;
             block.extend(k.original.encode_wide());
-            block.push(b'=' as u16);
+            block.push(u16::from(b'='));
             block.extend(v.encode_wide());
             block.push(0);
         }
@@ -1219,6 +1235,10 @@ mod windows {
             self.exit_status()
         }
 
+        #[allow(
+            clippy::needless_pass_by_ref_mut,
+            reason = "mirrors `ChildHandle::wait_handling_stop`, whose `std::process::Child` arm dispatches beside this one and does need `&mut`; a wait is exclusive by contract even where Windows reaches the exit status through a shared handle"
+        )]
         pub(crate) fn wait_handling_stop(&mut self) -> io::Result<crate::process::WaitOutcome> {
             self.wait_and_exit_status()
                 .map(crate::process::WaitOutcome::from_exit_status)
@@ -1237,6 +1257,10 @@ mod windows {
             }
         }
 
+        #[allow(
+            clippy::needless_pass_by_ref_mut,
+            reason = "mirrors `ChildHandle::reap`, whose `std::process::Child` arm calls the raw `Child::wait`; reaping is an exclusive act even where Windows performs it through a shared handle"
+        )]
         pub(crate) fn reap(&mut self) -> io::Result<std::process::ExitStatus> {
             self.wait_and_exit_status()
         }

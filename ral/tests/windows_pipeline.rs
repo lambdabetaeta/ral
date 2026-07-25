@@ -56,7 +56,7 @@ fn external_to_helper_pipeline_returns_value() {
         "#,
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(out.stdout.trim().ends_with("3"), "stdout={}", out.stdout);
+    assert!(out.stdout.trim().ends_with('3'), "stdout={}", out.stdout);
 }
 
 /// ral helper → external byte pipeline.  The helper writes bytes to
@@ -70,8 +70,8 @@ fn helper_to_external_pipeline_runs() {
         "#,
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(out.stdout.contains("a"), "stdout={}", out.stdout);
-    assert!(out.stdout.contains("c"), "stdout={}", out.stdout);
+    assert!(out.stdout.contains('a'), "stdout={}", out.stdout);
+    assert!(out.stdout.contains('c'), "stdout={}", out.stdout);
 }
 
 /// ral helper → ral helper via a value edge.  The producer returns a
@@ -83,13 +83,13 @@ fn helper_to_external_pipeline_runs() {
 fn helper_to_helper_value_edge() {
     let out = run(
         "win_pipeline_value_edge",
-        r#"
+        r"
         let r = !{ [1, 2, 3] | { |xs| return !{length $xs} } }
         echo $r
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(out.stdout.trim().ends_with("3"), "stdout={}", out.stdout);
+    assert!(out.stdout.trim().ends_with('3'), "stdout={}", out.stdout);
 }
 
 /// `2>&1` inside a pipeline stage.  The stage's stderr must be
@@ -140,7 +140,7 @@ fn pipeline_stage_redirect_to_file() {
 fn missing_command_in_pipeline_reports_user_command() {
     let out = run(
         "win_pipe_missing",
-        r#"this-command-does-not-exist-1729 | findstr ."#,
+        r"this-command-does-not-exist-1729 | findstr .",
     );
     assert_ne!(out.status, 0);
     assert!(

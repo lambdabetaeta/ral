@@ -693,7 +693,9 @@ mod tests {
         let mut log = fresh_log("pinned-state-waiting");
         assert!(
             reg.react(
-                &Ok(deliberate::Outcome::Complete("waiting on a descendant".into())),
+                &Ok(deliberate::Outcome::Complete(
+                    "waiting on a descendant".into()
+                )),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,

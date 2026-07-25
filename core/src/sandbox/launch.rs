@@ -76,10 +76,10 @@ pub(crate) fn sandboxed_command(
 }
 
 /// Windows: build the target's [`Launch`](crate::process::Launch) directly
-/// and confine it under the session AppContainer.
+/// and confine it under the session `AppContainer`.
 ///
 /// There is no re-exec into the sandbox as on macOS/Linux — the parent
-/// applies the LowBox token at spawn time via
+/// applies the `LowBox` token at spawn time via
 /// [`Launch::security_capabilities`](crate::process::Launch::security_capabilities)
 /// (wired in [`super::windows::session::confine`]).  A
 /// [`LaunchTarget::BundledTool`] is therefore a plain

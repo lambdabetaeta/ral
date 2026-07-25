@@ -153,7 +153,7 @@ impl ForegroundDecision {
         }
         #[cfg(windows)]
         {
-            ForegroundGuard::try_acquire(child_id as i32, lease)
+            ForegroundGuard::try_acquire(child_id.cast_signed(), lease)
         }
         #[cfg(not(any(unix, windows)))]
         {

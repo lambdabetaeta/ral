@@ -439,10 +439,14 @@ pub(crate) use windows_sys::Win32::System::Console::{
 /// (`GetConsoleMode` fails — redirected to a pipe or file), mirroring
 /// `termios_snapshot`'s `None` on a non-tty stdin.
 #[cfg(windows)]
+#[allow(
+    clippy::too_long_first_doc_paragraph,
+    reason = "the summary is one sentence with no interior stop: its only seam is an em dash, so a paragraph break there would leave rustdoc's item list an unterminated clause and open the next paragraph with a dangling dash"
+)]
 pub fn console_mode_snapshot() -> Option<u32> {
     let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
     let mut mode: u32 = 0;
-    (unsafe { GetConsoleMode(h, &mut mode) } != 0).then_some(mode)
+    (unsafe { GetConsoleMode(h, &raw mut mode) } != 0).then_some(mode)
 }
 
 /// Restore a console mode captured by [`console_mode_snapshot`] onto the
@@ -461,19 +465,21 @@ pub fn restore_console_mode(mode: u32) {
 pub(crate) fn is_console(std_handle: u32) -> bool {
     let h = unsafe { GetStdHandle(std_handle) };
     let mut mode: u32 = 0;
-    unsafe { GetConsoleMode(h, &mut mode) != 0 }
+    unsafe { GetConsoleMode(h, &raw mut mode) != 0 }
 }
 
 /// Enable ANSI virtual-terminal processing on the stdout and stderr console
-/// handles.  Must be called once at process startup.  A no-op when a handle
-/// is redirected to a pipe or file (`GetConsoleMode` will fail on those).
+/// handles.
+///
+/// Must be called once at process startup.  A no-op when a handle is
+/// redirected to a pipe or file (`GetConsoleMode` will fail on those).
 #[cfg(windows)]
 pub fn enable_virtual_terminal_processing() {
     const ENABLE_VTP: u32 = 0x0004;
     for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         let h = unsafe { GetStdHandle(id) };
         let mut mode: u32 = 0;
-        if unsafe { GetConsoleMode(h, &mut mode) } != 0 {
+        if unsafe { GetConsoleMode(h, &raw mut mode) } != 0 {
             unsafe {
                 SetConsoleMode(h, mode | ENABLE_VTP);
             }

@@ -35,8 +35,10 @@ exarch::pre_main_ctor!();
 /// A unique scratch directory per test so concurrent runs don't share
 /// session logs.
 fn tmp(tag: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir()
-        .join(format!("exarch-deliberate-test-{}-{tag}", std::process::id()));
+    let p = std::env::temp_dir().join(format!(
+        "exarch-deliberate-test-{}-{tag}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     p

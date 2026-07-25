@@ -396,9 +396,7 @@ fn is_writable_path(path: &Path) -> bool {
     reason = "[io-door:silent:writable-stat-nonunix] Stat behind the `is-writable` predicate on non-unix (readonly-attribute test). A stat predicate, not turn-time model data I/O — raises no card, like its unix sibling."
 )]
 fn is_writable_path(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|m| !m.permissions().readonly())
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|m| !m.permissions().readonly())
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {

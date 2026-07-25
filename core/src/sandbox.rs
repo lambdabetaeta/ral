@@ -181,20 +181,34 @@ pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
 /// `pre_exec` does not exist, a Job Object is attached post-spawn to cap
 /// the process tree at `ACTIVE_PROCESS_CAP` processes (preventing fork
 /// bombs).
-pub fn apply_child_limits(_child: &crate::process::ChildHandle) {
+#[cfg_attr(
+    not(windows),
+    allow(
+        unused_variables,
+        reason = "the child is read only by the Windows Job Object arm; elsewhere the limits are already in place from pre-exec, and this is a no-op"
+    )
+)]
+pub fn apply_child_limits(child: &crate::process::ChildHandle) {
     #[cfg(windows)]
-    windows::apply_job_limits(_child);
+    windows::apply_job_limits(child);
 }
 
 /// Same as [`apply_child_limits`] but for a child that is already a
 /// member of a pipeline Job Object.
+#[cfg_attr(
+    not(windows),
+    allow(
+        unused_variables,
+        reason = "child and leader are read only by the Windows Job Object arm; elsewhere this is a no-op"
+    )
+)]
 pub fn apply_child_limits_in_pipeline(
-    _child: &crate::process::ChildHandle,
-    _leader: Option<crate::process::Pgid>,
+    child: &crate::process::ChildHandle,
+    leader: Option<crate::process::Pgid>,
 ) {
     #[cfg(windows)]
     {
-        match _leader {
+        match leader {
             Some(group) if crate::process::is_known_group(group.as_raw()) => {
                 if !crate::process::apply_group_active_process_limit(
                     group.as_raw(),
@@ -203,7 +217,7 @@ pub fn apply_child_limits_in_pipeline(
                     eprintln!("ral: warning: failed to apply active-process limit to pipeline job");
                 }
             }
-            _ => windows::apply_job_limits(_child),
+            _ => windows::apply_job_limits(child),
         }
     }
 }
