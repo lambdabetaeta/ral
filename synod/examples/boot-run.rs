@@ -1,34 +1,41 @@
 //! A human-driven proof that a run crosses the wire into a booted guest.
 //!
 //! Where `vm-manager`'s `boot-smoke` example ends at "the engine is alive on
-//! the vsock", this one drives the §3 protocol over that same wire: it boots
-//! the three artifacts through the `vz` backend, adopts the control plane
-//! `take_control` hands back into a [`WireTransport`], attaches a session at
-//! the guest's `/work`, and dispatches one real run — reading the granted
-//! folder from inside the VM — to a settled [`Report`]. The captured output
-//! comes back across the wire, proving the whole path end to end: boot,
-//! workspace share, engine, and the frame protocol under a running run.
+//! the guest's socket", this one drives the §3 protocol over that same wire: it
+//! boots the three artifacts through whichever backend this platform has,
+//! adopts the control plane `take_control` hands back into a [`WireTransport`],
+//! attaches a session at the guest's `/work`, and dispatches one real run —
+//! reading the granted folder from inside the VM — to a settled [`Report`]. The
+//! captured output comes back across the wire, proving the whole path end to
+//! end: boot, workspace share, engine, and the frame protocol under a running
+//! run.
 //!
-//! Requires a signed binary — Virtualization.framework refuses an unentitled
-//! one. Run `dev/scripts/sign-virtualization.sh target/debug/examples/boot-run`
-//! after every rebuild.
+//! It is the same program on both platforms, and that is the interesting part.
+//! Nothing below is `#[cfg]`-ed except which backend is constructed: the
+//! control plane is an `AF_VSOCK` descriptor under Virtualization.framework and
+//! an `AF_HYPERV` socket under Hyper-V, and
+//! [`WireTransport::adopt`](ral_core::transport::WireTransport::adopt) takes
+//! either, so the protocol never learns which hypervisor it is talking through.
+//!
+//! # What each platform asks of you first
+//!
+//! - **macOS** — a signed binary. Run `dev/scripts/sign-virtualization.sh
+//!   target/debug/examples/boot-run` after every rebuild.
+//! - **Windows** — an account the compute service serves: an administrator, or a
+//!   member of the *Hyper-V Administrators* group.
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
-#[cfg(target_os = "macos")]
+use ral_core::io::TerminalState;
+use ral_core::transport::{
+    EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport,
+    dispatch_to_report,
+};
+use ral_core::types::Capabilities;
+use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
+
 fn main() {
-    use std::os::unix::net::UnixStream;
-
-    use ral_core::io::TerminalState;
-    use ral_core::transport::{
-        EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport,
-        dispatch_to_report,
-    };
-    use ral_core::types::Capabilities;
-    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
-    use vm_manager::vz::Vz;
-    use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Ok([kernel, initramfs, rootfs, folder]) = <[String; 4]>::try_from(args) else {
         eprintln!("usage: boot-run <kernel> <initramfs> <rootfs> <folder>");
@@ -36,8 +43,9 @@ fn main() {
     };
 
     // Seed a file the guest run will read back, so the captured output is
-    // proof the granted folder crossed the virtiofs share, not just that a
-    // run ran.
+    // proof the granted folder crossed into the guest — over virtiofs on one
+    // platform, over the host's own 9p server on the other — and not merely
+    // that a run ran.
     let sentinel = "boot-run-was-here";
     #[allow(
         clippy::disallowed_methods,
@@ -45,17 +53,18 @@ fn main() {
     )]
     std::fs::write(format!("{folder}/sentinel.txt"), sentinel).expect("seed the granted folder");
 
-    let vz = Vz::new(
-        BootArtifact {
-            kernel: kernel.into(),
-            initramfs: initramfs.into(),
-            rootfs: rootfs.into(),
-        },
-        std::env::temp_dir(),
-    );
+    let artifact = BootArtifact {
+        kernel: kernel.into(),
+        initramfs: initramfs.into(),
+        rootfs: rootfs.into(),
+    };
+    let Some(hypervisor) = backend(artifact) else {
+        eprintln!("this platform has no virtual-machine backend in vm-manager");
+        std::process::exit(1);
+    };
 
-    println!("booting via {}...", vz.name());
-    let mut machine = match vz.boot(&MachineSpec::for_folder(folder)) {
+    println!("booting via {}...", hypervisor.name());
+    let mut machine = match hypervisor.boot(&MachineSpec::for_folder(folder)) {
         Ok(machine) => machine,
         Err(err) => {
             eprintln!("boot failed: {err}");
@@ -66,7 +75,7 @@ fn main() {
 
     let workspace = machine.workspace_path().to_path_buf();
     let control = machine.take_control();
-    let transport = WireTransport::adopt(UnixStream::from(control), Liveness::default())
+    let transport = WireTransport::adopt(control, Liveness::default())
         .expect("adopt the guest's control plane");
 
     transport.attach(
@@ -135,8 +144,38 @@ fn main() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("boot-run drives vm_manager::vz, which builds on macOS only");
-    std::process::exit(1);
+/// The backend this platform has, constructed directly rather than through
+/// `vm_manager::detect` — an example already holds the boot media, and
+/// `synod::boot` is what finds it in a shipped build.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the `Option` is the seam's shape, not this arm's: a platform with a backend always \
+              answers `Some`, and the one without answers `None` from the third arm below"
+)]
+#[cfg(target_os = "macos")]
+fn backend(artifact: BootArtifact) -> Option<Box<dyn Hypervisor>> {
+    Some(Box::new(vm_manager::vz::Vz::new(
+        artifact,
+        std::env::temp_dir(),
+    )))
+}
+
+/// The backend this platform has — see the macOS twin.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the `Option` is the seam's shape, not this arm's: a platform with a backend always \
+              answers `Some`, and the one without answers `None` from the third arm below"
+)]
+#[cfg(windows)]
+fn backend(artifact: BootArtifact) -> Option<Box<dyn Hypervisor>> {
+    use vm_manager::hcs::Hyperv;
+    Some(Box::new(Hyperv::new(artifact, Hyperv::default_cache())))
+}
+
+/// No backend here, and the example says so at run time rather than failing to
+/// build.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn backend(artifact: BootArtifact) -> Option<Box<dyn Hypervisor>> {
+    drop(artifact);
+    None
 }

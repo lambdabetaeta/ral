@@ -1,0 +1,153 @@
+<?if $(sys.BUILDARCH)="x86"?>
+    <?define BrokerWin64 = "no" ?>
+<?elseif $(sys.BUILDARCH)="x64"?>
+    <?define BrokerWin64 = "yes" ?>
+<?elseif $(sys.BUILDARCH)="arm64"?>
+    <?define BrokerWin64 = "yes" ?>
+<?else?>
+    <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
+<?endif?>
+
+<!--
+  broker-service.wxs — the privileged half of synod on Windows.
+
+  Windows does not let an ordinary account near a virtual machine.  The Host
+  Compute System API that the machine layer drives (`vm-manager/src/hcs/`,
+  `dev/docs/VM/SYNOD.md` §2) answers `HCS_E_ACCESS_DENIED` to any caller who is
+  neither an administrator nor a member of the local *Hyper-V Administrators*
+  group.  Synod's users are university secretaries: they are not
+  administrators on their machines, and they must not have to become them to
+  open a folder and ask for a letter to be filed.
+
+  The shortcut this fragment exists to avoid is the installer putting each user
+  into Hyper-V Administrators.  That group's privilege is not "may run synod";
+  it is "may build an arbitrary virtual machine", and one of the things an
+  arbitrary machine may be given is a physical disk to boot from.  A disk
+  attached that way is read by the hypervisor at the block layer — beneath
+  NTFS, and so beneath every ACL the file system would otherwise enforce.
+  Joining the group would therefore hand every user of this app the ability to
+  read files they were denied, in exchange for a capability none of them asked
+  for: a local privilege escalation, installed deliberately, by us.  So the
+  privilege does not travel to the user; the work travels to the privilege.
+  This is the shape WSL (`wslservice`) and Docker Desktop
+  (`com.docker.service`) each settled on, and for this same reason.
+
+  What the service holds is one power and no others: it creates and stops the
+  machines synod runs its work in, and hands the running machine's control
+  socket back to the window over `\\.\pipe\synod-machine-broker`.  The synod
+  window itself stays entirely unprivileged — it asks, it does not do — which
+  is what makes the arrangement worth the extra moving part.  Everything else
+  synod does to the user's folder it still does as the user, with the user's
+  own rights, exactly as it does on macOS.
+
+  `LocalSystem`, and an automatic start, are not preferences; both follow from
+  facts about the platform.  The compute service serves SYSTEM, so a broker
+  that is anything less than SYSTEM is a broker that cannot broker.  And the
+  machine may be wanted by a session that has not begun: the service comes up
+  with the computer, before anyone has logged in, and must then survive every
+  logon and logoff for the life of the installation.  Nothing here impersonates
+  a user, and nothing here needs to — the broker never touches the granted
+  folder, only the machine that will be shown it.
+
+  One thing the broker shares with synod rather than owning: the guest boot
+  media.  It reads the kernel, initramfs, and rootfs from `boot\` beside its
+  own executable, which is the same relative layout `synod/src/boot.rs` looks
+  for beside synod's.  That is why this component installs into `INSTALLDIR`
+  and not a directory of its own — `bundle.resources` in
+  `tauri.windows.conf.json` already lands those three files in
+  `INSTALLDIR\boot\`, and one copy of a two-gigabyte image serving both
+  executables is the whole point.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Fragment>
+        <!--
+          `INSTALLDIR` is the directory the generated installer puts the
+          application in; tauri-bundler's own `main.wxs` declares it as
+          `<Directory Id="INSTALLDIR" Name="{product name}"/>` under
+          `ProgramFiles64Folder`, and then hangs the main binary, the registry
+          entries, and the whole resource map off `<DirectoryRef
+          Id="INSTALLDIR">`.  Naming it here joins that same folder instead of
+          creating a second one beside it.
+        -->
+        <ComponentGroup Id="SynodMachineBrokerServiceGroup" Directory="INSTALLDIR">
+            <Component Id="SynodMachineBrokerService" Guid="*" Win64="$(var.BrokerWin64)">
+                <!--
+                  Where the binary comes from, and why the path looks like
+                  that.  Tauri neither builds nor copies this executable:
+                  `bundle.externalBin`, the mechanism that would copy it,
+                  renames what it copies with a target-triple suffix.  That is
+                  right for a sidecar the app spawns by name and wrong for a
+                  service, whose image path is recorded in the registry at
+                  install time and must be the name we shipped.  So the
+                  fragment names the file cargo has already produced, which is
+                  why `just synod-msi` builds it on the line before it calls
+                  Tauri at all.
+
+                  The path is relative to neither this file nor the project.
+                  tauri-bundler runs candle and light with their working
+                  directory set to `<cargo target dir>/<profile>/wix/<arch>`
+                  (`run_candle` and `run_light` in its
+                  `bundle/windows/msi/mod.rs` pass that directory as the
+                  child's cwd), and WiX resolves a relative `Source` against
+                  the binder's working directory.  Two levels up is therefore
+                  the profile directory holding every binary of this build —
+                  including synod's own, which the generated `main.wxs`
+                  reaches by absolute path.  Written this way the reference
+                  follows a `CARGO_TARGET_DIR`, a cross-compilation target
+                  triple, and a debug profile without being told about any of
+                  them, which an absolute path frozen into
+                  `tauri.windows.conf.json` could not.  The one preprocessor
+                  variable tauri does define, `SourceDir`, is no help here: it
+                  is set to the main *binary's* path rather than to a
+                  directory, and the WiX preprocessor cannot take a parent of
+                  it.
+                -->
+                <File Id="SynodMachineBrokerExe"
+                      Name="synod-machine-broker.exe"
+                      Source="..\..\synod-machine-broker.exe"
+                      KeyPath="yes"
+                      Vital="yes" />
+
+                <!--
+                  `Vital="yes"` because an installation whose broker did not
+                  register is an installation that cannot create a machine, and
+                  saying so during the install is kinder than discovering it at
+                  the first grant.  `Type="ownProcess"`: the broker is its own
+                  executable, not a DLL in a shared host.  `Interactive="no"`
+                  is the default and stated anyway — a SYSTEM service that
+                  could put a window on a user's desktop is a classic shatter
+                  attack, and this one has no user interface at all.
+                -->
+                <ServiceInstall Id="SynodMachineBrokerServiceInstall"
+                                Name="SynodMachineBroker"
+                                DisplayName="Synod machine broker"
+                                Description="Creates and stops the virtual machines Synod runs its work in. Synod itself runs without privileges; this service holds the one privilege the platform requires for a virtual machine, and nothing else."
+                                Type="ownProcess"
+                                Start="auto"
+                                ErrorControl="normal"
+                                Account="LocalSystem"
+                                Interactive="no"
+                                Vital="yes" />
+
+                <!--
+                  `Start="install"` so the first grant after an installation
+                  does not have to wait for a reboot to find its broker.
+                  `Stop="both"` covers the upgrade as well as the uninstall: a
+                  running service holds its own executable open, and Windows
+                  would otherwise demand a restart to replace a file we could
+                  simply have stopped.  `Remove="uninstall"` is what keeps an
+                  uninstalled synod from leaving a SYSTEM service behind
+                  pointing at a deleted binary, and `Wait="yes"` makes each of
+                  those transitions finish before the installer moves on, so a
+                  failure to stop is reported rather than raced past.
+                -->
+                <ServiceControl Id="SynodMachineBrokerServiceControl"
+                                Name="SynodMachineBroker"
+                                Start="install"
+                                Stop="both"
+                                Remove="uninstall"
+                                Wait="yes" />
+            </Component>
+        </ComponentGroup>
+    </Fragment>
+</Wix>

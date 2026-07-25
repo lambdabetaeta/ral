@@ -40,26 +40,48 @@ enum Rootfs {
 
 /// The boot media this build ships, if this computer holds it.
 ///
-/// Two layouts are looked in, mirroring how the window finds its own
-/// bundle: the shipped bundle keeps the media under
-/// `Contents/Resources/boot/`, beside the binary's own `Contents/MacOS/`,
-/// with the rootfs compressed; a development build reaches the image
-/// pipeline's own output under the workspace `target` directory, with the
-/// rootfs already inflated.  `None` — no media anywhere — is not an error
-/// this function raises: [`vm_manager::detect`] turns it into the refusal a
-/// synod with nothing to boot must give.
+/// Three layouts are looked in, mirroring how the window finds its own
+/// bundle.  A shipped **macOS** bundle keeps the media under
+/// `Contents/Resources/boot/`, beside the binary's own `Contents/MacOS/`; a
+/// shipped **Windows** installation keeps it in `boot/` beside the executable
+/// itself, because that is where Tauri's resource map puts the same four
+/// destinations there.  Either way the rootfs is compressed and inflated into
+/// the cache on demand.  A development build reaches the image pipeline's own
+/// output under the workspace `target` directory, with the rootfs already
+/// inflated.
+///
+/// The two bundle layouts are tried on every platform rather than `#[cfg]`-ed
+/// apart: each is a *place a file might be*, and one that does not exist on
+/// this computer answers the question by not being there.  `None` — no media
+/// anywhere — is not an error this function raises: [`vm_manager::detect`]
+/// turns it into the refusal a synod with nothing to boot must give.
 pub(crate) fn boot_media() -> Option<BootPlan> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
 
-    // The shipped bundle: kernel and initramfs in place, rootfs compressed,
-    // inflated into the cache on demand.
-    if let Some(contents) = dir.parent() {
-        let boot = contents.join("Resources").join("boot");
+    for boot in [
+        dir.parent()
+            .map(|contents| contents.join("Resources").join("boot")),
+        Some(dir.join("boot")),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let kernel = boot.join("kernel");
         let initramfs = boot.join("initramfs.img");
+        if !kernel.is_file() || !initramfs.is_file() {
+            continue;
+        }
+        // Either spelling of the rootfs is a shipped bundle, because the two
+        // platforms' packages differ here for good reason.  A signed `.app` is
+        // read-only and downloaded whole, so it carries the archive and inflates
+        // it once into the cache below.  An MSI compresses its own cabinet, so it
+        // lays the image down flat — which is also what lets the machine service
+        // (`vm_manager::broker`) read it without a decompressor, and without
+        // writing into any one user's cache.
         let archive = boot.join("rootfs.img.zst");
-        if [&kernel, &initramfs, &archive].iter().all(|f| f.is_file()) {
+        let plain = boot.join("rootfs.img");
+        if archive.is_file() {
             return Some(BootPlan {
                 kernel,
                 initramfs,
@@ -68,6 +90,13 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
                     checksum: boot.join("rootfs.img.sha256"),
                     target: cache_boot_dir().join("rootfs.img"),
                 },
+            });
+        }
+        if plain.is_file() {
+            return Some(BootPlan {
+                kernel,
+                initramfs,
+                rootfs: Rootfs::Ready(plain),
             });
         }
     }

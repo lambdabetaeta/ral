@@ -1,7 +1,7 @@
 ---
-generated_at_commit: f7cf93a
+generated_at_commit: e6224a0
 generated_at_date: 2026-07-25
-covers_paths: [synod/, vm-manager/, ral-daemon/, vm-image/]
+covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
 ---
 
 # Map: synod
@@ -18,18 +18,33 @@ And it is itself a library, not a binary: `synod-app`, the GUI, is the one
 process.
 
 The design record is `dev/docs/VM/SYNOD.md`; the landed state is
-`dev/docs/VM/SYNOD-v1.md`. The VM stack runs end to end: every conversation
-boots a real Virtualization.framework machine from shipped boot media — there
-is no software-only fallback — and the engine runs inside the guest, one
-engine process per session, driven over the design's §3 wire
-([[decisions/260722_session-is-a-process|session-is-a-process]]).
+`dev/docs/VM/SYNOD-v1.md`. Every conversation boots a real hardware machine
+from shipped boot media — there is no software-only fallback — and the engine
+runs inside the guest, one engine process per session, driven over the
+design's §3 wire
+([[decisions/260722_session-is-a-process|session-is-a-process]]). **One guest,
+two lifecycle backends**: Virtualization.framework on macOS arm64, Hyper-V
+through the Host Compute System API on Windows x86_64
+([[decisions/260725_windows-hyper-v-backend|windows-hyper-v-backend]]). The
+two are the same machine assembled from the parts each platform has, and the
+guest cannot tell which one booted it, because every difference is either
+invisible from inside (the disk bus, the socket family) or carried on the
+kernel command line. On Windows the machine is created by a `LocalSystem`
+service the installer registers, asked for over a named pipe by an
+unprivileged window, so nobody has to be given a hypervisor's privilege to run
+synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 
 ## synod/ — the library
 
-- `lib.rs` — the crate doc names the five differences from exarch;
-  `boot_media()` finds the shipped kernel/initramfs/rootfs (the bundle's
-  `Resources/boot/`, or `vm-image/out` in development) for
-  `vm_manager::detect`.
+- `lib.rs` — the crate doc names the five differences from exarch.
+- `boot.rs` — the media this build ships, found and readied once.
+  `boot_media()` looks in three places, each simply *a place a file might be*
+  rather than a `#[cfg]` branch: a macOS bundle's `Contents/Resources/boot/`,
+  a Windows installation's `boot/` beside the executable, then the development
+  pipeline's `vm-image/out/`. `BootPlan::realise` inflates a shipped zstd
+  rootfs into the XDG cache against its `sha256` sidecar — a signed bundle is
+  read-only, so the cache is the only writable home the image has — and hands
+  `vm_manager::detect` a `BootArtifact`.
 - `grant.rs` — the folder becomes a `ral_core::types::Capabilities`
   ([[design/grant|grant]]), and a `vm_manager::MachineSpec` naming the same
   folder. One grant, read twice: once as authority, once as a workspace.
@@ -39,9 +54,13 @@ engine process per session, driven over the design's §3 wire
 - `session.rs` — `Conversation`, one folder held open from first message to
   last. `begin` opens the grant, boots the machine, and seats exarch's agent
   on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over
-  `Machine::take_control`, attached at the guest's `/work`); `exchange`
-  drives one message through `exarch::headless::converse_sink`, bracketed by
-  the safety net — a checkpoint before, a checkpoint after, even after a
+  `Machine::take_control`, attached at the guest's `/work`). `control_seat`
+  carries no platform condition at all: `take_control` hands back each
+  platform's own owned handle and `ral_core::transport::WireTransport::adopt`
+  takes either, so the seam is one function
+  ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+  `exchange` drives one message through `exarch::headless::converse_sink`,
+  bracketed by the safety net — a checkpoint before, a checkpoint after, even after a
   failed run; `end` closes the wire, and the guest halts itself. The model
   picker lives here too: `menu`/`refresh_menu` list what the computer's
   credentials can reach (cached-instant and fetched-complete), and a
@@ -99,14 +118,26 @@ every [[invariants/single-binary|multicall]] binary here.
 One trait each side of a boot: `Hypervisor::boot(&MachineSpec) -> Box<dyn
 Machine>`, with `MachineSpec::resolve` the one platform-independent judgment
 of a spec, called by every backend so a bad spec is refused in the same words
-everywhere.
+everywhere. `BootArtifact::resolve` is its twin for the media, and makes every
+file absolute: the paths are opened by *another process* — `vmcompute` runs in
+`C:\Windows\System32` — so a relative path that resolved for the caller names
+nothing by the time the machine is built. `Machine::take_control` is the one
+signature that varies — an `OwnedFd` on Unix, an `OwnedSocket` on Windows —
+because each platform owns its own accepted socket, and both are adopted by
+the host seam unchanged.
 
-**The crate boots only real machines.** `detect(Option<BootArtifact>)`
-answers `Vz` or refuses with a sentence for a non-programmer — not an Apple
-Silicon Mac, no boot media, or a build unsigned for virtualization. There is
-deliberately no software fallback: a synod that cannot put hardware between
-the agent and the rest of the computer refuses to start rather than degrade
-to a weaker mode.
+**The crate boots only real machines.** `detect(Option<BootArtifact>)` answers
+`Vz`, `Brokered`, or `Hyperv`, or refuses with a sentence for a
+non-programmer: not a platform with a hypervisor at all, no boot media, a
+macOS build unsigned for virtualization, or a Windows account the compute
+service will not serve. On Windows the order is the machine broker first —
+which needs no boot media from this process at all, since the service has its
+own installed beside it — and only then the in-process `Hyperv`, which is a
+checkout rather than an installation. There is deliberately no software
+fallback: a synod that cannot put hardware between the agent and the rest of
+the computer refuses to start rather than degrade to a weaker mode.
+`examples/boot-smoke.rs` is the human-driven boot, one body over both
+backends.
 
 - `vz.rs` — `Vz`: Virtualization.framework, macOS arm64, bound through
   `objc2-virtualization`. It builds and validates the full configuration —
@@ -121,6 +152,119 @@ to a weaker mode.
   `com.apple.security.virtualization` entitlement — `vz::entitled()` is a
   process check, not a platform check.
 
+## vm-manager/src/hcs/ — the Windows machine
+
+`Hyperv`: Hyper-V through the Host Compute System API — `computecore.dll`, the
+surface the Virtual Machine Platform feature provides and the one WSL 2 and
+Linux containers are built on. This is the module the broker below runs in its
+own process; `detect` reaches it directly only in a checkout. `available()`
+answers in one of three remedies rather than one failure: the feature is not
+installed, this account is outside the computer's local **Hyper-V
+Administrators** group, or the compute service is not answering at all. An HCS
+system has no thread affinity — it is a handle, not a queue-bound object — so a
+`Guest` holds its machine directly and the only threads in the backend serve
+blocking I/O.
+
+- `mod.rs` — `Hyperv`, `Guest`, `available()`, the refusal texts, and the table
+  of correspondences with `vz.rs`. `boot`'s order is load-bearing at three
+  points: the console pipe exists before the machine that names it, the
+  control-plane listener is bound before the machine *starts*, and
+  `HcsGrantVmAccess` runs on the four boot files before a worker process opens
+  them as its own virtual account. `Guest::stop` closes the wire first, so the
+  guest powers itself off from inside, then revokes every access entry it
+  granted, so none naming a dead per-machine identity is left on anyone's
+  folder; `Drop` shares that path.
+- `api.rs` — the entry points, resolved with `LoadLibraryW`/`GetProcAddress`
+  rather than statically imported, so a Windows without the feature gets a
+  sentence instead of a process that will not start. `Api::settle` holds the
+  whole operation protocol — mint an operation, hand it to the call, read the
+  real outcome and the service's own JSON error text out of
+  `HcsWaitForOperationResult` — in one place, and `HCS_E_ACCESS_DENIED` is the
+  one code recognised rather than merely reported.
+  `HcsGrantVmAccess`/`HcsRevokeVmAccess` are looked for in `computecore.dll`
+  *and* `computestorage.dll`, because they are exported by the former —
+  Microsoft's own documentation and Go binding name the latter, which on
+  10.0.26100 exports neither.
+- `spec.rs` — the machine as one JSON document, since HCS takes no builder
+  objects: `Chipset.LinuxKernelDirect`, `ComputeTopology`, `Devices.Scsi` (the
+  rootfs at LUN 0, the session disk at LUN 1), `Devices.Plan9` (the granted
+  folder, with `LINUX_METADATA` always and `READ_ONLY` when the grant is),
+  `Devices.HvSocket`, `Devices.ComPorts`,
+  `ShouldTerminateOnLastHandleClosed`, and **no network adapter at all** —
+  absent, not disabled. Being data rather than a sequence of setter calls, the
+  document is built and read back under ordinary `cargo test` with no machine
+  and no privilege. `kernel_command_line` writes `ral.port` and `ral.plan9`
+  from named fields, never positionally: the guest would mount its own control
+  plane if the two were ever swapped.
+- `hvsock.rs` — the control plane. `service_guid` is the entire bridge between
+  the two addressing schemes: a Linux vsock port `p` is the service GUID
+  `pppppppp-facb-11e6-bd58-64006a7986d3`, which is why a guest that knows
+  nothing of Windows can still be dialled. `socket_sddl` names SYSTEM,
+  built-in Administrators, and *this user's own SID* — never a wildcard, since
+  this socket is the one door in an otherwise networkless machine — and
+  `fresh_machine_id` draws on `ProcessPrng` because the machine's identifier
+  *is* half the socket's address.
+- `vhd.rs` — a `VirtualDisk` attachment must be a VHD, so the raw ext4 images
+  are wrapped as **fixed VHDs**: the sectors verbatim followed by one 512-byte
+  footer, which makes wrapping an append rather than a conversion — no block
+  map, nothing transcoded, the filesystem identically placed.
+  `ensure_rootfs_vhd` does it once into `%LOCALAPPDATA%\Synod\Machine\` behind
+  a marker recording *which* image was wrapped, and passes a shipped `.vhd`
+  through untouched; `create_session_vhd` makes the session disk, which the
+  guest formats on every boot and the machine's teardown deletes. That one is a
+  **dynamic** VHD declaring 8 GiB — ~18 KB of metadata when empty — because
+  Hyper-V refuses a virtual disk whose *file* is sparse (`0xC03A001A`), so
+  growth has to be the format's business rather than the filesystem's.
+- `console.rs` — the guest's `ttyS0` on a named pipe the compute service dials
+  as a client, pumped onto synod's own output, because without it a boot that
+  failed and a boot that is merely slow are the same timeout. `Console::wake`
+  connects to its own pipe to release a pump parked on a machine that never
+  started.
+
+## vm-manager/src/broker/ — the privileged half, on Windows
+
+The service that owns the machine so the window does not have to, and the
+client that asks it. One instruction crosses (`Request::Boot` — a folder and a
+read-only flag), and everything else about the machine is the service's own
+([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
+
+- `mod.rs` — the protocol and the argument: `PIPE`
+  (`\\.\pipe\synod-machine-broker`), `VERSION` checked before anything else,
+  the `Request`/`Reply` pair, and length-prefixed JSON with a 64 KiB frame cap
+  written out here rather than borrowed from `ral-core` (a machine layer that
+  needed the shell to talk to its own service would have the dependency
+  backwards). `Request::Adopted` is the third step of `Boot` → `Booted` →
+  `Adopted`, and its doc is where the ordering trap is stated.
+- `client.rs` — `Brokered`, a `Hypervisor` that asks rather than acts, so
+  `detect` can prefer it without `synod::session` or the seat knowing which
+  backend it got; `Brokered::available()` is the probe `detect` asks.
+  `adopt_socket` turns the service's `WSAPROTOCOL_INFOW` bytes back into an
+  `OwnedSocket`. `BrokeredGuest` holds the pipe as the lease: `shutdown` and
+  `Drop` both close it, and closing it is what stops the machine.
+- `service.rs` — the only privileged code synod ships, and the file to review:
+  `PIPE_SDDL` (`D:P`, SYSTEM + built-in Administrators + *interactively
+  logged-on* users, never `AU` and never a wildcard), `serve`/`serve_client`
+  (one machine per connection, held in the serving thread's local),
+  `readable_by_client` (`ImpersonateNamedPipeClient`, the folder opened as the
+  caller, reverted by a `Drop` guard on every path out including an unwind),
+  `client_process` (`GetNamedPipeClientProcessId` — the kernel's answer, not
+  the client's), `describe_socket` (`WSADuplicateSocketW` for that one process
+  id), `media` (the boot artifact beside *this* executable), and `cache`
+  (`%ProgramData%\Synod\Machine`, machine-wide because the wrapped rootfs is
+  identical for every user and `LocalSystem`'s `%LOCALAPPDATA%` is SYSTEM's
+  profile).
+- `vm-manager/src/bin/synod-machine-broker.rs` — the program: the service
+  control dispatcher (`SERVICE_NAME` = `SynodMachineBroker`, report `RUNNING`
+  before serving, stop by process exit since the threads own the machines), and
+  `--console`, the same behaviour with a terminal attached, which is how a
+  maintainer sees the guest's own console say why a kernel did not come up.
+- `synod/wix/broker-service.wxs` — the installer side: a WiX fragment
+  (referenced from `synod/tauri.windows.conf.json`) declaring the service into
+  `INSTALLDIR`, so it shares the one `boot\` directory with the application;
+  `LocalSystem`, automatic, started at install, removed on uninstall.
+  `just broker-install` / `broker-uninstall` do the same from a checkout with
+  `sc.exe`.
+
 ## ral-daemon/ — the guest's PID 1
 
 Runs inside every booted guest. Every decision — the kernel-cmdline
@@ -134,29 +278,74 @@ daemon verifies and names what it was handed. No ral semantics, no authority
 policy. When the engine exits — the wire's EOF is its cue — the daemon powers
 the machine off from inside: the clean inside-out halt.
 
-## vm-image/ — the boot media
+`Boot::workspace` is where the guest learns which hypervisor's folder it has:
+an `Export`, either `Virtiofs { tag }` or `Plan9 { name, port }`, decided by
+whether `ral.plan9` names a port on the command line. The 9p arm is the one
+mount whose options cannot be written before the mount is attempted, because
+`trans=fd` names the descriptor of a *fresh vsock connection to the host's
+server* — the daemon dials, sizes the socket's buffers, and mounts
+`trans=fd,rfdno=N,wfdno=N,msize=…,version=9p2000.L,aname=<share>` over it.
+`ral.plan9` and `ral.port` are two sockets for two jobs and are read by name,
+never by order.
 
-The design record's §7 built. `build.sh` assembles the rootfs — a pinned
-**Ubuntu 26.04 LTS (resolute) arm64** office userland (LibreOffice headless,
+## vm-image/ and ral-initramfs/ — the boot media
+
+The design record's §7 built, and `ARCH`-parametric over synod's two guests:
+`ARCH=arm64` for Virtualization.framework, `ARCH=amd64` for Hyper-V. A build
+refuses a container that is not its own architecture rather than let qemu-user
+emulation quietly produce something else. `build.sh` assembles the rootfs — a
+pinned **Ubuntu 26.04 LTS (resolute)** office userland (LibreOffice headless,
 the Python document stack, pandoc, OCR, wide fonts, full locales, no
-toolchain) via mmdebstrap → ext4 → zstd in a native-arm64 container,
-checksummed and version-manifested. `build-boot.sh` builds the boot pair:
-Ubuntu's generic kernel taken apart to the raw Image `VZLinuxBootLoader`
-boots, and a hand-written initramfs whose every decision is a typed plan —
-assemble the overlay root, make the session disk, install daemon and engine,
-`switch_root` — with the git hash stamped into `boot-manifest.txt`. The
-README records the corrections of §7's prose to real package names and the
-open questions (squashfs, distribution, determinism).
+toolchain) via mmdebstrap → ext4 → zstd in a native container, checksummed and
+version-manifested. `build-boot.sh` builds the boot pair, stamping the git hash
+into `boot-manifest.txt`, and the kernel is where the two guests part: arm64
+takes Ubuntu's generic kernel apart to the raw Image `VZLinuxBootLoader` wants,
+amd64 keeps that same `vmlinuz` verbatim, because it already *is* the bzImage
+`LinuxKernelDirect` loads. So do the module sets — virtio on arm64; on amd64
+`hv_vmbus` and the drivers on it (`hv_storvsc`, `hv_utils`, `hv_balloon`),
+`vsock` + `hv_sock`, and 9p as three modules: `9p`, `9pnet`, and **`9pnet_fd`**,
+the trap worth naming, since upstream split `trans_fd` out and a `trans=fd`
+mount with `9pnet` loaded and `9pnet_fd` missing fails with a bare `ENODEV`.
+There is deliberately no `hv_netvsc`: the guest has no network device to drive.
+`vm-image/README.md` records the corrections of §7's prose to real package
+names and the open questions (squashfs, distribution, determinism).
+
+`ral-initramfs/` is the initramfs itself, and every decision in it is a typed
+plan — assemble the overlay root, make the session disk, install daemon and
+engine, `switch_root` — unit-tested on any machine. It hardcodes no disk:
+`plan.rs`'s `resolve_disks` probes candidate *pairs* in order, virtio
+(`/dev/vda` + `/dev/vdb`) first, then Hyper-V's SCSI (`/dev/sda` + `/dev/sdb`),
+and refuses by naming every candidate it looked for.
 
 ## What is not here
 
-The Windows Hyper-V backend, and the image pipeline's open questions above.
-The rest of the design record runs: the §3 wire carries real runs
-(`synod/examples/boot-run.rs` witnesses boot → virtiofs share → engine →
-settled report), the §5 spawn jail stands inside the guest (a fresh uid and
-a cgroup between the engine and what it runs), and §6's `fetch-url` answers
-the web through `exarch::fleet::egress` under IT's policy, threaded once
-through `RootConfig` so both seats answer alike.
+Two things about the Windows machine, neither of them settled by the code
+compiling:
+
+- **No guest's own boot is verified yet.** A machine is created and started
+  through the broker, and the path is compiled, clippy- and rustdoc-clean, and
+  unit-tested wherever a test can reach without a machine — the document's
+  shape, the VHD footer's checksum and geometry, the port→service-GUID mapping,
+  the socket's own descriptor, the pipe's — but whether a kernel comes up and
+  the daemon dials is still being established.
+  `vm-manager/examples/boot-smoke.rs` and `synod/examples/boot-run.rs` are the
+  vehicles for that, and the guest console on its named pipe is there so the
+  first failure says why.
+- **Whether the host's 9p server can read the granted folder unaided is
+  untested.** `HcsGrantVmAccess` is called on the four boot files, which a
+  worker process really does open as its own virtual account, and deliberately
+  *not* on the user's folder. The broker's impersonation check answers a
+  different question — may the *caller* read it — so if a guest's mount is
+  refused, a session-scoped grant is still the knob.
+
+Also the image pipeline's open questions above. The rest of the design record
+runs — end to end on macOS, and everything above the machine on both: the §3
+wire carries real runs (`synod/examples/boot-run.rs` witnesses
+boot → shared folder → engine → settled report), the §5 spawn jail stands
+inside the guest (a fresh uid and a cgroup between the engine and what it
+runs), and §6's `fetch-url` answers the web through `exarch::fleet::egress`
+under IT's policy, threaded once through `RootConfig` so both seats answer
+alike.
 [[decisions/260715_vm-workspaces-cross-by-copy|vm-workspaces-cross-by-copy]]
 records where synod's work-in-place workspace deliberately departs from
 exarch's cross-by-copy position.
@@ -170,3 +359,11 @@ exarch's cross-by-copy position.
 - [[map/exarch|exarch]] — the sibling binary and the library synod embeds.
 - [[design/exarch-architecture|exarch-architecture]] — the loop both products
   run.
+- [[decisions/260725_windows-hyper-v-backend|windows-hyper-v-backend]] — why the
+  Windows machine is assembled the way it is.
+- [[decisions/260725_windows-machine-broker|windows-machine-broker]] — why a
+  `LocalSystem` service creates it, what the Hyper-V Administrators group would
+  have cost every user, and what keeps the service's surface narrow.
+- [[map/core/transport|core / transport]] — the framed seam the control plane
+  rides, whose stream type is std's owner for a connected socket and not a claim
+  about the address family.

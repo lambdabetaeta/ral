@@ -214,8 +214,6 @@ Documented degradations, not bugs:
   whole-job completion and `bg` is a no-op.
 - No `ral-sh` — it is a POSIX login-shell bridge (`/bin/sh`, `/etc/shells`);
   the concept does not exist on Windows.
-- No `--engine` mode — its wire transport is a Unix socketpair with fd
-  handoff.
 - A smaller coreutils subset: `id`, `stat`, `kill`, `test`, and `tac` are
   Unix-only and are not built; `timeout` is a scoped follow-up.
 
@@ -231,13 +229,21 @@ around a binary. Five profiles ship in the binary, from `dangerous` to
 exarch is a coding one: you grant it one folder, describe the job in plain
 language, and it works in that folder in place, under a checkpoint before, a
 report of what changed after, and per-file or whole-job undo. Every conversation
-boots a real virtual machine from shipped boot media — macOS only, on
-Virtualization.framework — and the engine runs inside the guest. `just
-synod-app` bundles it into a runnable `.app` under `target/release/bundle/`; it
-needs the Tauri CLI (`cargo install tauri-cli`) and a built guest image under
-`vm-image/out/`. A bare `cargo build` product cannot boot a machine — the
-virtualization entitlement arrives with the bundle's signature, or, for a
-development binary, from `dev/scripts/sign-virtualization.sh`.
+boots a real virtual machine from shipped boot media — one guest over two
+backends, Virtualization.framework on macOS and Hyper-V on Windows — and the
+engine runs inside it. `just synod-app` bundles it into a runnable `.app` and
+`just synod-msi` into a Windows installer, both under `target/release/bundle/`;
+each needs the Tauri CLI (`cargo install tauri-cli`) and a guest image under
+`vm-image/out/` — `just guest-rootfs` then `just guest-boot`, passing `amd64` for
+the Windows guest. On macOS a bare `cargo build` product cannot boot a machine:
+the virtualization entitlement arrives with the bundle's signature, or, for a
+development binary, from `dev/scripts/sign-virtualization.sh`. On Windows nothing
+needs signing and synod stays unprivileged, but Hyper-V must be there to ask —
+Windows Pro, Education, or Enterprise with the Virtual Machine Platform feature
+installed — and the account must be an administrator or a member of the
+computer's local Hyper-V Administrators group, which is empty by default. That
+group membership is the one deployment step, and synod checks it and names it
+before a folder is granted rather than failing halfway into a session.
 
 **Plugins.** The interactive shell is extended in ral itself:
 [plugins/](plugins) has autosuggestions, fzf-backed history, file, and

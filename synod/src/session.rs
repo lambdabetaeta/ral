@@ -689,11 +689,17 @@ fn resolve_account(
 /// The seat the trunk drives the guest's engine from: the machine's own
 /// control plane, adopted as a wire, working at `cwd`.
 ///
-/// Split out of [`Conversation::begin`] because it is the one step whose
-/// very existence is platform-conditional, and a `#[cfg]` around a `return`
-/// inside that long body would leave every line after it dead. Here the
-/// condition is a whole function, so `begin` has one body on every platform
-/// and the refusal arrives as an ordinary `Err`.
+/// Split out of [`Conversation::begin`] because it is the one step that used
+/// to be platform-conditional, and a `#[cfg]` around a `return` inside that
+/// long body left every line after it dead. It is no longer conditional at
+/// all, and the shape of *why* is worth keeping in view: what
+/// [`vm_manager::Machine::take_control`] hands over differs by platform — an
+/// `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
+/// socket under Hyper-V — and yet no `#[cfg]` appears below, because
+/// [`ral_core::transport::WireTransport::adopt`] takes whatever converts into
+/// its own [`WireStream`](ral_core::wire::WireStream) and each platform's
+/// owned handle does. The frame protocol never learns which hypervisor it is
+/// talking through.
 ///
 /// # Errors
 /// Returns `Err` if the control plane cannot be adopted as a wire.
@@ -702,16 +708,15 @@ fn resolve_account(
 /// Panics if the machine's control plane was already taken — see
 /// [`vm_manager::Machine::take_control`]. `begin` is its only caller and
 /// takes it once.
-#[cfg(unix)]
 fn control_seat(
     machine: &mut Box<dyn vm_manager::Machine>,
     cwd: std::path::PathBuf,
 ) -> Result<exarch::agent::RootSeat, String> {
-    let fd = machine.take_control();
+    let wire = machine.take_control();
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(
             ral_core::transport::WireTransport::adopt(
-                std::os::unix::net::UnixStream::from(fd),
+                wire,
                 ral_core::transport::Liveness::default(),
             )
             .map_err(|e| format!("could not take control of the machine: {e}"))?,
@@ -723,33 +728,6 @@ fn control_seat(
         // and in every change report.
         home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
     })
-}
-
-/// The refusal a non-Unix build can only give.
-///
-/// [`ral_core::transport::WireTransport`] is Unix-only, and so is every
-/// seat that could drive one — [`vm_manager::Machine::take_control`] does
-/// not even exist here. There is no non-Unix way to reach a machine's
-/// control plane, so this build says so rather than pretend.
-///
-/// In practice no caller reaches this: [`vm_manager::detect`] has already
-/// refused, several statements earlier, on every platform that is not an
-/// Apple Silicon Mac. It stands for the day a Windows backend lands and
-/// that refusal lifts, leaving this one to name the piece still missing.
-///
-/// # Errors
-/// Always.
-#[cfg(not(unix))]
-fn control_seat(
-    machine: &mut Box<dyn vm_manager::Machine>,
-    cwd: std::path::PathBuf,
-) -> Result<exarch::agent::RootSeat, String> {
-    drop((machine, cwd));
-    Err(
-        "synod cannot yet talk to a virtual machine on this kind of computer — the part \
-         of synod that would carry the conversation has not been built"
-            .to_string(),
-    )
 }
 
 /// The provider and model for a run whose [`Choice`] left both unnamed:
