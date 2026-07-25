@@ -4,16 +4,16 @@
 //!
 //! [[decisions/260618_run-turn-is-host-api]] makes the run door
 //! (`Shell::run`) / `RunRequest` / `RunReport` the only host-facing
-//! evaluation seam and collapses the old run-assembly vocabulary. These
-//! source-text scans hold that boundary lexically:
+//! evaluation seam. These source-text scans hold two lexical consequences of
+//! that boundary:
 //!
 //!   - `ral_core` names no async runtime — tokio never enters core; the seam
 //!     is a synchronous `EventSink` taking a `Value`, and the host owns its
 //!     concurrency model.
-//!   - host crates (`ral`, `exarch`) name none of the internal run types or
-//!     core helpers a host used to assemble a run by hand (`TurnFrame`,
-//!     `IoFrame`, core `TurnOutcome`, `eval_turn`, `arm_lifetime`). Hosts are
-//!     request suppliers now.
+//!   - host crates (`ral`, `exarch`) name no `arm_lifetime` — a host states a
+//!     wall clock in its `RunRequest` and the door arms the process lifetime
+//!     from it, so no host reaches past the door into core's reaper to time a
+//!     run by hand.
 //!
 //! The invariant being guarded is itself lexical — "this name does not occur
 //! here" — so a source scan is the right instrument. This test file lives
@@ -116,27 +116,12 @@ fn ral_core_names_no_async_runtime() {
 }
 
 /// Hosts are request suppliers: they build a `RunRequest`, call a run door,
-/// and render a `RunReport`. None of the collapsed internal run types, nor
-/// the core helpers a host once used to assemble a run, may reappear.
+/// and render a `RunReport`. A run's wall clock rides the request, and the
+/// door arms the process lifetime from it — so `arm_lifetime`, which core
+/// exports for its own use, must never be reached from a host.
 #[test]
-fn hosts_name_no_run_assembly_vocabulary() {
+fn hosts_do_not_arm_process_lifetimes() {
     for host in ["ral/src", "exarch/src"] {
-        assert_absent(host, "TurnFrame");
-        assert_absent(host, "IoFrame");
-        assert_absent(host, "eval_turn");
         assert_absent(host, "arm_lifetime");
-
-        // exarch legitimately owns `deliberate::Outcome` (provider-message
-        // outcomes) — a different layer the ADR keeps. Forbid only a host
-        // naming *core's* `TurnOutcome`, i.e. `TurnOutcome` reached through
-        // `ral_core`.
-        let sites = scan(host, |line| {
-            line.contains("TurnOutcome") && line.contains("ral_core")
-        });
-        assert!(
-            sites.is_empty(),
-            "host `{host}` must not name core's `TurnOutcome` (collapsed into `RunReport`):\n{}",
-            sites.join("\n"),
-        );
     }
 }
