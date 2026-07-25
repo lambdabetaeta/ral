@@ -17,12 +17,19 @@
 //!
 //! The fold has two halves, split by who may legally read what: the agent
 //! assembles its own rows on its drive thread (the shell's registry and
-//! bindings, its inbox, log, and disk — `Agent::resource_rows`), and the
+//! bindings, its inbox, log, and disk — [`Agent::resource_rows`]), and the
 //! frontend appends the rows for the accumulators *it* owns (viewports,
-//! views, the bus — [`frontend_rows`]) when the card reaches it. Neither
+//! views, the bus — [`frontend_rows`]) once [`Agent::emit_resources`] has
+//! folded the agent's rows into the card and put both on the bus. Neither
 //! half reaches across a thread for the other's figures.
 
+use crate::agent::Agent;
+use crate::agent::digest::COMPACT_THRESHOLD;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
+use crate::bus::{Emitter, Kind};
+use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
+use crate::shell_eval;
+use ral_core::serial::FOValue;
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
@@ -315,6 +322,228 @@ pub fn dir_size(root: &Path) -> u64 {
         .sum()
 }
 
+impl Agent {
+    /// Assemble this agent's half of the `/resources` probe fold — one
+    /// [`ProbeRow`] per session-lived accumulator this drive thread may
+    /// legally read: the shell's worker registry (running and settled
+    /// counts by class, with the nearest time-to-reap), the inbox's depth
+    /// per source, the event log's mirror length and history bytes, the
+    /// shell's binding count, the log-dir and scratch disk footprint
+    /// (walked at invocation, never periodically), and the sub-agent idle
+    /// lease's two rows.  A pure survey: nothing is mutated and no lease is
+    /// renewed — enumeration is not observation — so `/resources` can never
+    /// immortalise the zombies it exists to reveal.  The frontend appends
+    /// the rows for the accumulators *it* owns (viewports, views, the bus)
+    /// at render time; neither half reaches across a thread for the
+    /// other's figures.
+    fn resource_rows(&self) -> Vec<ProbeRow> {
+        let mut rows = Vec::new();
+
+        // ── the worker registry: running and settled, by class ──────────
+        let entries = self.probe_workers();
+        let mut running_worker = 0u64;
+        let mut running_durable = 0u64;
+        let mut settled = 0u64;
+        let mut nearest_reap: Option<std::time::Duration> = None;
+        let mut nearest_expiry: Option<u64> = None;
+        for entry in &entries {
+            if entry.running {
+                match entry.class {
+                    ral_core::types::LeaseClass::Worker => {
+                        running_worker += 1;
+                        // The nearer of the entry's two lease margins: idle
+                        // remaining off the shared last-observed cell, and
+                        // backstop remaining off its (display-only, close
+                        // enough for a probe) wall-clock start.
+                        let idle_left = shell_eval::DETACHED_WORKER_CEILING
+                            .saturating_sub(std::time::Duration::from_secs(entry.idle_secs));
+                        let age = std::time::Duration::from_secs(entry.up_secs);
+                        let backstop_left =
+                            shell_eval::DETACHED_WORKER_BACKSTOP.saturating_sub(age);
+                        let left = idle_left.min(backstop_left);
+                        nearest_reap = Some(nearest_reap.map_or(left, |m| m.min(left)));
+                    }
+                    ral_core::types::LeaseClass::Durable => running_durable += 1,
+                }
+            } else {
+                settled += 1;
+                // Retention remaining in ral calls; an unstamped entry has
+                // its whole retention ahead — the sweep stamps it next call.
+                let left = match entry.settled_epoch {
+                    Some(s) => shell_eval::SETTLED_WORKER_RETENTION
+                        .saturating_sub(self.ral_epoch.saturating_sub(s)),
+                    None => shell_eval::SETTLED_WORKER_RETENTION,
+                };
+                nearest_expiry = Some(nearest_expiry.map_or(left, |m| m.min(left)));
+            }
+        }
+        rows.push(ProbeRow::new(
+            "workers.running",
+            running_worker + running_durable,
+            Some(shell_eval::LIVE_WORKER_CAP as u64),
+            "reject",
+            None,
+        ));
+        rows.push(ProbeRow::new(
+            "workers.running[worker]",
+            running_worker,
+            None,
+            "reap",
+            nearest_reap.map(|d| format!("nearest reap in {}", terse_duration(d))),
+        ));
+        rows.push(ProbeRow::new(
+            "workers.running[durable]",
+            running_durable,
+            None,
+            "none (unbounded)",
+            Some("durable — dies by cancel, /clear, or process exit".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "workers.settled",
+            settled,
+            None,
+            "reap",
+            nearest_expiry.map(|n| format!("nearest expiry in {n} ral calls")),
+        ));
+
+        // ── the inbox, one row per source ────────────────────────────────
+        for (source, depth) in self.inbox.source_depths() {
+            // The ADR's split: idempotent sources coalesce (merge/dedupe)
+            // and never reject, so no cap is enforced against their depth;
+            // non-idempotent sources are accepted or rejected at
+            // `INBOX_SOURCE_CAP` — never silently dropped.
+            let (policy, cap, note) = match source {
+                "user" | "schedule" | "nudge" => (
+                    "coalesce",
+                    None,
+                    "merges/dedupes; never rejects".to_string(),
+                ),
+                _ => (
+                    "reject",
+                    Some(crate::bus::INBOX_SOURCE_CAP as u64),
+                    format!(
+                        "rejected at quota; {} total across every source",
+                        crate::bus::INBOX_TOTAL_CAP
+                    ),
+                ),
+            };
+            rows.push(ProbeRow::new(
+                format!("inbox[{source}]"),
+                depth,
+                cap,
+                policy,
+                Some(note),
+            ));
+        }
+
+        // ── the event log ────────────────────────────────────────────────
+        rows.push(ProbeRow::new(
+            "log.events",
+            self.log.lock().event_count() as u64,
+            None,
+            "evict",
+            Some("prefix drops with compaction".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "log.bytes",
+            self.log.lock().history_bytes() as u64,
+            Some(COMPACT_THRESHOLD as u64),
+            "evict",
+            Some("auto-compaction threshold".to_string()),
+        ));
+
+        // ── the lexical scope ────────────────────────────────────────────
+        let probe_count = |label: &str| match self.seat.transport().probe(FOValue::Variant {
+            label: label.into(),
+            payload: None,
+        }) {
+            Ok(FOValue::Int { value }) => {
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "probe binding-count is a non-negative cardinality"
+                )]
+                let count = value as u64;
+                count
+            }
+            other => unreachable!("`{label} probe must answer an Int, got {other:?}"),
+        };
+        rows.push(ProbeRow::new(
+            "bindings.count",
+            probe_count("binding-count"),
+            None,
+            "reap",
+            Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "bindings.leased",
+            probe_count("leased-binding-count"),
+            None,
+            "reap",
+            Some(format!(
+                "idle {} calls prunes",
+                shell_eval::BINDING_IDLE_CALLS
+            )),
+        ));
+        rows.push(ProbeRow::new(
+            "bindings.largest_bytes",
+            probe_count("largest-binding-bytes"),
+            Some(shell_eval::LARGE_BINDING_BYTES),
+            "warn",
+            Some("shallow estimate; a closure's captures are never chased".to_string()),
+        ));
+
+        // ── disk, walked at invocation ───────────────────────────────────
+        let log_dir = self.log.lock().dir().to_path_buf();
+        rows.push(ProbeRow::new(
+            "disk.log_dir",
+            dir_size(&log_dir),
+            None,
+            "warn",
+            Some(log_dir.display().to_string()),
+        ));
+        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
+            rows.push(ProbeRow::new(
+                "disk.scratch",
+                dir_size(&std::path::PathBuf::from(&scratch)),
+                None,
+                "warn",
+                Some(scratch),
+            ));
+        }
+
+        // ── the sub-agent idle lease, as two rows ────────────────────────
+        rows.push(ProbeRow::new(
+            "agents.lease",
+            self.agents
+                .nearest_reap()
+                .unwrap_or(AGENT_LEASE_IDLE)
+                .as_secs(),
+            Some(AGENT_LEASE_IDLE.as_secs()),
+            "reap",
+            Some("renewed by a human exchange".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "agents.demote",
+            AGENT_DEMOTE_IDLE.as_secs(),
+            None,
+            "warn",
+            Some("idle threshold after which a child leaves the tab cycle".to_string()),
+        ));
+
+        rows
+    }
+
+    /// Emit the `/resources` fold as one [`Kind::Resources`] bus event: the
+    /// agent rows beside the card rendering them.  Called from the TUI's
+    /// `Control` at the turn boundary the command drains at, exactly where
+    /// `/clear` runs; transcript and TUI only, never model-facing.
+    pub(crate) fn emit_resources(&self, emit: &Emitter) {
+        let rows = self.resource_rows();
+        let card = resources_card(&rows);
+        emit.emit(Kind::Resources { rows, card });
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -322,6 +551,8 @@ pub fn dir_size(root: &Path) -> u64 {
 )]
 mod tests {
     use super::*;
+    use crate::agent::testkit::*;
+    use crate::bus::InboxMsg;
 
     /// The frontend half of the fold: every row wears its decided policy;
     /// the viewport window's two enforced caps (blocks, rows) show up as
@@ -438,5 +669,168 @@ mod tests {
         assert_eq!(dir_size(&root), 8);
         assert_eq!(dir_size(&root.join("missing")), 0);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── `/resources`: the probe fold's agent half ─────────────────────────
+
+    /// The row for `name`, or a panic naming what is missing.
+    fn row<'a>(rows: &'a [ProbeRow], name: &str) -> &'a ProbeRow {
+        rows.iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))
+    }
+
+    /// The agent half of the probe fold surveys what this thread owns: the
+    /// worker registry's running/settled split with time-to-reap notes, the
+    /// binding count (which a `let` increments by exactly one), the inbox's
+    /// per-source depths (counted, never drained), and the sub-agent idle
+    /// lease's fallback when nothing has forked.
+    #[test]
+    fn resource_rows_survey_the_agents_accumulators() {
+        let dir = tmp("resource-rows");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .seat
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        // One running worker, one settled-unclaimed worker.
+        session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !session.probe_workers().iter().any(|w| !w.running) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the instant worker must settle within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // A binding is one more row in the count — measured across a `let`.
+        let before = row(&session.resource_rows(), "bindings.count").current;
+        session.run_shell("c3".into(), "let probe_marker = 1", 30, &emit);
+        let rows = session.resource_rows();
+        assert_eq!(
+            row(&rows, "bindings.count").current,
+            before + 1,
+            "a `let` adds exactly one binding to the probe figure"
+        );
+
+        // The registry chapter: one running worker under the admission cap,
+        // with the nearest-reap note; one settled entry under retention.
+        let running = row(&rows, "workers.running");
+        assert_eq!(running.current, 1);
+        assert_eq!(
+            running.cap,
+            Some(shell_eval::LIVE_WORKER_CAP as u64),
+            "the admission cap is armed"
+        );
+        let running_worker = row(&rows, "workers.running[worker]");
+        assert_eq!(running_worker.current, 1);
+        assert!(
+            running_worker
+                .note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("nearest reap in ")),
+            "a running worker carries its time-to-reap"
+        );
+        let settled = row(&rows, "workers.settled");
+        assert_eq!(settled.current, 1);
+        assert!(
+            settled
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("ral calls")),
+            "a settled entry carries its retention remaining in ral calls"
+        );
+
+        // The log and disk chapters.
+        assert!(row(&rows, "log.events").current > 0);
+        assert!(
+            row(&rows, "disk.log_dir").current > 0,
+            "a session dir with a written events.json probes nonzero"
+        );
+
+        // The lease chapter: with no live sub-agents, the row falls back to
+        // the full idle window rather than reporting zero.
+        assert_eq!(
+            row(&rows, "agents.lease").current,
+            AGENT_LEASE_IDLE.as_secs(),
+            "no live children — the lease row reports the full idle window"
+        );
+
+        // The inbox chapter counts without draining: two queued messages
+        // are visible in the rows, and the whole queue reads identically
+        // after the probe.  (The settled spawn's deferred `Surface` batch
+        // may also sit queued — a legitimate arrival, not the probe's
+        // doing — so the stability check compares snapshots rather than
+        // pinning the full vector.)
+        session
+            .inbox
+            .push(InboxMsg::UserSteering("hold".into()))
+            .unwrap();
+        session.inbox.push(InboxMsg::Nudge("go on".into())).unwrap();
+        let depths_before = session.inbox.source_depths();
+        let rows = session.resource_rows();
+        assert_eq!(row(&rows, "inbox[user]").current, 1);
+        assert_eq!(row(&rows, "inbox[nudge]").current, 1);
+        assert_eq!(
+            row(&rows, "inbox[agent]").current,
+            0,
+            "an idle source still emits its zero row — the row set is stable"
+        );
+        assert_eq!(
+            session.inbox.source_depths(),
+            depths_before,
+            "probing drained nothing"
+        );
+
+        // End the blocked worker so the test does not leak a live thread.
+        let workers = session.seat.shell_mut().shell.workers();
+        for entry in workers {
+            entry
+                .handle
+                .cancel
+                .cancel(ral_core::process::CancelCause::Explicit);
+        }
+    }
+
+    /// Probing renews nothing: assembling the rows reads a running
+    /// worker's `last_observed` cell without touching it — enumeration is
+    /// not observation, so `/resources` cannot immortalise the zombies it
+    /// reveals.
+    #[test]
+    fn resource_rows_renew_no_lease() {
+        let dir = tmp("resource-rows-no-renew");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .seat
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+
+        let entry = session
+            .seat
+            .shell_mut()
+            .shell
+            .workers()
+            .pop()
+            .expect("the spawn registered its worker");
+        let before = *entry.handle.last_observed.lock().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = session.resource_rows();
+        let after = *entry.handle.last_observed.lock().unwrap();
+        assert_eq!(after, before, "the probe must not renew the lease");
+
+        entry
+            .handle
+            .cancel
+            .cancel(ral_core::process::CancelCause::Explicit);
     }
 }
