@@ -295,6 +295,20 @@ const UNENTITLED: &str = "this copy of synod is not signed with the entitlement 
                            start a virtual machine — ask your IT department for a properly \
                            signed build";
 
+/// How a front-end readies its boot media, run only if the backend turns out
+/// to need it.
+///
+/// A closure rather than a [`BootArtifact`] because readying media is not free
+/// and is not always necessary.  The rootfs ships compressed — a Windows
+/// Installer cabinet cannot hold a two-gigabyte file at all — so producing an
+/// attachable image means inflating two and a half gigabytes.  An installed
+/// synod never needs to: it boots through the machine service, which has its own
+/// copy and inflates it once into its own cache, where every session on the
+/// computer shares it.  Whether that is the case is [`detect`]'s to decide, so
+/// what it takes is the *means* of getting media rather than media itself, and
+/// the work happens on exactly the paths that use it.
+pub type BootMedia = Box<dyn FnOnce() -> Result<BootArtifact, String>>;
+
 /// Start the one backend this build can actually run, given the boot media
 /// the application ships.
 ///
@@ -303,13 +317,13 @@ const UNENTITLED: &str = "this copy of synod is not signed with the entitlement 
 ///
 /// This build has no backend at all, so the refusal is the platform itself
 /// and nothing downstream of it is ever weighed — the boot media goes
-/// unread. The refusals the two real overloads can additionally give are
-/// their own, and named in their docs.
+/// unread, and is not so much as readied. The refusals the two real overloads
+/// can additionally give are their own, and named in their docs.
 ///
 /// # Errors
 /// Always, with [`NO_BACKEND`].
 #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
-pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
+pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
     drop(boot);
     Err(NO_BACKEND.to_string())
 }
@@ -326,14 +340,17 @@ pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String>
 ///
 /// The order is deliberate and matches the macOS overload's: the missing image
 /// is asked about first, because it is the answer a fresh install is most
-/// likely to need and the cheaper question to ask.
+/// likely to need and the cheaper question to ask.  Asking is all that happens
+/// there, though — the media is *readied* last, after the compute service has
+/// agreed to serve this user, so that a refusal costs no work.
 ///
 /// # Errors
-/// Returns [`NO_BOOT_MEDIA`] if there is no service and `boot` is `None`, or
+/// Returns [`NO_BOOT_MEDIA`] if there is no service and `boot` is `None`,
 /// [`hcs::available`]'s own sentence — with the service named beside it — if
-/// this Windows will not host a guest for this user directly either.
+/// this Windows will not host a guest for this user directly either, or
+/// whatever `boot` itself reports when the media cannot be readied.
 #[cfg(windows)]
-pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
+pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
     // The broker first, always: an installed synod runs unprivileged, and the
     // service is what makes that possible (`broker`'s own docs carry the
     // argument).  It needs no boot media from this process — it has its own,
@@ -346,7 +363,7 @@ pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String>
     // No service: this is a checkout, not an installation.  Fall back to
     // creating the machine here, which works for whoever the compute service
     // already serves — a maintainer in an elevated shell, or in the group.
-    let Some(artifact) = boot else {
+    let Some(media) = boot else {
         return Err(NO_BOOT_MEDIA.to_string());
     };
     hcs::available().map_err(|why| {
@@ -357,7 +374,7 @@ pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String>
         )
     })?;
     Ok(Box::new(hcs::Hyperv::new(
-        artifact,
+        media()?,
         hcs::Hyperv::default_cache(),
     )))
 }
@@ -370,17 +387,18 @@ pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String>
 /// [`UNENTITLED`].
 ///
 /// # Errors
-/// Returns [`NO_BOOT_MEDIA`] if `boot` is `None`, or [`UNENTITLED`] if this
-/// process is not signed with the virtualization entitlement.
+/// Returns [`NO_BOOT_MEDIA`] if `boot` is `None`, [`UNENTITLED`] if this
+/// process is not signed with the virtualization entitlement, or whatever
+/// `boot` itself reports when the media cannot be readied.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
-    let Some(artifact) = boot else {
+pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
+    let Some(media) = boot else {
         return Err(NO_BOOT_MEDIA.to_string());
     };
     if !vz::entitled() {
         return Err(UNENTITLED.to_string());
     }
-    Ok(Box::new(vz::Vz::new(artifact, std::env::temp_dir())))
+    Ok(Box::new(vz::Vz::new(media()?, std::env::temp_dir())))
 }
 
 /// Why a machine could not be started.
@@ -510,6 +528,15 @@ mod tests {
         }
     }
 
+    /// The same media, as the closure [`detect`] takes.  It is never called on
+    /// the paths that refuse, which is the point of it being a closure — these
+    /// tests would notice, because a `detect` that readied media before deciding
+    /// would have to open `/boot/kernel`, and that path exists on no computer
+    /// this test suite runs on.
+    fn media() -> BootMedia {
+        Box::new(|| Ok(artifact()))
+    }
+
     /// On a platform with no backend at all, `detect` refuses outright —
     /// media or not, since there is nothing downstream of the platform to
     /// weigh.
@@ -517,7 +544,7 @@ mod tests {
     #[test]
     fn without_a_backend_detect_refuses_regardless_of_media() {
         assert!(detect(None).is_err());
-        assert!(detect(Some(artifact())).is_err());
+        assert!(detect(Some(media())).is_err());
     }
 
     /// On Windows, no media is its own refusal — asked before the compute
@@ -525,19 +552,21 @@ mod tests {
     ///
     /// Unless there is a machine service, which has media of its own and needs
     /// none from this process. That is not a caveat to the law but the law's
-    /// other half, and it is reachable in this very test binary: the broker's
-    /// own test opens a real pipe that outlives it, so whether this assertion
-    /// applies depends on which tests have run — which is exactly why it asks
-    /// rather than assumes.
+    /// other half, and it is the half that matters most now that media is readied
+    /// lazily: an installed synod hands `detect` a closure it must never call.
+    /// Which half applies is read from the answer rather than asked in advance,
+    /// for the reason its sibling test sets out — a broker can appear part-way
+    /// through this binary's own run.
     #[cfg(windows)]
     #[test]
     fn without_media_detect_refuses_by_name() {
-        if broker::client::Brokered::available() {
-            assert!(detect(None).is_ok(), "a service carries its own media");
-            return;
+        match detect(None) {
+            Ok(_) => assert!(
+                broker::client::Brokered::available(),
+                "nothing but a machine service can boot with no media from this process"
+            ),
+            Err(message) => assert!(message.contains("could not find"), "{message}"),
         }
-        let message = detect(None).err().unwrap();
-        assert!(message.contains("could not find"), "{message}");
     }
 
     /// With media, the answer follows what this computer will actually do:
@@ -546,24 +575,32 @@ mod tests {
     /// test is agreement between the two, not either fixed answer — a developer
     /// box outside the Hyper-V Administrators group and a deployed one inside
     /// it must both be described correctly.
+    ///
+    /// A third answer is lawful and has to be allowed for: a machine service.
+    /// One may be installed on this computer, and one is *started by another test
+    /// in this binary* — `broker::tests::the_broker_answers_a_client_over_a_real_pipe`
+    /// serves on the real pipe from a thread that outlives it, deliberately,
+    /// because the pipe's name and its security descriptor are part of what that
+    /// test exists to check. Tests run in parallel, so the service can appear
+    /// between this test's question and its answer; asking beforehand would be a
+    /// race. So the broker is checked *after* `detect` instead, on the one branch
+    /// where it changes the verdict — a computer the compute service refuses can
+    /// only have got a backend through a broker, and if it did, one must be
+    /// reachable. Checking afterwards is sound because nothing in this binary
+    /// ever stops serving: within one test process a broker only appears, never
+    /// goes away, so an answer that was true when `detect` ran is still true when
+    /// the assertion asks.
     #[cfg(windows)]
     #[test]
     fn with_media_detect_follows_what_this_computer_permits() {
-        // A computer with the service installed needs nothing else: the broker
-        // is preferred over creating the machine here, and it carries its own
-        // media, so the artifact goes unread.
-        if broker::client::Brokered::available() {
-            assert!(detect(Some(artifact())).is_ok());
-            assert!(
-                detect(None).is_ok(),
-                "the service has its own boot media, so this process needs none"
-            );
-            return;
-        }
-        match (hcs::available(), detect(Some(artifact()))) {
+        match (hcs::available(), detect(Some(media()))) {
             (Ok(()), answer) => assert!(answer.is_ok(), "a permitted computer must get a backend"),
-            (Err(why), answer) => {
-                let message = answer.err().expect("a refused computer must be refused");
+            (Err(_), Ok(_)) => assert!(
+                broker::client::Brokered::available(),
+                "a computer the compute service refuses can only get a backend from a machine \
+                 service, and no service is listening"
+            ),
+            (Err(why), Err(message)) => {
                 assert!(
                     message.starts_with(&why),
                     "the refusal must carry the machine layer's own words: {message}"
@@ -592,9 +629,9 @@ mod tests {
     #[test]
     fn with_media_detect_follows_the_entitlement() {
         if vz::entitled() {
-            assert!(detect(Some(artifact())).is_ok());
+            assert!(detect(Some(media())).is_ok());
         } else {
-            let message = detect(Some(artifact())).err().unwrap();
+            let message = detect(Some(media())).err().unwrap();
             assert!(message.contains("entitlement"), "{message}");
         }
     }

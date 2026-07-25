@@ -30,10 +30,15 @@ dispatch2           = { version = "0.3", features = ["block2"] }
 # The Windows backend ([`hcs`]) speaks to the Host Compute System API, which
 # has no Rust binding at all: `computecore.dll`'s entry points are declared and
 # loaded by hand (see `hcs::api`), and everything around them — the `AF_HYPERV`
-# control-plane socket, the console named pipe, the sparse session disk, the
-# security descriptors naming who may use the guest's socket — is plain Win32.
-# So this is the Win32 surface itself rather than a wrapper over it.
+# control-plane socket, the console named pipe, the dynamic VHD written byte by
+# byte, the security descriptors naming who may use the guest's socket — is
+# plain Win32. So this is the Win32 surface itself rather than a wrapper over it.
 [target.'cfg(windows)'.dependencies]
+# The rootfs arrives compressed, because a Windows Installer cabinet cannot hold
+# a file of two gigabytes at all, and is inflated in the same pass that wraps it
+# as a VHD (`hcs::vhd`). The service does that into its own cache, so no user
+# ends up with a private copy of an image every session shares.
+zstd = "0.13"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     # The control plane: an AF_HYPERV stream socket, and SOCKADDR_HV to name it.
@@ -57,10 +62,11 @@ windows-sys = { workspace = true, features = [
     # The guest console: a named pipe the VM's COM port dials, read here.
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
-    # FSCTL_SET_SPARSE on the per-session disk, so an 8 GiB image costs what it
-    # holds rather than what it promises.
+    # Not imported by name anywhere: `ReadFile`, `WriteFile` and
+    # `ConnectNamedPipe` each take an `OVERLAPPED` pointer, so windows-sys gates
+    # them behind the feature that declares that struct. Removing it fails the
+    # build in the console and the broker at once.
     "Win32_System_IO",
-    "Win32_System_Ioctl",
 ] }
 
 [dev-dependencies]

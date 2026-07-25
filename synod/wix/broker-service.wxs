@@ -53,10 +53,9 @@
   media.  It reads the kernel, initramfs, and rootfs from `boot\` beside its
   own executable, which is the same relative layout `synod/src/boot.rs` looks
   for beside synod's.  That is why this component installs into `INSTALLDIR`
-  and not a directory of its own — `bundle.resources` in
-  `tauri.windows.conf.json` already lands those three files in
-  `INSTALLDIR\boot\`, and one copy of a two-gigabyte image serving both
-  executables is the whole point.
+  and not a directory of its own — `bundle.resources` in `tauri.conf.json`
+  already lands those files in `INSTALLDIR\boot\`, and one copy of a
+  two-gigabyte image serving both executables is the whole point.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Fragment>

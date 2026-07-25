@@ -78,9 +78,20 @@ pub(super) const SESSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// The rootfs as a path Hyper-V can attach, wrapping the shipped image into
 /// `cache` if it is not already a VHD.
 ///
+/// Three spellings of "the rootfs" reach here, and the difference between them
+/// is one branch each.  A `.vhd` is already what Hyper-V wants and is attached
+/// where it lies.  A plain image — what the image pipeline builds, and what a
+/// checkout therefore has — is copied and given a footer.  A `.zst` archive is
+/// inflated *while* being copied, in the same pass, because that is how the
+/// rootfs arrives from an installation: a Windows Installer cabinet cannot hold
+/// a file of two gigabytes at all (`light` refuses it outright), so the MSI
+/// ships the same compressed image the macOS bundle does.  Inflating here rather
+/// than earlier is what keeps that from costing a second copy — the bytes are
+/// decompressed straight into the disk that was going to be written anyway.
+///
 /// # Errors
-/// Returns a sentence if the image cannot be read, the cache cannot be made,
-/// or the wrapped copy cannot be written.
+/// Returns a sentence if the image cannot be read or inflated, the cache cannot
+/// be made, or the wrapped copy cannot be written.
 pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, String> {
     if image
         .extension()
@@ -88,6 +99,9 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
     {
         return Ok(image.to_path_buf());
     }
+    let compressed = image
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zst"));
 
     let source = std::fs::metadata(image)
         .map_err(|e| format!("the guest image {} could not be read: {e}", image.display()))?;
@@ -120,17 +134,22 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
     // Written to a temporary name and renamed into place, so an interrupted
     // launch never leaves a half-copied disk that a later one would attach.
     let part = cache.join("rootfs.vhd.part");
-    std::fs::copy(image, &part).map_err(|e| {
-        format!(
-            "the guest image could not be copied to {}: {e}",
-            part.display()
-        )
-    })?;
+    let bytes = if compressed {
+        inflate(image, &part)?
+    } else {
+        std::fs::copy(image, &part).map_err(|e| {
+            format!(
+                "the guest image could not be copied to {}: {e}",
+                part.display()
+            )
+        })?;
+        source.len()
+    };
     let mut file = OpenOptions::new()
         .write(true)
         .open(&part)
         .map_err(|e| format!("{} could not be opened: {e}", part.display()))?;
-    let disk = pad_to_sector(&file, source.len())?;
+    let disk = pad_to_sector(&file, bytes)?;
     append_footer(&mut file, disk)?;
     drop(file);
 
@@ -147,6 +166,57 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
         )
     })?;
     Ok(wrapped)
+}
+
+/// Decompress the zstd `archive` into `out`, returning how many bytes came out.
+///
+/// The inflated length is what the caller needs and what nothing else can
+/// supply: a zstd frame's header may carry the decompressed size but is not
+/// required to, so the only honest answer is the one counted while writing.
+/// That count then becomes the disk's size in the footer, which is why it is
+/// returned rather than measured afterwards.
+///
+/// No checksum is verified here, and the reason is worth stating rather than
+/// leaving as an omission.  The archive reaches this code from one of two
+/// places: an installation directory under `Program Files`, which only an
+/// administrator can write, or a checkout the maintainer built themselves.
+/// Windows Installer already validates its own cabinet at install time, so a
+/// download corrupted in transit fails the *install* rather than arriving here;
+/// and against someone who can rewrite `Program Files`, a hash shipped beside
+/// the file in the same directory proves nothing.
+///
+/// # Errors
+/// Returns a sentence naming the archive if it cannot be opened, is not a zstd
+/// stream, or cannot be written out.
+fn inflate(archive: &Path, out: &Path) -> Result<u64, String> {
+    let source = File::open(archive).map_err(|e| {
+        format!(
+            "the guest image {} could not be opened: {e}",
+            archive.display()
+        )
+    })?;
+    let mut decoder = zstd::stream::read::Decoder::new(std::io::BufReader::new(source))
+        .map_err(|e| format!("the guest image {} is not readable: {e}", archive.display()))?;
+    let file = File::create(out).map_err(|e| {
+        format!(
+            "the guest image could not be written to {}: {e}",
+            out.display()
+        )
+    })?;
+    let mut sink = std::io::BufWriter::new(file);
+    let bytes = std::io::copy(&mut decoder, &mut sink).map_err(|e| {
+        format!(
+            "the guest image {} could not be unpacked: {e}",
+            archive.display()
+        )
+    })?;
+    sink.flush().map_err(|e| {
+        format!(
+            "the guest image {} could not be written: {e}",
+            out.display()
+        )
+    })?;
+    Ok(bytes)
 }
 
 /// Make one session's empty read-write disk in `dir`.

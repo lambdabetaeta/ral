@@ -200,20 +200,28 @@ synod-app:
 # The WiX toolset the CLI drives is not a prerequisite: it fetches that
 # itself on first use.
 #
-# Like `synod-app`, this bundle ships the guest image — but flat, not as the
-# `.app`'s zstd archive and checksum: `tauri.windows.conf.json` maps three
-# resources into `boot/`, with the rootfs the raw image it was built as.  An
-# MSI compresses its own cabinet, so the archive would only be compressed
-# twice; and the alternative — inflating at first launch, the way the `.app`
-# must — writes two gigabytes into one user's cache, which is no use to a
-# `LocalSystem` service that has no user and no decompressor.  It ships them
-# because there is now
-# something to boot them with — a Hyper-V machine created through the Host
-# Compute System API (SYNOD.md §2), taking the kernel directly as a bzImage,
-# carrying the control plane over Hyper-V sockets into the guest's own
-# `AF_VSOCK`, and serving the granted folder as a 9p share over a vsock port.
-# The images ship as the raw ext4 they are built as; the fixed-VHD wrapper
-# Hyper-V insists on is applied by that backend at first boot.
+# Like `synod-app`, this bundle ships the guest image, and for the same reason
+# it ships it compressed: `light` will not link a file of two gigabytes into a
+# cabinet at all ("is too large, file size must be less than 2147483648"), and
+# the rootfs is two and a half.  So the media is exactly the `.app`'s — the four
+# resources `tauri.conf.json` maps into `boot/`, kernel and initramfs flat with
+# the rootfs as `rootfs.img.zst` beside its checksum — and
+# `tauri.windows.conf.json` says nothing about resources at all.  It does not
+# need to: Tauri merges a platform config into the base key by key rather than
+# replacing it, so the base map already covers Windows.  (Arrays are replaced,
+# not merged, which is how `targets` there narrows "all" to the one bundle.)
+# It ships them because there is now something to boot them
+# with: a Hyper-V machine created through the Host Compute System API
+# (SYNOD.md §2), taking the kernel directly as a bzImage, carrying the control
+# plane over Hyper-V sockets into the guest's own `AF_VSOCK`, and serving the
+# granted folder as a 9p share over a vsock port.
+#
+# Who inflates it is the one thing that differs from the .app.  There it is a
+# per-user cache, the only writable place a signed bundle has.  Here it is the
+# machine service, which decompresses the archive straight into the VHD it has
+# to write anyway, under `%ProgramData%\Synod\Machine` — no second copy, no
+# per-user copy, one inflate on the first boot after an installation, and every
+# session on the computer served from it afterwards.
 #
 # Unlike the .app, this installer ships two executables and registers one
 # service.  `synod/wix/broker-service.wxs` — reached through

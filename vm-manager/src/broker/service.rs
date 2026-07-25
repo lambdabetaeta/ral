@@ -87,17 +87,21 @@ pub fn cache() -> PathBuf {
 /// `boot\` in the same directory, so this is a property of the installation
 /// rather than of the conversation.
 ///
-/// # Why the rootfs is raw here, where the macOS bundle ships it compressed
+/// # The rootfs arrives compressed, and the format leaves no choice
 ///
-/// A signed `.app` is read-only and downloaded whole, so it carries
-/// `rootfs.img.zst` and inflates it once into a per-user cache
-/// (`synod::boot::BootPlan::realise`). An MSI compresses its own cabinet, so
-/// shipping the image raw costs the same on the wire — and saves this service
-/// from needing a decompressor at all. That is not merely tidier: the service
-/// runs as `LocalSystem`, and a per-*user* cache is precisely what it must not
-/// write into, so the compressed route would have had it inflating two
-/// gigabytes into machine-wide state for a file the installer could simply have
-/// laid down flat.
+/// A Windows Installer cabinet cannot hold a file of two gigabytes: `light`
+/// refuses to link one at all — *"is too large, file size must be less than
+/// 2147483648"* — and the rootfs is two and a half. So the MSI ships the same
+/// `rootfs.img.zst` the macOS bundle does, and the compressed spelling is
+/// preferred here over the plain one.
+///
+/// Inflating it is not this function's business, nor a second copy on disk:
+/// `hcs::vhd::ensure_rootfs_vhd` decompresses straight into the VHD it was going
+/// to write regardless, in the cache under `%ProgramData%` that this service
+/// owns.  That cache is what makes the arrangement fit a `LocalSystem` service
+/// at all — a per-*user* cache is precisely what it must not write into, and
+/// here there is no user to have one.  One inflate, on the first boot after an
+/// installation, shared by every session on the computer afterwards.
 ///
 /// # Errors
 /// Returns a sentence if this executable's own location cannot be read.
@@ -128,7 +132,7 @@ pub fn media() -> Result<BootArtifact, String> {
                 .join("vm-image")
                 .join("out");
             let development = BootArtifact {
-                rootfs: out.join("rootfs.img"),
+                rootfs: rootfs_in(&out),
                 ..artifact(&out.join("boot"))
             };
             if development.kernel.is_file() {
@@ -149,11 +153,28 @@ pub fn media() -> Result<BootArtifact, String> {
 /// The three files of a boot artifact, as they are named inside a `boot`
 /// directory. One spelling, used by both the installed and the development
 /// layout, so the two cannot drift apart.
+///
 fn artifact(boot: &Path) -> BootArtifact {
     BootArtifact {
         kernel: boot.join("kernel"),
         initramfs: boot.join("initramfs.img"),
-        rootfs: boot.join("rootfs.img"),
+        rootfs: rootfs_in(boot),
+    }
+}
+
+/// The rootfs inside `dir`, in whichever of its two spellings is there.
+///
+/// The plain image wins when it exists and the archive is the fallback, which is
+/// the right way round for both layouts: an installation has only
+/// `rootfs.img.zst`, while a checkout that has built the image holds *both*, and
+/// preferring the archive would make it inflate two and a half gigabytes it
+/// already has lying there uncompressed.
+fn rootfs_in(dir: &Path) -> PathBuf {
+    let plain = dir.join("rootfs.img");
+    if plain.is_file() {
+        plain
+    } else {
+        dir.join("rootfs.img.zst")
     }
 }
 

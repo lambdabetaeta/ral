@@ -432,9 +432,15 @@ impl Conversation {
         choice: Option<Choice>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
+        // Handed as the *means* of readying the media rather than the media
+        // itself.  On a computer where synod was installed, none of it is needed:
+        // the machine service boots from its own copy, inflated once into a cache
+        // every session on the computer shares, and readying it here would put
+        // two and a half gigabytes into this user's cache for nothing.  Which of
+        // those is the case is `vm_manager::detect`'s to know, so this hands over
+        // the closure and lets it decide.
         let boot = crate::boot::boot_media()
-            .map(crate::boot::BootPlan::realise)
-            .transpose()?;
+            .map(|plan| -> vm_manager::BootMedia { Box::new(move || plan.realise()) });
         let hypervisor = vm_manager::detect(boot)?;
 
         let disk_warn_bytes = exarch::config::disk_warn_bytes()?;

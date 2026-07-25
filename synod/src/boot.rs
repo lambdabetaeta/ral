@@ -72,13 +72,21 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
         if !kernel.is_file() || !initramfs.is_file() {
             continue;
         }
-        // Either spelling of the rootfs is a shipped bundle, because the two
-        // platforms' packages differ here for good reason.  A signed `.app` is
-        // read-only and downloaded whole, so it carries the archive and inflates
-        // it once into the cache below.  An MSI compresses its own cabinet, so it
-        // lays the image down flat — which is also what lets the machine service
-        // (`vm_manager::broker`) read it without a decompressor, and without
-        // writing into any one user's cache.
+        // Either spelling of the rootfs is a shipped bundle: both packages carry
+        // the archive, and a checkout has the plain image the pipeline built.
+        //
+        // Both packages, because neither has a choice.  A signed `.app` is
+        // read-only and downloaded whole, so it cannot hold a file it means to
+        // write; and a Windows Installer cabinet cannot hold a two-gigabyte file
+        // at all — `light` refuses to link one, which is how this was found out.
+        // What differs is who inflates it.  Here it is inflated into a per-user
+        // cache, because that is the only writable place a `.app` has.  On
+        // Windows an installed synod never reaches this code: it boots through
+        // the machine service, which inflates the same archive into its own
+        // machine-wide cache while wrapping it as a VHD, so one copy serves every
+        // session on the computer.  This path is then what a *checkout* on
+        // Windows uses, where the plain image is already there and the branch
+        // below takes it.
         let archive = boot.join("rootfs.img.zst");
         let plain = boot.join("rootfs.img");
         if archive.is_file() {
