@@ -1,28 +1,28 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / shell eval
 
-`shell_eval.rs` runs one tool call as a ral top-level turn against the
+`shell_eval.rs` runs one tool call as a ral top-level run against the
 persistent [[map/core/shell-state|`Shell`]]. **`run_shell` is a pure *request
-supplier*: it builds a transport-level `Source` `Turn`, dispatches it through
+supplier*: it builds a transport-level `Source` `Run`, dispatches it through
 `ral_core::transport::dispatch_to_report` against the agent's seat transport —
 the in-process `IdentityTransport`, or a wire engine's `WireTransport`
 ([[map/exarch/agent|agent]]) — and renders the terminal `Report` that comes
 back** — the
-transport is the canonical turn vocabulary
+transport is the canonical run vocabulary
 ([[decisions/260706_enquiry-channel|enquiry-channel]];
-[[internals/a-turn-end-to-end|a turn, end to end]];
+[[internals/a-turn-end-to-end|a run, end to end]];
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]). Evaluation can
-be entered *only* through a framed turn door — the reduction primitive behind it
+be entered *only* through a framed run door — the reduction primitive behind it
 is crate-private ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]) —
-so core owns all the turn machinery (compile, frame install, capture, the wall),
-and `run_shell` owns only the turn it builds and the outcome it formats:
+so core owns all the run machinery (compile, frame install, capture, the wall),
+and `run_shell` owns only the run it builds and the outcome it formats:
 
-- **source + `script_name: "<tool>"`.** Core's `compile_turn` runs
+- **source + `script_name: "<tool>"`.** Core's `compile_run` runs
   `compile_and_typecheck` seeded from the live session (`shell.session_schemes()`,
   the one name→scheme seed —
   [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); the
@@ -40,29 +40,29 @@ and `run_shell` owns only the turn it builds and the outcome it formats:
   OS sandbox as ral ([[map/core/capabilities|capabilities]]). The post-run
   `Mobile` installs onto the shell, so `let`, `cd`, and env persist across tool
   calls (the in-module tests pin this);
-- **`io: TurnIo::Capture`** — core mints the stdout/stderr buffers and returns
+- **`io: RunIo::Capture`** — core mints the stdout/stderr buffers and returns
   them in `Report::Ran`'s `captured`: the full, model-visible and logged
   text. Nothing echoes live; the [[map/exarch/frontend|rail]] surfaces cards
   instead, and the [[map/exarch/agent|digest]] caps shape only the model's
   history view;
-- **`terminal: RequestedTerminalAccess::Denied`** — a tool turn holds no
+- **`terminal: RequestedTerminalAccess::Denied`** — a tool run holds no
   [[decisions/260619_terminal-lease|terminal lease]], so the foreground handoff
   is *uninvocable*: a bare pipeline cannot `tcsetpgrp`, and the SIGTTIN crash of
   an agent stealing the controlling terminal becomes a state the types refuse to
-  represent. Paired with `stdin: TurnStdin::Empty`, the turn reads no terminal at
+  represent. Paired with `stdin: RunStdin::Empty`, the run reads no terminal at
   all — an explicit empty source, not a side effect of foreground denial;
-- **`turn_limit`** — the per-tool wall, the `ral` tool's `timeout_secs` (60s
-  default). Core arms it on the turn's foreground scope *before compiling*, so
-  it bounds the whole turn; only `CancelCause::Deadline` reports `timed_out`,
+- **`wall`** — the per-tool deadline, the `ral` tool's `timeout_secs` (60s
+  default). Core arms it on the run's foreground scope *before compiling*, so
+  it bounds the whole run; only `CancelCause::Deadline` reports `timed_out`,
   which `run_shell` turns into the timeout-124 message (retry with a higher
   `timeout_secs`, or `spawn` and overlap), while Esc stays an interrupt. A grant body evaluates locally — no sandbox-IPC
   round trip to interrupt — so cancellation reaches any spawned child through the
   ordinary process-group / cancel-scope path;
-- **`deferred_lease`** — the idle-observation lease for workers the turn
+- **`deferred_lease`** — the idle-observation lease for workers the run
   detaches at the durable root: `DETACHED_WORKER_CEILING` (1 h) as the idle
   bound — a worker is reaped once unobserved that long, renewed by any
   `poll`/`await`/`race` naming its handle — under `DETACHED_WORKER_BACKSTOP`
-  (24 h), the absolute age no polling extends. Not load-bearing for turn
+  (24 h), the absolute age no polling extends. Not load-bearing for run
   exit;
 - **`worker_cap`** — `LIVE_WORKER_CAP` (64), the admission bound core
   enforces at the spawn door: the 65th spawn is refused (the error names
@@ -72,7 +72,7 @@ and `run_shell` owns only the turn it builds and the outcome it formats:
   lease's scratch expiry) is not on the request at all — it is armed once
   through `Shell::arm_worker_retention`, and the sweep it parameterises is
   engine housekeeping;
-Surface delivery is not a `Turn` field: `dispatch_to_report` takes the live and
+Surface delivery is not a `Run` field: `dispatch_to_report` takes the live and
 deferred-batch sink closures directly (below, both routed through
 `fleet::desk::SurfaceApplier`), plus an enquiry handler answering through the
 per-call `ExarchDesk` when one is installed ([[map/exarch/builtins|builtins]]);
@@ -80,7 +80,7 @@ a desk-less dispatch gets an honest `EnquiryError`.
 
 `BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
 lease constant this module owns but does not put on the request: it is not
-per-turn policy, it is per-*shell* policy, armed once by
+per-run policy, it is per-*shell* policy, armed once by
 `bootstrap::arm_session_ledgers` — the one ledger-policy site, applied by
 the identity seat's ceremony and the wire engine's boot recipe alike
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
@@ -92,10 +92,10 @@ independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning its `Report`. A detached `spawn`ed worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
-of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool turn
+of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool run
 from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Frame
-teardown — restoring the prior `TurnState`, its byte sinks, its surface, and its
-terminal access — is core's `TurnGuard`, which self-heals on a caught worker
+teardown — restoring the prior `RunState`, its byte sinks, its surface, and its
+terminal access — is core's `RunGuard`, which self-heals on a caught worker
 panic as well as on the normal return
 ([[decisions/260612_exarch-panic-recovery|panic-recovery]]); exarch installs no
 per-call `IoGuard` of its own. The dynamic-context half of the contract lives in
@@ -133,7 +133,7 @@ Five shapes ride the one `surface` channel, tried pin-first:
 The producer is a direct `surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; detached workers do
 not — core buffers their `surface` calls and replays them once on `await`, so a
-bus `Emitter` clone can never outlive the tool turn. Across the OS-sandbox
+bus `Emitter` clone can never outlive the tool run. Across the OS-sandbox
 boundary the events are buffered in the confined child and replayed through the
 parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.

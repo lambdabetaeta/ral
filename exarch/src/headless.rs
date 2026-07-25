@@ -371,11 +371,11 @@ impl Sink for Headless<'_> {
     }
 }
 
-/// Drive a one-shot headless run of `session` from `seed` to quiescence,
+/// Attend `session` to quiescence in a one-shot headless run from `seed`,
 /// emitting the trace and (for `Json`) the final `result` to stdout.
 ///
 /// # Errors
-/// Returns `Err` if no launch prompt was supplied, if the drive worker
+/// Returns `Err` if no launch prompt was supplied, if the attend worker
 /// panics, if the sink's drive fails, or if the run ends without a `reply`
 /// (stopped, cancelled, or failed).
 pub fn run(
@@ -402,7 +402,7 @@ pub fn run(
     let root_transcript = session.transcript();
     // The fleet for this one-shot run: the trunk's shared registry and
     // transport engine, plus a per-exchange bus over the trunk's *own* inbox (so
-    // the drive worker's emitter and any in-exchange producer share one queue).
+    // the attend worker's emitter and any in-exchange producer share one queue).
     // Headless has no idle loop and no tabs, so the channel closes when
     // the worker finishes and async children stay muted *on the display* — but
     // each still records its own trace, the behaviour we want everywhere.
@@ -419,7 +419,7 @@ pub fn run(
     // declared here so its `&mut` borrow outlives the worker closure `pump`
     // runs on its scoped thread.  The trunk attends on its own provider handle.
     let mut control = crate::agent::NoControl;
-    // Drive on a scoped worker thread while the main thread drives the sink.
+    // Attend on a scoped worker thread while the main thread drives the sink.
     // `pump` returns the worker's `(outcome, text)`, or `None` if it panicked.
     let root_id = session.id;
     let outcome = pump(
@@ -481,7 +481,7 @@ pub fn run(
 /// the full contract.
 ///
 /// # Errors
-/// Returns `Err` if the drive worker panics or the sink's drive fails.
+/// Returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Result<(), String> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -490,7 +490,7 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
 
 /// One exchange of a converse session.
 ///
-/// Seed `message`, drive it (and any nudge continuations it raises) to the
+/// Seed `message`, attend it (and any nudge continuations it raises) to the
 /// agent's next park, streaming the same events [`run`]'s text mode streams
 /// — tokens to `out`, everything else to `err`.  `session` must have been
 /// built with [`RootConfig::interactive`](crate::agent::RootConfig) set: a
@@ -509,7 +509,7 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
 /// off the trailing newline on success.
 ///
 /// # Errors
-/// Returns `Err` if the drive worker panics or the sink's drive fails.
+/// Returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse_on(
     session: &mut Agent,
     message: String,
@@ -532,7 +532,7 @@ pub fn converse_on(
 /// bus's own `Kind` events — a GUI process, say — receives them unflattened.
 ///
 /// # Errors
-/// Returns `Err` if the drive worker panics or the sink's drive fails.
+/// Returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse_sink<S: Sink>(
     session: &mut Agent,
     message: String,

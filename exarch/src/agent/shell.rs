@@ -1,5 +1,5 @@
 //! The desk / `ral`-call seam: for the span of one [`Agent::run_shell`]
-//! call, the drive thread installs a fresh [`desk::HostServices`] and then
+//! call, the attend thread installs a fresh [`desk::HostServices`] and then
 //! sits parked inside `shell_eval::run_shell`, off to one side of the seat,
 //! while a desk handler thread runs on the other. [`ReplyCell`] and
 //! [`LogCell`] are the two `Arc`-shared cells that window exists to make
@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 /// One `ral` call's shared reply slot.  [`Agent::run_shell`] mints a fresh
 /// cell for each call and hands a clone into [`Agent::host_services`]; the
 /// desk's `reply` handler ([`Self::set`]) is the cell's only writer, running
-/// on the handler thread while the drive thread sits parked inside
+/// on the handler thread while the attend thread sits parked inside
 /// `run_shell`'s `shell_eval::run_shell` — the very window
 /// [`desk::HostServices`] as a whole depends on.  The instant the
 /// desk is retired, `run_shell` harvests the cell by ownership
@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 /// extent only, so the desk handler thread can write without ever reaching
 /// back through `&mut Agent`.  Because within-call contention is now
 /// structurally a bug — the cell exists for exactly one call, touched by
-/// exactly one handler while the drive thread is elsewhere — every accessor
+/// exactly one handler while the attend thread is elsewhere — every accessor
 /// `try_lock`s and panics didactically rather than blocking.
 #[derive(Clone, Default)]
 pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
@@ -48,7 +48,7 @@ impl ReplyCell {
         match self.0.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => panic!(
-                "reply cell contended: a desk handler may only run while the drive thread is \
+                "reply cell contended: a desk handler may only run while the attend thread is \
                  parked in run_shell"
             ),
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("reply cell poisoned"),
@@ -68,8 +68,8 @@ impl ReplyCell {
     }
 }
 
-/// [`Agent::log`]'s lock: taken only by the drive thread between calls or by
-/// a desk handler while the drive thread sits parked inside
+/// [`Agent::log`]'s lock: taken only by the attend thread between calls or by
+/// a desk handler while the attend thread sits parked inside
 /// [`Agent::run_shell`]'s `shell_eval::run_shell` — the same window
 /// [`ReplyCell`] and [`desk::HostServices`] as a whole depend on.  Concurrent
 /// access from both threads at once is a scheduling bug, not a legitimate
@@ -86,7 +86,7 @@ impl LogCell {
     }
 
     /// Lock the log — the sole accessor, every call site in the crate goes
-    /// through this.  `WouldBlock` means the drive thread and a desk handler
+    /// through this.  `WouldBlock` means the attend thread and a desk handler
     /// touched the log at once; `Poisoned` means a prior holder panicked
     /// while holding it.  Both are fatal, but only the first names the
     /// scheduling law being violated.
@@ -94,8 +94,8 @@ impl LogCell {
         match self.0.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => panic!(
-                "log cell contended: the log may only be locked by the drive thread between \
-                 calls or by a desk handler while the drive thread is parked in run_shell — \
+                "log cell contended: the log may only be locked by the attend thread between \
+                 calls or by a desk handler while the attend thread is parked in run_shell — \
                  concurrent access is a scheduling bug, not a wait"
             ),
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("log poisoned"),

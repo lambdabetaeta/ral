@@ -16,7 +16,7 @@
 //! residents are listed, cancelled, and leased.
 //!
 //! The fold has two halves, split by who may legally read what: the agent
-//! assembles its own rows on its drive thread (the shell's registry and
+//! assembles its own rows on its attend thread (the shell's registry and
 //! bindings, its inbox, log, and disk — [`Agent::resource_rows`]), and the
 //! frontend appends the rows for the accumulators *it* owns (viewports,
 //! views, the bus — [`frontend_rows`]) once [`Agent::emit_resources`] has
@@ -324,7 +324,7 @@ pub fn dir_size(root: &Path) -> u64 {
 
 impl Agent {
     /// Assemble this agent's half of the `/resources` probe fold — one
-    /// [`ProbeRow`] per session-lived accumulator this drive thread may
+    /// [`ProbeRow`] per session-lived accumulator this attend thread may
     /// legally read: the shell's worker registry (running and settled
     /// counts by class, with the nearest time-to-reap), the inbox's depth
     /// per source, the event log's mirror length and history bytes, the

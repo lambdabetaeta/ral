@@ -1,6 +1,6 @@
 # residency: a session is a ledger of residents
 
-**Everything that stays alive between turns — a detached worker, a stopped
+**Everything that stays alive between runs — a detached worker, a stopped
 pgid group, a sub-agent, a schedule, a top-level binding — is a *resident*,
 and a resident has exactly four facets: an identity in the session's
 ownership tree, a typed capability that reaches it, a lease, and a probe.**
@@ -53,7 +53,7 @@ claimed.
 
 | grade | state | population | entered by | left by |
 |---|---|---|---|---|
-| 0 | foreground | the running turn | evaluation | completion, the wall, interrupt |
+| 0 | foreground | the run in progress | evaluation | completion, the wall, interrupt |
 | 1 | stopped | pgid groups | kernel SIGTSTP | `fg`, `bg`, exit sweep |
 | 2 | background | pgid groups (`bg`) · detached handles (`spawn`/`&`) | `bg` · birth | completion, `cancel`, lease reap, exit |
 | 3 | durable | `service` workers | birth | completion, `cancel`, `/clear`, process exit |

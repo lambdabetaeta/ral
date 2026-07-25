@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -17,8 +17,8 @@ typechecker and the runtime see one surface by construction.
 ## The session
 
 **The session is a state machine over one long-lived `Shell`: each
-iteration drives a *turn* — read, then a single synchronous core entry —
-and the loop is seeded from the live session that the previous turn left
+iteration drives a *run* — read, then a single synchronous core entry —
+and the loop is seeded from the live session that the previous run left
 behind.**
 
 `session::Session` (`session.rs`) owns the interactive state: an
@@ -29,15 +29,15 @@ core's transport seam), the shared `Arc<Mutex<JobTable>>` and
 build it also owns the `Worksheet` (`worksheet.rs`) — the retained
 binding-edge / effect-verdict model the structural surface projects.
 
-- `run` loops `turn` until it returns `Flow::Break` — a frontend `Eof` or
+- `run` loops `iterate` until it returns `Flow::Break` — a frontend `Eof` or
   an `exit` escaping the evaluator.
-- `turn` is one cycle: reap children, break if the durable root has been
+- `iterate` is one cycle: reap children, break if the durable root has been
   cancelled (SIGTERM/SIGHUP or Ctrl-\ — cancellation is one-way, so exit
   with the cause's code rather than deal an unusable prompt),
   `process::clear` any residual interrupt, write the terminal title, render
   the prompt, `read`, and dispatch the `Read` event. `Read::Line` adds to
-  history and evaluates; `Read::Edit` becomes next turn's `pending`;
-  `Read::Interrupt` clears the signal, cancels the current turn scope, and
+  history and evaluates; `Read::Edit` becomes next iteration's `pending`;
+  `Read::Interrupt` clears the signal, cancels the in-flight run, and
   continues; `Read::Eof` breaks. `read` is handed the live `Shell`, the
   prompt, the pending buffer, the `JobTable`, and (structural) the
   worksheet.
@@ -49,8 +49,8 @@ binding-edge / effect-verdict model the structural surface projects.
   grant ACEs and deletes its per-projection profiles on Windows; a no-op
   elsewhere) — lives in
   `Drop for Session`, so it covers a panic unwinding through the owned
-  `Session` as well as the orderly exit; a crash mid-turn neither orphans a
-  stopped group nor loses history.
+  `Session` as well as the orderly exit; a crash mid-iteration neither
+  orphans a stopped group nor loses history.
 
 `session/boot.rs` does the one-shot setup: `setup_signals` (the whole Unix
 disposition table in one place — SIGINT relay, SIGQUIT root-abort,
@@ -72,20 +72,20 @@ error — the file has no runnable annotation — while the boot always survives
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]); a
 stop signal escaping rc sourcing is reported, not swallowed, so it cannot
 orphan a process group. An rc `startup` block registers as the
-`Session/"startup"` hook and runs through a **framed hook turn** under
+`Session/"startup"` hook and runs through a **framed hook run** under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak —
 never an in-place apply.
 
-## One turn through a framed door
+## One run through a framed door
 
-**A turn is one synchronous core entry, and evaluation enters only through
-the framed turn doors** ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
+**A run is one synchronous core entry, and evaluation enters only through
+the framed run doors** ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
 `exec.rs::step` is the per-line entry. `execute_input` builds the transport
-`Turn` — `Program::Source(trimmed)`, `script_name: "<stdin>"`,
-`Capabilities::root()`, no wall, `TurnIo::Inherit`,
-`RequestedTerminalAccess::Leased`, `TurnStdin::Inherit` — and dispatches it
+`Run` — `Program::Source(trimmed)`, `script_name: "<stdin>"`,
+`Capabilities::root()`, no wall, `RunIo::Inherit`,
+`RequestedTerminalAccess::Leased`, `RunStdin::Inherit` — and dispatches it
 through `transport::dispatch_to_report` on the session's
 `IdentityTransport`, draining the event stream to the terminal `Report`.
 The lifecycle hooks fire around the dispatch from `exec.rs` itself via
@@ -93,15 +93,15 @@ The lifecycle hooks fire around the dispatch from `exec.rs` itself via
 a pending `chpwd` then `post-exec` after. The door compiles and typechecks
 against the live session (`shell.session_schemes()`, the one name→scheme
 seed — [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]),
-then evaluates the annotated comp under the installed turn frame, since the
+then evaluates the annotated comp under the installed run frame, since the
 inference pass always runs
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
 
 It matches the one flat `Report`:
 
 - `Static` — a parse, type, or host failure that never reached evaluation,
-  printed from its `Diagnostics` arm. The turn is not run.
-- `Ran` — a compiled turn. `Ok` prints via `print_result` (and, on a
+  printed from its `Diagnostics` arm; the run never evaluates.
+- `Ran` — a run that compiled. `Ok` prints via `print_result` (and, on a
   `structural` build, records the bind into the worksheet);
   `Break::Exit` ends the loop (clamped through `platform::exit_byte`);
   `Break::Error` prints the diagnostic already rendered at the transport
@@ -109,10 +109,10 @@ It matches the one flat `Report`:
   parks the pipeline in the [[map/repl/jobs|job table]].
 
 The mobile-state install on every outcome is core's contract — a top-level
-turn is a resume point ([[map/core/evaluator|evaluator]]). The same door
+run is a resume point ([[map/core/evaluator|evaluator]]). The same door
 backs every host program the REPL holds as a value: the prompt body, an rc
 startup block, and a plugin hook are *registered hooks* run as
-`Program::Hook` turns ([[map/repl/plugins|plugins]]), under
+`Program::Hook` runs ([[map/repl/plugins|plugins]]), under
 `RequestedTerminalAccess::Denied` unless the site leases the terminal, so a
 hook that is not a command can never foreground a child.
 
@@ -137,7 +137,7 @@ the structural worksheet projection, and completion live in
 ## Prompt, rc, theme
 
 - `prompt.rs` — runs the registered `Session/"prompt"` hook through a
-  capture-into-string turn (`Program::Hook`, `TurnIo::Capture`, `Denied`
+  capture-into-string run (`Program::Hook`, `RunIo::Capture`, `Denied`
   terminal): its return value is the prompt, a returned unit falls back to
   its captured stdout. USER, CWD, and STATUS are ambient pseudo-variables
   the prompt body reads directly. Plugin `prompt` hooks may transform the

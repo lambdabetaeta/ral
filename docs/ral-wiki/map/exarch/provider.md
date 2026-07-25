@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -121,7 +121,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   that itself hit the 1024-token budget is surfaced as `Truncated`, so
   `compact` keeps the un-summarised history rather than committing a half
   summary (X10).
-- `cancel` is the **request-local** cancellation handle: the foreground turn
+- `cancel` is the **request-local** cancellation handle: the foreground exchange
   passes its root token (Esc-linked), an async `agent` passes its registry
   token, so two concurrent requests no longer share one process-global slot —
   the provider-side seam of [[decisions/260617_async-agent-tool|async-agent-tool]];

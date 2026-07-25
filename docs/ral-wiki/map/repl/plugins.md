@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -24,32 +24,32 @@ into the shell's hook table under a `HookName` at load time.
 brackets the call by taking the live `plugin_context` aside, installing the
 per-call one so `_ed-*` builtins resolve, applying the handler, then taking
 the (now-populated) context back and restoring the prior one. *Framing*
-decides whether the handler runs in the caller's turn or a fresh one:
+decides whether the handler runs in the caller's run or a fresh one:
 
 - `HookFraming::InFrame` — lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`)
-  fire from inside the command's own turn frame, so the handler is applied in
+  fire from inside the command's own run frame, so the handler is applied in
   place; a second frame would nest. `run_lifecycle_hook` (a `fold_hook` over
   the loaded plugins) is the entry [[map/repl/loop|`exec.rs`]] calls around
   each dispatch.
 - `HookFraming::Framed(FramedHook)` — keybinding, buffer-change, and prompt
   hooks fire during the frontend `read`, outside any frame, so they establish
-  one through `Shell::run_turn` (`framed_turn_request`, a `Program::Hook`
-  turn) ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
+  one through `Shell::run` (`framed_run_request`, a `Program::Hook`
+  run) ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
   `FramedHook` carries the per-hook policy: the terminal authority (`Leased`
   for keybinding dispatch, so an `_ed-tui` body can foreground a captured
-  pipeline; `Denied` elsewhere), a `kind` label for the turn's root context,
-  and an optional budget arming the turn's wall. Plugins run with the host
-  authority (`Capabilities::root()`) the framed turn already carries.
+  pipeline; `Denied` elsewhere), a `kind` label for the run's root context,
+  and an optional budget arming the run's wall. Plugins run with the host
+  authority (`Capabilities::root()`) the framed run already carries.
 
 ## Source-mapped faults and the buffer-change breaker
 
 A hook fault resolves to the right line of the plugin file and renders with a
 source arrow, exactly as a command fault does. The plugin's file source rides on
-the `LoadedPlugin` as an `Arc<str>` and is installed as the framed turn's root
+the `LoadedPlugin` as an `Arc<str>` and is installed as the framed run's root
 context, so a `Break::Error` reads against the right `FileId`.
 
-- **The fault is rendered inside `call_plugin_hook`, while that turn's source
-  registry is still live.** The next framed turn resets `shell.sources()`, so a
+- **The fault is rendered inside `call_plugin_hook`, while that run's source
+  registry is still live.** The next framed run resets `shell.sources()`, so a
   deferred raw `Error` would resolve against the wrong registry. The finished
   string rides out on `HookResult.rendered_error`, deferred through
   `defer_plugin_message` past the readline line-erase escape and flushed by
@@ -57,7 +57,7 @@ context, so a `Break::Error` reads against the right `FileId`.
   rendered in-frame, defer nothing and report via `errfmt::plugin_error`.
 - **A buffer-change hook fires on every keystroke, so a slow or faulting one is
   braked.** `HookHealth` (per plugin, in `plugin.rs`) is a circuit breaker:
-  `BUFFER_CHANGE_FAULT_LIMIT` consecutive faults, or any turn overrunning the
+  `BUFFER_CHANGE_FAULT_LIMIT` consecutive faults, or any run overrunning the
   `BUFFER_CHANGE_BUDGET` keystroke wall, trips it and the hook is skipped for the
   rest of the session; a success resets the count. The trip emits one disable
   notice (`format_plugin_disabled`). The wall is cooperative — the trampoline
@@ -128,7 +128,7 @@ once, so the frontends cannot disagree.
   `grant { … }`.
 - `plugin/load.rs` — resolves a plugin under `~/.config/ral/plugins/` or
   `RAL_PATH`, typechecks and evaluates it, instantiates a parameterised plugin
-  block through a framed hook turn, registers its hooks into the shell's hook
+  block through a framed hook run, registers its hooks into the shell's hook
   table (`register_plugin_hooks`), installs alias bindings, and records it
   (retaining the file source on the `LoadedPlugin`). Registration is
   reversible: hooks and aliases are committed only after every validation

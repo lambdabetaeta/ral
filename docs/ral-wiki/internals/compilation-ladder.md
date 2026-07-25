@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1baac6d
-verified_at_date: 2026-06-22
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, Wire, stage_types]
 ---
 
@@ -32,7 +32,7 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   is a *transformation* (`annotate`): it returns an annotated IR carrying three
   kinds of verdict. Each top-level name-bind takes the generalised `Scheme` it
   inferred, closed against the empty environment so the scheme outlives the
-  per-turn unifier
+  per-run unifier
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);
   every `Pipeline` stage and `Bind` RHS — at any depth — takes its *ground mode
   wire*, the checker's resolved `F[input, output]` with the unification variable
@@ -48,9 +48,9 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   for a stage type. The verdict rides inside the comp; `CompileOutcome` is
   unchanged in shape. ([[map/core/typecheck|typecheck]])
 
-Each turn's check is seeded from the live session — one `SessionSchemes`, the
+Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one
-turn enters the next turn's check at its inferred scheme rather than a fresh
+run enters the next run's check at its inferred scheme rather than a fresh
 variable. The evaluator installs each top-level bind's scheme next to its value,
 so the seed never drifts from the values it describes.
 
@@ -62,12 +62,12 @@ the only decode site (`BakedPrelude`) live there together as the host-embedding
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`
 (`core/src/typecheck.rs`), which serialises the *annotated* prelude and harvests
-its bind schemes from the same pass, so the baked list and a turn's installed
+its bind schemes from the same pass, so the baked list and a run's installed
 schemes come from one harvest. The two blobs — annotated IR and scheme list —
 land in `OUT_DIR`; a host embeds them through the `baked_prelude!` macro into a
 `BakedPrelude`, decoded lazily on first use. The typed IR is then handed to the
 [[internals/evaluator-machine|evaluator]], which a host reaches only through the
-synchronous framed turn doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
+synchronous framed run doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 
 See also [[design/cbpv|cbpv]], [[design/types|types]]; map hub
 [[map/core|core]]. The formal account is `docs/SPEC.md`.

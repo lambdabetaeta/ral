@@ -507,9 +507,9 @@ impl Agent {
     /// Build a trunk against a throwaway sessions root under `dir`, with
     /// default (unrestricted) capabilities, a baked shell, and an empty
     /// scripted provider (tests that drive set their own).  The harness in
-    /// `tests/` uses this to drive [`Self::apply`] and [`Self::drive`] through
+    /// `tests/` uses this to drive [`Self::apply`] and [`Self::attend`] through
     /// a [`Provider::scripted`] backend.  Non-interactive, so it terminates at
-    /// quiescence like any returning agent and `drive` never blocks.
+    /// quiescence like any returning agent and `attend` never blocks.
     ///
     /// # Errors
     /// Returns `Err` if creating the throwaway session log under `dir` fails.
@@ -575,7 +575,7 @@ impl Agent {
 impl Drop for Agent {
     /// The one place every teardown path funnels through, whatever got it
     /// here — a normal `reply`/settle, the subtree cascade, or the trunk's
-    /// own `deregister` at end of `drive`. `/clear` never reaches this (it
+    /// own `deregister` at end of `attend`. `/clear` never reaches this (it
     /// rebuilds the shell in place through `Seat::clear`), so it keeps its
     /// own explicit `schedules.clear`; every *other*
     /// teardown has no such call site of its own, and a subtree cascade
@@ -1051,7 +1051,7 @@ mod tests {
 
     /// The generation-and-cascade audit's real gap: a sub-agent that ends
     /// *without* ever being cancelled — the ordinary `reply`/settle path,
-    /// or the trunk's own end-of-`drive` `deregister` — has no cascade edge
+    /// or the trunk's own end-of-`attend` `deregister` — has no cascade edge
     /// pointed at it at all, so nothing upstream of `Agent`'s own `Drop`
     /// ever touches its workers. Pins the fix: dropping an `Agent` cancels
     /// every worker still registered on its own shell, regardless of why

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 6b953ce7c41c3f4897ac01596772fd1d09141944
-verified_at_date: 2026-07-21
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [from_genai, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, parse_json_body, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS]
 ---
 
@@ -131,9 +131,9 @@ Two more `ProviderError` variants never come from `from_genai`:
 
 - **`Cancelled(&'static str)`** — the user raised the cancel flag in flight; the
   `&'static str` records *where* so the UI pins the blame ([[internals/cancellation|cancellation]]).
-- **`Truncated { reason }`** — the turn was cut off *cleanly* by the output cap
-  or a stall, raised after the partial assistant message is already appended, so
-  re-prompting with `continue` preserves the work.
+- **`Truncated { reason }`** — the assistant turn was cut off *cleanly* by the
+  output cap or a stall, raised after the partial assistant message is already
+  appended, so re-prompting with `continue` preserves the work.
 
 ## The retry driver
 
@@ -183,7 +183,7 @@ stream has yielded content, and when the stream breaks:
 - **content already streamed** → `stalled_step_out` projects the text prefix
   and reasoning into a `CutShort::Stalled` `StepOut` — no tool calls, no stop
   reason, the stall cause carried for the operator note — and hands it back as
-  `Attempt::Done`. The session commits the prefix and continues the turn,
+  `Attempt::Done`. The session commits the prefix and continues the exchange,
   mirroring the output-cap truncation path.
 
 This is why `Attempt` needs no third "don't retry" variant: a committed stall is
@@ -249,9 +249,9 @@ attempt count.
 - [[map/exarch/provider|provider]] — the transport this classifies for:
   identity, client building, the streaming and summary calls, the idle timeout,
   usage and pricing.
-- [[internals/cancellation|cancellation]] — the per-turn `Token` the
+- [[internals/cancellation|cancellation]] — the per-exchange `Token` the
   `Cancelled` variant reports, and the cancel-aware backoff select.
-- [[map/exarch/agent|agent]] — the turn loop above the provider, where a
+- [[map/exarch/agent|agent]] — the deliberate loop above the provider, where a
   `Truncated` compaction summary and the nudge-retry rules live.
 - [[map/exarch/cards|cards]] / [[map/exarch/frontend|frontend]] — the structured
   error chrome that reads the parsed JSON `body`.

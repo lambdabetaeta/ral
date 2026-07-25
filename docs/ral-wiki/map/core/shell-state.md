@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -55,13 +55,13 @@ field name *is* the invariant** — joined by `Shell`
 
 - **`Mobile`** — the persistable computation state (lexical `scope` +
   `ControlState` + dynamic `Context`) that crosses evaluation boundaries and
-  thread spawns. `mobile` is the public embedding seam. The turn door
-  checkpoints and rolls back the `Mobile` around every turn, so a
-  panicking turn reports as a failed turn instead of corrupting the store.
-- **`TurnState`** — the dynamic frame a top-level turn installs and restores on
+  thread spawns. `mobile` is the public embedding seam. The run door
+  checkpoints and rolls back the `Mobile` around every run, so a
+  panicking run reports as a failed run instead of corrupting the store.
+- **`RunState`** — the dynamic frame a top-level run installs and restores on
   teardown: the pipeline-stage `Io`, the `surface` sink, the `deferred` sink
   (a detached worker's completion delivery — `None` outside an agent host),
-  the `desk` answering the turn's enquiries
+  the `desk` answering the run's enquiries
   ([[decisions/260706_enquiry-channel|enquiry-channel]]), the `nursery`
   holding engine-side session forks a desk handler adopts (`None` outside a
   host that installs one; like `desk`, never given to a deferred worker), the foreground
@@ -70,18 +70,18 @@ field name *is* the invariant** — joined by `Shell`
   travel as one value; `None` never reaps), the `worker_cap` admission bound
   (`Some(cap)` refuses a spawn of any class while `cap` workers still run;
   `None` admits freely, and both flow into same-thread bodies and spawned
-  workers alike), and the turn's `TerminalAccess`.
-- **`SessionState`** — what survives every turn's teardown: the durable cancel
+  workers alike), and the run's `TerminalAccess`.
+- **`SessionState`** — what survives every run's teardown: the durable cancel
   `root` that detached workers parent under (with `publishes_signal_slots`,
   true only for the one signal-facing session per process), the `sources`
-  registry rendered against after a turn returns (reset and reseeded at each
-  turn start), the `exit_hints` table, the host-installed
+  registry rendered against after a run returns (reset and reseeded at each
+  run start), the `exit_hints` table, the host-installed
   `builtins` with the session's `library_docs`, the session's
   `terminal_lease`, and the `guest_jail` (`Some` only inside a VM guest —
   the spawn jail's shared uid counter, [[map/core/io-process|io-process]]).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger); the
-  residue once turn and session state are named. The worker registry
+  residue once run and session state are named. The worker registry
   (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
   `HandleInner`, one per agent; `Shell::spawn_thread` shares it by `Arc` into
   a spawned worker's own shell (so a nested `spawn` registers alongside its
@@ -89,7 +89,7 @@ field name *is* the invariant** — joined by `Shell`
   one. Beside the entries it keeps the `ReapNotice` ledger the reap policies
   write — one compact record per entry removed by policy, atomic with the
   removal under the registry's one lock — pushed by the engine as
-  `` `notice `` surface events at each settled turn's ready boundary
+  `` `notice `` surface events at each settled run's ready boundary
   (`emit_ready_boundary_notices`; `take_worker_reap_notices` is
   crate-private, that push its one caller). A settled entry carries a
   `settled_epoch` stamp: retention is armed once at boot
@@ -113,11 +113,11 @@ field name *is* the invariant** — joined by `Shell`
   The binding-lease ledger (`shell/bindings.rs`,
   [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits
   beside the worker registry but needs no lock: it has exactly one writer,
-  the thread that owns `&mut Shell` for every turn, install, and prune
+  the thread that owns `&mut Shell` for every run, install, and prune
   (verified in the module's own doc comment). Inert (`BindingLedger::
   default()`) until `Shell::arm_binding_lease` seals every name then visible
   in the scope chain as permanently-exempt baseline and starts the
-  committed-turn clock. Every persistent top-level scope write funnels
+  committed-run clock. Every persistent top-level scope write funnels
   through one fused chokepoint, `Shell::install_scope_binding` (`scope.rs`,
   beside `bind_value`/`set_var`): it classifies the write by
   `Env::at_session_scope()` and stamps the ledger only when true, so "write a
@@ -126,7 +126,7 @@ field name *is* the invariant** — joined by `Shell`
   arms, `eval_letrec`'s two installs) all route here. Host verbs
   (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
   call to them precedes arming. Idleness is *use-observation*, not
-  re-installation: `Shell::run_turn`'s source arm ticks the committed-turn
+  re-installation: `Shell::dispatch`'s source arm ticks the committed-run
   clock, and a lease is renewed by reference — the compiled program's
   `ir::referenced_names` at each successful compile ([[map/core/ir|ir]]), plus
   the resolved name at an `Env`-arm command dispatch. The same chokepoint runs a second, orthogonal
@@ -142,7 +142,7 @@ field name *is* the invariant** — joined by `Shell`
   ready-boundary `` `notice `` push as the reap ledger's
   (`take_large_binding_notices` is crate-private).
 
-`turn` / `session` / `local` are `pub(crate)`: the fields that encode turn
+`run` / `session` / `local` are `pub(crate)`: the fields that encode run
 safety are not a public API. Hosts drive a session through the narrow accessors
 gathered in `host.rs`, which a host crate reaches while only `mobile` stays the
 public embedding seam. `Shell::binding_count` sits there too — the lexical
@@ -152,15 +152,15 @@ values, and enumeration renews nothing.
 
 ### Surface
 
-The `surface` sink (`TurnState::surface`, `Option<SurfaceSink>` where
+The `surface` sink (`RunState::surface`, `Option<SurfaceSink>` where
 `SurfaceSink = Arc<dyn EventSink>`) is the value-typed dual of the byte
 [[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
 borrowed `Value`; `Shell::surface` forwards onto the installed sink and is inert
-when none is present (a bare REPL). Turn-scoped, not a persistent capability — a
-turn door installs it, so a clone of it has no liveness role and can never decide
-a turn is over. A *detached* worker does not receive the live sink: its events
+when none is present (a bare REPL). Run-scoped, not a persistent capability — a
+run door installs it, so a clone of it has no liveness role and can never decide
+a run is over. A *detached* worker does not receive the live sink: its events
 buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
-the awaiting turn's surface on the first `await` / `race`, or handed to the
+the awaiting run's surface on the first `await` / `race`, or handed to the
 session-lived `deferred` sink at the worker's own completion, whichever renders
 first (a shared `joined` latch decides).
 
@@ -174,17 +174,17 @@ lifetimes:
 - The lease itself lives on `SessionState::terminal_lease`, minted once at
   startup from the `tcgetpgrp == getpgrp` witness — `Some` when ral owns the
   foreground, `None` otherwise. It is *lent*, never moved or cloned.
-- A turn's authority to borrow it is the per-turn `TerminalAccess` on
-  `TurnState`: `Denied` (the safe default — an exarch tool turn, the boot
-  frame), `Leased` (an interactive turn), or `ExplicitLoan` (a within-turn
+- A run's authority to borrow it is the per-run `TerminalAccess` on
+  `RunState`: `Denied` (the safe default — an exarch tool run, the boot
+  frame), `Leased` (an interactive run), or `ExplicitLoan` (a within-run
   elevation raised only by the host loan token). `Shell::terminal_lease` yields
   `&TerminalLease` only when access permits *and* the session owns a lease, so a
-  `Denied` turn cannot construct a foreground handoff.
+  `Denied` run cannot construct a foreground handoff.
 
-The host-facing `TerminalLoan` (`host.rs`) raises a `Leased` turn to
+The host-facing `TerminalLoan` (`host.rs`) raises a `Leased` run to
 `ExplicitLoan` for `_ed-tui` and restores the prior access on surrender; it
-leaves a `Denied` turn untouched, closing the `Denied → ExplicitLoan` door so a
-loan can only raise an authorised turn, never mint authority.
+leaves a `Denied` run untouched, closing the `Denied → ExplicitLoan` door so a
+loan can only raise an authorised run, never mint authority.
 
 ### Method modules
 
@@ -202,8 +202,8 @@ Methods on `Shell` live by concern, one submodule each:
 - `cwd.rs` (`Cwd`; `seed_cwd` lets an in-process front end whose working
   directory is not the process cwd state it directly), `inherit.rs` (the
   flow matrix, below), `modules.rs`,
-  `control.rs`, `hooks.rs` (the session-lived hook table of named turn-entry
-  points — prompt render, startup, plugin hooks — resolved by the turn door's
+  `control.rs`, `hooks.rs` (the session-lived hook table of named run-entry
+  points — prompt render, startup, plugin hooks — resolved by the run door's
   hook-program arm), `repl.rs` (`ReplScratch`, owned by the [[map/repl|REPL]]
   layer).
 
@@ -217,7 +217,7 @@ copying only the fields it happened to remember. There are two regimes.
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
 `Shell::with_thunk_body` runs the body *in* the caller's `Shell`. Only the
 `Mobile` is swapped, rescoped to the closure's captured `Env` plus a fresh frame;
-the `turn`, `session`, and `local` state are shared *by identity*, so the body
+the `run`, `session`, and `local` state are shared *by identity*, so the body
 observes the caller's audit trail, byte sinks, builtin table, cancel root, and
 terminal lease without any of them being copied. There is no second store to
 drift from the first ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
@@ -233,11 +233,11 @@ default for a store that is not the session's:
 
 - `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker helper)
   on a fresh OS thread that owns its own IO; nothing flows back. Runs under a
-  child of the durable root, not the foreground scope, so a turn timeout or Esc
+  child of the durable root, not the foreground scope, so a run timeout or Esc
   does not reach it.
 - `inherit_from` / `return_to` — the per-substate manifests a cross-process
   pipeline stage (`child_of`, [[decisions/260610_child-eval-unification|child-eval]])
-  leans on. Their asymmetry *is* the flow matrix: the source cursor (`turn.loc`)
+  leans on. Their asymmetry *is* the flow matrix: the source cursor (`run.loc`)
   and the `within`-attenuable bits do not flow back, but `context.cwd` does.
 - `child_from` — a REPL aside (the prompt/hook shell, one call site in the
   [[map/repl|REPL plugin runtime]]): an independent sibling that clones the

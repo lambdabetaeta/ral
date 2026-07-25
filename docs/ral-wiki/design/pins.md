@@ -36,7 +36,7 @@ gauge that *fills in place*, and a per-task `open → done` move appends nothing
 ## How it flows
 
 One decoder, one new arm, one viewport field — no concurrency invariant, because
-a pin is emitted **in-turn** through the live foreground sink, the exact place a
+a pin is emitted **in-run** through the live foreground sink, the exact place a
 card is already safe:
 
 - **Decode.** `value_to_pin` is tried first on the surface channel, ahead of the

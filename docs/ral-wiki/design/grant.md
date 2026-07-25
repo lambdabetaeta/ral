@@ -53,7 +53,7 @@ not a second schema. That walker resolves every sigil as it decodes —
 reaches the stack or the IPC wire.
 
 This is the boundary [[map/exarch|exarch]] reuses as its sandbox: each agent
-turn evaluates under a profile's capabilities pushed onto this same stack.
+run evaluates under a profile's capabilities pushed onto this same stack.
 
 **Concessions.** Three caveats are inherent to the design, not defects:
 - **Bare command names are ambient.** A bare exec key like `git` resolves through

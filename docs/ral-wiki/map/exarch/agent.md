@@ -1,20 +1,21 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs]
 ---
 
 # Map: exarch / agent
 
-`agent.rs` is the turn driver. An `Agent` is the **uniform node** of a run: the
+`agent.rs` defines the node every fleet member shares. An `Agent` is the
+**uniform node** of the fleet: the
 canonical [[map/exarch/frontend|event log]] (`AgentLog`), a **seat**
-(`agent/seat.rs`) carrying the transport its turns run through —
+(`agent/seat.rs`) carrying the transport each run drives through —
 `Seat::Identity`, the persistent in-process [[map/core/shell-state|`Shell`]]
 behind an `IdentityTransport` (plus the session `Scratch`, the re-seed cwd,
-and the turn-scope cell the registry interrupts through), or `Seat::Wire`, a
+and the run-scope cell the registry interrupts through), or `Seat::Wire`, a
 `WireTransport` driving a remote engine, one process per session
 ([[decisions/260722_session-is-a-process|session-is-a-process]]) — the
-canonical turn and probe vocabulary either way
+canonical run and probe vocabulary either way
 ([[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
 `Capabilities`, its own inbox, nudger, `cancel::Token`, an owned
 hot-swappable `ProviderHandle`, and the inherited
@@ -70,41 +71,46 @@ until their results drain; a live self-schedule holds it until cancelled;
 otherwise it terminates at quiescence — the one-shot contract a headless trunk
 and a settled sub-agent both satisfy. `--chat` builds the trunk with no system
 prompt and no tool at all (`tool_enabled: false`) — a bare conversation, the
-same drive loop.
+same attend loop.
 
-## The drive loop
+## The attend loop
 
 Three nested loops, the same for trunk and child alike:
 
-- `drive` — the per-agent lifetime. The trunk publishes its sticky cancel token
-  for the OS-signal path (`cancel::publish`, held for the whole drive, replacing
-  the old per-turn `mint_root`); a sub-agent publishes nothing, since its token
+- `attend` — the per-agent lifetime. The trunk publishes its sticky cancel token
+  for the OS-signal path (`cancel::publish`, held for the whole attend); a
+  sub-agent publishes nothing, since its token
   is reached through the registry cascade, not the slot. Each pass pulls the next
-  turn from this agent's [[map/exarch/frontend|inbox]] via
+  item from this agent's [[map/exarch/frontend|inbox]] via
   `next_or_idle(|| self.park_mode(), …)`, which **re-evaluates the park verdict
   on every `Condvar` wake** — so the idle lease's terminate-cause cancel, or the
-  last live child settling, is seen on the very next wake. A genuine
-  turn boundary resets the nudge latches and clears the sticky cancel token
-  (`cancel::Token::reset`), so a prior turn's Esc cannot bleed into the next; a
-  self-nudge is the same turn continuing and resets neither. `reply` hard-
+  last live child settling, is seen on the very next wake — and hands it to
+  `take_up`, the per-item step shared with `attend`'s bounded
+  twin `attend_backlog` (converse's per-exchange drain): generation admission, the
+  exchange-boundary latch reset, a session command's dispatch to `Control`, the
+  `deliberate` call itself, and the nudge reaction. A genuine
+  exchange boundary resets the nudge latches and clears the sticky cancel token
+  (`cancel::Token::reset`), so a prior exchange's Esc cannot bleed into the next; a
+  self-nudge is the same exchange continuing and resets neither. `reply` hard-
   terminates the loop regardless of focus or a self-armed schedule — the agent
   returns its value and is gone. At the single exit the loop winds a stranded
   prompt back through `quiesce` so the next `append_user` is always admissible
-  ([[invariants/turn-ends-ready|turn-ends-ready]]); the trunk then deregisters
+  ([[invariants/turn-ends-ready|exchange-ends-ready]]); the trunk then deregisters
   itself (a child is removed by its spawn site through `settle`), so the fleet
-  empties when the last agent leaves. A panic caught around `apply` is a
+  empties when the last agent leaves. A panic `take_up` catches around its
+  `deliberate` call is a
   *host-side* fault (provider transport, surface decode, render, digest),
-  reported as a failed turn; an eval-side panic never unwinds this far —
-  the engine's own turn door (`Shell::run_turn`) checkpoints the `Mobile`
-  at entry, rolls it back, and reports the failed turn, durability being
+  recorded as `AgentOutcome::Failed`; an eval-side panic never unwinds this far —
+  the engine's own run door (`Shell::run`) checkpoints the `Mobile`
+  at entry, rolls it back, and reports the failed run, durability being
   engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
   The per-call desk install retires on *every* exit, panic included, via
-  `seat::TurnGuard`.
-- `apply` — one provider round-trip loop over the agent's *own* provider
-  (`self.provider.current()`, read once at the top of the turn so a `/model` swap
-  lands next turn, never mid-turn): render the transcript, stream a reply through
-  `provider.complete`, **admit** then append the assistant message, dispatch any
-  tool calls, append their results, optionally append a drained steering prompt,
+  `seat::RunGuard`.
+- `deliberate` — one prompt stepped to quiescence over the agent's *own* provider
+  (`self.provider.current()`, read once at the top by `take_up` so a `/model` swap
+  lands next item, never mid-deliberation): render the transcript, stream a reply through
+  `provider.complete` (one `step`), **admit** then append the assistant message, run the
+  resulting tool-call batch (`run_batch`), append their results, optionally append a drained steering prompt,
   repeat until the model emits no tool call. The admission step (`admit_assistant`,
   at the commit boundary) enforces the [[invariants/transcript-admission|transcript-admission invariant]]:
   it repairs a non-object tool-call `fn_arguments` to `{}` (X2) and substitutes a
@@ -114,27 +120,28 @@ Three nested loops, the same for trunk and child alike:
   the partial, so a `continue` nudge keeps the work as context; *with* captured
   tool calls it dispatches them and continues instead, since returning `Truncated`
   there would strand the protocol in `AwaitingToolResults` and fail the nudge's
-  next `append_user` (X6). A hard `MAX_STEPS` ceiling (250) ends a turn whose
+  next `append_user` (X6). A hard `MAX_STEPS` ceiling (250) ends a deliberation whose
   model never stops calling tools — the headless/autonomous counterpart to
-  interactive Esc — returning `TurnOutcome::Capped`. That outcome matches no
-  nudge rule, so the driver treats it as terminal; re-driving would only spend
+  interactive Esc — returning `deliberate::Outcome::Capped`. That outcome matches no
+  nudge rule, so `attend` treats it as terminal; re-attending would only spend
   the ceiling again.
-- `dispatch` — runs the turn's tool-call batch in order. Every call returns a
+- `run_batch` — runs one step's tool-call batch in order, each call through
+  `invoke`. Every call returns a
   `SessionToolResult` synchronously — and there is only `ral` to call
   ([[map/exarch/tools|tools]]); a spawn verb inside it hands the script a start
   receipt after launching the detached child. Once every requested tool id has
   a result,
-  dispatch drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
+  `run_batch` drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
   steering. A non-slash steering prompt is appended after the complete
-  tool-result batch, and the next loop asks the provider with the user's steering
+  tool-result batch, and the next step asks the provider with the user's steering
   in context
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]). A
   sub-agent has no human writer, so its inbox holds no steering and this is always
   empty.
 
-Worker-reap and large-binding notices need no drain at `drive`'s top:
+Worker-reap and large-binding notices need no drain at `attend`'s top:
 core's own engine pushes both as `` `notice `` surface classes at the ready
-boundary of the turn that produced them
+boundary of the run that produced them
 ([[decisions/260706_enquiry-channel|enquiry-channel]]), decoded by
 [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Kind::Notice` at
 the emit seam. A reap notice names a worker removed by policy — the lease
@@ -143,13 +150,13 @@ expiring a settled entry's unclaimed result — rather than one an eliminator
 observed away. Transcript and TUI only — the rendered one-liner is
 [[map/exarch/cards|cards]]'s `reap_card`, the completion card's sibling — never
 model-facing, since delivery of a reap to the model itself is deferred.
-What `drive`'s
+What `attend`'s
 top still runs, each pass its own ready boundary: `reconcile_service_pins`
 (the protected `services` pin is (re-)born or dies here) and
 `check_disk_warn`.
 
 The retention clock itself is core's: the engine ticks the worker registry
-once per source dispatch and sweeps it at each settled turn's ready
+once per source dispatch and sweeps it at each settled run's ready
 boundary ([[map/core/shell-state|shell-state]]), armed with
 [[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`. The
 agent keeps its own mirror of the same drum — `Agent::ral_epoch`,
@@ -172,13 +179,13 @@ and the prune half is engine housekeeping too: idle top-level names fall at
 the engine's own ready boundary, announced as a pushed
 `` `notice [kind: `prune] `` class the host decodes into the same
 transcript-and-TUI `Kind::Notice` posture as a reap. The engine's
-turn-entry checkpoint orders after any prior boundary's prune, so a later
+run-entry checkpoint orders after any prior boundary's prune, so a later
 panic rollback can never resurrect a name a pass just pruned.
 
 `/resources` is the probe fold over the same accumulators
 ([[invariants/probe-convention|probe-convention]]): routed exactly as
-`/clear` — an `InboxMsg::Command` drained at the turn boundary, handled by
-the TUI's `Control` against the agent the drive loop owns —
+`/clear` — an `Item::Command` drained at the exchange boundary, handled by
+the TUI's `Control` against the agent the attend loop owns —
 `Agent::resource_rows` surveys what this thread may legally read — the worker
 registry's running/settled split with the nearest time-to-reap and the
 binding-ledger figures read as *data* through the transport's Enquiry desk
@@ -203,7 +210,7 @@ always succeed, coalescing instead of growing the queue — a
 `ScheduledWakeup` replaces a still-queued wakeup for the same schedule id
 (newest wins), consecutive `UserSteering` pushes merge with a blank line
 (never across a slash line, which would silently change its
-turn-boundary classification), and an exact-duplicate `Nudge` is a no-op.
+exchange-boundary classification), and an exact-duplicate `Nudge` is a no-op.
 The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
 quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
 `INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
@@ -213,7 +220,7 @@ a rejected slash command reports through the UI's error line, and a
 rejected `spawn` completion or surfaced batch — which has no synchronous
 caller left to return to — records straight to the durable
 `transcript.jsonl` instead of the live bus, so holding the rejection report
-never extends a bus sender's lifetime past the turn that queued it.
+never extends a bus sender's lifetime past the run that queued it.
 
 The headless-completion gate is gone with `expect_action`: the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
@@ -236,8 +243,8 @@ self-nudge.
 ## The Fleet
 
 `fleet.rs` is the thin run-as-a-whole: `{ agents: AgentRegistry, bus: FleetBus,
-engine: Arc<provider::Engine> }`. It owns no turn logic — the trunk
-and each child drive themselves; the fleet is only where the frontend reads "all
+engine: Arc<provider::Engine> }`. It owns no execution logic — the trunk
+and each child attend to themselves; the fleet is only where the frontend reads "all
 live agents" and "the bus to drain". The
 frontend ([[map/exarch/frontend|`tui::run`]] / `headless::run`) builds it from
 handles the trunk already minted at construction, so fleet and nodes never
@@ -279,31 +286,31 @@ subtree, `cancel_descendants(root)` abandons a returning agent's children withou
 advancing the global generation, and `clear_subtree(root)` reaps a subtree and
 bumps the generation, so a late result or deferred surface batch from a cleared
 generation is still dropped. Each cancelled node is stopped **across both
-layers**: its cooperative `Token` (read by the drive loop between steps and
+layers**: its cooperative `Token` (read by `deliberate` between steps and
 raced by the provider's mid-stream cancel) *and* the eval layer through the
 entry's `reach: Option<EvalReach>` (`fleet/registry.rs`, minted from the
 seat at registration) — `EvalReach::Identity` holds the session's durable
-root (`Shell::cancel_handle`) for `terminate` and the turn-scope cell for
+root (`Shell::cancel_handle`) for `terminate` and the run-scope cell for
 `interrupt`, while `EvalReach::Wire`'s only host-reachable primitive is
 `Control::Cancel` on the in-flight dispatch, so both motions resolve to it
 — and a `ral` eval already in flight
 unwinds at the evaluator's poll points instead of grinding to its
 `timeout_secs` wall. The trunk registers no eval-root — its session outlives
-any cancel; Esc reaches its turn through the published foreground slot
+any cancel; Esc reaches its exchange through the published foreground slot
 ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
 [[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
-**per-tab turn interrupt**, not a cascade: they stop only the *focused* agent's
-current turn (`AgentRegistry::interrupt(id)`, or `cancel::raise_interrupt` on
+**per-tab exchange interrupt**, not a cascade: they stop only the *focused* agent's
+current exchange (`AgentRegistry::interrupt(id)`, or `cancel::raise_interrupt` on
 the trunk), leaving its descendants running
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
-sticky token is cleared at each turn boundary (`Token::reset`).
+sticky token is cleared at each exchange boundary (`Token::reset`).
 
 Cancelling `eval_root` already reaches a cancelled node's own detached `ral`
 workers with no edge of its own: a worker's cancel scope is a child of its
 shell's durable root, and every `CancelScope::is_cancelled` walks its
 ancestors. What the cascade does *not* reach is a node that ends without
 ever being cancelled — the ordinary `reply`/settle path, or the trunk's own
-end-of-`drive` `deregister` — since neither touches the registry's cascade
+end-of-`attend` `deregister` — since neither touches the registry's cascade
 primitive at all. `Agent`'s `Drop` closes that gap in one place: it cancels
 every worker still registered on its own shell and clears its own armed
 schedules unconditionally, the same law `clear` already applies explicitly
@@ -312,8 +319,8 @@ below, so a settled-but-never-cancelled agent leaks neither
 
 ## The provider is per-agent and hot-swappable
 
-`ProviderHandle` is owned by the `Agent`, not threaded through `drive`'s
-parameters. `drive` reads `self.provider.current()` once per turn. `/model` swaps
+`ProviderHandle` is owned by the `Agent`, not threaded through `attend`'s
+parameters. `take_up` reads `self.provider.current()` once per item. `/model` swaps
 the **focused** agent's handle directly on the UI thread (via the registry), so a
 swap on one agent never disturbs another. `fork` seeds the child's own handle
 from the parent's current provider (`ProviderHandle::new(self.provider.current())`),
@@ -325,7 +332,7 @@ so the child inherits the model in force at spawn and may diverge afterward.
 it re-runs the seat's ceremony (`Seat::clear`) — the identity seat reboots a
 fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
 scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
-turn-scope cell; a wire session instead clears by killing its engine
+run-scope cell; a wire session instead clears by killing its engine
 process and booting a fresh one from the same recipe, so no caller routes
 `/clear` to that seat — truncates and restarts the event log, clears the
 schedule registry, and cascades cancel to its subtree. Replacing the
@@ -343,11 +350,11 @@ context. It is the focused agent's, not a fleet-wide reset.
 crosses the window's reserve (`digest.rs`'s `compaction_due` — used tokens
 into the top 15% of a known window; `COMPACT_THRESHOLD`, 500 KiB of serialised
 history, is the fallback when the window is unknown) and `AgentLog::can_compact`
-holds (no pending tool results). It is called at the **top of `apply`**, where the agent is
-`ReadyForUser` ([[invariants/turn-ends-ready|turn-ends-ready]]) and the gate
-actually holds — every provider round-trip passes through here, so long
-autonomous and headless turns stay bounded without an interactive `/compact`. A
-turn-boundary Esc bails before the summarize request
+holds (no pending tool results). It is called at the **top of `deliberate`**, where the agent is
+`ReadyForUser` ([[invariants/turn-ends-ready|exchange-ends-ready]]) and the gate
+actually holds — every provider round-trip (`step`) passes through here, so long
+autonomous and headless sessions stay bounded without an interactive `/compact`. An
+exchange-boundary Esc bails before the summarize request
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 A successful `AgentLog::apply_compaction` physically drains
 `events[..suffix_start]` from the in-memory mirror after the archival
@@ -365,7 +372,7 @@ Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
 by construction: no walk, no cost, ever. Configured, it rides the same
 `ral_epoch` the settled-worker and binding-lease sweeps already read,
 amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, at the same
-ready boundary as `reconcile_service_pins`/`reap_bindings` in `drive`'s loop.
+ready boundary as `reconcile_service_pins` in `attend`'s loop.
 Crossing the ceiling (session log dir + `EXARCH_SCRATCH`, summed via the
 existing `resources::dir_size`) emits one `Kind::SystemNote`, latched until
 a later check finds the total back under — one warning per excursion, not
@@ -399,7 +406,7 @@ mirrors on the bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
 `inherit_context`, minting a *conversing* peer tab with the parent's verbatim
 authority ([[decisions/260705_branch-minimal|branch-minimal]]). A builtin
 spawn takes the decomposed path instead: the `agent` verb's body forks the
-session into the turn's nursery (`Shell::fork_into_nursery`), and the desk's
+session into the run's nursery (`Shell::fork_into_nursery`), and the desk's
 `agent-start` arm adopts it and calls `Agent::assemble` at one less unit of
 fuel ([[map/exarch/builtins|builtins]]). The `` `mnemon `` memory mode
 additionally forks
@@ -408,7 +415,7 @@ the parent's `AgentLog` and imports its model-visible context before assembly
 drops a pending unanswered assistant tool-call frame when the parent is
 mid-dispatch, so the child inherits a request context rather than a dangling
 provider protocol. Both memory modes seed the launch prompt through the
-child's inbox, so the prompt enters through the same turn path.
+child's inbox, so the prompt enters through the same item path.
 
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `view-text`, `grep-files`,

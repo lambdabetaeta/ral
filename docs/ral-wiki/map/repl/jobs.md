@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -21,7 +21,7 @@ Statuses remain total kernel data through rustix's transparent `WaitStatus`;
 stopped, continued, exited, and signalled observations need no fallible enum decode
 ([[decisions/260720_total-wait-status|total-wait-status]]). The table backs the
 four captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
-`disown` — and is reaped each turn and on exit by the [[map/repl/loop|session]].
+`disown` — and is reaped each iteration and on exit by the [[map/repl/loop|session]].
 A bare `fg`/`bg`/`disown` defaults to `most_recent_id` (the highest, == newest,
 job id) per SPEC §18. `reap` requests continued as well as stopped statuses, so
 a group resumed out-of-band by an external `kill -CONT` flips back to running
@@ -44,8 +44,8 @@ through the Job Object's KILL_ON_JOB_CLOSE flag.
 
 On Unix, **`fg` resumes a parked group only through a held terminal lease**: the
 controlling-terminal handoff is an unforgeable [[map/core/shell-state|TerminalLease]]
-the turn is given, not a predicate `wait_foreground` re-derives. The accessor
-yields `Some(&TerminalLease)` only when the installed turn's access permits and
+the run is given, not a predicate `wait_foreground` re-derives. The accessor
+yields `Some(&TerminalLease)` only when the installed run's access permits and
 the session owns the lease (see [[decisions/260619_terminal-lease|terminal-lease]]);
 the [[map/core/io-process|ForegroundGuard]] acquires `tcsetpgrp` + the termios
 snapshot only on that borrow. Without a lease — a non-interactive resume — there

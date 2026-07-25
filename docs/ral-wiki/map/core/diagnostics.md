@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -26,15 +26,15 @@ the IR free of presentation state.
 render.** A `SourceLoc` (`diagnostic.rs` — the script position of a runtime
 error) carries the `FileId` of the source its `line`/`col` index — the script
 or module active when the error was raised — alongside `len`. `SourceDb`
-(`source.rs`) is the registry of every source the current turn has loaded,
-keyed by `FileId`: it lives on `SessionState::sources` (a turn resets and
-seeds it at turn start; hosts read it after the turn returns to render), while
-the turn-local cursor — `LocationCursor` in `diagnostic.rs`, with the
+(`source.rs`) is the registry of every source the current run has loaded,
+keyed by `FileId`: it lives on `SessionState::sources` (a run resets and
+seeds it at run start; hosts read it after the run returns to render), while
+the run-local cursor — `LocationCursor` in `diagnostic.rs`, with the
 active-source cache, the `current` id, and the `CallSite` snapshot — rides on
-`TurnState::loc`. `Shell::install_script_context` registers each source and
+`RunState::loc`. `Shell::install_script_context` registers each source and
 makes it `current`; `ScriptContextGuard` (module loads, the REPL plugin
-loader) saves and restores `current` around a load, and core's per-turn
-`TurnGuard` swaps the whole cursor with the rest of the turn frame, while the
+loader) saves and restores `current` around a load, and core's per-run
+`RunGuard` swaps the whole cursor with the rest of the run frame, while the
 registered source stays in the db.
 
 This is the structural fix for the cross-source caret: a runtime error raised

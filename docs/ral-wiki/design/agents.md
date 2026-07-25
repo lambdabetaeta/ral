@@ -1,7 +1,7 @@
 # Agents: the uniform node, the tree, and the parent-less trunk
 
 **An exarch run is a *fleet* of structurally identical *agents* arranged in a
-tree, driven by the single shared `drive` loop; the only thing that distinguishes
+tree, driven by the single shared `attend` loop; the only thing that distinguishes
 one agent from another is its *position* — whether it has a parent.** A sub-agent
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
 from a value-snapshot of its parent's shell, with a narrowed capability ceiling
@@ -81,12 +81,12 @@ One call:
   child's `cd`, env, and new bindings die with it; there is no flow-back, and the
   parent receives a string, not the child's bindings. The isolation mirrors a
   [[design/pipelines|byte-pipeline stage]]'s subshell;
-- **runs it on a detached thread** through the same `drive` loop, returning a
+- **runs it on a detached thread** through the same `attend` loop, returning a
   receipt `[name: Str, log-dir: Str]` at once — a ral record the
   script can bind and fan out over. The child runs off the
-  parent's critical path — the one shape in-turn concurrency cannot express, the
-  parent turn ending before the child does;
-- **delivers the child's single reply later** as a marked `Turn` through the
+  parent's critical path — the one shape in-exchange concurrency cannot
+  express, the parent exchange ending before the child does;
+- **delivers the child's single reply later** as a marked `Item` through the
   parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
   rendered to prose at the consuming edge.
 
@@ -160,10 +160,10 @@ authority, and does not wait for an answer. The durable result path remains
 `reply`; the durable cancellation path remains `agent-cancel`, addressed by name
 the same way.
 
-## Cancellation: a key interrupts one turn; a terminator cascades the subtree
+## Cancellation: a key interrupts one exchange; a terminator cascades the subtree
 
-`Esc` and `Ctrl-C` are a **per-tab turn interrupt** — they unwind only the focused
-tab's current turn, never a subtree and never an agent
+`Esc` and `Ctrl-C` are a **per-tab exchange interrupt** — they unwind only the focused
+tab's current exchange, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
 but only behind the **lifecycle terminators**: the `agent-cancel` builtin, the
 per-agent idle-lease reaper, and `/clear`. They share one registry cascade — the
@@ -173,8 +173,8 @@ the generation, dropping a late result or deferred surface batch from a cleared
 generation. A settling `reply` still cancels only the returning node's proper
 descendants — a parent may abandon unfinished children, but never leave live agents
 registered beneath a settled node. This refines
-[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus turn
-token now interrupts one turn in place, while the subtree cascade is the
+[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus cancel
+token now interrupts one exchange in place, while the subtree cascade is the
 terminators' alone.
 
 ## Self-scheduling is inherited
@@ -232,7 +232,7 @@ labels, commitments retired),
 [[decisions/260622_agent-reply-tool|agent-reply-tool]],
 [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]],
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]],
-[[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab turn
+[[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab exchange
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing parented child
 whose `returns` bit is fixed false at construction).

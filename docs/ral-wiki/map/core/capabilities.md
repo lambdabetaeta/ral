@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -193,10 +193,10 @@ profile inherits: deny-default, libSystem/dyld startup allowances, common device
 writes, and the runtime support needed before the policy-derived fs/net/exec rules
 can matter. Its broad `file-ioctl` compatibility allowance deliberately leaves
 `/dev/tty` configurable, because sandboxed full-screen children need termios and
-window-size ioctls when a turn has an explicit terminal loan. This is a known
+window-size ioctls when a run has an explicit terminal loan. This is a known
 hole: the current `SandboxProjection` carries fs/net/exec, not terminal-loan
 state, so the Seatbelt profile cannot yet deny `/dev/tty` ioctls for ordinary
-Denied-terminal tool turns while admitting them for `_ed-tui`-style children.
+Denied-terminal tool runs while admitting them for `_ed-tui`-style children.
 The notification-center carve-out is named in the POSIX shared-memory namespace
 (`ipc-posix-name "apple.shm.notification_center"`), matching Apple's profiles.
 

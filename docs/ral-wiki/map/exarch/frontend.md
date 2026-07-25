@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/bus.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -20,17 +20,17 @@ one inbound inbox**, defined by `bus.rs`:
   `Pin`/`Unpin`, or a worker's `Done` — decoded onto the bus by
   [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` and drawn by one
   generic interpreter ([[map/exarch/cards|cards]]).
-- `Inbox` is the typed inbound twin — a per-session queue of `InboxMsg`s, each
-  carrying its source and drain boundary. User steering drains mid-turn at a
-  tool boundary (`drain_tool`); a scheduled wakeup or a settled async agent
-  drains at the turn boundary as its own marked `Turn` (`drain_turn`)
+- `Inbox` is the typed inbound twin — a per-session queue of `Post`s, each
+  carrying its source and drain boundary. User steering drains mid-exchange at a
+  tool boundary (`drain_steering`); a scheduled wakeup or a settled async agent
+  drains at the exchange boundary as its own marked `Item` (`next_item`)
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
 - a `FleetBus` owns the event channel and the inbox; `pump` borrows it, runs
   the worker on a scoped thread, drains events into the sink, and reports a
-  worker panic as a final `Kind::Error`. Completion is the per-turn `done` flag,
-  latched by `drain_pass` so a turn ends even while a background producer keeps
+  worker panic as a final `Kind::Error`. Completion is the per-exchange `done` flag,
+  latched by `drain_pass` so an exchange ends even while a background producer keeps
   the channel non-empty — never the channel's state
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 - the channel itself is bounded and coalescing, not a bare `mpsc` pair
@@ -48,15 +48,15 @@ one inbound inbox**, defined by `bus.rs`:
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
 uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
-headless and test sinks build a **per-turn** bus that closes when the worker
+headless and test sinks build a **per-exchange** bus that closes when the worker
 finishes, keeping async children muted to their own log.
 
 `agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
 - the in-memory event mirror — renders the next provider request, drives
   the protocol state machine (`is_ready` gates a fresh prompt and `quiesce` winds
-  any in-flight turn back to it, so a turn never strands a prompt mid-protocol;
-  [[invariants/turn-ends-ready|turn-ends-ready]]);
+  any in-flight exchange back to it, so an exchange never strands a prompt mid-protocol;
+  [[invariants/turn-ends-ready|exchange-ends-ready]]);
 - a pretty-printed `events.json`, appended as each event lands — the post-mortem
   "model view". Oversize tool-result sections are elided head+tail at the
   [[map/exarch/agent|digest]] caps before they ever enter the log.
@@ -163,7 +163,7 @@ Two `Sink` implementations:
  also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
  `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
  blocks are already durable in `user.log`/`events.json`.
- `/clear` also cancels the in-flight model turn: `route_submit` raises
+ `/clear` also cancels the in-flight exchange: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
  one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
@@ -173,18 +173,18 @@ Two `Sink` implementations:
  The TUI owns the REPL loop and the raw-mode / bracketed-paste /
  alt-screen / mouse-capture guard. Every tab shares one submit path: a typed
  line goes to the *focused* agent (the prompt chrome follows the focused tab,
- not the trunk), and a prompt submitted while a turn runs
- is posted to the `Inbox`; the dispatch loop drains non-slash steering at
- the next safe tool boundary, and the rest lands at the turn
+ not the trunk), and a prompt submitted while an exchange runs
+ is posted to the `Inbox`; `run_batch` drains non-slash steering at
+ the next safe tool boundary, and the rest lands at the exchange
  boundary — a coalesced human run, or a wakeup / settled agent as its own
- marked turn. A committed human turn echoes on the `RailShape::Prompt` band;
+ marked item. A committed human prompt echoes on the `RailShape::Prompt` band;
  a wakeup stays dim, ambient chrome with no rail glyph (`RailShape::Plain`).
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
  `/export`, `/model`, `/login`, `/resources`) run on the UI thread; session commands
  (`/clear`, `/compact`, `/branch`, `/quit`) enter the focused
- agent's inbox as `Command` turns and run in `ReplControl`. `/branch`
+ agent's inbox as `Command` items and run in `ReplControl`. `/branch`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,
  the one command admitted off the trunk, kills the focused branch and its
@@ -201,30 +201,30 @@ Two `Sink` implementations:
   while device polling checks it before each bounded request.
 - `headless.rs` — one-shot pipe: assistant tokens to `out` (or, under
   `--output-format json`, one result object built from the root's `reply`),
-  every other event condensed to one line on `err`, exit after one seed turn.
+  every other event condensed to one line on `err`, exit after one seed exchange.
   The sink projects onto an explicit writer pair: `run`/`converse` are the
   CLI's wrappers over the process's real stdout/stderr, and `converse_on`
   hands the same projection to a non-CLI host (synod's GUI) one exchange at a
   time on a parked interactive trunk.
-  Takes the default `Sink::drive` and a per-turn bus, so its async children stay
+  Takes the default `Sink::drive` and a per-exchange bus, so its async children stay
   muted. It is a display only — the durable `transcript.jsonl` / `events.json`
   are written by each session's own `agent/transcript.rs` / `agent/event.rs`
   seams, in headless exactly as in the TUI.
 
-`agent/cancel.rs` is the per-agent turn cancellation layered on ral's interrupt
+`agent/cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
 handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
-whole drive; the drive loop `reset`s it at each genuine turn boundary. Esc /
-Ctrl-C interrupt the *focused tab's* current turn — never a cascade, never a
+whole attend; the attend loop `reset`s it at each genuine exchange boundary. Esc /
+Ctrl-C interrupt the *focused tab's* current exchange — never a cascade, never a
 subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): on the trunk
 they route through `raise_interrupt`, which cancels the trunk's published token
-and asks ral to cancel the current turn's foreground scope; on any other
-focused tab, `agents.interrupt(id)` unwinds that agent's turn and eval root
+and asks ral to cancel the current exchange's foreground scope; on any other
+focused tab, `agents.interrupt(id)` unwinds that agent's exchange and eval root
 through the registry. Only the trunk `publish`es its token's flag into the
 lock-free process-global slot for the OS signal handler (a handler must not
 lock), so the provider's mid-stream cancel race observes the same cancellation.
 The TUI key table keeps UI control separate from cancellation: idle Ctrl-C/Ctrl-D
-quit, overlays close, and only active-turn Ctrl-C/Esc drive ral's
-non-escalating foreground cancel. A single press stops the turn loop /
+quit, overlays close, and only active-exchange Ctrl-C/Esc drive ral's
+non-escalating foreground cancel. A single press stops the exchange /
 in-flight HTTP future and unwinds the in-flight eval at its next poll point;
 because the path never escalates the signal count, repeated presses cannot
 reach ral's third-signal `_exit`
@@ -234,7 +234,7 @@ exarch's routine after ral's, so it runs first in the last-registered-first
 chain, handles Ctrl-C/Ctrl-Break itself — `raise` plus ral's non-escalating
 `relay_interrupt`, which cancels the foreground scope and fans a Ctrl-Break to
 every live, non-detached pipeline group — and reports them handled, so ral's
-escalating disposition never ticks for a turn-cancel; window-close / logoff /
+escalating disposition never ticks for an exchange-cancel; window-close / logoff /
 shutdown pass through unhandled to that disposition, the analogue of
 SIGTERM/SIGHUP staying on the escalating path. Raw mode disables
 `ENABLE_PROCESSED_INPUT`, so Ctrl-C reaches the TUI as an ordinary key event

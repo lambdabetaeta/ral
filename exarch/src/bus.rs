@@ -3,7 +3,7 @@
 //!
 //! # Lock order: inbox before registries
 //!
-//! A drive loop evaluates its park verdict *while holding its inbox queue
+//! The attend loop evaluates its park verdict *while holding its inbox queue
 //! mutex* — [`Inbox::next_or_idle`] recomputes it under the lock on every
 //! wake — and the verdict reads the fleet's `AgentRegistry` and the
 //! session's `ScheduleRegistry`.  The process-wide lock order is therefore
@@ -54,7 +54,7 @@ pub type AgentId = u64;
 /// result, a scheduled wakeup, a settled `spawn`'s surface batch, a self-nudge
 /// — so it reaches the model as soon as the current tool batch settles rather
 /// than waiting out the whole exchange.  The sole exception is
-/// [`Post::Command`]: it is handed to the drive loop's `Control` (a
+/// [`Post::Command`]: it is handed to the attend loop's `Control` (a
 /// `/model` swap, a `/clear`), never shown to the model, so it waits for the
 /// exchange boundary where the session is `ReadyForUser`.  A slash-prefixed
 /// [`Post::UserSteering`] waits there too, purely to keep its place
@@ -267,7 +267,7 @@ pub enum Post {
     /// [`Mailbox`], never across agents.
     Nudge(String),
     /// A session-affecting slash command (`/clear`, `/model`, `/compact`,
-    /// `/quit`) the frontend posted at the exchange boundary.  The drive loop —
+    /// `/quit`) the frontend posted at the exchange boundary.  The attend loop —
     /// which owns the session the command mutates — hands it to its
     /// [`Control`](crate::agent::Control); view-only commands (`/help`,
     /// `/copy`, …) are handled frontend-side and never reach here.  Carries
@@ -421,7 +421,7 @@ fn surface_notice(values: &[Value]) -> String {
 /// The next deliverable an exchange-boundary drain yields, carrying both the
 /// model-facing text *and* its source.
 ///
-/// Each deliverable carries the source it came from, so the driver renders
+/// Each deliverable carries the source it came from, so the attend loop renders
 /// it in its honest medium — a human prompt echoes as the user's turn, a
 /// wakeup as marked chrome, an agent reply as the same `↘` block a
 /// synchronous child gets — while the model still receives [`Self::text`]
@@ -444,7 +444,7 @@ pub enum Item {
     /// with no human chrome and, crucially, does **not** reset the exchange
     /// latches — it is the same exchange continuing.
     Nudge(String),
-    /// A session-affecting slash command for the drive loop's [`Control`]
+    /// A session-affecting slash command for the attend loop's [`Control`]
     /// (`/clear`, `/model`, `/compact`, `/quit`).  Carries the raw line.
     ///
     /// [`Control`]: crate::agent::Control
@@ -550,7 +550,7 @@ impl Shared {
     ///   ([`Post::boundary`]) always survives intact.
     /// - `Nudge` replaces a still-queued nudge outright (newest wins,
     ///   mirroring `ScheduledWakeup`) rather than adding a second: it is
-    ///   always self-pushed by the agent's own drive loop reacting to one
+    ///   always self-pushed by the agent's own attend loop reacting to one
     ///   deliberation's outcome, so at most one is ever meaningfully outstanding —
     ///   a second one queuing means a fresher continuation superseded the
     ///   first, not that both are owed to the model.
@@ -684,10 +684,10 @@ impl Mailbox {
 }
 
 /// A session's inbox: the owned **consumer** of the typed, multi-producer
-/// queue the agent's drive loop pulls its next item from.  Senders are minted
+/// queue the agent's attend loop pulls its next item from.  Senders are minted
 /// with [`Self::mailbox`].
 ///
-/// The drive loop drains tool-boundary messages mid-exchange ([`Self::drain_steering`],
+/// The attend loop drains tool-boundary messages mid-exchange ([`Self::drain_steering`],
 /// from `deliberate`) and exchange-boundary items at the boundary
 /// ([`Self::next_or_idle`]); a drained message disappears from the pending
 /// strip and cannot be delivered twice.
@@ -776,7 +776,7 @@ impl Inbox {
 
     /// Pending user-authored steering prompts, oldest first, for the TUI's
     /// queue strip.  Non-human deliveries and slash-command control items stay
-    /// invisible here: they are work for the drive loop, not queued user text.
+    /// invisible here: they are work for the attend loop, not queued user text.
     pub fn queued_user_messages(&self) -> Vec<String> {
         self.shared
             .lock()
@@ -813,7 +813,7 @@ impl Inbox {
 
     /// Mid-exchange drain at a tool-call boundary: take the leading run of
     /// tool-boundary messages — every source but a slash command — and deliver
-    /// them, in order, each tagged with its source so the driver renders it in
+    /// them, in order, each tagged with its source so the attend loop renders it in
     /// its honest medium (a `↘` subagent block for an agent result, a marked
     /// wakeup, the cards of a settled `spawn`).  A consecutive run of user
     /// steering coalesces into one [`Item::Human`].
@@ -849,14 +849,14 @@ impl Inbox {
 
     /// Exchange-boundary drain: the next deliverable, tagged with its source, or
     /// `None` if the queue is empty.  Never blocks — see [`Self::next_or_idle`]
-    /// for the parking variant the drive loop uses.
+    /// for the parking variant the attend loop uses.
     pub fn next_item(&self) -> Option<Item> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         pop_item(&mut q, epoch)
     }
 
-    /// The drive loop's exchange-boundary pull.  Returns the next deliverable; on
+    /// The attend loop's exchange-boundary pull.  Returns the next deliverable; on
     /// an empty queue the `park` verdict — recomputed on every wake — decides
     /// whether to park or terminate ([`ParkMode`]):
     ///
@@ -967,7 +967,7 @@ impl Inbox {
 /// nor merges with the steering behind it, so it is always delivered alone,
 /// as ordinary prompt text — the same rule [`Inbox::drain_steering`] already
 /// applies at the tool boundary.  Every other source is delivered on its own
-/// so the drive loop can render each in its honest medium.
+/// so the attend loop can render each in its honest medium.
 ///
 /// `epoch` is this inbox's *current* clear-epoch, read by the caller under
 /// the same lock this function runs under.  A `ScheduledWakeup` whose stamped
@@ -1107,7 +1107,7 @@ pub enum Kind {
     Usage(Usage),
     Step {
         /// Steps in the current segment: restarts at 1 each time this
-        /// drive loop resumes (e.g. after an async-spawned block settles),
+        /// attend loop resumes (e.g. after an async-spawned block settles),
         /// so a run-wide step count is the consumer's own running tally
         /// (`headless::Headless::steps`), not this field.
         n: u32,
@@ -1171,14 +1171,14 @@ pub enum Kind {
     UserPromptEcho(String),
     StopReason(String),
     Error(String),
-    /// An operational note the agent's driver issued — a truncation recovery,
+    /// An operational note the agent's attend loop issued — a truncation recovery,
     /// a compaction step.  Names *what happened*, like every other operational
     /// `Kind`; the display renders it dim, but *dimness is the renderer's
     /// choice*, not a fact in the vocabulary.  The trace records it as
     /// `system_note`; it has no `events.json` twin, since it is not a message
     /// the model saw.
     SystemNote(String),
-    /// A recovery nudge the driver issued between attempts.  The trace records
+    /// A recovery nudge the attend loop issued between attempts.  The trace records
     /// it; the display surfaces it as it sees fit (a stderr line in headless,
     /// quiet on the TUI rail).  Its `events.json` twin is the model-view
     /// forensic breadcrumb.
@@ -1275,7 +1275,7 @@ pub enum Kind {
         card: Card,
     },
     /// The `/resources` probe fold: the agent's own accumulator rows,
-    /// assembled on its drive thread at the exchange boundary the command
+    /// assembled on its attend thread at the exchange boundary the command
     /// drains at, beside the card rendering them — the raw-fact/rendering
     /// pairing of [`Kind::Io`] and [`Kind::Notice`], so
     /// `transcript.jsonl` records the rows while the card stays a
@@ -1865,8 +1865,8 @@ impl FleetBus {
     }
 
     /// An [`Emitter`] stamped with `id`, sharing this bus's sender, root
-    /// mailbox, session-lived flag, and run [`UsageMeter`].  The root drive
-    /// worker takes one; a child emitter is derived with [`Emitter::child`] /
+    /// mailbox, session-lived flag, and run [`UsageMeter`].  The root attend
+    /// thread takes one; a child emitter is derived with [`Emitter::child`] /
     /// [`Emitter::muted_child`], inheriting the same meter.
     pub fn emitter(&self, id: AgentId, transcript: Transcript) -> Emitter {
         Emitter {

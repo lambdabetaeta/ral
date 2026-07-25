@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/bus/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
@@ -28,7 +28,7 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 
 Two operation classes, each with its runtime door. Emission is the one
 `Shell::surface(&self, ev: &Value)` method (`types/shell/mod.rs`), the public door
-onto the turn-local [[map/core/shell-state|`SurfaceSink`]]; `emit_io` delegates
+onto the run-local [[map/core/shell-state|`SurfaceSink`]]; `emit_io` delegates
 to it. The typed builders and the `WriteOutcome` enum live in one place,
 `runtime/command/io_event.rs`. With no surface installed every door is inert.
 
@@ -100,7 +100,7 @@ as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. An
 `ObservationBuf` (`tui/surface.rs`, beside the patch buffer but kept separate)
 buckets a consecutive run — even *interleaved*, order-independent — into deduped
 buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
-the turn boundaries through per-kind group helpers into **one card per
+natural boundaries through per-kind group helpers into **one card per
 non-empty kind** in a fixed Read → Exec → Grep order. Writes never join the
 buffer: each write is its own block (its diff/listing preview is a barrier, not
 a foldable observation). Each group reuses the exact `io_card` span vocabulary,

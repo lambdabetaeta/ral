@@ -40,7 +40,7 @@ decision is superseded, set its status and link forward; never delete the old
 page and never rewrite history into it.
 
 **Volatile — `map/`.** The *where*. Thin per-subsystem pages (the core engine,
-the exarch turn loop, the capability sandbox, the REPL, the prelude). A map page
+the exarch attend loop, the capability sandbox, the REPL, the prelude). A map page
 points at files and symbols and links out to the durable pages; it does **not**
 reproduce code. Every map page carries frontmatter:
 
@@ -57,7 +57,7 @@ This stamp is what keeps the volatile layer honest — see Lint.
 **Operational — `internals/`.** The *how it runs*. A small, curated set of
 narratives that thread several subsystems into one flow — the compilation ladder
 from source to typed IR, the evaluator as a trampolined CBPV machine, the
-lifecycle of one turn. These are *semi-durable*: the high-level machine outlives
+lifecycle of one run. These are *semi-durable*: the high-level machine outlives
 file moves and renames, but a deep architectural decision can rewrite it. An
 internals page explains *how a behaviour is realised* in terms stable across
 refactors; it links **down** to `map/` for the symbols that realise it and

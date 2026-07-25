@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -29,7 +29,7 @@ between parent and child shells.
 - `source.rs` — `Source`, a stage's byte input: `Pipe` (upstream stage),
   `File` (a `<file` redirect parked here), `Terminal` (fall through to fd 0),
   and `Empty` (no input — immediate EOF, child stdin to `/dev/null`, *no*
-  fall-through to fd 0). `Empty` is what an exarch tool turn installs so a tool
+  fall-through to fd 0). `Empty` is what an exarch tool run installs so a tool
   command can never steal the TUI's terminal; it is kept distinct from
   `Terminal` precisely so denial of byte input and denial of foreground stay
   separate effects.
@@ -62,7 +62,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at
   most once at session construction iff ral owned the foreground at startup
   (`None` on a backgrounded or tty-less launch, and always on platforms with no
-  `tcsetpgrp`), then lent per turn as `&TerminalLease` to the one chokepoint
+  `tcsetpgrp`), then lent per run as `&TerminalLease` to the one chokepoint
   that foregrounds — `ForegroundGuard::try_acquire`, which is *uninvocable*
   without the borrow. The type lives at [[map/core/shell-state|shell-state]];
   the rationale at [[decisions/260619_terminal-lease|terminal-lease]].

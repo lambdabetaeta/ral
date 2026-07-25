@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 110771c
-verified_at_date: 2026-07-02
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop]
 ---
 
@@ -150,7 +150,7 @@ drop has the `ForegroundGuard` restore the terminal to the shell and
 `AnchorProcess::finish` `SIGCONT` *just the anchor's own pid* (not `-pgid`), so
 the anchor wakes, sees EOF on its release fd, and exits without disturbing the
 parked stages — POSIX keeps the pgid addressable while any member lives. That
-guard was acquired at launch by `claim_foreground` only when the turn held a
+guard was acquired at launch by `claim_foreground` only when the run held a
 terminal lease: `try_acquire(leader, lease)` takes a `&TerminalLease` whose
 borrow *is* the proof ral owns the controlling terminal's foreground, so the
 terminal plan and the guard ask the same authority

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -62,7 +62,7 @@ Bodies are grouped by concern, one submodule each:
   data. `await` and `poll` gate first on `ensure_live`, the cancelled pre-check
   ([[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
-  A detached worker hangs under the durable session root, not the turn's
+  A detached worker hangs under the durable session root, not the run's
   foreground scope, so a foreground cancel never reaps it; `await` shares
   `race`'s cancel-aware wait loop (`wait_first_settled`), so a deadline unwinds
   the wait while the root-scoped worker survives
@@ -74,7 +74,7 @@ Bodies are grouped by concern, one submodule each:
   under an absolute `backstop` no polling extends; a worker that finished
   ends the chain silently, its entry lingering as an unclaimed result. A
   reap removes the registry entry, records a `ReapNotice` the engine
-  pushes at the next settled turn's ready boundary as a `` `notice ``
+  pushes at the next settled run's ready boundary as a `` `notice ``
   surface event (`emit_ready_boundary_notices`; exarch decodes it back via
   `card::value_to_notice`), and cancels the worker's scope with
   `Deadline` — never detaching the handle, so a later `poll`/`await` still
@@ -85,7 +85,7 @@ Bodies are grouped by concern, one submodule each:
   policy, whose only bounds are the handle's own `cancel`, the host's
   `/clear`, and process exit.
   The spawn door also enforces the frame's admission cap
-  (`TurnState::worker_cap`): a birth of any class *reserves* its seat at
+  (`RunState::worker_cap`): a birth of any class *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
   running or reserved, with an error naming `await`/`cancel` as the
   remedies, the reservation held across thread spawn and released into the
@@ -95,7 +95,7 @@ Bodies are grouped by concern, one submodule each:
   settled entry's own lease is retention, armed once at boot
   (`Shell::arm_worker_retention`, beside the binding lease): the registry
   keeps its own clock — one `tick_epoch` per source dispatch — and the
-  engine sweeps at each settled turn's ready boundary (`sweep_retention`,
+  engine sweeps at each settled run's ready boundary (`sweep_retention`,
   engine housekeeping), stamping an entry at the first sweep that
   observes it settled and expiring it — a `Retention`-cause `ReapNotice` on
   the same drain — once its unclaimed result has sat stamped a full

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [synod/, vm-manager/, ral-daemon/, vm-image/]
 ---
 
@@ -40,7 +40,7 @@ engine process per session, driven over the design's §3 wire
   last. `begin` opens the grant, boots the machine, and seats exarch's agent
   on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over
   `Machine::take_control`, attached at the guest's `/work`); `exchange`
-  drives one message through `exarch::headless::converse_on`, bracketed by
+  drives one message through `exarch::headless::converse_sink`, bracketed by
   the safety net — a checkpoint before, a checkpoint after, even after a
   failed run; `end` closes the wire, and the guest halts itself. The model
   picker lives here too: `menu`/`refresh_menu` list what the computer's
@@ -140,8 +140,8 @@ open questions (squashfs, distribution, determinism).
 ## What is not here
 
 The Windows Hyper-V backend, and the image pipeline's open questions above.
-The rest of the design record runs: the §3 wire carries real turns
-(`synod/examples/boot-turn.rs` witnesses boot → virtiofs share → engine →
+The rest of the design record runs: the §3 wire carries real runs
+(`synod/examples/boot-run.rs` witnesses boot → virtiofs share → engine →
 settled report), the §5 spawn jail stands inside the guest (a fresh uid and
 a cgroup between the engine and what it runs), and §6's `fetch-url` answers
 the web through `exarch::fleet::egress` under IT's policy, threaded once

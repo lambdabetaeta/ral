@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -8,7 +8,7 @@ covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platfo
 
 The `ral` binary startup is a three-part front door: **`main.rs` performs
 process dispatch, `cli.rs` distils argv into a `Mode`, and `batch.rs` runs
-non-interactive programs through core's framed turn door**. Interactive sessions
+non-interactive programs through core's framed run door**. Interactive sessions
 then hand to the REPL, above a pre-clap dispatch that lets the binary re-enter
 itself in confined or helper roles.
 
@@ -84,10 +84,10 @@ every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` / `--dump-ast`;
 ## Batch execution
 
 `ral/src/batch.rs` owns the whole non-interactive pipeline. `run_batch` parses,
-elaborates, typechecks, then **runs the program through core's framed turn door
+elaborates, typechecks, then **runs the program through core's framed run door
 rather than evaluating it directly**
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]): the same
-`Shell::run_turn` entry every host shares, handed a `Program::Source` turn
+`Shell::run` entry every host shares, handed a `Program::Source` run
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
 - **The check.** The inference pass is not optional — it writes the mode wires
@@ -100,10 +100,10 @@ rather than evaluating it directly**
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); a
   clean check returns the fully annotated comp, any type error is fatal, and
   `--check` runs the same check and exits without evaluating.
-- **The turn.** `shell.run_turn(TurnRequest { … })` with
+- **The run.** `shell.run(RunRequest { … })` with
   `Program::Source(source)` runs the annotated comp under
-  `Capabilities::root()` with no turn or detached limit, inheriting IO and
-  stdin. Its `TurnReport` has two arms: `Ran` yields the `result` to score;
+  `Capabilities::root()` with no wall or detached limit, inheriting IO and
+  stdin. Its `RunReport` has two arms: `Ran` yields the `result` to score;
   `Static` cannot occur on this path (batch already typechecked) and is
   treated defensively as a fatal exit.
 - **The foreground gate.** The request's `RequestedTerminalAccess` is `Leased`
@@ -125,7 +125,7 @@ rather than evaluating it directly**
 
 ## Embedding and the baked prelude
 
-A turn-evaluating host needs three things before rc files or capability
+A run-evaluating host needs three things before rc files or capability
 frames: the prelude as a baked [[map/core|`Comp`]], its top-level scheme
 list, and its own builtin surface as a `ral_core::HostSurface`. `main`
 reaches for them through core's *driver* — the Shell-embedding seam — via a
@@ -147,7 +147,7 @@ pass), then serialises the *annotated* `Comp` and the harvested schemes into
 ([[map/core|core]]): a crate's build script cannot depend on the crate it builds,
 so core cannot bake its own prelude, and each embedding host bakes it from core's
 source. Evaluating the annotated prelude installs each binding's scheme into
-scope[0], so the per-turn seed and the baked list agree by construction
+scope[0], so the per-run seed and the baked list agree by construction
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 ## Platform glue

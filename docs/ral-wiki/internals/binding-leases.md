@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 981c02b
-verified_at_date: 2026-07-05
-anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, reap_bindings, BINDING_IDLE_CALLS, renew_one]
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
+anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS, renew_one]
 ---
 
 # Binding leases
@@ -31,29 +31,30 @@ with their frame anyway.
 
 ## The clock, and what counts as use
 
-The ledger ticks once per committed source turn — in exarch, exactly once per
-`ral` tool call. No wall clock anywhere: a quiet weekend ages nothing.
+The ledger ticks once per committed source-door run — in exarch, exactly once
+per `ral` tool call. No wall clock anywhere: a quiet weekend ages nothing.
 
 Use is read off the program text, never off the running lookup path. When a
-turn compiles, an exhaustive walk over its typed IR (`ir::referenced_names`)
+run compiles, an exhaustive walk over its typed IR (`ir::referenced_names`)
 collects every variable occurrence and command-head name and renews those
-entries; the same harvest runs when `source`/`use` compile code mid-turn, and
+entries; the same harvest runs when `source`/`use` compile code mid-run, and
 a dispatch-time touch (`classify_command`'s `Resolution::Env` arm,
 `BindingLedger::renew_one`) catches command heads that resolve to a binding
 at runtime. Writing a name is also using it — a rebind restamps at the
-chokepoint. A turn that fails to parse or typecheck ticks the clock but
-renews nothing: failed turns age your scratch. Listing (`/resources`, any
+chokepoint. A run that fails to parse or typecheck ticks the clock but
+renews nothing: failed runs age your scratch. Listing (`/resources`, any
 enumeration) renews nothing either — enumeration is not observation.
 
 ## What pruning does — and deliberately does not do
 
-At each ready boundary the agent's drive loop calls
-`Shell::prune_idle_bindings` (beside the worker-reap drain,
-`Agent::reap_bindings`). Every entry idle past the bound is examined: a name
-whose value still structurally reaches a *running* worker handle is pinned
-and re-checked next boundary (`pins_running_work` — it recurses lists, maps,
-and variant payloads, and deliberately never looks inside a closure's
-captured environment); everything else is unset — value and type-scheme seed
+At each ready boundary — the tail of every `Shell::run` —
+`Shell::emit_ready_boundary_notices` calls `Shell::prune_idle_bindings`
+beside the worker-reap drain (`take_worker_reap_notices`). Every entry idle
+past the bound is examined: a name whose value still structurally reaches a
+*running* worker handle is pinned and re-checked next boundary
+(`pins_running_work` — it recurses lists, maps, and variant payloads, and
+deliberately never looks inside a closure's captured environment);
+everything else is unset — value and type-scheme seed
 in one act — and one dim transcript card names what fell. The verb returns
 the prune notices *together with* a post-prune `MobileSnapshot` the host must
 adopt as its panic-recovery checkpoint, so a later panic rollback cannot
@@ -71,11 +72,11 @@ The case that looks alarming and isn't:
 
 ```
 let big = <5 MB of text>
-let f = { … $big … }        # then f is called every turn
+let f = { … $big … }        # then f is called every run
 ```
 
-`f` renews every call — its name is in each turn's text. `big` does not: its
-reference lives inside `f`'s stored body, compiled once on the turn that
+`f` renews every call — its name is in each run's text. `big` does not: its
+reference lives inside `f`'s stored body, compiled once on the run that
 defined `f`; later calls recompile nothing, so nothing harvests `big` again.
 After 256 idle calls the live name `big` is pruned — and `f` keeps working,
 forever. A closure captures an `Arc<Env>` snapshot at creation and resolves

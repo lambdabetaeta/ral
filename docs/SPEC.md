@@ -1,4 +1,4 @@
-<!-- verified_at_commit: fc49779 -->
+<!-- verified_at_commit: f7cf93a -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -721,16 +721,16 @@ visible stream rather than being silently dropped.
 
 #### 4.3.1  Top-level vs block evaluation boundary
 
-Two evaluation modes are observable to user code: a **top-level turn**
+Two evaluation modes are observable to user code: a **top-level run**
 and a **block**.  They differ in what they hand back to their caller.
 
-A top-level turn — a script file, a `-c` argument, a REPL line, an
+A top-level run — a script file, a `-c` argument, a REPL line, an
 exarch tool call — runs a computation and **persists** every
 program-state effect it produced.  `let` bindings, `cd`, `env-set`,
 alias registrations, module loads, and the recorded last status all
-remain visible to the next top-level turn.  The same applies on
+remain visible to the next top-level run.  The same applies on
 failure and on `exit`: bindings entered before a failing command stay
-bound for the next turn, and a `try` handler running at top level
+bound for the next run, and a `try` handler running at top level
 observes the partial state.  This is why a REPL session is
 incremental.
 
@@ -757,19 +757,19 @@ echo $y                       # error: y unbound
 ```
 
 ```
-# at the REPL, one turn per line
+# at the REPL, one run per line
 ▸ let x = 1
 ▸ let x = 2
-▸ echo $x        # 2 — top-level turns persist
+▸ echo $x        # 2 — top-level runs persist
 ```
 
 `core::evaluator` reaches these two modes through `eval_top_level`
-(top-level turn) and `apply` on a `Value::Thunk` (block, via the
+(top-level run) and `apply` on a `Value::Thunk` (block, via the
 trampoline's value dispatch).  Both entries carry the boundary's
 transport semantics — mobile persistence and the local-vs-confined
 transport selection in a single call.  The distinction is part of
 the language, not the implementation: every frontend exposes these
-semantics to user code (a REPL line *is* a top-level turn; a `grant`
+semantics to user code (a REPL line *is* a top-level run; a `grant`
 body *is* a block), and any conforming implementation must respect
 them.  Today the implementation is staged: exarch's tool-call
 evaluator and the tests route through `evaluator::eval_top_level`;
@@ -1197,7 +1197,7 @@ echo $r[stderr]
 
 A delivered SIGINT, SIGTERM, or SIGHUP is translated into a
 **cancellation cause** on the session's cancel-scope tree; there is
-no separate signal flag.  SIGINT cancels the current foreground turn
+no separate signal flag.  SIGINT cancels the current foreground run
 (message `"interrupted"`, status 130); SIGTERM and SIGHUP cancel the
 session root (message `"terminated"`, status 143 = 128 + SIGTERM), so
 detached workers (§13) unwind along with the foreground, and an
@@ -1211,7 +1211,7 @@ by cause: SIGINT-first for an interrupt, SIGTERM-first for a
 terminate, each with a short grace period before a process-group
 SIGKILL.  At the poll point the cancellation surfaces as an ordinary
 failure, so the unwinding runs `guard` cleanups on the way out.  The
-cause is sticky for the turn and monotone — a later, weaker cause
+cause is sticky for the run and monotone — a later, weaker cause
 never masks a stronger one — so a `try` may observe the failure but
 cannot suppress the unwinding: the next poll point raises it again.
 A third delivered signal terminates the process immediately with
@@ -1849,8 +1849,8 @@ to sample.  The prelude predicate `is-done h` reduces `poll` to a `Bool`:
 ### 13.4  Child lifetime
 
 A spawned worker is *detached*: it hangs under the session's durable
-cancel root, not under the turn's foreground scope, so it outlives the
-turn that launched it and a foreground cancel — a turn deadline or an
+cancel root, not under the run's foreground scope, so it outlives the
+run that launched it and a foreground cancel — a run deadline or an
 interrupt — does not reach it.  There is no detach operator: dropping
 a handle binding is fire-and-forget, and the worker keeps running
 until something below stops it.
@@ -1929,12 +1929,12 @@ for stdout and `[LABEL:err] ` for stderr. `watch` returns a
 `Handle`, so awaiting, racing, and cancelling apply as for `&`.
 
 Because a watched worker is detached yet keeps writing as it runs, its
-output sink must outlive the turn. `watch` is therefore a builtin the
+output sink must outlive the run. `watch` is therefore a builtin the
 **host installs** into its own shell's builtin table (§16), not one the
 language ships everywhere: a host whose stdout is a durable sink (the
 `ral` shell, interactive or batch, writing to a terminal or pipe)
 installs it; a host whose active streams are per-call capture buffers —
-an embedding that collects each turn's output — does not, so in that
+an embedding that collects each run's output — does not, so in that
 shell's table `watch` is simply not a builtin and naming it resolves as
 any other unknown command would.  Per-shell scope also fixes where the
 name resolves: workers, pipeline stages, and session forks inherit the
@@ -2420,7 +2420,7 @@ its process group.  At the prompt, it discards the current line and
 redraws.  In a non-interactive script, it begins the unwinding
 process described in §10.7.
 
-**Value display.** A REPL turn that produces a value echoes it back
+**Value display.** A REPL run that produces a value echoes it back
 through the shared value pretty-printer — the same renderer exarch's
 value channel uses, tuned per surface.  Collections print bracketed,
 inline while they fit the width and one entry per line beyond it;
@@ -2801,7 +2801,7 @@ and, when the kind and reason admit one, a hint:
 Mismatch messages are symmetric — "couldn't match X with Y" rather
 than expected/actual — because the orientation depends on which side
 raised the constraint.  Every checking path runs the same
-typechecker: a REPL turn, `source`, a script run, and the baking of
+typechecker: a REPL run, `source`, a script run, and the baking of
 the prelude itself, so an ill-typed prelude definition is a build
 failure rather than a latent error.
 

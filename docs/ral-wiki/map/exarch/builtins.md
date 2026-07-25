@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/egress.rs, exarch/src/org_policy.rs, exarch/data/agent.ral]
 ---
 
@@ -75,7 +75,7 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   cached process-globally, so forked children sharing the cwd reuse it.
 
 Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
-through core's atomic door under the turn's pushed [[design/grant|grant]]
+through core's atomic door under the run's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 
 ## Legibility by lease class — `service`, `service-handle`
@@ -96,7 +96,7 @@ splits by class instead:
 - A `service`-born worker (`class: Durable`) is bound only by legibility, so
   that bound is structural: the host reconciles a protected `services` pin —
   one row per live service, keyed by id and its birth description, born and
-  retired at the drive loop's ready-boundary pass
+  retired at the attend loop's ready-boundary pass
   (`Agent::reconcile_service_pins`, `card::services_pin_card`). The pin is
   the one host-owned, write-protected register slot — unwritable by the
   program
@@ -121,7 +121,7 @@ only, by the id shown on the `services` pin. An id naming an ephemeral
 `spawn`/`watch` worker is refused exactly like an unknown one — an ephemeral
 worker's rediscovery path is the binding lease, not enumeration by id. A bare
 top-level `service-handle N` result cannot cross the host seam (a `Handle` is
-not ground) — it exists to be composed with an eliminator in the same turn:
+not ground) — it exists to be composed with an eliminator in the same run:
 `await (service-handle 3)`, `cancel (service-handle 3)`.
 
 Carried only on `builtins::host_surface()`, alongside the search/edit
@@ -192,7 +192,7 @@ error with no room for a didactic message.
 - **`unschedule <label>`** → `F Unit`.
 - **`reply <value>`** — `∀α. α → F Unit`, first-orderness checked at the
   door. The sole return path for a returning agent; last write wins within a
-  turn. Refused on every non-returning agent — the interactive trunk and
+  run. Refused on every non-returning agent — the interactive trunk and
   each `/branch` child alike, keyed on a `returns` bit fixed at
   construction — with the desk's own didactic text. The run ends only once
   the enclosing `ral` call's whole batch of statements drains, not at this

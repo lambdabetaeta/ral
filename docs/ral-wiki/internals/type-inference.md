@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a590f4f
-verified_at_date: 2026-06-18
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [Inferencer, Unifier, Pairs, unify_row, unify_mode, generalize, instantiate, annotate, SessionSchemes, PipeMode, PipeSpec]
 ---
 
@@ -71,15 +71,15 @@ and no de Bruijn index: a variable is **bound iff it is listed**.
 - Because the prefix is nominal-by-listing, an open scheme leaving its minting
   unifier aliases another's variables: see [[invariants/schemes-leave-closed|schemes-leave-closed]].
 
-**The verdict survives into the next turn.** The checker is a transformation:
+**The verdict survives into the next run.** The checker is a transformation:
 on success `annotate` writes each top-level name-bind's generalised `Scheme` onto
 its `Bind` node — and the ground mode `Wire` onto every `Pipeline` stage and `Bind`
 RHS ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]) — the
 scheme closed against the empty environment so it carries no residual variable that
-could alias the next turn's fresh ids. The next turn's
+could alias the next run's fresh ids. The next run's
 check is seeded from the live session — one `SessionSchemes` (the scope's
-name→scheme map plus the alias arms' schemes) — so a name bound in turn *N* is
-checked at its inferred scheme in turn *N+1*; a name from an unchecked path (a
+name→scheme map plus the alias arms' schemes) — so a name bound in run *N* is
+checked at its inferred scheme in run *N+1*; a name from an unchecked path (a
 `source`d file, a plugin) is `None` and infers afresh
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 

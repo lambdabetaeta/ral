@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 917119f
-verified_at_date: 2026-07-13
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox]
 ---
 
@@ -131,7 +131,7 @@ is what floors it
 [[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 
 This is the boundary [[design/exarch-architecture|exarch]] reuses unchanged — an
-agent turn is a host-pushed grant frame over this same stack.
+agent run is a host-pushed grant frame over this same stack.
 
 See also [[design/grant|grant]],
 [[design/capability-carriers|capability-carriers]] (why the rule, the live

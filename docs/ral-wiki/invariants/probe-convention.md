@@ -19,7 +19,7 @@ silence.
 
 `/resources` is a **fold over the registered probes**, not a bespoke report.
 It has two halves, split by who may legally read what: the agent assembles
-its own rows on its drive thread (the shell's worker registry and bindings,
+its own rows on its attend thread (the shell's worker registry and bindings,
 its inbox, event log, and disk) and emits them as one `Kind::Resources` —
 raw rows beside the rendered card, so `transcript.jsonl` keeps the figures —
 and the frontend appends the rows for the accumulators *it* owns (viewports,

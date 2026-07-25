@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/mode.rs]
 ---
 
@@ -36,7 +36,7 @@ Entry points (`typecheck.rs`):
 - `bake_prelude(comp) -> (Comp, Vec<(String, Scheme)>)` — called by the consumer
   `build.rs`: returns the annotated prelude comp alongside the schemes harvested
   off its `Bind` nodes (`harvest_schemes`), one walk behind both the build-time
-  bake and a turn's installs.
+  bake and a run's installs.
 - `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, ModeMismatch>`
   — infers an alias arm under the runtime handler calling convention, pins its
   `PipeSpec` to `head`'s spec (`Inferencer::pin_arm_to_head`), and closes it, for

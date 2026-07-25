@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -51,8 +51,8 @@ guards
     handoff on a held *terminal lease* (`Shell::terminal_lease` is `Some`) plus
     top-level launch role and a terminal-bound sink with no shell-side pump, not
     on REPL interactivity — so a non-interactive script launched at a terminal
-    holds a `Leased` turn and foregrounds its interactive children, while an
-    exarch `Denied` tool turn cannot construct the handoff at all
+    holds a `Leased` run and foregrounds its interactive children, while an
+    exarch `Denied` tool run cannot construct the handoff at all
     ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
     Parking a stopped child as a resumable job stays REPL-only.
   - Redirects install on the handler arm
@@ -66,7 +66,7 @@ guards
   - `io_event.rs` fixes the wire shape of the runtime I/O doors: the read door
     (`< file`), the write door (`> / >> / >|`, settled `committed`/`aborted`/
     `failed` at frame teardown), and the exec door (Host and spawned/inline
-    `BundledTool` completion). Core emits plain `Value::Map`s onto the turn's
+    `BundledTool` completion). Core emits plain `Value::Map`s onto the run's
     `surface` sink; a host (exarch) decodes them into cards. The event *shapes*
     and their card rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).

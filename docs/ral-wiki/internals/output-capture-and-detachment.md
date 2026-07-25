@@ -1,15 +1,15 @@
 ---
-verified_at_commit: 668499f
-verified_at_date: 2026-07-12
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire]
 ---
 
 # Output capture and detachment
 
-**A turn captures a child's output by draining its stdout/stderr pipe to
-end-of-file, so a process that never closes that pipe is foreground work the turn
+**A run captures a child's output by draining its stdout/stderr pipe to
+end-of-file, so a process that never closes that pipe is foreground work the run
 must wait on to its wall — and `spawn` is the construct that moves such work off
-the turn onto a root-parented, byte-bounded, lease-bound worker.** A long-running
+the run onto a root-parented, byte-bounded, lease-bound worker.** A long-running
 server is the canonical instance: run inline it stalls the call to the deadline
 and is killed with its tree; spawned it returns instantly and survives, reaped
 only for neglect — or never, if born a `service`.
@@ -44,11 +44,11 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   the drain joins, and the call returns at the wall with exit 124. The server dies
   with it.
 - This is correct, not a defect: an inline command that never closes its pipe is
-  genuinely work the turn cannot finish, so the turn bounds it and tears down its
+  genuinely work the run cannot finish, so the run bounds it and tears down its
   tree. The cancel→drain→collect path is the same one pipelines reap by
   ([[internals/pipeline-execution|pipeline-execution]]).
 
-## `spawn` moves the work off the turn
+## `spawn` moves the work off the run
 
 The escape is detachment — the *handle* is its evidence
 ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
@@ -56,14 +56,14 @@ The escape is detachment — the *handle* is its evidence
 - `spawn { … }` reifies a `Value::Handle` and runs the body on a worker thread
   parented at the *durable root*, not the swappable foreground scope
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]). The 30 s wall
-  never reaches it, so the worker survives the turn.
-- `spawn` returns the handle the instant the thread starts; the turn does not
-  wait. A server spawned this way keeps running while the launching turn returns in
+  never reaches it, so the worker survives the run.
+- `spawn` returns the handle the instant the thread starts; the run does not
+  wait. A server spawned this way keeps running while the launching run returns in
   milliseconds.
 - The worker's output goes to its *own* per-handle buffer — `spawn_child` wires the
   child's `stdout`/`stderr` to fresh `new_buffer()` sinks
   (`core/src/builtins/concurrency.rs`), drained into the handle's cache only when it
-  settles. There is no turn-owned pipe for it to hold open, so the turn cannot
+  settles. There is no run-owned pipe for it to hold open, so the run cannot
   stall on it.
 
 ## A chatty server is bounded, not unbounded
@@ -89,7 +89,7 @@ The escape is detachment — the *handle* is its evidence
   through the binding lease, never by id; a `service`-born worker
   (`LeaseClass::Durable`) is rediscovered through the host-owned `services`
   pin, which shows each live service's id and birth description, and
-  `service-handle <id>` (`exarch/src/agent_builtins.rs`) takes the handle back
+  `service-handle <id>` (`exarch/src/shell_eval/builtins.rs`) takes the handle back
   by that id to resume the ordinary eliminator idiom
   ([[map/exarch/builtins|builtins]]).
 - An ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is governed by the
@@ -99,7 +99,7 @@ The escape is detachment — the *handle* is its evidence
   of observation. exarch grants one hour idle / 24 hour backstop
   (`DETACHED_WORKER_CEILING`, `DETACHED_WORKER_BACKSTOP`,
   `exarch/src/shell_eval.rs`); the REPL grants none, so its spawns never reap.
-  Age alone no longer kills a worker: a build babysat every turn via `poll`
+  Age alone no longer kills a worker: a build babysat every run via `poll`
   renews indefinitely, up to the backstop.
 - The mechanism is the reaper's own re-arming `Run` deadline
   (`process::arm_callback`, `lease_fire` in `core/src/builtins/concurrency.rs`):
@@ -108,7 +108,7 @@ The escape is detachment — the *handle* is its evidence
   of the two remaining margins. A worker that has already settled (not
   `Running`) ends the chain silently — it lingers in the registry as an
   unclaimed result under its own, separate retention lease (256 idle ral
-  calls, `SETTLED_WORKER_RETENTION`), swept by `WorkerRegistry::advance_epoch`
+  calls, `SETTLED_WORKER_RETENTION`), swept by `WorkerRegistry::sweep_retention`
   on the host's ral-call epoch.
 - `service <desc> { … }` births a worker whose registry entry carries the
   durable class (`LeaseClass::Durable`): no idle bound, no backstop ever arms
@@ -117,11 +117,13 @@ The escape is detachment — the *handle* is its evidence
   id and description, `service-handle <id>` retakes its handle, and it dies
   only by `/clear`, an explicit `cancel`, or process exit.
 - Every reap — idle, backstop, or settled-retention — is atomic with a
-  `ReapNotice` recording what fell and why, drained at the host's ready
-  boundaries (`Shell::take_worker_reap_notices`, `Agent::drain_worker_reaps`,
-  beside the binding-lease drain) into one `Kind::WorkerReaped` transcript/TUI
-  event per entry. The model's later "where did my job go?" always has an
-  answer in the log.
+  `ReapNotice` recording what fell and why. The engine drains its ledger at
+  each run's own ready boundary (`Shell::emit_ready_boundary_notices`, called
+  from `run_framed` just before the frame tears down) and pushes it through
+  that run's surface sink as a `` `notice `` value, beside the binding-lease's
+  idle-prune notice; exarch decodes it back (`card::value_to_notice`) into a
+  `Kind::Notice` transcript/TUI event. The model's later "where did my job
+  go?" always has an answer in the log.
 
 ## Reading a spawned server's output (the exarch caveat)
 
@@ -138,16 +140,16 @@ The escape is detachment — the *handle* is its evidence
   still REPL-only: exarch's per-call capture sinks cannot host a root-surviving
   writer ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]). Partial `poll`
   is the headless substitute: not a live stream, but a poll-driven read exarch can
-  drive from its own turns.
+  drive from its own runs.
 - So under exarch a server is *fire-and-`poll`-and-`cancel`*: `spawn` it, read its
-  accumulated output with `poll $h` on later turns, `cancel $h` when done. `poll`
+  accumulated output with `poll $h` on later runs, `cancel $h` when done. `poll`
   is also what keeps a plain `spawn`ed server alive past an hour of inattention
   — it renews the idle-observation lease. A server known at birth to go long
   stretches unpolled wants `service <desc> { … }` instead: born with no idle bound and
   no backstop, it never reaps for inattention, only by `/clear`, `cancel`, or
   process exit. To keep a full, unbounded log past the 16 MiB cap, still
   redirect inside the block to a file — `spawn { python3 -m http.server >
-  srv.log 2>&1 }` — and read the file on later turns.
+  srv.log 2>&1 }` — and read the file on later runs.
 
 See also
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]

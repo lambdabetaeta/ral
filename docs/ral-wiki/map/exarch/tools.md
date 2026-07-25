@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
@@ -23,7 +23,7 @@ through. `shell_eval/tools.rs` shrinks to:
   tool-call block; oversize descriptions are truncated, never rejected). An
   optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
   (60s) — a default, not a cap: raise it for known-long work, or `spawn` what
-  should outlive the turn.
+  should outlive the run.
 - **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's `agent-start`

@@ -103,7 +103,7 @@ dynamic design:
 - **Audit is a trace of operations.** The tree records operations, the scopes
   that framed them, and the capability checks at each, owned lexically by the
   scope ([[design/audit|audit]]).
-- **exarch's sandbox bounds the effect set.** The agent runs each turn under a
+- **exarch's sandbox bounds the effect set.** The agent evaluates each run under a
   grant over this namespace, bounding which operations the model may perform —
   the sandbox is authority over effects ([[design/exarch-architecture|exarch-architecture]]).
 

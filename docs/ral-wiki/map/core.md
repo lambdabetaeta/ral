@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1cff92ae8c6c493aa045926a8977195c7fb16293
-generated_at_date: 2026-07-20
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -8,7 +8,7 @@ covers_paths: [core/src/lib.rs]
 
 **`core/` is the `ral-core` crate — the language engine — and a host reaches it
 through two narrow crate-root seams: a compile-then-typecheck pipeline that turns
-source into typed IR, and the framed turn door that is the only entry into
+source into typed IR, and the framed run door that is the only entry into
 evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
 binaries, `ral` and [[map/exarch|exarch]], embed it.
 
@@ -22,16 +22,16 @@ a host deliberately steps past the seam
 
 ## The evaluation seam
 
-Evaluation enters only through the *framed turn door* on `Shell`, never the
+Evaluation enters only through the *framed run door* on `Shell`, never the
 reduction primitive behind it. A host states policy; core owns resources.
 
-- `Shell::run_turn(TurnRequest)` runs one whole `Turn`, synchronously and
-  runtime-agnostic, returning one flat `TurnReport`. Its `Program` is either
+- `Shell::run(RunRequest)` runs one whole `Run`, synchronously and
+  runtime-agnostic, returning one flat `RunReport`. Its `Program` is either
   source text or a registered hook applied to first-order arguments —
   `Shell::register_hook` stores compiled hooks by name in the session-lived
   hook table ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 - Completion is the call returning, never a channel disconnecting, so a deferred
-  worker holding a surface clone cannot keep a turn from ending
+  worker holding a surface clone cannot keep a run from ending
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 - The seam itself is transport-parametric: `transport` is the frame algebra
   (Attach/Dispatch/Event/Control) a front-end speaks, run in-process as the

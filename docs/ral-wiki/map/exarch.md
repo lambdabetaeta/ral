@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -10,12 +10,12 @@ exarch is a small LLM coding agent — a separate workspace binary that
 **embeds** [[map/core|ral-core]] (`ral-core = { path = "../core" }`). A model
 (Anthropic / OpenAI / Gemini / xAI / Qwen / OpenRouter / DeepSeek / OpenCode, a
 `custom` provider, or a signed-in ChatGPT account) is
-given one `ral` tool, and each call is evaluated as a *ral top-level turn*
+given one `ral` tool, and each call is evaluated as a *ral top-level run*
 against a persistent in-process `Shell`, under capabilities the user chose. It
 ships as one executable ([[invariants/single-binary|single-binary]]); the same
 binary re-execs itself as the [[map/core/capabilities|OS sandbox child]].
 
-The agent is a provider loop over one tool, each turn grant-framed — the
+The agent is a provider loop over one tool, each run grant-framed — the
 design argument lives in [[design/exarch-architecture|exarch-architecture]].
 This page maps the binary's *front door*: what runs at startup, and how the
 system prompt is assembled.
@@ -99,7 +99,7 @@ can inherit a live key.**
 
 ## Bootstrap
 
-`bootstrap.rs` holds the once-per-process pieces; nothing here is per-turn.
+`bootstrap.rs` holds the once-per-process pieces; nothing here is per-run.
 
 - **`boot_shell`** — the identity seat's constructor: clear stale ral
   interrupts, install ral's handlers, chain exarch's cancel over them, then
@@ -182,13 +182,13 @@ every other section stands.
 
 ## Subsystems
 
-- [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the turn loop
-  (provider round-trips, tool dispatch with prompt-queue steering, auto-compaction,
+- [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the attend loop
+  (provider round-trips, tool-call batches with prompt-queue steering, auto-compaction,
   the nudge-retry policy, sub-agent fork), the `parent` predicate, the owned
   hot-swappable provider, dynamic focus, and the subtree cancel cascade.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
-- [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn under a
+- [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level run under a
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
@@ -211,10 +211,10 @@ every other section stands.
 
 ## Sandbox
 
-exarch does not invent its own sandbox. Each tool call is one transport `Turn`
-carrying the **profile's capabilities in `Turn.caps`**, dispatched across the
+exarch does not invent its own sandbox. Each tool call is one transport `Run`
+carrying the **profile's capabilities in `Run.caps`**, dispatched across the
 host seam (`shell_eval::run_shell`, → [[map/exarch/shell-eval|shell-eval]]) and
-pushed onto ral's capability stack by core's turn door — so the safety
+pushed onto ral's capability stack by core's run door — so the safety
 boundary *is* ral's [[design/grant|grant]] mechanism — authority attenuated by
 intersection. There is no source-level `grant { … }` the model could escape;
 the frame is installed by the host. Profiles ship as `.exarch.ral` files in
@@ -225,8 +225,8 @@ the frame is installed by the host. Profiles ship as `.exarch.ral` files in
 
 With `--allow-schedule`, the agent may schedule its own wakeups (`schedule`,
 `schedules`, `unschedule`) — a cron expression or a one-shot `after <dur>`. A
-wakeup schedules the *agent*, not a worker: at its time a synthetic user turn is
-posted to the agent's own inbox and delivered at the turn boundary, re-engaging
+wakeup schedules the *agent*, not a worker: at its time a synthetic user item is
+posted to the agent's own inbox and delivered at the exchange boundary, re-engaging
 the loop with no human present. It is off by default — waking yourself
 indefinitely is real authority. The inbox/reaper mechanics live on the
 [[map/exarch/frontend|frontend]] and [[map/exarch/agent|agent]] pages; see

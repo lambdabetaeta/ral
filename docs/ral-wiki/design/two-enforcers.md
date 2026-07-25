@@ -29,7 +29,7 @@ narrates *how* each runs; this page argues *why* both exist.
   the OS layer tightening further where it can.
 - *Its denials are opaque, and it is not free.* An in-process rejection is a
   structured escape carrying an [[design/audit|audit]] fragment — ral names which
-  grant denied what, and exarch's turn loop receives it as a value to reason
+  grant denied what, and exarch's attend loop receives it as a value to reason
   about. A sandbox violation is an `EPERM` or a `SIGKILL`, after the fact and
   unattributable. And when no layer restricts fs or net the projection is empty,
   so the per-command sandbox launch is skipped entirely — an unrestricted child
@@ -52,8 +52,8 @@ The discipline this draws: **the in-process gate is authority over dispatch, not
 confinement of children.** Treating it as the latter is the mistake; pairing it
 with the sandbox is the design.
 
-This is the boundary [[design/exarch-architecture|exarch]] reuses — an agent turn
-runs under a grant frame whose two enforcers are exactly these.
+This is the boundary [[design/exarch-architecture|exarch]] reuses — a run
+evaluates under a grant frame whose two enforcers are exactly these.
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (the gate sits where an effect is performed),
 [[design/grant|grant]], [[design/scoping|scoping]],

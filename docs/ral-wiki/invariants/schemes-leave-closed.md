@@ -9,8 +9,8 @@ not cross out of that unifier's lifetime.
 This is hard, not stylistic, because quantification is **nominal-by-listing**
 over unifier root ids ([[internals/type-inference|type-inference]]): the
 quantifier is a `Vec` of `u32`-tagged variable ids, and a free id is meaningful
-only relative to the union-find that minted it. A turn's unifier dies with the
-turn and the next turn's ids restart at zero. An open scheme imported into a
+only relative to the union-find that minted it. A run's unifier dies with the
+run and the next run's ids restart at zero. An open scheme imported into a
 fresh unifier therefore silently aliases *that* unifier's variables — type
 corruption that no check catches, not an error that surfaces.
 

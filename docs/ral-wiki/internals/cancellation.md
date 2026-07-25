@@ -1,6 +1,6 @@
 ---
-verified_at_commit: bbca4f4
-verified_at_date: 2026-07-04
+verified_at_commit: f7cf93a
+verified_at_date: 2026-07-25
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, publishes_signal_slots, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
@@ -33,7 +33,7 @@ The two pieces answer different questions:
 The platform handler `fetch_add`s the ladder on every delivered termination
 signal; the third hit calls `libc::_exit(128 + sig)` — bypassing `atexit` so a
 wedged process always dies. Nothing else reads it for control flow: `clear()`
-resets it at acknowledgment boundaries (a fresh prompt, a turn compile, a
+resets it at acknowledgment boundaries (a fresh prompt, a run compile, a
 session reboot), and `escalation_pending()` exposes it for observability only.
 
 **The force-exit floor is reachable only in non-interactive paths.** The `ral`
@@ -75,18 +75,18 @@ SIGTERMed the process expects to read back).
 
 ### Two typed scopes name the one invariant
 
-The tree's load-bearing rule — *a turn's foreground scope is always a descendant
+The tree's load-bearing rule — *a run's foreground scope is always a descendant
 of the session's durable root* — is spelled in the type system, not left to
 discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 
 - **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`. Detached
   workers — `spawn`, `&`, `watch` — parent under it, so a *foreground* cancel
   never reaches them ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-- **`ForegroundScope`** (`shell.turn.cancel`) is the turn's work scope. It can be
+- **`ForegroundScope`** (`shell.run.cancel`) is the run's work scope. It can be
   minted *only* from a `DurableRoot` (or by nesting another foreground), so an
   unrelated root can never be installed as a foreground by accident.
 - Children are minted at exactly four sites: shell init (`root.child()` →
-  foreground), `build_turn` (`foreground.child()` per nested turn), the
+  foreground), `Shell::dispatch` (`durable_root().child()` per run), the
   concurrency worker (`root.child()` — root-parented, *not* foreground), and the
   IPC inherit path. **Pipelines mint no scope of their own** — they are bounded by
   the foreground scope they run under and by `PipelineGroup::Drop`, which group-
@@ -99,14 +99,14 @@ process-global `AtomicPtr<AtomicU8>` slots publish a *borrowed pointer* into the
 live scope's flag for the async edge to set.
 
 - **`FOREGROUND_SCOPE`** and **`DURABLE_ROOT_SCOPE`** are published together, for
-  the turn's whole extent, by `TurnGuard::install` (`core/src/turn.rs`) when
-  `eval_turn` swaps a `TurnState` in. Publication is a *swap*, not a store, so a
-  re-entrant turn nests its scope above the outer one and reveals it again on drop
+  the run's whole extent, by `RunGuard::install` (`core/src/run.rs`), which swaps
+  a `RunState` in. Publication is a *swap*, not a store, so a re-entrant run
+  nests its scope above the outer one and reveals it again on drop
   ([[decisions/260617_turn-local-state|turn-local-state]]).
 - **At most one session per process publishes** — the *signal-facing* one, marked
   by `SessionState::publishes_signal_slots`. The swap/restore discipline is LIFO
   on a single thread, which concurrent sessions would violate; and a signal must
-  target the primary session's turn, never whichever session dispatched last. A
+  target the primary session's run, never whichever session dispatched last. A
   forked session (`Shell::fork_session` — exarch's sub-agents) never publishes;
   its host cancels it through a clonable handle on its durable root
   (`Shell::cancel_handle`)
@@ -114,9 +114,9 @@ live scope's flag for the async edge to set.
 - **`request_foreground_cancel(cause)`** / **`request_root_cancel(cause)`** load
   the slot and `fetch_max` the cause onto the borrowed flag — the *exact* store
   `scope.cancel(cause)` performs, and itself async-signal-safe. A null slot
-  (between turns) makes the request a no-op, so an idle Ctrl-C or Ctrl-`\` touches
+  (between runs) makes the request a no-op, so an idle Ctrl-C or Ctrl-`\` touches
   nothing.
-- Drop order is the safety argument: `TurnGuard` declares the slot guards *before*
+- Drop order is the safety argument: `RunGuard` declares the slot guards *before*
   the displaced frame, so they un-publish before the scope `Arc` they borrow can
   free — a slot never points at a freed flag.
 
@@ -174,9 +174,9 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker; the REPL loop observes the sticky root and exits |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
-| **Ctrl-C / Esc** | exarch TUI, active turn | `cancel::raise_interrupt` | cancels the per-turn `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
+| **Ctrl-C / Esc** | exarch TUI, active exchange | `cancel::raise_interrupt` | cancels the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
-| **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / turn; no root cancel |
+| **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
 | **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `sigint_relay` |
 | **async SIGTERM / SIGHUP** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's `handler` → root `Terminate` + ladder |
 
@@ -203,26 +203,27 @@ fix the interactive dispositions:
   **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `SIG_IGN`** (the shell drives job control by
   `waitpid` and rewrites terminal state without being stopped).
 
-### exarch: the chained handler and the per-turn token
+### exarch: the chained handler and the per-agent token
 
-exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
+exarch layers a *per-agent* cancellation `Token` over ral's machinery
 ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]).
 
-- **`Token`** is an `Arc<AtomicBool>`, one sticky token per agent for its whole
-  life; the drive loop threads clones through `apply`/dispatch/tools, so
-  cancelling any share halts that agent's turn (provider streaming, staged
-  tools). The trunk's token flag is published into exarch's own `CURRENT` slot —
-  the same lock-free pattern as ral's — and a genuine turn boundary
-  `Token::reset`s the flag, so a prior turn's Esc never bleeds into the next.
+- **`Token`** is an `Arc<AtomicU8>` carrying a `CancelCause` (`0` while
+  uncancelled), one sticky token per agent for its whole life; the attend loop
+  threads clones through `deliberate`/`run_batch`/tools, so cancelling any share
+  halts that agent's exchange (provider streaming, invoked tools). The trunk's
+  token flag is published into exarch's own `CURRENT` slot — the same
+  lock-free pattern as ral's — and a genuine exchange boundary
+  `Token::reset`s the flag, so a prior exchange's Esc never bleeds into the next.
 - **The registry cascade is two-layer.** `AgentRegistry::cancel` (behind
   `agent-cancel`, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
   session's `DurableRoot` (`Shell::cancel_handle`, held per registry entry). The
-  token stops the drive loop between steps; the root cancel unwinds a `ral` eval
+  token stops the attend loop between steps; the root cancel unwinds a `ral` eval
   already in flight at the evaluator's poll points — without it, a cancelled
   agent would grind to its tool's `timeout_secs` wall before noticing. The trunk
-  carries no eval-root handle: its session outlives any cancel, and Esc reaches
-  its turn through the published foreground slot instead
+  carries no eval-root handle: its session outlives any cancel, and an Esc
+  cancels its *run* through the published foreground slot instead
   ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
 - **`install`** chains ral's `term_handler`: the exarch handler `raise`s the token
   then forwards into ral's disposition, so the root-`Terminate` translation and
@@ -230,9 +231,9 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
   then exarch's chain — and `bootstrap::boot_shell` re-establishes it after
   every `/clear` rebuild.
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
-  key table (`exarch/src/tui.rs`) separates UI shape from cancellation: idle
-  Ctrl-C/Ctrl-D quit, overlays close, and only active-turn Ctrl-C/Esc route to
-  `raise_interrupt`. `deliver_interrupt` re-creates the SIGINT the kernel would
+  key table (`exarch/src/tui/tui_loop.rs`) separates UI shape from cancellation:
+  idle Ctrl-C/Ctrl-D quit, overlays close, and only active-exchange Ctrl-C/Esc
+  route to `raise_interrupt`. `deliver_interrupt` re-creates the SIGINT the kernel would
   have sent a foreground *external* child via `interrupt_foreground_child`
   (Windows re-injects `CTRL_C_EVENT`).
 
@@ -240,7 +241,7 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
 
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
 unreachable from an interactive prompt.** Interactive SIGINT goes to the relay,
-which never ticks the ladder; the TUI's active-turn Ctrl-C goes to
+which never ticks the ladder; the TUI's active-exchange Ctrl-C goes to
 `raise_interrupt`, which writes a flag and a cause but never the ladder.
 Repeated presses re-write the same cause (`fetch_max`), never escalate. The hard
 floor exists for batch scripts (`handler`), for external SIGTERM/SIGHUP, and for
@@ -253,16 +254,16 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
   signal delivery onto the scope tree: `Terminate`, the scope-only `check`, the
   one wait loop.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] — the
-  root/foreground split, the `CancelCause` order, and the per-turn cancel slots.
+  root/foreground split, the `CancelCause` order, and the per-run cancel slots.
 - [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]] —
   why the user interrupt writes a flag, not a counter.
 - [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] — exarch's shared
-  root-turn token and its mint-as-reset.
+  per-agent token and its exchange-boundary reset.
 - [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] — the original
   cooperative-poll insight.
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] and
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.
 - [[map/core/io-process|io-process]] (signals, process groups), [[map/repl/jobs|jobs]]
-  (relay, fg/bg), [[map/exarch/agent|agent]] (the turn loop the token wraps),
+  (relay, fg/bg), [[map/exarch/agent|agent]] (the attend loop the token wraps),
   and `core/src/process/signal.rs` itself.

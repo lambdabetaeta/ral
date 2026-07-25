@@ -1,31 +1,31 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: f7cf93a
+generated_at_date: 2026-07-25
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
 # Map: core / evaluator
 
 `core/src/evaluator/` runs the CBPV [[map/core/ir|IR]] as a trampolined machine
-(`evaluator.rs`). **Evaluation is entered only through framed turn doors; the
+(`evaluator.rs`). **Evaluation is entered only through framed run doors; the
 machine's own verbs are crate-private.** Two reach outside the module:
 
-- `eval_top_level(comp, shell)` (`pub(crate)`) — the turn-evaluation verb a tool
-  call, a REPL turn, or a script line settles through. Hosts never call it: they
-  enter through the framed `Shell::run_turn` door (`core/src/driver.rs`, over
-  the turn spine in `core/src/turn.rs`), the sole way into evaluation — its
-  `Turn` carries a `Program` of source text or a registered hook
+- `eval_top_level(comp, shell)` (`pub(crate)`) — the run-evaluation verb a tool
+  call, a REPL run, or a script line settles through. Hosts never call it: they
+  enter through the framed `Shell::run` door (`core/src/driver.rs`, over
+  the run spine in `core/src/run.rs`), the sole way into evaluation — its
+  `Run` carries a `Program` of source text or a registered hook
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
   [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
   The post-run `Mobile` is *installed* on the parent shell on every outcome
-  (Ok / Error / Exit), because a top-level turn is a resume point.
+  (Ok / Error / Exit), because a top-level run is a resume point.
 - `evaluate(comp, shell)` — a bare tail-absorbed run with no mobile contract, for
   callers already inside a session (module load, prelude bootstrap, capability
   profiles, REPL plugin / config loading).
 
 `apply(callee, args, shell)` is `pub(crate)`: it reduces a `Value` (closure or
 thunk) applied to arguments, absorbing tail signals through the trampoline. A
-host reaches it only through the turn door's hook-program arm or the
+host reaches it only through the run door's hook-program arm or the
 in-frame builtin wrapper, so an unframed reduction is unconstructable.
 
 The result surface is `Settled<Value>` carrying `Escape` / `BodyResult`; tail
@@ -35,7 +35,7 @@ guarantees (try does not swallow exit, grant does not bypass tail calls) are
 regression-tested ([[decisions/260514_escape-propagation-bugs|escape-propagation-bugs]]).
 
 A *same-thread thunk body* — forcing a block or applying a lambda — evaluates in
-place on the caller's `Shell`, sharing turn, session, and local state by
+place on the caller's `Shell`, sharing run, session, and local state by
 identity and swapping in only a mobile rescoped to the closure's `captured`
 environment plus a fresh frame
 ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
