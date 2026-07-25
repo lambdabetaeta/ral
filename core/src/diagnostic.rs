@@ -51,7 +51,7 @@ pub struct CallSite {
     pub col: usize,
 }
 
-/// Turn-local source cursor for diagnostics.
+/// Run-local source cursor for diagnostics.
 ///
 /// Holds where execution is,
 /// where it was called from (saved before entering prelude wrappers so
@@ -60,9 +60,9 @@ pub struct CallSite {
 ///
 /// The durable registry it resolves against — the
 /// [`SourceDb`](crate::source::SourceDb) keyed by [`FileId`] — is session
-/// state, not part of this cursor: the cursor is installed by the current turn
-/// and discarded on teardown, while the registry survives so a turn's runtime
-/// error still renders after the turn returns.
+/// state, not part of this cursor: the cursor is installed by the current run
+/// and discarded on teardown, while the registry survives so a run's runtime
+/// error still renders after the run returns.
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LocationCursor {
     pub script: String,
@@ -478,7 +478,7 @@ pub fn format_runtime_error_auto(
     }
 }
 
-/// Turn-result epilogue shared by every host that runs a top-level turn:
+/// Run-result epilogue shared by every host that runs a top-level run:
 ///
 /// render the caught runtime error via [`format_runtime_error_auto`] into
 /// `out`, then hand back the process-exit-code-clamped status.
@@ -819,20 +819,20 @@ mod tests {
         );
     }
 
-    /// A top-level turn boundary resets the db before registering: a second
-    /// turn's source reuses the first turn's id rather than appending, so a
+    /// A top-level run boundary resets the db before registering: a second
+    /// run's source reuses the first run's id rather than appending, so a
     /// long session does not grow the registry without bound.
     #[test]
-    fn reset_reclaims_ids_across_turns() {
+    fn reset_reclaims_ids_across_runs() {
         let mut db = SourceDb::default();
         let first = db.register(Source::from_text("<stdin>", "echo a"));
         db.reset();
         let second = db.register(Source::from_text("<stdin>", "echo b"));
-        assert_eq!(first, second, "the reset turn must reuse the first id");
+        assert_eq!(first, second, "the reset run must reuse the first id");
         assert_eq!(
             db.get(second).map(Source::as_str),
             Some("echo b"),
-            "only the current turn's source resolves after a reset"
+            "only the current run's source resolves after a reset"
         );
     }
 

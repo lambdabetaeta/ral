@@ -893,7 +893,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 // ── `notice`: core's own ready-boundary housekeeping, pushed ─────────────
 
 /// The decoded body of a `` `notice `` surface event core's own engine
-/// pushes at a turn's ready boundary.
+/// pushes at a run's ready boundary.
 ///
 /// The notice names a worker the lease chain
 /// reaped or a run of idle top-level bindings the ledger pruned.

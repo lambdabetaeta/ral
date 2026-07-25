@@ -4,7 +4,7 @@
 //!
 //!   * **Signal translation.**  SIGINT / SIGTERM / SIGHUP are translated
 //!     by the platform handlers into a [`CancelCause`](crate::process::CancelCause)
-//!     on the published cancel slots — SIGINT interrupts the foreground turn,
+//!     on the published cancel slots — SIGINT interrupts the foreground run,
 //!     SIGTERM / SIGHUP terminate the durable root.  A separate escalation
 //!     ladder counts deliveries and forces `_exit` on the third — the last
 //!     resort when cooperative delivery is wedged, never the delivery
@@ -227,7 +227,7 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 /// Fires when the shell's [`CancelScope`](crate::process::CancelScope) (or any
 /// of its ancestors) has been cancelled: a signal translated by the platform
 /// handler (SIGINT → foreground `Interrupt`, SIGTERM / SIGHUP → root
-/// `Terminate`), a turn deadline ([`reaper`](crate::process::reaper)), an
+/// `Terminate`), a run deadline ([`reaper`](crate::process::reaper)), an
 /// explicit `cancel <handle>`, or a Ctrl-\ root abort.  The error carries the
 /// strongest cause's message and exit code.
 ///
@@ -241,17 +241,17 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 /// cancelled, carrying the strongest cause's message and exit code; `Ok(())`
 /// while the chain is uncancelled.
 pub fn check(shell: &crate::types::Shell) -> Result<(), crate::types::Break> {
-    if let Some(cause) = shell.turn.cancel.cause() {
+    if let Some(cause) = shell.run.cancel.cause() {
         return Err(crate::types::Break::Error(
             crate::types::Error::new(cause.message(), cause.exit_code())
-                .at_loc(shell.turn.loc.source_loc(0)),
+                .at_loc(shell.run.loc.source_loc(0)),
         ));
     }
     Ok(())
 }
 
 /// Reset the escalation ladder at an acknowledgment boundary — a fresh
-/// prompt, a turn compile, a session reboot —
+/// prompt, a run compile, a session reboot —
 ///
 /// so signals already handled
 /// cooperatively don't creep toward the third-delivery force-exit.

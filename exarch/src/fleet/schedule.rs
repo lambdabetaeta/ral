@@ -16,7 +16,7 @@
 //! recomputing on each fire so DST shifts, clock steps, and suspends are
 //! absorbed.
 
-use crate::bus::{InboxMsg, Mailbox};
+use crate::bus::{Mailbox, Post};
 use crate::sync::LockExt;
 use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
@@ -382,7 +382,7 @@ fn is_reserved_label(label: &str) -> bool {
 ///
 /// Cheap to clone — the inner `Arc`
 /// shares the map, so the reaper closure that fires a schedule holds a
-/// handle it re-arms and posts through after the arming turn has ended.
+/// handle it re-arms and posts through after the arming run has ended.
 #[derive(Clone)]
 pub struct ScheduleRegistry {
     inner: Arc<Mutex<Inner>>,
@@ -502,7 +502,7 @@ impl ScheduleRegistry {
         g.entries.remove(&id).is_some()
     }
 
-    /// Whether any schedule is live — the drive loop's park-or-terminate
+    /// Whether any schedule is live — the attend loop's park-or-terminate
     /// input at quiescence: a peer with a live self-schedule parks for its
     /// next wakeup rather than terminating.
     pub fn armed(&self) -> bool {
@@ -574,7 +574,7 @@ impl ScheduleRegistry {
             None
         } else {
             entry.fires += 1;
-            Some(InboxMsg::ScheduledWakeup {
+            Some(Post::ScheduledWakeup {
                 id,
                 label: entry.label.clone(),
                 trigger: entry.trigger.describe(),
@@ -608,7 +608,7 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{Inbox, Turn};
+    use crate::bus::{Inbox, Item};
     use jiff::civil::date;
 
     fn sched(expr: &str) -> CronSchedule {
@@ -855,18 +855,18 @@ mod tests {
         .unwrap();
         let mut fired = None;
         for _ in 0..200 {
-            if let Some(turn) = inbox.drain_turn() {
-                fired = Some(turn);
+            if let Some(item) = inbox.next_item() {
+                fired = Some(item);
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let turn = fired.expect("a one-shot `after` schedule must fire");
+        let item = fired.expect("a one-shot `after` schedule must fire");
         assert!(
-            matches!(&turn, Turn::Wakeup(_)),
-            "delivered tagged as a wakeup turn, got {turn:?}"
+            matches!(&item, Item::Wakeup(_)),
+            "delivered tagged as a wakeup item, got {item:?}"
         );
-        let text = turn.text();
+        let text = item.text();
         assert!(text.contains("ping"), "delivered the prompt: {text}");
         assert!(text.starts_with("[scheduled"), "marked wakeup: {text}");
         assert!(

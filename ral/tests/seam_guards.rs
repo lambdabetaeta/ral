@@ -1,17 +1,17 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Architecture grep guards for the run-turn host-API cutover.
+//! Architecture grep guards for the run host-API cutover.
 //!
-//! [[decisions/260618_run-turn-is-host-api]] makes the turn door
-//! (`Shell::run_turn`) / `TurnRequest` / `TurnReport` the only host-facing
-//! evaluation seam and collapses the old turn-assembly vocabulary. These
+//! [[decisions/260618_run-turn-is-host-api]] makes the run door
+//! (`Shell::run`) / `RunRequest` / `RunReport` the only host-facing
+//! evaluation seam and collapses the old run-assembly vocabulary. These
 //! source-text scans hold that boundary lexically:
 //!
 //!   - `ral_core` names no async runtime — tokio never enters core; the seam
 //!     is a synchronous `EventSink` taking a `Value`, and the host owns its
 //!     concurrency model.
-//!   - host crates (`ral`, `exarch`) name none of the internal turn types or
-//!     core helpers a host used to assemble a turn by hand (`TurnFrame`,
+//!   - host crates (`ral`, `exarch`) name none of the internal run types or
+//!     core helpers a host used to assemble a run by hand (`TurnFrame`,
 //!     `IoFrame`, core `TurnOutcome`, `eval_turn`, `arm_lifetime`). Hosts are
 //!     request suppliers now.
 //!
@@ -115,18 +115,18 @@ fn ral_core_names_no_async_runtime() {
     assert_absent("core/src", "spawn_blocking");
 }
 
-/// Hosts are request suppliers: they build a `TurnRequest`, call a turn door,
-/// and render a `TurnReport`. None of the collapsed internal turn types, nor
-/// the core helpers a host once used to assemble a turn, may reappear.
+/// Hosts are request suppliers: they build a `RunRequest`, call a run door,
+/// and render a `RunReport`. None of the collapsed internal run types, nor
+/// the core helpers a host once used to assemble a run, may reappear.
 #[test]
-fn hosts_name_no_turn_assembly_vocabulary() {
+fn hosts_name_no_run_assembly_vocabulary() {
     for host in ["ral/src", "exarch/src"] {
         assert_absent(host, "TurnFrame");
         assert_absent(host, "IoFrame");
         assert_absent(host, "eval_turn");
         assert_absent(host, "arm_lifetime");
 
-        // exarch legitimately owns `session::TurnOutcome` (provider-message
+        // exarch legitimately owns `deliberate::Outcome` (provider-message
         // outcomes) — a different layer the ADR keeps. Forbid only a host
         // naming *core's* `TurnOutcome`, i.e. `TurnOutcome` reached through
         // `ral_core`.
@@ -135,7 +135,7 @@ fn hosts_name_no_turn_assembly_vocabulary() {
         });
         assert!(
             sites.is_empty(),
-            "host `{host}` must not name core's `TurnOutcome` (collapsed into `TurnReport`):\n{}",
+            "host `{host}` must not name core's `TurnOutcome` (collapsed into `RunReport`):\n{}",
             sites.join("\n"),
         );
     }

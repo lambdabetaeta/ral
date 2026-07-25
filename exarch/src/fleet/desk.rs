@@ -5,7 +5,7 @@
 //! without lending `&mut Agent`/`&mut Shell`, since the reentrancy law bars a
 //! handler from ever taking the session lock. [`ExarchDesk`] answers one enquiry
 //! against that capture; [`DeskBinding`] is the identity-transport adapter
-//! that keeps a handler's own chrome from outrunning the turn's earlier
+//! that keeps a handler's own chrome from outrunning the run's earlier
 //! surface output. Step 0 of `dev/docs/260715_tools_to_builtins.md` wired
 //! both desk bindings answering every enquiry class alike, with the
 //! extension law's unrecognised-class error; this module now also carries
@@ -46,7 +46,7 @@ pub(crate) struct HostServices {
     /// parent — `None` on a wire seat, which owns no host-side scratch at
     /// all (`Agent::host_services`).
     pub scratch: Option<Arc<crate::bootstrap::Scratch>>,
-    /// This turn's agent: the child's upward edge for `agent-start`'s
+    /// This run's agent: the child's upward edge for `agent-start`'s
     /// receipt and the descendant check `message`/`agent-cancel` enforce.
     pub parent: AgentId,
     /// The parent's own inbox — where a spawned child's eventual result and
@@ -64,7 +64,7 @@ pub(crate) struct HostServices {
     /// The working directory frozen at install, for `policy::narrow` and
     /// any handler that needs a path root.
     pub cwd: PathBuf,
-    /// The depth-budget snapshot for this turn, immutable for its extent:
+    /// The depth-budget snapshot for this run, immutable for its extent:
     /// `agent-start` refuses once it reads zero.
     pub fuel: u32,
     /// Whether this agent holds `reply` — the desk's `reply` refusal reads
@@ -96,7 +96,7 @@ pub(crate) struct HostServices {
     pub indexes: std::sync::Arc<crate::prompt::BuiltinIndexes>,
     /// Whether a human is attached to the fleet, inherited by every spawn.
     pub interactive: bool,
-    /// The adoption end of this turn's body-side session forks
+    /// The adoption end of this run's body-side session forks
     /// (`Shell::fork_into_nursery`) — `agent-start` redeems a
     /// [`ral_core::types::NurseryId`] here.
     pub nursery: Nursery,
@@ -369,7 +369,7 @@ impl ExarchDesk {
         let Some(shell) = s.nursery.adopt(NurseryId(spec.session_id)) else {
             return Err(Error::new(
                 "`agent-start`: no forked session parked under this id — it may already have \
-                 started, or the turn that forked it has ended",
+                 started, or the run that forked it has ended",
                 1,
             ));
         };
@@ -820,7 +820,7 @@ impl ExarchDesk {
     }
 
     /// `` `reply `` — the desk half of the `reply` builtin: stage the
-    /// payload into the reply cell for `Agent::apply`'s drain to lift into
+    /// payload into the reply cell for `Agent::deliberate`'s drain to lift into
     /// a `Replied` terminal once the batch drains, and put the `reply` act
     /// on the rail. Refused on every non-returning agent — the conversing
     /// trunk and each `/branch` child alike — keyed on the captured
@@ -976,7 +976,7 @@ impl SurfaceApplier {
     }
 }
 
-/// The inert desk the turn guard ([`crate::agent::seat::TurnGuard`])
+/// The inert desk the run guard ([`crate::agent::seat::RunGuard`])
 /// installs once a call's real desk retires, so nothing keeps that call's
 /// `Emitter` (and the rest of its `HostServices` capture) alive past the
 /// call that owns it — `engine.desk` is unobservable between calls, since
@@ -996,10 +996,10 @@ impl EnquiryDesk for AbsentDesk {
 /// Under `IdentityTransport`, `Shell::enquire` calls straight into whatever
 /// desk is installed, synchronously, mid-`dispatch` — before
 /// `dispatch_to_report`'s own drain loop ever runs, since that loop only
-/// starts once `dispatch` returns. Any surface frames this turn already
+/// starts once `dispatch` returns. Any surface frames this run already
 /// emitted are therefore still queued, undrained, on the transport's event
 /// channel; answering the enquiry before applying them would let a
-/// handler's own chrome render ahead of the turn's earlier surface output.
+/// handler's own chrome render ahead of the run's earlier surface output.
 /// [`Self::enquire`] drains every frame already queued through `apply`
 /// before delegating to `desk`, so the identity path renders in the same
 /// order the wire path's live drain loop would.
@@ -1038,8 +1038,8 @@ mod tests {
         Provider, ProviderKind,
         scripted::{Reply, Script},
     };
-    use ral_core::transport::{DispatchId, IdentityTransport, Program, Transport, Turn};
-    use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+    use ral_core::transport::{DispatchId, IdentityTransport, Program, Run, Transport};
+    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
     /// A session log under a scratch dir unique to this call — tests run in
     /// parallel, so a shared fixed `sessions_root`/id-0 pair would race this
@@ -1162,13 +1162,13 @@ mod tests {
         (desk, registry, parent_inbox)
     }
 
-    /// Poll `inbox` for the next turn-boundary deliverable — a spawned
+    /// Poll `inbox` for the next exchange-boundary item — a spawned
     /// child's settled [`crate::bus::AgentResult`] lands here.
-    fn wait_for_settle(inbox: &Inbox) -> crate::bus::Turn {
+    fn wait_for_settle(inbox: &Inbox) -> crate::bus::Item {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if let Some(turn) = inbox.drain_turn() {
-                return turn;
+            if let Some(item) = inbox.next_item() {
+                return item;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1178,7 +1178,7 @@ mod tests {
         }
     }
 
-    /// A unique scratch directory per test, mirroring `tests/agent_apply.rs`'s
+    /// A unique scratch directory per test, mirroring `tests/agent_deliberate.rs`'s
     /// own `tmp` helper.
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("exarch-desk-full-{}-{tag}", std::process::id()));
@@ -1207,7 +1207,7 @@ mod tests {
     /// once for the whole fleet; every fork in production reaches its shell
     /// through `Shell::fork_session` on that one already-booted root, never
     /// by re-booting. A test that instead calls `boot_shell` once per spawn
-    /// races that global reset against whichever sibling child's turn is
+    /// races that global reset against whichever sibling child's run is
     /// already in flight on its own worker thread, and deadlocks rather
     /// than erroring.
     fn root_shell() -> ral_core::Shell {
@@ -1254,9 +1254,9 @@ mod tests {
     /// `DeskBinding` drains every surface frame already queued on the
     /// transport's event channel before it hands the request to the inner
     /// desk — the drain-then-handle adapter's law: a handler's own chrome
-    /// must never jump ahead of the turn's earlier surface output.
+    /// must never jump ahead of the run's earlier surface output.
     ///
-    /// Dispatches a real turn through a real `IdentityTransport` that
+    /// Dispatches a real run through a real `IdentityTransport` that
     /// surfaces an `` `unpin `` event via the ground `surface` builtin —
     /// the actual path a surfaced value takes onto the transport's event
     /// queue, left undrained until something calls `events().try_recv()`.
@@ -1271,16 +1271,16 @@ mod tests {
         let transport = IdentityTransport::new(shell);
         transport.dispatch(
             DispatchId(1),
-            Turn {
+            Run {
                 program: Program::Source(r#"surface `unpin [key: "test-marker"]"#.into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
-                stdin: TurnStdin::Empty,
+                stdin: RunStdin::Empty,
             },
         );
 
@@ -1398,14 +1398,14 @@ mod tests {
         );
 
         match wait_for_settle(&parent_inbox) {
-            crate::bus::Turn::Agent(result) => {
+            crate::bus::Item::Agent(result) => {
                 assert!(
                     result.text.contains("hi from child"),
                     "the child's reply must reach the parent's inbox, got: {}",
                     result.text
                 );
             }
-            other => panic!("expected an Agent result turn, got {other:?}"),
+            other => panic!("expected an Agent result item, got {other:?}"),
         }
     }
 
@@ -1565,7 +1565,7 @@ mod tests {
         assert!(
             desk.services.nursery.adopt(session).is_some(),
             "a fuel refusal happens before adopt, so the parked fork must \
-             stay for the turn guard to reap, never claimed by a refused call"
+             stay for the run guard to reap, never claimed by a refused call"
         );
     }
 
@@ -1646,7 +1646,7 @@ mod tests {
         assert!(
             desk.services.nursery.adopt(session2).is_some(),
             "a name-collision refusal happens before adopt, so the parked \
-             fork must stay for the turn guard to reap, never claimed by a \
+             fork must stay for the run guard to reap, never claimed by a \
              refused call"
         );
         assert_eq!(
@@ -1709,8 +1709,8 @@ mod tests {
         let mut texts = Vec::new();
         for _ in 0..3 {
             match wait_for_settle(&parent_inbox) {
-                crate::bus::Turn::Agent(result) => texts.push(result.text),
-                other => panic!("expected an Agent result turn, got {other:?}"),
+                crate::bus::Item::Agent(result) => texts.push(result.text),
+                other => panic!("expected an Agent result item, got {other:?}"),
             }
         }
         for want in ["a", "b", "c"] {
@@ -1909,7 +1909,7 @@ mod tests {
         );
     }
 
-    /// A desk handler observes the turn's earlier surfaced values already
+    /// A desk handler observes the run's earlier surfaced values already
     /// drained before it answers — the identity drain-then-handle adapter's
     /// law — exercised here with a real `agent` spawn rather than
     /// the stub `probe` class `desk_binding_drains_pending_surfaces_before_handling`
@@ -2367,10 +2367,10 @@ mod tests {
             .expect("a fresh child of a live parent always registers")
     }
 
-    /// Drive an already-registered `child` to completion on a detached
+    /// Attend an already-registered `child` to completion on a detached
     /// thread and deliver its result to `parent_mailbox`, exactly as
     /// `spawn_async`'s own worker epilogue does (deliver, then settle).
-    fn drive_and_deliver(
+    fn attend_and_deliver(
         mut child: Agent,
         name: &str,
         generation: u64,
@@ -2383,13 +2383,13 @@ mod tests {
         std::thread::spawn(move || {
             let (tx, _rx) = crate::bus::channel();
             let emit = Emitter::new(tx, id);
-            let (outcome, payload) = child.drive(&mut crate::agent::NoControl, &emit);
+            let (outcome, payload) = child.attend(&mut crate::agent::NoControl, &emit);
             let text = payload
                 .as_ref()
                 .map(crate::agent::render_reply)
                 .unwrap_or_default();
             let _ =
-                parent_mailbox.push(crate::bus::InboxMsg::AgentResult(crate::bus::AgentResult {
+                parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
                     id,
                     name,
                     outcome,
@@ -2402,7 +2402,7 @@ mod tests {
         })
     }
 
-    /// Register a live, never-driven child under `parent_id` — just enough
+    /// Register a live, never-attended child under `parent_id` — just enough
     /// for `AgentRegistry::has_children` to read true, so `parent_id` parks
     /// `HeldByChildren` rather than quiescing before either steer lands (or,
     /// once engaged, so `Engaged` outranks `HeldByChildren` regardless — the
@@ -2444,7 +2444,7 @@ mod tests {
     /// `AgentRegistry::steer`'s own delivery, no notion of TUI focus at all.
     /// A fake grandchild keeps the child parked `HeldByChildren` rather than
     /// quiescing before it is ever engaged, so both steers land
-    /// deterministically instead of racing the child's own drive loop.
+    /// deterministically instead of racing the child's own attend loop.
     #[test]
     fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
         let dir = tmp("engaged-second-steer");
@@ -2467,7 +2467,7 @@ mod tests {
 
         let generation = register_lease_child(parent.id, None, "helper", &child);
         register_keepalive(&registry, child_id, &dir.join("keepalive"));
-        let handle = drive_and_deliver(child, "helper", generation, parent.mailbox());
+        let handle = attend_and_deliver(child, "helper", generation, parent.mailbox());
 
         assert!(
             registry.steer(child_id, "first message".into()),
@@ -2491,19 +2491,19 @@ mod tests {
             "the parked, engaged child still accepts a second steer"
         );
         match wait_for_settle(&parent.inbox()) {
-            crate::bus::Turn::Agent(result) => {
+            crate::bus::Item::Agent(result) => {
                 assert!(
                     result.text.contains("second response arrived"),
                     "the second steer's response must reach the parent, got: {}",
                     result.text
                 );
             }
-            other => panic!("expected an Agent result turn, got {other:?}"),
+            other => panic!("expected an Agent result item, got {other:?}"),
         }
         handle.join().expect("worker thread must not panic");
     }
 
-    /// A millisecond-lease child that is never renewed is reaped mid-turn
+    /// A millisecond-lease child that is never renewed is reaped mid-exchange
     /// and delivers exactly one `AgentOutcome::Cancelled` to the parent
     /// inbox; a sibling renewed partway through the same ttl survives past
     /// it. Child A runs a long, cheap tool-call sequence so the lease has
@@ -2516,7 +2516,7 @@ mod tests {
         let parent = Agent::for_test(&dir, "system").unwrap();
         // Child A's ttl must land comfortably inside the round-trip loop's
         // own `MAX_STEPS` cap (250 steps, well under 100 ms on this box) so
-        // the lease — not the step cap — is what ends its turn. Child B's
+        // the lease — not the step cap — is what ends its exchange. Child B's
         // ttl is independent and generous instead, since its renewal is
         // paced by `thread::sleep` on the test's own thread, and this VM's
         // scheduling jitter (`container-disk-setup`/timing notes) can push
@@ -2538,18 +2538,18 @@ mod tests {
         let id_a = child_a.id;
         let registry = child_a.agents.clone();
         let gen_a = register_lease_child(parent.id, Some(ttl_a), "child-a", &child_a);
-        let handle_a = drive_and_deliver(child_a, "child-a", gen_a, parent.mailbox());
+        let handle_a = attend_and_deliver(child_a, "child-a", gen_a, parent.mailbox());
 
         match wait_for_settle(&parent.inbox()) {
-            crate::bus::Turn::Agent(result) => {
+            crate::bus::Item::Agent(result) => {
                 assert_eq!(result.id, id_a);
                 assert!(
                     matches!(result.outcome, crate::bus::AgentOutcome::Cancelled),
-                    "a never-renewed lease reaps mid-turn with Cancelled, got {:?}",
+                    "a never-renewed lease reaps mid-exchange with Cancelled, got {:?}",
                     result.outcome
                 );
             }
-            other => panic!("expected an Agent result turn, got {other:?}"),
+            other => panic!("expected an Agent result item, got {other:?}"),
         }
         assert!(!registry.is_live(id_a), "the reaped entry settles");
         handle_a.join().expect("worker thread must not panic");
@@ -2561,7 +2561,7 @@ mod tests {
         let id_b = child_b.id;
         let gen_b = register_lease_child(parent.id, Some(ttl_b), "child-b", &child_b);
         register_keepalive(&registry, id_b, &dir.join("keepalive-b"));
-        let handle_b = drive_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
+        let handle_b = attend_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
 
         std::thread::sleep(ttl_b / 2);
         assert!(registry.renew(id_b), "a live entry renews");

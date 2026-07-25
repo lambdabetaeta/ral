@@ -71,7 +71,7 @@ pub enum ProviderError {
     /// The assistant turn was cut off before the model finished — the
     /// output cap ([`crate::provider::CutShort::OutputCap`]) or a
     /// mid-stream stall ([`crate::provider::CutShort::Stalled`]).  Raised
-    /// by [`crate::agent::Agent::apply`] **after** appending the partial
+    /// by [`crate::agent::Agent::deliberate`] **after** appending the partial
     /// assistant message, so re-prompting with `continue` preserves the
     /// partial work as transcript context.
     Truncated {

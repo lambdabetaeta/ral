@@ -70,7 +70,7 @@ pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
 /// installed here, once the whole pattern has matched. A pattern that
 /// fails partway through — `let [[p],[q,r]] = [[1],[2]]` binds `p` then
 /// finds `[2]` too short for `[q,r]` — therefore leaves no partial
-/// bindings visible, whether the caller is a REPL turn (which installs
+/// bindings visible, whether the caller is a REPL run (which installs
 /// its mobile on every outcome) or a nested destructure.
 pub(crate) fn assign_pattern(
     pattern: &IrPattern,

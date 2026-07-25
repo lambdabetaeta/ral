@@ -51,7 +51,7 @@
 //! 3rd: `ExitProcess(130)`.
 //!
 //! [`relay_interrupt`] is the non-escalating alternative a frontend with its
-//! own turn-cancel ladder (exarch) calls directly instead: it cancels the
+//! own exchange-cancel ladder (exarch) calls directly instead: it cancels the
 //! foreground scope and fans `CTRL_BREAK_EVENT` out to every live
 //! *non-detached* group, never touching the counter above -- the Windows
 //! analogue of Unix's non-escalating `relay_handler`.  A detached
@@ -98,14 +98,14 @@ pub fn install_handlers() {
     });
 }
 
-/// Non-escalating turn-cancel relay: cancels the current turn's foreground
+/// Non-escalating exchange-cancel relay: cancels the current run's foreground
 /// scope and fans `CTRL_BREAK_EVENT` out to every live, non-detached
 /// pipeline group.  The Windows analogue of Unix's non-escalating
 /// `relay_handler` (`sigint_relay`) -- unlike the ladder [`install_handlers`]
 /// installs, this never ticks [`ESCALATION`] and never reaches a detached
-/// worker's group.  A frontend with its own turn-cancel contract (exarch)
+/// worker's group.  A frontend with its own exchange-cancel contract (exarch)
 /// calls this directly, in-process, for a Ctrl-C/Ctrl-Break it has already
-/// decided to treat as a turn-cancel, instead of re-injecting a console
+/// decided to treat as an exchange-cancel, instead of re-injecting a console
 /// event that would re-enter `install_handlers`'s escalating disposition.
 pub fn relay_interrupt() {
     request_foreground_cancel(CancelCause::Interrupt);
@@ -176,7 +176,7 @@ mod win_groups {
         /// True for a detached background worker's group (spawned under
         /// `PgidPolicy::NewSession`), false for a foreground job or
         /// pipeline leader (`PgidPolicy::NewLeader`).  [`break_foreground`]
-        /// (the turn-cancel relay) filters on this so a trunk interrupt
+        /// (the exchange-cancel relay) filters on this so a trunk interrupt
         /// never reaches a detached worker; [`break_all`]/[`terminate_all`]
         /// (the escalation ladder for a genuine termination request) do
         /// not filter, and reach every group regardless.
@@ -415,7 +415,7 @@ mod win_groups {
     /// Send `CTRL_BREAK_EVENT` to every member of every live,
     /// non-detached pipeline group — [`break_all`] narrowed to skip a
     /// detached background worker's group (`GroupState::detached`).  The
-    /// turn-cancel relay ([`super::relay_interrupt`]) uses this instead of
+    /// exchange-cancel relay ([`super::relay_interrupt`]) uses this instead of
     /// `break_all` so a trunk interrupt can never reach a detached worker.
     pub(super) fn break_foreground() {
         let groups = GROUPS.lock().unwrap();

@@ -1,19 +1,19 @@
-//! A human-driven proof that a turn crosses the wire into a booted guest.
+//! A human-driven proof that a run crosses the wire into a booted guest.
 //!
 //! Where `vm-manager`'s `boot-smoke` example ends at "the engine is alive on
 //! the vsock", this one drives the §3 protocol over that same wire: it boots
 //! the three artifacts through the `vz` backend, adopts the control plane
 //! `take_control` hands back into a [`WireTransport`], attaches a session at
-//! the guest's `/work`, and dispatches one real turn — reading the granted
+//! the guest's `/work`, and dispatches one real run — reading the granted
 //! folder from inside the VM — to a settled [`Report`]. The captured output
 //! comes back across the wire, proving the whole path end to end: boot,
-//! workspace share, engine, and the frame protocol under a running turn.
+//! workspace share, engine, and the frame protocol under a running run.
 //!
 //! Requires a signed binary — Virtualization.framework refuses an unentitled
-//! one. Run `dev/scripts/sign-virtualization.sh target/debug/examples/boot-turn`
+//! one. Run `dev/scripts/sign-virtualization.sh target/debug/examples/boot-run`
 //! after every rebuild.
 //!
-//! Usage: `boot-turn <kernel> <initramfs> <rootfs> <folder>`
+//! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -21,27 +21,27 @@ fn main() {
 
     use ral_core::io::TerminalState;
     use ral_core::transport::{
-        EnquiryError, Liveness, Program, Report, TerminalEndpoint, Transport, Turn, WireTransport,
+        EnquiryError, Liveness, Program, Report, TerminalEndpoint, Transport, Run, WireTransport,
         dispatch_to_report,
     };
     use ral_core::types::Capabilities;
-    use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
     use vm_manager::vz::Vz;
     use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Ok([kernel, initramfs, rootfs, folder]) = <[String; 4]>::try_from(args) else {
-        eprintln!("usage: boot-turn <kernel> <initramfs> <rootfs> <folder>");
+        eprintln!("usage: boot-run <kernel> <initramfs> <rootfs> <folder>");
         std::process::exit(2);
     };
 
-    // Seed a file the guest turn will read back, so the captured output is
+    // Seed a file the guest run will read back, so the captured output is
     // proof the granted folder crossed the virtiofs share, not just that a
-    // turn ran.
-    let sentinel = "boot-turn-was-here";
+    // run ran.
+    let sentinel = "boot-run-was-here";
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: example scaffolding seeds the folder it then grants; no shell, no turn, no card"
+        reason = "REASONED-SILENT: example scaffolding seeds the folder it then grants; no shell, no run, no card"
     )]
     std::fs::write(format!("{folder}/sentinel.txt"), sentinel).expect("seed the granted folder");
 
@@ -83,20 +83,20 @@ fn main() {
     let src = format!("cat {}/sentinel.txt", workspace.display());
     let report = dispatch_to_report(
         &transport,
-        Turn {
+        Run {
             program: Program::Source(src),
-            script_name: "<boot-turn>".into(),
+            script_name: "<boot-run>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Capture,
+            io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
+            stdin: RunStdin::Empty,
         },
         |_| {},
         |_| {},
-        |_| -> Result<_, EnquiryError> { unreachable!("this turn raises no enquiry") },
+        |_| -> Result<_, EnquiryError> { unreachable!("this run raises no enquiry") },
     )
     .expect("the guest engine must answer the dispatch with a Report");
 
@@ -110,9 +110,9 @@ fn main() {
             captured: Some(c), ..
         } = &report
     {
-        println!("turn ran in the guest; it read the granted folder back over the wire:");
+        println!("run ran in the guest; it read the granted folder back over the wire:");
         println!("  {}", String::from_utf8_lossy(&c.stdout).trim());
-        println!("PASS: a turn crossed the wire and saw the workspace");
+        println!("PASS: a run crossed the wire and saw the workspace");
     }
     if !passed {
         eprintln!("FAIL: unexpected report {report:?}");
@@ -137,6 +137,6 @@ fn main() {
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("boot-turn drives vm_manager::vz, which builds on macOS only");
+    eprintln!("boot-run drives vm_manager::vz, which builds on macOS only");
     std::process::exit(1);
 }

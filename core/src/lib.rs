@@ -61,21 +61,21 @@ pub(crate) mod test_env;
 pub mod test_helper;
 pub mod text;
 pub mod transport;
-pub mod turn;
+pub mod run;
 pub mod typecheck;
 pub mod types;
 #[cfg(unix)]
 pub(crate) mod wire;
 
-// The crate-root host surface: the turn seam, the host-embedding re-exec
+// The crate-root host surface: the run seam, the host-embedding re-exec
 // helpers, the typed-compile API, and ordinary value / rendering / diagnostic
-// types.  A host imports a turn from here; it does not reach the evaluator or
+// types.  A host imports a run from here; it does not reach the evaluator or
 // syntax layers through the crate root.
 pub use driver::{
-    Captured, HostSurface, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin,
+    Captured, HostSurface, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
 };
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
-pub use turn::{StaticDiagnostics, TurnLifecycle};
+pub use run::{StaticDiagnostics, RunLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
     Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError, Settled,
@@ -88,8 +88,7 @@ pub use types::{
 // owning module explicitly — `ral_core::syntax::parser::parse`,
 // `ral_core::elaborator::elaborate`, `ral_core::evaluator::evaluate`,
 // `ral_core::ir::Comp` — which reads as deliberately stepping past the
-// turn-door seam rather than as part of it.  See
-// decisions/260618_after-turn-api-simplifications.
+// run-door seam rather than as part of it.
 pub(crate) use elaborator::elaborate;
 pub(crate) use evaluator::evaluate;
 pub(crate) use ir::Comp;
@@ -153,7 +152,7 @@ impl CompileOutcome {
 /// elaborator consumes the names (which names are free variable
 /// references rather than command heads — the REPL's live shell env;
 /// non-REPL callers pass an empty map), the checker consumes the schemes
-/// (each session binding's type, seeding the turn's inference).
+/// (each session binding's type, seeding the run's inference).
 ///
 /// This is the shared ahead-of-time pipeline used by every entry point
 /// that takes source text and turns it into something the evaluator can
@@ -163,7 +162,7 @@ impl CompileOutcome {
 /// `file` is the [`FileId`](source::FileId) every span in the compiled
 /// program is stamped with. A production caller passes the id its source
 /// will be (or already is) registered under in the session's `SourceDb`,
-/// so the program's spans carry the turn's real file identity rather than
+/// so the program's spans carry the run's real file identity rather than
 /// the [`FileId::DUMMY`](source::FileId::DUMMY) placeholder [`parse`] falls
 /// back to.
 pub fn compile_and_typecheck(

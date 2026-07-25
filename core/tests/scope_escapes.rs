@@ -5,16 +5,16 @@
 //!
 //! The harness mirrors `top_level_vs_block.rs` exactly — bootstrap a
 //! `Shell` with the prelude registered, then drive each source string
-//! through the public `run_turn` door like a REPL turn would.  We
+//! through the public `run` door like a REPL run would.  We
 //! deliberately do not reach into internal types: the bugs are observable
-//! at the public turn-door API.
+//! at the public run-door API.
 
 mod common;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Escape, Settled, Shell};
 use ral_core::{
-    Break, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, builtins,
+    Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins,
 };
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
@@ -29,21 +29,21 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Run one top-level turn of `source` through the public `run_turn` door
+/// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -51,8 +51,8 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 

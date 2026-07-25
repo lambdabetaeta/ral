@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 /// The fixed total-request timeout — connect, TLS, and the whole read,
 /// bounded together, a host-side constant regardless of the caller's own
-/// turn budget: a `fetch-url` answer is a start receipt, a ledger read, a
+/// run budget: a `fetch-url` answer is a start receipt, a ledger read, a
 /// confirmation, a verdict, never a long-lived stream.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 

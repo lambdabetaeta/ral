@@ -54,9 +54,9 @@ pub struct HandlerEntry {
     pub arity: HandlerArity,
     pub thunk: Value,
     /// The arm's closed scheme, stored at install for persistent (alias)
-    /// frames so the next turn's check sees the alias as the installing
-    /// turn did.  `None` on `within [handlers: …]` entries, whose frames
-    /// never outlive their turn.
+    /// frames so the next run's check sees the alias as the installing
+    /// run did.  `None` on `within [handlers: …]` entries, whose frames
+    /// never outlive their run.
     pub scheme: Option<crate::typecheck::Scheme>,
 }
 
@@ -89,8 +89,8 @@ impl HandlerEntry {
     /// pipeline mode, enforced by [`crate::typecheck::alias_arm_scheme`].
     /// `role` names the diagnostic and picks whether the inferred scheme
     /// is persisted on the entry — an alias frame outlives its
-    /// installing turn and needs it seeded for the next turn's check; a
-    /// `within [handlers: …]` frame is popped before the turn ends and
+    /// installing run and needs it seeded for the next run's check; a
+    /// `within [handlers: …]` frame is popped before the run ends and
     /// needs none.
     ///
     /// # Errors
@@ -146,9 +146,9 @@ impl HandlerEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerRole {
     /// `alias NAME { |args| … }` — the frame outlives its installing
-    /// turn, so its scheme is persisted for the next turn's check.
+    /// run, so its scheme is persisted for the next run's check.
     Alias,
-    /// `within [handlers: …]` — the frame is popped before the turn
+    /// `within [handlers: …]` — the frame is popped before the run
     /// ends, so no scheme needs to survive it.
     Scoped,
 }
@@ -369,7 +369,7 @@ impl HandlerStack {
     }
 
     /// The (name, scheme) pairs of installed alias arms, outermost first
-    /// — the alias half of the next turn's check seed.
+    /// — the alias half of the next run's check seed.
     pub fn alias_schemes(&self) -> Vec<(String, typecheck::Scheme)> {
         self.frames
             .iter()

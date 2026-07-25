@@ -22,7 +22,7 @@
 //! [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
 //! and the working space is the guest's own [`GUEST_SCRATCH`] tmpfs, so
 //! [`Grant::capabilities`] is minted over those guest paths: the value
-//! rides every turn into the guest and is enforced there, where a host
+//! rides every run into the guest and is enforced there, where a host
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
@@ -199,7 +199,7 @@ impl Grant {
 
         // Readability is a separate question from existence: a folder can
         // sit on a share the user can see but not list.  Ask now, plainly,
-        // rather than let the first turn fail halfway through the work.
+        // rather than let the first exchange fail halfway through the work.
         std::fs::read_dir(&root).map_err(|e| {
             format!(
                 "Synod cannot see what is inside {} ({e}). \

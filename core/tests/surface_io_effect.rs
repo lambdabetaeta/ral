@@ -1,18 +1,18 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Structural I/O events: core pushes a plain `Value` onto the turn's
+//! Structural I/O events: core pushes a plain `Value` onto the run's
 //! `surface` sink at every redirect read/write door and every exec
-//! completion door.  These tests drive the public `Shell::run_turn`
+//! completion door.  These tests drive the public `Shell::run`
 //! door (exactly as `surface_effect.rs` does) with a recording sink
 //! and assert the emitted `{io: …}` maps.  Decoding these into cards is
 //! exarch's job and out of scope here — we only check the wire shape.
 
 mod common;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Settled, Shell, Value};
 use ral_core::{
-    EventSink, RequestedTerminalAccess, SurfaceSink, TurnIo, TurnReport, TurnRequest, TurnStdin,
+    EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
     builtins,
 };
 use std::sync::{Arc, Mutex};
@@ -41,24 +41,24 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
     (log, sink)
 }
 
-/// Run one turn of `source` with a recording surface sink and return the
+/// Run one run of `source` with a recording surface sink and return the
 /// settled value alongside the captured events.  Unlike `surface_effect`'s
-/// helper this tolerates a failing turn result, since several I/O doors
+/// helper this tolerates a failing run result, since several I/O doors
 /// (a failed exec, an aborted write) emit their event *and* surface an
 /// error.
 fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
     let (log, sink) = recording();
-    let result = match shell.run_turn(TurnRequest {
-        turn: Turn {
+    let result = match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: Some(sink),
         deferred: None,
@@ -66,8 +66,8 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     };
     let events = log.lock().unwrap().clone();
     (result, events)

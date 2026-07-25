@@ -2,16 +2,16 @@
 
 //! The `surface` effect: a value handed to the builtin reaches the
 //! host-installed sink unchanged, and with no sink installed the builtin
-//! is the identity.  Drives the public `Shell::run_turn` door the
+//! is the identity.  Drives the public `Shell::run` door the
 //! same way `ral` and `exarch` do.
 
 mod common;
 
 use ral_core::serial::FOValue;
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Settled, Shell, Value};
 use ral_core::{
-    EventSink, RequestedTerminalAccess, SurfaceSink, TurnIo, TurnReport, TurnRequest, TurnStdin,
+    EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
     builtins,
 };
 use std::sync::{Arc, Mutex};
@@ -45,21 +45,21 @@ fn fo_map_get<'a>(entries: &'a [(String, FOValue)], key: &str) -> Option<&'a FOV
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-/// Run one turn of `source` with an optional surface sink, returning the
+/// Run one run of `source` with an optional surface sink, returning the
 /// settled value.  These sources are well-formed, so a static diagnostic is
 /// a test bug.
 fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface,
         deferred: None,
@@ -67,8 +67,8 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 

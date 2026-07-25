@@ -1,5 +1,5 @@
 //! The uniform agent node: canonical event log, persistent shell, capability
-//! set, an owned hot-swappable provider, and the turn driver every node runs.
+//! set, an owned hot-swappable provider, and the attend loop every node runs.
 //!
 //! An exarch run is a *fleet* of these arranged in a tree; the
 //! [`Fleet`](crate::fleet::Fleet) holds what is shared (the registry, the one
@@ -11,7 +11,7 @@
 //! `returns` bit (`!interactive` at the trunk, `true` for every fork), and
 //! parking out of `interactive`/the registry's engagement read. A child's
 //! single result is delivered up its parent's mailbox by the spawn site, not
-//! by the loop, so the drive loop itself is identical for all.
+//! by the loop, so the attend loop itself is identical for all.
 //!
 //! This module holds the node's state — [`Agent`] and its fields — and the
 //! projections the rest of the crate reads it through. The machinery lives in
@@ -20,24 +20,26 @@
 //!
 //! - `build` — construction, the fork/branch descent, `/clear`'s rebuild, and
 //!   the `Drop` teardown.
-//! - `drive` — the one loop: pull a turn-boundary message, run one turn, do the
+//! - `attend` — the one loop: pull the next inbox item, take it up, do the
 //!   ready-boundary housekeeping, and turn a nudge-worthy outcome into a
-//!   self-posted [`InboxMsg::Nudge`](crate::bus::InboxMsg).
-//!   [`Agent::drive_queued`] is its bounded, per-exchange twin for a converse
-//!   session, sharing every per-turn step rather than looping a second way.
-//! - `turn` — one round-trip against the provider: the step loop under its
-//!   ceiling, the tool-call batch, the compaction step, and the outcome
-//!   constructors behind [`TurnOutcome`].
+//!   self-posted [`Post::Nudge`](crate::bus::Post).
+//!   [`Agent::attend_backlog`] is its bounded, per-exchange twin for a
+//!   converse session, sharing every per-item `take_up` rather than looping a
+//!   second way.
+//! - `deliberate` — one prompt run to quiescence against the provider: the
+//!   step loop under its ceiling, the tool-call batch, the compaction step,
+//!   and the outcome constructors behind [`deliberate::Outcome`].
 //! - `shell` — the desk seam: the host services installed for the extent of one
 //!   `ral` call, and the two cells through which the desk handler thread writes
-//!   while the drive thread sits parked inside it.
+//!   while the attend thread sits parked inside it.
 //! - `probe` — engine state decoded back across the probe rail, since a live
 //!   worker handle is not transportable.
 
+mod attend;
 mod build;
 pub mod cancel;
+pub mod deliberate;
 pub mod digest;
-mod drive;
 pub mod event;
 pub mod nudge;
 mod probe;
@@ -47,11 +49,10 @@ mod shell;
 #[cfg(test)]
 mod testkit;
 pub mod transcript;
-mod turn;
 
+pub use attend::{Control, NoControl, Verdict};
 pub use build::{RootConfig, RootSeat};
 pub(crate) use build::{Build, fresh_id};
-pub use drive::{Control, ControlFlow, NoControl};
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};
 
@@ -73,8 +74,8 @@ use std::sync::{Arc, Mutex};
 pub struct Agent {
     pub id: AgentId,
     /// This agent's own system prompt, resolved for its own `returns`/
-    /// `allow_schedule` — what actually reaches the model on every turn
-    /// ([`Self::apply`], [`Self::compact`]).
+    /// `allow_schedule` — what actually reaches the model on every step
+    /// ([`Self::deliberate`], [`Self::compact`]).
     pub(crate) system: String,
     /// The system prompt template [`Self::system`] was resolved from — still
     /// carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`] rather than a
@@ -90,9 +91,9 @@ pub struct Agent {
     /// fork, so resolving a child's own index never needs a live `Shell`.
     indexes: Arc<crate::prompt::BuiltinIndexes>,
     /// This session's canonical event log.  Its own lock, never the session
-    /// lock, so a per-turn desk can capture it off `&mut Agent` — but
+    /// lock, so a per-call desk can capture it off `&mut Agent` — but
     /// [`LogCell::lock`] enforces the non-contention this buys as a checked
-    /// law, not a hope: the desk only ever runs while the drive thread sits
+    /// law, not a hope: the desk only ever runs while the attend thread sits
     /// parked in `run_shell`, so a collision panics rather than blocking.
     log: LogCell,
     /// This session's operational trace (`transcript.jsonl`), written at the
@@ -126,32 +127,33 @@ pub struct Agent {
     /// This agent's own hot-swappable provider.  A `/model` on the focused
     /// agent swaps *its* handle alone; a `fork` seeds the child's own handle
     /// from this one's current provider, so neither disturbs the other.  The
-    /// drive loop reads it once per turn.
+    /// attend loop reads it once per item.
     provider: ProviderHandle,
     /// Whether a human is attached to the fleet (the TUI).  With `parent =
     /// None` it makes this the *conversing* trunk; off the TUI (`false`) the
     /// trunk is a one-shot headless agent.  Inherited by every fork.
     interactive: bool,
     /// This agent's own inbox — the consumer side of its message queue.
-    /// [`Agent::drive`] pulls turn-boundary deliverables from here;
-    /// [`Agent::apply`] drains tool-boundary steering from it mid-round-trip.
+    /// [`Agent::attend`] pulls inbox items from here; [`Agent::deliberate`]
+    /// drains tool-boundary steering from it mid-round-trip.
     /// Self-nudges and self-armed wakeups land here; a child's result lands in
     /// its *parent's* inbox, never reaching across into a sibling's.
     inbox: Inbox,
     /// Per-agent nudge state — the retry budget and the one-shot completion
-    /// gates.  Its latches reset on a genuine turn-boundary message, never on
-    /// a self-[`InboxMsg::Nudge`], so a multi-step nudge sequence runs to
-    /// completion within one turn.
+    /// gates.  Its latches reset on a genuine exchange-boundary item, never on
+    /// a self-[`Post::Nudge`](crate::bus::Post), so a multi-step nudge sequence runs to
+    /// completion within one exchange.
     nudges: nudge::Registry,
     /// This agent's cancellation token — one sticky token for its life,
     /// registered in the fleet so the subtree cascade (`agent-cancel`, the
-    /// ceiling, and `/clear`) always reaches the live turn.
-    /// The drive loop [`reset`](cancel::Token::reset)s its flag at each genuine
-    /// turn boundary, so an Esc on one turn never bleeds into the next; the
-    /// trunk additionally [`publish`](cancel::publish)es it for OS signals.
+    /// ceiling, and `/clear`) always reaches the live exchange.
+    /// The attend loop [`reset`](cancel::Token::reset)s its flag at each
+    /// genuine exchange boundary, so an Esc on one exchange never bleeds into
+    /// the next; the trunk additionally [`publish`](cancel::publish)es it for
+    /// OS signals.
     cancel: cancel::Token,
     /// Whether this agent's provider requests advertise the `ral` tool at
-    /// all — read by `provider.complete` (advertisement) and [`Self::stage`]
+    /// all — read by `provider.complete` (advertisement) and [`Self::invoke`]
     /// (dispatch), so the two can never disagree about whether a call was
     /// invited.  `false` only for a `--chat` trunk, which converses with no
     /// tool whatsoever; construction-fixed like `returns`/`allow_schedule`
@@ -169,20 +171,20 @@ pub struct Agent {
     pub(crate) allow_schedule: bool,
     /// A returning agent's staged return value, harvested by
     /// [`Self::run_shell`] from that call's own [`ReplyCell`] the instant its
-    /// installed desk retires. Lifted by [`Self::apply`]
-    /// into a [`TurnOutcome::Replied`] once the current tool-call batch
-    /// finishes draining — never mid-batch, so the session reaches a clean
-    /// boundary with every `call_id` answered.  Held as the faithful
+    /// installed desk retires. Lifted by [`Self::deliberate`]
+    /// into a [`deliberate::Outcome::Replied`] once the current tool-call
+    /// batch finishes draining — never mid-batch, so the session reaches a
+    /// clean boundary with every `call_id` answered.  Held as the faithful
     /// [`FOValue`] the model passed, so the consuming edge renders it (a null
     /// or empty value settles as the `Empty` variant of
     /// [`AgentOutcome`](crate::bus::AgentOutcome)).  Every returning
     /// agent sets it — a peer and the headless root; `reply` is withheld only
-    /// from the interactive root.  Scoped to its own batch: [`Self::apply`]
-    /// resets it on entry, so a reply staged in a turn that then cancels,
-    /// errors, or panics before the drain that takes it never survives to
-    /// poison the next turn.  A plain field, not a `ReplyCell`: outside the
-    /// one call's extent a fresh cell is harvested into, this is touched only
-    /// by the drive thread under `&mut Agent`.
+    /// from the interactive root.  Scoped to its own batch: [`Self::deliberate`]
+    /// resets it on entry, so a reply staged in a deliberation that then
+    /// cancels, errors, or panics before the drain that takes it never
+    /// survives to poison the next deliberation.  A plain field, not a
+    /// `ReplyCell`: outside the one call's extent a fresh cell is harvested
+    /// into, this is touched only by the attend thread under `&mut Agent`.
     reply: Option<FOValue>,
     /// The **fleet's** agent registry — one shared map, cloned to every node,
     /// so "all live agents" is its contents.  Every agent registers itself here
@@ -238,34 +240,6 @@ pub struct Agent {
     egress: crate::fleet::egress::Egress,
 }
 
-/// Outcome of one [`Agent::apply`].  Degenerate cases (`Empty`,
-/// `Stopped`) become nudges; `Cancelled` and `Capped` do not; hard
-/// failures travel through [`ProviderError`].
-#[derive(Debug)]
-pub enum TurnOutcome {
-    Complete(String),
-    /// A returning agent called `reply`: the carried payload is its deliberate
-    /// return value, a faithful [`FOValue`] (`FOValue::Unit` when the
-    /// argument was absent or unit).  Carried as a value, not pre-rendered
-    /// text, so each consumer renders it at its own edge — prose for a model
-    /// parent, the structure itself for the headless harness (via
-    /// [`shell_eval::user_json`]).  Distinct from [`Self::Complete`]
-    /// precisely so the nudge layer can tell "already returned" from
-    /// "stopped without returning" and not re-nudge an agent that replied.
-    /// Terminal: it ends the drive loop.
-    Replied(FOValue),
-    Empty,
-    Stopped {
-        reason: String,
-    },
-    Cancelled,
-    /// The round-trip loop hit [`MAX_STEPS`] without the model ever
-    /// emitting a tool-call-free reply.  Terminal: it carries no nudge
-    /// (re-driving would just spend another `MAX_STEPS`).
-    Capped,
-}
-
-
 /// The depth budget exarch's own trunks start with, passed as
 /// [`RootConfig::fuel`]; each [`Agent::fork_with`] hands its child one less,
 /// and a `fuel == 0` agent's `agent-start` calls are refused at the desk
@@ -278,12 +252,12 @@ pub(crate) const SPAWN_FUEL: u32 = 3;
 
 /// A shared, swappable handle to the active provider.
 ///
-/// The drive loop reads
-/// the current provider once per turn through [`Self::current`]; a `/model`
+/// The attend loop reads
+/// the current provider once per item through [`Self::current`]; a `/model`
 /// switch on the frontend's UI thread swaps it through [`Self::swap`].  Live
-/// provider replacement across the UI / drive thread boundary needs a shared
+/// provider replacement across the UI / attend thread boundary needs a shared
 /// cell rather than an owned `Arc` the worker would hold privately; a `Mutex`
-/// suffices (the cell is touched at most once per turn and on the rare
+/// suffices (the cell is touched at most once per item and on the rare
 /// switch).  A peer wraps a *snapshot* of the provider at spawn, so a later
 /// root `/model` never disturbs an already-running child.
 #[derive(Clone)]
@@ -294,7 +268,7 @@ impl ProviderHandle {
         Self(Arc::new(Mutex::new(provider)))
     }
 
-    /// The provider in force for the next turn.
+    /// The provider in force for the next item.
     ///
     /// # Panics
     /// Panics if the provider-handle mutex is poisoned.
@@ -303,8 +277,9 @@ impl ProviderHandle {
     }
 
     /// Replace the active provider (a `/model` switch).  Takes effect on the
-    /// drive loop's next turn; an in-flight turn finishes on the provider it
-    /// started with, and any running peer keeps its own snapshot.
+    /// attend loop's next item; an in-flight deliberation finishes on the
+    /// provider it started with, and any running peer keeps its own
+    /// snapshot.
     ///
     /// # Panics
     /// Panics if the provider-handle mutex is poisoned.
@@ -321,8 +296,9 @@ impl Agent {
         self.provider.clone()
     }
 
-    /// The provider in force for this agent's next turn — for a slash command
-    /// (`/compact`) the drive loop runs against the agent's own handle.
+    /// The provider in force for this agent's next item — for a slash
+    /// command (`/compact`) the attend loop runs against the agent's own
+    /// handle.
     pub(crate) fn current_provider(&self) -> Arc<Provider> {
         self.provider.current()
     }
@@ -347,7 +323,7 @@ impl Agent {
 
     /// A handle to this session's inbox — for a frontend to build the bus
     /// (whose emitters mint mailboxes onto this same queue) over the session's
-    /// own queue, so producers and the drive loop share one inbox.
+    /// own queue, so producers and the attend loop share one inbox.
     pub(crate) fn inbox(&self) -> Inbox {
         self.inbox.clone()
     }
@@ -358,9 +334,9 @@ impl Agent {
         &self.cancel
     }
 
-    /// Whether the session is at a settled turn boundary — every turn
-    /// must hand it back here.  Exposed for the harness to assert the
-    /// transcript-admission invariant after a turn.
+    /// Whether the session is at a settled ready boundary — every
+    /// deliberation must hand it back here.  Exposed for the harness to
+    /// assert the transcript-admission invariant after a deliberation.
     ///
     /// # Panics
     /// Panics if the log mutex is poisoned.
@@ -420,12 +396,12 @@ impl Agent {
         &self.caps
     }
 
-    /// Non-blocking pop of the next deliverable inbox message, for a test
-    /// polling for an async spawn's settle without driving a full turn (and
-    /// its provider round-trip) on the parent session.
+    /// Non-blocking pop of the next inbox item, for a test polling for an
+    /// async spawn's settle without running a full deliberation (and its
+    /// provider round-trip) on the parent session.
     #[cfg(test)]
-    pub(crate) fn drain_turn_for_test(&self) -> Option<crate::bus::Turn> {
-        self.inbox.drain_turn()
+    pub(crate) fn next_item_for_test(&self) -> Option<crate::bus::Item> {
+        self.inbox.next_item()
     }
 }
 

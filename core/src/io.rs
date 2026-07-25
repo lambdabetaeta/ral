@@ -132,7 +132,7 @@ impl Io {
         self.interactive = parent.interactive;
         self.launch_role = parent.launch_role;
         // Move the whole source so every marker (`Empty` as well as a `Pipe` /
-        // `File`) reaches the child: a child of an `Empty`-stdin turn must also
+        // `File`) reaches the child: a child of an `Empty`-stdin run must also
         // see no fall-through to fd 0, not silently revert to `Terminal`.
         self.stdin = std::mem::replace(&mut parent.stdin, Source::Terminal);
     }

@@ -18,8 +18,8 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Control, ControlFlow, cancel},
-    bus::{AgentId, Emitter, FleetBus, Inbox, InboxMsg, Pass, drain_pass},
+    agent::{Agent, Control, Verdict, cancel},
+    bus::{AgentId, Emitter, FleetBus, Inbox, Pass, Post, drain_pass},
     fleet::{Fleet, registry::AgentRegistry},
     provider::{
         self, Provider,
@@ -59,20 +59,20 @@ impl Tui {
     }
 }
 
-/// The agent-affecting slash command hook the worker's [`Agent::drive`]
-/// calls at the turn boundary, where the drive thread owns the agent the
+/// The agent-affecting slash command hook the worker's [`Agent::attend`]
+/// calls at the exchange boundary, where the attend thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was
 /// already cleared UI-side), `/compact` summarizes the history, `/resources`
 /// surveys the agent's accumulators into one probe card, and `/quit` ends the
-/// drive loop — which sets `done`, so the UI loop's next drain returns `Stop`
+/// attend loop — which sets `done`, so the UI loop's next drain returns `Stop`
 /// and exits.  Every other command is handled UI-side and never reaches here.
-/// Only the trunk drives with this `Control` (a sub-agent uses
+/// Only the trunk attends with this `Control` (a sub-agent uses
 /// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
 /// the trunk's own context and provider.
 pub struct ReplControl;
 
 impl Control for ReplControl {
-    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
+    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> Verdict {
         let trimmed = raw.trim();
         let (head, rest) = commands::split_head(trimmed);
         if head == "/branch" {
@@ -84,29 +84,29 @@ impl Control for ReplControl {
                 ),
                 Err(e) => session.note_error(format!("could not start branch: {e}"), emit),
             }
-            return ControlFlow::Continue;
+            return Verdict::Continue;
         }
         match trimmed {
             "/clear" => {
                 let _ = session.clear();
-                ControlFlow::Continue
+                Verdict::Continue
             }
             "/compact" => {
                 let p = session.current_provider();
                 let token = session.cancel_token().clone();
                 session.compact(&p, emit, true, &token);
-                ControlFlow::Continue
+                Verdict::Continue
             }
-            // The probe fold: assembled here, on the drive thread that owns
+            // The probe fold: assembled here, on the attend thread that owns
             // the shell the rows survey, and emitted as one bus event the
             // frontend renders (appending its own rows) — never a model
             // turn.
             "/resources" => {
                 session.emit_resources(emit);
-                ControlFlow::Continue
+                Verdict::Continue
             }
-            "/quit" | "/exit" => ControlFlow::Quit,
-            _ => ControlFlow::Continue,
+            "/quit" | "/exit" => Verdict::Quit,
+            _ => Verdict::Continue,
         }
     }
 }
@@ -145,7 +145,7 @@ pub fn run(
     tui.app.update_live_model(provider);
     // The fleet: a session-lived bus over the trunk's inbox, plus the shared
     // registry and transport engine.  Input, the queued-user strip, async-agent
-    // results, and the worker's drive loop all read and write this one inbox,
+    // results, and the worker's attend loop all read and write this one inbox,
     // already threaded into `tui.app` above.
     let fleet = Fleet {
         agents: session.agents.clone(),
@@ -159,11 +159,11 @@ pub fn run(
         .banner(tui.guard.term(), info)
         .map_err(|e| e.to_string())?;
 
-    // The worker thread runs the trunk via `Agent::drive`, parking on an empty
+    // The worker thread runs the trunk via `Agent::attend`, parking on an empty
     // inbox (the conversing trunk) until a `/quit` command tells its `Control`
     // to quit; it then sets `done`, and the UI loop's next drain returns
     // `Stop`. The UI loop renders the bus and routes input in one continuous
-    // loop alongside it.  The trunk drives on its own provider handle.
+    // loop alongside it.  The trunk attends on its own provider handle.
     let done = AtomicBool::new(false);
     let done_ref = &done;
     let mut control = ReplControl;
@@ -200,7 +200,7 @@ pub fn run(
         let worker = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn_scoped(scope, move || {
-                let out = session.drive(&mut control, &worker_emit);
+                let out = session.attend(&mut control, &worker_emit);
                 done_ref.store(true, Ordering::Release);
                 out
             })
@@ -213,7 +213,7 @@ pub fn run(
             // rejected `/quit` here (the inbox somehow at quota) has nowhere
             // more specific left to report to than the fatal error already
             // in flight; worst case the join below waits on a parked worker.
-            let _ = quit_mailbox.push(InboxMsg::Command("/quit".into()));
+            let _ = quit_mailbox.push(Post::Command("/quit".into()));
         }
         let _ = worker.join();
         r.map_err(|e| e.to_string())
@@ -260,15 +260,16 @@ pub struct CommandCtx<'a> {
 }
 
 /// The merged render + input loop, running on the UI thread alongside the
-/// worker's [`Agent::drive`].  It drains the session-lived bus into the App
-/// (the same `App::handle` the old per-turn drive used), ticks and redraws at
-/// ~60 FPS, and routes the user's keystrokes: scrollback / picker keys edit the
-/// App, a submitted line is routed by [`route_submit`] (view commands run here;
-/// agent commands and plain prompts go onto the focused agent's inbox), and Esc
-/// / Ctrl-C interrupt the focused tab's current turn (never a cascade, never a
-/// kill).  A `TAB` that moves focus updates the live-model chrome to the
-/// newly focused agent's provider; no agent-side lifecycle depends on focus,
-/// so nothing else needs to be woken by the move.  Returns when the worker
+/// worker's [`Agent::attend`].  It drains the session-lived bus into the App
+/// (the same `App::handle` the old per-exchange attend loop used), ticks and
+/// redraws at ~60 FPS, and routes the user's keystrokes: scrollback / picker
+/// keys edit the App, a submitted line is routed by [`route_submit`] (view
+/// commands run here; agent commands and plain prompts go onto the focused
+/// agent's inbox), and Esc / Ctrl-C interrupt the focused tab's current
+/// exchange (never a cascade, never a kill).  A `TAB` that moves focus
+/// updates the live-model chrome to the newly focused agent's provider; no
+/// agent-side lifecycle depends on focus, so nothing else needs to be woken
+/// by the move.  Returns when the worker
 /// finishes (a `/quit`), draining its final events for one last frame.
 fn ui_loop(
     tui: &mut Tui,
@@ -279,7 +280,7 @@ fn ui_loop(
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
     // The session inbox, so a routed line (a plain prompt, a session command)
-    // reaches the worker's drive loop through the App's own queue.
+    // reaches the worker's attend loop through the App's own queue.
     let mailbox = tui.app.inbox.mailbox();
     let rx = bus.rx();
     // The frame clock: the instant the last frame was painted, seeded a frame
@@ -295,7 +296,7 @@ fn ui_loop(
     // flip. Seeded true so the first frame always paints.
     let mut dirty = true;
     // Sampled once per iteration, purely for the dirty-flip below: whether the
-    // focused tab's drive loop parks or unparks repaints the tab title and
+    // focused tab's attend loop parks or unparks repaints the tab title and
     // prompt chrome even with no bus event of its own, but `App` derives the
     // bit itself (via [`App::focused_waiting`]) whenever it actually needs it.
     let mut prev_waiting = tui.app.focused_waiting();
@@ -370,12 +371,12 @@ fn ui_loop(
                     let steerable = tui.app.is_steerable();
                     match key_action(&k, steerable) {
                         // Esc / Ctrl-C interrupt the *focused* tab's current
-                        // turn — never a cascade, never a kill.  On the trunk
-                        // `raise_interrupt()` unwinds the trunk's own turn via
+                        // exchange — never a cascade, never a kill.  On the trunk
+                        // `raise_interrupt()` unwinds the trunk's own exchange via
                         // the published slot and the ral foreground.  On any
                         // other focused tab `interrupt(id)` unwinds that
-                        // agent's turn alone by cancelling its registered
-                        // token and whatever `ForegroundScope` its turn-scope
+                        // agent's exchange alone by cancelling its registered
+                        // token and whatever `ForegroundScope` its run-scope
                         // cell currently holds, never `eval_root`; a sub-agent
                         // never publishes the slots, so the slot/foreground
                         // path would target the trunk by mistake.  Neither
@@ -485,10 +486,10 @@ pub enum KeyAction {
 
 /// Classify one key press in the running UI loop: Ctrl-C and Esc always
 /// cancel; otherwise a bare Enter submits when `enter_submits` (the focused
-/// tab's steerability), and everything else edits. The worker drives the
-/// whole session, so the prompt is never an idle read — there is no separate
-/// mode to classify against here. The modal overlays (`/model`, `/login`)
-/// resolve their own cancel chord through [`overlay_tick`] instead.
+/// tab's steerability), and everything else edits. The worker's attend loop
+/// owns the whole session, so the prompt is never an idle read — there is no
+/// separate mode to classify against here. The modal overlays (`/model`,
+/// `/login`) resolve their own cancel chord through [`overlay_tick`] instead.
 pub fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
     if ctrl_key(k, 'c') {
         return KeyAction::Cancel;
@@ -517,14 +518,14 @@ mod tests {
     use crate::bus::Kind;
 
     /// `/resources` routes exactly as `/clear` does: posted to the inbox as
-    /// an `InboxMsg::Command`, drained at the turn boundary, and handled by
-    /// [`ReplControl`] against the agent the drive loop owns — which
+    /// a `Post::Command`, drained at the exchange boundary, and handled by
+    /// [`ReplControl`] against the agent the attend loop owns — which
     /// assembles its probe rows and emits exactly one [`Kind::Resources`],
     /// recorded by the transcript as a `resources` line, with no
-    /// model-facing side effect (the drive quiesces without a provider
+    /// model-facing side effect (the attend loop quiesces without a provider
     /// round-trip).
     #[test]
-    fn resources_command_routes_through_drive_and_emits_once() {
+    fn resources_command_routes_through_attend_and_emits_once() {
         let dir =
             std::env::temp_dir().join(format!("exarch-resources-route-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -532,13 +533,13 @@ mod tests {
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
             .mailbox()
-            .push(InboxMsg::Command("/resources".into()))
+            .push(Post::Command("/resources".into()))
             .unwrap();
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
         let mut control = ReplControl;
-        let _ = session.drive(&mut control, &emit);
+        let _ = session.attend(&mut control, &emit);
 
         let event = rx
             .try_recv()

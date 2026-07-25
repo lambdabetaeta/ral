@@ -50,7 +50,7 @@ fn marks_dto(card: Card) -> Vec<MarkDto> {
         .collect()
 }
 
-/// The wire shape of one turn's worth of narration, as the window's own
+/// The wire shape of one exchange's worth of narration, as the window's own
 /// `synod-event` listener sees it — [`project`]'s codomain, plus
 /// [`Self::Failure`], which never comes from the bus.
 #[derive(Clone, Serialize)]
@@ -126,7 +126,7 @@ pub enum SynodEvent {
 /// Project one bus [`Kind`] into the event the window renders, or `None`
 /// for a `Kind` the window has no use for.
 ///
-/// `Step`'s `tuning` is dropped: the window narrates turns, not the
+/// `Step`'s `tuning` is dropped: the window narrates exchanges, not the
 /// provider's effort dial.  The card-carrying kinds split by intent:
 /// [`Kind::Card`] is a deliberate user-facing act and projects to `Card`,
 /// which the window stands in the transcript; `Io`/`Done`/`Notice`/

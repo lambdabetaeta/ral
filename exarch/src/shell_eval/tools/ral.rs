@@ -37,7 +37,7 @@ struct RalArgs {
 /// may set `timeout_secs` higher for work known to run long, and there
 /// is no upper clamp.  Work you can overlap with other progress still
 /// belongs in a `spawn`ed block whose handle is polled and awaited
-/// across turns.
+/// across steps.
 const CALL_TIMEOUT_SECS: u64 = 60;
 
 /// Soft cap on `description` length.  The field is a one-line label

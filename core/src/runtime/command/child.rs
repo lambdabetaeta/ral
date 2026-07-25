@@ -66,7 +66,7 @@ pub(crate) enum GroupOwner {
 /// Audit-agnostic.  Per-command byte capture is the *caller's* concern:
 /// pipeline stages own their `tee_with_buffer` arcs on `ProcessHandle`;
 /// standalone externals are captured at dispatch level by
-/// `evaluator::with_audit_capture` (which tees `shell.turn.io.stdout/stderr`).
+/// `evaluator::with_audit_capture` (which tees `shell.run.io.stdout/stderr`).
 /// `RunningChild` carries no audit fields.
 pub(crate) struct RunningChild {
     pub child: Option<crate::process::ChildHandle>,

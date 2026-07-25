@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-//! §3 frame protocol over vsock — the heartbeat and turn-durability laws
+//! §3 frame protocol over vsock — the heartbeat and run-durability laws
 //! (`dev/docs/VM/SYNOD.md` §3), proven end to end against a *real* engine
 //! child.
 //!
@@ -20,11 +20,11 @@ use std::time::{Duration, Instant};
 
 use ral_core::io::TerminalState;
 use ral_core::transport::{
-    DispatchId, EnquiryError, Liveness, Program, Report, TerminalEndpoint, Transport, Turn,
+    DispatchId, EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport,
     WireTransport, dispatch_to_report,
 };
 use ral_core::types::Capabilities;
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
 // served here, before libtest sees a flag it would reject, so a re-exec'd
@@ -103,24 +103,24 @@ fn attach(transport: &WireTransport) -> tempfile::TempDir {
     dir
 }
 
-/// One capturing turn under the ⊤ capability ceiling, uncapped and
+/// One capturing run under the ⊤ capability ceiling, uncapped and
 /// stdin-less — the shape `core/src/transport.rs`'s own `capture_req` mints.
-fn source_turn(src: &str) -> Turn {
-    Turn {
+fn source_run(src: &str) -> Run {
+    Run {
         program: Program::Source(src.into()),
         script_name: "<test>".into(),
         caps: Capabilities::root(),
-        turn_limit: None,
+        wall: None,
         deferred_lease: None,
         worker_cap: None,
-        io: TurnIo::Capture,
+        io: RunIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
-        stdin: TurnStdin::Empty,
+        stdin: RunStdin::Empty,
     }
 }
 
 /// The §3 heartbeat keeps an *idle* session alive across a real child: adopt
-/// → attach → a turn runs to a settled `Report::Ran { Ok }`, and then the
+/// → attach → a run settles to a `Report::Ran { Ok }`, and then the
 /// session, left silent for wall-clock time well past its read deadline,
 /// stays live — because the engine's `Pong` echoes of the host's `Ping`s are
 /// the traffic that resets the deadline.
@@ -134,10 +134,10 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
 
     let report = dispatch_to_report(
         &transport,
-        source_turn("$[1 + 1]"),
+        source_run("$[1 + 1]"),
         |_| {},
         |_| {},
-        |_| -> Result<_, EnquiryError> { unreachable!("this turn raises no enquiry") },
+        |_| -> Result<_, EnquiryError> { unreachable!("this run raises no enquiry") },
     )
     .expect("the engine must answer the dispatch with a Report");
 
@@ -157,23 +157,23 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
     );
 }
 
-/// A dead peer fails the in-flight turn as cancelled: a turn that would run
-/// far past the test (`sleep 30`) is dispatched and left running; dropping
-/// the transport shuts the socket, so the engine sees EOF, cancels the
-/// in-flight turn, waits for it to settle, and exits — well within a generous
-/// bound, rather than running the sleep to term or hanging on a peer that
-/// will never speak again.
+/// A dead peer fails the in-flight run as cancelled: a run that would take
+/// far longer than the test (`sleep 30`) is dispatched and left running;
+/// dropping the transport shuts the socket, so the engine sees EOF, cancels
+/// the in-flight run, waits for it to settle, and exits — well within a
+/// generous bound, rather than running the sleep to term or hanging on a
+/// peer that will never speak again.
 #[test]
-fn a_dead_peer_fails_the_in_flight_turn_as_cancelled() {
+fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
     let (transport, mut child) = engine_over_socketpair(Liveness::default());
     let _dir = attach(&transport);
 
     // Fire-and-forget: write the Dispatch frame and do not drain its Report.
     // A literal id suffices — nothing here correlates a reply.
-    transport.dispatch(DispatchId(1), source_turn("sleep 30"));
+    transport.dispatch(DispatchId(1), source_run("sleep 30"));
 
     // Give the engine time to actually enter the sleep, so what the dropped
-    // peer interrupts is a genuinely in-flight turn, not a race with dispatch.
+    // peer interrupts is a genuinely in-flight run, not a race with dispatch.
     std::thread::sleep(Duration::from_secs(1));
 
     // The engine sees EOF on fd 3 once the transport drops.
@@ -193,7 +193,7 @@ fn a_dead_peer_fails_the_in_flight_turn_as_cancelled() {
 
     assert!(
         exited,
-        "a dead peer must fail the in-flight turn as cancelled and exit, not run `sleep 30` to \
+        "a dead peer must fail the in-flight run as cancelled and exit, not run `sleep 30` to \
          term or hang"
     );
 }

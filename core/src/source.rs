@@ -7,7 +7,7 @@
 //!
 //! [`Source`] bundles a loaded text with a precomputed line-start index for
 //! O(log lines) `byte → (line, col)` recovery, and [`SourceDb`] is the
-//! per-turn registry that resolves a [`FileId`] back to its [`Source`] at
+//! per-run registry that resolves a [`FileId`] back to its [`Source`] at
 //! render time.
 
 use serde::{Deserialize, Serialize};
@@ -282,7 +282,7 @@ impl Source {
     }
 }
 
-/// Registry of every source text the current turn has loaded, keyed by
+/// Registry of every source text the current run has loaded, keyed by
 /// [`FileId`].
 ///
 /// A [`SourceLoc`](crate::diagnostic::SourceLoc) carries the `FileId` of the
@@ -291,8 +291,8 @@ impl Source {
 /// the module's own bytes rather than the top-level script's.
 ///
 /// `Arc`-shared so the per-closure `Location` clone is a refcount bump.
-/// Within a turn the top-level source and each module it loads each register
-/// once; [`reset`](Self::reset) at the next turn boundary reclaims them.
+/// Within a run the top-level source and each module it loads each register
+/// once; [`reset`](Self::reset) at the next run boundary reclaims them.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
     sources: Arc<Vec<Source>>,
@@ -304,7 +304,7 @@ impl SourceDb {
         let sources = Arc::make_mut(&mut self.sources);
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
+            reason = "FileId is u32; a run registers a handful of sources, far below 2^32"
         )]
         let id = FileId(sources.len() as u32);
         sources.push(source);
@@ -313,8 +313,8 @@ impl SourceDb {
 
     /// Drop every registered source, returning the registry to empty so the
     /// next [`register`](Self::register) hands out [`FileId`] with index `0` again.
-    /// Called at each top-level turn boundary so a long interactive session
-    /// reclaims the prior turn's sources instead of growing without bound.
+    /// Called at each top-level run boundary so a long interactive session
+    /// reclaims the prior run's sources instead of growing without bound.
     pub fn reset(&mut self) {
         Arc::make_mut(&mut self.sources).clear();
     }
@@ -334,7 +334,7 @@ impl SourceDb {
     pub fn next_id(&self) -> FileId {
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "FileId is u32; a turn registers a handful of sources, far below 2^32"
+            reason = "FileId is u32; a run registers a handful of sources, far below 2^32"
         )]
         FileId(self.sources.len() as u32)
     }

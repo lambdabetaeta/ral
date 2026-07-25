@@ -51,7 +51,7 @@ pub(super) struct Session {
     /// its own internal stack when this is `None`.
     pending: Option<EditBuffer>,
     /// The reactive-worksheet model: per-binding dependency edges and the
-    /// pure/effectful verdict, accumulated across turns and projected by the
+    /// pure/effectful verdict, accumulated across runs and projected by the
     /// structural surface.  Owned here so it persists; recorded after a
     /// successful top-level bind and read by `frontend.read`.  Only the
     /// `structural` build constructs and reads it.
@@ -170,7 +170,7 @@ impl Session {
         // but the terminal lease (hardcoded `None`).  Computing cwd/HOME/a
         // re-probed terminal only to throw them away is dead work — wire it
         // when `WireTransport` is actually constructed.
-        while matches!(self.turn(), Flow::Continue) {}
+        while matches!(self.iterate(), Flow::Continue) {}
         ExitCode::from(self.exit_code)
     }
 
@@ -178,13 +178,13 @@ impl Session {
     /// Returns `Break` when the frontend hits EOF, the evaluator
     /// returns an exit code, or the session's durable root has been
     /// cancelled.
-    fn turn(&mut self) -> Flow {
+    fn iterate(&mut self) -> Flow {
         self.jobs.lock().unwrap().reap();
 
         // A cancelled durable root ends the session.  Cancellation is
         // one-way — the root can never be un-cancelled — so after a
         // SIGTERM/SIGHUP (`Terminate`) or a Ctrl-\ (`RootAbort`) every
-        // future turn would fail with the same cause; exit with its
+        // future iteration would fail with the same cause; exit with its
         // code instead of dealing the user an unusable prompt.
         let cancel_cause = self
             .transport
@@ -263,7 +263,7 @@ impl Session {
 impl Drop for Session {
     /// Flush history and take down remaining jobs.  Runs on both the
     /// orderly `run` return and a panic unwinding through the owned
-    /// `Session`, so a crash mid-turn neither orphans a stopped process
+    /// `Session`, so a crash mid-iteration neither orphans a stopped process
     /// group nor drops the session's history.
     ///
     /// The exit story is a warn-then-sweep fold over the session's ledger

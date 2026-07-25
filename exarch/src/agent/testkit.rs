@@ -1,5 +1,5 @@
 //! Shared test scaffolding for the `agent` test modules: the fixtures and
-//! drivers exercised from two or more of `build.rs`, `drive.rs`, `turn.rs`,
+//! drivers exercised from two or more of `build.rs`, `attend.rs`, `deliberate.rs`,
 //! `shell.rs` and `resources.rs`. A helper used by only one of those files
 //! lives in that file's own `mod tests` instead.
 
@@ -24,7 +24,7 @@ use ral_core::types::{BuiltinBody, BuiltinEntry, Settled};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// A scripted provider behind the `Arc` the turn driver threads.
+/// A scripted provider behind the `Arc` the attend loop threads.
 pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
 }
@@ -122,7 +122,7 @@ pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOu
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id);
     child.provider = ProviderHandle::new(provider);
-    let (outcome, payload) = child.drive(&mut NoControl, &emit);
+    let (outcome, payload) = child.attend(&mut NoControl, &emit);
     let text = payload.as_ref().map(render_reply).unwrap_or_default();
     (outcome, text)
 }

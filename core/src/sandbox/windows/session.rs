@@ -19,7 +19,7 @@
 //! different key, and spawns under a SID that has never been granted the
 //! wider paths: attenuation is enforced at the kernel, per projection.
 //! Commands sharing one frozen projection (the overwhelmingly common case —
-//! every turn of an agent session under one policy) share one SID and one
+//! every exchange of an agent session under one policy) share one SID and one
 //! stamp, so the per-grant cost is paid once per *distinct* projection, not
 //! per command. Recorded in
 //! `docs/ral-wiki/decisions/260713_projection-keyed-appcontainer.md`.

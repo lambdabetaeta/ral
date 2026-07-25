@@ -21,7 +21,7 @@ use crate::reap::{self, Waking};
 use crate::sysctl;
 
 /// How long the engine is given to finish after being asked to stop, before
-/// it is killed.  Long enough for a turn to abandon its work and flush the
+/// it is killed.  Long enough for a run to abandon its work and flush the
 /// workspace; short enough that a wedged guest does not hold a user's
 /// afternoon.
 const GRACE: Duration = Duration::from_secs(5);

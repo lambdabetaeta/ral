@@ -16,7 +16,7 @@
 //!
 //! The section caps here bound one tool result; the model's whole history
 //! is bounded separately by the compaction budget ([`compaction_due`] /
-//! [`COMPACT_THRESHOLD`]), which summarises older turns once context
+//! [`COMPACT_THRESHOLD`]), which summarises older exchanges once context
 //! pressure crosses the reserve.
 
 use crate::shell_eval;

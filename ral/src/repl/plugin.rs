@@ -34,11 +34,11 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 #[cfg(test)]
 pub(super) use self::router::parse_key_notation;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Capabilities, Settled};
 use ral_core::{
-    HookName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
-    TurnStdin, Value, diagnostic,
+    HookName, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
+    StaticDiagnostics, Value, diagnostic,
 };
 use std::time::Duration;
 
@@ -221,7 +221,7 @@ pub(super) struct PendingKeybinding {
 
 // ── Transactional hook helper ───────────────────────────────────────────
 
-/// Per-call view of the plugin owning a hook: `name` labels the hook turn's
+/// Per-call view of the plugin owning a hook: `name` labels the hook run's
 /// root context and the source-mapped fault.
 #[derive(Clone, Copy)]
 pub(super) struct HookFor<'a> {
@@ -235,13 +235,13 @@ pub(super) struct HookFor<'a> {
 /// flag) and `state_cell` (to save back into the plugin record).
 ///
 /// `rendered_error` is the source-mapped rendering of a [`Break::Error`] the
-/// handler raised, produced *inside the helper* while the hook turn's source
-/// registry is still the live one — the next framed turn resets it, so a
+/// handler raised, produced *inside the helper* while the hook run's source
+/// registry is still the live one — the next framed run resets it, so a
 /// deferred raw `Error` would later resolve its `FileId` against the wrong
 /// registry. It is `Some` only on the [`HookFraming::Framed`] path (where the
 /// helper owns the source context); the in-frame path leaves rendering to the
 /// caller against the command's own frame. `timed_out` reports whether the
-/// turn's wall fired — the circuit-breaker's signal that a hook overran its
+/// run's wall fired — the circuit-breaker's signal that a hook overran its
 /// budget.
 pub(super) struct HookResult {
     pub(super) result: Settled<Value>,
@@ -254,7 +254,7 @@ pub(super) struct HookResult {
 ///
 /// A buffer-change hook fires on every keystroke, so a slow or always-faulting
 /// one must not run unbraked. Consecutive faults accumulate; a fault run that
-/// reaches [`BUFFER_CHANGE_FAULT_LIMIT`], or any turn that overruns
+/// reaches [`BUFFER_CHANGE_FAULT_LIMIT`], or any run that overruns
 /// [`BUFFER_CHANGE_BUDGET`], trips the breaker — the hook is skipped for the
 /// rest of the session. A success resets the fault count.
 #[derive(Debug, Clone, Default)]
@@ -295,7 +295,7 @@ impl HookHealth {
     }
 }
 
-/// Foreground wall for a single buffer-change hook turn: a hook that runs this
+/// Foreground wall for a single buffer-change hook run: a hook that runs this
 /// long on one keystroke has overrun its keystroke budget and trips the
 /// breaker. The wall is cooperative — the trampoline polls cancellation at
 /// every reduction step, so any handler doing ordinary work (iteration,
@@ -305,37 +305,37 @@ const BUFFER_CHANGE_BUDGET: Duration = Duration::from_millis(100);
 /// Consecutive buffer-change faults that trip the breaker.
 const BUFFER_CHANGE_FAULT_LIMIT: u32 = 3;
 
-/// How a hook call is framed against the turn machinery.
+/// How a hook call is framed against the run machinery.
 ///
 /// A hook handler is a thunk applied to argument values, so it runs through
-/// the value turn door — but only when there is no turn frame around it yet.
+/// the value run door — but only when there is no run frame around it yet.
 /// The three hook contexts differ exactly here:
 ///
 ///   - [`HookFraming::Framed`] — keybinding dispatch, buffer-change, and
-///     prompt hooks fire during the frontend `read`, *outside* any turn frame.
+///     prompt hooks fire during the frontend `read`, *outside* any run frame.
 ///     They must establish one, so a hook that runs `_ed-tui` (a keybinding
 ///     handler) lands under [`RequestedTerminalAccess::Leased`] and its
 ///     terminal loan can elevate to foreground the body's pipeline; the others
 ///     pass `Denied`, since they never hand the terminal to a child.
 ///   - [`HookFraming::InFrame`] — lifecycle hooks (`pre-exec`, `post-exec`,
-///     `chpwd`) fire from inside the command's own turn frame. A second frame
+///     `chpwd`) fire from inside the command's own run frame. A second frame
 ///     would nest, so the handler is applied in place.
 #[derive(Clone, Copy)]
 pub(super) enum HookFraming {
-    /// Establish a fresh turn frame before applying the handler. Inherits the
+    /// Establish a fresh run frame before applying the handler. Inherits the
     /// session streams and runs no lifecycle hooks; the [`FramedHook`] carries
     /// the rest of the per-hook policy.
     Framed(FramedHook),
-    /// Apply the handler in place — already inside the command's turn frame.
+    /// Apply the handler in place — already inside the command's run frame.
     InFrame,
 }
 
 /// The per-hook policy for a [`HookFraming::Framed`] call.
 ///
-/// `terminal` is the terminal authority the hook turn may hand to a child
+/// `terminal` is the terminal authority the hook run may hand to a child
 /// (keybinding dispatch leases it; the others deny it). `kind` labels the hook
-/// for the turn's root context and fault attribution (`"keybinding"`,
-/// `"buffer-change"`, `"prompt"`). `budget` arms the turn's foreground wall:
+/// for the run's root context and fault attribution (`"keybinding"`,
+/// `"buffer-change"`, `"prompt"`). `budget` arms the run's foreground wall:
 /// `Some(d)` cancels a handler that overruns `d` (the buffer-change keystroke
 /// budget), `None` leaves it uncapped.
 #[derive(Clone, Copy)]
@@ -349,13 +349,13 @@ pub(super) struct FramedHook {
 ///   1. take any pre-existing `shell.repl().plugin_context` aside
 ///   2. install `ctx_in` (when `Some`) so `_ed-*` builtins resolve correctly
 ///   3. apply the handler to `args`, framed per `framing` (plugins run with
-///      the host authority the framed turn already carries)
+///      the host authority the framed run already carries)
 ///   4. take the context back out (now carrying outputs and any `state_cell` mutation)
 ///   5. restore the pre-existing context
 ///
-/// The context install/restore is local-state bookkeeping that a turn frame
+/// The context install/restore is local-state bookkeeping that a run frame
 /// does not swap, so it brackets the framing decision: a [`HookFraming::Framed`]
-/// handler sees the same `plugin_context` whether the value turn door installs
+/// handler sees the same `plugin_context` whether the value run door installs
 /// a frame or not.
 ///
 /// State cell flows through `ctx_in.state_cell` / `result.ctx.state_cell`
@@ -397,14 +397,14 @@ pub(super) fn call_plugin_hook(
             let label = format!("{kind}:{}", plugin.name);
             // Encode at this edge: a plugin hook call is not itself a
             // transport door, so a non-first-order argument is this call
-            // site's bug to report, not `run_turn`'s.
+            // site's bug to report, not `run`'s.
             let fo_args: Result<Vec<_>, _> = args
                 .iter()
                 .map(ral_core::serial::FOValue::try_from)
                 .collect();
             let report = match fo_args {
                 Ok(fo_args) => {
-                    let mut req = framed_turn_request(
+                    let mut req = framed_run_request(
                         &label,
                         terminal,
                         Program::Hook {
@@ -412,10 +412,10 @@ pub(super) fn call_plugin_hook(
                             args: fo_args,
                         },
                     );
-                    req.turn.turn_limit = budget;
-                    shell.run_turn(req)
+                    req.run.wall = budget;
+                    shell.run(req)
                 }
-                Err(e) => TurnReport::Static {
+                Err(e) => RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(ral_core::types::Error::new(
                         format!("hook '{hook}' argument is not first-order: {}", e.message),
                         1,
@@ -423,10 +423,10 @@ pub(super) fn call_plugin_hook(
                 },
             };
             let (result, timed_out) = match report {
-                TurnReport::Ran {
+                RunReport::Ran {
                     result, timed_out, ..
                 } => (result, timed_out),
-                TurnReport::Static { diagnostics } => {
+                RunReport::Static { diagnostics } => {
                     // A host error (hook not found, non-ground arg).
                     let msg = match diagnostics {
                         StaticDiagnostics::Host(e) => e.message,
@@ -439,7 +439,7 @@ pub(super) fn call_plugin_hook(
                 }
             };
             // Render the fault here, while `shell.sources()` still holds this
-            // turn's registry.
+            // run's registry.
             let rendered_error = match &result {
                 Err(Break::Error(e)) => Some(
                     diagnostic::format_runtime_error_auto(shell.sources(), e, false)
@@ -465,28 +465,28 @@ pub(super) fn call_plugin_hook(
     }
 }
 
-/// The per-turn policy for a turn the REPL host runs from a `Value` it already
+/// The per-run policy for a run the REPL host runs from a `Value` it already
 /// holds — a plugin hook, the `RAL_PROMPT` body, an rc startup block, a plugin
 /// factory: the session's live streams, host authority, no limits, no surface,
 /// no lifecycle. `script_name` labels the root source context; `terminal`
 /// varies (keybinding dispatch leases it; every other site denies it, never
-/// handing the terminal to a child); `program` is the hook the turn runs.
-pub(super) fn framed_turn_request<'a>(
+/// handing the terminal to a child); `program` is the hook the run runs.
+pub(super) fn framed_run_request<'a>(
     script_name: &str,
     terminal: RequestedTerminalAccess,
     program: Program,
-) -> TurnRequest<'a> {
-    TurnRequest {
-        turn: Turn {
+) -> RunRequest<'a> {
+    RunRequest {
+        run: Run {
             program,
             script_name: script_name.to_string(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -913,7 +913,7 @@ pub(crate) fn fold_hook<T>(
 /// Run a named lifecycle hook on all plugins, passing `args` to each handler.
 ///
 /// Lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`) fire from inside the
-/// command's own turn frame, so the handler is applied in place
+/// command's own run frame, so the handler is applied in place
 /// ([`HookFraming::InFrame`]) — a fresh frame would nest inside the live one.
 pub(crate) fn run_lifecycle_hook(
     runtime: &Arc<Mutex<PluginRuntime>>,

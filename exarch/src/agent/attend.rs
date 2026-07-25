@@ -1,43 +1,43 @@
-//! The one loop every node in the fleet runs: pull the next turn-boundary
-//! message off the node's own [`Inbox`](crate::bus::Inbox), run one
-//! [`Agent::apply`], do the ready-boundary housekeeping
+//! The one loop every node in the fleet runs: pull the next inbox item off
+//! the node's own [`Inbox`](crate::bus::Inbox), take it up
+//! ([`Agent::take_up`]), do the ready-boundary housekeeping
 //! ([`Agent::reconcile_service_pins`], [`Agent::check_disk_warn`]), and turn
-//! a nudge-worthy outcome into a self-posted [`InboxMsg::Nudge`].
+//! a nudge-worthy outcome into a self-posted [`Post::Nudge`].
 //!
-//! The round-trip itself — one request/response exchange with the provider —
-//! is `agent::turn`'s job ([`Agent::apply`]); this module is what calls it,
-//! over and over, until the node parks or terminates.  No node is privileged
+//! Stepping the model to quiescence over one item is `agent::deliberate`'s
+//! job ([`Agent::deliberate`]); this module is what calls it, over and over,
+//! once per item, until the node parks or terminates.  No node is privileged
 //! by special-case code; the distinctions reduce to *position*: the
 //! parent-less **trunk** publishes its cancel token for the OS-signal path,
 //! holding `reply` falls out of the construction-fixed `returns` bit
 //! (`!interactive` at the trunk, `true` for every fork), and parking out of
 //! `interactive`/the registry's engagement read via [`Agent::park_mode`].  A
 //! child's single result is delivered up its parent's mailbox by the spawn
-//! site, not here, so [`Agent::drive`] itself is identical for all.
-//! [`Agent::drive_queued`] is the one exception: a converse session's
-//! bounded, per-exchange twin, sharing every per-turn step with `drive`
-//! ([`Agent::step_turn`]) rather than looping the round-trip a second way.
+//! site, not here, so [`Agent::attend`] itself is identical for all.
+//! [`Agent::attend_backlog`] is the one exception: a converse session's
+//! bounded, per-exchange twin, sharing every per-item step with `attend`
+//! ([`Agent::take_up`]) rather than looping the round-trip a second way.
 //!
-//! [`Control`] is the frontend hook `drive` calls out to for a
-//! session-affecting slash command drained at the turn boundary; off the
+//! [`Control`] is the frontend hook `attend` calls out to for a
+//! session-affecting slash command drained at the exchange boundary; off the
 //! TUI, [`NoControl`] answers none.
 
 use crate::agent::cancel;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
-use crate::agent::{panic_msg, render_reply, Agent, TurnOutcome};
-use crate::bus::{AgentOutcome, Emitter, InboxMsg, Kind, ParkMode, Turn, WORKER_PANIC_PREFIX};
+use crate::agent::{Agent, deliberate, panic_msg, render_reply};
+use crate::bus::{AgentOutcome, Emitter, Item, Kind, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::ProviderError;
 use crate::shell_eval;
 use ral_core::serial::FOValue;
 
-/// What [`Agent::step_turn`] tells its caller's loop to do next: `Break`
+/// What [`Agent::take_up`] tells its caller's loop to do next: `Stop`
 /// on a `/quit` or a terminal `reply`, `Continue` for everything else —
-/// shared by [`Agent::drive`]'s forever loop and [`Agent::drive_queued`]'s
-/// bounded one, which differ only in how they pull the next [`Turn`].
-enum StepFlow {
+/// shared by [`Agent::attend`]'s forever loop and [`Agent::attend_backlog`]'s
+/// bounded one, which differ only in how they pull the next [`Item`].
+enum Flow {
     Continue,
-    Break,
+    Stop,
 }
 
 /// How many ral calls elapse between disk-warn ceiling checks, once
@@ -46,17 +46,17 @@ enum StepFlow {
 /// at the ready boundary rather than off a timer.
 const DISK_WARN_CHECK_INTERVAL: u64 = 32;
 
-/// What [`Agent::drive`] should do after handing a session-affecting slash
+/// What [`Agent::attend`] should do after handing a session-affecting slash
 /// command to [`Control`].
-pub enum ControlFlow {
+pub enum Verdict {
     Continue,
     Quit,
 }
 
-/// The frontend hook the drive loop calls for a session-affecting slash
-/// command ([`Turn::Command`]) drained at the turn boundary.
+/// The frontend hook the attend loop calls for a session-affecting slash
+/// command ([`Item::Command`]) drained at the exchange boundary.
 ///
-/// The drive thread owns the session the command mutates, so it cannot run on
+/// The attend thread owns the session the command mutates, so it cannot run on
 /// the UI thread.
 /// Only the non-interactive session commands route here (`/clear`, `/compact`,
 /// `/quit`); `/model` swaps the [`ProviderHandle`](crate::agent::ProviderHandle)
@@ -64,66 +64,65 @@ pub enum ControlFlow {
 /// handled frontend-side.  Off the TUI there are no such commands, so
 /// [`NoControl`] handles none.
 pub trait Control {
-    /// Run `raw` (a slash-command line) against the session the drive loop
+    /// Run `raw` (a slash-command line) against the session the attend loop
     /// owns, returning whether the loop should quit.
-    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow;
+    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> Verdict;
 }
 
 /// The no-op control for drivers with no slash commands (headless, peers,
-/// tests): a [`Turn::Command`] should never reach them, so it is a no-op.
+/// tests): an [`Item::Command`] should never reach them, so it is a no-op.
 pub struct NoControl;
 
 impl Control for NoControl {
-    fn command(&mut self, _raw: &str, _session: &mut Agent, _emit: &Emitter) -> ControlFlow {
-        ControlFlow::Continue
+    fn command(&mut self, _raw: &str, _session: &mut Agent, _emit: &Emitter) -> Verdict {
+        Verdict::Continue
     }
 }
 
 impl Agent {
-    /// The one shared turn loop — every node alike.  Pull a turn-boundary
-    /// deliverable from the inbox, run one [`Self::apply`], let the nudge
-    /// registry post any retry as a self-[`InboxMsg::Nudge`], and repeat.  An
-    /// empty inbox parks or terminates by [`Self::park_mode`]: a present human
-    /// (the conversing trunk or an engaged returning agent) holds it; a live
-    /// schedule holds it until cancelled; otherwise it terminates at
-    /// quiescence.
+    /// The one shared attend loop — every node alike.  Pull the next inbox
+    /// item, take it up ([`Agent::take_up`]), let the nudge registry post any
+    /// retry as a self-[`Post::Nudge`], and repeat.  An empty inbox parks or
+    /// terminates by [`Self::park_mode`]: a present human (the conversing
+    /// trunk or an engaged returning agent) holds it; a live schedule holds it
+    /// until cancelled; otherwise it terminates at quiescence.
     ///
-    /// Per-`apply` panic recovery lives here — the `catch_unwind` records the
-    /// failure and continues the loop, so one crashing turn never sinks the
-    /// agent; eval-side state is already safe, rolled back at the engine's
-    /// own turn door (`Shell::run_turn`).  Returns the
-    /// final turn's `(outcome, payload)` digest, where `payload` is the
-    /// faithful [`FOValue`] a `reply` carried (else `None`); the
-    /// interactive trunk ignores it, a child's spawn site renders it to text,
-    /// and the headless sink projects it through [`shell_eval::user_json`].
+    /// Per-item panic recovery lives here — the `catch_unwind` records the
+    /// failure and continues the loop, so one crashing deliberation never
+    /// sinks the agent; eval-side state is already safe, rolled back at the
+    /// engine's own run door (`Shell::run`).  Returns the final
+    /// `(outcome, payload)`, where `payload` is the faithful [`FOValue`] a
+    /// `reply` carried (else `None`); the interactive trunk ignores it, a
+    /// child's spawn site renders it to text, and the headless sink projects
+    /// it through [`shell_eval::user_json`].
     ///
     /// The provider is the agent's own [`ProviderHandle`](crate::agent::ProviderHandle),
-    /// read once per turn, so a `/model` swap on this agent takes effect next
-    /// turn; `control` handles agent-affecting slash commands ([`NoControl`]
-    /// off the TUI).
+    /// read once per item, so a `/model` swap on this agent takes effect on
+    /// the next one; `control` handles agent-affecting slash commands
+    /// ([`NoControl`] off the TUI).
     ///
     /// # Panics
     /// Panics if pushing a reactive nudge onto the inbox is rejected, which
     /// the idempotent nudge protocol guarantees cannot occur.
-    pub fn drive(
+    pub fn attend(
         &mut self,
         control: &mut dyn Control,
         emit: &Emitter,
     ) -> (AgentOutcome, Option<FOValue>) {
         // The trunk publishes its sticky token for the OS-signal path, held for
-        // the whole drive; a sub-agent's token is reached through the registry
+        // the whole attend; a sub-agent's token is reached through the registry
         // cascade, never the slot, so it publishes nothing.
         let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
-        let mut digest = (AgentOutcome::Empty, None);
+        let mut final_outcome = (AgentOutcome::Empty, None);
         loop {
             // Every pass back to the loop top is a settled ready boundary
-            // (the per-iteration quiesce below, or the invariant `drive` is
-            // entered under). A lease-chain reap between turns is not drained
+            // (the per-iteration quiesce below, or the invariant `attend` is
+            // entered under). A lease-chain reap between items is not drained
             // here: core's own engine pushes it as a `` `notice `` surface
-            // class at the ready boundary of the turn that produced it, so it
-            // becomes visible only at the next dispatched turn, not on every
+            // class at the ready boundary of the run that produced it, so it
+            // becomes visible only at the next dispatched run, not on every
             // idle pass through this loop — a worker reaped while this agent
-            // sits fully idle surfaces once a turn next runs, not the
+            // sits fully idle surfaces once an item next runs, not the
             // instant the reap happens.
             //
             // The service ledger's sibling boundary drain: the `services`
@@ -134,29 +133,29 @@ impl Agent {
             self.check_disk_warn(emit);
             // The park verdict ([`Self::park_mode`]) is recomputed on every
             // wake inside `next_or_idle`: an un-engaged idle returning agent
-            // reads `Quiesce` here and the loop breaks — its digest still
+            // reads `Quiesce` here and the loop breaks — its outcome still
             // reaches its parent through the worker epilogue's
             // deliver-then-retire, never through this break itself.
-            let Some(turn) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
+            let Some(item) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
                 break;
             };
             if matches!(
-                self.step_turn(&turn, control, emit, &mut digest),
-                StepFlow::Break
+                self.take_up(&item, control, emit, &mut final_outcome),
+                Flow::Stop
             ) {
                 break;
             }
         }
-        // Safety net: per-iteration quiescing (inside `step_turn`) handles
+        // Safety net: per-iteration quiescing (inside `take_up`) handles
         // mid-loop errors, but a `break` from `Replied` or a future exit path
-        // could still bypass it.  This catch-all ensures the turn-ends-ready
+        // could still bypass it.  This catch-all ensures the exchange-ends-ready
         // invariant holds regardless of how the loop exits.
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
         debug_assert!(
             self.log.lock().is_ready(),
-            "drive must leave the agent ReadyForUser"
+            "attend must leave the agent ReadyForUser"
         );
         // The trunk removes itself at termination (a child is removed by its
         // spawn site through `settle`), so the fleet empties when the last
@@ -164,38 +163,38 @@ impl Agent {
         if self.parent.is_none() {
             self.agents.deregister(self.id);
         }
-        digest
+        final_outcome
     }
 
-    /// The converse primitive's per-exchange half of [`Self::drive`]:
-    /// process every turn already queued — the message
+    /// The converse primitive's per-exchange half of [`Self::attend`]:
+    /// process every item already queued — the message
     /// [`exarch::converse`](crate::headless::converse) just seeded, and
     /// whatever nudge continuations it raises — to the next park, then
-    /// return, instead of blocking for the next message the way `drive`
-    /// does.  Shares [`Self::step_turn`] with `drive` rather than looping
+    /// return, instead of blocking for the next message the way `attend`
+    /// does.  Shares [`Agent::take_up`] with `attend` rather than looping
     /// the round-trip a second way; the only difference is the non-blocking
-    /// pull ([`Inbox::drain_turn`](crate::bus::Inbox::drain_turn)) in place
-    /// of `drive`'s parking one.  Safe because a converse session's trunk
+    /// pull ([`Inbox::next_item`](crate::bus::Inbox::next_item)) in place
+    /// of `attend`'s parking one.  Safe because a converse session's trunk
     /// starts no children (`fuel: 0`) and arms no self-schedule
     /// (`allow_schedule: false`), so an empty queue always means *this*
     /// exchange is answered, never a wait on something still to arrive. No
     /// [`Control`]: a slash-shaped user message still reaches the model as
-    /// ordinary text ([`Turn::Command`] only ever arises from a frontend
+    /// ordinary text ([`Item::Command`] only ever arises from a frontend
     /// that posts one itself, which converse never does), so [`NoControl`]
     /// is correct here, not a placeholder for one the caller forgot to
     /// supply.
-    pub(crate) fn drive_queued(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
+    pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
         let mut control = NoControl;
-        let mut digest = (AgentOutcome::Empty, None);
+        let mut final_outcome = (AgentOutcome::Empty, None);
         loop {
             self.reconcile_service_pins(emit);
             self.check_disk_warn(emit);
-            let Some(turn) = self.inbox.drain_turn() else {
+            let Some(item) = self.inbox.next_item() else {
                 break;
             };
             if matches!(
-                self.step_turn(&turn, &mut control, emit, &mut digest),
-                StepFlow::Break
+                self.take_up(&item, &mut control, emit, &mut final_outcome),
+                Flow::Stop
             ) {
                 break;
             }
@@ -203,85 +202,86 @@ impl Agent {
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
-        digest
+        final_outcome
     }
 
-    /// Process one turn already drained from the inbox: generation
-    /// admission, the turn-boundary latch reset, a session command's
-    /// dispatch to `control`, the round-trip itself, and the nudge
-    /// reaction. The one per-turn step both [`Self::drive`]'s forever loop
-    /// and [`Self::drive_queued`]'s bounded one run — the two never repeat
-    /// this logic independently. `digest` carries the running
-    /// `(outcome, payload)` the caller reports once its own loop ends; a
-    /// turn this returns [`StepFlow::Continue`] for without reaching the
-    /// round-trip (an inadmissible generation, a command) leaves it
+    /// Process one item already drawn from the inbox: generation
+    /// admission, the exchange-boundary latch reset, a session command's
+    /// dispatch to `control`, the deliberation itself, and the nudge
+    /// reaction. The one per-item step both [`Self::attend`]'s forever loop
+    /// and [`Self::attend_backlog`]'s bounded one run — the two never repeat
+    /// this logic independently. `final_outcome` carries the running
+    /// `(outcome, payload)` the caller reports once its own loop ends; an
+    /// item this returns [`Flow::Continue`] for without reaching the
+    /// deliberation (an inadmissible generation, a command) leaves it
     /// untouched.
-    fn step_turn(
+    fn take_up(
         &mut self,
-        turn: &Turn,
+        item: &Item,
         control: &mut dyn Control,
         emit: &Emitter,
-        digest: &mut (AgentOutcome, Option<FOValue>),
-    ) -> StepFlow {
+        final_outcome: &mut (AgentOutcome, Option<FOValue>),
+    ) -> Flow {
         // Generation admission: a worker delivers before it retires, so a
         // result that settled across a `/clear` can reach this queue; it
         // is dropped here, before it can reset latches or enter the log.
-        if !self.admits(turn) {
-            return StepFlow::Continue;
+        if !self.admits(item) {
+            return Flow::Continue;
         }
-        // A genuine turn boundary resets the nudge latches and clears the
-        // sticky cancel token, so a prior turn's Esc cannot carry into this
-        // one.  A self-nudge is the same turn continuing and resets neither.
-        if turn.resets_turn() {
+        // A genuine exchange boundary resets the nudge latches and clears the
+        // sticky cancel token, so a prior exchange's Esc cannot carry into
+        // this one.  A self-nudge is the same exchange continuing and resets
+        // neither.
+        if item.opens_exchange() {
             self.nudges.reset();
             self.cancel.reset();
         }
         // Agent-affecting slash commands run against the owned agent,
         // never the model.
-        if let Turn::Command(raw) = turn {
+        if let Item::Command(raw) = item {
             return match control.command(raw, self, emit) {
-                ControlFlow::Quit => StepFlow::Break,
-                ControlFlow::Continue => StepFlow::Continue,
+                Verdict::Quit => Flow::Stop,
+                Verdict::Continue => Flow::Continue,
             };
         }
-        announce(turn, emit);
-        // Read the provider in force for this turn; a `/model` swap on this
-        // agent lands here next turn, never mid-turn.
+        announce(item, emit);
+        // Read the provider in force for this item; a `/model` swap on this
+        // agent lands here on the next item, never mid-item.
         let active = self.provider.current();
         let token = self.cancel.clone();
-        let prompt = Some(turn.text());
+        let prompt = Some(item.text());
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.apply(&active, prompt, &token, emit)
+            self.deliberate(&active, prompt, &token, emit)
         }));
         let outcome = match attempt {
             Ok(o) => o,
             Err(p) => {
                 // A host-side panic — provider transport, surface decode,
-                // render, digest.  The shell needs no attention here: an
-                // eval-side panic is caught at the engine's own turn door
-                // (`Shell::run_turn`), which rolls the dynamic state back
-                // and reports a failed turn, so it never unwinds this far.
+                // render, outcome.  The shell needs no attention here: an
+                // eval-side panic is caught at the engine's own run door
+                // (`Shell::run`), which rolls the dynamic state back
+                // and reports a failed run, so it never unwinds this far.
                 let msg = panic_msg(&p);
                 self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
-                *digest = (
+                *final_outcome = (
                     AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
                     None,
                 );
                 if !self.log.lock().is_ready() {
                     self.log.lock().quiesce(QuiesceReason::Aborted);
                 }
-                return StepFlow::Continue;
+                return Flow::Continue;
             }
         };
         // A provider error or step cap can leave the session
         // mid-protocol (e.g. AwaitingAssistantAfterToolResults).
         // The caller's post-loop guard does the same but only on loop exit;
-        // quiesce per-turn so the next prompt — nudge or user — is
-        // admissible (turn-ends-ready invariant, X12).
+        // quiesce per-item so the next prompt — nudge or user — is
+        // admissible (exchange-ends-ready invariant, X12).
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
-        *digest = agent_digest(&outcome);
+        *final_outcome = agent_outcome(&outcome);
         let waiting_on_children = self.has_live_children();
         let ctx = nudge::NudgeCtx {
             // Every returning agent (a sub-agent or a headless trunk) hands
@@ -299,13 +299,13 @@ impl Agent {
             waiting_on_children,
             is_headless_root: self.parent.is_none() && !self.interactive,
         };
-        let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
+        let replied = matches!(outcome, Ok(deliberate::Outcome::Replied(_)));
         let nudge_msg = self
             .nudges
             .react(&outcome, &ctx, emit, &mut self.log.lock());
         if let Some(msg) = &nudge_msg {
             self.inbox
-                .push(InboxMsg::Nudge(msg.clone()))
+                .push(Post::Nudge(msg.clone()))
                 .expect("Nudge is idempotent and never rejects");
         }
         // `reply` hard-terminates: end the loop regardless of engagement or
@@ -315,13 +315,13 @@ impl Agent {
         // `nudge_msg` carries that reminder and the loop must keep running
         // to deliver it.
         if replied && nudge_msg.is_none() {
-            StepFlow::Break
+            Flow::Stop
         } else {
-            StepFlow::Continue
+            Flow::Continue
         }
     }
 
-    /// Generation admission for a drained deliverable.  An
+    /// Generation admission for a drawn item.  An
     /// [`AgentResult`](crate::bus::AgentResult) is stamped with its worker's
     /// birth generation, and the worker posts it *before* retiring its
     /// registry entry (deliver-then-retire, so a parked parent can never
@@ -334,16 +334,16 @@ impl Agent {
     /// that predates the live registry generation settled across a `/clear`
     /// and belongs to a context that no longer exists.  A `ScheduledWakeup`
     /// is checked earlier, at the inbox's own pop boundary
-    /// (`pop_turn`/`to_turn`, `bus.rs`), against that inbox's local
+    /// (`pop_item`/`to_item`, `bus.rs`), against that inbox's local
     /// clear-epoch rather than this fleet-wide registry generation — its only
     /// producer (the schedule reaper) never has a handle to this registry, so
-    /// staleness is settled before a `Turn` is even minted; by the time one
-    /// reaches here it is already current.  Every other turn source is
+    /// staleness is settled before an `Item` is even minted; by the time one
+    /// reaches here it is already current.  Every other item source is
     /// generation-free and admitted unconditionally.
-    pub(super) fn admits(&self, turn: &Turn) -> bool {
-        match turn {
-            Turn::Agent(r) => r.generation == self.agents.generation(),
-            Turn::Surface { generation, .. } => *generation == self.agents.generation(),
+    pub(super) fn admits(&self, item: &Item) -> bool {
+        match item {
+            Item::Agent(r) => r.generation == self.agents.generation(),
+            Item::Surface { generation, .. } => *generation == self.agents.generation(),
             _ => true,
         }
     }
@@ -389,14 +389,14 @@ impl Agent {
     /// Whether this agent has a live child still running — an async child it
     /// launched that has not yet settled its result up this inbox.  Read by
     /// [`Self::park_mode`] (so a root waiting on its fleet parks rather than
-    /// quiescing) and by [`Self::drive`] (so the `reply` nudge is not raised
+    /// quiescing) and by [`Self::attend`] (so the `reply` nudge is not raised
     /// against a finish that is a legitimate wait, not a dropped return).
     fn has_live_children(&self) -> bool {
         self.agents.has_children(self.id)
     }
 
     /// Reconcile the host-owned `services` pin against the shell's live
-    /// worker registry at the drive loop's ready-boundary pass: one card lists every currently-running durable
+    /// worker registry at the attend loop's ready-boundary pass: one card lists every currently-running durable
     /// service, re-pinned whenever at least one is alive; the pin drops the
     /// moment none remain (cancelled, or settled and reaped). The model
     /// cannot write or clear this pin itself — `shell_eval::
@@ -442,7 +442,7 @@ impl Agent {
     /// [`Self::ral_epoch`] the settled-worker and binding-lease sweeps read)
     /// so the walk's cost — a full scan of the session log dir and scratch —
     /// is paid rarely, at the ready boundary both frontends share
-    /// ([`Self::drive`]).
+    /// ([`Self::attend`]).
     fn check_disk_warn(&mut self, emit: &Emitter) {
         let Some(ceiling) = self.disk_warn_bytes else {
             return;
@@ -475,18 +475,18 @@ impl Agent {
     }
 }
 
-/// The model-facing chrome a turn's source emits as it enters context —
-/// whether it opens a fresh turn at the boundary or lands mid-turn at a tool
-/// boundary: a human prompt and a wakeup echo as their (possibly marked) text,
-/// an agent result renders as the dialable `↘` subagent block the sink already
-/// knows.  A self-nudge and a command are quiet — a nudge is an internal
-/// continuation, a command never reaches the model.
-pub(super) fn announce(turn: &Turn, emit: &Emitter) {
-    match turn {
-        Turn::Human(_) | Turn::Wakeup(_) | Turn::Message(_) => {
-            emit.emit(Kind::UserPromptEcho(turn.text()));
+/// The model-facing chrome an item's source emits as it enters context —
+/// whether it opens a fresh exchange at the boundary or lands mid-exchange at
+/// a tool boundary: a human prompt and a wakeup echo as their (possibly
+/// marked) text, an agent result renders as the dialable `↘` subagent block
+/// the sink already knows.  A self-nudge and a command are quiet — a nudge is
+/// an internal continuation, a command never reaches the model.
+pub(super) fn announce(item: &Item, emit: &Emitter) {
+    match item {
+        Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
+            emit.emit(Kind::UserPromptEcho(item.text()));
         }
-        Turn::Agent(r) => emit.emit(Kind::SubagentDone {
+        Item::Agent(r) => emit.emit(Kind::SubagentDone {
             name: r.name.clone(),
             outcome: r.outcome.clone(),
             text: r.text.clone(),
@@ -497,8 +497,8 @@ pub(super) fn announce(turn: &Turn, emit: &Emitter) {
         // on the rail.  The emitter's id is this session's, which is exactly the
         // id the batch was stamped with (a session's boundary sink stamps with
         // its own id and posts to its own inbox), so the cards reach the right
-        // viewport.  The model is then woken with `turn.text()`'s notice.
-        Turn::Surface { values, .. } => {
+        // viewport.  The model is then woken with `item.text()`'s notice.
+        Item::Surface { values, .. } => {
             for v in values {
                 if let Some(kind) = shell_eval::accepted_surface(v, emit) {
                     emit.emit(kind);
@@ -506,39 +506,43 @@ pub(super) fn announce(turn: &Turn, emit: &Emitter) {
             }
         }
         // A self-nudge is a quiet continuation; a command never reaches the model.
-        Turn::Nudge(_) | Turn::Command(_) => {}
+        Item::Nudge(_) | Item::Command(_) => {}
     }
 }
 
-/// Reduce a finished turn's outcome to the `(tag, payload)` digest a returning
-/// agent's result carries — the one place the reduction happens.  Only a
-/// deliberate `reply` carries a value up, and it travels as the faithful
-/// [`FOValue`] the model passed; the consuming edge renders it (a unit or
-/// empty-string value settles `Empty`).  A tool-call-free prose finish
-/// is **not** harvested — there is no scrape — and because `reply` is the sole
-/// return path, a returning agent that never replied did not complete its
-/// contract: it (like a genuinely empty turn) settles `Failed`.  Every other
-/// shape carries only its tag.
-fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option<FOValue>) {
+/// Reduce a finished deliberation's outcome to the `(tag, payload)` a
+/// returning agent's result carries — the one place the reduction happens.
+/// Only a deliberate `reply` carries a value up, and it travels as the
+/// faithful [`FOValue`] the model passed; the consuming edge renders it (a
+/// unit or empty-string value settles `Empty`).  A tool-call-free prose
+/// finish is **not** harvested — there is no scrape — and because `reply` is
+/// the sole return path, a returning agent that never replied did not
+/// complete its contract: it (like a genuinely empty finish) settles
+/// `Failed`.  Every other shape carries only its tag.
+fn agent_outcome(
+    r: &Result<deliberate::Outcome, ProviderError>,
+) -> (AgentOutcome, Option<FOValue>) {
     match r {
         // Any value that renders to text carries content; a unit or
         // empty-string reply (renders to nothing) is a deliberate empty
         // return.
-        Ok(TurnOutcome::Replied(v)) if !render_reply(v).is_empty() => {
+        Ok(deliberate::Outcome::Replied(v)) if !render_reply(v).is_empty() => {
             (AgentOutcome::Complete, Some(v.clone()))
         }
-        Ok(TurnOutcome::Replied(_)) => (AgentOutcome::Empty, None),
+        Ok(deliberate::Outcome::Replied(_)) => (AgentOutcome::Empty, None),
         // A finish without `reply`.  There is no scrape: a returning agent that
         // never replied did not complete its contract, so it fails honestly
         // rather than handing up a trailing fragment that masquerades as the
         // answer.  Re-nudged within budget first (see [`nudge`]).
-        Ok(TurnOutcome::Complete(_) | TurnOutcome::Empty) => (
+        Ok(deliberate::Outcome::Complete(_) | deliberate::Outcome::Empty) => (
             AgentOutcome::Failed("ended without calling `reply`".into()),
             None,
         ),
-        Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), None),
-        Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, None),
-        Ok(TurnOutcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
+        Ok(deliberate::Outcome::Stopped { reason }) => {
+            (AgentOutcome::Stopped(reason.clone()), None)
+        }
+        Ok(deliberate::Outcome::Cancelled) => (AgentOutcome::Cancelled, None),
+        Ok(deliberate::Outcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
         Err(e) => (AgentOutcome::Failed(e.summary()), None),
     }
 }
@@ -557,7 +561,7 @@ mod tests {
 
     /// The park verdict reads engagement from the registry, never from focus:
     /// a conversing trunk parks `Held` regardless; an un-engaged parented
-    /// returning agent quiesces once idle (the un-replied-worker digest
+    /// returning agent quiesces once idle (the un-replied-worker outcome
     /// path, untouched); the same agent parks `Engaged` the instant a human
     /// exchange renews it (`bus.rs` pins the terminate-cause half of that
     /// contract).
@@ -586,7 +590,7 @@ mod tests {
         assert_eq!(
             child.park_mode(),
             ParkMode::Quiesce,
-            "un-engaged, no live children, no schedule: idle quiesce delivers the digest"
+            "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
         );
 
         child.agents.renew(child.id);
@@ -663,40 +667,40 @@ mod tests {
         assert!(child.is_ready());
     }
 
-    /// Run `cmd` as one dispatched turn under a millisecond-scale
+    /// Run `cmd` as one dispatched run under a millisecond-scale
     /// `deferred_lease`, bypassing `shell_eval::run_shell`'s hardcoded 1 h/24 h
     /// constants so a reap test doesn't need to wait out the real policy.
     /// No deferred sink: a lease reap never tries to deliver anything to the
     /// inbox, so the tests using this only care about the registry side
     /// effect.
     fn dispatch_with_lease(session: &Agent, cmd: &str, lease: ral_core::types::WorkerLease) {
-        use ral_core::transport::{DispatchId, Program, Turn};
-        use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+        use ral_core::transport::{DispatchId, Program, Run};
+        use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
         session.seat.transport().dispatch(
             DispatchId(0),
-            Turn {
+            Run {
                 program: Program::Source(cmd.to_string()),
                 script_name: "<test>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
-                turn_limit: Some(std::time::Duration::from_secs(5)),
+                wall: Some(std::time::Duration::from_secs(5)),
                 deferred_lease: Some(lease),
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
-                stdin: TurnStdin::Empty,
+                stdin: RunStdin::Empty,
             },
         );
     }
 
     /// Seed one lease-chain reap (an unpolled worker under a millisecond
-    /// idle bound) with no turn running to push it — core's engine only
-    /// pushes a `` `notice `` from *inside* a turn's own surface stream, so a
-    /// reap the background lease chain performs between turns sits queued
-    /// until one runs. The next dispatched turn surfaces it as
-    /// `Kind::Notice`, ordered before that turn's own `Kind::ToolResult`; a
-    /// further turn with nothing new queued surfaces no second notice.
+    /// idle bound) with no run running to push it — core's engine only
+    /// pushes a `` `notice `` from *inside* a run's own surface stream, so a
+    /// reap the background lease chain performs between runs sits queued
+    /// until one runs. The next dispatched run surfaces it as
+    /// `Kind::Notice`, ordered before that run's own `Kind::ToolResult`; a
+    /// further run with nothing new queued surfaces no second notice.
     #[test]
-    fn ready_boundary_reap_notice_surfaces_at_the_next_turn() {
+    fn ready_boundary_reap_notice_surfaces_at_the_next_run() {
         let dir = tmp("drain-worker-reaps");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -752,7 +756,7 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             assert!(
                 !matches!(event.kind, Kind::Notice { .. }),
-                "a further turn with nothing new queued must surface no second notice"
+                "a further run with nothing new queued must surface no second notice"
             );
         }
     }
@@ -762,7 +766,7 @@ mod tests {
     /// The `services` pin is the host's own write: born with the service's
     /// description as soon as a durable birth is reconciled, and retired
     /// the moment cancelling it leaves no durable service running — the
-    /// same ready-boundary pass in [`Agent::drive`].
+    /// same ready-boundary pass in [`Agent::attend`].
     #[test]
     fn reconcile_service_pins_births_and_retires_the_services_pin() {
         let dir = tmp("reconcile-service-pins");
@@ -879,12 +883,12 @@ mod tests {
 
     /// Seed one idle binding (a tiny re-armed bound, for speed — every
     /// `Agent` is already armed with the production `BINDING_IDLE_CALLS` by
-    /// `assemble`): the boundary prune fires inside a later call's own turn
-    /// and its `Kind::Notice` rides that turn's surface stream — one notice
+    /// `assemble`): the boundary prune fires inside a later call's own run
+    /// and its `Kind::Notice` rides that run's surface stream — one notice
     /// naming the pruned binding, and no second notice once nothing is left
     /// idle.
     #[test]
-    fn boundary_prune_notice_rides_the_turns_own_stream() {
+    fn boundary_prune_notice_rides_the_runs_own_stream() {
         let dir = tmp("reap-bindings");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -915,7 +919,7 @@ mod tests {
         assert_eq!(
             prunes.len(),
             1,
-            "exactly one prune notice rides a turn's surface stream"
+            "exactly one prune notice rides a run's surface stream"
         );
         let (names, idle_calls) = &prunes[0];
         assert_eq!(names, &vec!["reap_me".to_string()]);
@@ -1027,7 +1031,7 @@ mod tests {
     }
 
     /// A binding prune is transcript/TUI-only: it must never grow the
-    /// model-view `events.json` the same drive loop pass writes tool
+    /// model-view `events.json` the same attend loop pass writes tool
     /// results into.
     #[test]
     fn prune_event_is_absent_from_events_json() {

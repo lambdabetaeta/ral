@@ -59,7 +59,7 @@ pub struct CompletedHandle {
     pub stderr: Vec<u8>,
     /// Structured-event values a *detached* worker deferred, drained once
     /// from [`HandleInner::surface_buf`].  Replayed through the awaiting
-    /// turn's surface by `await`/`race` (once), never by `poll`.
+    /// run's surface by `await`/`race` (once), never by `poll`.
     pub surface: Vec<crate::serial::FOValue>,
     pub outcome: super::flow::Settled<Value>,
 }
@@ -67,9 +67,9 @@ pub struct CompletedHandle {
 /// Bounded buffer of structured-event values a *detached* worker defers
 /// instead of emitting live.
 ///
-/// The turn that spawned the worker may already
+/// The run that spawned the worker may already
 /// have ended, so its `surface` events are buffered here and replayed through
-/// the awaiting turn's surface on the first `await`/`race`.  Bounded so a
+/// the awaiting run's surface on the first `await`/`race`.  Bounded so a
 /// runaway detached emitter cannot grow it without limit (see
 /// `builtins::concurrency`'s `DeferredSurface`).
 pub type SurfaceBuffer = Arc<Mutex<Vec<crate::serial::FOValue>>>;
@@ -97,7 +97,7 @@ pub struct HandleInner {
     pub stderr_buf: ByteBuffer,
     /// Bounded deferred surface events from the worker: a *detached*
     /// worker's `surface` builtin lands here rather than on the
-    /// (possibly-ended) spawning turn's live sink.  Drained once on
+    /// (possibly-ended) spawning run's live sink.  Drained once on
     /// completion into [`CompletedHandle::surface`].
     pub surface_buf: SurfaceBuffer,
     /// The deliver-once test-and-set latch for the worker's deferred surface,

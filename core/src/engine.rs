@@ -1,5 +1,5 @@
 //! Engine process: the connection-lived child that holds the Shell
-//! and executes turns sent over a framed socket by the front-end.
+//! and executes runs sent over a framed socket by the front-end.
 //!
 //! # Liveness law
 //! Any received frame is proof the front-end lives; heartbeats exist only
@@ -11,11 +11,11 @@
 //! infinite, its death arriving as a kernel-guaranteed EOF, not silence.
 //!
 //! # Durability law
-//! A teardown never abandons a running turn. Whether the peer died silent,
+//! A teardown never abandons a running run. Whether the peer died silent,
 //! the read faulted, or the front-end detached, the loop first cancels the
-//! in-flight turn and the shell's durable root, then waits — bounded — for
-//! the worker to settle its turn (write its `Report` and re-park) before
-//! the process exits. Nothing the turn spawned is left running when the
+//! in-flight run and the shell's durable root, then waits — bounded — for
+//! the worker to settle its run (write its `Report` and re-park) before
+//! the process exits. Nothing the run spawned is left running when the
 //! engine is gone.
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use crate::process::CancelCause;
 use crate::serial::FOValue;
 use crate::transport::{
-    Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Turn, answer_probe,
+    Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, answer_probe,
 };
 use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
 use crate::wire::WireChannel;
@@ -71,7 +71,7 @@ impl crate::types::EventSink for ChannelSurfaceSink {
 }
 
 /// A deferred sink that writes `Event::DeferredSurface` frames to the wire.
-/// Built once, before the worker spawns: a batch settling between turns is
+/// Built once, before the worker spawns: a batch settling between runs is
 /// stamped id 0, the identity transport's already-lawful shape.
 struct ChannelDeferredSink {
     current_dispatch: Arc<AtomicU64>,
@@ -109,8 +109,8 @@ const TICK: Duration = Duration::from_secs(1);
 const HOST_SILENCE_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The ceiling on the teardown settle: how long the loop waits for the
-/// worker to fail its in-flight turn and re-park before the engine exits
-/// regardless. Bounds a teardown against a turn that ignores cancellation,
+/// worker to fail its in-flight run and re-park before the engine exits
+/// regardless. Bounds a teardown against a run that ignores cancellation,
 /// so a dead peer can never wedge the exit.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -121,11 +121,11 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// enquiry-channel ADR). `enquire` mints a fresh [`EnquiryId`], writes
 /// `Event::Enquiry` up the wire inside the in-flight dispatch, and parks on
 /// a rendezvous slot keyed by that id until the reader thread's
-/// `Frame::Answer` arm fills it — or the turn's foreground cancel fires,
+/// `Frame::Answer` arm fills it — or the run's foreground cancel fires,
 /// polled at the condvar wait's timeout.
 struct WireDesk {
     writer: Arc<Mutex<WireChannel>>,
-    /// The in-flight dispatch id, stamped by the worker before each turn so
+    /// The in-flight dispatch id, stamped by the worker before each run so
     /// the enquiry frame correlates to the dispatch that raised it.
     current_dispatch: Arc<AtomicU64>,
     next_eid: AtomicU64,
@@ -167,7 +167,7 @@ impl EnquiryDesk for WireDesk {
         }
 
         // Park on the rendezvous. The enquiring thread is the worker running
-        // the turn — the thread that published this turn's foreground scope —
+        // the run — the thread that published this run's foreground scope —
         // so the global cancel slot polled here is exactly that scope, and a
         // `Control::Cancel` (relayed by the reader thread) wakes the park at
         // the next timeout tick. The cancellation message matches
@@ -238,7 +238,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // `dup2` (the front-end's pre_exec handoff) always clears CLOEXEC on
     // the duplicate it creates, so fd 3 arrives here open-across-exec by
     // necessity. Set it CLOEXEC now, the instant the engine owns it, so no
-    // external command any turn spawns inherits the protocol socket.
+    // external command any run spawns inherits the protocol socket.
     if let Err(e) = rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC) {
         eprintln!("engine: failed to set CLOEXEC on the wire fd: {e}");
         std::process::exit(1);
@@ -343,14 +343,14 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
         }
     };
 
-    // One item of work the rendezvous hands the worker: a whole turn, or a
+    // One item of work the rendezvous hands the worker: a whole run, or a
     // pure boundary-time probe. Both ride the same rendezvous so a probe
-    // serialises with dispatches for free — busy while a turn runs answers
+    // serialises with dispatches for free — busy while a run runs answers
     // "engine busy", the same arm a second dispatch gets.
     enum WorkItem {
         /// Boxed for the same reason `Frame::Dispatch` boxes it: a probe
-        /// must not be sized to `Turn`'s stack footprint.
-        Turn(DispatchId, Box<Turn>),
+        /// must not be sized to `Run`'s stack footprint.
+        Run(DispatchId, Box<Run>),
         Probe(DispatchId, FOValue),
     }
 
@@ -361,10 +361,10 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
 
     // True while a work item is in flight. Claimed by CAS at the reader,
     // cleared by the worker only after its Report is written and it is
-    // about to re-park — so "engine busy" reflects a turn genuinely in
+    // about to re-park — so "engine busy" reflects a run genuinely in
     // flight, never a worker that has merely not yet re-parked.
     let busy = Arc::new(AtomicBool::new(false));
-    let (turn_tx, turn_rx) = mpsc::channel::<WorkItem>();
+    let (run_tx, run_rx) = mpsc::channel::<WorkItem>();
 
     let current_dispatch = Arc::new(AtomicU64::new(0));
     let desk = Arc::new(WireDesk {
@@ -392,36 +392,36 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     let worker_busy = busy.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
-        while let Ok(item) = turn_rx.recv() {
+        while let Ok(item) = run_rx.recv() {
             match item {
-                WorkItem::Turn(id, turn) => {
+                WorkItem::Run(id, run) => {
                     // Stamp the in-flight dispatch so the desk's enquiry
-                    // frames correlate to the turn that raised them.
+                    // frames correlate to the run that raised them.
                     worker_current_dispatch.store(id.0, Ordering::Relaxed);
 
-                    let req = crate::driver::TurnRequest {
-                        turn: *turn,
+                    let req = crate::driver::RunRequest {
+                        run: *run,
                         surface: Some(surface.clone() as SurfaceSink),
                         deferred: Some(deferred.clone() as Arc<dyn DeferredSink>),
                         desk: Some(worker_desk.clone() as crate::types::Desk),
                         nursery: None,
                         lifecycle: Box::new(()),
                     };
-                    // Liveness backstop only: a turn-time panic is already
+                    // Liveness backstop only: a panic during the run is already
                     // caught, rolled back, and reported inside
-                    // `Shell::run_turn` itself. This outer catch exists for
+                    // `Shell::run` itself. This outer catch exists for
                     // a panic escaping `into_report` or the report plumbing
                     // on this worker thread — under `panic = "unwind"` such
                     // a panic would otherwise tear the thread down silently,
                     // no `Report` frame would ever be written, and the
                     // front-end's `recv` would block forever.
                     let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let turn_report = shell.run_turn(req);
-                        turn_report.into_report(shell.sources())
+                        let run_report = shell.run(req);
+                        run_report.into_report(shell.sources())
                     }))
                     .unwrap_or_else(|_| Report::Static {
                         diagnostics: crate::transport::Diagnostics::Host(
-                            "engine: turn report plumbing panicked".into(),
+                            "engine: run report plumbing panicked".into(),
                         ),
                     });
 
@@ -458,14 +458,14 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     });
 
     // Claim the worker atomically: only the frame that flips `false → true`
-    // may hand it work, so "busy" reflects a turn genuinely in flight,
+    // may hand it work, so "busy" reflects a run genuinely in flight,
     // never a worker that has merely not yet re-parked.
     let claim = |id: DispatchId, item: WorkItem| -> bool {
         if busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            turn_tx.send(item).is_ok()
+            run_tx.send(item).is_ok()
         } else {
             write_report(
                 &writer,
@@ -499,7 +499,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
                     let silent = last_frame.elapsed();
                     if silent >= HOST_SILENCE_DEADLINE {
                         eprintln!(
-                            "engine: front-end silent for {}s (deadline {}s) — failing the in-flight turn and exiting",
+                            "engine: front-end silent for {}s (deadline {}s) — failing the in-flight run and exiting",
                             silent.as_secs(),
                             HOST_SILENCE_DEADLINE.as_secs()
                         );
@@ -526,8 +526,8 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
         last_frame = Instant::now();
 
         match frame {
-            Frame::Dispatch(id, turn) => {
-                if !claim(id, WorkItem::Turn(id, turn)) {
+            Frame::Dispatch(id, run) => {
+                if !claim(id, WorkItem::Run(id, run)) {
                     break 0; // worker died
                 }
             }
@@ -538,7 +538,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
             }
             Frame::Answer(_, eid, answer) => {
                 // Correlated by EnquiryId alone: the dispatch id names the
-                // turn for the front-end's benefit, but the slot is the
+                // run for the front-end's benefit, but the slot is the
                 // enquiry's. A late answer for a dead id drops in `fill`.
                 desk.fill(eid, answer);
             }
@@ -571,7 +571,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     };
 
     // ── Teardown settle (durability law) ───────────────────────────
-    // The loop may exit with a turn in flight: cancel it, and the shell's
+    // The loop may exit with a run in flight: cancel it, and the shell's
     // durable root (its deferred workers), then wait — bounded — for the
     // busy flag to clear. A clean Detach or EOF still exits 0; a silent
     // peer or read fault exits 1.
@@ -686,7 +686,7 @@ mod wire_desk_tests {
             answered: Condvar::new(),
         };
 
-        // The turn's foreground scope, published as the turn doors publish
+        // The run's foreground scope, published as the run doors publish
         // it, cancelled as `Control::Cancel`'s reader arm cancels it.
         let scope = crate::process::CancelScope::default();
         let _slot = publish_foreground(&scope);
@@ -779,12 +779,12 @@ mod tests {
 // test process's own cwd and HOME, so the engine's environment restoration
 // is a no-op by value — an in-process engine must never chdir the test
 // process. Timing is poll-until with multi-second slack (the dev fleet
-// includes a jittery VM); "cancelled promptly" is proven by using a turn
+// includes a jittery VM); "cancelled promptly" is proven by using a run
 // (`sleep 30`) that could not settle inside the ceiling on its own.
 //
 // The engine's shell publishes the process-global foreground/durable-root
-// cancel slots for every turn it runs (the single-session default), so any
-// test here that dispatches a turn serialises on `SLOT_SERIAL` — the same
+// cancel slots for every run it runs (the single-session default), so any
+// test here that dispatches a run serialises on `SLOT_SERIAL` — the same
 // discipline `transport.rs`'s durability test follows.
 #[cfg(test)]
 mod engine_session_tests {
@@ -807,18 +807,18 @@ mod engine_session_tests {
 
     static INSTALLERS: &[EngineInstaller] = &[EngineInstaller { tag: "test", boot }];
 
-    /// One capturing turn under the ⊤ capability ceiling.
-    fn turn(src: &str) -> Turn {
-        Turn {
+    /// One capturing run under the ⊤ capability ceiling.
+    fn run(src: &str) -> Run {
+        Run {
             program: crate::transport::Program::Source(src.into()),
             script_name: "<test>".into(),
             caps: crate::types::Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: crate::driver::TurnIo::Capture,
+            io: crate::driver::RunIo::Capture,
             terminal: crate::driver::RequestedTerminalAccess::Denied,
-            stdin: crate::driver::TurnStdin::Empty,
+            stdin: crate::driver::RunStdin::Empty,
         }
     }
 
@@ -866,7 +866,7 @@ mod engine_session_tests {
         }
 
         fn dispatch(&mut self, id: u64, src: &str) {
-            self.send(&Frame::Dispatch(DispatchId(id), Box::new(turn(src))));
+            self.send(&Frame::Dispatch(DispatchId(id), Box::new(run(src))));
         }
 
         /// Await the first frame matching `pred` within [`WAIT`], buffering
@@ -945,7 +945,7 @@ mod engine_session_tests {
         assert_eq!(host.detach_and_join(), 0);
     }
 
-    /// A second dispatch and a probe sent while a turn runs both answer
+    /// A second dispatch and a probe sent while a run runs both answer
     /// "engine busy": the single worker rendezvous, one arm for both riders.
     #[test]
     fn busy_refuses_a_second_dispatch_and_a_probe() {
@@ -964,11 +964,11 @@ mod engine_session_tests {
         assert_eq!(host.detach_and_join(), 0, "teardown cancels the sleep");
     }
 
-    /// `Control::Cancel` settles an in-flight turn promptly — a `sleep 30`
+    /// `Control::Cancel` settles an in-flight run promptly — a `sleep 30`
     /// could not settle inside the await ceiling on its own — and detach
     /// still exits 0.
     #[test]
-    fn cancel_settles_an_in_flight_turn_promptly() {
+    fn cancel_settles_an_in_flight_run_promptly() {
         let _g = SLOT_SERIAL.lock().unwrap();
         let mut host = start();
         host.dispatch(1, "sleep 30");

@@ -139,7 +139,7 @@ pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 /// `!allow_schedule` (no `--allow-schedule` grant). Installation stays
 /// unconditional and the desk's refusal is the only real wall — this list
 /// is prompt-only, so an agent is never shown a verb it cannot call and
-/// never spends a turn finding that out.
+/// never spends a step finding that out.
 ///
 /// This is a *progressive-disclosure* index, not a reference: the agent reads
 /// the whole surface at a glance, then `explain <name>`s any one for its
@@ -331,7 +331,7 @@ pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) ->
 /// bullets carry the actual capabilities.  `None` fields are
 /// "unrestricted" (no attenuation at this layer); empty containers
 /// are "(none)".  One effect per line so the agent can scan its
-/// authority at a glance and avoid burning turns on denied ops.
+/// authority at a glance and avoid burning steps on denied ops.
 ///
 /// `scratch_line` is the right-hand side of the `- scratch:` bullet,
 /// rendered by the caller because the two products name different working

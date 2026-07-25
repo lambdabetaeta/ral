@@ -219,7 +219,7 @@ pub(super) trait Frontend {
     /// build only), threaded so the structural surface can draw each user
     /// binding's dependency edges and pure/effectful verdict — the data the
     /// live env cannot reconstruct.  The session owns it so it accumulates
-    /// across turns; the frontend reads it.  The line-editor backends ignore
+    /// across runs; the frontend reads it.  The line-editor backends ignore
     /// it, exactly as they ignore `jobs`.
     fn read(
         &mut self,

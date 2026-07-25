@@ -38,7 +38,7 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    and manipulated wholesale through Python and `LibreOffice` — and its
 ///    text edits are few, targeted, and to files it usually just wrote.
 ///    String-replace needs no prior `view-text` to obtain a witness, which
-///    is one fewer turn on every edit, and half the prompt weight for a
+///    is one fewer step on every edit, and half the prompt weight for a
 ///    peripheral capability.
 /// 4. **Toolbox** (`data/toolbox.md`) — how office work is actually done
 ///    with the image's userland.  This section is what makes synod capable.

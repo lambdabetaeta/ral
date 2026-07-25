@@ -33,22 +33,22 @@ pub(super) enum StageHandle {
 ///
 /// This mirrors `command::wire_stdin` for standalone externals: if the
 /// enclosing call has parked a `<file` redirect or a parent-shell pipe
-/// on `shell.turn.io.stdin`, the boundary stage consumes it.  Without this,
+/// on `shell.run.io.stdin`, the boundary stage consumes it.  Without this,
 /// `f < file` on a function whose body is a pipeline would silently
 /// drop the redirect — the pipeline saw only `Parent` without ever
 /// reading the source.  Pipeline policy diverges from standalone exec
 /// only in the inherit branch: a foreground pipeline's pgid is what
 /// owns the tty, so the permit kind reflects that.
 fn route_parent_stdin(group: &PipelineGroup, shell: &mut Shell) -> command::StdinRoute {
-    // An explicit empty source (an exarch tool turn) wires the boundary stage
+    // An explicit empty source (an exarch tool run) wires the boundary stage
     // to `/dev/null` — no fd-0 fall-through, mirroring `command::wire_stdin`.
-    if matches!(shell.turn.io.stdin, crate::io::Source::Empty) {
+    if matches!(shell.run.io.stdin, crate::io::Source::Empty) {
         return command::StdinRoute::Null;
     }
-    match shell.turn.io.stdin.take_reader() {
+    match shell.run.io.stdin.take_reader() {
         Some(crate::io::SourceReader::Pipe(r)) => command::StdinRoute::Pipe(r),
         Some(crate::io::SourceReader::File(f)) => command::StdinRoute::File(f),
-        None if !shell.turn.io.terminal.startup_stdin_tty => {
+        None if !shell.run.io.terminal.startup_stdin_tty => {
             command::StdinRoute::Inherit(command::TtyInputPermit::for_non_tty_stdin())
         }
         None if group.owns_tty() => {
@@ -94,9 +94,9 @@ pub(super) fn wire_stage_stdout(
             // or `ls`/`grep` sees a TTY — under the same predicate the
             // standalone path uses (`stdio::inherit_tty`): fd 1 was a tty at
             // startup and this group owns the terminal foreground.
-            let inherit = shell.turn.io.terminal.startup_stdout_tty && group.owns_tty();
+            let inherit = shell.run.io.terminal.startup_stdout_tty && group.owns_tty();
             let plan = shell
-                .turn
+                .run
                 .io
                 .stdout
                 .child_stdout(inherit)
@@ -129,7 +129,7 @@ pub(super) fn wire_stage_stdio(
     cmd.stdin(route_stdin(stdin, group, shell).into_stdio());
     let stdout_pump = wire_stage_stdout(cmd, stdout, group, shell)?;
     let stderr_plan = shell
-        .turn
+        .run
         .io
         .stderr
         .child_stderr()
@@ -171,7 +171,7 @@ pub(super) fn spawn_into_group(
         // Pipeline stages borrow the group; `PipelineGroup::Drop`
         // owns the release.
         command::GroupOwner::BorrowedByPipeline,
-        shell.turn.cancel.as_scope().clone(),
+        shell.run.cancel.as_scope().clone(),
         jail,
     ))
 }
@@ -228,7 +228,7 @@ fn spawn_stage(
                 Some(&captured),
                 cx.shell.local.audit.active_policy(),
                 wants_value,
-                &cx.shell.turn.loc,
+                &cx.shell.run.loc,
             )?
         }
     };
@@ -413,7 +413,7 @@ fn launch_external_stage_direct(
 /// pgid (see `group.rs`'s SIGINT/relay invariant), so SIGINTs arriving
 /// before that claim — between `prepare` and the first `spawn`, or
 /// between a stage spawn returning and the next stage starting — only
-/// cancel the turn's foreground scope.  Polling that scope at the top
+/// cancel the run's foreground scope.  Polling that scope at the top
 /// of every iteration aborts launch promptly without leaving
 /// anchor-only or partially-spawned groups stranded.
 fn spawn_all_stages(

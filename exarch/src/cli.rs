@@ -92,16 +92,16 @@ pub struct Cli {
     /// choice.
     #[arg(long = "effort", value_name = "LEVEL")]
     pub effort: Option<String>,
-    /// Run one seed turn non-interactively: the assistant's reply
+    /// Run one seed exchange non-interactively: the assistant's reply
     /// streams to stdout, every other event (tool calls, results,
     /// errors) condenses to one line on stderr, and the process exits
-    /// when the turn finishes.  Requires `--prompt` or
+    /// when the exchange finishes.  Requires `--prompt` or
     /// `--file`; no alt-screen, no REPL.  Pipe-friendly.
     #[arg(long)]
     pub headless: bool,
     /// Headless stdout format.  `text` (default) streams the root
     /// agent's assistant text live; `json` holds it back and emits one
-    /// result object (final message, stop reason, turns, duration,
+    /// result object (final message, stop reason, steps, duration,
     /// token usage + cost) when the run ends.  Only meaningful with
     /// `--headless`, which clap enforces when this flag is given.
     #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text, requires = "headless")]

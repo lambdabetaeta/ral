@@ -9,7 +9,7 @@
 //! contract, the six-label grant vocabulary, the trigger/label
 //! vocabularies — before it ever forks a session or puts an enquiry, so a
 //! malformed call never reaches the host. The spawning body (`agent`) forks
-//! this shell into the turn's nursery
+//! this shell into the run's nursery
 //! ([`ral_core::Shell::fork_into_nursery`]) and enquires with the adopted
 //! session's id; every other body enquires directly. The desk answers class
 //! by class in `crate::fleet::desk`; this module only ever crosses that one seam.
@@ -192,7 +192,7 @@ fn spawn_receipt(answer: FOValue) -> Settled<Value> {
 }
 
 /// `agent [prompt: …, name: …, type: …, grant: …]` — validate the door,
-/// fork this shell into the turn's nursery, and enquire `` `agent-start ``
+/// fork this shell into the run's nursery, and enquire `` `agent-start ``
 /// with the adopted session's id — the builtin-body half of a spawn, the
 /// desk's own launch spine ([`crate::fleet::desk::ExarchDesk::launch`]) the
 /// other half. The argument arrives as a [`Value::Map`] — the closed record
@@ -241,7 +241,7 @@ fn builtin_agent(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let prompt = prompt.to_string();
 
     let session = shell.fork_into_nursery()?;
-    // A NurseryId is a small monotonic per-turn counter; `unwrap_or` never
+    // A NurseryId is a small monotonic per-run counter; `unwrap_or` never
     // actually saturates in practice, but keeps this door total without an
     // `as` cast's silent wraparound.
     let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
@@ -575,49 +575,49 @@ pub static HARNESS_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("agent"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent),
-        doc: "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked turn in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_agent),
     },
     BuiltinEntry {
         name: Cow::Borrowed("agents"),
         type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_agents),
-        doc: "agents  — list the live descendants you started that are still running: [[name: Str, elapsed-s: Int, log-dir: Str]]. Use it to recover names after a context compaction, then agent-cancel to stop a straggler. Settled agents are not listed — their replies arrive on their own as marked turns in your inbox. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "agents  — list the live descendants you started that are still running: [[name: Str, elapsed-s: Int, log-dir: Str]]. Use it to recover names after a context compaction, then agent-cancel to stop a straggler. Settled agents are not listed — their replies arrive on their own as marked items in your inbox. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_agents),
     },
     BuiltinEntry {
         name: Cow::Borrowed("message"),
         type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_message),
-        doc: "message <name> <text>  — send `text` as a marked turn to the live descendant named `name` (from agents or a spawn receipt); it lands at its next turn boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. Does not return the recipient's answer — coordination only. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "message <name> <text>  — send `text` as a marked item to the live descendant named `name` (from agents or a spawn receipt); it lands at its next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. Does not return the recipient's answer — coordination only. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_message),
     },
     BuiltinEntry {
         name: Cow::Borrowed("agent-cancel"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent_cancel),
-        doc: "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent bears that name. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent bears that name. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_agent_cancel),
     },
     BuiltinEntry {
         name: Cow::Borrowed("schedule"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_schedule),
-        doc: "schedule <spec>  — arm a self-wakeup: at the chosen time a marked turn carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next turn boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to name the wakeup — the label is its identity: it must not be borne by another live schedule, and the sched-<n> form is reserved for defaults — or `none` to take the default sched-<n>; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "schedule <spec>  — arm a self-wakeup: at the chosen time a marked item carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next exchange boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to name the wakeup — the label is its identity: it must not be borne by another live schedule, and the sched-<n> form is reserved for defaults — or `none` to take the default sched-<n>; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_schedule),
     },
     BuiltinEntry {
         name: Cow::Borrowed("schedules"),
         type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_schedules),
-        doc: "schedules  — list your live scheduled wakeups: [[label: Str, trigger: Str, next-s: Int, fires: Int]] — next-s the seconds until the next fire, fires how many times it has fired so far. Use it to recover labels after a context compaction, then unschedule to remove one. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "schedules  — list your live scheduled wakeups: [[label: Str, trigger: Str, next-s: Int, fires: Int]] — next-s the seconds until the next fire, fires how many times it has fired so far. Use it to recover labels after a context compaction, then unschedule to remove one. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_schedules),
     },
     BuiltinEntry {
         name: Cow::Borrowed("unschedule"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_unschedule),
-        doc: "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). A no-op if no live schedule bears that label. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). A no-op if no live schedule bears that label. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_unschedule),
     },
     BuiltinEntry {
         name: Cow::Borrowed("reply"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_reply),
-        doc: "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in a turn and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the turn that calls it: inside spawn { … } this errors.",
+        doc: "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_reply),
     },
 ];
@@ -800,13 +800,13 @@ mod tests {
     /// call whose script is
     /// `` agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only] ``
     /// — real source, parsed and type-checked, crossing the desk through a
-    /// real nursery fork — and the receipt record is the turn's value,
+    /// real nursery fork — and the receipt record is the run's value,
     /// while the child's own reply later settles into the parent's inbox.
     ///
-    /// Drives `run_shell` directly rather than `Agent::apply`'s provider
+    /// Drives `run_shell` directly rather than `Agent::deliberate`'s provider
     /// loop: the spawned child inherits the parent's *own* `Arc<Provider>`
     /// (`agent-start`'s `ProviderHandle::new(services.provider.current())`),
-    /// so a script consumed by both a driven parent turn and its spawned
+    /// so a script consumed by both a driven parent exchange and its spawned
     /// child races unpredictably over which one gets which stage.
     #[test]
     fn agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox() {
@@ -834,14 +834,14 @@ mod tests {
         );
         assert!(
             result.content.contains("helper"),
-            "the receipt record must be the turn's value, got: {}",
+            "the receipt record must be the run's value, got: {}",
             result.content
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match session.drain_turn_for_test() {
-                Some(crate::bus::Turn::Agent(r)) => {
+            match session.next_item_for_test() {
+                Some(crate::bus::Item::Agent(r)) => {
                     assert!(
                         r.text.contains("say hi"),
                         "the child's reply must settle into the parent's inbox, got: {}",
@@ -849,7 +849,7 @@ mod tests {
                     );
                     break;
                 }
-                Some(_other) => panic!("expected an Agent result turn"),
+                Some(_other) => panic!("expected an Agent result item"),
                 None => {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1021,7 +1021,7 @@ mod tests {
     /// type-checked, crossing the desk — answers a receipt record naming
     /// the resolved `sched-{n}` default label and the seconds to first
     /// fire, and once it fires the marked wakeup lands in the inbox as a
-    /// [`crate::bus::Turn::Wakeup`]. Mirrors `crate::fleet::schedule`'s own
+    /// [`crate::bus::Item::Wakeup`]. Mirrors `crate::fleet::schedule`'s own
     /// `after_fires_once_then_is_removed` for how to wait for the fire — a
     /// real second, since `parse_duration`'s smallest unit is whole
     /// seconds.
@@ -1046,7 +1046,7 @@ mod tests {
         );
         assert!(
             result.content.contains("next-s"),
-            "the receipt record must be the turn's value, got: {}",
+            "the receipt record must be the run's value, got: {}",
             result.content
         );
         let live = session.schedules.list();
@@ -1064,15 +1064,15 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            match session.drain_turn_for_test() {
-                Some(crate::bus::Turn::Wakeup(text)) => {
+            match session.next_item_for_test() {
+                Some(crate::bus::Item::Wakeup(text)) => {
                     assert!(
                         text.contains("wake"),
                         "the wakeup must carry the prompt, got: {text}"
                     );
                     break;
                 }
-                Some(_other) => panic!("expected a Wakeup turn"),
+                Some(_other) => panic!("expected a Wakeup item"),
                 None => {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1127,7 +1127,7 @@ mod tests {
     // ── `reply` ───────────────────────────────────────────────────────────
 
     /// A `ral` tool call carrying a real script as its `cmd` — the shape a
-    /// scripted child's own turn issues, mirroring `agent.rs`'s private
+    /// scripted child's own exchange issues, mirroring `agent.rs`'s private
     /// helper of the same name (this test module has no access to it).
     fn ral_call(id: &str, cmd: &str) -> genai::chat::ToolCall {
         genai::chat::ToolCall {
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     /// The `reply` builtin's full stack, end to end: a spawned child's own
-    /// scripted turn runs `` reply [files: $found] `` — real source, parsed
+    /// scripted exchange runs `` reply [files: $found] `` — real source, parsed
     /// and type-checked, crossing the desk through a real enquiry — and the
     /// structured record it built reaches the parent's inbox, not a
     /// flattened string. Substitutes the child's own script for the
@@ -1174,14 +1174,14 @@ mod tests {
         );
         assert!(
             result.content.contains("finder"),
-            "the receipt record must be the turn's value, got: {}",
+            "the receipt record must be the run's value, got: {}",
             result.content
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match session.drain_turn_for_test() {
-                Some(crate::bus::Turn::Agent(r)) => {
+            match session.next_item_for_test() {
+                Some(crate::bus::Item::Agent(r)) => {
                     assert!(
                         r.text.contains("files:")
                             && r.text.contains("a.rs")
@@ -1191,7 +1191,7 @@ mod tests {
                     );
                     break;
                 }
-                Some(_other) => panic!("expected an Agent result turn"),
+                Some(_other) => panic!("expected an Agent result item"),
                 None => {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1231,10 +1231,10 @@ mod tests {
         );
     }
 
-    /// A double `reply` within one turn is last-wins: the second call's
-    /// value is what the turn settles `Replied` with.
+    /// A double `reply` within one exchange is last-wins: the second call's
+    /// value is what the exchange settles `Replied` with.
     #[test]
-    fn double_reply_in_one_turn_is_last_wins() {
+    fn double_reply_in_one_exchange_is_last_wins() {
         let dir = tmp("double-reply-last-wins");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
@@ -1251,20 +1251,20 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let provider_handle = session.current_provider();
-        let outcome = session.apply(
+        let outcome = session.deliberate(
             &provider_handle,
             Some("go".into()),
             &crate::agent::cancel::Token::new(),
             &emit,
         );
         match outcome {
-            Ok(crate::agent::TurnOutcome::Replied(v)) => {
+            Ok(crate::agent::deliberate::Outcome::Replied(v)) => {
                 assert_eq!(
                     v,
                     ral_core::serial::FOValue::String {
                         value: "second".into()
                     },
-                    "the last reply in the turn must win"
+                    "the last reply in the exchange must win"
                 );
             }
             other => panic!("expected Replied, got {other:?}"),

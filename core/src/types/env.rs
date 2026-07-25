@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// One scope entry: the runtime value together with the checker's
-/// scheme for the binding, where one survived the turn that installed
+/// scheme for the binding, where one survived the run that installed
 /// it.
 ///
 /// Value and scheme are installed together by the statement-level
@@ -91,7 +91,7 @@ impl Env {
     /// True when the innermost scope is the persisted user scope itself —
     /// `scopes[0]` prelude, `scopes[1]` the user scope `builtins::register`
     /// pushes — with no block/lambda/`if`/`letrec` frame above it.  A binding
-    /// installed here survives the turn; anything deeper is popped before it
+    /// installed here survives the run; anything deeper is popped before it
     /// ends.  Same convention as [`Self::get_local`].
     pub fn at_session_scope(&self) -> bool {
         self.scopes.len() == 2
@@ -210,7 +210,7 @@ impl Env {
     }
 
     /// Every bound name with its installed scheme, innermost binding
-    /// wins.  The seed of the next turn's check: a name with a scheme is
+    /// wins.  The seed of the next run's check: a name with a scheme is
     /// bound to it, a name without one is checked as a bare name.
     pub fn binding_schemes(&self) -> Vec<(String, Option<Scheme>)> {
         self.fold_innermost_wins(|b| b.scheme.clone())

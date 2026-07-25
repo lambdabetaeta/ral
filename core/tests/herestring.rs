@@ -5,16 +5,16 @@
 //! verbatim everywhere; the drop is a semantic property of `<<` alone,
 //! applied to whatever string reaches it at evaluation.
 //!
-//! Tests drive the public `run_turn` door like a REPL turn or an exarch
+//! Tests drive the public `run` door like a REPL run or an exarch
 //! tool call would; the in-process consumer is `from-string` (a codec that
 //! drains stdin to a string), the external consumer is `cat`.
 
 mod common;
 
 use ral_core::io::TerminalState;
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Settled, Shell};
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 fn fresh_shell() -> Shell {
     ral_core::driver::boot_shell(
@@ -25,17 +25,17 @@ fn fresh_shell() -> Shell {
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -43,8 +43,8 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 

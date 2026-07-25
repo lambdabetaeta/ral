@@ -4,14 +4,14 @@
 //! `trunc` map a Float to the Int in their direction.  All four take a Float
 //! only (an Int is a static type error — it is already rounded).  The harness
 //! mirrors `comparison.rs`: bootstrap a prelude-registered `Shell` and drive
-//! each source string through the public `run_turn` door like a REPL
-//! turn.
+//! each source string through the public `run` door like a REPL
+//! run.
 
 mod common;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Capabilities, Settled, Shell, Value};
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -21,17 +21,17 @@ fn fresh_shell() -> Shell {
 }
 
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -39,8 +39,8 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 
@@ -84,20 +84,20 @@ fn expect_error(source: &str, needle: &str) {
 }
 
 /// Run `source`, expecting it to be rejected by the type checker before it
-/// ever runs (a `TurnReport::Static`).
+/// ever runs (a `RunReport::Static`).
 fn expect_static_reject(source: &str) {
     let mut shell = fresh_shell();
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -105,8 +105,8 @@ fn expect_static_reject(source: &str) {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Static { .. } => {}
-        TurnReport::Ran { result, .. } => {
+        RunReport::Static { .. } => {}
+        RunReport::Ran { result, .. } => {
             panic!("{source:?}: expected a static type error, but it ran: {result:?}")
         }
     }

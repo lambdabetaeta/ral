@@ -58,10 +58,10 @@ pub struct ScriptContextGuard<'a> {
 
 impl<'a> ScriptContextGuard<'a> {
     pub fn enter(shell: &'a mut Shell, script: &str, text: &str) -> Self {
-        let saved_current_script = shell.turn.loc.script.clone();
-        let saved_call_site_script = shell.turn.loc.call_site.script.clone();
-        let saved_source = shell.turn.loc.source.take();
-        let saved_current = shell.turn.loc.current;
+        let saved_current_script = shell.run.loc.script.clone();
+        let saved_call_site_script = shell.run.loc.call_site.script.clone();
+        let saved_source = shell.run.loc.source.take();
+        let saved_current = shell.run.loc.current;
         shell.install_script_context(script.to_string(), text);
         Self {
             shell,
@@ -79,10 +79,10 @@ impl<'a> ScriptContextGuard<'a> {
 
 impl Drop for ScriptContextGuard<'_> {
     fn drop(&mut self) {
-        self.shell.turn.loc.script = std::mem::take(&mut self.saved_current_script);
-        self.shell.turn.loc.call_site.script = std::mem::take(&mut self.saved_call_site_script);
-        self.shell.turn.loc.source = self.saved_source.take();
-        self.shell.turn.loc.current = self.saved_current;
+        self.shell.run.loc.script = std::mem::take(&mut self.saved_current_script);
+        self.shell.run.loc.call_site.script = std::mem::take(&mut self.saved_call_site_script);
+        self.shell.run.loc.source = self.saved_source.take();
+        self.shell.run.loc.current = self.saved_current;
     }
 }
 
@@ -144,7 +144,7 @@ pub fn evaluate_checked(
 ///
 /// The path is virtual in the sense that the
 /// caller is responsible for any filesystem read; this function only
-/// uses it to label `shell.turn.loc.script` (so error messages and
+/// uses it to label `shell.run.loc.script` (so error messages and
 /// nested `source`/`use` resolutions point back to the right file) and
 /// to participate in the cycle-detection stack.
 ///
@@ -165,7 +165,7 @@ pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> S
 /// Parse, elaborate, and check `source` against the live session before
 /// it evaluates.  The inference pass is what writes the evaluator's mode
 /// wires, so a loaded file passes through the checker exactly as a REPL
-/// turn does.  A type error is fatal, surfaced as a `Break::Error` so the
+/// run does.  A type error is fatal, surfaced as a `Break::Error` so the
 /// file is reported and not run.  The schemes seed the check from the
 /// caller's scope, so a `source`d file sees the names already installed.
 ///
@@ -180,7 +180,7 @@ pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> S
 /// `source`, `use`, capability files, plugin loads — funnels through here,
 /// so renewing the compiled program's referenced names once, right here,
 /// covers all of them. The load is executing inside an already-committed
-/// turn, so its references are real uses, unlike the turn-boundary tick
+/// run, so its references are real uses, unlike the run-boundary tick
 /// which this door does not touch.
 fn check_source(source: &str, shell: &mut Shell) -> Settled<std::sync::Arc<Comp>> {
     let file = shell.session.sources.next_id();
@@ -287,5 +287,5 @@ pub(crate) fn builtin_use(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
-    crate::path::resolve_relative_to_script(path, shell.turn.loc.script.as_str())
+    crate::path::resolve_relative_to_script(path, shell.run.loc.script.as_str())
 }

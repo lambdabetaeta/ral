@@ -68,7 +68,7 @@ impl WorkerId {
     }
 }
 
-/// The lifetime a frame grants the workers its turns detach: an idle bound
+/// The lifetime a frame grants the workers its runs detach: an idle bound
 /// on the observation clock under an absolute backstop.
 ///
 /// A lease, not a
@@ -76,7 +76,7 @@ impl WorkerId {
 /// when `idle` old, and each eliminator naming the handle (`poll`, a
 /// blocked `await`/`race` sweep) renews it. The two travel as one value so
 /// no ceiling-without-backstop state exists: a frame either grants the
-/// whole lease or (`None` on the turn axis — the interactive REPL) never
+/// whole lease or (`None` on the run axis — the interactive REPL) never
 /// reaps at all.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerLease {
@@ -230,7 +230,7 @@ struct RegistryInner {
     /// it has anything registered to show for it.
     reserved: usize,
     /// The registry's own ral-call clock: one tick per source dispatch
-    /// ([`Shell::run_turn`](super::Shell::run_turn)'s Source arm), the same
+    /// ([`Shell::run`](super::Shell::run)'s Source arm), the same
     /// cadence the binding-lease ledger keeps.
     epoch: u64,
     /// The armed settled-entry retention, in ral calls. `None` — no host
@@ -380,7 +380,7 @@ impl WorkerRegistry {
         self.0.lock().unwrap().retention = Some(retention);
     }
 
-    /// Advance the registry's own ral-call clock by one. Ticked at the turn
+    /// Advance the registry's own ral-call clock by one. Ticked at the run
     /// door's Source arm, beside the binding ledger's tick, so the two
     /// ledgers read one logical clock.
     pub(crate) fn tick_epoch(&self) {

@@ -76,7 +76,7 @@ pub(crate) fn run_pipeline(
     // The pipeline group's SIGINT-forwarding relay slot is claimed
     // inside `PipelineGroup::spawn` once the first real child has
     // joined the pgid (see `group.rs`'s SIGINT/relay invariant).
-    // Earlier SIGINTs only cancel the turn's foreground scope, which
+    // Earlier SIGINTs only cancel the run's foreground scope, which
     // the per-stage `signal::check` inside `launch_pipeline` observes
     // to abort promptly.
     let (_group, running) = launch_pipeline(stages, &plan, shell)?;

@@ -30,7 +30,7 @@ pub struct TyEnv {
     /// The checked session's builtin table — names a `Bind`/`Exec`/`Val`
     /// site resolves against before falling through to a lexical binding
     /// or handler.  Set once by `seed_env`; unchanged for the rest of the
-    /// turn's inference.
+    /// run's inference.
     pub builtins: crate::types::BuiltinTable,
 }
 

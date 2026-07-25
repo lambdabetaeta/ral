@@ -8,15 +8,15 @@
 //! `from-json` u64 overflow (B12).
 //!
 //! The harness mirrors `comparison.rs`: bootstrap a prelude-registered
-//! `Shell`, then drive each source string through the public `run_turn`
-//! door like a REPL turn.  Each defect passed `--check` and the prior
+//! `Shell`, then drive each source string through the public `run`
+//! door like a REPL run.  Each defect passed `--check` and the prior
 //! suite, so every test below is a coverage gap the doc facet let drift.
 
 mod common;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Capabilities, Escape, Settled, Shell, Status, Value};
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -25,21 +25,21 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Run one top-level turn of `source` through the public `run_turn` door
+/// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -47,8 +47,8 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 

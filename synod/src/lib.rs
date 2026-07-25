@@ -3,7 +3,7 @@
 //! Where [`exarch`] is a coding agent pointed at a repository, synod is
 //! pointed at a *folder*: the spreadsheets, letters, and PDFs of someone
 //! who does not program.  The two are siblings over one engine — synod
-//! reuses exarch's provider transport, agent turn driver, and card bus
+//! reuses exarch's provider transport, agent exchange driver, and card bus
 //! wholesale, and differs in exactly five places:
 //!
 //! - **the grant** ([`grant`]) — one folder, nothing else, no network;

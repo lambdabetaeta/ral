@@ -1,26 +1,26 @@
-//! Exarch's per-turn cancellation, layered on top of ral's SIGINT handling.
+//! Exarch's per-exchange cancellation, layered on top of ral's SIGINT handling.
 //!
 //! ral's `signal::install_handlers` translates a delivered signal into a
 //! [`CancelCause`](ral_core::process::CancelCause) on the published
 //! cancel slots, so the evaluator unwinds at its next poll; that
-//! interrupts an in-flight tool call but leaves exarch's turn loop free
+//! interrupts an in-flight tool call but leaves exarch's attend loop free
 //! to keep going.  Here we add a cancellation [`Token`]: every agent holds one sticky token for its
 //! life (registered in the fleet so the subtree cascade always reaches the
-//! live turn), and the drive loop [`reset`](Token::reset)s its flag at each
-//! genuine turn boundary so a prior turn's Esc never bleeds into the next.
-//! The token is threaded down through `apply` → dispatch → tools, cancelled
-//! by the chained signal handler, by a per-tab turn interrupt
+//! live exchange), and the attend loop [`reset`](Token::reset)s its flag at each
+//! genuine exchange boundary so a prior exchange's Esc never bleeds into the next.
+//! The token is threaded down through `deliberate` → `run_batch` → tools, cancelled
+//! by the chained signal handler, by a per-tab exchange interrupt
 //! (`AgentRegistry::interrupt`), by the registry cascade (`agent-cancel`, the
 //! ceiling, `/clear`), and raced by the HTTP request future, so one
-//! cancellation stops the turn and returns to the prompt.  The cause a token
+//! cancellation stops the exchange and returns to the prompt.  The cause a token
 //! carries decides how far it reaches: an
 //! [`Interrupt`](ral_core::process::CancelCause) unwinds only the in-flight
-//! turn and the agent re-parks; any stronger cause terminates the agent.
+//! exchange and the agent re-parks; any stronger cause terminates the agent.
 //!
-//! Ctrl-C and Esc are a *per-tab turn interrupt* — they unwind the focused
-//! tab's current turn, never cascade to descendants, never end the agent.  On
+//! Ctrl-C and Esc are a *per-tab exchange interrupt* — they unwind the focused
+//! tab's current exchange, never cascade to descendants, never end the agent.  On
 //! the trunk they route through [`raise_interrupt`], which cancels the trunk's
-//! published token and asks ral to cancel the current turn's foreground scope
+//! published token and asks ral to cancel the current run's foreground scope
 //! with [`CancelCause::Interrupt`](ral_core::process::CancelCause), so the
 //! foreground evaluation unwinds at its next poll; on any other focused tab
 //! they route through `AgentRegistry::interrupt`, which cancels that agent's
@@ -51,10 +51,10 @@
 //! *non-escalating* [`relay_handler`] (`ral_core::process::relay_handler`),
 //! not the [`term_handler`] whose third signal `_exit`s: a SIGINT reaching
 //! the supervising TUI — from a stray child, another process, anything —
-//! must only cancel the current turn, never force-exit exarch.  SIGTERM/SIGHUP
+//! must only cancel the current exchange, never force-exit exarch.  SIGTERM/SIGHUP
 //! keep ral's `term_handler`, since those are deliberate termination
 //! requests: it cancels the durable root with `Terminate` — reaching the
-//! foreground turn and every detached worker — and force-exits on the third
+//! foreground exchange and every detached worker — and force-exits on the third
 //! delivery; the chained handler stamps the trunk's own token with the same
 //! `Terminate` cause, so a park reading the token agrees with ral's root
 //! about why the agent is ending.  By convention `install` still runs after
@@ -72,18 +72,18 @@
 //! that list; unlike Unix's static forwarding targets, this ordering is a
 //! genuine correctness requirement here, since the list position decides
 //! which routine runs first.  On Ctrl-C or
-//! Ctrl-Break — the same two events [`cancels_turn`] recognises — it calls
+//! Ctrl-Break — the same two events [`cancels_exchange`] recognises — it calls
 //! [`raise`] and [`ral_core::process::relay_interrupt`] directly: the
-//! non-escalating relay that cancels the current turn's foreground scope
+//! non-escalating relay that cancels the current run's foreground scope
 //! and fans a Ctrl-Break out to every live, non-detached pipeline group,
 //! the same contract Unix's [`relay_handler`] gives a forwarded SIGINT.  It
 //! then returns `TRUE` ("handled"), so ral's own `ctrlc`-installed
 //! disposition — whose ladder ticks a counter toward `TerminateJobObject`
 //! and `ExitProcess` — never runs for these two events: a trunk interrupt
-//! can only ever cancel the turn, never escalate, and never reaches a
+//! can only ever cancel the exchange, never escalate, and never reaches a
 //! detached worker's group.  Every other console event (window close,
-//! logoff, shutdown) is a genuine termination request, not a turn-cancel:
-//! [`cancels_turn`] answers `false` for those, exarch's handler returns
+//! logoff, shutdown) is a genuine termination request, not an exchange-cancel:
+//! [`cancels_exchange`] answers `false` for those, exarch's handler returns
 //! `FALSE` in turn, and ral's escalating disposition runs exactly as it
 //! would without exarch installed — the Windows analogue of SIGTERM/SIGHUP
 //! staying on Unix's escalating [`term_handler`].
@@ -107,8 +107,8 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 ///
 /// Cloning shares the same flag (an
 /// `Arc<AtomicU8>`, holding the [`CancelCause`] a cancel was raised with, `0`
-/// while un-cancelled), so the registry entry's clone and the drive loop's
-/// clone are one token — cancelling either halts the agent's turn.
+/// while un-cancelled), so the registry entry's clone and the attend loop's
+/// clone are one token — cancelling either halts the agent's exchange.
 #[derive(Clone, Default)]
 pub struct Token(Arc<AtomicU8>);
 
@@ -120,15 +120,15 @@ impl Token {
     }
 
     /// True once this token (or, since clones share the flag, any of its
-    /// shares) has been cancelled — for *any* cause.  The `apply` loop and the
-    /// provider poll this to unwind whatever turn is in flight.
+    /// shares) has been cancelled — for *any* cause.  The `deliberate` loop and the
+    /// provider poll this to unwind whatever exchange is in flight.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed) != 0
     }
 
     /// True when a *terminate*-cause cancel is in force — any cause but an
     /// [`Interrupt`](CancelCause).  A non-`Held` park ends the agent on this;
-    /// a bare interrupt only drops the in-flight turn and the agent re-parks.
+    /// a bare interrupt only drops the in-flight exchange and the agent re-parks.
     pub fn terminated(&self) -> bool {
         let flag = self.0.load(Ordering::Relaxed);
         flag != 0 && flag != CancelCause::Interrupt as u8
@@ -144,14 +144,14 @@ impl Token {
         self.0.fetch_max(cause as u8, Ordering::Relaxed);
     }
 
-    /// Clear a bare interrupt — the per-turn reset the drive loop runs at a
-    /// genuine turn boundary, so a prior turn's Esc never bleeds into the
+    /// Clear a bare interrupt — the per-exchange reset the attend loop runs at a
+    /// genuine exchange boundary, so a prior exchange's Esc never bleeds into the
     /// next.  A compare-exchange from exactly [`Interrupt`](CancelCause::Interrupt)
     /// to `0`: any terminate-class cause already recorded (`Explicit`,
-    /// `Deadline`, ...) is left in force, since a turn boundary must never
-    /// erase a cascade cancellation that landed between the drive loop's
+    /// `Deadline`, ...) is left in force, since an exchange boundary must never
+    /// erase a cascade cancellation that landed between the attend loop's
     /// pop and this reset.  Each agent holds one sticky token (registered
-    /// once, so the subtree cascade always reaches the live turn); the
+    /// once, so the subtree cascade always reaches the live exchange); the
     /// boundary clears its flag rather than swapping the `Arc`.
     pub fn reset(&self) {
         let _ = self.0.compare_exchange(
@@ -173,9 +173,9 @@ static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 /// guard lives.
 ///
 /// The trunk (the parent-less agent) calls it once, holding the
-/// guard for its whole drive, so a SIGINT/SIGTERM/Ctrl-C cancels the trunk's
-/// current turn through the token it already threads — without the
-/// per-turn-mint dance, because the boundary [`reset`](Token::reset)s the same
+/// guard for its whole attend loop, so a SIGINT/SIGTERM/Ctrl-C cancels the trunk's
+/// current exchange through the token it already threads — without the
+/// per-exchange-mint dance, because the boundary [`reset`](Token::reset)s the same
 /// sticky token instead of swapping it.  A signal handler that has already
 /// loaded the slot's pointer may dereference it at any later instant,
 /// including after the guard has dropped and restored the slot, so the
@@ -183,7 +183,7 @@ static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 /// publishing interval: this leaks one strong share of the token's `Arc`,
 /// making the pointee live for the rest of the process.  That leak is
 /// bounded and deliberate — production calls this once per process, with
-/// the trunk holding the guard for its whole drive, plus a handful of calls
+/// the trunk holding the guard for its whole attend loop, plus a handful of calls
 /// from tests.
 pub fn publish(token: &Token) -> SlotGuard {
     std::mem::forget(token.0.clone());
@@ -235,7 +235,8 @@ fn raise(cause: CancelCause) {
 }
 
 /// The trunk-only half of Esc/Ctrl-C: cancel the trunk's published token
-/// with `Interrupt` and unwind its current turn via [`deliver_interrupt`].
+/// with `Interrupt` and unwind its current exchange via [`deliver_interrupt`].
+///
 /// Any other focused tab instead goes through `AgentRegistry::interrupt`,
 /// which reaches that agent's own token directly rather than the slot (see
 /// the module doc).
@@ -284,12 +285,12 @@ extern "C" fn chained(sig: libc::c_int) {
 
 /// Raw mode disables `ISIG`, so pressing Ctrl-C no longer causes the
 /// kernel to deliver SIGINT to the foreground job.  Recreate that
-/// missing terminal behaviour, then cancel the current turn's foreground
+/// missing terminal behaviour, then cancel the current run's foreground
 /// scope so the evaluator unwinds the foreground at its next poll.
 ///
 /// A foreground external child still gets a real SIGINT via its own
 /// process group (`interrupt_foreground_child`) — killing *another* group
-/// carries no escalation.  For ral itself we cancel the current turn's
+/// carries no escalation.  For ral itself we cancel the current run's
 /// foreground scope with [`CancelCause::Interrupt`](ral_core::process::CancelCause):
 /// the evaluator unwinds the foreground at its next poll, while detached
 /// workers — parented at the durable root, not the foreground — are
@@ -304,7 +305,7 @@ fn deliver_interrupt() {
 /// Raw mode suppresses the console's automatic Ctrl-C handling — Esc and
 /// Ctrl-C both surface as ordinary key events instead (see the module
 /// doc).  Call ral's non-escalating relay directly, in-process: it cancels
-/// the current turn's foreground scope and fans a Ctrl-Break out to every
+/// the current run's foreground scope and fans a Ctrl-Break out to every
 /// live, non-detached pipeline group, exactly what [`console_ctrl_handler`]
 /// does for a real console event.  A `GenerateConsoleCtrlEvent` re-injection
 /// was tried and rejected here: it broadcasts to the whole console group and
@@ -319,7 +320,7 @@ fn deliver_interrupt() {
 #[cfg(not(any(unix, windows)))]
 fn deliver_interrupt() {}
 
-/// Whether a delivered Windows console-control event is a turn-cancel
+/// Whether a delivered Windows console-control event is an exchange-cancel
 /// gesture — Ctrl-C or Ctrl-Break, the same two events the `ctrlc` crate
 /// reacts to — that exarch's handler fully handles itself.
 ///
@@ -329,12 +330,12 @@ fn deliver_interrupt() {}
 /// it drives can, the same reason [`Token`]'s cause is a plain `u8` rather
 /// than something only readable inside a handler.
 ///
-/// The single bool doubles as both "does this cancel the turn" and "does
+/// The single bool doubles as both "does this cancel the exchange" and "does
 /// exarch report the event as handled": for Ctrl-C/Ctrl-Break exarch
 /// performs the whole non-escalating relay itself and must stop the event
 /// from reaching ral's escalating disposition next in the handler list, so
 /// the two questions have one answer.  Every other event (window close,
-/// logoff, shutdown) is a genuine termination request with no turn to
+/// logoff, shutdown) is a genuine termination request with no exchange to
 /// cancel, and exarch leaves it unhandled so ral's own disposition still
 /// applies its escalation ladder — see the module doc.
 #[cfg_attr(
@@ -345,7 +346,7 @@ fn deliver_interrupt() {}
                   exercised directly by this module's own tests on every host"
     )
 )]
-pub(crate) fn cancels_turn(ctrl_type: u32) -> bool {
+pub(crate) fn cancels_exchange(ctrl_type: u32) -> bool {
     const CTRL_C_EVENT: u32 = 0;
     const CTRL_BREAK_EVENT: u32 = 1;
     ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT
@@ -365,8 +366,8 @@ static WIN_CTRL_HANDLER_INSTALLED: std::sync::Once = std::sync::Once::new();
 
 /// Register exarch's console-ctrl handler.  Must run after
 /// `ral_core::process::install_handlers` (see the module doc for why); the
-/// handler translates Ctrl-C/Ctrl-Break into a turn-cancel via
-/// [`cancels_turn`] and reports those two events as handled so ral's own
+/// handler translates Ctrl-C/Ctrl-Break into an exchange-cancel via
+/// [`cancels_exchange`] and reports those two events as handled so ral's own
 /// escalating disposition never runs for them, deferring to it only for
 /// the genuine termination events.
 #[cfg(windows)]
@@ -398,7 +399,7 @@ pub fn install() {
 /// other event reports `FALSE`, deferring to ral's disposition unchanged.
 #[cfg(windows)]
 extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BOOL {
-    if cancels_turn(ctrl_type) {
+    if cancels_exchange(ctrl_type) {
         raise(CancelCause::Interrupt);
         ral_core::process::relay_interrupt();
         return windows_sys::Win32::Foundation::TRUE;
@@ -406,26 +407,26 @@ extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BO
     windows_sys::Win32::Foundation::FALSE
 }
 
-/// [`cancels_turn`] is a plain function of a `u32` event code, so it is
+/// [`cancels_exchange`] is a plain function of a `u32` event code, so it is
 /// exercised natively on every platform this crate builds for — no
 /// `cfg(windows)`, no real console handler required.
 #[cfg(test)]
-mod cancels_turn_tests {
-    use super::cancels_turn;
+mod cancels_exchange_tests {
+    use super::cancels_exchange;
 
     #[test]
-    fn ctrl_c_and_ctrl_break_cancel_the_turn() {
-        assert!(cancels_turn(0), "CTRL_C_EVENT cancels the turn");
-        assert!(cancels_turn(1), "CTRL_BREAK_EVENT cancels the turn");
+    fn ctrl_c_and_ctrl_break_cancel_the_exchange() {
+        assert!(cancels_exchange(0), "CTRL_C_EVENT cancels the exchange");
+        assert!(cancels_exchange(1), "CTRL_BREAK_EVENT cancels the exchange");
     }
 
     #[test]
-    fn other_console_events_never_cancel_the_turn() {
+    fn other_console_events_never_cancel_the_exchange() {
         // CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6.
         for ctrl_type in [2, 5, 6] {
             assert!(
-                !cancels_turn(ctrl_type),
-                "event {ctrl_type} is not a turn-cancel signal, so ral's \
+                !cancels_exchange(ctrl_type),
+                "event {ctrl_type} is not an exchange-cancel signal, so ral's \
                  escalating disposition must still see it"
             );
         }
@@ -509,7 +510,7 @@ mod tests {
     static SERIAL: Mutex<()> = Mutex::new(());
 
     /// Esc cancels the trunk's published token (and, via `deliver_interrupt`,
-    /// the current turn's foreground scope — exercised by `ral_core`'s own
+    /// the current run's foreground scope — exercised by `ral_core`'s own
     /// slot tests), but never ticks ral's escalation ladder: detached
     /// workers are cancelled through the registry cascade, not the
     /// foreground, so they survive an Esc that stops the trunk alone.
@@ -553,12 +554,12 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// The turn-boundary reset clears a prior turn's Esc so it does not bleed
-    /// into the next.  The trunk holds one sticky published token; the drive
+    /// The exchange-boundary reset clears a prior exchange's Esc so it does not bleed
+    /// into the next.  The trunk holds one sticky published token; the attend
     /// loop [`Token::reset`]s its flag at each genuine boundary rather than
     /// swapping the `Arc`, and the slot keeps tracking that same token.
     #[test]
-    fn reset_clears_prior_turn_cancel() {
+    fn reset_clears_prior_exchange_cancel() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
         install();
@@ -567,11 +568,11 @@ mod tests {
         raise_interrupt();
         assert!(token.is_cancelled(), "Esc cancels the published token");
         assert!(is_set(), "the slot reports cancelled");
-        // The drive loop's per-turn reset clears the flag for the next turn.
+        // The attend loop's per-exchange reset clears the flag for the next exchange.
         token.reset();
         assert!(
             !token.is_cancelled(),
-            "the boundary reset clears the prior turn's Esc"
+            "the boundary reset clears the prior exchange's Esc"
         );
         assert!(
             !is_set(),
@@ -580,9 +581,9 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// The drive loop threads *clones* of the published token into
-    /// `apply`/dispatch/tools; cancelling the published token cancels every
-    /// clone, so an Esc landing mid-turn halts the in-flight tool call.
+    /// The attend loop threads *clones* of the published token into
+    /// `deliberate`/`run_batch`/tools; cancelling the published token cancels every
+    /// clone, so an Esc landing mid-exchange halts the in-flight tool call.
     #[test]
     fn published_token_clone_shares_cancellation() {
         let _g = SERIAL.lock().unwrap();
@@ -606,7 +607,7 @@ mod tests {
     /// (the token half of the chain) would never fire, and the delivered
     /// SIGINT would tick ral's escalation ladder.  With the chain in place
     /// a SIGINT sets the token and routes into the *non-escalating*
-    /// `relay_handler`, which cancels the foreground turn without ever
+    /// `relay_handler`, which cancels the foreground run without ever
     /// ticking the third-signal `_exit` ladder — so the two observable
     /// signatures (token set, ladder un-ticked) together prove the chain
     /// is installed and a delivered SIGINT can only cancel, never force-exit.
@@ -637,8 +638,8 @@ mod tests {
 
     /// `/clear` can be the first action after a delivered termination
     /// signal.  The signal's cooperative delivery (a cause on the cancel
-    /// slots) dies with the turn that unwound on it, but its escalation
-    /// tick would otherwise outlive the turn — leaving the rebuilt
+    /// slots) dies with the run that unwound on it, but its escalation
+    /// tick would otherwise outlive the run — leaving the rebuilt
     /// session one delivery closer to the third-signal `_exit`.  The
     /// exarch shell constructor resets the ladder before loading the
     /// library.
@@ -654,7 +655,7 @@ mod tests {
         let mut session = Agent::for_test(&dir, "system").expect("test session");
 
         // Seed the ladder exactly as a delivered SIGTERM would: through
-        // ral's own term handler.  No turn is running, so the published
+        // ral's own term handler.  No run is running, so the published
         // cancel slots are null and the delivery is the tick alone.
         ral_core::process::term_handler()(libc::SIGTERM);
         assert!(
@@ -684,10 +685,10 @@ mod tests {
 
     /// Drive the two `#[ignore]`d signal-delivery tests above in a child
     /// process they own outright.  Delivered signals are process-wide — a
-    /// raised SIGINT cancels the process's published foreground turn, and
+    /// raised SIGINT cancels the process's published foreground exchange, and
     /// the SIGTERM handler root-cancels every published slot — so inside
     /// the parallel test binary they terminate whatever *other* test
-    /// happens to be mid-turn.  The `SERIAL` lock cannot help: the victims
+    /// happens to be mid-exchange.  The `SERIAL` lock cannot help: the victims
     /// are readers that never know to take it.  Re-execing the test binary
     /// filtered to exactly these tests gives them the singleton process the
     /// signal machinery is designed around.

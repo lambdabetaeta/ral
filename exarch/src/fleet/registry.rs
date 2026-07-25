@@ -16,7 +16,7 @@
 //!     and `remove_subtree`, and `terminate_entry` is the per-entry primitive
 //!     all of them share.  Each
 //!     node is cancelled across both layers — the cooperative [`Token`] its
-//!     drive loop polls, and its own session's durable root, so an
+//!     attend loop polls, and its own session's durable root, so an
 //!     in-flight `ral` eval unwinds at ral's poll points instead of
 //!     grinding to its timeout wall.  Cancelling that root is already the
 //!     whole story for the node's own detached `ral` workers, too: a
@@ -25,22 +25,22 @@
 //!     every `CancelScope::is_cancelled`
 //!     walks its ancestors, so the cascade reaches them with no extra edge
 //!     of its own. A node that is never cancelled — the ordinary `reply`/
-//!     settle path, or the trunk's own end-of-`drive` `deregister` — takes
+//!     settle path, or the trunk's own end-of-`attend` `deregister` — takes
 //!     a different route to the same law: [`crate::agent::Agent`]'s `Drop`
 //!     cancels its own workers and clears its own schedules unconditionally,
 //!     so a settled agent leaks neither. `/clear` is the third route,
 //!     explicit and immediate on the outgoing shell (`Agent::clear`), since
 //!     it rebuilds the agent in place rather than ending it;
-//!   * a **per-turn interrupt**, distinct from the terminate cascade above:
+//!   * a **per-run interrupt**, distinct from the terminate cascade above:
 //!     [`AgentRegistry::interrupt`] unwinds exactly one entry's in-flight
-//!     turn through [`interrupt_entry`], which cancels the [`Token`] *and*
+//!     run through [`interrupt_entry`], which cancels the [`Token`] *and*
 //!     interrupts through the entry's [`EvalReach`] — which cancels whatever
 //!     [`ForegroundScope`](ral_core::process::ForegroundScope) the
-//!     [`TurnScope`] cell currently holds, the scope `exarch`'s own
-//!     transport captures fresh at the start of every turn. Cancelling that
+//!     [`RunScope`] cell currently holds, the scope `exarch`'s own
+//!     transport captures fresh at the start of every run. Cancelling that
 //!     scope reaches an in-flight eval exactly as terminating would, but
-//!     the *next* turn mints an entirely new scope from the untouched
-//!     durable root, so an interrupt never poisons a later turn.  The
+//!     the *next* run mints an entirely new scope from the untouched
+//!     durable root, so an interrupt never poisons a later run.  The
 //!     terminate layer stays [`EvalReach::terminate`]'s alone;
 //!   * an **idle lease** (children only), armed on the shared
 //!     `process::reaper` as a self-re-arming `Run` deadline against the
@@ -64,7 +64,7 @@
 
 use crate::agent::ProviderHandle;
 use crate::agent::cancel::Token;
-use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
+use crate::bus::{AgentId, AgentMessage, InboxReject, Mailbox, Post};
 use crate::sync::LockExt;
 use ral_core::process::{self, CancelCause, DurableRoot, ForegroundScope};
 use std::collections::HashMap;
@@ -72,35 +72,35 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// A live agent's current-turn foreground scope, refreshed by its own
-/// `IdentityTransport` at the start of every turn
+/// A live agent's current-run foreground scope, refreshed by its own
+/// `IdentityTransport` at the start of every run
 /// ([`ral_core::transport::IdentityTransport::observe_foreground`]).  Lives
 /// outside the registry's own lock, so [`AgentRegistry::interrupt`] can
-/// cancel whatever the *in-flight* turn installed without contending with a
-/// dispatch that may run for the turn's whole duration.  `None` until the
-/// agent's first turn runs.
-pub(crate) type TurnScope = Arc<Mutex<Option<ForegroundScope>>>;
+/// cancel whatever the *in-flight* run installed without contending with a
+/// dispatch that may run for the run's whole duration.  `None` until the
+/// agent's first run runs.
+pub(crate) type RunScope = Arc<Mutex<Option<ForegroundScope>>>;
 
 /// How the registry reaches one agent's running eval, per seat kind — the
 /// eval-layer half of every cancel path, beside the cooperative [`Token`]
 /// each entry also carries.  Two distinct motions, both seat-shaped:
 /// [`Self::terminate`] ends the agent's eval for good, [`Self::interrupt`]
-/// unwinds exactly the in-flight turn and leaves every later turn clean.
+/// unwinds exactly the in-flight run and leaves every later run clean.
 pub(crate) enum EvalReach {
     /// The in-process reach: the durable root of the agent's own `Shell`
     /// (the terminate cascade's handle — cancelling it also reaches the
     /// agent's detached workers through the cancel-scope ancestor chain),
-    /// and the turn-scope cell its transport refreshes each turn (the
+    /// and the run-scope cell its transport refreshes each run (the
     /// interrupt's handle — cancelling the held scope unwinds the in-flight
-    /// turn alone, since the next turn mints a fresh scope from the
+    /// run alone, since the next run mints a fresh scope from the
     /// untouched root).
     Identity {
         eval_root: DurableRoot,
-        turn_scope: TurnScope,
+        run_scope: RunScope,
     },
     /// The wire reach: a wire session's only host-reachable cancel primitive
     /// is `Control::Cancel` on its own in-flight dispatch — there is no
-    /// host-side turn scope or durable root to reach separately, so both
+    /// host-side run scope or durable root to reach separately, so both
     /// [`Self::interrupt`] and [`Self::terminate`] resolve to the same
     /// [`ControlSender::cancel_in_flight`]. A wire-seated agent never
     /// actually has a child today (a wire session's `agent-start` is always
@@ -111,13 +111,13 @@ pub(crate) enum EvalReach {
 }
 
 impl EvalReach {
-    /// Unwind the in-flight turn without ending the agent: cancel whatever
-    /// [`ForegroundScope`] the turn-scope cell currently holds.  Never
-    /// touches the durable root — the next turn is born uncancelled.
+    /// Unwind the in-flight run without ending the agent: cancel whatever
+    /// [`ForegroundScope`] the run-scope cell currently holds.  Never
+    /// touches the durable root — the next run is born uncancelled.
     pub(crate) fn interrupt(&self) {
         match self {
-            Self::Identity { turn_scope, .. } => {
-                if let Some(scope) = turn_scope.lock_ignore_poison().as_ref() {
+            Self::Identity { run_scope, .. } => {
+                if let Some(scope) = run_scope.lock_ignore_poison().as_ref() {
                     scope.cancel(CancelCause::Interrupt);
                 }
             }
@@ -129,7 +129,7 @@ impl EvalReach {
     /// End the agent's eval: cancel its session's durable root, so an
     /// in-flight `ral` eval unwinds at the evaluator's poll points rather
     /// than running to its timeout wall.  Permanently poisons the root by
-    /// design — every caller is ending the agent, so there is no later turn
+    /// design — every caller is ending the agent, so there is no later run
     /// for a poisoned root to break.
     pub(crate) fn terminate(&self, cause: CancelCause) {
         match self {
@@ -179,7 +179,7 @@ pub struct Registration {
     pub cancel: Token,
     /// The eval-layer cancel reach for this agent's seat, or `None` for the
     /// trunk, whose session outlives any cancel — an Esc cancels its
-    /// *turn*, delivered through the published foreground slot, never its
+    /// *run*, delivered through the published foreground slot, never its
     /// eval layer.
     pub(crate) reach: Option<EvalReach>,
     pub mailbox: Mailbox,
@@ -191,7 +191,7 @@ pub struct Registration {
 /// Cheap to clone — the inner `Arc` makes a clone
 /// share the same map, so the trunk, every forked child, and the frontend all
 /// hold one registry, and a detached worker holds a handle it can settle
-/// through after its turn has ended.
+/// through after its exchange has ended.
 #[derive(Clone)]
 pub struct AgentRegistry {
     inner: Arc<Mutex<Inner>>,
@@ -213,13 +213,13 @@ struct Entry {
     started: Instant,
     cancel: Token,
     /// The eval-layer cancel reach ([`EvalReach`]).  A tripped [`Token`]
-    /// alone cannot stop an in-flight `ral` tool call (the drive loop reads
+    /// alone cannot stop an in-flight `ral` tool call (the attend loop reads
     /// it only between steps, and `run_shell` blocks until the engine
     /// reports), so the cascade also [`terminate`](EvalReach::terminate)s
     /// through this reach, and a per-tab interrupt
     /// [`interrupt`](EvalReach::interrupt)s through it.  `None` for the
     /// trunk, whose session outlives any cancel — an Esc cancels its
-    /// *turn*, delivered through the published foreground slot, never its
+    /// *run*, delivered through the published foreground slot, never its
     /// eval layer.
     reach: Option<EvalReach>,
     /// The agent's inbox sender.  A human exchange delivers through
@@ -320,7 +320,7 @@ impl AgentRegistry {
     /// this agent's whole subtree, or `None` to arm none: a child no longer
     /// *implies* one — the caller says so.  A worker gets one (an abandoned
     /// detached worker must be reaped); a branch is a parented child
-    /// *without* one (a conversation must not lose a turn at the hour mark);
+    /// *without* one (a conversation must not lose an exchange at the hour mark);
     /// a root never had one.  A `parent`-set agent still carries its
     /// [`EvalReach`] so the cascade and an interrupt each reach its running
     /// eval.
@@ -550,7 +550,7 @@ impl AgentRegistry {
             (mailbox, from_name)
         };
         mailbox
-            .push(InboxMsg::AgentMessage(AgentMessage {
+            .push(Post::AgentMessage(AgentMessage {
                 from,
                 from_name,
                 text,
@@ -584,7 +584,7 @@ impl AgentRegistry {
     }
 
     /// Remove an agent from the registry unconditionally — the trunk's
-    /// self-removal at the end of its drive (a child is removed by its spawn
+    /// self-removal at the end of its attend (a child is removed by its spawn
     /// site through [`Self::settle`]).
     pub fn deregister(&self, id: AgentId) {
         self.lock().entries.remove(&id);
@@ -638,10 +638,10 @@ impl AgentRegistry {
         Ok(self.cancel(target))
     }
 
-    /// A per-tab turn interrupt: unwind exactly this entry's in-flight turn,
+    /// A per-tab run interrupt: unwind exactly this entry's in-flight run,
     /// without cascading to descendants or removing the entry. Esc/Ctrl-C on
-    /// a focused sub-agent tab route here; the agent drops its turn and
-    /// re-parks — its *next* turn runs uncancelled, since [`interrupt_entry`]
+    /// a focused sub-agent tab route here; the agent drops its run and
+    /// re-parks — its *next* run runs uncancelled, since [`interrupt_entry`]
     /// never touches the terminate layer.
     pub fn interrupt(&self, id: AgentId) {
         let g = self.lock();
@@ -688,7 +688,7 @@ impl AgentRegistry {
         g.generation += 1;
     }
 
-    /// Close `root` and its whole subtree: cancel each entry's in-flight turn and
+    /// Close `root` and its whole subtree: cancel each entry's in-flight run and
     /// eval, then drop the entries.  The inclusive twin of the `/clear` reap
     /// (which leaves the root live); no generation bump — a branch pushes no
     /// result, so there is nothing to fence.  `/close` routes here.
@@ -830,7 +830,7 @@ fn renew_entry(e: &mut Entry) {
 }
 
 /// Cancel one entry across both terminate-class layers: the cooperative
-/// [`Token`] the drive loop polls between steps, and — for a parented
+/// [`Token`] the attend loop polls between steps, and — for a parented
 /// agent — its eval layer through [`EvalReach::terminate`], so an in-flight
 /// eval unwinds at the evaluator's poll points rather than running to its
 /// timeout wall.
@@ -841,9 +841,9 @@ fn terminate_entry(e: &Entry, cause: CancelCause) {
     }
 }
 
-/// Unwind one entry's in-flight turn without ending the agent: cancel the
+/// Unwind one entry's in-flight run without ending the agent: cancel the
 /// [`Token`] and interrupt through the entry's [`EvalReach`], which never
-/// touches the terminate layer — the next turn is born clean regardless of
+/// touches the terminate layer — the next run is born clean regardless of
 /// what this call cancels.
 fn interrupt_entry(e: &Entry) {
     e.cancel.cancel(CancelCause::Interrupt);
@@ -889,7 +889,7 @@ mod tests {
             cancel: Token::new(),
             reach: parent.map(|_| EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
@@ -909,7 +909,7 @@ mod tests {
     /// `lease: None` entry's eval layer is never reached by the reaper,
     /// while a `lease: Some(short)` entry's is cancelled once its bound
     /// elapses — asserted behaviourally (the reap stamps the entry's
-    /// cancel layers; a live drive loop, absent here, is what would go on
+    /// cancel layers; a live attend loop, absent here, is what would go on
     /// to settle the entry out of the map), since there is no guard field
     /// left to peek at — liveness gating lives in the fire itself.
     #[test]
@@ -926,7 +926,7 @@ mod tests {
             cancel: branch_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -941,7 +941,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: worker_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -994,7 +994,7 @@ mod tests {
             cancel: token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: eval_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1015,7 +1015,7 @@ mod tests {
     /// on the trunk's own token: `cancel_descendants` is the primitive that
     /// guarantees it, in contrast to [`AgentRegistry::cancel`]'s inclusive
     /// cascade, which would stamp `Explicit` on the trunk too and fail every
-    /// turn after it forever.
+    /// run after it forever.
     #[test]
     fn clear_gesture_reaps_descendants_but_spares_the_trunks_token() {
         let reg = AgentRegistry::new();
@@ -1041,7 +1041,7 @@ mod tests {
             cancel: child_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1069,7 +1069,7 @@ mod tests {
         assert!(
             !trunk_token.is_cancelled(),
             "the trunk's token round-trips through an interrupt and reset \
-             uncancelled, so the next turn after /clear would run"
+             uncancelled, so the next run after /clear would run"
         );
     }
 
@@ -1093,7 +1093,7 @@ mod tests {
             cancel: branch_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: branch_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1107,7 +1107,7 @@ mod tests {
             cancel: child_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1135,18 +1135,18 @@ mod tests {
         );
     }
 
-    /// `interrupt` is the per-tab turn interrupt, not the subtree cascade: it
+    /// `interrupt` is the per-tab run interrupt, not the subtree cascade: it
     /// trips exactly one entry's token and whatever `ForegroundScope` its
-    /// `turn_scope` cell holds — simulating the transport's per-turn
+    /// `run_scope` cell holds — simulating the transport's per-run
     /// capture — walks no descendants, and deregisters nothing.  So the
     /// child's token is `is_cancelled` but not `terminated` (an interrupt
-    /// drops the turn, it does not end the agent), the interrupt reaches the
+    /// drops the run, it does not end the agent), the interrupt reaches the
     /// cell's scope, the grandchild is untouched, and both entries stay
     /// live.  Contrast `cancel(1)`, which would trip the grandchild too and
     /// with a terminate cause (`Explicit`), settling the whole subtree.
     ///
     /// `eval_root` itself is never touched, so it stays uncancelled — pinned
-    /// again by [`interrupt_never_poisons_the_next_turn`].
+    /// again by [`interrupt_never_poisons_the_next_run`].
     #[test]
     fn interrupt_unwinds_exactly_one_entry() {
         let reg = AgentRegistry::new();
@@ -1154,8 +1154,8 @@ mod tests {
         let child_token = Token::new();
         let child_root = DurableRoot::default();
         // Simulates what `IdentityTransport::observe_foreground` writes at
-        // the start of the child's in-flight turn.
-        let child_turn_scope: TurnScope = Arc::new(Mutex::new(Some(child_root.child())));
+        // the start of the child's in-flight run.
+        let child_run_scope: RunScope = Arc::new(Mutex::new(Some(child_root.child())));
         let grandchild_token = Token::new();
         let _ = reg.register(Registration {
             id: 1,
@@ -1166,7 +1166,7 @@ mod tests {
             cancel: child_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: child_root.clone(),
-                turn_scope: child_turn_scope.clone(),
+                run_scope: child_run_scope.clone(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1180,7 +1180,7 @@ mod tests {
             cancel: grandchild_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1197,13 +1197,13 @@ mod tests {
             "an interrupt is not a terminate cause"
         );
         assert!(
-            child_turn_scope
+            child_run_scope
                 .lock()
                 .unwrap()
                 .as_ref()
-                .expect("the cell holds the in-flight turn's scope")
+                .expect("the cell holds the in-flight run's scope")
                 .is_cancelled(),
-            "the interrupt reaches whatever scope the turn-scope cell holds"
+            "the interrupt reaches whatever scope the run-scope cell holds"
         );
         assert!(
             !child_root.as_scope().is_cancelled(),
@@ -1217,17 +1217,17 @@ mod tests {
         assert!(reg.is_live(2), "nor its descendant");
     }
 
-    /// An interrupted agent's *next* turn must run uncancelled: `interrupt`
-    /// reaches only the turn-scope cell, never `eval_root`, and core's cancel
+    /// An interrupted agent's *next* run must run uncancelled: `interrupt`
+    /// reaches only the run-scope cell, never `eval_root`, and core's cancel
     /// scopes are monotone — so a foreground scope minted from `eval_root`
-    /// for the next turn (exactly what `IdentityTransport::observe_foreground`
+    /// for the next run (exactly what `IdentityTransport::observe_foreground`
     /// captures at the start of every dispatch) starts clean.
     #[test]
-    fn interrupt_never_poisons_the_next_turn() {
+    fn interrupt_never_poisons_the_next_run() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
-        let turn_scope: TurnScope = Arc::new(Mutex::new(Some(eval_root.child())));
+        let run_scope: RunScope = Arc::new(Mutex::new(Some(eval_root.child())));
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
@@ -1237,7 +1237,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: eval_root.clone(),
-                turn_scope: turn_scope.clone(),
+                run_scope: run_scope.clone(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1245,19 +1245,19 @@ mod tests {
 
         reg.interrupt(1);
         assert!(
-            turn_scope.lock().unwrap().as_ref().unwrap().is_cancelled(),
-            "the in-flight turn did unwind"
+            run_scope.lock().unwrap().as_ref().unwrap().is_cancelled(),
+            "the in-flight run did unwind"
         );
 
-        // The next turn mints a fresh scope from the same `eval_root` and the
+        // The next run mints a fresh scope from the same `eval_root` and the
         // transport re-captures it into the same cell, exactly as
         // `IdentityTransport::observe_foreground` does at every dispatch.
-        let next_turn = eval_root.child();
-        *turn_scope.lock().unwrap() = Some(next_turn.clone());
+        let next_run = eval_root.child();
+        *run_scope.lock().unwrap() = Some(next_run.clone());
 
         assert!(
-            !next_turn.is_cancelled(),
-            "the next turn is born uncancelled — the interrupt never poisoned eval_root"
+            !next_run.is_cancelled(),
+            "the next run is born uncancelled — the interrupt never poisoned eval_root"
         );
     }
 
@@ -1276,7 +1276,7 @@ mod tests {
             cancel: token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: eval_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
@@ -1321,7 +1321,7 @@ mod tests {
             cancel: c.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1335,7 +1335,7 @@ mod tests {
             cancel: g.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1349,7 +1349,7 @@ mod tests {
             cancel: sibling.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1390,7 +1390,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1398,7 +1398,7 @@ mod tests {
 
         reg.message(1, 2, "check the lexer".into())
             .expect("message to a live agent succeeds");
-        let Some(crate::bus::Turn::Message(msg)) = inbox.drain_turn() else {
+        let Some(crate::bus::Item::Message(msg)) = inbox.next_item() else {
             panic!("expected a peer message");
         };
         assert_eq!(msg.from, 1);
@@ -1456,7 +1456,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1484,7 +1484,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1499,7 +1499,7 @@ mod tests {
             cancel: sibling_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1514,7 +1514,7 @@ mod tests {
             cancel: grandchild_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1570,7 +1570,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1602,7 +1602,7 @@ mod tests {
             cancel: parent_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1619,7 +1619,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1650,7 +1650,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1666,7 +1666,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1707,7 +1707,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: eval_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1759,7 +1759,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: eval_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1800,7 +1800,7 @@ mod tests {
                 cancel: token.clone(),
                 reach: Some(EvalReach::Identity {
                     eval_root: DurableRoot::default(),
-                    turn_scope: TurnScope::default(),
+                    run_scope: RunScope::default(),
                 }),
                 mailbox: mb(),
                 provider: provider(),
@@ -1834,7 +1834,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: eval_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: mb(),
             provider: provider(),
@@ -1874,7 +1874,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1886,7 +1886,7 @@ mod tests {
             "idle reads off birth before any exchange"
         );
 
-        inbox.push(InboxMsg::UserSteering("hello".into())).unwrap();
+        inbox.push(Post::UserSteering("hello".into())).unwrap();
         assert!(!reg.engaged(1), "a raw mailbox push is not an exchange");
 
         assert!(reg.renew(1), "renew stamps a live entry");
@@ -1916,7 +1916,7 @@ mod tests {
             cancel: Token::new(),
             reach: Some(EvalReach::Identity {
                 eval_root: DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1933,7 +1933,7 @@ mod tests {
             "idle resets to (near) zero right after a steer"
         );
 
-        let Some(crate::bus::Turn::Human(text)) = inbox.drain_turn() else {
+        let Some(crate::bus::Item::Human(text)) = inbox.next_item() else {
             panic!("expected the steered text to have actually landed");
         };
         assert_eq!(text, "hello");

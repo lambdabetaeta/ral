@@ -1,23 +1,23 @@
-//! One top-level turn lifted into core, behind one host entry.
+//! One top-level run lifted into core, behind one host entry.
 //!
-//! A turn is the unit a host runs over a persistent [`Shell`]: clear the
-//! signal state, fix the turn's program (compiled from source, or an
-//! already-evaluated thunk applied to argument values), install the turn's
+//! A run is the unit a host evaluates over a persistent [`Shell`]: clear the
+//! signal state, fix the run's program (compiled from source, or an
+//! already-evaluated thunk applied to argument values), install the run's
 //! dynamic frame, evaluate, and classify the [`Settled<Value>`] into a
 //! transport status. The hosts that drive this — the interactive REPL,
 //! exarch's tool evaluator, batch — go through one door,
-//! [`Shell::run_turn`](crate::Shell::run_turn), whose
-//! [`Turn`](crate::transport::Turn) carries the program
+//! [`Shell::run`](crate::Shell::run), whose
+//! [`Run`](crate::transport::Run) carries the program
 //! ([`Program`](crate::transport::Program): source text or a registered
 //! hook) and the conditions it runs under: where the byte streams go,
 //! whether a capability frame is pushed, the wall and deferred limits, and
 //! which lifecycle hooks fire.
 //!
-//! This module owns the spine the turn doors orchestrate: [`compile_turn`]
-//! (parse/typecheck), [`build_turn`] (materialise the [`TurnState`]), and
-//! [`run_framed`] (install, hook, evaluate, classify). The whole turn-local
-//! part of a [`Shell`] is one field — [`TurnState`] — so installing a turn is
-//! a single swap: [`TurnGuard`] moves the new frame into `shell.turn`, runs,
+//! This module owns the spine the run doors orchestrate: [`compile_run`]
+//! (parse/typecheck), [`build_run`] (materialise the [`RunState`]), and
+//! [`run_framed`] (install, hook, evaluate, classify). The whole run-local
+//! part of a [`Shell`] is one field — [`RunState`] — so installing a run is
+//! a single swap: [`RunGuard`] moves the new frame into `shell.run`, runs,
 //! and restores the previous frame on `Drop`, even when the evaluation unwinds
 //! (a host may catch a worker panic and continue the session on the same
 //! `Shell`). The IO regime is a sum of two cases: under `Inherit` the new
@@ -30,31 +30,31 @@ use crate::process::{CancelSlot, ForegroundScope};
 use crate::syntax::parser::ParseError;
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Escape, LocationCursor, Nursery, Settled, Shell,
-    SurfaceSink, TurnState, Value,
+    Break, Capabilities, DeferredSink, Desk, Escape, LocationCursor, Nursery, RunState, Settled,
+    Shell, SurfaceSink, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use std::sync::Arc;
 
-/// Optional per-turn lifecycle hooks. The REPL supplies pre/post-exec
+/// Optional per-run lifecycle hooks. The REPL supplies pre/post-exec
 /// plugin hooks; a host with none uses the no-op `()` impl.
-pub trait TurnLifecycle {
+pub trait RunLifecycle {
     fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {}
     fn post_exec(&mut self, _shell: &mut Shell, _src: &str, _status: i32) {}
 }
 
-impl TurnLifecycle for () {}
+impl RunLifecycle for () {}
 
-/// Parse/type diagnostics from a turn that never reached evaluation.
+/// Parse/type diagnostics from a run that never reached evaluation.
 pub enum StaticDiagnostics {
     Parse(ParseError),
     Types(Vec<TypeError>),
-    /// A host-level error that prevented the turn from running:
+    /// A host-level error that prevented the run from starting:
     /// hook not found, non-ground argument, etc.
     Host(crate::types::Error),
 }
 
-/// The transport status of one settled turn: the success status for a
+/// The transport status of one settled run: the success status for a
 /// normal return, the error's exit code for a caught error, the requested
 /// code for `exit`, and `128 + signal` for a stopped job.
 fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
@@ -67,21 +67,21 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
     }
 }
 
-/// Saves the previous turn frame on install and restores it on `Drop`,
-/// and owns the per-turn foreground and durable-root signal-slot
+/// Saves the previous run frame on install and restores it on `Drop`,
+/// and owns the per-run foreground and durable-root signal-slot
 /// publications for the same extent. Restoring under `Drop` rather than an
 /// explicit epilogue keeps the persistent `Shell` clean even when the
 /// evaluation unwinds — a host that catches a worker panic and continues the
 /// session on the same `Shell` would otherwise inherit a stale cursor, an
-/// already-cancelled foreground scope, and (had the turn captured IO) the
-/// prior turn's buffers and a foreign surface sink.
+/// already-cancelled foreground scope, and (had the run captured IO) the
+/// prior run's buffers and a foreign surface sink.
 ///
 /// Only the signal-facing session publishes
 /// (`SessionState::publishes_signal_slots`): the slots' save/restore
 /// discipline is LIFO on one thread, which concurrent sessions — a host's
-/// forked sub-agents dispatching turns on their own threads — would
-/// violate; and a signal must target the primary session's turn, never
-/// whichever session dispatched last.  A non-publishing session's turns
+/// forked sub-agents dispatching runs on their own threads — would
+/// violate; and a signal must target the primary session's run, never
+/// whichever session dispatched last.  A non-publishing session's runs
 /// are cancelled through its scope handles instead
 /// ([`Shell::cancel_handle`](crate::types::Shell::cancel_handle)).
 ///
@@ -92,16 +92,16 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
 /// order, so the slots — declared before `saved` — un-publish before the
 /// displaced frame's scope is freed, and a signal slot never points at a
 /// freed flag.
-struct TurnGuard<'s> {
+struct RunGuard<'s> {
     // Declared before `saved` for the drop order the type doc explains.
     _fg: Option<CancelSlot>,
     _root: Option<CancelSlot>,
     shell: &'s mut Shell,
-    saved: TurnState,
+    saved: RunState,
 }
 
-impl<'s> TurnGuard<'s> {
-    /// Swap `next` into `shell.turn`, publish the installed frame's
+impl<'s> RunGuard<'s> {
+    /// Swap `next` into `shell.run`, publish the installed frame's
     /// foreground scope and the session's durable root into the
     /// signal-reachable slots (signal-facing session only), and hold the
     /// displaced frame for restoration on `Drop`.
@@ -109,10 +109,10 @@ impl<'s> TurnGuard<'s> {
         clippy::used_underscore_binding,
         reason = "RAII guard field; the leading underscore marks it as held for Drop, not read"
     )]
-    fn install(shell: &'s mut Shell, next: TurnState) -> Self {
-        let saved = std::mem::replace(&mut shell.turn, next);
+    fn install(shell: &'s mut Shell, next: RunState) -> Self {
+        let saved = std::mem::replace(&mut shell.run, next);
         let publish = shell.session.publishes_signal_slots;
-        let _fg = publish.then(|| crate::process::publish_foreground(shell.turn.cancel.as_scope()));
+        let _fg = publish.then(|| crate::process::publish_foreground(shell.run.cancel.as_scope()));
         let _root =
             publish.then(|| crate::process::publish_durable_root(shell.session.root.as_scope()));
         Self {
@@ -128,38 +128,38 @@ impl<'s> TurnGuard<'s> {
     }
 }
 
-impl Drop for TurnGuard<'_> {
+impl Drop for RunGuard<'_> {
     fn drop(&mut self) {
         // Swap the saved frame back in; the displaced frame moves into `saved`
         // and drops with the guard.
-        std::mem::swap(&mut self.shell.turn, &mut self.saved);
-        // Empty the displaced frame's nursery: a fork parked during the turn
-        // and never adopted (a refused enquiry, or a turn that ended before
-        // its handler ran) must not survive the turn that parked it.
+        std::mem::swap(&mut self.shell.run, &mut self.saved);
+        // Empty the displaced frame's nursery: a fork parked during the run
+        // and never adopted (a refused enquiry, or a run that ended before
+        // its handler ran) must not survive the run that parked it.
         if let Some(nursery) = self.saved.nursery.as_ref() {
             nursery.clear();
         }
     }
 }
 
-/// Build the [`TurnState`] a turn installs, seeded from the ambient `shell`.
+/// Build the [`RunState`] a run installs, seeded from the ambient `shell`.
 ///
-/// `capture` is `Some` only under [`TurnIo::Capture`](crate::driver::TurnIo),
-/// where the turn's byte *output* streams are redirected into host-read
+/// `capture` is `Some` only under [`RunIo::Capture`](crate::driver::RunIo),
+/// where the run's byte *output* streams are redirected into host-read
 /// buffers; under `Inherit` it is `None` and the ambient streams flow through
 /// unchanged. `stdin` and `terminal_access` are supplied independently of the
-/// output regime (the host's [`TurnStdin`](crate::driver::TurnStdin) and
+/// output regime (the host's [`RunStdin`](crate::driver::RunStdin) and
 /// [`RequestedTerminalAccess`](crate::driver::RequestedTerminalAccess)): stdin is
 /// always installed, so `Capture` no longer implies `Source::Terminal`. The
-/// `surface` is always the request's turn-local sink — it is no longer carried
+/// `surface` is always the request's run-local sink — it is no longer carried
 /// on the persistent session, so it has no liveness role.  `deferred` is the
 /// session-lived destination a deferred worker delivers its surface batch to
-/// when it settles.  `desk` is the request's turn-local enquiry desk; `None`
+/// when it settles.  `desk` is the request's run-local enquiry desk; `None`
 /// outside a host that answers enquiries.  `nursery` is the request's
-/// turn-local nursery for engine-side session forks; `None` outside a host
+/// run-local nursery for engine-side session forks; `None` outside a host
 /// that installs one.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_turn(
+pub(crate) fn build_run(
     shell: &Shell,
     capture: Option<(Sink, Sink)>,
     stdin: Source,
@@ -171,20 +171,20 @@ pub(crate) fn build_turn(
     deferred: Option<Arc<dyn DeferredSink>>,
     desk: Option<Desk>,
     nursery: Option<Nursery>,
-) -> TurnState {
-    let mut turn_io = shell.turn.io.try_clone().unwrap_or_else(|_| Io {
-        terminal: shell.turn.io.terminal,
-        interactive: shell.turn.io.interactive,
-        launch_role: shell.turn.io.launch_role,
+) -> RunState {
+    let mut run_io = shell.run.io.try_clone().unwrap_or_else(|_| Io {
+        terminal: shell.run.io.terminal,
+        interactive: shell.run.io.interactive,
+        launch_role: shell.run.io.launch_role,
         ..Io::default()
     });
-    turn_io.stdin = stdin;
+    run_io.stdin = stdin;
     if let Some((stdout, stderr)) = capture {
-        turn_io.stdout = stdout;
-        turn_io.stderr = stderr;
+        run_io.stdout = stdout;
+        run_io.stderr = stderr;
     }
-    TurnState {
-        io: turn_io,
+    RunState {
+        io: run_io,
         surface,
         deferred,
         desk,
@@ -199,17 +199,17 @@ pub(crate) fn build_turn(
 
 /// Clear signal state, compile and typecheck `src` against the live session.
 /// `Ok((comp, single_command))` on a clean compile; `Err(diagnostics)` on a
-/// parse or type failure (the turn never reaches evaluation). The
+/// parse or type failure (the run never reaches evaluation). The
 /// `single_command` flag is harvested here because the host needs it to render
 /// runtime errors after `comp` is consumed.
 ///
 /// Resets the session's source registry and peeks the [`FileId`] the next
 /// registration will mint *before* compiling, so the compiled program's
-/// spans carry this turn's real file identity. [`Shell::install_root_context`]
-/// performs the actual reset-then-register once the turn frame exists to
+/// spans carry this run's real file identity. [`Shell::install_root_context`]
+/// performs the actual reset-then-register once the run frame exists to
 /// install it into ([`run_framed`]); nothing between here and there touches
 /// the registry, so the id it mints always agrees with the one peeked here.
-pub(crate) fn compile_turn(
+pub(crate) fn compile_run(
     shell: &mut Shell,
     src: &str,
 ) -> Result<(Arc<crate::ir::Comp>, bool), StaticDiagnostics> {
@@ -247,26 +247,26 @@ pub(crate) fn compile_turn(
     Ok((comp, single_command))
 }
 
-/// Install the built turn state, fire the lifecycle hooks around the eval
+/// Install the built run state, fire the lifecycle hooks around the eval
 /// `body` under `capabilities`, compute the transport status, and tear the
-/// frame down before returning `(result, status)`. The `body` is the turn's
+/// frame down before returning `(result, status)`. The `body` is the run's
 /// program: the source door evaluates a compiled [`Comp`](crate::ir::Comp)
 /// (`eval_top_level`); the value door applies an already-evaluated thunk in
 /// place (`builtins::apply`). Both settle to one [`Settled<Value>`], so the
-/// lifecycle/capability/status spine is shared verbatim. The `TurnGuard`
-/// restores the prior frame on `Drop`, even on unwind. The caller (the
-/// `run_*_turn` doors) owns IO materialisation, limit arming, and the
+/// lifecycle/capability/status spine is shared verbatim. The `RunGuard`
+/// restores the prior frame on `Drop`, even on unwind. The caller
+/// (`Self::run_built`) owns IO materialisation, limit arming, and the
 /// `timed_out`/capture classification.
 pub(crate) fn run_framed<'a>(
     shell: &mut Shell,
-    next: TurnState,
+    next: RunState,
     script_name: &str,
     src: &str,
     capabilities: Capabilities,
-    mut lifecycle: Box<dyn TurnLifecycle + 'a>,
+    mut lifecycle: Box<dyn RunLifecycle + 'a>,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
-    let mut guard = TurnGuard::install(shell, next);
+    let mut guard = RunGuard::install(shell, next);
     let shell = guard.shell_mut();
     shell.install_root_context(script_name.to_string(), src);
 
@@ -278,12 +278,12 @@ pub(crate) fn run_framed<'a>(
 
     lifecycle.post_exec(shell, src, status);
 
-    // Push this turn's ready-boundary housekeeping — the lease chain's reap
+    // Push this run's ready-boundary housekeeping — the lease chain's reap
     // notices as `` `notice `` surface classes, the large-binding warning onto
-    // the turn's own stderr — while this turn's frame (its surface sink and
-    // capture streams) is still installed, so each rides this turn's own
+    // the run's own stderr — while this run's frame (its surface sink and
+    // capture streams) is still installed, so each rides this run's own
     // stream, ordered before its Report (`decisions/260706_enquiry-channel`
-    // §4.2). After `guard` drops below, `shell.turn` reverts and there is no
+    // §4.2). After `guard` drops below, `shell.run` reverts and there is no
     // sink left to push through.
     shell.emit_ready_boundary_notices();
 
@@ -298,26 +298,26 @@ mod tests {
     use crate::io::ByteBuffer;
     use std::sync::{Arc, Mutex};
 
-    use crate::driver::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
-    use crate::transport::{Program, Turn};
+    use crate::driver::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+    use crate::transport::{Program, Run};
 
     /// A capturing request under the ⊤ capability ceiling with no surface
     /// sink and no lifecycle hooks — the minimal request a host with no
-    /// surface decoder or plugin policy supplies. Mirrors exarch's tool turn:
+    /// surface decoder or plugin policy supplies. Mirrors exarch's tool run:
     /// foreground `Denied`, stdin `Empty`. Core mints the capture buffers and
-    /// returns them in `TurnReport::Ran { captured, .. }`.
-    fn capture_req<'a>(src: &str) -> TurnRequest<'a> {
-        TurnRequest {
-            turn: Turn {
+    /// returns them in `RunReport::Ran { captured, .. }`.
+    fn capture_req<'a>(src: &str) -> RunRequest<'a> {
+        RunRequest {
+            run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
-                stdin: TurnStdin::Empty,
+                stdin: RunStdin::Empty,
             },
             surface: None,
             deferred: None,
@@ -327,18 +327,18 @@ mod tests {
         }
     }
 
-    /// A clean turn over a simple expression settles to an `Ok` value
+    /// A clean run over a simple expression settles to an `Ok` value
     /// with a zero transport status.
     #[test]
-    fn clean_turn_runs_with_zero_status() {
+    fn clean_run_settles_with_zero_status() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(capture_req("$[1 + 1]")) {
-            TurnReport::Ran { result, status, .. } => {
+        match shell.run(capture_req("$[1 + 1]")) {
+            RunReport::Ran { result, status, .. } => {
                 assert_eq!(status, 0);
                 assert!(result.is_ok(), "expected Ok, got {result:?}");
             }
-            TurnReport::Static { .. } => panic!("clean source must not be Static"),
+            RunReport::Static { .. } => panic!("clean source must not be Static"),
         }
     }
 
@@ -348,14 +348,14 @@ mod tests {
     fn parse_failure_is_static() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(capture_req("let = ")) {
-            TurnReport::Static { diagnostics } => {
+        match shell.run(capture_req("let = ")) {
+            RunReport::Static { diagnostics } => {
                 assert!(
                     matches!(diagnostics, StaticDiagnostics::Parse(_)),
                     "expected a parse diagnostic"
                 );
             }
-            TurnReport::Ran { .. } => panic!("malformed source must be Static"),
+            RunReport::Ran { .. } => panic!("malformed source must be Static"),
         }
     }
 
@@ -364,14 +364,14 @@ mod tests {
     fn type_failure_is_static() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(capture_req("$[1 + true]")) {
-            TurnReport::Static { diagnostics } => {
+        match shell.run(capture_req("$[1 + true]")) {
+            RunReport::Static { diagnostics } => {
                 assert!(
                     matches!(diagnostics, StaticDiagnostics::Types(_)),
                     "expected type diagnostics"
                 );
             }
-            TurnReport::Ran { .. } => panic!("ill-typed source must be Static"),
+            RunReport::Ran { .. } => panic!("ill-typed source must be Static"),
         }
     }
 
@@ -381,74 +381,74 @@ mod tests {
     fn exit_escape_reports_code() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(capture_req("exit 3")) {
-            TurnReport::Ran { result, status, .. } => {
+        match shell.run(capture_req("exit 3")) {
+            RunReport::Ran { result, status, .. } => {
                 assert_eq!(status, 3);
                 assert!(
                     matches!(result, Err(Break::Escape(Escape::Exit(3)))),
                     "expected Escape::Exit(3), got {result:?}"
                 );
             }
-            TurnReport::Static { .. } => panic!("`exit 3` must reach evaluation"),
+            RunReport::Static { .. } => panic!("`exit 3` must reach evaluation"),
         }
     }
 
-    /// `TurnIo::Capture` returns the turn's stdout in `Ran::captured`.
+    /// `RunIo::Capture` returns the run's stdout in `Ran::captured`.
     #[test]
     fn capture_returns_stdout_bytes() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(capture_req("echo hi")) {
-            TurnReport::Ran { captured, .. } => {
+        match shell.run(capture_req("echo hi")) {
+            RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
                 assert!(
                     String::from_utf8_lossy(&captured.stdout).contains("hi"),
-                    "captured stdout must hold the turn's output, got {:?}",
+                    "captured stdout must hold the run's output, got {:?}",
                     captured.stdout
                 );
             }
-            TurnReport::Static { .. } => panic!("`echo hi` must reach evaluation"),
+            RunReport::Static { .. } => panic!("`echo hi` must reach evaluation"),
         }
     }
 
-    /// The turn's foreground scope and turn-local surface are torn down
-    /// before `run_turn` returns: the surface is restored to its pre-turn
-    /// value, and cancelling the restored `shell.turn.cancel` reaches the
-    /// pre-turn scope (proving the guard swapped the pre-turn frame back in,
-    /// not the turn's internally-minted child).
+    /// The run's foreground scope and run-local surface are torn down
+    /// before `run` returns: the surface is restored to its pre-run
+    /// value, and cancelling the restored `shell.run.cancel` reaches the
+    /// pre-run scope (proving the guard swapped the pre-run frame back in,
+    /// not the run's internally-minted child).
     #[test]
     fn frame_restores_state_on_return() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(
-            shell.turn.surface.is_none(),
-            "no surface sink before the turn"
+            shell.run.surface.is_none(),
+            "no surface sink before the run"
         );
-        assert!(!shell.turn.cancel.is_cancelled(), "pre-turn scope is live");
+        assert!(!shell.run.cancel.is_cancelled(), "pre-run scope is live");
         let pre = shell.foreground().clone();
 
-        let _ = shell.run_turn(TurnRequest {
+        let _ = shell.run(RunRequest {
             surface: Some(Arc::new(())),
             ..capture_req("$[1 + 1]")
         });
 
         assert!(
-            shell.turn.surface.is_none(),
-            "turn-local surface must be restored to its pre-turn value"
+            shell.run.surface.is_none(),
+            "run-local surface must be restored to its pre-run value"
         );
-        // Cancelling the restored foreground must reach the pre-turn scope:
-        // the teardown swapped the pre-turn frame back in, discarding the
-        // turn's internally-minted child.
+        // Cancelling the restored foreground must reach the pre-run scope:
+        // the teardown swapped the pre-run frame back in, discarding the
+        // run's internally-minted child.
         shell
             .foreground()
             .cancel(crate::process::CancelCause::Explicit);
         assert!(
             pre.is_cancelled(),
-            "foreground scope must be restored to the pre-turn scope"
+            "foreground scope must be restored to the pre-run scope"
         );
     }
 
-    /// A no-op desk, just enough to install a non-`None` value on the turn.
+    /// A no-op desk, just enough to install a non-`None` value on the run.
     struct NoopDesk;
     impl crate::types::EnquiryDesk for NoopDesk {
         fn enquire(
@@ -459,63 +459,63 @@ mod tests {
         }
     }
 
-    /// The desk twin of `frame_restores_state_on_return`: the turn-local
-    /// enquiry desk is torn down before `run_turn` returns, restored
-    /// to its pre-turn value (`None`) exactly as `surface` is.
+    /// The desk twin of `frame_restores_state_on_return`: the run-local
+    /// enquiry desk is torn down before `run` returns, restored
+    /// to its pre-run value (`None`) exactly as `surface` is.
     #[test]
-    fn desk_is_restored_to_its_pre_turn_value() {
+    fn desk_is_restored_to_its_pre_run_value() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        assert!(shell.turn.desk.is_none(), "no desk before the turn");
+        assert!(shell.run.desk.is_none(), "no desk before the run");
 
-        let _ = shell.run_turn(TurnRequest {
+        let _ = shell.run(RunRequest {
             desk: Some(Arc::new(NoopDesk)),
             ..capture_req("$[1 + 1]")
         });
 
         assert!(
-            shell.turn.desk.is_none(),
-            "turn-local desk must be restored to its pre-turn value"
+            shell.run.desk.is_none(),
+            "run-local desk must be restored to its pre-run value"
         );
     }
 
-    /// A `TurnLifecycle` that parks a fork into the turn's nursery during
+    /// A `RunLifecycle` that parks a fork into the run's nursery during
     /// `pre_exec` (mirroring how a desk handler's builtin body would) and
     /// records the minted id for the test to redeem afterward.
-    struct ParkDuringTurn(std::sync::Arc<Mutex<Option<crate::types::NurseryId>>>);
-    impl crate::turn::TurnLifecycle for ParkDuringTurn {
+    struct ParkDuringRun(std::sync::Arc<Mutex<Option<crate::types::NurseryId>>>);
+    impl crate::run::RunLifecycle for ParkDuringRun {
         fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
             let id = shell
                 .fork_into_nursery()
-                .expect("a nursery is installed on this turn");
+                .expect("a nursery is installed on this run");
             *self.0.lock().unwrap() = Some(id);
         }
     }
 
-    /// The nursery twin of `desk_is_restored_to_its_pre_turn_value`: the
-    /// turn-local nursery is torn down before `run_turn` returns, restored to
-    /// its pre-turn value (`None`) exactly as `desk` is — and, beyond mere
-    /// restoration, a fork parked during the turn and never adopted is gone
-    /// from the host's own `Nursery` clone afterward, proving the turn guard
+    /// The nursery twin of `desk_is_restored_to_its_pre_run_value`: the
+    /// run-local nursery is torn down before `run` returns, restored to
+    /// its pre-run value (`None`) exactly as `desk` is — and, beyond mere
+    /// restoration, a fork parked during the run and never adopted is gone
+    /// from the host's own `Nursery` clone afterward, proving the run guard
     /// empties it rather than merely swapping it out.
     #[test]
-    fn nursery_is_restored_and_emptied_at_turn_teardown() {
+    fn nursery_is_restored_and_emptied_at_run_teardown() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        assert!(shell.turn.nursery.is_none(), "no nursery before the turn");
+        assert!(shell.run.nursery.is_none(), "no nursery before the run");
 
         let nursery = crate::types::Nursery::default();
         let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
 
-        let _ = shell.run_turn(TurnRequest {
+        let _ = shell.run(RunRequest {
             nursery: Some(nursery.clone()),
-            lifecycle: Box::new(ParkDuringTurn(parked_id.clone())),
+            lifecycle: Box::new(ParkDuringRun(parked_id.clone())),
             ..capture_req("$[1 + 1]")
         });
 
         assert!(
-            shell.turn.nursery.is_none(),
-            "turn-local nursery must be restored to its pre-turn value"
+            shell.run.nursery.is_none(),
+            "run-local nursery must be restored to its pre-run value"
         );
         let id = parked_id
             .lock()
@@ -523,16 +523,16 @@ mod tests {
             .expect("pre_exec must fork into the nursery");
         assert!(
             nursery.adopt(id).is_none(),
-            "a fork parked during the turn and never adopted must not survive the turn's teardown"
+            "a fork parked during the run and never adopted must not survive the run's teardown"
         );
     }
 
-    /// A settling turn's ready-boundary housekeeping surfaces the expected
+    /// A settling run's ready-boundary housekeeping surfaces the expected
     /// `` `notice `` class (`decisions/260706_enquiry-channel` §4.2): a
-    /// worker the lease chain reaps between turns has no live sink to push
-    /// through until the *next* turn runs one — installed here on that next
-    /// turn, it captures the reap as a `notice` variant, ordered before this
-    /// turn's own settling.
+    /// worker the lease chain reaps between runs has no live sink to push
+    /// through until the *next* run installs one — installed here on that
+    /// next run, it captures the reap as a `notice` variant, ordered before
+    /// this run's own settling.
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
@@ -541,11 +541,11 @@ mod tests {
         // Spawn a worker under a millisecond-scale idle lease and never
         // poll it, so the background lease chain reaps it quickly.
         let mut req = capture_req("spawn { sleep 10 }");
-        req.turn.deferred_lease = Some(crate::types::WorkerLease {
+        req.run.deferred_lease = Some(crate::types::WorkerLease {
             idle: std::time::Duration::from_millis(20),
             backstop: std::time::Duration::from_secs(10),
         });
-        let _ = shell.run_turn(req);
+        let _ = shell.run(req);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while shell.worker_count() > 0 {
@@ -556,7 +556,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        // A live sink installed only on this *next* turn: the pending reap
+        // A live sink installed only on this *next* run: the pending reap
         // has nowhere to push through until now.
         struct CapturingSink(Arc<Mutex<Vec<crate::serial::FOValue>>>);
         impl crate::types::EventSink for CapturingSink {
@@ -565,7 +565,7 @@ mod tests {
             }
         }
         let captured: Arc<Mutex<Vec<crate::serial::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
-        let _ = shell.run_turn(TurnRequest {
+        let _ = shell.run(RunRequest {
             surface: Some(Arc::new(CapturingSink(captured.clone()))),
             ..capture_req("$[1 + 1]")
         });
@@ -589,7 +589,7 @@ mod tests {
         });
         assert!(
             saw_reap_notice,
-            "the settled turn must surface the pending reap as a `notice`, got {events:?}"
+            "the settled run must surface the pending reap as a `notice`, got {events:?}"
         );
     }
 
@@ -603,7 +603,7 @@ mod tests {
             pre: Arc<Mutex<bool>>,
             post_status: Arc<Mutex<Option<i32>>>,
         }
-        impl TurnLifecycle for Spy {
+        impl RunLifecycle for Spy {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
                 *self.pre.lock().unwrap() = true;
             }
@@ -617,7 +617,7 @@ mod tests {
             pre: Arc::new(Mutex::new(false)),
             post_status: Arc::new(Mutex::new(None)),
         };
-        let _ = shell.run_turn(TurnRequest {
+        let _ = shell.run(RunRequest {
             lifecycle: Box::new(spy.clone()),
             ..capture_req("exit 7")
         });
@@ -630,27 +630,27 @@ mod tests {
         );
     }
 
-    /// `run_turn` publishes the installed foreground scope into the
+    /// `run` publishes the installed foreground scope into the
     /// signal-reachable slot for the eval's extent: a lifecycle hook that
     /// requests a foreground cancel (the role a signal handler plays) reaches
-    /// `shell.turn.cancel`, and the trampoline's `process::check` unwinds
+    /// `shell.run.cancel`, and the trampoline's `process::check` unwinds
     /// the eval into a `Break::Error` with transport status 130.
     #[test]
     fn published_foreground_slot_carries_request_into_eval() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct CancelInPreExec;
-        impl TurnLifecycle for CancelInPreExec {
+        impl RunLifecycle for CancelInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
             }
         }
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(TurnRequest {
+        match shell.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            TurnReport::Ran { result, status, .. } => {
+            RunReport::Ran { result, status, .. } => {
                 assert_eq!(
                     status, 130,
                     "a foreground cancel observed mid-eval reports 130"
@@ -660,22 +660,22 @@ mod tests {
                     "the cancel must unwind into a Break::Error, got {result:?}"
                 );
             }
-            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     }
 
     /// A forked session ([`Shell::fork_session`]) is not the signal-facing
-    /// session, so its turn doors leave the signal slots untouched: a
-    /// foreground-cancel request fired mid-turn (the role a signal handler
+    /// session, so its run doors leave the signal slots untouched: a
+    /// foreground-cancel request fired mid-run (the role a signal handler
     /// plays) finds no published slot and the eval completes undisturbed.
     /// Its host stops it through [`Shell::cancel_handle`] instead — the
     /// companion assertion below cancels the handle and sees the same
     /// unwind a published slot would have produced.
     #[test]
-    fn forked_session_turn_does_not_publish_signal_slots() {
+    fn forked_session_run_does_not_publish_signal_slots() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct CancelInPreExec;
-        impl TurnLifecycle for CancelInPreExec {
+        impl RunLifecycle for CancelInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
             }
@@ -683,50 +683,50 @@ mod tests {
 
         let trunk = Shell::new(crate::io::TerminalState::default());
         let mut forked = trunk.fork_session();
-        match forked.run_turn(TurnRequest {
+        match forked.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            TurnReport::Ran { result, status, .. } => {
+            RunReport::Ran { result, status, .. } => {
                 assert_eq!(
                     status, 0,
-                    "a foreground-cancel request must not reach a forked session's turn"
+                    "a foreground-cancel request must not reach a forked session's run"
                 );
                 assert!(
                     result.is_ok(),
                     "the forked session's eval completes undisturbed, got {result:?}"
                 );
             }
-            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
 
         // The host-side path: cancelling the forked session's handle unwinds
-        // its next turn at the evaluator's poll, exactly as a published slot
+        // its next run at the evaluator's poll, exactly as a published slot
         // would have for the signal-facing session.
         struct CancelHandleInPreExec(crate::process::DurableRoot);
-        impl TurnLifecycle for CancelHandleInPreExec {
+        impl RunLifecycle for CancelHandleInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
                 self.0.cancel(crate::process::CancelCause::Explicit);
             }
         }
         let handle = forked.cancel_handle();
-        match forked.run_turn(TurnRequest {
+        match forked.run(RunRequest {
             lifecycle: Box::new(CancelHandleInPreExec(handle)),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            TurnReport::Ran { result, status, .. } => {
-                assert_eq!(status, 130, "a cancelled handle unwinds the turn");
+            RunReport::Ran { result, status, .. } => {
+                assert_eq!(status, 130, "a cancelled handle unwinds the run");
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the handle cancel must unwind into a Break::Error, got {result:?}"
                 );
             }
-            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     }
 
-    /// `run_turn` publishes the durable root into the signal-reachable
-    /// root slot for the turn's extent: a lifecycle hook that requests a
+    /// `run` publishes the durable root into the signal-reachable
+    /// root slot for the run's extent: a lifecycle hook that requests a
     /// root abort (the role a SIGQUIT handler plays) reaches the root, and
     /// the foreground scope — a child of the root — observes the abort
     /// through its parent chain. The trampoline's `process::check` unwinds
@@ -735,29 +735,29 @@ mod tests {
     fn published_root_slot_carries_abort_into_eval() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct AbortInPreExec;
-        impl TurnLifecycle for AbortInPreExec {
+        impl RunLifecycle for AbortInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
                 crate::process::request_root_cancel(crate::process::CancelCause::RootAbort);
             }
         }
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run_turn(TurnRequest {
+        match shell.run(RunRequest {
             lifecycle: Box::new(AbortInPreExec),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            TurnReport::Ran { result, status, .. } => {
+            RunReport::Ran { result, status, .. } => {
                 assert_eq!(status, 130, "a root abort observed mid-eval reports 130");
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the abort must unwind into a Break::Error, got {result:?}"
                 );
             }
-            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     }
 
-    /// A turn whose wall (`turn_limit`) is armed and whose foreground scope is
+    /// A run whose wall is armed and whose foreground scope is
     /// cancelled with `Deadline` reports `timed_out`. Driven through a
     /// lifecycle hook that fires the deadline cause directly, so the test
     /// pins the `timed_out` classification without sleeping on the reaper.
@@ -765,7 +765,7 @@ mod tests {
     fn deadline_cancel_reports_timed_out() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         struct DeadlineInPreExec;
-        impl TurnLifecycle for DeadlineInPreExec {
+        impl RunLifecycle for DeadlineInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Deadline);
             }
@@ -773,74 +773,74 @@ mod tests {
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let req = capture_req("let x = 42\nreturn $x");
-        match shell.run_turn(TurnRequest {
-            turn: Turn {
-                turn_limit: Some(std::time::Duration::from_secs(30)),
-                ..req.turn
+        match shell.run(RunRequest {
+            run: Run {
+                wall: Some(std::time::Duration::from_secs(30)),
+                ..req.run
             },
             lifecycle: Box::new(DeadlineInPreExec),
             ..req
         }) {
-            TurnReport::Ran { timed_out, .. } => {
+            RunReport::Ran { timed_out, .. } => {
                 assert!(
                     timed_out,
                     "a Deadline foreground cancel must report timed_out"
                 );
             }
-            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     }
 
-    /// Under `TurnIo::Inherit` the turn runs on a clone of the session's
+    /// Under `RunIo::Inherit` the run evaluates on a clone of the session's
     /// streams and the guard restores them on teardown: the session's stdout
-    /// sink is the *same* object before and after the turn (its `Arc` is
-    /// shared into the turn and restored after), and the turn's output lands
+    /// sink is the *same* object before and after the run (its `Arc` is
+    /// shared into the run and restored after), and the run's output lands
     /// in it.
     #[test]
     fn inherit_leaves_session_streams_untouched() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
-        shell.turn.io.stdout = Sink::Buffer(marker.clone());
+        shell.run.io.stdout = Sink::Buffer(marker.clone());
 
         let req = capture_req("echo hi");
-        let _ = shell.run_turn(TurnRequest {
-            turn: Turn {
-                io: TurnIo::Inherit,
-                ..req.turn
+        let _ = shell.run(RunRequest {
+            run: Run {
+                io: RunIo::Inherit,
+                ..req.run
             },
             ..req
         });
 
         assert!(
-            matches!(&shell.turn.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
-            "Inherit must restore the session's stdout sink after the turn"
+            matches!(&shell.run.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
+            "Inherit must restore the session's stdout sink after the run"
         );
         let written = marker.lock().unwrap().clone();
         assert!(
             !written.is_empty(),
-            "the turn's stdout must land in the inherited sink"
+            "the run's stdout must land in the inherited sink"
         );
         assert!(
             String::from_utf8_lossy(&written).contains("hi"),
-            "the inherited sink must receive the turn's output"
+            "the inherited sink must receive the run's output"
         );
     }
 
-    // ── Turn-door durability ──────────────────────────────────────────
+    // ── Run-door durability ──────────────────────────────────────────
     //
-    // The turn door is the durability boundary (`decisions/260706_
-    // enquiry-channel` §5): a panic anywhere in the turn reports as a
-    // failed turn with the shell's `Mobile` already rolled back to its
-    // turn-entry state. State-owner rollback — no host holds a snapshot.
+    // The run door is the durability boundary (`decisions/260706_
+    // enquiry-channel` §5): a panic anywhere in the run reports as a
+    // failed run with the shell's `Mobile` already rolled back to its
+    // run-entry state. State-owner rollback — no host holds a snapshot.
 
     /// A nullary builtin whose body panics — stands in for any Rust panic
-    /// the evaluator can raise mid-turn.
+    /// the evaluator can raise mid-run.
     fn builtin_panic_now(
         _args: &[crate::types::Value],
         _shell: &mut Shell,
     ) -> crate::types::Settled<crate::types::Value> {
-        panic!("turn-door test: deliberate mid-eval panic");
+        panic!("run-door test: deliberate mid-eval panic");
     }
 
     fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
@@ -851,30 +851,30 @@ mod tests {
     static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &[crate::types::BuiltinEntry {
         name: std::borrow::Cow::Borrowed("core-panic-now"),
         type_rule: crate::typecheck::builtins::BuiltinTypeRule::Scheme(Some(0), scheme_panic_now),
-        doc: "test-only: panic the evaluator mid-turn.",
+        doc: "test-only: panic the evaluator mid-run.",
         body: crate::types::BuiltinBody::Static(builtin_panic_now),
     }];
 
-    /// A mid-eval panic reports as a failed turn naming the panic, with the
-    /// panicking turn's own partial mutations rolled back, a pre-turn
-    /// binding intact, and the shell running the next turn cleanly.
+    /// A mid-eval panic reports as a failed run naming the panic, with the
+    /// panicking run's own partial mutations rolled back, a pre-run
+    /// binding intact, and the shell evaluating the next run cleanly.
     #[test]
-    fn panicking_turn_reports_failed_and_rolls_back() {
+    fn panicking_run_reports_failed_and_rolls_back() {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
 
-        match shell.run_turn(capture_req("let pre_panic = 1")) {
-            TurnReport::Ran { result, .. } => assert!(result.is_ok()),
-            TurnReport::Static { .. } => panic!("the pre-turn binding must evaluate"),
+        match shell.run(capture_req("let pre_panic = 1")) {
+            RunReport::Ran { result, .. } => assert!(result.is_ok()),
+            RunReport::Static { .. } => panic!("the pre-run binding must evaluate"),
         }
 
-        match shell.run_turn(capture_req("let mid_panic = 2\ncore-panic-now")) {
-            TurnReport::Static {
+        match shell.run(capture_req("let mid_panic = 2\ncore-panic-now")) {
+            RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
             } => {
                 assert!(
-                    e.message.contains("turn panicked"),
+                    e.message.contains("run panicked"),
                     "the report must name the panic, got {:?}",
                     e.message
                 );
@@ -884,36 +884,36 @@ mod tests {
                     e.message
                 );
             }
-            _ => panic!("a panicking turn must report Static{{Host}}"),
+            _ => panic!("a panicking run must report Static{{Host}}"),
         }
 
         assert!(
             shell.scope_lookup("pre_panic").is_some(),
-            "a pre-turn binding must survive a later turn's panic"
+            "a pre-run binding must survive a later run's panic"
         );
         assert!(
             shell.scope_lookup("mid_panic").is_none(),
-            "the panicking turn's own partial binding must be rolled back"
+            "the panicking run's own partial binding must be rolled back"
         );
 
-        match shell.run_turn(capture_req("$pre_panic")) {
-            TurnReport::Ran { result, .. } => {
+        match shell.run(capture_req("$pre_panic")) {
+            RunReport::Ran { result, .. } => {
                 assert!(
                     result.is_ok(),
-                    "the next turn must run clean on the same shell"
+                    "the next run must evaluate clean on the same shell"
                 );
             }
-            TurnReport::Static { .. } => panic!("the healed shell must still evaluate"),
+            RunReport::Static { .. } => panic!("the healed shell must still evaluate"),
         }
     }
 
     /// A panic in a lifecycle hook — after evaluation, outside the
-    /// evaluator proper — is caught by the same door: the whole turn spine
+    /// evaluator proper — is caught by the same door: the whole run spine
     /// is inside the checkpoint.
     struct PanicInPostExec;
-    impl TurnLifecycle for PanicInPostExec {
+    impl RunLifecycle for PanicInPostExec {
         fn post_exec(&mut self, _shell: &mut Shell, _src: &str, _status: i32) {
-            panic!("turn-door test: post_exec panic");
+            panic!("run-door test: post_exec panic");
         }
     }
 
@@ -922,35 +922,35 @@ mod tests {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
-        match shell.run_turn(TurnRequest {
+        match shell.run(RunRequest {
             lifecycle: Box::new(PanicInPostExec),
             ..capture_req("let post_panic = 3")
         }) {
-            TurnReport::Static {
+            RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
-            } => assert!(e.message.contains("turn panicked")),
+            } => assert!(e.message.contains("run panicked")),
             _ => panic!("a lifecycle panic must report Static{{Host}}"),
         }
         assert!(
             shell.scope_lookup("post_panic").is_none(),
-            "a post-exec panic rolls the whole turn back — its binding included"
+            "a post-exec panic rolls the whole run back — its binding included"
         );
     }
 
-    /// A desk handler that panics mid-enquiry unwinds through the turn and
-    /// is caught at the door like any other turn-time panic.
+    /// A desk handler that panics mid-enquiry unwinds through the run and
+    /// is caught at the door like any other panic during a run.
     struct PanickingDesk;
     impl crate::types::EnquiryDesk for PanickingDesk {
         fn enquire(
             &self,
             _req: crate::serial::FOValue,
         ) -> Result<crate::serial::FOValue, crate::types::Error> {
-            panic!("turn-door test: desk handler panic");
+            panic!("run-door test: desk handler panic");
         }
     }
 
     struct EnquireInPreExec;
-    impl TurnLifecycle for EnquireInPreExec {
+    impl RunLifecycle for EnquireInPreExec {
         fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
             let _ = shell.enquire(crate::serial::FOValue::Unit);
         }
@@ -961,19 +961,19 @@ mod tests {
         let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
-        match shell.run_turn(TurnRequest {
+        match shell.run(RunRequest {
             desk: Some(Arc::new(PanickingDesk)),
             lifecycle: Box::new(EnquireInPreExec),
             ..capture_req("let desk_panic = 4")
         }) {
-            TurnReport::Static {
+            RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
-            } => assert!(e.message.contains("turn panicked")),
+            } => assert!(e.message.contains("run panicked")),
             _ => panic!("a desk-handler panic must report Static{{Host}}"),
         }
         assert!(
             shell.scope_lookup("desk_panic").is_none(),
-            "the enquiring turn's binding must be rolled back with the rest"
+            "the enquiring run's binding must be rolled back with the rest"
         );
     }
 }

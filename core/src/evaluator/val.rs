@@ -189,7 +189,7 @@ fn eval_map(entries: &[ValMapEntry], shell: &mut Shell) -> Result<Value, Error> 
             if !seen.insert(key.clone()) {
                 diagnostic::shell_warning(&format!(
                     "duplicate key '{key}' (line {})",
-                    shell.turn.loc.line
+                    shell.run.loc.line
                 ));
             }
             pairs.push((key, eval_val(v, shell)?));

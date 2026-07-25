@@ -1,4 +1,4 @@
-//! Structural I/O event values pushed onto a turn's `surface` sink at
+//! Structural I/O event values pushed onto a run's `surface` sink at
 //! every redirect read/write door and every exec completion door.
 //!
 //! Core emits plain [`Value::Map`]s here; a host (exarch) decodes them

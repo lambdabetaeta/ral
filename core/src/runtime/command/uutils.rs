@@ -31,7 +31,7 @@ use {
 /// stdio is direct-to-fd and ral's logical state agrees with the process
 /// state.  A non-terminal stdin (`Source::Pipe` / `Source::File`, e.g. a
 /// piped-into bundled tool or a function body fed by `<`) is parked in
-/// `shell.turn.io.stdin`, not on fd 0, so it forces child placement: the
+/// `shell.run.io.stdin`, not on fd 0, so it forces child placement: the
 /// child receives the real stdin handle through ordinary stdio plumbing
 /// rather than the parent rewiring its own fd 0.  Any capture buffer or
 /// audit Tee, or any `env_overrides` / `within [dir: …]` / `cd`-mutated
@@ -49,9 +49,9 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
         None => true,
         Some(p) => crate::path::process_cwd().is_some_and(|q| q == *p),
     };
-    matches!(shell.turn.io.stdin, Source::Terminal)
-        && matches!(shell.turn.io.stdout, Sink::Terminal | Sink::External(_))
-        && matches!(shell.turn.io.stderr, Sink::Stderr)
+    matches!(shell.run.io.stdin, Source::Terminal)
+        && matches!(shell.run.io.stdout, Sink::Terminal | Sink::External(_))
+        && matches!(shell.run.io.stderr, Sink::Stderr)
         && shell.mobile.context.env_overrides().is_empty()
         && shell.mobile.context.dir.is_none()
         && cwd_matches_process
@@ -162,7 +162,7 @@ pub(crate) fn run_uutils_in_process(
         shell.emit_io(&super::io_event::exec(tool, arg_strs, 1));
         return Err(Break::Error(
             Error::new(format!("bundled tool '{tool}' panicked"), 1)
-                .at_loc(shell.turn.loc.source_loc(0)),
+                .at_loc(shell.run.loc.source_loc(0)),
         ));
     };
 
@@ -183,7 +183,7 @@ pub(crate) fn run_uutils_in_process(
                 format!("'{tool}' exited with status {exit_code}"),
                 exit_code,
             )
-            .at_loc(shell.turn.loc.source_loc(tool.len())),
+            .at_loc(shell.run.loc.source_loc(tool.len())),
         ))
     }
 }
@@ -264,7 +264,7 @@ mod tests {
     fn pipe_stdin_forces_child_placement() {
         let mut shell = Shell::default();
         let (reader, _writer) = os_pipe::pipe().expect("pipe");
-        shell.turn.io.stdin = crate::io::Source::Pipe(reader);
+        shell.run.io.stdin = crate::io::Source::Pipe(reader);
         assert!(
             !can_run_uutils_in_process(&shell),
             "a non-terminal stdin must force child placement, not inline \

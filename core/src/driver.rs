@@ -1,7 +1,7 @@
 //! Embedding and driving a `Shell` in a host process.
 //!
 //! A host (the interactive `ral` REPL, `exarch`, a test binary) needs the
-//! same four things before it runs any turn: the prelude as a baked
+//! same four things before it evaluates any run: the prelude as a baked
 //! [`Comp`], the prelude's top-level [`Scheme`] list, its [`HostSurface`],
 //! and a `Shell` constructed-seeded-and-loaded from all three.  This
 //! module names the missing type, [`BakedPrelude`], the surface type,
@@ -17,14 +17,14 @@
 //! wall-clock) lives in [`crate::host`].
 //!
 //! Beyond the embedding, this module holds the host's synchronous
-//! turn-entry seam. [`Shell::run_turn`] runs one whole
-//! [`Turn`](crate::transport::Turn) — source text or a registered hook —
-//! to a flat [`TurnReport`], and [`Shell::register_hook`] populates the
+//! run-entry seam. [`Shell::run`] runs one whole
+//! [`Run`](crate::transport::Run) — source text or a registered hook —
+//! to a flat [`RunReport`], and [`Shell::register_hook`] populates the
 //! session-lived hook table those [`Program::Hook`](crate::transport::Program)
-//! turns dispatch against.  The types a host describes turn policy with
-//! ([`TurnIo`], [`TurnStdin`], [`RequestedTerminalAccess`],
-//! [`TurnRequest`]) live here; the turn's spine — compile, build, and
-//! run-framed — is orchestrated in [`crate::turn`].
+//! runs dispatch against.  The types a host describes run policy with
+//! ([`RunIo`], [`RunStdin`], [`RequestedTerminalAccess`],
+//! [`RunRequest`]) live here; the run's spine — compile, build, and
+//! run-framed — is orchestrated in [`crate::run`].
 //!
 //! The prelude is baked ahead of time: the host's build script calls
 //! [`bake_prelude_to_out_dir`], which parses, elaborates, and
@@ -38,9 +38,9 @@
 use crate::io::{Source, TerminalState};
 use crate::ir::Comp;
 use crate::process::CancelCause;
+use crate::run::{RunLifecycle, StaticDiagnostics};
 use crate::source::Span;
-use crate::transport::{Program, Turn};
-use crate::turn::{StaticDiagnostics, TurnLifecycle};
+use crate::transport::{Program, Run};
 use crate::typecheck::Scheme;
 use crate::types::{
     BuiltinEntry, BuiltinTable, DeferredSink, Desk, Nursery, Settled, Shell, SurfaceSink, Value,
@@ -243,61 +243,61 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_schemes.bin");
 }
 
-// ── The turn entry: one synchronous, runtime-agnostic host seam ──────────────
+// ── The run entry: one synchronous, runtime-agnostic host seam ──────────────
 //
 // Hosts start an evaluation through exactly one door:
-// `Shell::run_turn(TurnRequest)` runs one whole `Turn` — its `Program` is
+// `Shell::run(RunRequest)` runs one whole `Run` — its `Program` is
 // either source text or a registered hook applied to first-order arguments
 // (`Shell::register_hook` stores compiled hooks by name in the session-lived
-// hook table).  It returns one flat `TurnReport`.  Hosts describe *policy*
-// (the protocol `Turn`, `TurnIo`, `SurfaceSink`, lifecycle hooks); core owns
-// *resources* (`Sink`, `Source`, `TurnState`, guards, buffers, signal
+// hook table).  It returns one flat `RunReport`.  Hosts describe *policy*
+// (the protocol `Run`, `RunIo`, `SurfaceSink`, lifecycle hooks); core owns
+// *resources* (`Sink`, `Source`, `RunState`, guards, buffers, signal
 // slots).  Completion is the call returning — never a channel disconnecting
-// — so a deferred worker holding a surface clone cannot keep a turn from
+// — so a deferred worker holding a surface clone cannot keep a run from
 // ending.  This door is the only way into evaluation: the reduction
 // primitive behind it is crate-private, so a host cannot start an unframed
 // evaluation that would foreground or capture against a stale frame.
 
-/// The IO regime of a turn: intent, materialised into resources by the turn
+/// The IO regime of a run: intent, materialised into resources by the run
 /// doors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TurnIo {
-    /// Run on the session's live streams: the turn's byte sinks are cloned
-    /// from the ambient `shell.turn`. The interactive REPL (whose stdout is
+pub enum RunIo {
+    /// Run on the session's live streams: the run's byte sinks are cloned
+    /// from the ambient `shell.run`. The interactive REPL (whose stdout is
     /// the external printer) and batch (the process streams).
     Inherit,
     /// Mint fresh stdout/stderr buffers core returns in
-    /// [`TurnReport::Ran`]'s `captured`. Independent of [`TurnStdin`]: byte
+    /// [`RunReport::Ran`]'s `captured`. Independent of [`RunStdin`]: byte
     /// output regime and byte input source are separate choices. exarch's tool
     /// capture.
     Capture,
 }
 
-/// Whether a turn may hand the controlling terminal to a child.
+/// Whether a run may hand the controlling terminal to a child.
 ///
-/// The host-facing half of the terminal lease: the host states the turn's
+/// The host-facing half of the terminal lease: the host states the run's
 /// authority, and core decides whether the session's
 /// [`TerminalLease`](crate::process::TerminalLease) is reachable from it (see
 /// [`Shell::terminal_lease`]). `ExplicitLoan` is deliberately absent — a host
-/// cannot seed it; it is a within-turn elevation a loan token raises.
+/// cannot seed it; it is a within-run elevation a loan token raises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestedTerminalAccess {
-    /// No child/job foreground handoff in this turn. exarch tool turns and any
+    /// No child/job foreground handoff in this run. exarch tool runs and any
     /// launch that does not own the terminal foreground.
     Denied,
-    /// This turn may foreground terminal-bound children. The interactive REPL
+    /// This run may foreground terminal-bound children. The interactive REPL
     /// and a terminal-launched script.
     Leased,
 }
 
-/// The byte source a turn's stdin reads from.
+/// The byte source a run's stdin reads from.
 ///
-/// Orthogonal to [`TurnIo`] (the *output* regime) and to
+/// Orthogonal to [`RunIo`] (the *output* regime) and to
 /// [`RequestedTerminalAccess`] (foreground authority): a piped `ral -c` is
 /// `Denied` foreground yet still reads its inherited pipe (`Inherit`), while an
-/// exarch tool turn is `Denied` *and* reads no terminal (`Empty`).
+/// exarch tool run is `Denied` *and* reads no terminal (`Empty`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TurnStdin {
+pub enum RunStdin {
     /// Use the session stdin source — the inherited fd 0, which may be a
     /// terminal, a pipe, or a redirected file.
     Inherit,
@@ -306,39 +306,39 @@ pub enum TurnStdin {
     Empty,
 }
 
-/// The engine door for one turn: the protocol [`Turn`] plus the live,
+/// The engine door for one run: the protocol [`Run`] plus the live,
 /// non-transportable handles the host lends it.
 ///
 /// Composition, not
-/// mirroring — a field added to [`Turn`] crosses the seam and reaches the
+/// mirroring — a field added to [`Run`] crosses the seam and reaches the
 /// engine in one declaration.
-pub struct TurnRequest<'a> {
-    /// The turn, exactly as it crosses (or would cross) the host seam.
-    pub turn: Turn,
-    /// The turn-local structured-event sink, installed only for this turn.
+pub struct RunRequest<'a> {
+    /// The run, exactly as it crosses (or would cross) the host seam.
+    pub run: Run,
+    /// The run-local structured-event sink, installed only for this run.
     /// `None` is the identity (a bare REPL). Same-thread children inherit it;
     /// deferred workers buffer into bounded deferred storage instead.
     pub surface: Option<SurfaceSink>,
     /// The session-lived destination a deferred worker delivers its surface
-    /// batch to when it settles, rendered by the host at the next turn
+    /// batch to when it settles, rendered by the host at the next run
     /// boundary. `None` outside an agent host (a bare REPL): then a deferred
     /// worker's surface reaches a sink only via `await`/`race`.
     pub deferred: Option<Arc<dyn DeferredSink>>,
-    /// The turn-local enquiry desk, installed only for this turn. `None` is
+    /// The run-local enquiry desk, installed only for this run. `None` is
     /// the honest absence a host that answers no enquiries reports (a bare
     /// REPL, and exarch until the migration installs its desk). Same-thread
     /// children inherit it; deferred workers never receive it.
     pub desk: Option<Desk>,
-    /// The turn-local nursery for engine-side session forks, installed only
-    /// for this turn. `None` outside a host that installs one. Same-thread
+    /// The run-local nursery for engine-side session forks, installed only
+    /// for this run. `None` outside a host that installs one. Same-thread
     /// children inherit it; deferred workers never receive it.
     pub nursery: Option<Nursery>,
-    /// Per-turn lifecycle hooks; `Box::new(())` for a host with none.
-    pub lifecycle: Box<dyn TurnLifecycle + 'a>,
+    /// Per-run lifecycle hooks; `Box::new(())` for a host with none.
+    pub lifecycle: Box<dyn RunLifecycle + 'a>,
 }
 
-/// The byte streams captured under [`TurnIo::Capture`], returned in
-/// [`TurnReport::Ran`] and carried verbatim on the protocol
+/// The byte streams captured under [`RunIo::Capture`], returned in
+/// [`RunReport::Ran`] and carried verbatim on the protocol
 /// [`Report`](crate::transport::Report).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
@@ -347,15 +347,15 @@ pub struct Captured {
 }
 
 /// One flat result the host matches once. `captured`/`timed_out` live on
-/// `Ran`, where they mean something — a `Static` turn never ran.
-pub enum TurnReport {
-    /// A parse/type failure: the turn never reached evaluation. The host
-    /// renders the diagnostics and treats the turn as status 1.
+/// `Ran`, where they mean something — a `Static` run never ran.
+pub enum RunReport {
+    /// A parse/type failure: the run never reached evaluation. The host
+    /// renders the diagnostics and treats the run as status 1.
     Static { diagnostics: StaticDiagnostics },
-    /// A compiled turn ran. `status` is the transport status computed once;
+    /// A compiled run ran. `status` is the transport status computed once;
     /// `single_command` is whether the source compiled to a single command
     /// (for runtime-error rendering); `captured` is `Some` under
-    /// [`TurnIo::Capture`]; `timed_out` is whether the wall fired.
+    /// [`RunIo::Capture`]; `timed_out` is whether the wall fired.
     Ran {
         result: Settled<Value>,
         status: i32,
@@ -365,18 +365,18 @@ pub enum TurnReport {
     },
 }
 
-/// Resolve a turn's armed wall clock from every source that can bind it:
-/// the host's requested `turn_limit` and — for a hook turn — its
+/// Resolve a run's armed wall clock from every source that can bind it:
+/// the host's requested `wall` and — for a hook run — its
 /// registered budget. Both bind the same foreground scope, tightest wins
 /// (`min`, not `or`), so a host wall can never be silently widened by a
-/// hook's own budget or vice versa. `None` from both leaves the turn
+/// hook's own budget or vice versa. `None` from both leaves the run
 /// unarmed, exactly as before.
-fn arm_turn_wall(
-    turn_limit: Option<std::time::Duration>,
+fn arm_wall(
+    wall: Option<std::time::Duration>,
     hook_budget: Option<std::time::Duration>,
     foreground: &crate::process::ForegroundScope,
 ) -> Option<crate::process::Deadline> {
-    let effective = match (turn_limit, hook_budget) {
+    let effective = match (wall, hook_budget) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (Some(a), None) | (None, Some(a)) => Some(a),
         (None, None) => None,
@@ -394,38 +394,38 @@ fn panic_text(payload: &dyn std::any::Any) -> String {
 }
 
 impl Shell {
-    /// Run one whole [`Turn`] under `req`, synchronously, and return one
-    /// flat [`TurnReport`]. The single turn door: the turn's
+    /// Run one whole [`Run`] under `req`, synchronously, and return one
+    /// flat [`RunReport`]. The single run door: the run's
     /// [`Program`] is resolved here — source text compiles and typechecks
     /// against the live session, a hook resolves in the session-lived hook
     /// table — and either program then runs through the shared framed
     /// scaffold ([`Self::run_built`]): materialising the IO regime, minting
-    /// the turn's foreground scope and arming its wall, installing the
-    /// turn-local surface, evaluating under the capability ceiling, and
+    /// the run's foreground scope and arming its wall, installing the
+    /// run-local surface, evaluating under the capability ceiling, and
     /// folding in the captured bytes and `timed_out`.
     ///
-    /// Turn completion is *this call returning* — never a channel
+    /// Run completion is *this call returning* — never a channel
     /// disconnecting. A deferred worker may hold a clone of the surface sink
     /// forever; it changes nothing, because nothing waits on that sink to
-    /// decide the turn is over.
+    /// decide the run is over.
     ///
-    /// The turn door is also the durability boundary
+    /// The run door is also the durability boundary
     /// (`decisions/260706_enquiry-channel` §5): the shell checkpoints its
     /// [`Mobile`](crate::types::Mobile) at entry and a panic anywhere in the
-    /// turn — compile, eval, hook body, desk handler, ready-boundary
-    /// housekeeping — restores it, so a panicked turn reports as a failed
-    /// turn with the shell already rolled back. State-owner rollback, one
+    /// run — compile, eval, hook body, desk handler, ready-boundary
+    /// housekeeping — restores it, so a panicked run reports as a failed
+    /// run with the shell already rolled back. State-owner rollback, one
     /// mechanism for every transport and host; a snapshot never crosses the
     /// seam.
-    pub fn run_turn(&mut self, req: TurnRequest<'_>) -> TurnReport {
+    pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
         let checkpoint = self.mobile.clone();
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch_turn(req))) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(req))) {
             Ok(report) => report,
             Err(payload) => {
                 self.mobile = checkpoint;
-                TurnReport::Static {
+                RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                        format!("turn panicked: {}", panic_text(payload.as_ref())),
+                        format!("run panicked: {}", panic_text(payload.as_ref())),
                         101,
                     )),
                 }
@@ -433,33 +433,33 @@ impl Shell {
         }
     }
 
-    /// [`Self::run_turn`]'s body, separated so the durability wrapper above
+    /// [`Self::run`]'s body, separated so the durability wrapper above
     /// is the only way through the door.
-    fn dispatch_turn(&mut self, mut req: TurnRequest<'_>) -> TurnReport {
-        match req.turn.program {
+    fn dispatch(&mut self, mut req: RunRequest<'_>) -> RunReport {
+        match req.run.program {
             Program::Source(ref src) => {
-                // The two session ledgers' committed-turn clock: one tick
+                // The two session ledgers' committed-run clock: one tick
                 // per source dispatch, whether or not it goes on to compile —
-                // a failed turn ages the ledgers' scratch without renewing it
+                // a failed run ages the ledgers' scratch without renewing it
                 // (`decisions/260629_agent-binding-reaping`). No-ops when
                 // unarmed, so the REPL/batch pay two branches and nothing
                 // else.
                 self.local.bindings.tick();
                 self.local.workers.tick_epoch();
 
-                // Mint the turn's foreground scope and arm its wall *before*
-                // compiling, so the limit bounds the whole turn — compile and
-                // typecheck included, not only evaluation. `compile_turn`'s
+                // Mint the run's foreground scope and arm its wall *before*
+                // compiling, so the limit bounds the whole run — compile and
+                // typecheck included, not only evaluation. `compile_run`'s
                 // `process::clear` touches only the signal count, never the
                 // reaper, so an entry armed here survives the compile. The
                 // `Deadline` guard disarms when `wall` drops, so an early
                 // `Static` return leaves no pending reaper entry.
                 let foreground = self.durable_root().child();
-                let wall = arm_turn_wall(req.turn.turn_limit, None, &foreground);
+                let wall = arm_wall(req.run.wall, None, &foreground);
 
-                let (comp, single_command) = match crate::turn::compile_turn(self, src) {
+                let (comp, single_command) = match crate::run::compile_run(self, src) {
                     Ok(parts) => parts,
-                    Err(diagnostics) => return TurnReport::Static { diagnostics },
+                    Err(diagnostics) => return RunReport::Static { diagnostics },
                 };
 
                 // "Committed" = reached evaluation: harvest the compiled
@@ -478,7 +478,7 @@ impl Shell {
             }
             Program::Hook { ref name, ref args } => {
                 let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
-                    return TurnReport::Static {
+                    return RunReport::Static {
                         diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
                             format!("hook '{name}' is not registered"),
                             1,
@@ -491,15 +491,15 @@ impl Shell {
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
 
                 let foreground = self.durable_root().child();
-                let wall = arm_turn_wall(req.turn.turn_limit, hook.policy.budget, &foreground);
+                let wall = arm_wall(req.run.wall, hook.policy.budget, &foreground);
 
-                // Fold the hook's registered `DefaultPolicy` into the turn's
+                // Fold the hook's registered `DefaultPolicy` into the run's
                 // conditions: capture, terminal authority, and budget are the
                 // hook's to decide, not the dispatching host's.
                 if hook.policy.capture {
-                    req.turn.io = TurnIo::Capture;
+                    req.run.io = RunIo::Capture;
                 }
-                req.turn.terminal = match hook.policy.terminal {
+                req.run.terminal = match hook.policy.terminal {
                     TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
                     TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
                 };
@@ -512,11 +512,11 @@ impl Shell {
     }
 
     /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
-    /// as a named turn-entry point in the session-lived hook table.
+    /// as a named run-entry point in the session-lived hook table.
     ///
     /// The hook is stored by `name`; it is never readable as `$name`
     /// and never invokable as a command — it fires only when the host
-    /// dispatches a [`Program::Hook`] turn at a lifecycle moment (prompt
+    /// dispatches a [`Program::Hook`] run at a lifecycle moment (prompt
     /// render, startup, plugin hook, keybinding).
     ///
     /// A re-registration of an already-registered `name` short-circuits
@@ -596,23 +596,23 @@ impl Shell {
         before - self.mobile.context.hooks.len()
     }
 
-    /// The framed scaffold behind the turn door: materialise the IO regime
-    /// from the turn's conditions, build and install the turn frame on the
+    /// The framed scaffold behind the run door: materialise the IO regime
+    /// from the run's conditions, build and install the run frame on the
     /// pre-minted `foreground`, evaluate `body` under the capability ceiling
     /// and lifecycle hooks, then disarm the `wall` and fold the captured
-    /// bytes and `timed_out` into the report. `body` is the turn's resolved
+    /// bytes and `timed_out` into the report. `body` is the run's resolved
     /// program — the source arm's `eval_top_level`, the hook arm's in-frame
     /// `apply`.
     fn run_built(
         &mut self,
-        req: TurnRequest<'_>,
+        req: RunRequest<'_>,
         foreground: &crate::process::ForegroundScope,
         wall: Option<crate::process::Deadline>,
         single_command: bool,
         body: impl FnOnce(&mut Self) -> Settled<Value>,
-    ) -> TurnReport {
-        let TurnRequest {
-            turn,
+    ) -> RunReport {
+        let RunRequest {
+            run,
             surface,
             deferred,
             desk,
@@ -621,18 +621,18 @@ impl Shell {
         } = req;
 
         // The source text the lifecycle hooks and root context see: the
-        // program itself for a source turn, empty for a hook turn (whose
+        // program itself for a source run, empty for a hook run (whose
         // program is an already-compiled value, not text).
-        let src = match &turn.program {
+        let src = match &run.program {
             Program::Source(src) => src.as_str(),
             Program::Hook { .. } => "",
         };
 
         // Materialise the IO regime: `Capture` mints buffers we read back,
-        // `Inherit` leaves the ambient streams to flow through `build_turn`.
-        let (capture, capture_bufs) = match turn.io {
-            TurnIo::Inherit => (None, None),
-            TurnIo::Capture => {
+        // `Inherit` leaves the ambient streams to flow through `build_run`.
+        let (capture, capture_bufs) = match run.io {
+            RunIo::Inherit => (None, None),
+            RunIo::Capture => {
                 let (stdout_sink, stdout_buf) = crate::io::new_buffer();
                 let (stderr_sink, stderr_buf) = crate::io::new_buffer();
                 (
@@ -643,46 +643,46 @@ impl Shell {
         };
 
         // Stdin source and terminal authority are independent of the output
-        // regime: `Capture` no longer implies `Source::Terminal`. A tool turn
+        // regime: `Capture` no longer implies `Source::Terminal`. A tool run
         // is `Denied` + `Empty`; a piped `ral -c` is `Denied` + `Inherit`.
-        let stdin = match turn.stdin {
-            TurnStdin::Inherit => Source::Terminal,
-            TurnStdin::Empty => Source::Empty,
+        let stdin = match run.stdin {
+            RunStdin::Inherit => Source::Terminal,
+            RunStdin::Empty => Source::Empty,
         };
-        let terminal_access = match turn.terminal {
+        let terminal_access = match run.terminal {
             RequestedTerminalAccess::Leased => crate::types::TerminalAccess::Leased,
             RequestedTerminalAccess::Denied => crate::types::TerminalAccess::Denied,
         };
 
-        let next = crate::turn::build_turn(
+        let next = crate::run::build_run(
             self,
             capture,
             stdin,
             terminal_access,
             foreground.clone(),
-            turn.deferred_lease,
-            turn.worker_cap,
+            run.deferred_lease,
+            run.worker_cap,
             surface,
             deferred,
             desk,
             nursery,
         );
-        let (result, status) = crate::turn::run_framed(
+        let (result, status) = crate::run::run_framed(
             self,
             next,
-            &turn.script_name,
+            &run.script_name,
             src,
-            turn.caps.clone(),
+            run.caps.clone(),
             lifecycle,
             body,
         );
 
         // Disarm the wall before reading the cause. While it stays armed the
-        // reaper can still fire; classifying against a live ceiling lets a turn
+        // reaper can still fire; classifying against a live ceiling lets a run
         // that finished inside its budget be misread as timed out should the
         // reaper trip in the gap between eval returning and this read. Dropping
         // the guard removes the entry, so `cause` is `Deadline` below only for a
-        // deadline that genuinely elapsed during the turn.
+        // deadline that genuinely elapsed during the run.
         drop(wall);
 
         let timed_out = foreground.cause() == Some(CancelCause::Deadline);
@@ -691,7 +691,7 @@ impl Shell {
             stderr: crate::io::take_buffer(&err),
         });
 
-        TurnReport::Ran {
+        RunReport::Ran {
             result,
             status,
             single_command,

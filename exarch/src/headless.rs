@@ -6,7 +6,7 @@
 //! built from the root's deliberate `reply` value — is emitted at the end.
 //! Every other
 //! event — and sub-agent activity, as breadcrumbs — goes to `err`; the
-//! process exits after one seed turn.  Takes the default [`Sink::drive`];
+//! process exits after one seed exchange.  Takes the default [`Sink::drive`];
 //! only [`Sink::handle`] is custom.
 //!
 //! This frontend is a *display* — it projects the bus onto a pair of
@@ -69,13 +69,13 @@ pub struct Headless<'a> {
     /// the end instead of the live token stream.
     json_mode: bool,
     /// Cumulative count of root-session steps (LLM round-trips) — the
-    /// turn count surfaced at the end and in the JSON result. The
+    /// step count surfaced at the end and in the JSON result. The
     /// per-segment `Kind::Step(n)` index resets when the root resumes
     /// after an async-spawned block, so this counts rather than tracks it.
-    turns: u32,
+    steps: u32,
     /// Last non-routine stop reason surfaced by the root, if any.
     last_stop: Option<String>,
-    /// The root's deliberate return value — the drive digest's faithful
+    /// The root's deliberate return value — the attend digest's faithful
     /// [`FOValue`](ral_core::serial::FOValue) payload, projected through
     /// [`user_json`] (not `FOValue`'s own transport `serde`, which is
     /// internally tagged and carries floats by bits).  It is the `result`
@@ -87,7 +87,7 @@ pub struct Headless<'a> {
     /// Set when a worker thread unwound this run.  `pump` recovers from the
     /// panic, emits it as a [`WORKER_PANIC_PREFIX`](crate::bus::WORKER_PANIC_PREFIX)
     /// error, and returns the worker value as normal, so without latching it
-    /// here the JSON result would report a crashed turn as a clean, empty
+    /// here the JSON result would report a crashed exchange as a clean, empty
     /// success.
     panicked: bool,
     /// Whether the last byte written to `out` in text mode was a newline, so
@@ -110,7 +110,7 @@ impl<'a> Headless<'a> {
             root_id,
             started: Instant::now(),
             json_mode,
-            turns: 0,
+            steps: 0,
             last_stop: None,
             result: None,
             panicked: false,
@@ -175,7 +175,7 @@ fn card_stderr(card: &Card) -> Vec<String> {
 }
 
 /// The `--output-format json` result object on stdout: the root's deliberate
-/// `reply` value plus the run's stop reason, turn count, wall-clock, and token
+/// `reply` value plus the run's stop reason, step count, wall-clock, and token
 /// usage + cost.  Field names mirror Claude Code's headless result so a harness
 /// can parse either agent identically; `result` deliberately diverges in *type*
 /// — it is the faithful value (`string | object | array | null`), not always a
@@ -207,7 +207,7 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
                 "completed".into()
             }
         }),
-        "num_turns": h.turns,
+        "num_steps": h.steps,
         "duration_ms": duration_ms,
         "total_cost_usd": u.dollars,
         "usage": {
@@ -234,9 +234,9 @@ impl Sink for Headless<'_> {
             // Only the root agent's tokens reach the user, and only in text
             // mode — there they stream to `out` as live narration.  In json
             // mode they are dropped: the `result` is the root's deliberate
-            // `reply` value, captured from the drive digest, not whatever prose
+            // `reply` value, captured from the attend digest, not whatever prose
             // happened to stream.  Sub-agent token streams would interleave
-            // unreadably and are an internal detail of the root's turn; their
+            // unreadably and are an internal detail of the root's exchange; their
             // full transcript lives in that session's own log dir.
             Kind::Token(text) if id == self.root_id && !self.json_mode => {
                 let _ = self.out.write_all(text.as_bytes());
@@ -249,7 +249,7 @@ impl Sink for Headless<'_> {
             Kind::Usage(_) => {}
             Kind::Step { n, .. } => {
                 if id == self.root_id {
-                    self.turns += 1;
+                    self.steps += 1;
                     let _ = writeln!(self.err, "[step {n}]");
                 }
             }
@@ -352,7 +352,7 @@ impl Sink for Headless<'_> {
             // prints it (it would clutter the stderr stream) nor records it
             // (the operational trace omits presentation events).  A message
             // boundary carries no result value: `result` is the root's
-            // deliberate `reply`, captured from the drive digest, never read
+            // deliberate `reply`, captured from the attend digest, never read
             // off the token stream.  Reasoning / thinking are TUI-only
             // presentation blocks; the content already round-trips to the
             // model on the assistant message, so headless neither prints nor
@@ -401,23 +401,23 @@ pub fn run(
     // through; bound before `session` is borrowed into the worker closure.
     let root_transcript = session.transcript();
     // The fleet for this one-shot run: the trunk's shared registry and
-    // transport engine, plus a per-turn bus over the trunk's *own* inbox (so
-    // the drive worker's emitter and any in-turn producer share one queue).
+    // transport engine, plus a per-exchange bus over the trunk's *own* inbox (so
+    // the drive worker's emitter and any in-exchange producer share one queue).
     // Headless has no idle loop and no tabs, so the channel closes when
     // the worker finishes and async children stay muted *on the display* — but
     // each still records its own trace, the behaviour we want everywhere.
     let fleet = Fleet {
         agents: session.agents.clone(),
-        bus: FleetBus::per_turn(&session.inbox()),
+        bus: FleetBus::per_exchange(&session.inbox()),
         engine,
     };
     // Seed the launch prompt into that same inbox; the headless trunk is a
-    // returning agent that does not park, so `drive` runs the seeded work and
+    // returning agent that does not park, so `attend` runs the seeded work and
     // returns once it is idle.
     session.seed(prompt);
-    // Headless has no slash commands, so the drive loop's `Control` is a no-op;
+    // Headless has no slash commands, so the attend loop's `Control` is a no-op;
     // declared here so its `&mut` borrow outlives the worker closure `pump`
-    // runs on its scoped thread.  The trunk drives on its own provider handle.
+    // runs on its scoped thread.  The trunk attends on its own provider handle.
     let mut control = crate::agent::NoControl;
     // Drive on a scoped worker thread while the main thread drives the sink.
     // `pump` returns the worker's `(outcome, text)`, or `None` if it panicked.
@@ -427,9 +427,9 @@ pub fn run(
         &fleet.bus,
         root_id,
         root_transcript,
-        |emit| session.drive(&mut control, emit),
+        |emit| session.attend(&mut control, emit),
     );
-    // `pump` returns the drive digest — the outcome and the root's faithful
+    // `pump` returns the attend digest — the outcome and the root's faithful
     // `reply` payload, an `FOValue`.  Projected through `user_json` (not
     // `FOValue`'s own transport encoding) into the json `result` (a string
     // stays a string, an object/array stays structured); the outcome drives
@@ -451,7 +451,7 @@ pub fn run(
         Err(e) => Err(e.to_string()),
     };
     // The run total, summed at the emit seam across the root and every
-    // sub-agent — including async children muted on this per-turn bus, whose
+    // sub-agent — including async children muted on this per-exchange bus, whose
     // usage never reached the sink.  This is the single source of truth the
     // JSON result and the `[done]` line both read.
     headless.usage = fleet.bus.usage_total();
@@ -467,8 +467,8 @@ pub fn run(
     }
     eprintln!("Agent log: {}", session.log_dir().display());
     eprintln!(
-        "[done] {} turns · {:.1}s · {}",
-        headless.turns,
+        "[done] {} steps · {:.1}s · {}",
+        headless.steps,
         elapsed.as_secs_f64(),
         headless.usage
     );
@@ -496,12 +496,12 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
 /// built with [`RootConfig::interactive`](crate::agent::RootConfig) set: a
 /// conversing trunk withholds `reply` and parks between messages instead of
 /// returning once, so — unlike `run` — there is no result to report at the
-/// end, only the narration itself; a per-turn digest that merely says "no
+/// end, only the narration itself; a per-exchange digest that merely says "no
 /// reply" is therefore not an error and never surfaces as one. Call this
 /// once per user message on the *same* session, so each exchange sees what
-/// came before — the interactive trunk's own drive loop
-/// ([`Agent::drive_queued`](crate::agent::Agent)) shares its per-turn step
-/// with the one [`run`] and the TUI both drive forever, rather than
+/// came before — the interactive trunk's own attend loop
+/// ([`Agent::attend_backlog`](crate::agent::Agent)) shares its per-exchange step
+/// with the one [`run`] and the TUI both attend forever, rather than
 /// running a second loop of its own.
 ///
 /// A thin wrapper over [`converse_sink`], which carries the seeding and
@@ -540,18 +540,18 @@ pub fn converse_sink<S: Sink>(
     sink: &mut S,
 ) -> Result<(), String> {
     let root_transcript = session.transcript();
-    // Per-exchange, like headless's own per-turn bus: this call's channel
+    // Per-exchange, like headless's own per-exchange bus: this call's channel
     // closes when the exchange parks, so draining it can never block on a
     // later message the caller has not sent yet.
     let fleet = Fleet {
         agents: session.agents.clone(),
-        bus: FleetBus::per_turn(&session.inbox()),
+        bus: FleetBus::per_exchange(&session.inbox()),
         engine,
     };
     session.seed(message);
     let root_id = session.id;
     let outcome = pump(sink, &fleet.bus, root_id, root_transcript, |emit| {
-        session.drive_queued(emit)
+        session.attend_backlog(emit)
     });
     match outcome {
         Ok(Some(_)) => Ok(()),
@@ -636,7 +636,7 @@ mod tests {
 
     /// The interactive trunk parks rather than returning a reply: a plain
     /// assistant turn with no tool calls carries no payload up, and the
-    /// per-turn digest never reduces to the returning agent's `Complete`
+    /// per-exchange digest never reduces to the returning agent's `Complete`
     /// tag — the shape only a deliberate `reply` produces.
     #[test]
     fn the_interactive_trunk_parks_rather_than_replying() {
@@ -644,7 +644,7 @@ mod tests {
         session.seed("hello".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
-        let (outcome, payload) = session.drive_queued(&emit);
+        let (outcome, payload) = session.attend_backlog(&emit);
         assert!(
             payload.is_none(),
             "a conversing trunk carries no reply payload"
@@ -675,12 +675,12 @@ mod tests {
         assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
     }
 
-    /// `num_turns` is the cumulative count of root steps, not the last
+    /// `num_steps` is the cumulative count of root steps, not the last
     /// per-segment index: the `Kind::Step(n)` index restarts each time the
     /// root resumes after an async-spawned block, so storing `n` would
     /// report only the final segment. Sub-agent steps must not count.
     #[test]
-    fn num_turns_counts_root_steps_across_segments() {
+    fn num_steps_counts_root_steps_across_segments() {
         let root: AgentId = 1;
         let sub: AgentId = 2;
         let mut sink_out = Vec::new();
@@ -706,7 +706,7 @@ mod tests {
         });
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
-        assert_eq!(v["num_turns"], serde_json::json!(5), "{out}");
+        assert_eq!(v["num_steps"], serde_json::json!(5), "{out}");
     }
 
     /// A structured `reply` value reaches the json `result` faithfully — an
@@ -828,7 +828,7 @@ mod tests {
     /// `converse_sink` hands a host its own `Sink` the bus's `Kind` events
     /// unflattened, rather than projecting them through `Headless`'s
     /// token/card writer split: a collecting sink sees the reply as a
-    /// `Kind::Token` and the turn boundary as a `Kind::Step`.
+    /// `Kind::Token` and the exchange boundary as a `Kind::Step`.
     #[test]
     fn converse_sink_delivers_structured_events() {
         struct Collecting(Vec<Kind>);
@@ -853,7 +853,7 @@ mod tests {
         );
         assert!(
             sink.0.iter().any(|k| matches!(k, Kind::Step { .. })),
-            "the turn boundary must arrive as a Kind::Step among {} events",
+            "the exchange boundary must arrive as a Kind::Step among {} events",
             sink.0.len()
         );
     }

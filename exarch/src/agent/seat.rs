@@ -1,4 +1,4 @@
-//! The agent's seat: the transport its turns run through, plus the
+//! The agent's seat: the transport its runs run through, plus the
 //! host-side state that seat kind owns.  Every engine-side reach — per-call
 //! installs, `/clear`'s rebuild, the registry's cancel reach — is a seat
 //! method, so a second seat kind (the wire engine) is one more variant
@@ -7,7 +7,7 @@
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
 use crate::fleet::desk::{AbsentDesk, DeskBinding, ExarchDesk, SurfaceApplier};
-use crate::fleet::registry::{EvalReach, TurnScope};
+use crate::fleet::registry::{EvalReach, RunScope};
 use crate::shell_eval::builtins;
 use ral_core::Shell;
 use ral_core::transport::{IdentityTransport, Transport};
@@ -18,16 +18,16 @@ use std::sync::{Arc, Mutex};
 pub(crate) enum Seat {
     /// In-process: owns the session [`Scratch`] (`/clear` reboots from it),
     /// the working directory the shell is re-seeded with on every such
-    /// reboot, and the turn-scope cell the registry interrupts through,
+    /// reboot, and the run-scope cell the registry interrupts through,
     /// which must stay live across a `/clear` rebuild.
     Identity {
         transport: Box<IdentityTransport>,
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
-        turn_scope: TurnScope,
+        run_scope: RunScope,
     },
     /// Out-of-process: the engine lives on the far end of `transport`, one
-    /// process per session. It holds nothing per call: a wire turn's desk
+    /// process per session. It holds nothing per call: a wire run's desk
     /// and applier ride
     /// [`Agent::run_shell`](crate::agent::Agent::run_shell)'s own arguments
     /// into the drain loop's enquiry arm — the engine asks over
@@ -43,7 +43,7 @@ pub(crate) enum Seat {
 
 /// One `ral` call's capture set, installed for the extent of the eval —
 /// built fresh per call so nothing a desk handler captures can go stale.
-pub(crate) struct TurnInstall {
+pub(crate) struct RunInstall {
     pub(crate) desk: Arc<ExarchDesk>,
     pub(crate) apply: SurfaceApplier,
     pub(crate) deferred: Arc<dyn ral_core::types::DeferredSink>,
@@ -51,12 +51,12 @@ pub(crate) struct TurnInstall {
 }
 
 /// Retires the install on drop — [`AbsentDesk`] back in, nursery cleared —
-/// on *every* exit, including a panic `Agent::drive` recovers from, where
+/// on *every* exit, including a panic `Agent::attend` recovers from, where
 /// straight-line teardown would leave the desk's whole capture (its
 /// `Emitter` included) installed for the rest of the session.
-pub(crate) struct TurnGuard<'s>(&'s Seat);
+pub(crate) struct RunGuard<'s>(&'s Seat);
 
-impl Drop for TurnGuard<'_> {
+impl Drop for RunGuard<'_> {
     fn drop(&mut self) {
         match self.0 {
             Seat::Identity { transport, .. } => {
@@ -72,20 +72,20 @@ impl Drop for TurnGuard<'_> {
 impl Seat {
     /// The identity ceremony — trunk construction, every fork, and the
     /// desk's spawn spine all route here; `/clear` re-runs it through
-    /// [`Self::clear`] onto the same turn-scope cell.
+    /// [`Self::clear`] onto the same run-scope cell.
     pub(crate) fn identity(
         shell: Shell,
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
         log: &AgentLog,
     ) -> Self {
-        let turn_scope: TurnScope = Arc::new(Mutex::new(None));
-        let transport = Box::new(identity_ceremony(shell, log, &turn_scope, cwd.clone()));
+        let run_scope: RunScope = Arc::new(Mutex::new(None));
+        let transport = Box::new(identity_ceremony(shell, log, &run_scope, cwd.clone()));
         Self::Identity {
             transport,
             scratch,
             cwd,
-            turn_scope,
+            run_scope,
         }
     }
 
@@ -139,11 +139,11 @@ impl Seat {
     }
 
     /// Install one call's capture set; the guard retires it on every exit.
-    /// A wire seat has nothing to install: its turn's desk and applier ride
+    /// A wire seat has nothing to install: its run's desk and applier ride
     /// [`Agent::run_shell`](crate::agent::Agent::run_shell)'s own arguments
     /// into the drain loop's enquiry arm, so the slots this fills are
     /// identity-only.
-    pub(crate) fn install_turn(&self, install: TurnInstall) -> TurnGuard<'_> {
+    pub(crate) fn install_run(&self, install: RunInstall) -> RunGuard<'_> {
         match self {
             Self::Identity { transport, .. } => {
                 transport.set_deferred_sink(install.deferred);
@@ -160,7 +160,7 @@ impl Seat {
             #[cfg(unix)]
             Self::Wire { .. } => {}
         }
-        TurnGuard(self)
+        RunGuard(self)
     }
 
     /// The cancel reach the fleet registry stores for this agent.
@@ -168,11 +168,11 @@ impl Seat {
         match self {
             Self::Identity {
                 transport,
-                turn_scope,
+                run_scope,
                 ..
             } => EvalReach::Identity {
                 eval_root: transport.shell_mut().shell.cancel_handle(),
-                turn_scope: turn_scope.clone(),
+                run_scope: run_scope.clone(),
             },
             #[cfg(unix)]
             Self::Wire { transport, .. } => EvalReach::Wire(transport.control().clone()),
@@ -180,7 +180,7 @@ impl Seat {
     }
 
     /// `/clear`'s engine half: reboot the shell from the owned scratch and
-    /// re-run the ceremony onto the *same* turn-scope cell.  Replacing the
+    /// re-run the ceremony onto the *same* run-scope cell.  Replacing the
     /// transport drops the outgoing shell, whose teardown cancels its
     /// registered workers — `/clear` outranks every lease. Panics on a wire
     /// seat (see the panic message).
@@ -190,12 +190,12 @@ impl Seat {
                 transport,
                 scratch,
                 cwd,
-                turn_scope,
+                run_scope,
             } => {
                 **transport = identity_ceremony(
                     boot_root_shell(scratch, cwd.clone()),
                     log,
-                    turn_scope,
+                    run_scope,
                     cwd.clone(),
                 );
             }
@@ -225,7 +225,7 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> She
 
 /// Seed the session-dir variable, arm the ledgers over everything just
 /// seeded (seeding then arming stay one visible sequence), then seat the
-/// shell behind a fresh transport observing `turn_scope` and attach the
+/// shell behind a fresh transport observing `run_scope` and attach the
 /// host endpoint.
 /// `cwd` is the same directory [`boot_root_shell`] seeded onto the shell —
 /// restated here only because `attach`'s signature is shared with the wire
@@ -233,7 +233,7 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> She
 fn identity_ceremony(
     mut shell: Shell,
     log: &AgentLog,
-    turn_scope: &TurnScope,
+    run_scope: &RunScope,
     cwd: std::path::PathBuf,
 ) -> IdentityTransport {
     // `EXARCH_SESSION_DIR` must always point at the live session's
@@ -245,7 +245,7 @@ fn identity_ceremony(
     );
     crate::bootstrap::arm_session_ledgers(&mut shell);
     let mut transport = IdentityTransport::new(shell);
-    transport.observe_foreground(turn_scope.clone());
+    transport.observe_foreground(run_scope.clone());
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     transport.attach(
         ral_core::transport::TerminalEndpoint {
@@ -263,13 +263,13 @@ fn identity_ceremony(
 // Wire-seat tests drive a *real* engine child (`std::env::current_exe()`
 // re-exec'd with `--engine`, exactly the pre_exec handoff
 // `WireTransport::new`/`exarch/tests/wire_liveness.rs` use), never an
-// in-process `engine_session` thread. `Shell::run_turn` publishes the
-// process-global foreground/durable-root cancel slots for every turn it
-// runs (the single-session default); those slots are guarded by
+// in-process `engine_session` thread. `Shell::run` publishes the
+// process-global foreground/durable-root cancel slots on every run
+// (the single-session default); those slots are guarded by
 // `ral_core::process::cancel::SLOT_SERIAL` in core's own tests, but that
 // mutex is `pub(crate)` to core and unreachable here. A same-process
 // engine thread would race that slot against whatever sibling test in this
-// same lib binary is mid-turn; a child process owns its slots alone.
+// same lib binary is mid-run; a child process owns its slots alone.
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
@@ -281,25 +281,25 @@ mod tests {
     use crate::fleet::desk::{ExarchDesk, HostServices};
     use crate::fleet::registry::AgentRegistry;
     use crate::provider::{Provider, ProviderKind, scripted::Script};
-    use ral_core::transport::{EnquiryError, Liveness, Program, Report, Turn, WireTransport};
+    use ral_core::transport::{EnquiryError, Liveness, Program, Report, Run, WireTransport};
     use ral_core::types::{Capabilities, Nursery};
-    use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    fn source_turn(src: &str) -> Turn {
-        Turn {
+    fn source_run(src: &str) -> Run {
+        Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Capture,
+            io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
+            stdin: RunStdin::Empty,
         }
     }
 
@@ -396,20 +396,20 @@ mod tests {
         }
     }
 
-    /// A wire-seat turn round-trips through a real engine child: dispatch,
+    /// A wire-seat run round-trips through a real engine child: dispatch,
     /// drain, and a live `` `surface `` value reaches `on_surface` in order
     /// before the terminal `Report`.
     #[test]
-    fn wire_seat_turn_round_trips_and_surfaces_a_value() {
+    fn wire_seat_run_round_trips_and_surfaces_a_value() {
         let (seat, mut child) = wire_seat(Liveness::default());
 
         let mut surfaced = Vec::new();
         let report = ral_core::transport::dispatch_to_report(
             seat.transport(),
-            source_turn("surface `ping"),
+            source_run("surface `ping"),
             |v| surfaced.push(v),
             |_| {},
-            |_| unreachable!("this turn raises no enquiry"),
+            |_| unreachable!("this run raises no enquiry"),
         )
         .expect("the engine must answer the dispatch with a Report");
 
@@ -430,7 +430,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// An enquiry the engine raises mid-turn (the `agents` builtin's
+    /// An enquiry the engine raises mid-run (the `agents` builtin's
     /// `` `agent-list ``) crosses as a real `Event::Enquiry` frame and is
     /// answered by an `ExarchDesk` in the drain loop's enquiry arm — the
     /// production binding exactly: `Agent::run_shell` hands its desk
@@ -447,7 +447,7 @@ mod tests {
 
         let report = ral_core::transport::dispatch_to_report(
             seat.transport(),
-            source_turn("agents"),
+            source_run("agents"),
             |_| {},
             |_| {},
             |req| {
@@ -469,11 +469,11 @@ mod tests {
     }
 
     /// `eval_reach().interrupt()` — the registry's per-tab interrupt path —
-    /// cancels an in-flight wire turn promptly: a `sleep 30` that could not
+    /// cancels an in-flight wire run promptly: a `sleep 30` that could not
     /// settle inside the ceiling on its own does, once cancelled.  Generous
     /// timing throughout: the dev fleet includes a jittery VM.
     #[test]
-    fn wire_eval_reach_cancel_settles_an_in_flight_turn_promptly() {
+    fn wire_eval_reach_cancel_settles_an_in_flight_run_promptly() {
         const WAIT: Duration = Duration::from_secs(20);
         let (seat, mut child) = wire_seat(Liveness::default());
         let reach = seat.eval_reach();
@@ -482,14 +482,14 @@ mod tests {
             let dispatch = s.spawn(|| {
                 ral_core::transport::dispatch_to_report(
                     seat.transport(),
-                    source_turn("sleep 30"),
+                    source_run("sleep 30"),
                     |_| {},
                     |_| {},
-                    |_| unreachable!("this turn raises no enquiry"),
+                    |_| unreachable!("this run raises no enquiry"),
                 )
             });
             // Let the engine actually enter the sleep before interrupting,
-            // so what gets cancelled is a genuinely in-flight turn.
+            // so what gets cancelled is a genuinely in-flight run.
             std::thread::sleep(Duration::from_secs(1));
             let started = Instant::now();
             reach.interrupt();
@@ -504,7 +504,7 @@ mod tests {
         );
         assert!(
             elapsed < WAIT,
-            "cancel must settle the turn well inside {WAIT:?} rather than run `sleep 30` to \
+            "cancel must settle the run well inside {WAIT:?} rather than run `sleep 30` to \
              term, took {elapsed:?}"
         );
 

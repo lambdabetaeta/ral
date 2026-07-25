@@ -8,7 +8,7 @@
 //! consult shell state instead of resyscalling.  That function's doc
 //! lists the seeded variables.
 
-use super::{Context, LocalState, Mobile, SessionState, Shell, TurnState};
+use super::{Context, LocalState, Mobile, RunState, SessionState, Shell};
 use crate::types::{ControlState, Env, GrantStack, LocationCursor};
 use std::path::PathBuf;
 
@@ -34,7 +34,7 @@ impl Shell {
                     ..Context::default()
                 },
             },
-            turn: TurnState {
+            run: RunState {
                 io: crate::io::Io {
                     terminal,
                     ..Default::default()
@@ -48,7 +48,7 @@ impl Shell {
                 deferred_lease: None,
                 worker_cap: None,
                 // The boot frame holds no terminal authority; a host states it
-                // per turn via `TurnRequest::terminal`. `Denied` is the safe
+                // per run via `RunRequest::terminal`. `Denied` is the safe
                 // default so a frame with no stated policy never foregrounds.
                 terminal_access: crate::types::TerminalAccess::Denied,
             },

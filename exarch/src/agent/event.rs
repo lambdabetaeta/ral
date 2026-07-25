@@ -182,7 +182,7 @@ pub enum SessionEvent {
         log_dir: PathBuf,
     },
     /// A user-authored prompt — the seed / typed turn, a synthetic
-    /// continuation injected by the top-level driver after a degenerate turn,
+    /// continuation injected by the top-level attend loop after a degenerate turn,
     /// or a steering interjection drained after tool results and before the
     /// next assistant reply.
     UserPrompt { text: String },
@@ -191,7 +191,7 @@ pub enum SessionEvent {
     /// does not drive the local protocol state machine; the child's fresh
     /// `UserPrompt` remains the turn it must answer.
     ContextMessage { message: ChatMessage },
-    /// Marks the start of one inner step of `Agent::apply`.  Several
+    /// Marks the start of one inner step of `Agent::deliberate`.  Several
     /// steps may share a single user prompt when the model issues tool
     /// calls.
     StepStarted { n: u32, tuning: Tuning },
@@ -211,7 +211,7 @@ pub enum SessionEvent {
     ToolResults { results: Vec<ToolResult> },
     /// Per-step token / dollar usage as reported by the provider.
     UsageDelta { usage: UsageDelta },
-    /// The user pressed Ctrl-C / Esc mid-turn.  Whatever events were
+    /// The user pressed Ctrl-C / Esc mid-exchange.  Whatever events were
     /// pending have been synthesised back to a `ReadyForUser` state by
     /// [`AgentLog::quiesce`].
     Cancelled,
@@ -228,18 +228,18 @@ pub enum SessionEvent {
     /// in the rendered log.  Not visible to the model: errors are about
     /// the orchestration, not the conversation.
     Error { text: String },
-    /// Recovery breadcrumb the top-level driver writes between
+    /// Recovery breadcrumb the top-level attend loop writes between
     /// iterations when nudging the model.  Recorded so events.json
-    /// shows where the driver intervened.
+    /// shows where the attend loop intervened.
     Nudge { used: u32, max: u32, cause: String },
-    /// Structured provider-error block, written when a turn returns an
+    /// Structured provider-error block, written when an exchange returns an
     /// error rather than an assistant message.  Recorded as a
     /// [`ProviderErrorRecord`] so the on-screen render is fully
     /// reconstructable from events.json.
     ProviderError { error: ProviderErrorRecord },
     /// Bookend at the tail.  Written by [`Agent`](crate::agent::Agent)'s
     /// `Drop` impl, the one funnel every teardown path — a settled `reply`,
-    /// the subtree cascade, or the trunk's own end-of-`drive` teardown —
+    /// the subtree cascade, or the trunk's own end-of-`attend` teardown —
     /// runs through.
     SessionEnded,
 }
@@ -281,20 +281,20 @@ enum State {
     AwaitingAssistantAfterToolResults,
 }
 
-/// Why a turn is being wound back to `ReadyForUser` without a natural
+/// Why an exchange is being wound back to `ReadyForUser` without a natural
 /// assistant reply — selects the synthetic stub text recorded in the
 /// transcript so a post-mortem reads the cause in place.
 #[derive(Clone, Copy)]
 pub enum QuiesceReason {
-    /// The user pressed Ctrl-C / Esc mid-turn.
+    /// The user pressed Ctrl-C / Esc mid-exchange.
     Cancelled,
-    /// The turn ended on a surfaced error — a transport failure or an
+    /// The exchange ended on a surfaced error — a transport failure or an
     /// exhausted retry budget — before the assistant replied.
     Aborted,
     /// A sub-agent called `reply`: the last round-trip dispatched the reply
     /// and its result but never asked for a closing assistant message, so the
     /// machine sits in `AwaitingAssistantAfterToolResults`.  This winds it
-    /// back cleanly — the turn ended on purpose, not on an error.
+    /// back cleanly — the exchange ended on purpose, not on an error.
     Replied,
 }
 
@@ -421,9 +421,9 @@ impl AgentLog {
         &self.dir
     }
 
-    /// Whether the session is at a settled turn boundary: the committed
+    /// Whether the session is at a settled exchange boundary: the committed
     /// transcript is complete and a fresh user prompt is admissible.
-    /// The invariant the driver relies on — every turn hands the session
+    /// The invariant the attend loop relies on — every exchange hands the session
     /// back here — and the precondition compaction needs.
     pub fn is_ready(&self) -> bool {
         matches!(self.state, State::ReadyForUser)
@@ -478,7 +478,7 @@ impl AgentLog {
     }
 
     /// The parent context a mnemon child should inherit.  When called from
-    /// a tool dispatch, the parent may be waiting for the very tool result this
+    /// a tool-call batch, the parent may be waiting for the very tool result this
     /// child is about to produce; drop that unfinished assistant frame so the
     /// child starts from the request context, not a dangling tool protocol.
     pub fn inherited_context_messages(&self) -> Vec<ChatMessage> {
@@ -501,11 +501,11 @@ impl AgentLog {
     /// Import parent context messages without appending a prompt.
     ///
     /// A `mnemon` child receives its launch prompt through its inbox, so
-    /// the drive loop commits it through [`append_user`] at apply time: the
-    /// same path every other turn takes.
+    /// the attend loop commits it through [`append_user`] at deliberate time: the
+    /// same path every other exchange takes.
     ///
     /// # Errors
-    /// Returns `Err` if the session is not at a ready turn boundary, or if
+    /// Returns `Err` if the session is not at a ready exchange boundary, or if
     /// recording an imported context message fails.
     pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
@@ -522,10 +522,10 @@ impl AgentLog {
 
     // ── Protocol mutations ────────────────────────────────────────────────
 
-    /// Commit a top-level user prompt, opening a new turn.
+    /// Commit a top-level user prompt, opening a new exchange.
     ///
     /// # Errors
-    /// Returns `Err` if the session is not at a ready turn boundary (tool
+    /// Returns `Err` if the session is not at a ready exchange boundary (tool
     /// results are still pending), or if recording the prompt fails.
     pub fn append_user(&mut self, text: String) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
@@ -540,7 +540,7 @@ impl AgentLog {
     }
 
     /// Append a user steering message after a complete tool-result batch, before
-    /// the next provider request.  This is the only mid-turn user ingress: the
+    /// the next provider request.  This is the only mid-exchange user ingress: the
     /// tool protocol is first brought back to
     /// `AwaitingAssistantAfterToolResults`, then the queued prompt becomes the
     /// next model-visible message.
@@ -560,7 +560,7 @@ impl AgentLog {
         Ok(())
     }
 
-    /// Commit an assistant reply, moving the turn to await tool results or
+    /// Commit an assistant reply, moving the exchange to await tool results or
     /// (when no tools were called) back to a ready boundary.
     ///
     /// # Errors
@@ -628,7 +628,7 @@ impl AgentLog {
 
     /// Drive the session back to `ReadyForUser`, synthesising whatever
     /// tool-result and assistant events the role-alternation invariant
-    /// needs.  Called whenever a turn ends without a natural assistant
+    /// needs.  Called whenever an exchange ends without a natural assistant
     /// reply — a user cancellation or a surfaced error.  `reason`
     /// selects the synthetic stub text and the optional breadcrumb.
     ///
@@ -646,13 +646,13 @@ impl AgentLog {
                 "cancelled",
             ),
             QuiesceReason::Aborted => (
-                "no result: turn aborted before tool execution",
-                "(no reply: turn aborted)",
+                "no result: exchange aborted before tool execution",
+                "(no reply: exchange aborted)",
                 "aborted",
             ),
             QuiesceReason::Replied => (
-                "no result: turn ended on reply",
-                "(turn ended: replied to parent)",
+                "no result: exchange ended on reply",
+                "(exchange ended: replied to parent)",
                 "replied",
             ),
         };
@@ -689,13 +689,13 @@ impl AgentLog {
         }
     }
 
-    /// Indices in `events` of top-level user prompts — the turn boundaries a
-    /// compaction may cut at.  Replays the ready/in-turn state so a mid-turn
+    /// Indices in `events` of top-level user prompts — the exchange boundaries a
+    /// compaction may cut at.  Replays the ready/in-exchange state so a mid-exchange
     /// steering prompt (not a clean boundary) is skipped, and a cut never
     /// splits an assistant message from its tool results.  `events` is
     /// already the live view (see [`Compaction`]), so the whole vector is
     /// candidates — no separate "visible from" index to skip past.
-    fn turn_start_indices(&self) -> Vec<usize> {
+    fn exchange_start_indices(&self) -> Vec<usize> {
         let mut ready = true;
         let mut starts = Vec::new();
         for (i, e) in self.events.iter().enumerate() {
@@ -721,18 +721,18 @@ impl AgentLog {
         starts
     }
 
-    /// Plan a compaction: choose the cut so the most recent turns fitting
+    /// Plan a compaction: choose the cut so the most recent exchanges fitting
     /// in `keep_budget_bytes` stay verbatim, and gather the older prefix
     /// (plus any prior summary) as the messages to summarise.  `None` when
     /// everything currently visible fits the budget — nothing older than
     /// the kept suffix to summarise.
     pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
-        let candidates = self.turn_start_indices();
+        let candidates = self.exchange_start_indices();
 
-        // Walk turn starts newest-first, growing the kept suffix until it
+        // Walk exchange starts newest-first, growing the kept suffix until it
         // would exceed the budget; the cut is the oldest start still
         // inside it.  Default: keep nothing (cut past the end) — a single
-        // turn larger than the whole budget falls back to summarising all.
+        // exchange larger than the whole budget falls back to summarising all.
         let mut cut = self.events.len();
         let mut acc = 0usize;
         let mut upper = self.events.len();
@@ -1127,12 +1127,12 @@ mod tests {
         s.append_assistant(ChatMessage::assistant("done"), vec![], None)
             .unwrap();
         // Keep no suffix (cut past the end) — the model view collapses to
-        // the summary alone, as it does when no recent turn fits the budget.
+        // the summary alone, as it does when no recent exchange fits the budget.
         let cut = s.events.len();
         s.apply_compaction("did stuff".into(), cut).unwrap();
         // Compaction lands in `ReadyForUser`; mimic the REPL by
         // priming a fresh user prompt before asking what the model
-        // sees on the next turn.
+        // sees on the next exchange.
         s.append_user("next".into()).unwrap();
         let ms = s.render_messages().unwrap();
         // Model view skips the pre-compaction history: just the
@@ -1155,16 +1155,16 @@ mod tests {
                 .unwrap();
         }
 
-        // A budget that holds exactly the last turn keeps it verbatim and
+        // A budget that holds exactly the last exchange keeps it verbatim and
         // summarises everything older.
-        let last_turn = &s.events[s.events.len() - 2..];
-        let keep = last_turn.iter().map(event_message_bytes).sum::<usize>();
+        let last_exchange = &s.events[s.events.len() - 2..];
+        let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
         let plan = s.plan_compaction(keep).expect("a prefix to summarise");
         s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
             .unwrap();
 
         let view = serde_json::to_string(&s.history_messages()).unwrap();
-        // Summary stands in for the dropped turns; the last turn survives.
+        // Summary stands in for the dropped exchanges; the last exchange survives.
         assert!(view.contains("PRIOR-WORK"));
         assert!(view.contains("USER3") && view.contains("ASST3"));
         // The summarised prefix is gone from the model view…
@@ -1188,8 +1188,8 @@ mod tests {
         let count_before = s.event_count();
         let bytes_before = s.history_bytes();
 
-        let last_turn = &s.events[s.events.len() - 2..];
-        let keep = last_turn.iter().map(event_message_bytes).sum::<usize>();
+        let last_exchange = &s.events[s.events.len() - 2..];
+        let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
         let plan = s.plan_compaction(keep).expect("a prefix to summarise");
         let kept_len = s.events.len() - plan.suffix_start;
         s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
@@ -1225,8 +1225,8 @@ mod tests {
         }
         let before = fs::read_to_string(s.dir().join("events.json")).unwrap();
 
-        let last_turn = &s.events[s.events.len() - 2..];
-        let keep = last_turn.iter().map(event_message_bytes).sum::<usize>();
+        let last_exchange = &s.events[s.events.len() - 2..];
+        let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
         let plan = s.plan_compaction(keep).expect("a prefix to summarise");
         s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
             .unwrap();
@@ -1315,7 +1315,7 @@ mod tests {
         );
     }
 
-    /// A turn that ends on a surfaced error — not a cancel — must still
+    /// An exchange that ends on a surfaced error — not a cancel — must still
     /// wind the committed-but-unanswered prompt back to `ReadyForUser`
     /// so the next prompt is admitted.  Regression for the
     /// transport-failure wedge: a stranded `AwaitingAssistantAfterUser`

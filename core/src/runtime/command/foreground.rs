@@ -40,34 +40,34 @@ impl ForegroundDecision {
     ///
     /// Foreground requires *all three*: this caller is the top-level
     /// orchestrator ([`LaunchRole::is_top_level`](crate::io::LaunchRole::is_top_level),
-    /// not a pipeline stage), the installed turn holds the terminal lease
+    /// not a pipeline stage), the installed run holds the terminal lease
     /// ([`Shell::terminal_lease`] is `Some` — the authority the old
     /// `startup_foreground` predicate stood in for), and stdout is terminal-
     /// bound with no shell-side pump.  The lease — not `interactive` — is the
     /// terminal-ownership oracle: a non-interactive script launched at a
-    /// terminal holds a `Leased` turn exactly like the REPL and must foreground
+    /// terminal holds a `Leased` run exactly like the REPL and must foreground
     /// its interactive children, or they raise SIGTTOU on their first
     /// `tcsetattr` from a background pgroup.  An internal pipeline stage runs
     /// with [`LaunchRole::PipelineStage`](crate::io::LaunchRole), so even when
-    /// its `shell.turn.io` appears to satisfy the conditions it cannot take
-    /// foreground; an exarch tool turn installs `Denied`, so its lease borrow
+    /// its `shell.run.io` appears to satisfy the conditions it cannot take
+    /// foreground; an exarch tool run installs `Denied`, so its lease borrow
     /// is unavailable and the handoff cannot be constructed at all.
     pub(super) fn for_standalone(shell: &Shell, needs_pump: bool) -> Self {
-        let want_fg = shell.turn.io.launch_role.is_top_level()
+        let want_fg = shell.run.io.launch_role.is_top_level()
             && shell.terminal_lease().is_some()
             && !needs_pump
             && matches!(
-                shell.turn.io.stdout,
+                shell.run.io.stdout,
                 crate::io::Sink::Terminal | crate::io::Sink::External(_)
             );
         Self {
             want_fg,
             // Lead an own group in the background — see the field doc.
-            own_group_when_background: shell.turn.io.launch_role.is_top_level()
-                && !shell.turn.io.interactive,
+            own_group_when_background: shell.run.io.launch_role.is_top_level()
+                && !shell.run.io.interactive,
             // Park only a foreground child of an interactive REPL — see
             // the field doc.
-            park_on_stop: want_fg && shell.turn.io.interactive,
+            park_on_stop: want_fg && shell.run.io.interactive,
         }
     }
 

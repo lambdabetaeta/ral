@@ -4,8 +4,8 @@
 //! The handle is the evidence of detachment.  `spawn` (with its
 //! host-installed siblings — the REPL's `watch`, the agent host's durable
 //! `service`) reifies a [`Value::Handle`] and parks its worker under the
-//! durable session root, so it outlives the turn that launched it; a
-//! foreground cancel — a turn deadline or interrupt — cannot reach a
+//! durable session root, so it outlives the run that launched it; a
+//! foreground cancel — a run deadline or interrupt — cannot reach a
 //! worker that is not a child of the foreground scope.  `await`, `race`,
 //! and `poll` are the eliminators that observe a handle from the
 //! foreground, and `cancel` the explicit reaper.
@@ -53,10 +53,10 @@ pub(super) enum ChildIoMode {
 const DEFERRED_SURFACE_CAP: usize = 4096;
 
 /// The surface a *deferred* worker installs.  Unlike a same-thread thunk body,
-/// a deferred worker may outlive the turn that spawned it, so it must not hold
-/// the turn's live sink: it buffers structured events into a bounded
+/// a deferred worker may outlive the run that spawned it, so it must not hold
+/// the run's live sink: it buffers structured events into a bounded
 /// [`SurfaceBuffer`].  The buffer has two ways out — `await`/`race` replay it
-/// through the awaiting turn's surface (the live-frame pull), and at completion
+/// through the awaiting run's surface (the live-frame pull), and at completion
 /// the worker delivers a clone to its [`DeferredSink`] (the un-awaited
 /// fallback) — gated to deliver exactly once by the handle's `joined` latch.
 struct DeferredSurface {
@@ -217,7 +217,7 @@ where
     // to the `register` call near the end; every early return in between —
     // the `Watch` arm's clone failure included — releases it through
     // `Reservation`'s own drop.
-    let reservation = match shell.local.workers.reserve(shell.turn.worker_cap) {
+    let reservation = match shell.local.workers.reserve(shell.run.worker_cap) {
         Ok(reservation) => reservation,
         Err(CapReached(cap)) => {
             return Err(sig(format!(
@@ -235,16 +235,16 @@ where
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
     // The deferred worker buffers `surface` calls here rather than holding the
-    // spawning turn's live sink; `await`/`race` replay it once and the worker
+    // spawning run's live sink; `await`/`race` replay it once and the worker
     // delivers a clone to the deferred sink at completion.
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
     // The session-lived deferred sink the worker delivers to at completion,
-    // captured from the spawning turn so it survives that turn's teardown and
+    // captured from the spawning run so it survives that run's teardown and
     // a nested `spawn` inside the worker inherits it.  The worker's
     // `DeferredSurface` holds both the buffer and this destination; the
     // `joined` latch is shared with the eliminators so whichever renders
     // first wins the deliver-once test.
-    let deferred = shell.turn.deferred.clone();
+    let deferred = shell.run.deferred.clone();
     let worker_surface = Arc::new(DeferredSurface {
         buf: surface_buf.clone(),
         deferred: deferred.clone(),
@@ -256,7 +256,7 @@ where
         ChildIoMode::Watch { label } => {
             let clone_parent = || {
                 shell
-                    .turn
+                    .run
                     .io
                     .stdout
                     .try_clone()
@@ -285,9 +285,9 @@ where
     let worker_state = state.clone();
 
     let (_join, cancel) = shell.spawn_thread(snap, move |child_env| {
-        child_env.turn.io.capture_outer = None;
-        child_env.turn.io.stdout = stdout;
-        child_env.turn.io.stderr = stderr;
+        child_env.run.io.capture_outer = None;
+        child_env.run.io.stdout = stdout;
+        child_env.run.io.stderr = stderr;
         // A detached worker is a background computation with no terminal: its
         // stdout/stderr are buffers, and its stdin must not fall through to
         // fd 0.  `spawn_thread` builds the worker from a defaulted `Io`
@@ -295,12 +295,12 @@ where
         // `cargo test` exercising signal code, say — would inherit the real
         // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
         // it.  `Empty` wires fd 0 to `/dev/null`.
-        child_env.turn.io.stdin = crate::io::Source::Empty;
-        // The deferred sink flows onto the worker's turn so a nested `spawn`
+        child_env.run.io.stdin = crate::io::Source::Empty;
+        // The deferred sink flows onto the worker's run so a nested `spawn`
         // inside the body installs its own `DeferredSurface` with the same
         // sink and delivers at *its* own completion.
-        child_env.turn.deferred = deferred;
-        child_env.turn.surface = Some(worker_surface.clone());
+        child_env.run.deferred = deferred;
+        child_env.run.surface = Some(worker_surface.clone());
 
         // Arm the flush guard before the body runs: a panicking body unwinds
         // through it (a `` `panic `` batch, then the unwind continues to drop
@@ -319,8 +319,8 @@ where
         // tail call surfaces here rather than collapsing inside.
         let result = absorb_tail(work(child_env), child_env);
         if flush_pending {
-            let _ = child_env.turn.io.stdout.flush_pending();
-            let _ = child_env.turn.io.stderr.flush_pending();
+            let _ = child_env.run.io.stdout.flush_pending();
+            let _ = child_env.run.io.stderr.flush_pending();
         }
         // Flush the boundary's clone before sending the result, so its copy is
         // independent of `complete_handle`'s later `mem::take` of the buffer.
@@ -390,7 +390,7 @@ where
     // no chain at all — no reaper entry ever exists for it, which is the
     // whole durable policy.
     if class == LeaseClass::Worker
-        && let Some(lease) = shell.turn.deferred_lease
+        && let Some(lease) = shell.run.deferred_lease
     {
         let chain = LeaseChain {
             scope: handle.cancel.clone(),
@@ -517,7 +517,7 @@ fn spawn_buffered(body: Arc<crate::ir::Comp>, captured: Arc<Env>, shell: &Shell)
 /// label.
 ///
 /// The watched worker is detached at the root and keeps writing as it
-/// runs, so its sink must outlive the turn.  Availability is therefore the
+/// runs, so its sink must outlive the run.  Availability is therefore the
 /// host's: a host with a durable stdout sink (the ral REPL, batch scripts)
 /// installs it via [`crate::builtins::WATCH_BUILTIN`]; a host whose active
 /// streams are per-call capture buffers (exarch) leaves it uninstalled, so
@@ -687,12 +687,12 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
 }
 
 /// Replay a finished detached worker's deferred surface events through the
-/// awaiting turn's *current* surface — once.  Only the foreground eliminators
+/// awaiting run's *current* surface — once.  Only the foreground eliminators
 /// `await`/`race` call this: a `poll`ed-but-not-awaited handle and a handle no
-/// turn ever awaits emit no cards, and repeated `await` does not duplicate
+/// run ever awaits emit no cards, and repeated `await` does not duplicate
 /// them.  A detached worker's `surface` calls are buffered (never on the
-/// possibly-ended spawning turn's sink), so this is where they finally surface
-/// — on whichever turn observes the handle.
+/// possibly-ended spawning run's sink), so this is where they finally surface
+/// — on whichever run observes the handle.
 fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, shell: &Shell) {
     {
         let mut joined = handle.joined.lock().unwrap();
@@ -701,7 +701,7 @@ fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, sh
         }
         *joined = true;
     }
-    if let Some(sink) = shell.turn.surface.as_ref() {
+    if let Some(sink) = shell.run.surface.as_ref() {
         for ev in &completed.surface {
             sink.emit(ev);
         }
@@ -726,7 +726,7 @@ fn project_completed(completed: CompletedHandle) -> Settled<Value> {
 /// if none remain live.  Between sweeps it polls `process::check`, so a
 /// foreground-scope cancel (a deadline or interrupt) unwinds the wait;
 /// but the workers hang at the durable root, not the foreground, so a
-/// cut-short wait leaves them alive to be observed on a later turn.
+/// cut-short wait leaves them alive to be observed on a later run.
 fn wait_first_settled<'a>(
     handles: &[&'a HandleInner],
     shell: &mut Shell,
@@ -760,7 +760,7 @@ fn wait_first_settled<'a>(
 /// output, and return its result record.  Errors if the handle was
 /// cancelled, and re-raises a failed block.  The wait shares `race`'s
 /// cancel-aware loop rather than a bare `recv`: a foreground deadline or
-/// interrupt unwinds it, but the root-scoped worker survives the turn.
+/// interrupt unwinds it, but the root-scoped worker survives the run.
 pub(super) fn await_handle(handle: &HandleInner, shell: &mut Shell) -> Settled<Value> {
     ensure_live(handle, shell)?;
     let (_, completed) = wait_first_settled(&[handle], shell)?;
@@ -1160,17 +1160,17 @@ mod tests {
 
     /// A foreground cancel spares a detached worker: the worker parents
     /// under the durable root, not the swappable foreground scope, so
-    /// cancelling `turn.cancel` does not reach it.  This is the
-    /// collateral-kill fix made executable — a turn timeout on the
+    /// cancelling `run.cancel` does not reach it.  This is the
+    /// collateral-kill fix made executable — a run timeout on the
     /// foreground must not reap a `spawn`/`watch` worker meant to outlive
-    /// the turn.
+    /// the run.
     #[test]
     fn foreground_cancel_spares_detached_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let (_join, worker_scope) = shell.spawn_thread(snap, |_| ());
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         assert!(
@@ -1180,9 +1180,9 @@ mod tests {
     }
 
     /// A blocked `await` unwinds when the foreground scope is cancelled (a
-    /// turn deadline or interrupt) instead of sleeping forever on a bare
+    /// run deadline or interrupt) instead of sleeping forever on a bare
     /// `recv`, yet the worker it was awaiting — root-parented, not
-    /// foreground — is left alive to be awaited again on a later turn.
+    /// foreground — is left alive to be awaited again on a later run.
     /// One test for the two failure modes the old bare-`recv` path
     /// produced: the past-the-wall hang and the collateral kill, both gone.
     #[test]
@@ -1210,9 +1210,9 @@ mod tests {
             cancel: worker_scope.clone(),
         };
 
-        // Cancel the foreground (turn deadline / interrupt), not the root.
+        // Cancel the foreground (run deadline / interrupt), not the root.
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
 
@@ -1265,7 +1265,7 @@ mod tests {
     #[test]
     fn unobserved_worker_is_reaped_at_its_idle_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(40, 10_000));
+        shell.run.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1359,14 +1359,14 @@ mod tests {
     }
 
     /// Containment (§3 of the enquiry-channel ADR): a detached worker never
-    /// receives the spawning turn's enquiry desk, even though one is
-    /// installed on the spawning turn. The worker's own `enquire` call must
+    /// receives the spawning run's enquiry desk, even though one is
+    /// installed on the spawning run. The worker's own `enquire` call must
     /// answer the honest absence error, never reach `EchoDesk`, and never
     /// park.
     #[test]
     fn spawned_worker_never_receives_the_enquiry_desk() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
+        shell.run.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
         let snap = Arc::new(shell.mobile().scope);
         let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
         let handle = spawn_child(
@@ -1388,20 +1388,20 @@ mod tests {
             .expect("worker must send its enquire outcome before settling");
         match outcome {
             Err(e) => assert_eq!(e.message, "this host answers no enquiries"),
-            Ok(_) => panic!("a detached worker must never reach the spawning turn's desk"),
+            Ok(_) => panic!("a detached worker must never reach the spawning run's desk"),
         }
     }
 
     /// Containment (§3 of the enquiry-channel ADR), the nursery's twin of
     /// `spawned_worker_never_receives_the_enquiry_desk`: a detached worker
-    /// never receives the spawning turn's nursery, even though one is
-    /// installed on the spawning turn. The worker's own `fork_into_nursery`
+    /// never receives the spawning run's nursery, even though one is
+    /// installed on the spawning run. The worker's own `fork_into_nursery`
     /// call must answer the honest absence error, never reach the parent's
     /// `Nursery`, and never park.
     #[test]
     fn spawned_worker_never_receives_the_nursery() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.nursery = Some(crate::types::Nursery::default());
+        shell.run.nursery = Some(crate::types::Nursery::default());
         let snap = Arc::new(shell.mobile().scope);
         let (tx, rx) = mpsc::channel::<crate::types::Settled<crate::types::NurseryId>>();
         let handle = spawn_child(
@@ -1424,7 +1424,7 @@ mod tests {
         match outcome {
             Err(Break::Error(e)) => assert_eq!(e.message, "this host adopts no forked sessions"),
             Err(other) => panic!("expected Break::Error, got {other:?}"),
-            Ok(_) => panic!("a detached worker must never reach the spawning turn's nursery"),
+            Ok(_) => panic!("a detached worker must never reach the spawning run's nursery"),
         }
     }
 
@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn polled_worker_survives_past_its_idle_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(200, 10_000));
+        shell.run.deferred_lease = Some(lease_ms(200, 10_000));
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1475,7 +1475,7 @@ mod tests {
     #[test]
     fn backstop_reaps_a_ritually_polled_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(150, 400));
+        shell.run.deferred_lease = Some(lease_ms(150, 400));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1514,7 +1514,7 @@ mod tests {
     #[test]
     fn completed_unobserved_worker_is_not_reaped() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(100, 10_000));
+        shell.run.deferred_lease = Some(lease_ms(100, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn listing_does_not_renew_the_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(40, 10_000));
+        shell.run.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1598,7 +1598,7 @@ mod tests {
     #[test]
     fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(40, 150));
+        shell.run.deferred_lease = Some(lease_ms(40, 150));
 
         let snap = Arc::new(shell.mobile().scope);
         let durable = spawn_child(
@@ -1660,7 +1660,7 @@ mod tests {
     #[test]
     fn cancel_through_the_handle_ends_a_durable_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.deferred_lease = Some(lease_ms(10_000, 20_000));
+        shell.run.deferred_lease = Some(lease_ms(10_000, 20_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1696,23 +1696,23 @@ mod tests {
 
     // ── `service`'s mandatory description ────────────────────────────────
 
-    /// Run `src` as one capturing top-level turn with `SERVICE_BUILTIN`
+    /// Run `src` as one capturing top-level run with `SERVICE_BUILTIN`
     /// installed, returning the runtime result. Panics on a parse/type
     /// failure — every source these tests run is expected to compile.
     fn run_service_source(shell: &mut Shell, src: &str) -> Settled<Value> {
-        use crate::transport::{Program, Turn};
-        use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
-        let req = TurnRequest {
-            turn: Turn {
+        use crate::transport::{Program, Run};
+        use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+        let req = RunRequest {
+            run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
-                stdin: TurnStdin::Empty,
+                stdin: RunStdin::Empty,
             },
             surface: None,
             deferred: None,
@@ -1720,9 +1720,9 @@ mod tests {
             nursery: None,
             lifecycle: Box::new(()),
         };
-        match shell.run_turn(req) {
-            TurnReport::Ran { result, .. } => result,
-            TurnReport::Static { .. } => {
+        match shell.run(req) {
+            RunReport::Ran { result, .. } => result,
+            RunReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
             }
         }
@@ -1773,7 +1773,7 @@ mod tests {
     }
 
     /// A detached worker's `surface` events are buffered, not emitted live,
-    /// and replay through the *awaiting* turn's surface exactly once: `poll`
+    /// and replay through the *awaiting* run's surface exactly once: `poll`
     /// never replays, the first `await` replays, and a second `await` does
     /// not duplicate.  Models `spawn { surface … }` then observing the handle.
     #[test]
@@ -1787,7 +1787,7 @@ mod tests {
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let log = Arc::new(Mutex::new(Vec::new()));
-        shell.turn.surface = Some(Arc::new(Rec(log.clone())));
+        shell.run.surface = Some(Arc::new(Rec(log.clone())));
 
         // A settled handle carrying one buffered surface event, modelling a
         // detached worker that called `surface` once and returned.  The
@@ -1886,7 +1886,7 @@ mod tests {
         fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<FOValue> {
             let mut shell = Shell::new(crate::io::TerminalState::default());
             let batches = Arc::new(Mutex::new(Vec::new()));
-            shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+            shell.run.deferred = Some(Arc::new(RecDeferred(batches.clone())));
             let snap = Arc::new(shell.mobile().scope);
             // Hold the handle (and its receiver) so the channel stays connected
             // until the worker has flushed; never observed, so no eliminator
@@ -1937,7 +1937,7 @@ mod tests {
     fn deferred_batch_carries_body_surface_before_done() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
-        shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+        shell.run.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
 
         // A worker that surfaces one card, then panics: the buffered card must
@@ -1950,7 +1950,7 @@ mod tests {
             LeaseClass::Worker,
             "<block>",
             |child| {
-                if let Some(sink) = child.turn.surface.as_ref() {
+                if let Some(sink) = child.run.surface.as_ref() {
                     sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
@@ -1991,7 +1991,7 @@ mod tests {
     #[test]
     fn no_deferred_sink_means_no_delivery() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        assert!(shell.turn.deferred.is_none(), "a bare REPL installs none");
+        assert!(shell.run.deferred.is_none(), "a bare REPL installs none");
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -2000,7 +2000,7 @@ mod tests {
             LeaseClass::Worker,
             "<block>",
             |child| {
-                if let Some(sink) = child.turn.surface.as_ref() {
+                if let Some(sink) = child.run.surface.as_ref() {
                     sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
@@ -2013,7 +2013,7 @@ mod tests {
 
         // Join through `await`: the worker has run and (with no deferred sink)
         // flushed nothing.  The `joined` latch was never set by a delivery, so
-        // the replay still surfaces the body's card through the awaiting turn
+        // the replay still surfaces the body's card through the awaiting run
         // — the existing pull-forward path.
         let log = Arc::new(Mutex::new(Vec::new()));
         struct Rec(Arc<Mutex<Vec<FOValue>>>);
@@ -2022,7 +2022,7 @@ mod tests {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
-        shell.turn.surface = Some(Arc::new(Rec(log.clone())));
+        shell.run.surface = Some(Arc::new(Rec(log.clone())));
         await_handle(&handle, &mut shell).expect("await ok");
         let replayed = log.lock().unwrap().clone();
         assert_eq!(
@@ -2043,7 +2043,7 @@ mod tests {
     fn deferred_delivery_suppresses_a_later_await_replay() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
-        shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+        shell.run.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -2052,7 +2052,7 @@ mod tests {
             LeaseClass::Worker,
             "<block>",
             |child| {
-                if let Some(sink) = child.turn.surface.as_ref() {
+                if let Some(sink) = child.run.surface.as_ref() {
                     sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
@@ -2071,7 +2071,7 @@ mod tests {
         );
 
         // A later `await` reads the result but finds the latch set, so it
-        // replays no card into the live turn.
+        // replays no card into the live run.
         let log = Arc::new(Mutex::new(Vec::new()));
         struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
@@ -2079,7 +2079,7 @@ mod tests {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
-        shell.turn.surface = Some(Arc::new(Rec(log.clone())));
+        shell.run.surface = Some(Arc::new(Rec(log.clone())));
         await_handle(&handle, &mut shell).expect("await still returns the result record");
         assert_eq!(
             log.lock().unwrap().len(),
@@ -2131,7 +2131,7 @@ mod tests {
     fn spawn_child_registers_with_no_deferred_lease_granted() {
         let shell = Shell::new(crate::io::TerminalState::default());
         assert!(
-            shell.turn.deferred_lease.is_none(),
+            shell.run.deferred_lease.is_none(),
             "precondition: no lease granted"
         );
         let snap = Arc::new(shell.mobile().scope);
@@ -2578,7 +2578,7 @@ mod tests {
     #[test]
     fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.worker_cap = Some(2);
+        shell.run.worker_cap = Some(2);
 
         let mut gates = Vec::new();
         let mut handles = Vec::new();
@@ -2649,7 +2649,7 @@ mod tests {
     #[test]
     fn durable_birth_counts_toward_the_cap() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.worker_cap = Some(2);
+        shell.run.worker_cap = Some(2);
 
         let mut gates = Vec::new();
         for (class, cmd) in [
@@ -2696,7 +2696,7 @@ mod tests {
     #[test]
     fn settled_entries_do_not_block_admission() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.worker_cap = Some(1);
+        shell.run.worker_cap = Some(1);
         let first = spawn_child(
             Arc::new(shell.mobile().scope),
             &shell,

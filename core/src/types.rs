@@ -78,7 +78,7 @@ pub use audit::{
     STDERR_CAP_BYTES, epoch_us,
 };
 
-// Turn-local source cursor and its call-site snapshot.  See diagnostic.rs.
+// Run-local source cursor and its call-site snapshot.  See diagnostic.rs.
 pub use crate::diagnostic::{CallSite, LocationCursor};
 
 // Shell state, Context.
@@ -88,7 +88,7 @@ pub use shell::hooks::{
 };
 pub use shell::{
     Context, DEFAULT_RECURSION_LIMIT, DeferredSink, Desk, EnquiryDesk, EventSink, LocalState,
-    Mobile, Nursery, NurseryId, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
+    Mobile, Nursery, NurseryId, RunState, SessionState, Shell, SurfaceSink, TerminalLoan,
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};
 

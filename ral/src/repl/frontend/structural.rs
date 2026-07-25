@@ -155,7 +155,7 @@ impl StructuralFrontend {
         // the user composes (no evaluation happens here), so build them once.
         // Both project the same user bindings, so fold the scope once and
         // derive both from that single snapshot.  The matrix also takes a
-        // snapshot of the pgid jobs (the session reaps the table each turn
+        // snapshot of the pgid jobs (the session reaps the table each iteration
         // before `read`), copied out under a brief lock that is dropped before
         // rendering.
         let baseline = self.baseline.get_or_insert_with(|| binding_names(shell));

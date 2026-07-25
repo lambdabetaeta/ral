@@ -25,7 +25,7 @@
 //! [`arm_lifetime`] / [`arm_callback`] return a [`Deadline`] guard, which
 //! selects between two modes.  Held and then dropped, the guard *disarms*
 //! its entry: the daemon skips a disarmed entry when it comes due, so a
-//! turn that finishes before its ceiling is never reaped by a late pop.
+//! run that finishes before its ceiling is never reaped by a late pop.
 //! Consumed by [`Deadline::keep`], the entry stays armed forever and fires
 //! at its ceiling regardless — the fire-and-forget mode the detached-worker
 //! death-clock needs, since its worker outlives the `spawn` call that armed

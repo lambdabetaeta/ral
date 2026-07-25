@@ -426,7 +426,7 @@ pub fn wait_foreground(pgid: Pgid, shell: &Shell) -> ForegroundWait {
     #[cfg(unix)]
     {
         // RAII handoff: tcsetpgrp + termios snapshot on acquire,
-        // restored on drop.  `None` when the turn holds no terminal
+        // restored on drop.  `None` when the run holds no terminal
         // lease (e.g. a non-interactive resume) — exactly when there
         // is no tty handoff to do, so we still SIGCONT and wait but
         // skip the tty dance.

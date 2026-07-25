@@ -20,7 +20,7 @@
 //! first `spawn` that establishes a `leader`.
 //!
 //! Between `prepare` and the first `spawn`, no relay is active, so a
-//! SIGINT racing the launch sequence merely cancels the turn's
+//! SIGINT racing the launch sequence merely cancels the run's
 //! foreground scope.  The launch loop's per-stage `signal::check`
 //! observes the scope and aborts cleanly before any stage spawns.
 
@@ -130,7 +130,7 @@ impl PipelineGroup {
 
     pub(super) fn claim_foreground(&mut self, shell: &Shell) {
         // The terminal plan was already resolved against the lease, so a
-        // `ForegroundExternalGroup` here implies the turn holds one; the
+        // `ForegroundExternalGroup` here implies the run holds one; the
         // borrow is the unforgeable proof `try_acquire` now demands.
         if self.terminal.owns_tty()
             && self.foreground.is_none()

@@ -98,9 +98,9 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         0u16
     };
     // The queued-user rows sit above the matrix/tab row: prompts the human
-    // submitted mid-turn, waiting for a tool or turn boundary. They read only
-    // `UserSteering` from the typed inbox, then render through the same prompt
-    // chrome path as committed prompt echoes.
+    // submitted mid-exchange, waiting for a tool or exchange boundary. They
+    // read only `UserSteering` from the typed inbox, then render through the
+    // same prompt chrome path as committed prompt echoes.
     let queued = app.inbox.queued_user_messages();
     let queued_lines = if queued.is_empty() {
         Vec::new()

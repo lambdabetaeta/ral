@@ -26,7 +26,7 @@
 //! - [`session`]  -- The REPL state machine driving the loop.
 //! - [`theme`]    -- REPL value-output styling (configurable from rc).
 //! - [`worksheet`] -- The REPL-side worksheet model: per-binding
-//!   dependency edges and the pure/effectful verdict, retained across turns
+//!   dependency edges and the pure/effectful verdict, retained across runs
 //!   for the structural surface's reactive worksheet.
 
 mod complete;

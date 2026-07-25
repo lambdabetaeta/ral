@@ -4,7 +4,7 @@
 //! A "frame" names one of the rails that cross between front-end and
 //! engine: Attach/Detach/Ping/Pong bracket and keep alive one connection —
 //! the connection *is* the session — while Dispatch carries one whole
-//! turn, Event flows engine→front-end, and Control flows front-end→engine.
+//! run, Event flows engine→front-end, and Control flows front-end→engine.
 //!
 //! Under the **identity transport** (Phase 1) the channel is a direct Rust
 //! call: frames are passed by move, never encoded.  The `Transport` trait
@@ -83,15 +83,15 @@ pub enum Frame {
     /// Front-end drops: cancel in-flight dispatch, reap foreground
     /// subtree, restore terminal state.
     Detach,
-    /// One whole turn.  Boxed so every other `Frame` variant is not sized
-    /// to `Turn`'s stack footprint.
-    Dispatch(DispatchId, Box<Turn>),
+    /// One whole run.  Boxed so every other `Frame` variant is not sized
+    /// to `Run`'s stack footprint.
+    Dispatch(DispatchId, Box<Run>),
     /// A pure, boundary-time read of session state — no wall, no sinks, no
-    /// clock, absent by type, which is why it is a `Frame` and not a `Turn`
+    /// clock, absent by type, which is why it is a `Frame` and not a `Run`
     /// variant. Answered through the same `Event::Report` rail as a
     /// dispatch and correlated by the same `DispatchId`; it serialises with
     /// dispatches on the engine's single worker rendezvous, so a probe sent
-    /// while a turn runs gets the same "engine busy" answer a second
+    /// while a run runs gets the same "engine busy" answer a second
     /// dispatch would. The `FOValue` names the reading class (a
     /// `Variant` label, decoded by [`answer_probe`]); an unrecognised class
     /// answers an error naming it, never a silent default.
@@ -124,10 +124,10 @@ pub enum Frame {
     Pong(u64),
 }
 
-/// One whole turn: the program to run and the conditions it runs under.
+/// One whole run: the program to evaluate and the conditions it runs under.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Turn {
-    /// What the turn runs.
+pub struct Run {
+    /// What the run evaluates.
     pub program: Program,
     /// Label for the root source context (`"<stdin>"` for the REPL,
     /// `"<tool>"` for exarch).
@@ -137,11 +137,11 @@ pub struct Turn {
     /// (the REPL) — while a narrower profile attenuates the session's grant
     /// (exarch).
     pub caps: crate::types::Capabilities,
-    /// The turn's foreground wall: `Some(d)` arms a `Deadline` cancel on the
-    /// turn's foreground scope `d` after it starts (exarch's per-tool wall);
-    /// `None` leaves the turn uncapped (the REPL).
-    pub turn_limit: Option<std::time::Duration>,
-    /// The lease for workers the turn defers at the durable root. `None`
+    /// The run's foreground wall: `Some(d)` arms a `Deadline` cancel on the
+    /// run's foreground scope `d` after it starts (exarch's per-tool wall);
+    /// `None` leaves the run uncapped (the REPL).
+    pub wall: Option<std::time::Duration>,
+    /// The lease for workers the run defers at the durable root. `None`
     /// (the interactive ral host) leaves a worker until `cancel`, root
     /// abort, or session exit; `Some(lease)` (an agent host) reaps a
     /// still-running worker once unobserved for `lease.idle` — renewed by
@@ -155,14 +155,14 @@ pub struct Turn {
     /// freely.
     pub worker_cap: Option<usize>,
     /// The byte IO regime.
-    pub io: crate::driver::TurnIo,
-    /// Whether the turn may hand the controlling terminal to a child.
+    pub io: crate::driver::RunIo,
+    /// Whether the run may hand the controlling terminal to a child.
     pub terminal: crate::driver::RequestedTerminalAccess,
     /// Stdin source.
-    pub stdin: crate::driver::TurnStdin,
+    pub stdin: crate::driver::RunStdin,
 }
 
-/// What a turn runs: source text compiled and typechecked against the live
+/// What a run runs: source text compiled and typechecked against the live
 /// session, or a registered hook applied to first-order arguments.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Program {
@@ -176,11 +176,11 @@ pub enum Program {
 /// Engine → front-end event frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
-    /// A live surface value from the foreground turn, ordered before this
+    /// A live surface value from the foreground run, ordered before this
     /// dispatch's Report.
     Surface(FOValue),
     /// A deferred worker's surface batch, delivered when it settles and
-    /// rendered by the host at the next turn boundary.
+    /// rendered by the host at the next run boundary.
     DeferredSurface(Vec<FOValue>),
     /// One enquiry the running dispatch raised on its host desk, nested
     /// inside this dispatch and ordered before its Report. Answered by a
@@ -249,21 +249,21 @@ impl Clone for TerminalEndpoint {
 
 // ── The terminal frame ────────────────────────────────────────────────
 
-/// The turn's terminal frame: the protocol projection of the engine's
-/// [`TurnReport`](crate::driver::TurnReport), produced by
-/// [`TurnReport::into_report`].
+/// The run's terminal frame: the protocol projection of the engine's
+/// [`RunReport`](crate::driver::RunReport), produced by
+/// [`RunReport::into_report`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Report {
-    /// Parse/type/host failure: the turn never reached evaluation. The host
-    /// renders the diagnostics and treats the turn as status 1.
+    /// Parse/type/host failure: the run never reached evaluation. The host
+    /// renders the diagnostics and treats the run as status 1.
     Static { diagnostics: Diagnostics },
-    /// The turn ran to a settled result. `status` is the transport status
+    /// The run ran to a settled result. `status` is the transport status
     /// computed once; `single_command` is whether the source compiled to a
     /// single command (for runtime-error rendering); `captured` is `Some`
-    /// under [`TurnIo::Capture`](crate::driver::TurnIo); `timed_out` is
+    /// under [`RunIo::Capture`](crate::driver::RunIo); `timed_out` is
     /// whether the wall fired.
     Ran {
-        /// The turn's settled result. `Ok` carries a [`FOValue`] so a
+        /// The run's settled result. `Ok` carries a [`FOValue`] so a
         /// successful result crosses the wire; a non-transportable result
         /// (e.g. a live `Handle`) is reported as an error instead.
         result: Result<FOValue, Break>,
@@ -274,8 +274,8 @@ pub enum Report {
     },
 }
 
-/// Rendered diagnostics from a turn that never ran: the protocol projection
-/// of [`StaticDiagnostics`](crate::turn::StaticDiagnostics).
+/// Rendered diagnostics from a run that never ran: the protocol projection
+/// of [`StaticDiagnostics`](crate::run::StaticDiagnostics).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Diagnostics {
     Parse(String),
@@ -283,12 +283,12 @@ pub enum Diagnostics {
     Host(String),
 }
 
-/// First-order projection of a settled turn's
+/// First-order projection of a settled run's
 /// [`Break`](crate::types::Break).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Break {
     /// A caught runtime error, already rendered to its full diagnostic string
-    /// (see [`TurnReport::into_report`]) — the host prints it verbatim.
+    /// (see [`RunReport::into_report`]) — the host prints it verbatim.
     /// `command_exit` carries the one classification a host's own didactics
     /// need — whether the status was an external command's non-zero exit,
     /// as opposed to a raised error — as a fact beside the rendering, since
@@ -339,7 +339,7 @@ fn render_break(
     }
 }
 
-impl crate::driver::TurnReport {
+impl crate::driver::RunReport {
     /// Project into the protocol [`Report`]: the live `Value` becomes a
     /// first-order [`FOValue`] (a non-transportable result — e.g. a live
     /// `Handle` — is reported as an error rather than dropped silently),
@@ -353,7 +353,7 @@ impl crate::driver::TurnReport {
     /// `error:` prefix, exit status, hint, and source-span caret.  The host
     /// then only has to print it.
     pub fn into_report(self, sources: &crate::source::SourceDb) -> Report {
-        use crate::turn::StaticDiagnostics;
+        use crate::run::StaticDiagnostics;
         match self {
             Self::Static { diagnostics } => Report::Static {
                 diagnostics: match diagnostics {
@@ -375,7 +375,7 @@ impl crate::driver::TurnReport {
                     Ok(v) => match FOValue::try_from(&v) {
                         Ok(fo) => Ok(fo),
                         Err(_) => Err(Break::Error {
-                            rendered: "turn result is not transportable across the host seam"
+                            rendered: "run result is not transportable across the host seam"
                                 .into(),
                             command_exit: false,
                         }),
@@ -401,7 +401,7 @@ pub trait Transport: Send + Sync {
     /// Run a dispatch synchronously.  The `Report` arrives as the final
     /// `Event`; `Surface` events are written to the event channel during
     /// execution and may be drained concurrently.
-    fn dispatch(&self, id: DispatchId, turn: Turn);
+    fn dispatch(&self, id: DispatchId, run: Run);
 
     /// Run a pure, boundary-time read of session state synchronously and
     /// return its answer. Serialises with `dispatch` on the same rendezvous
@@ -452,8 +452,8 @@ pub trait Transport: Send + Sync {
 
 // ── Dispatch loop ─────────────────────────────────────────────────────
 
-/// Mint a dispatch id, send `turn` down `transport`, and drain the event
-/// stream to the turn's terminal [`Report`](Event::Report), handing each
+/// Mint a dispatch id, send `run` down `transport`, and drain the event
+/// stream to the run's terminal [`Report`](Event::Report), handing each
 /// surface regime to its caller-supplied handler.
 ///
 /// The two surface regimes stay distinct on purpose: `on_surface` sees each
@@ -464,10 +464,10 @@ pub trait Transport: Send + Sync {
 /// so flattening the two into one undistinguished stream would be a
 /// behaviour change, not a fold.
 ///
-/// `on_enquiry` answers one [`Event::Enquiry`] this dispatch's turn raised on
+/// `on_enquiry` answers one [`Event::Enquiry`] this dispatch's run raised on
 /// its host desk; the answer is written back through
 /// [`Transport::answer`]. Under the identity transport `Event::Enquiry` never
-/// arrives here at all — the installed `Desk` is a direct call the turn makes
+/// arrives here at all — the installed `Desk` is a direct call the run makes
 /// mid-evaluation (§3 of the enquiry-channel ADR), so `on_enquiry` is dead
 /// code on that transport and live only under the wire, where the loop is
 /// the front-end's side of the desk's rendezvous.
@@ -478,14 +478,14 @@ pub trait Transport: Send + Sync {
 /// no-Report handling).
 pub fn dispatch_to_report(
     transport: &dyn Transport,
-    turn: Turn,
+    run: Run,
     mut on_surface: impl FnMut(FOValue),
     mut on_deferred: impl FnMut(Vec<FOValue>),
     mut on_enquiry: impl FnMut(FOValue) -> Result<FOValue, EnquiryError>,
 ) -> Option<Report> {
     let id = mint_dispatch_id();
 
-    transport.dispatch(id, turn);
+    transport.dispatch(id, run);
 
     while let Some((did, event)) = transport.events().recv() {
         if did != id {
@@ -755,7 +755,7 @@ impl ControlSender {
             Control::Cancel(_id) => {
                 // Trip the signal-reachable foreground scope — the same
                 // static the SIGINT relay writes to.  This is the actual
-                // scope the turn runs under, not a transport-side sibling.
+                // scope the run runs under, not a transport-side sibling.
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
             }
             Control::Suspend | Control::Resume | Control::Resize(_) => {
@@ -857,7 +857,7 @@ struct TransportSink {
     /// sets and both impls read. A live surface value emitted while it reads
     /// `0` has no dispatch to correlate to and is dropped; a deferred batch
     /// is stamped with whatever is in flight — `0` when it settles between
-    /// turns.
+    /// runs.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -888,10 +888,10 @@ impl crate::types::DeferredSink for TransportSink {
 
 // ── Identity transport ────────────────────────────────────────────────
 
-/// A session lock that cannot poison-panic.  A turn that unwinds drops its
+/// A session lock that cannot poison-panic.  A run that unwinds drops its
 /// guard mid-mutation, which would otherwise poison the mutex and turn every
 /// later `lock()` into a second panic (`PoisonError`); recovering the guard
-/// instead means a panicking turn can never wedge the session.  This is the
+/// instead means a panicking run can never wedge the session.  This is the
 /// only lock over the engine state, so the failure is impossible by
 /// construction — there is no `unwrap()` to forget.
 struct SessionLock(std::sync::Mutex<EngineInner>);
@@ -906,7 +906,7 @@ impl SessionLock {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     /// Consume the lock and recover the engine state, recovering poison the
-    /// same way `lock` does — a turn that unwound mid-mutation must not wedge
+    /// same way `lock` does — a run that unwound mid-mutation must not wedge
     /// the move-out.
     fn into_inner(self) -> EngineInner {
         self.0
@@ -937,17 +937,17 @@ pub struct IdentityTransport {
     /// lock — checking it must not touch `self.engine`.
     dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
     /// Set by [`Self::observe_foreground`]: a cell this transport writes
-    /// each turn's freshly-installed foreground scope into, at the turn's
+    /// each run's freshly-installed foreground scope into, at the run's
     /// very start.  Lives outside `engine`'s own lock, so a caller holding
-    /// a clone of the cell can read (and cancel) the *current* turn's
+    /// a clone of the cell can read (and cancel) the *current* run's
     /// scope from another thread without waiting on a dispatch in flight —
     /// the extension point a forked-session host uses to interrupt one
-    /// turn without touching the session's durable root.
-    turn_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
+    /// run without touching the session's durable root.
+    run_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
 }
 
 pub struct EngineInner {
-    /// The shell that runs turns.
+    /// The shell that executes runs.
     pub shell: crate::types::Shell,
     /// Send events to the front-end.
     pub(crate) event_tx: mpsc::Sender<(DispatchId, Event)>,
@@ -970,7 +970,7 @@ pub struct EngineInner {
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Clears the dispatch-thread stamp on drop, even on unwind — a turn that
+/// Clears the dispatch-thread stamp on drop, even on unwind — a run that
 /// panics must not leave the stamp set, or the next legitimate
 /// `shell_mut`/`with_shell` call would false-trip the reentrancy panic.
 struct DispatchStampGuard<'a> {
@@ -1014,7 +1014,7 @@ impl IdentityTransport {
             control,
             events_recv: Arc::new(EventReceiver::new(event_rx)),
             dispatch_thread: std::sync::Mutex::new(None),
-            turn_scope: None,
+            run_scope: None,
         }
     }
 
@@ -1030,21 +1030,21 @@ impl IdentityTransport {
         self.engine.lock().deferred_sink = Some(deferred);
     }
 
-    /// Arm this transport to publish each turn's freshly-installed
+    /// Arm this transport to publish each run's freshly-installed
     /// foreground scope into `cell` at the start of every dispatch, before
     /// evaluation begins.  Call once, right after construction: a forked
     /// session (exarch's agent fleet) keeps its own clone of `cell`
     /// alongside the session's durable root, so an interrupt can cancel
-    /// whichever scope the in-flight turn actually installed without ever
-    /// touching the root a later turn would inherit.
+    /// whichever scope the in-flight run actually installed without ever
+    /// touching the root a later run would inherit.
     pub fn observe_foreground(
         &mut self,
         cell: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
     ) {
-        self.turn_scope = Some(cell);
+        self.run_scope = Some(cell);
     }
 
-    /// Install the session's enquiry desk. Per-turn hosts (e.g. exarch, once
+    /// Install the session's enquiry desk. Per-run hosts (e.g. exarch, once
     /// the migration lands) call this before each dispatch so whatever the
     /// desk captures is fresh — the same reasoning `set_deferred_sink`
     /// follows.
@@ -1052,7 +1052,7 @@ impl IdentityTransport {
         self.engine.lock().desk = Some(desk);
     }
 
-    /// Install the session's nursery for engine-side session forks. Per-turn
+    /// Install the session's nursery for engine-side session forks. Per-run
     /// hosts call this before each dispatch so a stale fork from an earlier
     /// generation is never adoptable, the same reasoning `set_desk` follows.
     pub fn set_nursery(&self, nursery: crate::types::Nursery) {
@@ -1073,7 +1073,7 @@ impl IdentityTransport {
 
     /// Consume the transport and recover the owned `Shell`.  The inverse of
     /// [`IdentityTransport::new`]: a caller that handed a shell in to route a
-    /// turn through production can move it back out afterward.
+    /// run through production can move it back out afterward.
     pub fn into_shell(self) -> crate::types::Shell {
         self.engine.into_inner().shell
     }
@@ -1119,12 +1119,12 @@ impl IdentityTransport {
 }
 
 /// [`IdentityTransport::observe_foreground`]'s engine-side half: writes the
-/// turn's freshly-installed foreground scope into the caller's cell in
-/// `pre_exec`, which core's own turn door runs after installing that scope
+/// run's freshly-installed foreground scope into the caller's cell in
+/// `pre_exec`, which core's own run door runs after installing that scope
 /// but before evaluation starts.
 struct ForegroundCapture(Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>);
 
-impl crate::turn::TurnLifecycle for ForegroundCapture {
+impl crate::run::RunLifecycle for ForegroundCapture {
     fn pre_exec(&mut self, shell: &mut crate::types::Shell, _src: &str) {
         *self
             .0
@@ -1134,7 +1134,7 @@ impl crate::turn::TurnLifecycle for ForegroundCapture {
 }
 
 impl Transport for IdentityTransport {
-    fn dispatch(&self, id: DispatchId, turn: Turn) {
+    fn dispatch(&self, id: DispatchId, run: Run) {
         self.check_not_reentrant();
         let mut engine = self.engine.lock();
         *self
@@ -1151,22 +1151,22 @@ impl Transport for IdentityTransport {
             .current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
 
-        // The live handles this dispatch lends the turn, joined with the
-        // protocol `Turn` in the request the engine door runs.
-        let lifecycle: Box<dyn crate::turn::TurnLifecycle> = match &self.turn_scope {
+        // The live handles this dispatch lends the run, joined with the
+        // protocol `Run` in the request the engine door runs.
+        let lifecycle: Box<dyn crate::run::RunLifecycle> = match &self.run_scope {
             Some(cell) => Box::new(ForegroundCapture(cell.clone())),
             None => Box::new(()),
         };
-        let req = crate::driver::TurnRequest {
-            turn,
+        let req = crate::driver::RunRequest {
+            run,
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
             desk: engine.desk.clone(),
             nursery: engine.nursery.clone(),
             lifecycle,
         };
-        let turn_report = engine.shell.run_turn(req);
-        let report = turn_report.into_report(engine.shell.sources());
+        let run_report = engine.shell.run(req);
+        let report = run_report.into_report(engine.shell.sources());
 
         engine
             .current_dispatch
@@ -1205,7 +1205,7 @@ impl Transport for IdentityTransport {
     }
 
     fn detach(&self) {
-        // Cancel any in-flight turn via the signal-reachable scope.
+        // Cancel any in-flight run via the signal-reachable scope.
         crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
         self.engine.lock().terminal_lease = None;
     }
@@ -1537,10 +1537,10 @@ impl Drop for WireTransport {
 
 #[cfg(unix)]
 impl Transport for WireTransport {
-    fn dispatch(&self, id: DispatchId, turn: Turn) {
+    fn dispatch(&self, id: DispatchId, run: Run) {
         self.current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
-        self.write(&Frame::Dispatch(id, Box::new(turn)));
+        self.write(&Frame::Dispatch(id, Box::new(run)));
     }
 
     fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
@@ -1633,34 +1633,34 @@ impl Transport for WireTransport {
 //
 // Phase A installs no desk anywhere in production (§"the exarch installation
 // point" of the enquiry-channel ADR): the rail is exercised only here, by a
-// stub desk. There is no `enquire` builtin yet, so a turn's body (parsed ral
+// stub desk. There is no `enquire` builtin yet, so a run's body (parsed ral
 // source) has no way to call `Shell::enquire` itself; the round-trip test
-// below drives it the same way the turn door's own lifecycle
-// tests do — a `TurnLifecycle` given `&mut Shell` mid-turn, exactly the
+// below drives it the same way the run door's own lifecycle
+// tests do — a `RunLifecycle` given `&mut Shell` mid-run, exactly the
 // shape the migration's first handler will run under.
 #[cfg(test)]
 mod enquiry_tests {
     use super::*;
-    use crate::driver::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
-    use crate::turn::TurnLifecycle;
+    use crate::driver::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+    use crate::run::RunLifecycle;
     use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Shell};
     use std::sync::Mutex;
 
     /// The minimal capturing request under the ⊤ capability ceiling: no
-    /// surface, no deferred sink, no desk — matches `turn.rs`'s own
+    /// surface, no deferred sink, no desk — matches `run.rs`'s own
     /// `capture_req`.
-    fn capture_req<'a>(src: &str) -> TurnRequest<'a> {
-        TurnRequest {
-            turn: Turn {
+    fn capture_req<'a>(src: &str) -> RunRequest<'a> {
+        RunRequest {
+            run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
-                stdin: TurnStdin::Empty,
+                stdin: RunStdin::Empty,
             },
             surface: None,
             deferred: None,
@@ -1692,38 +1692,38 @@ mod enquiry_tests {
         }
     }
 
-    /// A `TurnLifecycle` that enquires mid-turn (`pre_exec`, which runs with
-    /// the turn frame — and its desk — installed) and records the answer.
+    /// A `RunLifecycle` that enquires mid-run (`pre_exec`, which runs with
+    /// the run frame — and its desk — installed) and records the answer.
     #[derive(Clone)]
-    struct AskDuringTurn {
+    struct AskDuringRun {
         req: FOValue,
         answer: std::sync::Arc<Mutex<Option<Result<FOValue, Error>>>>,
     }
-    impl TurnLifecycle for AskDuringTurn {
+    impl RunLifecycle for AskDuringRun {
         fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
             *self.answer.lock().unwrap() = Some(shell.enquire(self.req.clone()));
         }
     }
 
     /// `Shell::enquire` round-trips through a stub desk installed on the
-    /// turn: the desk's transform (`Int{41} -> Int{42}`) is visible to the
+    /// run: the desk's transform (`Int{41} -> Int{42}`) is visible to the
     /// caller of `enquire`, not just to the desk.
     #[test]
     fn enquire_round_trips_through_a_stub_desk() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let answer = std::sync::Arc::new(Mutex::new(None));
-        let lifecycle = AskDuringTurn {
+        let lifecycle = AskDuringRun {
             req: FOValue::Int { value: 41 },
             answer: answer.clone(),
         };
 
-        match shell.run_turn(TurnRequest {
+        match shell.run(RunRequest {
             desk: Some(std::sync::Arc::new(IncrementDesk) as Desk),
             lifecycle: Box::new(lifecycle),
             ..capture_req("$[1 + 1]")
         }) {
-            TurnReport::Ran { .. } => {}
-            TurnReport::Static { .. } => panic!("`$[1 + 1]` must reach evaluation"),
+            RunReport::Ran { .. } => {}
+            RunReport::Static { .. } => panic!("`$[1 + 1]` must reach evaluation"),
         }
 
         let answer = answer.lock().unwrap().take().expect("pre_exec must fire");
@@ -1760,7 +1760,7 @@ mod enquiry_tests {
         )));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
+        shell.run.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
         let _ = shell.enquire(FOValue::Unit);
     }
 
@@ -1772,16 +1772,16 @@ mod enquiry_tests {
         fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
             self.0.dispatch(
                 DispatchId(0),
-                Turn {
+                Run {
                     program: Program::Source(String::new()),
                     script_name: "<test>".into(),
                     caps: Capabilities::root(),
-                    turn_limit: None,
+                    wall: None,
                     deferred_lease: None,
                     worker_cap: None,
-                    io: TurnIo::Capture,
+                    io: RunIo::Capture,
                     terminal: RequestedTerminalAccess::Denied,
-                    stdin: TurnStdin::Empty,
+                    stdin: RunStdin::Empty,
                 },
             );
             Ok(req)
@@ -1796,12 +1796,12 @@ mod enquiry_tests {
         )));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.turn.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
+        shell.run.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
         let _ = shell.enquire(FOValue::Unit);
     }
 
     /// `IdentityTransport::set_desk` installs the desk that `dispatch` hands
-    /// onto the `TurnRequest` it builds: the same `Arc` reaches
+    /// onto the `RunRequest` it builds: the same `Arc` reaches
     /// `EngineInner.desk`.
     #[test]
     fn set_desk_installs_onto_engine_inner() {
@@ -1845,7 +1845,7 @@ mod enquiry_tests {
     }
 }
 
-// ── Turn-door durability, seen through the seam ───────────────────────
+// ── Run-door durability, seen through the seam ───────────────────────
 #[cfg(test)]
 mod durability_tests {
     use super::*;
@@ -1866,27 +1866,27 @@ mod durability_tests {
     static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &[crate::types::BuiltinEntry {
         name: std::borrow::Cow::Borrowed("seam-panic-now"),
         type_rule: crate::typecheck::builtins::BuiltinTypeRule::Scheme(Some(0), scheme_panic_now),
-        doc: "test-only: panic the evaluator mid-turn.",
+        doc: "test-only: panic the evaluator mid-run.",
         body: crate::types::BuiltinBody::Static(builtin_panic_now),
     }];
 
-    fn turn(src: &str) -> Turn {
-        Turn {
+    fn run(src: &str) -> Run {
+        Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
             caps: crate::types::Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: crate::driver::TurnIo::Capture,
+            io: crate::driver::RunIo::Capture,
             terminal: crate::driver::RequestedTerminalAccess::Denied,
-            stdin: crate::driver::TurnStdin::Empty,
+            stdin: crate::driver::RunStdin::Empty,
         }
     }
 
-    /// A panicking turn dispatched through the identity seam arrives as an
-    /// ordinary `Report::Static{Host}` event — the turn door caught it and
-    /// rolled the shell back — and the session dispatches the next turn
+    /// A panicking run dispatched through the identity seam arrives as an
+    /// ordinary `Report::Static{Host}` event — the run door caught it and
+    /// rolled the shell back — and the session dispatches the next run
     /// cleanly on the same transport.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
@@ -1897,7 +1897,7 @@ mod durability_tests {
 
         let report = dispatch_to_report(
             &transport,
-            turn("seam-panic-now"),
+            run("seam-panic-now"),
             |_| {},
             |_| {},
             |_| {
@@ -1911,13 +1911,13 @@ mod durability_tests {
         match report {
             Report::Static {
                 diagnostics: Diagnostics::Host(msg),
-            } => assert!(msg.contains("turn panicked"), "got {msg:?}"),
-            other => panic!("a panicking turn must report Static Host, got {other:?}"),
+            } => assert!(msg.contains("run panicked"), "got {msg:?}"),
+            other => panic!("a panicking run must report Static Host, got {other:?}"),
         }
 
         let report = dispatch_to_report(
             &transport,
-            turn("$[1 + 1]"),
+            run("$[1 + 1]"),
             |_| {},
             |_| {},
             |_| {

@@ -1,48 +1,77 @@
-//! One provider round-trip against the model.
+//! One prompt run to quiescence against the provider.
 //!
-//! [`Agent::apply`] steps the provider to quiescence: render the transcript,
-//! await a completion, admit the assistant message, dispatch the resulting
-//! tool-call batch ([`Agent::dispatch`], call by call through
-//! [`Agent::stage`]), and repeat — bounded by [`MAX_STEPS`] so a headless or
-//! autonomous run with no Esc to hand still terminates. The one
-//! auto-compaction check ([`Agent::compact`]) sits at `apply`'s entry, the
-//! sole boundary guaranteed `ReadyForUser`; the policy behind it — the
+//! [`Agent::deliberate`] steps the provider until it stops calling tools:
+//! render the transcript, await a completion, admit the assistant message,
+//! run the resulting tool-call batch ([`Agent::run_batch`], call by call
+//! through [`Agent::invoke`]), and repeat — bounded by [`MAX_STEPS`] so a
+//! headless or autonomous run with no Esc to hand still terminates. The one
+//! auto-compaction check ([`Agent::compact`]) sits at `deliberate`'s entry,
+//! the sole boundary guaranteed `ReadyForUser`; the policy behind it — the
 //! pressure trigger, the summary cap, the suffix-keep budget — lives in
 //! [`digest`](crate::agent::digest), this module only carries it out.
-//! `apply`'s three exits, [`Agent::replied`], [`Agent::cancelled`], and
+//! `deliberate`'s three exits, [`Agent::replied`], [`Agent::cancelled`], and
 //! [`Agent::capped`], are the outcome constructors: each winds the session
-//! log back to `ReadyForUser` its own way before handing back a
-//! [`TurnOutcome`].
+//! log back to `ReadyForUser` its own way before handing back an
+//! [`Outcome`].
 //!
-//! [`Agent::drive`] is the loop around this: it pulls one turn-boundary
-//! message per iteration and calls `apply` once. This module is what
-//! happens *inside* that one call — never the loop that repeats it.
+//! [`Agent::attend`] is the loop around this: it pulls one inbox item per
+//! iteration and takes it up ([`Agent::take_up`]), which calls `deliberate`
+//! once. This module is what happens *inside* that one call — never the loop
+//! that repeats it.
 
+use crate::agent::Agent;
+use crate::agent::attend::announce;
 use crate::agent::cancel;
 use crate::agent::digest::{
     COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS, compaction_due, suffix_keep_budget,
     summary_cap_tokens,
 };
-use crate::agent::drive::announce;
 use crate::agent::event::{QuiesceReason, ToolResult as SessionToolResult};
-use crate::agent::{Agent, TurnOutcome};
-use crate::bus::{Emitter, Kind, Turn};
+use crate::bus::{Emitter, Item, Kind};
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use ral_core::serial::FOValue;
 use std::sync::Arc;
 
-/// Hard ceiling on provider round-trips in one [`Agent::apply`].  The
-/// interactive frontend has Esc to halt a runaway turn; headless and
+/// Outcome of one [`Agent::deliberate`].  Degenerate cases (`Empty`,
+/// `Stopped`) become nudges; `Cancelled` and `Capped` do not; hard
+/// failures travel through [`ProviderError`].
+#[derive(Debug)]
+pub enum Outcome {
+    Complete(String),
+    /// A returning agent called `reply`: the carried payload is its deliberate
+    /// return value, a faithful [`FOValue`] (`FOValue::Unit` when the
+    /// argument was absent or unit).  Carried as a value, not pre-rendered
+    /// text, so each consumer renders it at its own edge — prose for a model
+    /// parent, the structure itself for the headless harness (via
+    /// [`crate::shell_eval::user_json`]).  Distinct from [`Self::Complete`]
+    /// precisely so the nudge layer can tell "already returned" from
+    /// "stopped without returning" and not re-nudge an agent that replied.
+    /// Terminal: it ends the attend loop.
+    Replied(FOValue),
+    Empty,
+    Stopped {
+        reason: String,
+    },
+    Cancelled,
+    /// The round-trip loop hit [`MAX_STEPS`] without the model ever
+    /// emitting a tool-call-free reply.  Terminal: it carries no nudge
+    /// (re-attending would just spend another `MAX_STEPS`).
+    Capped,
+}
+
+/// Hard ceiling on provider round-trips in one [`Agent::deliberate`].  The
+/// interactive frontend has Esc to halt a runaway deliberation; headless and
 /// autonomous sub-agent runs have nothing, so a model that keeps
 /// emitting tool calls would loop until the token budget or the wall
 /// runs out.  Bounding the step count keeps benchmark and headless runs
-/// terminating.  Generous enough that no genuine interactive turn ever
+/// terminating.  Generous enough that no genuine interactive deliberation ever
 /// reaches it.
 const MAX_STEPS: u32 = 250;
 
 impl Agent {
-    /// Run one turn: optionally commit `prompt`, then step the provider
-    /// round-trip loop to quiescence, returning the turn's outcome.
+    /// Run one deliberation: optionally commit `prompt`, then step the
+    /// provider round-trip loop to quiescence, returning the deliberation's
+    /// outcome.
     ///
     /// # Errors
     /// Returns `Err` if a provider round-trip fails, or if a session-log
@@ -51,28 +80,29 @@ impl Agent {
     /// appending the reply).
     ///
     /// # Panics
-    /// Panics if the turn is truncated with no tool calls yet no cut-short
+    /// Panics if a step is truncated with no tool calls yet no cut-short
     /// cause was recorded — an internal invariant of the round-trip loop.
-    pub fn apply(
+    pub fn deliberate(
         &mut self,
         provider: &Arc<Provider>,
         prompt: Option<String>,
         token: &cancel::Token,
         emit: &Emitter,
-    ) -> Result<TurnOutcome, ProviderError> {
+    ) -> Result<Outcome, ProviderError> {
         // A reply only ever belongs to the batch that staged it: a cancel, a
-        // log-append error, or a panic between the `stage` call that set it
+        // log-append error, or a panic between the `invoke` call that set it
         // and the drain that takes it (all recovered by returning from this
-        // `apply` without reaching that take) must not let it outlive this
-        // call.  Entering fresh here — every route into `apply` is a new turn
-        // — is the one place that is structurally guaranteed to run, so it is
-        // the one place this reset needs to live.
+        // `deliberate` without reaching that take) must not let it outlive
+        // this call.  Entering fresh here — every route into `deliberate` is
+        // a new deliberation — is the one place that is structurally
+        // guaranteed to run, so it is the one place this reset needs to live.
         self.reply = None;
         // Auto-compaction runs here, at the one boundary where `can_compact()`
-        // actually holds — `apply` is entered `ReadyForUser` (the
-        // turn-ends-ready invariant), before the prompt is committed.  Every
-        // provider round-trip — each user turn, each nudge iteration — passes
-        // through here, so long autonomous and headless runs stay bounded.
+        // actually holds — `deliberate` is entered `ReadyForUser` (the
+        // exchange-ends-ready invariant), before the prompt is committed.
+        // Every provider round-trip — each user exchange, each nudge
+        // iteration — passes through here, so long autonomous and headless
+        // runs stay bounded.
         self.compact(provider, emit, false, token);
         let mut last_text = String::new();
         if let Some(p) = prompt {
@@ -104,7 +134,7 @@ impl Agent {
                 .render_messages()
                 .map_err(ProviderError::Other)?;
             ral_core::dbg_trace!(
-                "turn",
+                "deliberate",
                 "render_messages: {} msgs in {:?}",
                 messages.len(),
                 t_render.elapsed()
@@ -136,7 +166,7 @@ impl Agent {
                 )
             };
             ral_core::dbg_trace!(
-                "turn",
+                "deliberate",
                 "provider.complete: first token {first_token:?}, full {:?}",
                 t_req.elapsed()
             );
@@ -181,7 +211,7 @@ impl Agent {
             }
             emit.emit(Kind::Boundary);
             // The tokens the model just saw — the live numerator for the
-            // context-pressure compaction trigger at this turn's boundary.
+            // context-pressure compaction trigger at this step's boundary.
             self.last_input = usage.input;
             self.log
                 .lock()
@@ -214,16 +244,16 @@ impl Agent {
             let truncated = cut_short.is_some();
             // The assistant turn was cut short — the output cap or a
             // mid-stream stall.  With no captured tool call there is nothing
-            // to dispatch and the assistant turn is final, so commit the
+            // to run and the assistant turn is final, so commit the
             // partial reply (done above) and surface a `Truncated` so the
-            // nudge re-drives the turn with `continue`.  With captured tool
-            // calls (only the output cap leaves any) the assistant message
-            // carries `tool_ids` and the session is now `AwaitingToolResults`;
-            // returning here would strand it there and the nudge's
-            // `append_user` would fail "tool results pending" (X6).  Instead
-            // fall through to dispatch the calls and continue the loop — the
-            // next round-trip resumes the truncated turn with the results in
-            // hand.
+            // nudge re-drives the exchange with `continue`.  With captured
+            // tool calls (only the output cap leaves any) the assistant
+            // message carries `tool_ids` and the session is now
+            // `AwaitingToolResults`; returning here would strand it there and
+            // the nudge's `append_user` would fail "tool results pending"
+            // (X6).  Instead fall through to run the calls and continue the
+            // loop — the next round-trip resumes the truncated turn with the
+            // results in hand.
             if truncated && tool_calls.is_empty() {
                 let reason = match cut_short.as_ref().expect("truncated implies cut_short") {
                     CutShort::OutputCap => {
@@ -255,34 +285,34 @@ impl Agent {
             if tool_calls.is_empty() {
                 return Ok(match &stop_reason {
                     Some(r) if !matches!(r, StopReason::Completed(_) | StopReason::ToolCall(_)) => {
-                        TurnOutcome::Stopped {
+                        Outcome::Stopped {
                             reason: r.raw().to_string(),
                         }
                     }
-                    _ if last_text.is_empty() => TurnOutcome::Empty,
-                    _ => TurnOutcome::Complete(last_text),
+                    _ if last_text.is_empty() => Outcome::Empty,
+                    _ => Outcome::Complete(last_text),
                 });
             }
             if truncated {
                 Self::note("[Truncated mid-tool-call; continuing]".into(), emit);
             }
-            let (results, injected) = self.dispatch(tool_calls, token, emit);
+            let (results, injected) = self.run_batch(tool_calls, token, emit);
             self.log
                 .lock()
                 .append_tool_results(results)
                 .map_err(ProviderError::Other)?;
-            // Everything that arrived during the batch lands now, mid-turn:
+            // Everything that arrived during the batch lands now, mid-step:
             // each source renders its own chrome (a `↘` block for a subagent, a
             // marked wakeup, a `spawn`'s cards), and their texts coalesce into
             // the single steering message the protocol admits after a batch.
             if !injected.is_empty() {
                 let mut text = String::new();
-                for turn in &injected {
-                    announce(turn, emit);
+                for item in &injected {
+                    announce(item, emit);
                     if !text.is_empty() {
                         text.push_str("\n\n");
                     }
-                    text.push_str(&turn.text());
+                    text.push_str(&item.text());
                 }
                 self.log
                     .lock()
@@ -343,18 +373,19 @@ impl Agent {
         if !requested && !due {
             return;
         }
-        // A turn-boundary Esc must not kick off a summarize request we'd
-        // only instantly cancel; bail before the work and let `apply`'s
-        // post-compact check return to the prompt.
+        // An exchange-boundary Esc must not kick off a summarize request
+        // we'd only instantly cancel; bail before the work and let
+        // `deliberate`'s post-compact check return to the prompt.
         if token.is_cancelled() {
             return;
         }
         // Keep the recent half verbatim; summarise the older prefix.
         let keep = suffix_keep_budget(self.log.lock().history_bytes());
         let Some(plan) = self.log.lock().plan_compaction(keep) else {
-            // No turn old enough to summarise.  This is a no-op, not an event:
-            // the absence of a `compacted` note already says nothing happened,
-            // and the worker has no honest way to draw view-only chrome.
+            // No exchange old enough to summarise.  This is a no-op, not an
+            // event: the absence of a `compacted` note already says nothing
+            // happened, and the worker has no honest way to draw view-only
+            // chrome.
             return;
         };
         Self::note(format!("[Compacting history: {detail} → summary]"), emit);
@@ -389,18 +420,18 @@ impl Agent {
 
     // --- private helpers ---
 
-    /// Dispatch a batch of tool calls in order, short-circuiting the rest to
+    /// Run a batch of tool calls in order, short-circuiting the rest to
     /// cancelled results the instant the token trips.  Every call returns its
     /// result synchronously — a spawn inside the `ral` eval launches a
     /// detached peer and answers with a start receipt — so there is no join
     /// phase and no `thread::scope`.  Answers with the batch's results and the
-    /// turns admitted at the tool boundary while it ran.
-    fn dispatch(
+    /// items admitted at the tool boundary while it ran.
+    fn run_batch(
         &mut self,
         tool_calls: Vec<ToolCall>,
         token: &cancel::Token,
         emit: &Emitter,
-    ) -> (Vec<SessionToolResult>, Vec<Turn>) {
+    ) -> (Vec<SessionToolResult>, Vec<Item>) {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
@@ -409,29 +440,30 @@ impl Agent {
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
                 break;
             }
-            results.push(self.stage(call, emit));
+            results.push(self.invoke(call, emit));
         }
         // The tool-boundary drain: every message that arrived during the
         // batch — barged-in user steering, a settled subagent's result, a
         // fired wakeup, a `spawn`'s surface — tagged with its source. A
-        // slash command is the lone exception, held for the turn boundary.
-        // Generation admission applies here as at the turn boundary: a
-        // result that settled across a `/clear` is dropped, not injected.
+        // slash command is the lone exception, held for the exchange
+        // boundary.  Generation admission applies here as at the exchange
+        // boundary: a result that settled across a `/clear` is dropped, not
+        // injected.
         let injected = self
             .inbox
-            .drain_tool()
+            .drain_steering()
             .into_iter()
             .filter(|t| self.admits(t))
             .collect();
         (results, injected)
     }
 
-    fn stage(&mut self, call: ToolCall, emit: &Emitter) -> SessionToolResult {
+    fn invoke(&mut self, call: ToolCall, emit: &Emitter) -> SessionToolResult {
         // `ral` is the only name this agent ever recognises, and only when
         // its provider requests actually advertised it (withheld only for a
         // `--chat` trunk) — so a well-behaved model never names anything
         // else here. Every harness verb (`agent`, `reply`, `schedule`, …)
-        // is a builtin *inside* a `ral` call, not a name `stage` matches.
+        // is a builtin *inside* a `ral` call, not a name `invoke` matches.
         if self.tool_enabled && call.fn_name == crate::shell_eval::tools::ral::NAME {
             crate::shell_eval::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
         } else {
@@ -448,36 +480,36 @@ impl Agent {
     /// `ReadyForUser` with the dedicated breadcrumb (the last round-trip
     /// dispatched the reply but never asked for a final assistant message, so
     /// the protocol sits in `AwaitingAssistantAfterToolResults`), cancel any
-    /// live descendants, and return the payload.  `drive` then breaks the loop
-    /// — `reply` hard-terminates.
-    fn replied(&self, payload: FOValue) -> TurnOutcome {
+    /// live descendants, and return the payload.  `attend` then breaks the
+    /// loop — `reply` hard-terminates.
+    fn replied(&self, payload: FOValue) -> Outcome {
         self.agents.cancel_descendants(self.id);
         self.log.lock().quiesce(QuiesceReason::Replied);
-        TurnOutcome::Replied(payload)
+        Outcome::Replied(payload)
     }
 
-    fn cancelled(&self, emit: &Emitter) -> TurnOutcome {
+    fn cancelled(&self, emit: &Emitter) -> Outcome {
         self.log.lock().quiesce(QuiesceReason::Cancelled);
         // The canonical log already carries `Cancelled` from quiesce;
         // this is the user-facing companion only.
         emit.emit(Kind::Error("cancelled".into()));
-        TurnOutcome::Cancelled
+        Outcome::Cancelled
     }
 
     /// Reached at the top of the round-trip loop once the step count
     /// would exceed [`MAX_STEPS`].  The history is mid-protocol (the last
-    /// step appended its tool results); `drive`'s single exit winds it
+    /// step appended its tool results); `attend`'s single exit winds it
     /// back to `ReadyForUser`.  `note_error` is the user-facing line and
     /// the forensic breadcrumb; the `StopReason` surfaces in the headless
     /// JSON result so a benchmark harness can tell a capped run from a
     /// completed one.
-    fn capped(&self, emit: &Emitter) -> TurnOutcome {
+    fn capped(&self, emit: &Emitter) -> Outcome {
         self.note_error(
-            format!("step cap reached ({MAX_STEPS} provider round-trips); ending turn"),
+            format!("step cap reached ({MAX_STEPS} provider round-trips); ending the deliberation"),
             emit,
         );
         emit.emit(Kind::StopReason("step_cap".into()));
-        TurnOutcome::Capped
+        Outcome::Capped
     }
 }
 
@@ -491,14 +523,14 @@ fn cancelled_result(id: String) -> SessionToolResult {
 /// Substituted for an assistant message that would serialise to no
 /// substantive content.  Anthropic rejects an assistant turn whose
 /// `content` is empty (`[]` or only an empty text block) once a later
-/// message makes it non-final, so the empty-turn nudge — which appends a
+/// message makes it non-final, so the empty nudge — which appends a
 /// user prompt right after — would poison every subsequent request.  A
 /// short stub keeps the turn renderable; the nudge still recovers the
 /// empty reply by re-prompting.
 const EMPTY_ASSISTANT_STUB: &str = "(no content)";
 
 /// Normalise an assistant message to the transcript-admission invariant
-/// at the `apply` commit boundary: **every committed message serialises
+/// at the `deliberate` commit boundary: **every committed message serialises
 /// to a request every supported provider accepts.**
 ///
 /// - X2: a tool call whose `fn_arguments` is not a JSON object is repaired
@@ -540,8 +572,8 @@ mod tests {
     use super::*;
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, fresh_id};
-    use crate::bus::{AgentOutcome, Inbox, InboxMsg};
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, Registration, TurnScope};
+    use crate::bus::{AgentOutcome, Inbox, Post};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, Registration, RunScope};
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
@@ -577,7 +609,7 @@ mod tests {
         );
         assert!(
             child.is_ready(),
-            "a replied turn must leave the session ReadyForUser"
+            "a replied deliberation must leave the session ReadyForUser"
         );
     }
 
@@ -624,7 +656,7 @@ mod tests {
             cancel: direct_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: direct_root.clone(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
@@ -638,7 +670,7 @@ mod tests {
             cancel: grandchild_token.clone(),
             reach: Some(EvalReach::Identity {
                 eval_root: ral_core::process::DurableRoot::default(),
-                turn_scope: TurnScope::default(),
+                run_scope: RunScope::default(),
             }),
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
@@ -654,7 +686,7 @@ mod tests {
                 cancel: sibling_token.clone(),
                 reach: Some(EvalReach::Identity {
                     eval_root: ral_core::process::DurableRoot::default(),
-                    turn_scope: TurnScope::default(),
+                    run_scope: RunScope::default(),
                 }),
                 mailbox: Inbox::new().mailbox(),
                 provider: child.provider.clone(),
@@ -692,19 +724,19 @@ mod tests {
         );
     }
 
-    /// X12: a provider error mid-turn (e.g. "stream ended without End
-    /// event") must not wedge the session.  When `apply` returns `Err`
+    /// X12: a provider error mid-deliberation (e.g. "stream ended without End
+    /// event") must not wedge the session.  When `deliberate` returns `Err`
     /// with the session stranded in `AwaitingAssistantAfterToolResults`,
-    /// the `drive` loop quiesces per-iteration so the next prompt is
+    /// the `attend` loop quiesces per-iteration so the next prompt is
     /// admitted — not rejected with "tool results are pending".
     #[test]
-    fn provider_error_mid_turn_does_not_wedge_session() {
+    fn provider_error_mid_deliberation_does_not_wedge_session() {
         let dir = tmp("x12-provider-error");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         // 1st round-trip: model requests a tool call (runs to completion,
         // leaving the session `AwaitingAssistantAfterToolResults`);
         // 2nd round-trip: stream error mid-protocol;
-        // 3rd–6th: clean replies for the second turn and its nudges.
+        // 3rd–6th: clean replies for the second exchange and its nudges.
         let provider = scripted(
             "test-model",
             Script::new()
@@ -718,29 +750,29 @@ mod tests {
                 .then(Reply::text("ok")),
         );
         session.provider = ProviderHandle::new(provider);
-        session.seed("first turn".into());
-        session.seed("second turn after error".into());
+        session.seed("first exchange".into());
+        session.seed("second exchange after error".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        let (outcome, _) = session.drive(&mut NoControl, &emit);
+        let (outcome, _) = session.attend(&mut NoControl, &emit);
         // The session is ready for the next prompt.
         assert!(
             session.is_ready(),
-            "session must be ReadyForUser after a mid-turn provider error"
+            "session must be ReadyForUser after a mid-deliberation provider error"
         );
         // The binding from the completed tool call survived.
         assert!(
             scope_has(&mut session, "x12_a"),
             "a binding from a completed tool call must survive a later provider error"
         );
-        // The second turn ran: the final outcome is the no-reply failure
-        // from the second turn's nudges, NOT a "tool results are pending"
+        // The second exchange ran: the final outcome is the no-reply failure
+        // from the second exchange's nudges, NOT a "tool results are pending"
         // rejection from a wedged session.
         match outcome {
             AgentOutcome::Failed(msg) => {
                 assert!(
                     !msg.contains("tool results are pending"),
-                    "second turn must not be rejected; got: {msg}"
+                    "second exchange must not be rejected; got: {msg}"
                 );
             }
             other => panic!("expected Failed from no-reply nudges, got {other:?}"),
@@ -751,7 +783,7 @@ mod tests {
         /// The token this process's [`builtin_t2_cancel_now`] cancels, staged
         /// by the test that installs it — a same-thread, test-only side
         /// channel standing in for a cancellation racing in mid-batch, since
-        /// nothing else lets a bare builtin reach the token `apply` is
+        /// nothing else lets a bare builtin reach the token `deliberate` is
         /// watching.
         static T2_CANCEL_TOKEN: std::cell::RefCell<Option<cancel::Token>> =
             const { std::cell::RefCell::new(None) };
@@ -784,14 +816,15 @@ mod tests {
 
     /// T2: a `reply` staged mid-batch that is then overtaken by a
     /// cancellation before the batch fully drains must not survive into the
-    /// next turn.  The scripted batch carries `reply` first — staging
-    /// `self.reply` — then a builtin that cancels the very token `apply` is
-    /// watching, landing the cancel exactly where dispatch already ran the
-    /// reply but the post-dispatch drain has not yet taken it.  Without the
-    /// reset at `apply`'s entry, the next turn's first tool batch would
-    /// hard-terminate on this stale payload instead of completing.
+    /// next deliberation.  The scripted batch carries `reply` first — staging
+    /// `self.reply` — then a builtin that cancels the very token `deliberate`
+    /// is watching, landing the cancel exactly where `run_batch` already ran
+    /// the reply but the post-batch drain has not yet taken it.  Without the
+    /// reset at `deliberate`'s entry, the next deliberation's first tool
+    /// batch would hard-terminate on this stale payload instead of
+    /// completing.
     #[test]
-    fn cancel_between_dispatch_and_drain_does_not_leak_reply_into_next_turn() {
+    fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation() {
         let dir = tmp("t2-cancel-mid-batch");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -812,35 +845,35 @@ mod tests {
         );
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        match session.apply(&provider, Some("go".into()), &token, &emit) {
-            Ok(TurnOutcome::Cancelled) => {}
+        match session.deliberate(&provider, Some("go".into()), &token, &emit) {
+            Ok(Outcome::Cancelled) => {}
             other => panic!("expected the cancel to win before the reply drains, got {other:?}"),
         }
         T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = None);
 
         let token2 = cancel::Token::new();
-        // The next turn's first batch must itself dispatch a tool call and
+        // The next deliberation's first batch must itself run a tool call and
         // reach the reply-drain check — a leaked `self.reply` hard-terminates
         // exactly there, on `c3`'s batch, before the second round-trip that
-        // actually completes the turn ever runs.
+        // actually completes the deliberation ever runs.
         let provider2 = scripted(
             "test-model",
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("c3", "1")]))
                 .then(Reply::text("done")),
         );
-        match session.apply(&provider2, Some("continue".into()), &token2, &emit) {
-            Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "done"),
+        match session.deliberate(&provider2, Some("continue".into()), &token2, &emit) {
+            Ok(Outcome::Complete(s)) => assert_eq!(s, "done"),
             other => panic!(
-                "a reply staged in a cancelled batch must not leak into the next turn, got {other:?}"
+                "a reply staged in a cancelled batch must not leak into the next deliberation, got {other:?}"
             ),
         }
     }
 
     /// Generation admission: a worker delivers before it retires, so a
-    /// result that settled across a `/clear` can reach the inbox — the drive
-    /// loop must drop it before it becomes a model turn.  The script is
-    /// empty, so any admitted turn would consult the provider and fail the
+    /// result that settled across a `/clear` can reach the inbox — the attend
+    /// loop must drop it before it becomes a deliberation.  The script is
+    /// empty, so any admitted item would consult the provider and fail the
     /// run; a clean `Empty` quiescence proves the result never got that far.
     #[test]
     fn stale_agent_result_is_dropped_by_generation_admission() {
@@ -850,7 +883,7 @@ mod tests {
         session.agents.clear_subtree(session.id);
         session
             .inbox
-            .push(InboxMsg::AgentResult(crate::bus::AgentResult {
+            .push(Post::AgentResult(crate::bus::AgentResult {
                 id: fresh_id(),
                 name: "late".into(),
                 outcome: AgentOutcome::Complete,
@@ -863,24 +896,24 @@ mod tests {
         session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Empty),
-            "a stale result must be dropped, not driven; got {outcome:?}"
+            "a stale result must be dropped, not attended to; got {outcome:?}"
         );
         assert!(payload.is_none());
         assert!(session.is_ready());
     }
 
     /// The admission control's positive half: a result stamped with the live
-    /// generation is delivered as a turn and drives the provider.
+    /// generation is delivered as an item and drives the provider.
     #[test]
     fn current_generation_agent_result_is_delivered() {
         let dir = tmp("generation-admission-live");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
             .inbox
-            .push(InboxMsg::AgentResult(crate::bus::AgentResult {
+            .push(Post::AgentResult(crate::bus::AgentResult {
                 id: fresh_id(),
                 name: "worker".into(),
                 outcome: AgentOutcome::Complete,
@@ -901,7 +934,7 @@ mod tests {
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Complete),
             "a live-generation result must be delivered; got {outcome:?}"
@@ -917,9 +950,9 @@ mod tests {
     /// The same admission control's `Surface` half: a deferred `spawn`
     /// batch's birth generation (`InboxDeferred`, `shell_eval.rs`) is checked
     /// here exactly like an `AgentResult`'s, since neither producer can decide
-    /// its own staleness (each composes on a thread other than the drive
+    /// its own staleness (each composes on a thread other than the attend
     /// loop's, and its push can land arbitrarily long after). The script is
-    /// empty, so any admitted turn would consult the provider and fail the
+    /// empty, so any admitted item would consult the provider and fail the
     /// run.
     #[test]
     fn stale_surface_batch_is_dropped_by_generation_admission() {
@@ -929,7 +962,7 @@ mod tests {
         session.agents.clear_subtree(session.id);
         session
             .inbox
-            .push(InboxMsg::Surface {
+            .push(Post::Surface {
                 id: session.id,
                 values: Vec::new(),
                 generation: stale,
@@ -938,24 +971,24 @@ mod tests {
         session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Empty),
-            "a stale surface batch must be dropped, not driven; got {outcome:?}"
+            "a stale surface batch must be dropped, not attended to; got {outcome:?}"
         );
         assert!(payload.is_none());
         assert!(session.is_ready());
     }
 
     /// The positive half: a surface batch stamped with the live generation is
-    /// delivered as a turn and drives the provider.
+    /// delivered as an item and drives the provider.
     #[test]
     fn current_generation_surface_batch_is_delivered() {
         let dir = tmp("generation-admission-live-surface");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
             .inbox
-            .push(InboxMsg::Surface {
+            .push(Post::Surface {
                 id: session.id,
                 values: Vec::new(),
                 generation: session.agents.generation(),
@@ -970,7 +1003,7 @@ mod tests {
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Complete),
             "a live-generation surface batch must be delivered; got {outcome:?}"

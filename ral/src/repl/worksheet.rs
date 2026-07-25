@@ -1,5 +1,5 @@
 //! The REPL-side worksheet model: per-binding dependency edges and the
-//! pure/effectful verdict, retained across turns.
+//! pure/effectful verdict, retained across runs.
 //!
 //! This is substrate extension #2 of the structural-surface design
 //! ([`260620_repl-as-structural-surface`], §2 "The Reactive Worksheet").
@@ -69,7 +69,7 @@ impl Worksheet {
 
     /// Record the top-level bindings of a *successfully evaluated* input.
     ///
-    /// Called from the success arm of the eval path, after the turn has
+    /// Called from the success arm of the eval path, after the run has
     /// installed its bindings into the env.  Re-parses the input for the
     /// free-reference edges and re-compiles it for the effect verdict — both
     /// at human-typing cadence (once per submit, not per keystroke), so the
@@ -84,7 +84,7 @@ impl Worksheet {
 
         // The candidate set for edge analysis: every name the worksheet
         // already knows, plus the names this input binds (so a mutually-
-        // referencing turn records edges among its own bindings).  Edges to
+        // referencing run records edges among its own bindings).  Edges to
         // names outside this set — command heads, prelude functions — are
         // not dependency edges between user bindings and are dropped.
         let mut candidates: HashSet<String> = self.entries.iter().map(|e| e.name.clone()).collect();
@@ -230,10 +230,10 @@ mod tests {
         assert_eq!(refs(&ws, "b"), vec!["a"], "b depends on a");
     }
 
-    /// Edges among bindings defined in one turn are recorded: the turn's own
+    /// Edges among bindings defined in one run are recorded: the run's own
     /// names are candidates for each other's free-ref analysis.
     #[test]
-    fn records_edges_within_one_turn() {
+    fn records_edges_within_one_run() {
         let shell = shell();
         let mut ws = Worksheet::default();
         ws.record("let a = 1\nlet b = $a\nlet c = $[$a + $b]", &shell);

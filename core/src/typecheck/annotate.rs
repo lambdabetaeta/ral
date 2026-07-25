@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// The recorded pre-generalisation type is closed by generalising against
 /// the empty environment: that resolves it against the final unifier and
 /// quantifies every residual variable, which is exactly the closure
-/// condition a scheme must satisfy to survive into the next turn's check.
+/// condition a scheme must satisfy to survive into the next run's check.
 ///
 /// Wires and RHS output modes are written everywhere they were recorded,
 /// at any depth — inside thunk bodies, branches, pipeline stages.  A node

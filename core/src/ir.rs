@@ -461,9 +461,9 @@ pub enum CompKind {
         /// The checker's generalised scheme for the bound name, written
         /// by the annotation pass for a top-level `Bind` with a `Name`
         /// pattern; the evaluator installs it next to the value so the
-        /// next turn's check can be seeded from the live binding.  Closed
+        /// next run's check can be seeded from the live binding.  Closed
         /// (every variable ground or quantified) so it survives across
-        /// per-turn unifiers.  `None` until the checker runs, and always
+        /// per-run unifiers.  `None` until the checker runs, and always
         /// `None` for destructuring patterns.  Boxed so the optional
         /// scheme stays one pointer wide on the `Bind` node.
         scheme: Option<Box<crate::typecheck::Scheme>>,

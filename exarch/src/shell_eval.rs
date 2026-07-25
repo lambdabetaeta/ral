@@ -1,6 +1,6 @@
 //! In-process ral evaluation against a persistent `Shell`.
 //!
-//! Runs each tool call as a top-level turn under a pushed capabilities
+//! Runs each tool call as a top-level run under a pushed capabilities
 //! frame with stdout/stderr captured.  The capabilities come from the user's grant
 //! policy; there is no source-level `grant { … }` wrapper around the
 //! model's body — the boundary is enforced by `eval_top_level` plus the
@@ -19,7 +19,7 @@ use crate::agent::transcript::Transcript;
 use crate::bus::card::{
     done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin,
 };
-use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
+use crate::bus::{AgentId, Emitter, Kind, Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -107,7 +107,7 @@ impl PinDigest {
 /// Written
 /// by the live surface sink as `` `pin ``/`` `unpin `` flow by and read by the
 /// nudge facility to describe what the model has pinned.  The session clones a
-/// handle into each turn's turn surface sink; `None` (tests, any path with no
+/// handle into each run's surface sink; `None` (tests, any path with no
 /// nudge layer) disables the mirror.  The session is otherwise pin-blind — pins
 /// flow past it to the frontend — so this small mirror is how the boundary
 /// nudge can name them.
@@ -129,7 +129,7 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 ///
 /// The live foreground sink
 /// (the transport event loop) calls it to emit now; the deferred sink's
-/// `deliver` calls the *same* function to mint the identical events at the turn
+/// `deliver` calls the *same* function to mint the identical events at the exchange
 /// boundary.  Four shapes arrive on the one `surface` channel:
 ///
 ///   * a structural I/O event core emits (a read, write, exec, or grep) — a
@@ -205,8 +205,8 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
 /// detached `spawn` worker flushes its buffered batch to at completion.  It is
 /// surface's *deferred destination* — not a new channel — so it carries the
 /// same ordinary surface vocabulary the live sink does, posted through the
-/// session's own [`Mailbox`] as an [`InboxMsg::Surface`] for the host to render
-/// at the next turn boundary (the [`Card`]/`Io` events the live path mints now,
+/// session's own [`Mailbox`] as a [`Post::Surface`] for the host to render
+/// at the next exchange boundary (the [`Card`]/`Io` events the live path mints now,
 /// minted later) — the spawn worker flushes its deferred surface batch into the
 /// agent that ran the spawn.  The id it stamps is the **root** session's, so a
 /// spawn worker's cards land in the root viewport — a spawn worker registers no
@@ -238,7 +238,7 @@ struct InboxDeferred {
     /// has no caller to return a `Result` to (it runs on the spawn worker's
     /// own completion, not a synchronous tool call), so this is how the drop
     /// stays visible rather than silent.  A `Transcript`, deliberately
-    /// not a whole `Emitter`: this sink outlives the turn (installed once,
+    /// not a whole `Emitter`: this sink outlives the run (installed once,
     /// flushed whenever the worker settles), and an `Emitter` carries a live
     /// bus sender whose lifetime would then wrongly extend with it — the
     /// exact daemon-task-hang shape `drain_pass`'s own doc warns against. A
@@ -251,7 +251,7 @@ impl DeferredSink for InboxDeferred {
         // Decode once, totally, at this door: the deferred batch carries
         // first-order values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
-        if let Err(reject) = self.mailbox.push(InboxMsg::Surface {
+        if let Err(reject) = self.mailbox.push(Post::Surface {
             id: self.root,
             values,
             generation: self.generation,
@@ -266,12 +266,12 @@ impl DeferredSink for InboxDeferred {
     }
 }
 
-/// Build the [`Arc<dyn DeferredSink>`] a tool turn installs: an
+/// Build the [`Arc<dyn DeferredSink>`] a tool run installs: an
 /// [`InboxDeferred`] over `emit`'s session inbox, stamping batches with `root`
 /// and `registry`'s generation at this moment.
 ///
 /// Cloned into the
-/// worker's turn state by core, so a nested `spawn` inherits it and flushes at
+/// worker's run state by core, so a nested `spawn` inherits it and flushes at
 /// its own completion.
 pub fn deferred_sink(
     emit: &Emitter,
@@ -289,7 +289,7 @@ pub fn deferred_sink(
 /// Evaluate `cmd` against `transport`, wrapped in `caps`, capturing
 /// stdout and stderr into buffers. Returns the result as an [`Outcome`].
 ///
-/// Routes through the transport seam: builds a `Source` [`Turn`], dispatches
+/// Routes through the transport seam: builds a `Source` [`Run`], dispatches
 /// it, drains surface events to the bus, and converts the terminal
 /// [`Report`] into the structured result.
 pub(crate) fn run_shell(
@@ -309,22 +309,22 @@ pub(crate) fn run_shell(
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    use ral_core::transport::{Program, Report, Turn};
-    use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+    use ral_core::transport::{Program, Report, Run};
+    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
-    let turn = Turn {
+    let run = Run {
         program: Program::Source(cmd.to_string()),
         script_name: name.to_string(),
         caps: caps.clone(),
-        turn_limit: Some(Duration::from_secs(timeout_secs)),
+        wall: Some(Duration::from_secs(timeout_secs)),
         deferred_lease: Some(ral_core::types::WorkerLease {
             idle: DETACHED_WORKER_CEILING,
             backstop: DETACHED_WORKER_BACKSTOP,
         }),
         worker_cap: Some(LIVE_WORKER_CAP),
-        io: TurnIo::Capture,
+        io: RunIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
-        stdin: TurnStdin::Empty,
+        stdin: RunStdin::Empty,
     };
 
     // Dispatch and drain to the Report, rendering surface classes to the bus.
@@ -338,7 +338,7 @@ pub(crate) fn run_shell(
     };
     let report = ral_core::transport::dispatch_to_report(
         transport,
-        turn,
+        run,
         |val| applier.live(val),
         |batch| applier.deferred(batch),
         // Dead under the identity transport (`transport.set_desk` answers a
@@ -408,7 +408,7 @@ pub(crate) fn run_shell(
                                 "error: ral tool: timed out after {timeout_secs}s. If the command is simply slow \
                                  and there is nothing to overlap it with, retry with a higher `timeout_secs`. \
                                  If other work can run alongside it, defer it instead (`let h = defer {{ … }}`) \
-                                 and let the turn return: the host notifies you at the next turn boundary when \
+                                 and let the run return: the host notifies you at the next exchange boundary when \
                                  it settles and renders its output on the rail, and `await $h` gives you its \
                                  value record — you need not poll.\n"
                             );
@@ -614,11 +614,11 @@ mod tests {
         shell
     }
 
-    /// Run one tool turn through the **real** production [`run_shell`], so the
+    /// Run one tool run through the **real** production [`run_shell`], so the
     /// test path can never drift from what a live tool call does.  The only
     /// thing the helper owns that production does not is the `&mut Shell`: it
-    /// moves the shell into a throwaway [`IdentityTransport`], routes the turn
-    /// through `run_shell` (which builds the `Turn`, dispatches, drains the
+    /// moves the shell into a throwaway [`IdentityTransport`], routes the run
+    /// through `run_shell` (which builds the `Run`, dispatches, drains the
     /// surface stream into `emit`, and computes the exit code — including the
     /// timeout→124 mapping and the full error rendering), then moves the shell
     /// back out so the caller keeps its session across calls.
@@ -639,12 +639,12 @@ mod tests {
         let transport = ral_core::transport::IdentityTransport::new(taken);
         let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None, None);
         // Recover the (now-mutated) shell so `let`/`cd`/binding state persists
-        // into the caller's next turn — the across-calls contract these tests pin.
+        // into the caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
         outcome
     }
 
-    /// Run one tool turn and return its [`ToolResult`], delegating to
+    /// Run one tool run and return its [`ToolResult`], delegating to
     /// [`run_shell_direct`] under `Capabilities::root()` — exarch's
     /// least-restricted default, letting every test source here compile and
     /// run without exercising the OS sandbox (covered separately by
@@ -1125,7 +1125,7 @@ keep-bottom
     /// its ink), and a `` `pin ``/`` `unpin `` disposition to
     /// `Kind::Pin`/`Kind::Unpin` — and drops a junk value to `None`.  The
     /// foreground sink emits these now; the deferred sink's `deliver` mints
-    /// the identical ones at the turn boundary.
+    /// the identical ones at the exchange boundary.
     #[test]
     fn decode_surface_round_trips_each_class() {
         // An io map → Kind::Io.
@@ -1261,8 +1261,8 @@ keep-bottom
         assert!(!reject_protected_pin(&ordinary, &emit));
     }
 
-    /// The `InboxDeferred` always posts a deferred worker's batch as an
-    /// `InboxMsg::Surface` stamped with the root id and its own construction-time
+    /// The `InboxDeferred` always posts a deferred worker's batch as a
+    /// `Post::Surface` stamped with the root id and its own construction-time
     /// generation — including a batch flushed after a `/clear` advanced the
     /// registry past it. Staleness is not this sink's call: it is decided at
     /// the consuming edge (`Agent::admits`), exactly as a stale `AgentResult`
@@ -1279,12 +1279,12 @@ keep-bottom
         // A fresh batch reaches the inbox, stamped with the root id (7) and
         // the generation live at construction.
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
-        match inbox.drain_turn() {
-            Some(crate::bus::Turn::Surface { id, generation, .. }) => {
+        match inbox.next_item() {
+            Some(crate::bus::Item::Surface { id, generation, .. }) => {
                 assert_eq!(id, 7, "the batch is stamped with the root session id");
                 assert_eq!(generation, born, "stamped with the sink's birth generation");
             }
-            other => panic!("a delivered batch surfaces as Turn::Surface, got {other:?}"),
+            other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
         }
 
         // A `/clear` bumps the registry generation past the sink's captured
@@ -1292,8 +1292,8 @@ keep-bottom
         // generation for the consuming edge to reject.
         registry.clear_subtree(7);
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
-        match inbox.drain_turn() {
-            Some(crate::bus::Turn::Surface { generation, .. }) => {
+        match inbox.next_item() {
+            Some(crate::bus::Item::Surface { generation, .. }) => {
                 assert_eq!(
                     generation, born,
                     "the post-clear flush still carries its stale birth generation"
@@ -1576,7 +1576,7 @@ keep-bottom
         // and the command's signal death is the statement error; between
         // statements, `check` raises the Explicit cause as "cancelled".
         // Either shape is the unwind under test.
-        assert_ne!(r.exit, 0, "a cancelled turn must not report success");
+        assert_ne!(r.exit, 0, "a cancelled run must not report success");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert!(
             stderr.contains("cancelled") || stderr.contains("SIGTERM"),

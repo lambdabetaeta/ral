@@ -2,7 +2,7 @@
 //! window drives between them.
 //!
 //! Synod's session is exarch's session with the developer removed.  The
-//! provider transport, the turn driver, and the card bus are exarch's
+//! provider transport, the exchange driver, and the card bus are exarch's
 //! ([`exarch::provider`], [`exarch::agent`], [`exarch::headless`]); what
 //! differs is where the work happens (the machine's workspace, not the
 //! shell's cwd), what the agent may touch (the grant, not a capability
@@ -564,7 +564,7 @@ impl Conversation {
     /// Drops the agent first: under a real VM its seat owns the wire, and
     /// closing that end is what makes the guest's engine see EOF and power
     /// the machine off from the inside — the same inside-out shutdown
-    /// `boot-turn`'s own drop-then-stop performs, so the grace window
+    /// `boot-run`'s own drop-then-stop performs, so the grace window
     /// `machine.shutdown` waits on below normally observes a stop already
     /// under way rather than forcing one.
     ///

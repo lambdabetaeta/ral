@@ -1,7 +1,7 @@
 //! Single-input parse / typecheck / evaluate cycle, routed through the
 //! transport seam.
 //!
-//! [`step`] is the per-line entry point.  It dispatches a source turn
+//! [`step`] is the per-line entry point.  It dispatches a source run
 //! through the [`IdentityTransport`] and drains the event stream for the
 //! terminal [`Report`].  Lifecycle hooks (`pre-exec`, `chpwd`,
 //! `post-exec`) fire around the dispatch through
@@ -10,8 +10,8 @@
 //! Job-control and plugin-lifecycle commands are handled by the captured
 //! builtins installed at boot (see [`super::host_handlers`]).
 
-use ral_core::transport::{self, Diagnostics, IdentityTransport, Program, Report, Turn};
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+use ral_core::transport::{self, Diagnostics, IdentityTransport, Program, Report, Run};
+use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use ral_core::{Value, builtins};
 use std::sync::{Arc, Mutex};
 
@@ -59,7 +59,7 @@ fn pre_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, sr
 }
 
 /// Drain a pending `chpwd` then fire `post-exec` after a dispatch — both
-/// side-effects; neither redefines the turn status, which the transport
+/// side-effects; neither redefines the run status, which the transport
 /// already computed.
 fn post_exec(
     runtime: &Arc<Mutex<PluginRuntime>>,
@@ -115,24 +115,24 @@ pub(super) fn execute_input(
     // Fire pre-exec hook through transport shell access.
     transport.with_shell(|shell| pre_exec(runtime, shell, trimmed));
 
-    // Build the transport-level Turn from the source text.
-    let turn = Turn {
+    // Build the transport-level Run from the source text.
+    let run = Run {
         program: Program::Source(trimmed.to_string()),
         script_name: "<stdin>".to_string(),
         caps: ral_core::types::Capabilities::root(),
-        turn_limit: None,
+        wall: None,
         deferred_lease: None,
         worker_cap: None,
-        io: TurnIo::Inherit,
+        io: RunIo::Inherit,
         terminal: RequestedTerminalAccess::Leased,
-        stdin: TurnStdin::Inherit,
+        stdin: RunStdin::Inherit,
     };
 
     // Dispatch and drain to the terminal Report.  The REPL renders no live
     // surface values or deferred batches, and answers no enquiries.
     let report = transport::dispatch_to_report(
         transport,
-        turn,
+        run,
         |_val| {},
         |_batch| {},
         |_req| {
@@ -175,7 +175,7 @@ pub(super) fn execute_input(
             let exit_code = match result {
                 Ok(sv) => {
                     print_result(&Value::from(sv));
-                    // The turn installed its bindings: record their dependency
+                    // The run installed its bindings: record their dependency
                     // edges and effect verdict into the worksheet model.
                     #[cfg(feature = "structural")]
                     transport.with_shell(|shell| worksheet.record(trimmed, shell));

@@ -13,7 +13,7 @@ use crate::types::{
 
 /// One lambda call frame: evaluate the body *in place* on the caller's
 /// shell via [`Shell::with_thunk_body`] — the body shares the caller's
-/// turn, session, and local state by identity, swapping in only a mobile
+/// run, session, and local state by identity, swapping in only a mobile
 /// rescoped to the lambda's `captured` environment plus a fresh frame.
 /// `pat` is bound to `arg` in that frame (pattern binding lives in this
 /// evaluator layer, not on `Shell`), then `body` runs. As a

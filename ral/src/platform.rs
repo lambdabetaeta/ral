@@ -54,7 +54,7 @@ pub(crate) fn load_exit_hints() -> ExitHints {
 ///
 /// Ral carries exit codes as `i32` (an `exit` argument, a signal-derived
 /// status, a cancel cause); the OS process status is a single byte. Every
-/// mode — batch, `-c`, the REPL turn loop — funnels its final code through
+/// mode — batch, `-c`, the REPL run loop — funnels its final code through
 /// here so the clamp-and-narrow lives in one place.
 pub(crate) fn exit_byte(code: i32) -> u8 {
     #[allow(

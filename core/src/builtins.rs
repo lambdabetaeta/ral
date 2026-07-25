@@ -434,7 +434,7 @@ pub fn core_builtin_table() -> crate::types::BuiltinTable {
 /// A watched worker is line-framed (`concurrency::builtin_watch` over
 /// `spawn_child`'s `ChildIoMode::Watch`) and streams live to the caller's
 /// stdout as it runs, so it is admissible only where that sink is durable
-/// enough to outlive the turn — an interactive or batch ral host, whose
+/// enough to outlive the run — an interactive or batch ral host, whose
 /// stdout is the real terminal or pipe.  An agent host (exarch), whose
 /// active streams are per-call capture buffers, does not install it; naming
 /// `watch` there is then a compile-time unknown-name diagnostic, not a
@@ -574,8 +574,8 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
             .scope
             .set("false".into(), Value::Bool(false));
 
-        let saved_script = prelude_env.turn.loc.script.clone();
-        prelude_env.turn.loc.script = "<prelude>".into();
+        let saved_script = prelude_env.run.loc.script.clone();
+        prelude_env.run.loc.script = "<prelude>".into();
         if let Err(e) = crate::evaluate(prelude_comp, &mut prelude_env) {
             let msg = match &e {
                 Break::Error(err) => err.to_string(),
@@ -587,7 +587,7 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
             };
             diagnostic::cmd_error("prelude", &msg);
         }
-        prelude_env.turn.loc.script = saved_script;
+        prelude_env.run.loc.script = saved_script;
         prelude_env.mobile.scope.top_scope().clone()
     });
 
@@ -605,12 +605,12 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
 
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 
-/// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
+/// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a run frame is
 /// already installed.
 ///
 /// Any other `Value` produces a descriptive error.  Used
-/// by builtins that accept function arguments and by the turn door's hook
-/// arm ([`crate::Shell::run_turn`]), which establishes the frame first.
+/// by builtins that accept function arguments and by the run door's hook
+/// arm ([`crate::Shell::run`]), which establishes the frame first.
 ///
 /// # Errors
 /// Returns `Err` if `val` is neither a `Block` nor a `Lambda`, or if

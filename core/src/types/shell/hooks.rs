@@ -1,4 +1,4 @@
-//! Hook table: a session-lived namespace of named turn-entry points
+//! Hook table: a session-lived namespace of named run-entry points
 //! registered by the host (rc file, plugin loader) and dispatched by the
 //! engine at lifecycle moments — prompt render, startup, plugin hooks,
 //! keybindings.
@@ -6,12 +6,12 @@
 //! A hook is a [`Value::Block`] / [`Value::Lambda`] the host already
 //! holds in compiled form.  **Registering** it = storing it by name in
 //! the session-lived [`Context::hooks`] table.  **Running** it =
-//! dispatching a [`Program::Hook`](crate::transport::Program) turn through
-//! [`Shell::run_turn`], which looks up the hook and applies it through
+//! dispatching a [`Program::Hook`](crate::transport::Program) run through
+//! [`Shell::run`], which looks up the hook and applies it through
 //! the shared framed scaffold.
 //!
 //! The table is a separate namespace from both the user lexical scope
-//! ([`Env`]) and the handler stack ([`HandlerStack`]): a hook is a turn
+//! ([`Env`]) and the handler stack ([`HandlerStack`]): a hook is a run
 //! root, never a command; it is never resolved by `$name` and never
 //! consulted at command position.  This keeps host entry points out of
 //! the user's value/command namespace.
@@ -89,7 +89,7 @@ pub enum HookSig {
     /// Plugin factory: one-input Lambda receiving the options map.
     PluginFactory,
     /// In-frame lifecycle hook: applied directly inside the command's
-    /// turn frame rather than as a fresh turn root.
+    /// run frame rather than as a fresh run root.
     Lifecycle { kind: String },
 }
 
@@ -116,22 +116,22 @@ impl HookSig {
 
 // ── Per-hook policy ─────────────────────────────────────────────────────
 
-/// Whether a hook's turns may hand the controlling terminal to a child.
+/// Whether a hook's runs may hand the controlling terminal to a child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalPolicy {
     Denied,
     Leased,
 }
 
-/// The host-stated policy for a registered hook's turns: terminal
-/// access, capture regime, and optional turn budget.
+/// The host-stated policy for a registered hook's runs: terminal
+/// access, capture regime, and optional run budget.
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy {
-    /// Terminal authority for turns run from this hook.
+    /// Terminal authority for runs from this hook.
     pub terminal: TerminalPolicy,
-    /// Capture stdout/stderr for this hook's turns.
+    /// Capture stdout/stderr for this hook's runs.
     pub capture: bool,
-    /// Optional per-turn wall; `None` = uncapped.
+    /// Optional per-run wall; `None` = uncapped.
     pub budget: Option<Duration>,
 }
 
@@ -164,7 +164,7 @@ impl DefaultPolicy {
 // ── Hook ────────────────────────────────────────────────────────────────
 
 /// One entry in the hook table: a named, typechecked, policy-tagged
-/// turn root.
+/// run root.
 #[derive(Debug, Clone)]
 pub struct Hook {
     /// The lexical binding — `{ value: Block/Lambda, scheme }` — built
@@ -173,7 +173,7 @@ pub struct Hook {
     /// The engine-declared fixed-arity signature this hook was
     /// checked against at registration.
     pub sig: HookSig,
-    /// The host-stated default policy for turns run from this hook.
+    /// The host-stated default policy for runs from this hook.
     pub policy: DefaultPolicy,
     /// Declaration site, for diagnostics.
     pub origin: Span,

@@ -132,7 +132,7 @@ pub(super) struct StageSpec {
 /// current source text held on `shell`.  Carried on the stage so a stage
 /// error resolves against the right source at render time.
 fn stage_loc(stage: &Comp, shell: &Shell) -> crate::diagnostic::SourceLoc {
-    let (line, col) = match (stage.span, shell.turn.loc.source.as_ref()) {
+    let (line, col) = match (stage.span, shell.run.loc.source.as_ref()) {
         (Some(sp), Some(src)) => src.byte_to_line_col(sp.start as usize),
         // No span, or no source text to convert the byte offset against:
         // fall back to the "unknown location" sentinel (as in
@@ -141,7 +141,7 @@ fn stage_loc(stage: &Comp, shell: &Shell) -> crate::diagnostic::SourceLoc {
         _ => (0, 0),
     };
     crate::diagnostic::SourceLoc {
-        source: shell.turn.loc.current,
+        source: shell.run.loc.current,
         line,
         col,
         len: 0,
@@ -297,8 +297,8 @@ pub(super) struct PipelinePlan {
 
 fn resolve_terminal_plan(shell: &Shell) -> TerminalPlan {
     // The handoff authority is the session's terminal lease, lent only to a
-    // turn whose `TerminalAccess` permits it.  No reachable lease → never
-    // foreground: a `Denied` turn (an exarch tool turn), a backgrounded or
+    // run whose `TerminalAccess` permits it.  No reachable lease → never
+    // foreground: a `Denied` run (an exarch tool run), a backgrounded or
     // tty-less launch (the session minted no lease), and every platform with
     // no `tcsetpgrp` (the lease is never minted off Unix) all land here — the
     // old `startup_foreground` gate and the `cfg!(windows)` short-circuit both
@@ -307,17 +307,17 @@ fn resolve_terminal_plan(shell: &Shell) -> TerminalPlan {
         return TerminalPlan::NoTerminal;
     }
     // With the lease held, foreground iff the final sink is terminal-bound, or
-    // the turn is an explicit tty loan.  A captured pipeline (`!{...}`) has a
+    // the run is an explicit tty loan.  A captured pipeline (`!{...}`) has a
     // buffer sink, so it does not foreground — the let-binding bytes are bound
     // for memory, not the terminal.  The `_ed-tui` loan is the positive
     // exception: its stdout is captured so the plugin can read the body's
     // selection, but the body (e.g. `fzf`) draws on `/dev/tty` and *must* own
     // the foreground pgid or its first `tcsetattr` raises SIGTTOU; the host
-    // suspended its own surface and raised the turn to `ExplicitLoan` for
+    // suspended its own surface and raised the run to `ExplicitLoan` for
     // exactly this window.  Foregrounding is this single final-sink/loan rule.
-    let loan = matches!(shell.turn.terminal_access, TerminalAccess::ExplicitLoan);
+    let loan = matches!(shell.run.terminal_access, TerminalAccess::ExplicitLoan);
     let terminal_bound = matches!(
-        shell.turn.io.stdout,
+        shell.run.io.stdout,
         crate::io::Sink::Terminal | crate::io::Sink::External(_)
     );
     if terminal_bound || loan {
@@ -400,21 +400,21 @@ pub(super) fn resolve_pipeline(
 mod tests {
     use super::*;
 
-    /// A shell whose session owns a terminal lease and whose installed turn
+    /// A shell whose session owns a terminal lease and whose installed run
     /// holds `Leased` access — the interactive REPL and a terminal-launched
     /// script.  Stdout defaults to `Sink::Terminal` (terminal-bound).
     fn leased_shell() -> Shell {
         let mut shell = Shell::default();
-        shell.turn.io.interactive = true;
-        shell.turn.io.terminal.startup_stdin_tty = true;
-        shell.turn.io.terminal.startup_stdout_tty = true;
-        // Hand the session a lease and the turn the authority to borrow it.
+        shell.run.io.interactive = true;
+        shell.run.io.terminal.startup_stdin_tty = true;
+        shell.run.io.terminal.startup_stdout_tty = true;
+        // Hand the session a lease and the run the authority to borrow it.
         shell.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
-        shell.turn.terminal_access = TerminalAccess::Leased;
+        shell.run.terminal_access = TerminalAccess::Leased;
         shell
     }
 
-    /// A Leased turn with a terminal-bound sink foregrounds its pipeline.
+    /// A Leased run with a terminal-bound sink foregrounds its pipeline.
     #[test]
     #[cfg(unix)]
     fn leased_terminal_bound_pipeline_foregrounds() {
@@ -426,12 +426,12 @@ mod tests {
     }
 
     /// A captured pipeline (`!{...}`) has a buffer sink, not a terminal one,
-    /// so it must not steal foreground — even in a Leased turn.
+    /// so it must not steal foreground — even in a Leased run.
     #[test]
     fn leased_captured_pipeline_skips_foreground() {
         let mut shell = leased_shell();
         let (sink, _buf) = crate::io::new_buffer();
-        shell.turn.io.stdout = sink;
+        shell.run.io.stdout = sink;
         assert_eq!(resolve_terminal_plan(&shell), TerminalPlan::NoTerminal);
     }
 
@@ -444,15 +444,15 @@ mod tests {
     fn ed_tui_loan_foregrounds_captured_pipeline() {
         let mut shell = leased_shell();
         let (sink, _buf) = crate::io::new_buffer();
-        shell.turn.io.stdout = sink;
-        shell.turn.terminal_access = TerminalAccess::ExplicitLoan;
+        shell.run.io.stdout = sink;
+        shell.run.terminal_access = TerminalAccess::ExplicitLoan;
         assert_eq!(
             resolve_terminal_plan(&shell),
             TerminalPlan::ForegroundExternalGroup,
         );
     }
 
-    /// A non-interactive script launched at a terminal holds a `Leased` turn
+    /// A non-interactive script launched at a terminal holds a `Leased` run
     /// exactly like the REPL, so its pipeline foregrounds — otherwise an
     /// interactive child (`claude`, `fzf`) raises SIGTTOU on its first
     /// `tcsetattr` from a background pgroup.  Regression for the
@@ -461,21 +461,21 @@ mod tests {
     #[cfg(unix)]
     fn terminal_script_leased_pipeline_foregrounds() {
         let mut shell = leased_shell();
-        shell.turn.io.interactive = false;
+        shell.run.io.interactive = false;
         assert_eq!(
             resolve_terminal_plan(&shell),
             TerminalPlan::ForegroundExternalGroup,
         );
     }
 
-    /// A `Denied` turn never foregrounds, *even though the session owns a
-    /// lease* — the exarch tool-turn case.  The lease borrow is unreachable
-    /// from a `Denied` turn, so the SIGTTIN handoff is unrepresentable.
+    /// A `Denied` run never foregrounds, *even though the session owns a
+    /// lease* — the exarch tool-run case.  The lease borrow is unreachable
+    /// from a `Denied` run, so the SIGTTIN handoff is unrepresentable.
     #[test]
     #[cfg(unix)]
-    fn denied_turn_skips_foreground() {
+    fn denied_run_skips_foreground() {
         let mut shell = leased_shell();
-        shell.turn.terminal_access = TerminalAccess::Denied;
+        shell.run.terminal_access = TerminalAccess::Denied;
         assert!(
             shell.session.terminal_lease.is_some(),
             "session owns a lease"
@@ -485,7 +485,7 @@ mod tests {
 
     /// A launch that never owned the terminal foreground (backgrounded
     /// `ral … &`, a piped or tty-less eval) minted no lease, so even a
-    /// `Leased` turn cannot borrow one and never foregrounds.
+    /// `Leased` run cannot borrow one and never foregrounds.
     #[test]
     fn no_lease_skips_foreground() {
         let mut shell = leased_shell();

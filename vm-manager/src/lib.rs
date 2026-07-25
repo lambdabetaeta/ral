@@ -5,7 +5,7 @@
 //! crate is that, and nothing more — [`detect`] finds the one backend this
 //! build can actually run, [`Hypervisor::boot`] turns a [`MachineSpec`]
 //! into a [`Machine`], and [`Machine::take_control`] hands over the wire
-//! the engine's turns run across.
+//! the engine's runs run across.
 //!
 //! # What this crate does, stated plainly
 //!
@@ -101,7 +101,7 @@ impl MachineSpec {
         clippy::disallowed_methods,
         reason = "REASONED-SILENT: resolving the granted folder before a machine exists. \
                   This runs on the host, before any engine, so there is no Shell to route \
-                  through `crate::path::canon` and no turn to raise a card in; vm-manager \
+                  through `crate::path::canon` and no run to raise a card in; vm-manager \
                   deliberately does not depend on ral-core."
     )]
     pub fn resolve(&self) -> Result<PathBuf, Error> {

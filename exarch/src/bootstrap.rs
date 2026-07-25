@@ -3,7 +3,7 @@
 //!
 //! One-shot bootstrap pieces that live for the lifetime of the process
 //! (or, for [`Scratch`], for the lifetime of one root session).
-//! Nothing here participates in the per-turn loop.  Per-session disk
+//! Nothing here participates in the per-exchange loop.  Per-session disk
 //! state (the canonical event log) lives in [`crate::agent::event::AgentLog`].
 
 use crate::agent::cancel;

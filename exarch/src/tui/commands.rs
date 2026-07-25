@@ -12,7 +12,7 @@ use super::model_picker::pick_model;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
 use super::viewport;
-use crate::bus::{InboxMsg, Mailbox};
+use crate::bus::{Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
 use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
@@ -279,7 +279,7 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
 /// inbox at quota — vanishingly rare, since `Command` is user-paced, never a
 /// flood) to the UI rather than dropping it silently.
 fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
-    if let Err(reject) = mailbox.push(InboxMsg::Command(cmd)) {
+    if let Err(reject) = mailbox.push(Post::Command(cmd)) {
         tui.app
             .push_error(tui.app.tabs.root(), &format!("command dropped: {reject}"));
     }
@@ -291,7 +291,7 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
 /// `/copy`, `/export`, `/model`) touches only the App, clipboard, file, or
 /// picker, so it runs here on the UI thread.  A session command (`/clear`,
 /// `/compact`, `/resources`, `/quit`) and a plain prompt on the
-/// trunk go onto the session inbox, where the worker's drive loop drains them —
+/// trunk go onto the session inbox, where the worker's attend loop drains them —
 /// `/clear` *also* clears the viewport UI-side so the screen blanks immediately,
 /// before the worker rebuilds the session.  A slash token naming no registered
 /// command ([`unrecognized_command`]) prints an error instead of mailing the
@@ -357,18 +357,18 @@ pub(super) fn route_submit(
             // The viewport blanks immediately, and the in-flight model response
             // is cancelled first — otherwise streamed tokens sitting in the bus
             // keep flowing into the cleared viewport until the worker, parked
-            // inside `apply`, hits its next poll (50 ms) and the model's turn
-            // ends on its own.  Raising the interrupt cancels the trunk's
+            // inside `deliberate`, hits its next poll (50 ms) and the model's
+            // turn ends on its own.  Raising the interrupt cancels the trunk's
             // published token and the ral foreground, exactly as Esc does, at
-            // interrupt strength — so the next turn's boundary `reset` clears
-            // it. `cancel_descendants` reaps any live descendants now rather
-            // than after the worker reaches the `Turn::Command`, leaving the
-            // trunk's own entry, and its sticky token, untouched: `/clear`
+            // interrupt strength — so the next exchange boundary's `reset`
+            // clears it. `cancel_descendants` reaps any live descendants now
+            // rather than after the worker reaches the `Item::Command`, leaving
+            // the trunk's own entry, and its sticky token, untouched: `/clear`
             // rebuilds the trunk in place rather than ending it, and a
             // terminate-class cause on its token would be permanent.
             // Stragglers already in the unbounded bus channel are dropped in
             // `App::handle` by the clear-drain guard `root_clear_drain` arms.
-            // Then the `/clear` itself reaches the worker's drive loop and
+            // Then the `/clear` itself reaches the worker's attend loop and
             // rebuilds the session.
             "/clear" => {
                 crate::agent::cancel::raise_interrupt();

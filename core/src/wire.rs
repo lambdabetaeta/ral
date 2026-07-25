@@ -31,7 +31,7 @@ impl WireChannel {
     /// from while another writes to the same socket.
     ///
     /// `UnixStream::try_clone` keeps the duplicate close-on-exec, so it is
-    /// never inherited by a child a turn spawns.
+    /// never inherited by a child a run spawns.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stream: self.stream.try_clone()?,

@@ -122,7 +122,7 @@ pub struct PluginOutputs {
 /// every access site: callsites populate `inputs` before the call and inspect
 /// `outputs` after.  `editor_state` is the live buffer (read and written by
 /// the handler); `state_cell` is internal scratch.  The TUI-active state
-/// is the turn's `TerminalAccess::ExplicitLoan`, set via
+/// is the run's `TerminalAccess::ExplicitLoan`, set via
 /// `Shell::begin_terminal_loan`/`end_terminal_loan` and queried via
 /// `Shell::in_terminal_loan`, not a field here.
 #[derive(Debug, Clone)]

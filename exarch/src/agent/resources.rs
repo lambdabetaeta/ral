@@ -535,7 +535,7 @@ impl Agent {
 
     /// Emit the `/resources` fold as one [`Kind::Resources`] bus event: the
     /// agent rows beside the card rendering them.  Called from the TUI's
-    /// `Control` at the turn boundary the command drains at, exactly where
+    /// `Control` at the exchange boundary the command drains at, exactly where
     /// `/clear` runs; transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, emit: &Emitter) {
         let rows = self.resource_rows();
@@ -552,7 +552,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::bus::InboxMsg;
+    use crate::bus::Post;
 
     /// The frontend half of the fold: every row wears its decided policy;
     /// the viewport window's two enforced caps (blocks, rows) show up as
@@ -770,9 +770,9 @@ mod tests {
         // pinning the full vector.)
         session
             .inbox
-            .push(InboxMsg::UserSteering("hold".into()))
+            .push(Post::UserSteering("hold".into()))
             .unwrap();
-        session.inbox.push(InboxMsg::Nudge("go on".into())).unwrap();
+        session.inbox.push(Post::Nudge("go on".into())).unwrap();
         let depths_before = session.inbox.source_depths();
         let rows = session.resource_rows();
         assert_eq!(row(&rows, "inbox[user]").current, 1);

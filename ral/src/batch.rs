@@ -1,9 +1,9 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Escape, Settled};
 use ral_core::{
-    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, diagnostic,
+    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, diagnostic,
     elaborator::elaborate, syntax::parser::parse,
 };
 use std::process::ExitCode;
@@ -192,17 +192,17 @@ pub(crate) fn run_batch(
     } else {
         RequestedTerminalAccess::Denied
     };
-    let result = match shell.run_turn(TurnRequest {
-        turn: Turn {
+    let result = match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.to_string()),
             script_name: name.to_string(),
             caps: ral_core::types::Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: terminal_access,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -210,10 +210,10 @@ pub(crate) fn run_batch(
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
+        RunReport::Ran { result, .. } => result,
         // Batch already typechecked above, so a static report should not occur
         // here; treat it defensively as a fatal run (exit 1).
-        TurnReport::Static { .. } => Err(Break::Escape(Escape::Exit(1))),
+        RunReport::Static { .. } => Err(Break::Escape(Escape::Exit(1))),
     };
     tick!("evaluate");
 

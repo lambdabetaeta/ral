@@ -36,7 +36,7 @@ use std::sync::Arc;
 /// carries the exact id the parent's registry resolves — and the child
 /// computes real line/col from real text instead of `comp.rs`'s no-source
 /// byte-offset fallback.  Carried on the eval-request envelope rather than
-/// [`WireMobile`], mirroring `audit_policy`: it names the parent's turn
+/// [`WireMobile`], mirroring `audit_policy`: it names the parent's run
 /// state, not a property of the mobile snapshot itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireScriptContext {
@@ -246,7 +246,7 @@ pub(crate) fn transfer_error(err: &Error) -> Error {
 
 /// Reify a [`Mobile`] and a body into a wire-ready [`ChildEvalRequest`].
 /// Inverse of [`decode_response`].  `captured` carries the pipeline stage
-/// closure env; `loc` is the launching turn's source cursor, captured as a
+/// closure env; `loc` is the launching run's source cursor, captured as a
 /// [`WireScriptContext`] so the child resolves its spans against the same
 /// source.
 pub(crate) fn pack_request(
@@ -314,15 +314,15 @@ fn eval_request(
     }
     // The stage child has no surface sink to replay to, but the body may
     // still call `surface`; the no-op `()` sink discards those calls.
-    shell.turn.surface = Some(Arc::new(()));
+    shell.run.surface = Some(Arc::new(()));
     crate::dbg_trace!(
         "child-eval",
         "pre-eval: audit.active={}",
         shell.local.audit.active(),
     );
 
-    shell.turn.io.terminal = TerminalState::probe();
-    shell.turn.io.launch_role = crate::io::LaunchRole::PipelineStage;
+    shell.run.io.terminal = TerminalState::probe();
+    shell.run.io.launch_role = crate::io::LaunchRole::PipelineStage;
     let captured = captured
         .ok_or_else(|| {
             Break::Error(Error::new(
@@ -580,7 +580,7 @@ mod tests {
             Some(&captured),
             shell.local.audit.active_policy(),
             wants_value,
-            &shell.turn.loc,
+            &shell.run.loc,
         )
         .expect("pack")
     }

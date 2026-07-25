@@ -496,7 +496,7 @@ let nub = { |xs| fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x]
 
 ## Spawn a thunk under audit and return the handle.  The spawned block
 ## never fails (failure is data in the audit tree), so `await $h` is
-## always safe and the handle survives turn boundaries.
+## always safe and the handle survives run boundaries.
 let defer = { |body| spawn { audit { !$body } } }
 
 ## Decode the stdout/stderr Bytes from an `await` result into a String.

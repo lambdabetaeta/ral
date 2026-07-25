@@ -47,7 +47,7 @@ pub(crate) fn start(shell: &Shell) -> AuditStart {
         return AuditStart::default();
     }
     AuditStart {
-        site: shell.turn.loc.audit_site(),
+        site: shell.run.loc.audit_site(),
         time: epoch_us(),
     }
 }
@@ -213,7 +213,7 @@ pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &st
     if !shell.should_audit_capabilities() {
         return;
     }
-    let site = shell.turn.loc.audit_site();
+    let site = shell.run.loc.audit_site();
     let node = ExecNode::capability_check(
         resource,
         decision,

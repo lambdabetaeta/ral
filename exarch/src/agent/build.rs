@@ -268,7 +268,7 @@ impl Agent {
         // Index resolution reads only the compiled-in builtin table, which
         // an identity seat's own shell and a wire seat's boot recipe dress
         // identically (`bootstrap::exarch_shell`). An identity seat resolves
-        // off the very shell it goes on to run turns through; a wire seat's
+        // off the very shell it goes on to run calls through; a wire seat's
         // real shell lives in the remote engine, so the shared dressing —
         // the boot recipe minus its engine-local scratch — stands in here
         // and is then discarded.
@@ -345,13 +345,13 @@ impl Agent {
     pub(crate) fn clear(&mut self) -> io::Result<()> {
         self.log.lock().clear(self.system.len())?;
         // The seat reboots its shell from its own scratch and re-runs the
-        // identity ceremony onto the same turn-scope cell; the outgoing
+        // identity ceremony onto the same run-scope cell; the outgoing
         // shell's teardown cancels its registered workers — `/clear`
         // outranks every lease, the durable class included, through the
         // same ownership edge every other teardown path takes.
         self.seat.clear(&self.log.lock());
         // A rebuilt context starts empty: drop the stale pressure reading so
-        // the next turn's usage sets it afresh.
+        // the next step's usage sets it afresh.
         self.last_input = 0;
         // Retire the subtree, then disarm schedules, then empty the queue —
         // in that order, though no ordering among the three is actually
@@ -604,7 +604,7 @@ impl Drop for Agent {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::bus::{Emitter, Turn};
+    use crate::bus::{Emitter, Item};
     use crate::provider::scripted::Script;
 
     /// A forked child inherits the parent's installed builtin surface, not
@@ -1037,11 +1037,11 @@ mod tests {
         }
         let late = session
             .inbox
-            .drain_turn()
+            .next_item()
             .expect("a worker settling after /clear still posts its late surface batch");
         assert!(
-            matches!(late, Turn::Surface { .. }),
-            "expected the late post to surface as a Turn::Surface, got {late:?}"
+            matches!(late, Item::Surface { .. }),
+            "expected the late post to surface as an Item::Surface, got {late:?}"
         );
         assert!(
             !session.admits(&late),

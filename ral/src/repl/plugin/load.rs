@@ -13,12 +13,12 @@
 use ral_core::source::Span;
 use ral_core::transport::Program;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Settled};
-use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
+use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
 
 use super::super::errfmt::plugin_warning;
 use super::manifest::LoadedPlugin;
-use super::{PluginRuntime, framed_turn_request, load_err, lock, unload_err};
+use super::{PluginRuntime, framed_run_request, load_err, lock, unload_err};
 
 /// Load a plugin by name (or path) with an optional options map.
 ///
@@ -116,7 +116,7 @@ pub(crate) fn load_plugin(
 /// hook table, each keyed under the plugin's namespace so
 /// [`Shell::remove_plugin_hooks`] can drop them all at unload (or roll back
 /// a failed load).  Every handler fires as a `Program::Hook` through
-/// `Shell::run_turn`.
+/// `Shell::run`.
 fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(), Error> {
     let origin = Span::synthetic();
     for (hook_event, handler) in &plugin.hooks {
@@ -269,7 +269,7 @@ fn instantiate(
                     ))));
                 }
             };
-            let req = framed_turn_request(
+            let req = framed_run_request(
                 "<plugin>",
                 RequestedTerminalAccess::Denied,
                 Program::Hook {
@@ -277,14 +277,14 @@ fn instantiate(
                     args: vec![fo_arg],
                 },
             );
-            let report = shell.run_turn(req);
+            let report = shell.run(req);
             // The factory is construction-time only: it built the manifest and
             // is never dispatched again, so it leaves the hook table now rather
             // than outliving the load.
             shell.unregister_hook(&factory_name);
             match report {
-                TurnReport::Ran { result, .. } => result,
-                TurnReport::Static { .. } => {
+                RunReport::Ran { result, .. } => result,
+                RunReport::Static { .. } => {
                     unreachable!("a thunk plugin factory never compiles source")
                 }
             }

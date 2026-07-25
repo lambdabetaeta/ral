@@ -110,9 +110,9 @@ impl Shell {
     /// not popped at scope exit, only by [`Self::remove_alias`] (or
     /// `unalias NAME`).
     ///
-    /// An alias is cross-turn dynamic rebinding, so the arm's scheme is
+    /// An alias is cross-run dynamic rebinding, so the arm's scheme is
     /// computed and stored on the frame at install — by the same static
-    /// inference a turn's check uses (one engine), seeded from the live
+    /// inference a run's check uses (one engine), seeded from the live
     /// scope and closed against its own unifier.  This covers all three
     /// install paths uniformly (the `alias` statement, rc `aliases:`
     /// maps, plugin loads).
@@ -133,7 +133,7 @@ impl Shell {
     /// `bindings:` path).  Where [`Self::install_alias`] pushes a handler
     /// frame, this writes a scope entry: for a function value the closed
     /// session scheme is inferred under the value/function-application
-    /// convention and stored alongside the value, so the next turn's
+    /// convention and stored alongside the value, so the next run's
     /// check sees its type and the binding is applyable by function
     /// application at the prompt.  A non-function value carries no scheme.
     pub fn bind_value(&mut self, name: String, value: Value) {
@@ -271,7 +271,7 @@ impl Shell {
         r
     }
 
-    /// The next turn's check seed, read off the live session: every
+    /// The next run's check seed, read off the live session: every
     /// scope binding with its installed scheme, plus the alias arms'
     /// schemes off the persistent handler frames.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {

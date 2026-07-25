@@ -248,8 +248,8 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// non-Unit value it wins; otherwise the captured bytes are decoded
 /// (trailing newline stripped).
 ///
-/// The re-entrancy guard and the pipeline foreground signal are the turn's
-/// explicit terminal loan.  `begin_terminal_loan` raises the turn
+/// The re-entrancy guard and the pipeline foreground signal are the run's
+/// explicit terminal loan.  `begin_terminal_loan` raises the run
 /// to `ExplicitLoan` — which the pipeline foreground rule honors, keeping
 /// `_ed-tui`'s body in the foreground process group despite the captured
 /// stdout pipe — and the matching `end_terminal_loan` restores it;

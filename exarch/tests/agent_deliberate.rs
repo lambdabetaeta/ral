@@ -1,26 +1,26 @@
 #![allow(clippy::disallowed_methods)]
 
-//! End-to-end tests for [`exarch::agent::Agent::apply`] driven through
+//! End-to-end tests for [`exarch::agent::Agent::deliberate`] driven through
 //! a scripted provider backend (`exarch::provider::Provider::scripted`).
 //! This is the composition the protocol machine (`event.rs`) is exercised
-//! under in production: `apply` renders the transcript, calls the provider,
-//! commits the reply, dispatches tools, drains tool-boundary steering, and
-//! continues until the turn completes — the path `event.rs`'s unit tests
-//! never see.
+//! under in production: `deliberate` renders the transcript, calls the
+//! provider, commits the reply, runs the tool batch, drains tool-boundary
+//! steering, and continues until it reaches quiescence — the path
+//! `event.rs`'s unit tests never see.
 //!
 //! The transcript-admission invariant (every committed message
 //! serialises to a request every provider accepts) is asserted by
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::{Agent, TurnOutcome};
+use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
-/// A scripted provider behind the `Arc` the turn driver threads — the same
+/// A scripted provider behind the `Arc` the attend loop threads — the same
 /// shape the live driver holds so an async `agent` worker could capture a
 /// clone.
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
@@ -35,24 +35,25 @@ exarch::pre_main_ctor!();
 /// A unique scratch directory per test so concurrent runs don't share
 /// session logs.
 fn tmp(tag: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("exarch-apply-test-{}-{tag}", std::process::id()));
+    let p = std::env::temp_dir()
+        .join(format!("exarch-deliberate-test-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     p
 }
 
-/// Run one `apply` against a fresh `Emitter`/collector pair, returning
+/// Run one `deliberate` against a fresh `Emitter`/collector pair, returning
 /// the outcome plus every event the worker emitted.
-fn drive_apply(
+fn drive_deliberate(
     session: &mut Agent,
     provider: &Arc<Provider>,
     prompt: Option<&str>,
-) -> (Result<TurnOutcome, ProviderError>, Vec<Kind>) {
+) -> (Result<deliberate::Outcome, ProviderError>, Vec<Kind>) {
     let id: AgentId = session.id;
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
     let token = exarch::agent::cancel::Token::new();
-    let outcome = session.apply(provider, prompt.map(str::to_string), &token, &emit);
+    let outcome = session.deliberate(provider, prompt.map(str::to_string), &token, &emit);
     drop(emit);
     let kinds = rx.into_iter().map(|e| e.kind).collect();
     (outcome, kinds)
@@ -87,15 +88,15 @@ fn assert_admissible(session: &Agent) {
 }
 
 #[test]
-fn plain_text_turn_completes() {
+fn plain_text_reaches_quiescence() {
     let dir = tmp("plain-text");
     let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
-    let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("hi"));
+    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("hi"));
 
     match outcome {
-        Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "hello"),
+        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "hello"),
         other => panic!("expected Complete, got {other:?}"),
     }
     assert!(session.is_ready());
@@ -113,10 +114,10 @@ fn tool_call_then_completion() {
             .then(Reply::text("done")),
     );
 
-    let (outcome, kinds) = drive_apply(&mut session, &provider, Some("set x then report"));
+    let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("set x then report"));
 
     match outcome {
-        Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "done"),
+        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
         other => panic!("expected Complete, got {other:?}"),
     }
     assert!(
@@ -130,7 +131,7 @@ fn tool_call_then_completion() {
 }
 
 /// A `let` binding committed by an earlier tool call survives into the
-/// next tool call — the persistent-shell contract `apply` relies on.
+/// next tool call — the persistent-shell contract `deliberate` relies on.
 #[test]
 fn bindings_persist_across_tool_calls() {
     let dir = tmp("bindings-persist");
@@ -143,8 +144,8 @@ fn bindings_persist_across_tool_calls() {
             .then(Reply::text("done")),
     );
 
-    let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("compute"));
-    assert!(matches!(outcome, Ok(TurnOutcome::Complete(_))));
+    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("compute"));
+    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 
     // The second tool result must show 42 — the binding survived.
     let results: Vec<_> = session
@@ -168,13 +169,13 @@ fn bindings_persist_across_tool_calls() {
     );
 }
 
-/// X6: a `MaxTokens` reply carrying captured tool calls must dispatch them
+/// X6: a `MaxTokens` reply carrying captured tool calls must run them
 /// and continue, not return `Truncated` while the session is
 /// `AwaitingToolResults` (which strands the protocol and fails the next
 /// `append_user`).  The truncated-with-tools reply runs the tool; the next
-/// reply completes the turn.
+/// reply reaches quiescence.
 #[test]
-fn truncated_with_tool_calls_dispatches_and_continues() {
+fn truncated_with_tool_calls_runs_and_continues() {
     let dir = tmp("truncated-with-tools");
     let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted(
@@ -187,25 +188,26 @@ fn truncated_with_tool_calls_dispatches_and_continues() {
             .then(Reply::text("resumed after truncation")),
     );
 
-    let (outcome, kinds) = drive_apply(&mut session, &provider, Some("do work then get cut off"));
+    let (outcome, kinds) =
+        drive_deliberate(&mut session, &provider, Some("do work then get cut off"));
     match outcome {
-        Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "resumed after truncation"),
-        other => panic!("truncated-with-tools must dispatch and complete, got {other:?}"),
+        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "resumed after truncation"),
+        other => panic!("truncated-with-tools must run and complete, got {other:?}"),
     }
     assert!(
         kinds
             .iter()
             .any(|k| matches!(k, Kind::ToolCall { tool: "ral", .. })),
-        "the captured tool call must be dispatched, not dropped"
+        "the captured tool call must be run, not dropped"
     );
     assert!(session.is_ready());
     assert_admissible(&session);
 }
 
 /// A stream that stalls after some text has streamed must not discard the
-/// work and end the run: `apply` commits the streamed prefix as the
+/// work and end the run: `deliberate` commits the streamed prefix as the
 /// assistant message and returns `Truncated` (carrying the stall cause) so
-/// the nudge re-drives the turn with `continue`.  The recovery is an
+/// the nudge continues the exchange with `continue`.  The recovery is an
 /// operational `SystemNote`, not an `Error`.
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
@@ -216,15 +218,15 @@ fn stalled_stream_commits_partial_and_truncates() {
         Script::new().then(Reply::stalled("partial answer before the stall")),
     );
 
-    let (outcome, kinds) = drive_apply(&mut session, &provider, Some("answer at length"));
+    let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("answer at length"));
     match outcome {
         Err(ProviderError::Truncated { reason }) => {
             assert_eq!(reason, "Web stream error: operation timed out");
         }
         other => panic!("a committed stall must surface as Truncated, got {other:?}"),
     }
-    // The streamed prefix is committed verbatim, so the re-driven turn
-    // continues from exactly what the user already saw.
+    // The streamed prefix is committed verbatim, so the exchange the nudge
+    // continues resumes from exactly what the user already saw.
     let committed: Vec<_> = session
         .rendered_messages()
         .into_iter()
@@ -255,16 +257,16 @@ fn stalled_stream_commits_partial_and_truncates() {
 
 /// X7: an empty assistant reply (zero content parts) must never be
 /// committed empty — a stub is substituted so the transcript stays
-/// admissible — while the turn still surfaces as `Empty` for the nudge.
+/// admissible — while the outcome still surfaces as `Empty` for the nudge.
 #[test]
 fn empty_reply_commits_a_stub_not_empty_content() {
     let dir = tmp("empty-reply");
     let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
-    let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("say nothing"));
+    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("say nothing"));
     assert!(
-        matches!(outcome, Ok(TurnOutcome::Empty)),
+        matches!(outcome, Ok(deliberate::Outcome::Empty)),
         "an empty reply still surfaces as Empty for the nudge"
     );
     // The committed assistant message must not be empty — this is the
@@ -284,7 +286,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
 /// X2: a tool call whose `fn_arguments` is not a JSON object is repaired to
 /// `{}` at the commit boundary, so the re-serialised transcript is one a
 /// strict backend accepts.  The repaired-to-`{}` call still reaches the
-/// tool (which reports the missing fields), and the turn completes.
+/// tool (which reports the missing fields), and it reaches quiescence.
 #[test]
 fn malformed_tool_arguments_are_normalised_to_object() {
     let dir = tmp("malformed-tool-args");
@@ -302,8 +304,8 @@ fn malformed_tool_arguments_are_normalised_to_object() {
             .then(Reply::text("recovered")),
     );
 
-    let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("emit a bad call"));
-    assert!(matches!(outcome, Ok(TurnOutcome::Complete(_))));
+    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
+    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 
     // Every committed tool call's arguments must be a JSON object.
     for m in session.rendered_messages() {

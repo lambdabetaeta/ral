@@ -13,7 +13,7 @@
 //!
 //! - Every touch is `Agent::transport.shell_mut()`. Every `Agent` — the
 //!   trunk and every forked sub-agent — is driven by exactly one dedicated
-//!   OS thread running `Agent::drive`: the TUI's `worker` thread
+//!   OS thread running `Agent::attend`: the TUI's `worker` thread
 //!   (`exarch/src/tui/tui_loop.rs`, `std::thread::Builder::spawn_scoped`),
 //!   headless's single `pump` worker thread (`exarch/src/headless.rs`), and
 //!   each `agent`-tool spawn's own dedicated thread
@@ -21,8 +21,8 @@
 //!   same `Agent`, and an `Agent` (with it, its `Shell`) never migrates
 //!   threads mid-life.
 //! - `/clear` and `/resources` do not bypass this: both route as
-//!   `InboxMsg::Command` through `Agent::drive`'s loop, handled by
-//!   `Control::command` — called from *inside* `drive`, on the agent's own
+//!   `Post::Command` through `Agent::attend`'s loop, handled by
+//!   `Control::command` — called from *inside* `attend`, on the agent's own
 //!   thread, never from the TUI's separate render/input thread (which reads
 //!   only the bus and the fleet's shared, separately-locked registry).
 //! - The reaper daemon thread that fires the worker lease
@@ -40,8 +40,8 @@ use std::collections::{HashMap, HashSet};
 /// Host-stated per-agent policy: a leased name expires once it has gone
 /// `idle_calls` epochs without use.
 ///
-/// The epoch is the shell's committed-turn
-/// clock ([`Shell::run_turn`](super::Shell::run_turn)'s source-arm tick),
+/// The epoch is the shell's committed-run
+/// clock ([`Shell::run`](super::Shell::run)'s source-arm tick),
 /// never wall time. `large_binding_bytes` is a separate, orthogonal axis —
 /// residency, not lifetime — read only by the install chokepoint's
 /// large-binding check: an install whose
@@ -82,7 +82,7 @@ pub struct LargeBindingNotice {
 /// called [`Shell::arm_binding_lease`](super::Shell::arm_binding_lease).
 struct Armed {
     lease: BindingLease,
-    /// The committed-turn clock. Ticks once per source-door turn.
+    /// The committed-run clock. Ticks once per source-door run.
     epoch: u64,
     /// Every name visible anywhere in the scope chain at arm time —
     /// prelude, agent library, rc bindings, host seed vars. A baseline name
@@ -105,7 +105,7 @@ struct Armed {
 
 /// Per-`Shell` binding-lease ledger. `Default` is the inert state: a host
 /// that never arms it (REPL, batch, worker shells, pipeline children) pays
-/// one branch per turn door and nothing else, and observes no expiry ever.
+/// one branch per run door and nothing else, and observes no expiry ever.
 #[derive(Default)]
 pub(crate) struct BindingLedger(Option<Armed>);
 
@@ -128,7 +128,7 @@ impl BindingLedger {
         self.0.is_some()
     }
 
-    /// Advance the committed-turn clock by one. A no-op when unarmed.
+    /// Advance the committed-run clock by one. A no-op when unarmed.
     pub(crate) fn tick(&mut self) {
         if let Some(armed) = &mut self.0 {
             armed.epoch += 1;
@@ -357,15 +357,15 @@ mod tests {
     }
 }
 
-/// Turn-level tests for the install chokepoint and the use-observation
+/// Run-level tests for the install chokepoint and the use-observation
 /// harvest (`decisions/260629_agent-binding-reaping` parcels 2 and 3): every
 /// persistent top-level install routes through
 /// [`Shell::install_scope_binding`] and gets leased, while every
-/// deeper-scope write is recorded nowhere; a committed turn's referenced
+/// deeper-scope write is recorded nowhere; a committed run's referenced
 /// names renew already-leased entries at the three harvest seams
-/// (`run_turn`'s own compiled program, `check_source`'s
+/// (`run`'s own compiled program, `check_source`'s
 /// runtime-compiled loads, `classify_command`'s `Resolution::Env` dispatch
-/// touch). Driven through the public `run_turn` door, no exarch
+/// touch). Driven through the public `run` door, no exarch
 /// involved — the same harness shape as `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
 #[allow(
@@ -374,9 +374,9 @@ mod tests {
 )]
 mod chokepoint_tests {
     use crate::driver::BakedPrelude;
-    use crate::transport::{Program, Turn};
+    use crate::transport::{Program, Run};
     use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
-    use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+    use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
@@ -411,20 +411,20 @@ mod chokepoint_tests {
         shell
     }
 
-    /// Run one top-level turn through the public door. Every source below
+    /// Perform one top-level run through the public door. Every source below
     /// is expected to compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-        match shell.run_turn(TurnRequest {
-            turn: Turn {
+        match shell.run(RunRequest {
+            run: Run {
                 program: Program::Source(source.into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Inherit,
+                io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
-                stdin: TurnStdin::Inherit,
+                stdin: RunStdin::Inherit,
             },
             surface: None,
             deferred: None,
@@ -432,25 +432,25 @@ mod chokepoint_tests {
             nursery: None,
             lifecycle: Box::new(()),
         }) {
-            TurnReport::Ran { result, .. } => result,
-            TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+            RunReport::Ran { result, .. } => result,
+            RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
     }
 
-    /// Run one top-level turn capturing its streams, returning the turn's
+    /// Perform one top-level run capturing its streams, returning the run's
     /// stderr — where the ready boundary writes the large-binding warning.
     fn top_level_stderr(shell: &mut Shell, source: &str) -> String {
-        match shell.run_turn(TurnRequest {
-            turn: Turn {
+        match shell.run(RunRequest {
+            run: Run {
                 program: Program::Source(source.into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Leased,
-                stdin: TurnStdin::Inherit,
+                stdin: RunStdin::Inherit,
             },
             surface: None,
             deferred: None,
@@ -458,11 +458,11 @@ mod chokepoint_tests {
             nursery: None,
             lifecycle: Box::new(()),
         }) {
-            TurnReport::Ran { captured, .. } => {
+            RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
                 String::from_utf8_lossy(&captured.stderr).into_owned()
             }
-            TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+            RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
     }
 
@@ -486,7 +486,7 @@ mod chokepoint_tests {
             .is_some_and(|armed| armed.baseline.contains(name))
     }
 
-    /// The ledger's committed-turn clock, for asserting the tick.
+    /// The ledger's committed-run clock, for asserting the tick.
     fn epoch(shell: &Shell) -> u64 {
         shell.local.bindings.0.as_ref().expect("armed").epoch
     }
@@ -497,7 +497,7 @@ mod chokepoint_tests {
     }
 
     /// Idle out `name`'s lease relative to the current epoch by running
-    /// `n` unrelated turns, so a later renewal is observable against a
+    /// `n` unrelated runs, so a later renewal is observable against a
     /// genuinely stale timestamp rather than one that happens to already
     /// equal the current epoch.
     fn idle_spin(shell: &mut Shell, n: u32) {
@@ -610,24 +610,24 @@ mod chokepoint_tests {
     // ── use observation (parcel 3) ────────────────────────────────────────
 
     /// An ordinary expression referencing a stale name renews it to the
-    /// turn's own epoch — the turn's-own-program harvest seam.
+    /// run's own epoch — the run's-own-program harvest seam.
     #[test]
-    fn turn_reference_renews_lease() {
+    fn run_reference_renews_lease() {
         let mut shell = armed_shell(64);
-        top_level(&mut shell, "let turn_ref_x = 1").expect("define");
+        top_level(&mut shell, "let run_ref_x = 1").expect("define");
         idle_spin(&mut shell, 3);
-        let stale = last_used_of(&shell, "turn_ref_x");
+        let stale = last_used_of(&shell, "run_ref_x");
         assert!(stale < epoch(&shell), "must be stale before the reference");
-        top_level(&mut shell, "return $[$turn_ref_x + 1]").expect("reference");
+        top_level(&mut shell, "return $[$run_ref_x + 1]").expect("reference");
         assert_eq!(
-            last_used_of(&shell, "turn_ref_x"),
+            last_used_of(&shell, "run_ref_x"),
             epoch(&shell),
-            "a referencing turn must renew to its own epoch"
+            "a referencing run must renew to its own epoch"
         );
     }
 
-    /// A turn that fails to typecheck ticks the clock (aging every leased
-    /// name) but harvests nothing — `compile_turn` never returns a `Comp` to
+    /// A run that fails to typecheck ticks the clock (aging every leased
+    /// name) but harvests nothing — `compile_run` never returns a `Comp` to
     /// walk, so a stale name stays exactly as stale as it was.
     #[test]
     fn static_failure_ticks_but_renews_nothing() {
@@ -637,17 +637,17 @@ mod chokepoint_tests {
         let epoch_before = epoch(&shell);
         let stale = last_used_of(&shell, "static_x");
 
-        match shell.run_turn(TurnRequest {
-            turn: Turn {
+        match shell.run(RunRequest {
+            run: Run {
                 program: Program::Source("$[1 + true]".into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Inherit,
+                io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
-                stdin: TurnStdin::Inherit,
+                stdin: RunStdin::Inherit,
             },
             surface: None,
             deferred: None,
@@ -655,25 +655,25 @@ mod chokepoint_tests {
             nursery: None,
             lifecycle: Box::new(()),
         }) {
-            TurnReport::Static { .. } => {}
-            TurnReport::Ran { .. } => panic!("ill-typed source must not run"),
+            RunReport::Static { .. } => {}
+            RunReport::Ran { .. } => panic!("ill-typed source must not run"),
         }
 
         assert_eq!(
             epoch(&shell),
             epoch_before + 1,
-            "a failed turn still ticks the clock"
+            "a failed run still ticks the clock"
         );
         assert_eq!(
             last_used_of(&shell, "static_x"),
             stale,
-            "a failed turn must renew nothing"
+            "a failed run must renew nothing"
         );
     }
 
-    /// A registered hook run through `run_turn`'s `Program::Hook` is not a
+    /// A registered hook run through `run`'s `Program::Hook` is not a
     /// tool call: it ticks no epoch and renews nothing, even though its body
-    /// reads a name the turn's own harvest would otherwise have caught.
+    /// reads a name the run's own harvest would otherwise have caught.
     #[test]
     fn hook_door_neither_ticks_nor_renews() {
         let mut shell = armed_shell(64);
@@ -701,20 +701,20 @@ mod chokepoint_tests {
             )
             .expect("register the hook");
 
-        let report = shell.run_turn(TurnRequest {
-            turn: Turn {
+        let report = shell.run(RunRequest {
+            run: Run {
                 program: Program::Hook {
                     name: crate::types::HookName::session("test_prompt"),
                     args: vec![],
                 },
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Inherit,
+                io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
-                stdin: TurnStdin::Inherit,
+                stdin: RunStdin::Inherit,
             },
             surface: None,
             deferred: None,
@@ -723,10 +723,10 @@ mod chokepoint_tests {
             lifecycle: Box::new(()),
         });
         match report {
-            TurnReport::Ran { result, .. } => {
+            RunReport::Ran { result, .. } => {
                 result.expect("the hook body must run");
             }
-            TurnReport::Static { .. } => panic!("the registered hook must run"),
+            RunReport::Static { .. } => panic!("the registered hook must run"),
         }
 
         assert_eq!(
@@ -789,9 +789,9 @@ mod chokepoint_tests {
     }
 
     /// A `source`d file referencing a name that exists only in the caller's
-    /// scope — never mentioned anywhere in the outer turn's own compiled
+    /// scope — never mentioned anywhere in the outer run's own compiled
     /// program — is still renewed: the `check_source` harvest seam, not the
-    /// turn's-own-program seam, is what catches it here.
+    /// run's-own-program seam, is what catches it here.
     #[test]
     fn sourced_module_reference_renews() {
         let mut shell = armed_shell(64);
@@ -849,7 +849,7 @@ mod chokepoint_tests {
 
     /// A name mentioned only inside a double-quoted interpolated string
     /// renews — exercising the walker's `CompKind::Interpolation` arm
-    /// end-to-end through a real turn.
+    /// end-to-end through a real run.
     #[test]
     fn interpolated_reference_renews() {
         let mut shell = armed_shell(64);
@@ -867,7 +867,7 @@ mod chokepoint_tests {
 
     // ── the prune verb (parcel 4) ──────────────────────────────────────────
 
-    /// A pruned name is gone from scope *and* from the next turn's type
+    /// A pruned name is gone from scope *and* from the next run's type
     /// seed: `unset` drops the `Binding` (value and scheme together) in one
     /// act, so a later reference reads as an ordinary undefined variable —
     /// core's unmodified runtime diagnostic (`eval_val`'s `Val::Variable`
@@ -887,17 +887,17 @@ mod chokepoint_tests {
         assert_eq!(notices[0].kind, "Int");
         assert!(shell.scope_lookup("prune_x").is_none());
 
-        match shell.run_turn(TurnRequest {
-            turn: Turn {
+        match shell.run(RunRequest {
+            run: Run {
                 program: Program::Source("return $prune_x".into()),
                 script_name: "<test>".into(),
                 caps: Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Inherit,
+                io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
-                stdin: TurnStdin::Inherit,
+                stdin: RunStdin::Inherit,
             },
             surface: None,
             deferred: None,
@@ -905,7 +905,7 @@ mod chokepoint_tests {
             nursery: None,
             lifecycle: Box::new(()),
         }) {
-            TurnReport::Ran { result, .. } => {
+            RunReport::Ran { result, .. } => {
                 let err = result.expect_err("a pruned name must read as undefined");
                 let msg = match err {
                     crate::types::Break::Error(e) => e.message,
@@ -918,7 +918,7 @@ mod chokepoint_tests {
                     "expected an undefined-variable diagnostic, got: {msg}"
                 );
             }
-            TurnReport::Static { .. } => {
+            RunReport::Static { .. } => {
                 panic!("an unbound variable reference is a runtime error, not a static one")
             }
         }
@@ -950,7 +950,7 @@ mod chokepoint_tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        // The `cancel $h_pin` turn itself referenced (and so renewed)
+        // The `cancel $h_pin` run itself referenced (and so renewed)
         // h_pin; idle it back out before pruning again.
         idle_spin(&mut shell, 2);
 
@@ -984,7 +984,7 @@ mod chokepoint_tests {
     }
 
     /// A ledger entry whose install a panic rollback undid — simulated here
-    /// with the same mobile install/restore motion the turn door's own
+    /// with the same mobile install/restore motion the run door's own
     /// rollback performs — is dropped silently at the next prune: no
     /// notice, no error.
     #[test]
@@ -1075,11 +1075,11 @@ mod chokepoint_tests {
     // ── the large-binding warning (parcel 6) ────────────────────────────────
 
     /// A session-scope install meeting the threshold writes exactly one
-    /// warning onto its turn's stderr, naming the binding and its byte
+    /// warning onto its run's stderr, naming the binding and its byte
     /// estimate. A rebind that still meets the threshold warns again — no
     /// de-duplication.
     #[test]
-    fn large_binding_threshold_warns_on_turn_stderr() {
+    fn large_binding_threshold_warns_on_run_stderr() {
         let mut shell = armed_shell_with(64, 8);
         let text = "this string is definitely over eight bytes long";
         let stderr = top_level_stderr(&mut shell, &format!("let large_x = '{text}'"));

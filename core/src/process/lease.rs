@@ -3,12 +3,12 @@
 //! A [`TerminalLease`] is the authority to hand the controlling terminal to a
 //! child via `tcsetpgrp`. It is not a predicate code re-derives from
 //! process-global startup state — it is a value the runtime is *given* at
-//! session construction and then lends, per turn, to the one chokepoint that
+//! session construction and then lends, per run, to the one chokepoint that
 //! performs a foreground handoff
 //! ([`ForegroundGuard::try_acquire`](super::ForegroundGuard::try_acquire)).
 //!
 //! The token has no public constructor and is neither `Clone` nor `Copy`, so a
-//! host cannot forge one or duplicate it; it can only ask core to run a turn
+//! host cannot forge one or duplicate it; it can only ask core to perform a run
 //! with a stated terminal policy and let core decide whether the borrow is
 //! reachable. This is the witness discipline of the reduced-authority-witness
 //! decision applied to the terminal: a readable flag becomes a capability value
@@ -21,7 +21,7 @@
 /// `tcgetpgrp(stdin) == getpgrp()` predicate that populates
 /// [`startup_foreground`](crate::io::TerminalState::startup_foreground). Held
 /// on `SessionState`; lent as `&TerminalLease` to the post-startup foreground
-/// handoff only when the installed turn's access permits it (see
+/// handoff only when the installed run's access permits it (see
 /// [`Shell::terminal_lease`](crate::types::Shell::terminal_lease)).
 #[derive(Debug, PartialEq, Eq)]
 pub struct TerminalLease {

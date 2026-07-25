@@ -67,7 +67,7 @@ impl Shell {
     /// value-typed so it does not re-borrow `context.location` once the
     /// context is live.  Every audit-emitting check funnels through here.
     fn audit_call<R>(&mut self, f: impl FnOnce(&Context, &mut Audit, CallSite) -> R) -> R {
-        let site = self.turn.loc.audit_site();
+        let site = self.run.loc.audit_site();
         f(&self.mobile.context, &mut self.local.audit, site)
     }
 

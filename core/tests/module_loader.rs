@@ -16,17 +16,16 @@
 //!
 //! The harness mirrors `top_level_vs_block.rs`: bootstrap a `Shell` with
 //! the prelude registered, then drive each source string through the
-//! public `run_turn` door like a REPL turn would.
+//! public `run` door like a REPL run would.
 
 mod common;
 
 use std::io::Write;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Capabilities, Settled, Shell};
 use ral_core::{
-    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, builtins,
-    diagnostic,
+    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins, diagnostic,
 };
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
@@ -38,21 +37,21 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Run one top-level turn of `source` through the public `run_turn` door
+/// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -60,8 +59,8 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 
@@ -209,14 +208,14 @@ fn source_leaks_bindings_into_caller_scope() {
 ///
 /// The error's location carries the module's source identity; the renderer
 /// resolves it against the session's `SourceDb` once at render time.  The
-/// module's failing line has no counterpart in the top-level turn, so a
+/// module's failing line has no counterpart in the top-level run, so a
 /// caret drawn against the top-level text (the dead-guard regression) would
 /// land at unrelated bytes — this test pins that it lands in the module.
 #[test]
 fn sourced_module_runtime_error_points_into_module() {
     // The error is on line 3 of the module: a runtime division by zero,
     // which carries a source location (unlike a bare `fail`).  Line 3 has
-    // no counterpart in the one-line top-level turn that sources it.
+    // no counterpart in the one-line top-level run that sources it.
     let path = write_module(
         "ral_source_runtime_err.ral",
         "let a = 1\nlet z = 0\nreturn $[$a / $z]\n",

@@ -614,7 +614,7 @@ mod tests {
     }
 
     /// Typecheck `src` against `shell`'s live session schemes — the same
-    /// seed a real prompt turn uses — and return the errors.
+    /// seed a real prompt run uses — and return the errors.
     fn typecheck_against_session(shell: &Shell, src: &str) -> Vec<ral_core::TypeError> {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
         let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default());

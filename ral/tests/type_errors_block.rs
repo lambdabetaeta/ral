@@ -146,7 +146,7 @@ fn run_agrees_ed_insert_is_external_in_batch() {
 // what the rc left behind.
 
 /// Boot `ral -i` with `rc_body` written to the isolated rc file and `line`
-/// fed as the single REPL turn after rc sourcing.
+/// fed as the single REPL run after rc sourcing.
 fn boot_with_rc(rc_body: &str, line: &str) -> Run {
     let dir = common::fresh_tmp_path("ral_rc_home", "d");
     std::fs::create_dir_all(dir.join("ral")).unwrap();
@@ -178,7 +178,7 @@ fn boot_with_rc(rc_body: &str, line: &str) -> Run {
 
 /// An rc file with a value-type error is skipped — the error is fatal to the
 /// file, so `marker` never installs — but the shell still boots (the next
-/// turn runs).
+/// run happens).
 #[test]
 fn rc_value_type_error_skips_file_but_boots() {
     let rc = "let marker = 'applied'\nlet bad = [a: 1]\nreturn $bad[b]\n";
@@ -193,7 +193,7 @@ fn rc_value_type_error_skips_file_but_boots() {
         "a skipped rc file must not install its bindings; stdout was:\n{}",
         r.stdout
     );
-    // The shell still booted: the piped turn ran.
+    // The shell still booted: the piped run completed.
     assert!(
         r.stdout.contains("marker-absent"),
         "the shell must boot even when the rc file is skipped; stdout was:\n{}",

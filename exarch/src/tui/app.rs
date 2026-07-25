@@ -71,10 +71,10 @@ pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
     /// The session's own inbox, shared with the input editor, queued-user
-    /// strip, and worker drive loop. A submitted prompt is pushed onto it
+    /// strip, and worker attend loop. A submitted prompt is pushed onto it
     /// (through a `Mailbox`); the worker drains a non-slash prefix after a
-    /// tool result to steer the next assistant step ([`Agent::dispatch`])
-    /// and the remainder at the next turn boundary ([`Inbox::next_or_idle`]).
+    /// tool result to steer the next assistant step ([`Agent::run_batch`])
+    /// and the remainder at the next exchange boundary ([`Inbox::next_or_idle`]).
     /// Until drained, the strip renders queued user prompts, and bare Up on
     /// an empty prompt pulls the whole queued run back into the editor for
     /// revision.
@@ -112,7 +112,7 @@ pub(crate) struct App {
     /// of the underlying state.
     pub(super) matrix_sort: MatrixSort,
     /// Set by [`Self::clear`] when the trunk viewport is blanked: drops leftover
-    /// events from a turn cancelled in flight (`Token`, `Boundary`, ...) until
+    /// events from an exchange cancelled in flight (`Token`, `Boundary`, ...) until
     /// the next prompt genuinely begins.  Only the root needs guarding —
     /// retired sub-agent tabs are already dropped in [`Self::handle`] via the
     /// `dying` linger window — because the unbounded bus channel can still
@@ -255,7 +255,7 @@ impl App {
     }
 
     pub fn busy_off(&mut self) {
-        // A turn ending supersedes any live phase label: clear it on the
+        // An exchange ending supersedes any live phase label: clear it on the
         // focused viewport so the elapsed-wait bar disappears.
         let focused = self.tabs.focused();
         if let Some(vp) = self.tabs.viewport_mut(focused) {
@@ -330,7 +330,7 @@ impl App {
             return;
         }
         // While the trunk viewport is freshly cleared (`App::clear` armed
-        // `root_clear_drain`), drop the straggler events the cancelled turn
+        // `root_clear_drain`), drop the straggler events the cancelled exchange
         // left in the unbounded bus — the tokens and trailing chrome the
         // worker emitted before the streaming `select!` noticed the cancel
         // flag, at most one `wait_for_cancel` poll (~50 ms) of queued events.

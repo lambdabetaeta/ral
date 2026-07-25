@@ -6,12 +6,12 @@
 //! construction.  (The rc-sourcing helpers are the exception: login
 //! profiles and the user rc are each sourced through `source_config_file`,
 //! so it runs up to three times.)  Splitting them out of `session.rs`
-//! keeps the state machine itself focused on the run/turn/eval loop.
+//! keeps the state machine itself focused on the run/iterate/eval loop.
 
 use ral_core::source::Span;
 use ral_core::transport::Program;
 use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig};
-use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic};
+use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -19,14 +19,14 @@ use super::super::config::{RcCtx, create_default_rc, find_ralrc};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
-use super::super::plugin::{PluginRuntime, framed_turn_request};
+use super::super::plugin::{PluginRuntime, framed_run_request};
 
 /// Install signal handlers and job-control signal masks for interactive use.
 ///
 /// Unix disposition table:
 /// - SIGINT  → relay handler (no-op when idle; forwards to external pipeline groups)
 /// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
-///   foreground turn and every detached worker — instead of core-dumping)
+///   foreground run and every detached worker — instead of core-dumping)
 /// - SIGTERM/SIGHUP → term handler (cancels the durable root with `Terminate`;
 ///   the third delivery force-exits via the escalation ladder)
 /// - SIGTSTP → `SIG_IGN`  (shell handles Ctrl+Z via waitpid, not self-stop)
@@ -387,7 +387,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         ) {
             return Err(format!("{path}: startup: {e}"));
         }
-        let req = framed_turn_request(
+        let req = framed_run_request(
             "<startup>",
             RequestedTerminalAccess::Denied,
             Program::Hook {
@@ -395,8 +395,8 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
                 args: vec![],
             },
         );
-        match ctx.shell.run_turn(req) {
-            TurnReport::Ran { result, .. } => match result {
+        match ctx.shell.run(req) {
+            RunReport::Ran { result, .. } => match result {
                 Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
                 Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),
                 #[cfg(unix)]
@@ -406,7 +406,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
                     ));
                 }
             },
-            TurnReport::Static { .. } => {
+            RunReport::Static { .. } => {
                 unreachable!("a thunk startup block never compiles source")
             }
         }

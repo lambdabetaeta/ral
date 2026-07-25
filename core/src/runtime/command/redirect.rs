@@ -1,7 +1,7 @@
 //! Atomic write recipe (`> file` to a regular file), fd-level redirects
 //! for bundled tools and unsupported fd shapes (`apply_redirects` /
 //! `restore_redirects`), and the `<file → fd 0` handoff that parks the
-//! file in `shell.turn.io.stdin` so every dispatch arm reads input
+//! file in `shell.run.io.stdin` so every dispatch arm reads input
 //! through the same `Source` channel.
 
 use crate::syntax::ast::RedirectMode;
@@ -496,7 +496,7 @@ impl Drop for RedirectGuard {
 }
 
 /// Stdin redirects to fd 0 — `< file` and the here-string `<< str` — are
-/// owned by `shell.turn.io.stdin` (set up by [`install_stdin_redirect`]);
+/// owned by `shell.run.io.stdin` (set up by [`install_stdin_redirect`]);
 /// `apply_redirects` and `wire_stdin` must agree to leave them alone.  This
 /// predicate is the single point where that rule is named.
 #[cfg(any(unix, windows))]
@@ -740,13 +740,13 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
 }
 
 /// Install the fd-0 redirect — `< file` or the here-string `<< str` — as
-/// `shell.turn.io.stdin`.
+/// `shell.run.io.stdin`.
 ///
 /// Returns a [`StdinRedirectGuard`] whose `restore` puts back whatever Source
 /// was previously installed (a pipeline pipe, an outer redirect, or
 /// Terminal).  When several redirects target fd 0, the last one wins — same
 /// as POSIX shells.  No-op when no such redirect is present, in which case
-/// `shell.turn.io.stdin` is left untouched.
+/// `shell.run.io.stdin` is left untouched.
 ///
 /// `< file` opens the path and emits a read event.  `<< str` feeds the
 /// payload string itself: one newline at its very front is dropped (so a
@@ -812,7 +812,7 @@ pub(crate) fn install_stdin_redirect(
         }
         _ => unreachable!("find_map above only yields Read or HereString"),
     };
-    let prior = std::mem::replace(&mut shell.turn.io.stdin, source);
+    let prior = std::mem::replace(&mut shell.run.io.stdin, source);
     Ok(StdinRedirectGuard::Installed(prior))
 }
 
@@ -825,7 +825,7 @@ pub(crate) enum StdinRedirectGuard {
 impl StdinRedirectGuard {
     pub(crate) fn restore(self, shell: &mut Shell) {
         if let Self::Installed(prior) = self {
-            shell.turn.io.stdin = prior;
+            shell.run.io.stdin = prior;
         }
     }
 }

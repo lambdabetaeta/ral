@@ -49,7 +49,7 @@ pub(crate) struct LoadedPlugin {
     pub(crate) bindings: Vec<String>,
     pub(crate) state_cell: Option<Value>,
     /// The plugin file's source text, installed as the root context of every
-    /// framed hook turn so a fault inside a handler renders against the right
+    /// framed hook run so a fault inside a handler renders against the right
     /// line of the right file.  Set by the loader once the file is read;
     /// [`parse`](Self::parse) leaves it empty (it sees only the manifest value).
     pub(crate) source: Arc<str>,

@@ -106,11 +106,11 @@ pub(crate) fn run(
     let inherit_tty = inherit_tty(&plan, shell);
 
     // Wire stdout before stderr: on Windows, `wire_stderr`'s `2>&1`
-    // case reads `shell.turn.io.stdout` to clone a writer; on Unix,
+    // case reads `shell.run.io.stdout` to clone a writer; on Unix,
     // the `pre_exec` dup2 needs a real stdout fd in place pre-fork.
     let stdout_plan = if plan.stdout_file.is_none() {
         let p = shell
-            .turn
+            .run
             .io
             .stdout
             .child_stdout(inherit_tty)
@@ -124,14 +124,14 @@ pub(crate) fn run(
 
     let stderr_piped = wire_stderr(&mut command, &plan, inherit_tty, stdout_file_dup, shell)?;
 
-    // Stderr pump destination: clone `shell.turn.io.stderr` (which
+    // Stderr pump destination: clone `shell.run.io.stderr` (which
     // may itself be a Tee under dispatch-level audit capture) when
     // stderr was piped; otherwise there is nothing for ral to drain
     // (file / 2>&1 / inherited fd 2). The clone happens pre-spawn so
     // that no fallible work remains between `spawn` and
     // `RunningChild::assemble` — the `?` here cannot leak a child.
     let stderr_pump = if stderr_piped {
-        Some(shell.turn.io.stderr.try_clone().map_err(|e| pipe_err(&e))?)
+        Some(shell.run.io.stderr.try_clone().map_err(|e| pipe_err(&e))?)
     } else {
         None
     };
@@ -210,7 +210,7 @@ pub(crate) fn run(
         },
         park_on_stop,
         group_owner,
-        shell.turn.cancel.as_scope().clone(),
+        shell.run.cancel.as_scope().clone(),
         jail,
     );
 
@@ -274,7 +274,7 @@ pub(crate) fn run(
 
     // Join the pump threads. When audit is active, bytes are
     // captured by the dispatch-level `with_audit_capture` Tee on
-    // `shell.turn.io.stdout` / `shell.turn.io.stderr`, so there is
+    // `shell.run.io.stdout` / `shell.run.io.stderr`, so there is
     // nothing for this site to drain.
     waited.drain();
     let code = outcome.to_user_exit_code();
@@ -288,14 +288,14 @@ pub(crate) fn run(
     // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
     // pipeline helper subprocess) forgives SIGPIPE — the reader ended the
     // pipe, not a real error.
-    let forgive_sigpipe = !shell.turn.io.launch_role.is_top_level();
+    let forgive_sigpipe = !shell.run.io.launch_role.is_top_level();
     match crate::process::CommandFailure::from_outcome(outcome, forgive_sigpipe) {
         None => Ok(Value::Unit),
         Some(failure) => {
             let err = Error::from_command_failure(
                 &cmd_name,
                 failure,
-                shell.turn.loc.source_loc(cmd_name.len()),
+                shell.run.loc.source_loc(cmd_name.len()),
                 shell,
             );
             // When this child ran under an active OS sandbox, attach the
@@ -312,7 +312,7 @@ pub(crate) fn run(
 
 /// Announce the running command via the terminal title (OSC 0).
 fn announce_command_title(cmd: &str, shell: &Shell) {
-    if shell.turn.io.interactive && shell.turn.io.terminal.ui_title_ok() {
+    if shell.run.io.interactive && shell.run.io.terminal.ui_title_ok() {
         use std::io::Write;
         let _ = std::io::stdout().write_all(crate::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();
@@ -332,7 +332,7 @@ fn trace_io_wiring(
     fg: &ForegroundDecision,
     shell: &Shell,
 ) {
-    let sink = match &shell.turn.io.stdout {
+    let sink = match &shell.run.io.stdout {
         crate::io::Sink::Terminal => "Terminal",
         crate::io::Sink::External(_) => "External",
         crate::io::Sink::Pipe(_) => "Pipe",
@@ -343,10 +343,10 @@ fn trace_io_wiring(
         "cmd={cmd_name} resolved={resolved} tty=[in:{} out:{} err:{}] \
          sink={sink} inherit={inherit_tty} pump={needs_pump} \
          interactive={} fg_job={}",
-        shell.turn.io.terminal.startup_stdin_tty,
-        shell.turn.io.terminal.startup_stdout_tty,
-        shell.turn.io.terminal.startup_stderr_tty,
-        shell.turn.io.interactive,
+        shell.run.io.terminal.startup_stdin_tty,
+        shell.run.io.terminal.startup_stdout_tty,
+        shell.run.io.terminal.startup_stderr_tty,
+        shell.run.io.interactive,
         fg.want_fg(),
     );
 }

@@ -13,7 +13,7 @@
 use crate::agent::Agent;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
-use crate::agent::seat::{Seat, TurnInstall};
+use crate::agent::seat::{RunInstall, Seat};
 use crate::bus::{Emitter, Kind};
 use crate::fleet::desk;
 use crate::shell_eval;
@@ -194,12 +194,12 @@ impl Agent {
         let reply_cell = ReplyCell::default();
         // The desk and its whole capture set are fresh for every ral call —
         // a handler's captured generation, fuel, caps, and grant must never
-        // go stale — and the guard retires them on every exit ([`seat::TurnGuard`]).
+        // go stale — and the guard retires them on every exit ([`seat::RunGuard`]).
         let desk = Arc::new(desk::ExarchDesk {
             services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
         });
         let content = {
-            let _guard = self.seat.install_turn(TurnInstall {
+            let _guard = self.seat.install_run(RunInstall {
                 desk: desk.clone(),
                 apply: desk::SurfaceApplier {
                     emit: emit.clone(),
@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::agent::cancel;
     use crate::agent::testkit::*;
-    use crate::agent::{NoControl, ProviderHandle, TurnOutcome};
+    use crate::agent::{NoControl, ProviderHandle, deliberate};
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
@@ -298,9 +298,9 @@ mod tests {
     /// Panic-recovery integrity (A4): a panic mid-tool-eval must preserve
     /// the bindings completed tool calls left behind and leave the dynamic
     /// context clean. Driven through the scripted provider and the shared
-    /// `drive` loop — the real path: the engine's own turn door
-    /// (`Shell::run_turn`) catches the unwind, rolls the dynamic context
-    /// back, and reports the panicking call as a failed turn.
+    /// `attend` loop — the real path: the engine's own run door
+    /// (`Shell::run`) catches the unwind, rolls the dynamic context
+    /// back, and reports the panicking call as a failed run.
     #[test]
     fn worker_panic_preserves_completed_bindings_and_clean_context() {
         let dir = tmp("panic-recovery");
@@ -313,8 +313,8 @@ mod tests {
         let baseline_grant_depth = probe_int(&session, "grant-depth");
 
         // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.  The
-        // panic is caught at the engine's own turn door (`Shell::run_turn`),
-        // which rolls the shell back and reports a failed turn — so the model
+        // panic is caught at the engine's own run door (`Shell::run`),
+        // which rolls the shell back and reports a failed run — so the model
         // sees an ordinary failed tool result and the batch continues to a
         // third, closing reply.
         let provider = scripted(
@@ -328,7 +328,7 @@ mod tests {
         session.seed("compute then crash".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        let _ = session.drive(&mut NoControl, &emit);
+        let _ = session.attend(&mut NoControl, &emit);
 
         // The dynamic context is rolled back to the clean boundary: no
         // leaked grant frame from the panicking call's `with_capabilities`.
@@ -336,40 +336,40 @@ mod tests {
         assert_eq!(
             probe_int(&session, "grant-depth"),
             baseline_grant_depth,
-            "the panicking call's grant frame must not leak into the next turn"
+            "the panicking call's grant frame must not leak into the next run"
         );
         // The completed call's binding survives the panic.
         assert!(
             scope_has(&mut session, "a4_x"),
             "a binding from a completed tool call must survive a later call's panic"
         );
-        // The drive loop handed the session back ready for a fresh prompt.
+        // The attend loop handed the session back ready for a fresh prompt.
         assert!(
             session.is_ready(),
-            "drive must leave the session ReadyForUser even after a worker panic"
+            "attend must leave the session ReadyForUser even after a worker panic"
         );
 
-        // The next turn is admissible and runs to completion on the
+        // The next exchange is admissible and runs to completion on the
         // healed shell.
         let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let token = cancel::Token::new();
         let _slot = cancel::publish(&token);
-        match session.apply(&provider2, Some("continue".into()), &token, &emit) {
-            Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "ok"),
-            other => panic!("next turn on the healed shell must complete, got {other:?}"),
+        match session.deliberate(&provider2, Some("continue".into()), &token, &emit) {
+            Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "ok"),
+            other => panic!("next exchange on the healed shell must complete, got {other:?}"),
         }
     }
 
     /// A session-scope install that meets the large-binding threshold writes
-    /// the warning onto the installing turn's own stderr — model-facing
+    /// the warning onto the installing run's own stderr — model-facing
     /// feedback in the tool result, not a frontend card — from inside that
-    /// very turn. A further turn with no new session-scope install writes no
+    /// very run. A further run with no new session-scope install writes no
     /// warning. The two axes are independent: nothing here is idle enough to
     /// prune.
     #[test]
-    fn large_binding_install_warns_on_its_own_turn_stderr() {
+    fn large_binding_install_warns_on_its_own_run_stderr() {
         let dir = tmp("reap-large-binding");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -411,9 +411,9 @@ mod tests {
         );
     }
 
-    /// A prune that fires between two turns cannot be undone by a later
+    /// A prune that fires between two runs cannot be undone by a later
     /// call's panic: the rollback checkpoint is taken at that call's own
-    /// turn entry, after the prune, so the pruned name cannot resurrect.
+    /// run entry, after the prune, so the pruned name cannot resurrect.
     /// A completed call's own binding, made after the prune, survives the
     /// panic exactly as
     /// `worker_panic_preserves_completed_bindings_and_clean_context` pins.
@@ -461,7 +461,7 @@ mod tests {
         );
         session.provider = ProviderHandle::new(provider);
         session.seed("compute then crash".into());
-        let _ = session.drive(&mut NoControl, &emit);
+        let _ = session.attend(&mut NoControl, &emit);
 
         // `survives_y` first: each probe ticks the armed idle bound (2), and
         // reading it renews it, so the second probe's tick cannot prune it.
@@ -506,7 +506,7 @@ mod tests {
     /// The settled-worker retention ledger, end to end through the
     /// engine's own clock: the registry ticks once per dispatched call,
     /// its sweep runs at each call's ready boundary, and an expiry's
-    /// `Retention`-cause `Kind::Notice` rides a turn's own surface stream.
+    /// `Retention`-cause `Kind::Notice` rides a run's own surface stream.
     #[test]
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
         let dir = tmp("ral-epoch-retention");

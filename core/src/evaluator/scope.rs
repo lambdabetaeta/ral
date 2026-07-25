@@ -252,8 +252,8 @@ pub(crate) fn eval_try(body: &Val, handler: &Val, shell: &mut Shell) -> Raw<Valu
     // error record.  Exit/Stopped propagate cleanly as `Err(Escape)`
     // through `?`, which lifts via `From<Escape> for Control`; the
     // parked-pipeline case never reaches `classify`.
-    let call_line = shell.turn.loc.line;
-    let call_col = shell.turn.loc.col;
+    let call_line = shell.run.loc.line;
+    let call_col = shell.run.loc.col;
     let body_val = eval_val(body, shell)?;
     let handler_val = eval_val(handler, shell)?;
     let record = audit::record_scope(shell, "try", CapturePolicy::Off, |s| {

@@ -1,10 +1,10 @@
 //! Exarch — a delegate driving ral in process under a user-chosen grant
 //! policy.  This library crate holds the whole agent: the CLI, the
-//! capability composition, the [`agent::Agent`] turn driver, the
+//! capability composition, the [`agent::Agent`] exchange driver, the
 //! [`provider::Provider`] transport, and the two frontends
 //! ([`tui::run`] / [`headless::run`]).  The `exarch` binary is a thin
 //! shell over [`run`]; integration tests in `tests/` link this library
-//! directly to drive [`agent::Agent::apply`] through a scripted
+//! directly to drive [`agent::Agent::deliberate`] through a scripted
 //! provider (see [`provider::Provider::scripted`]).
 #![allow(
     clippy::disallowed_methods,

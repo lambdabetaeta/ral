@@ -119,7 +119,7 @@
 //! as an abort at machine-creation time.  That failure path cannot be
 //! exercised here — this Mac's test binary is unentitled by construction — so
 //! it is documented rather than tested; the live-machine path is exercised by
-//! the signed `boot-smoke` and `boot-turn` examples, never by `cargo test`.
+//! the signed `boot-smoke` and `boot-run` examples, never by `cargo test`.
 
 use std::ffi::c_void;
 use std::os::fd::{BorrowedFd, OwnedFd};
@@ -539,7 +539,7 @@ fn unix_seconds() -> u64 {
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: creating the per-session disk before any engine exists. \
               This is host-side session setup, not a model's turn-time write: there is no \
-              Shell to route through a redirect door and no turn to raise a card in, exactly \
+              Shell to route through a redirect door and no run to raise a card in, exactly \
               as with `MachineSpec::resolve`'s canonicalisation above."
 )]
 fn create_session_image(dir: &Path) -> Result<PathBuf, Error> {
@@ -821,7 +821,7 @@ fn new_listener(readiness: &Retained<SocketReadiness>) -> Retained<VZVirtioSocke
 #[allow(
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: releasing the per-session disk after power-off. Infrastructure \
-              teardown, not a model's turn-time write; no Shell, no turn, no card."
+              teardown, not a model's turn-time write; no Shell, no run, no card."
 )]
 fn remove_session_image(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
@@ -1005,7 +1005,7 @@ impl Drop for Guest {
 #[allow(
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: test scaffolding writes the dummy kernel, images, and folder it \
-              then builds a configuration from; no shell, no turn, no card."
+              then builds a configuration from; no shell, no run, no card."
 )]
 mod tests {
     use super::*;

@@ -49,17 +49,17 @@ use crate::runtime::pipeline;
 pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<Value> {
     // Update source position from the node's span.
     if let Some(span) = comp.span {
-        if let Some(src) = shell.turn.loc.source.as_ref() {
+        if let Some(src) = shell.run.loc.source.as_ref() {
             let (l, c) = src.byte_to_line_col(span.start as usize);
-            shell.turn.loc.line = l;
-            shell.turn.loc.col = c;
+            shell.run.loc.line = l;
+            shell.run.loc.col = c;
         } else {
             // No source text is attached, so there is no line/column to
             // compute from the byte offset — use the established
             // "unknown location" sentinel rather than passing the raw
             // byte offset off as a line number.
-            shell.turn.loc.line = 0;
-            shell.turn.loc.col = 0;
+            shell.run.loc.line = 0;
+            shell.run.loc.col = 0;
         }
     }
 
@@ -334,7 +334,7 @@ fn eval_bind_rhs(m: &Arc<Comp>, rhs_output: ByteMode, shell: &mut Shell) -> Raw<
 /// [`set_status_from_value`]. The RHS itself is evaluated by
 /// [`eval_bind_rhs`], which handles byte-mode capture per SPEC §4.3.
 /// The node's scheme — the checker's verdict for this bind — installs
-/// together with the value, so the next turn's check is seeded from the
+/// together with the value, so the next run's check is seeded from the
 /// live binding.
 ///
 /// The bound computation `m` runs under a non-trivial continuation;
@@ -417,7 +417,7 @@ fn eval_chain(parts: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> 
 /// `if V then M else N` — conditional on `V : Bool`.
 ///
 /// CBPV Bind has scope-local binding semantics; ral's runtime keeps
-/// Bind-bound names in the surrounding scope so that REPL turns
+/// Bind-bound names in the surrounding scope so that REPL runs
 /// persist their `let`s. At `if` branches that is the wrong default:
 /// a `let` inside a branch should not leak. Pushing a fresh scope
 /// around the branch restores the CBPV reading without disturbing
@@ -462,9 +462,9 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
         let last = i == len - 1;
         let elem_tail = if last { tail } else { Tail::No };
         result = eval_comp(c, shell, elem_tail)?;
-        if !last && let Some(outer) = &shell.turn.io.capture_outer {
+        if !last && let Some(outer) = &shell.run.io.capture_outer {
             shell
-                .turn
+                .run
                 .io
                 .stdout
                 .flush_to(outer)

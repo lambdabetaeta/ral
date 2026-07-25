@@ -19,7 +19,7 @@ use std::io::{self, Read};
 /// fd 0 of the shell process is".  `Empty` means "no input at all" — an
 /// explicit empty source that reads as immediate EOF and wires a child's stdin
 /// to `/dev/null`, with *no* fall-through to fd 0.  It is what an exarch tool
-/// turn installs so a tool command can never steal the TUI's controlling
+/// run installs so a tool command can never steal the TUI's controlling
 /// terminal; it is distinct from `Terminal` precisely so denial of foreground
 /// authority and denial of byte input stay separate effects.
 pub enum Source {
@@ -45,7 +45,7 @@ impl Source {
     ///
     /// Returns `None` for both fd-less markers: `Terminal` (fall through to
     /// fd 0) and `Empty` (no input). `Empty` is restored in place rather than
-    /// collapsing to `Terminal`, so a second read in the same turn still sees
+    /// collapsing to `Terminal`, so a second read in the same run still sees
     /// no fd-0 fall-through; a consumer that must distinguish the two markers
     /// inspects the `Source` itself.
     pub fn take_reader(&mut self) -> Option<SourceReader> {

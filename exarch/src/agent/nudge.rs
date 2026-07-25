@@ -1,29 +1,29 @@
 //! Single home for the inter-attempt nudge facility.
 //!
 //! Owns the rule set, the budget counter, and the post-attempt decision:
-//! walk the rules and either accept the turn (surfacing any attached provider
-//! error on the way out) or hand back a synthetic next prompt for the drive
-//! loop to post to itself as an [`InboxMsg::Nudge`](crate::bus::InboxMsg).
+//! walk the rules and either accept the exchange (surfacing any attached provider
+//! error on the way out) or hand back a synthetic next prompt for the attend
+//! loop to post to itself as a [`Post::Nudge`](crate::bus::Post).
 //! Records each nudge to both the `events.json` breadcrumb and the operational
 //! trace (`Kind::Nudge`); the display decides whether to surface it.
 //!
-//! The registry is **per-session** ([`Agent::nudges`]): the drive loop runs
-//! one [`Agent::apply`] per inbox message, not one whole turn, so the
-//! per-turn state must outlive a single `apply`.  It resets on a genuine
-//! turn-boundary message via [`Registry::reset`], never on a self-nudge.
+//! The registry is **per-session** ([`Agent::nudges`]): the attend loop runs
+//! one [`Agent::deliberate`] per inbox item, not one whole exchange, so the
+//! per-exchange state must outlive a single `deliberate`.  It resets on a genuine
+//! exchange-boundary item via [`Registry::reset`], never on a self-nudge.
 //!
-//! [`Agent::apply`]: crate::agent::Agent::apply
+//! [`Agent::deliberate`]: crate::agent::Agent::deliberate
 //! [`Agent::nudges`]: crate::agent::Agent
 
-use crate::agent::TurnOutcome;
+use crate::agent::deliberate;
 use crate::agent::event::AgentLog;
 use crate::bus::{Emitter, Kind};
 use crate::provider::ProviderError;
 
-/// Outer-attempt budget per user turn.  Independent of the provider's
+/// Outer-attempt budget per user exchange.  Independent of the provider's
 /// transport retry budget: this is only for model-visible recovery.
 const BUDGET: u32 = 3;
-/// How many genuine turns elapse between "nothing is pinned" reminders.  A
+/// How many genuine exchanges elapse between "nothing is pinned" reminders.  A
 /// gentle cadence, since there is no outstanding obligation to be restless
 /// about.  The pinned-state reminder itself is budget-free and fires on
 /// every clean completion instead — see [`Registry::react`].
@@ -37,10 +37,10 @@ const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
 /// A degenerate-outcome classifier: `None` if the attempt doesn't match, else
 /// the nudge `(cause, message)` — `cause` is the breadcrumb recorded to the
 /// log and trace, `message` is the synthetic reminder text sent to the model.
-type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)>;
+type Rule = fn(&Result<deliberate::Outcome, ProviderError>) -> Option<(String, &'static str)>;
 
 /// The rule set the binary ships with.
-const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
+const RULES: &[Rule] = &[on_empty, on_early_stop, on_truncated];
 
 /// Wrap a synthetic reminder body in the shared bracket, so the model can
 /// distinguish a system reminder from genuine user input.
@@ -51,9 +51,9 @@ fn wrap_reminder(body: &str) -> String {
 /// Per-attempt expectations that depend on the agent rather than the
 /// attempt outcome: whether this agent returns through `reply`
 /// ([`must_reply`](Self::must_reply)) and its current pinned state
-/// ([`pinned`](Self::pinned)).  Threaded in by [`Agent::drive`].
+/// ([`pinned`](Self::pinned)).  Threaded in by [`Agent::attend`].
 ///
-/// [`Agent::drive`]: crate::agent::Agent::drive
+/// [`Agent::attend`]: crate::agent::Agent::attend
 pub(crate) struct NudgeCtx {
     /// Whether this session returns through `reply` — true for a returning
     /// agent (a peer or a headless root), false for the interactive root.  A
@@ -82,22 +82,22 @@ pub(crate) struct NudgeCtx {
 }
 
 /// Per-session nudge state.  Lives on the [`Agent`](crate::agent::Agent)
-/// and is reset at each genuine turn boundary by [`Self::reset`];
+/// and is reset at each genuine exchange boundary by [`Self::reset`];
 /// [`Self::react`] is the only post-attempt entry point.
 pub(crate) struct Registry {
     used: u32,
-    /// Genuine turns since the last "nothing is pinned" reminder, bumped once
-    /// per turn-boundary message by [`Self::reset`].  Unlike a latch it
-    /// accumulates *across* turns; the reminder fires once it reaches
+    /// Genuine exchanges since the last "nothing is pinned" reminder, bumped once
+    /// per exchange-boundary item by [`Self::reset`].  Unlike a latch it
+    /// accumulates *across* exchanges; the reminder fires once it reaches
     /// [`REMIND_EVERY`], then it returns to zero.  Unused while anything is
     /// pinned — that case is budget-free, see [`Self::react`].
-    turns_since_no_pins_reminder: u32,
+    exchanges_since_no_pins_reminder: u32,
     /// One-shot latch for the headless root's self-verification nudge: once
     /// its first `reply` has been turned back, every later `reply` — from
-    /// this same run, regardless of turn boundaries — is honoured.  Unlike
+    /// this same run, regardless of exchange boundaries — is honoured.  Unlike
     /// [`Self::used`] this is never cleared by [`Self::reset`]: the
     /// obligation is "verify once before the run's result stands", not a
-    /// per-turn accounting.
+    /// per-exchange accounting.
     reply_verified: bool,
 }
 
@@ -105,32 +105,32 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             used: 0,
-            turns_since_no_pins_reminder: 0,
+            exchanges_since_no_pins_reminder: 0,
             reply_verified: false,
         }
     }
 
-    /// Reset the per-turn state — the retry budget and the one-shot latch —
-    /// and count this turn toward the periodic "nothing is pinned" reminder.
-    /// Called by [`Agent::drive`] on a genuine turn-boundary message, never on
-    /// a self-nudge (which is the same turn continuing), so the turn counter
-    /// advances once per real turn.
+    /// Reset the per-exchange state — the retry budget and the one-shot latch —
+    /// and count this exchange toward the periodic "nothing is pinned" reminder.
+    /// Called by [`Agent::attend`] on a genuine exchange-boundary item, never on
+    /// a self-nudge (which is the same exchange continuing), so the exchange counter
+    /// advances once per real exchange.
     ///
-    /// [`Agent::drive`]: crate::agent::Agent::drive
+    /// [`Agent::attend`]: crate::agent::Agent::attend
     pub fn reset(&mut self) {
         self.used = 0;
-        self.turns_since_no_pins_reminder += 1;
+        self.exchanges_since_no_pins_reminder += 1;
     }
 
     /// The one decider.  Walks [`RULES`] against `attempt`, optionally
     /// records the nudge to `log`, emits any user-facing error breadcrumbs
-    /// through `emit`, and returns the synthetic next prompt to re-drive
-    /// with — `Some(message)` for the drive loop to self-post as an
-    /// [`InboxMsg::Nudge`](crate::bus::InboxMsg) — or `None` to accept the
-    /// turn and stop.
+    /// through `emit`, and returns the synthetic next prompt to re-attend
+    /// with — `Some(message)` for the attend loop to self-post as a
+    /// [`Post::Nudge`](crate::bus::Post) — or `None` to accept the
+    /// exchange and stop.
     pub fn react(
         &mut self,
-        attempt: &Result<TurnOutcome, ProviderError>,
+        attempt: &Result<deliberate::Outcome, ProviderError>,
         ctx: &NudgeCtx,
         emit: &Emitter,
         log: &mut AgentLog,
@@ -140,8 +140,8 @@ impl Registry {
         // visible output, with no parent left to read it and push back. Turn
         // it back once, budget-free, for self-verification; [`Self::reply_verified`]
         // latches so the very next `reply` — whatever it carries — is honoured
-        // and [`Agent::drive`](crate::agent::Agent::drive) lets it terminate.
-        if matches!(attempt, Ok(TurnOutcome::Replied(_))) {
+        // and [`Agent::attend`](crate::agent::Agent::attend) lets it terminate.
+        if matches!(attempt, Ok(deliberate::Outcome::Replied(_))) {
             if ctx.is_headless_root && !self.reply_verified {
                 self.reply_verified = true;
                 record_nudge(emit, log, self.used, "reply verification".into());
@@ -154,7 +154,7 @@ impl Registry {
             // nudges below; every other outcome here (a provider error the
             // rules didn't classify, a `Replied`/`Cancelled`/`Capped`
             // termination) is reported and accepted as-is.
-            if !matches!(attempt, Ok(TurnOutcome::Complete(_))) {
+            if !matches!(attempt, Ok(deliberate::Outcome::Complete(_))) {
                 surface_provider_error(attempt, emit, log);
                 return None;
             }
@@ -197,8 +197,8 @@ impl Registry {
                 if let Some(pinned) = ctx.pinned.as_deref() {
                     record_nudge(emit, log, self.used, "pinned-state reminder".into());
                     parts.push(format!("There is pinned state: {pinned}"));
-                } else if self.turns_since_no_pins_reminder >= REMIND_EVERY {
-                    self.turns_since_no_pins_reminder = 0;
+                } else if self.exchanges_since_no_pins_reminder >= REMIND_EVERY {
+                    self.exchanges_since_no_pins_reminder = 0;
                     record_nudge(emit, log, self.used, "no-pins reminder".into());
                     parts.push(
                         "Nothing is pinned — consider calling `set-goal` to remember what you are \
@@ -237,7 +237,7 @@ fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
 }
 
 fn surface_provider_error(
-    attempt: &Result<TurnOutcome, ProviderError>,
+    attempt: &Result<deliberate::Outcome, ProviderError>,
     emit: &Emitter,
     log: &mut AgentLog,
 ) {
@@ -267,9 +267,9 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     or a quote, write it as a raw string `#'…'#`. This is the only way to hand your work back; \
     a final message on its own is not delivered.";
 
-fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
+fn on_empty(r: &Result<deliberate::Outcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
-        Ok(TurnOutcome::Empty) => Some((
+        Ok(deliberate::Outcome::Empty) => Some((
             "empty turn".into(),
             "Your previous turn produced no text and no tool calls. \
              If you are finished, say so explicitly; otherwise continue.",
@@ -278,9 +278,9 @@ fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'st
     }
 }
 
-fn on_early_stop(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
+fn on_early_stop(r: &Result<deliberate::Outcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
-        Ok(TurnOutcome::Stopped { reason }) => Some((
+        Ok(deliberate::Outcome::Stopped { reason }) => Some((
             format!("stop={reason}"),
             "Your previous turn ended early on a provider-side stop. \
              Reformulate the previous reply or take a different approach.",
@@ -289,7 +289,7 @@ fn on_early_stop(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'st
     }
 }
 
-fn on_truncated(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
+fn on_truncated(r: &Result<deliberate::Outcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
         Err(ProviderError::Truncated { .. }) => Some((
             "truncated".into(),
@@ -356,7 +356,7 @@ mod tests {
     }
 
     /// A transient failure exhausted the provider loop before the model
-    /// produced output.  Re-driving through a nudge would duplicate the same
+    /// produced output.  Re-attending through a nudge would duplicate the same
     /// invisible request as a fake user turn, so it stops immediately.
     #[test]
     fn transient_surfaces_without_nudge() {
@@ -417,7 +417,7 @@ mod tests {
         let mut reg = Registry::new();
         let mut log = fresh_log("empty");
         match reg.react(
-            &Ok(TurnOutcome::Empty),
+            &Ok(deliberate::Outcome::Empty),
             &NudgeCtx {
                 must_reply: false,
                 is_headless_root: false,
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(reg.used, 1);
     }
 
-    /// Past the budget, even a nudgeable outcome stops the turn.
+    /// Past the budget, even a nudgeable outcome stops the exchange.
     #[test]
     fn exhausted_budget_stops() {
         let mut reg = Registry::new();
@@ -441,7 +441,7 @@ mod tests {
         for _ in 0..BUDGET {
             assert!(
                 reg.react(
-                    &Ok(TurnOutcome::Empty),
+                    &Ok(deliberate::Outcome::Empty),
                     &NudgeCtx {
                         must_reply: false,
                         is_headless_root: false,
@@ -456,7 +456,7 @@ mod tests {
         }
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Empty),
+                &Ok(deliberate::Outcome::Empty),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
@@ -470,14 +470,14 @@ mod tests {
         );
     }
 
-    /// A clean `Complete` ends the turn.
+    /// A clean `Complete` ends the exchange.
     #[test]
     fn completion_stops() {
         let mut reg = Registry::new();
         let mut log = fresh_log("complete");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Complete("done".into())),
+                &Ok(deliberate::Outcome::Complete("done".into())),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
@@ -493,9 +493,9 @@ mod tests {
 
     /// A returning agent (`must_reply`) that finishes a tool-call-free
     /// `Complete` without replying is re-nudged to call `reply` while budget
-    /// remains — drawing on the shared per-turn budget — then, once it is
-    /// spent, the un-replied finish is accepted (`None`) so the drive loop ends
-    /// and `agent_digest` maps the `Complete` to `Failed`.
+    /// remains — drawing on the shared per-exchange budget — then, once it is
+    /// spent, the un-replied finish is accepted (`None`) so the attend loop ends
+    /// and `agent_outcome` maps the `Complete` to `Failed`.
     #[test]
     fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
         let mut reg = Registry::new();
@@ -509,7 +509,7 @@ mod tests {
         // Each un-replied finish re-nudges and spends one unit of budget.
         for _ in 0..BUDGET {
             match reg.react(
-                &Ok(TurnOutcome::Complete("prose, no reply".into())),
+                &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -529,7 +529,7 @@ mod tests {
         // Past the budget the un-replied finish is accepted so the run ends.
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Complete("still no reply".into())),
+                &Ok(deliberate::Outcome::Complete("still no reply".into())),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -540,14 +540,14 @@ mod tests {
     }
 
     /// The interactive root (`must_reply` false) never gets the reply reminder
-    /// — a clean `Complete` ends its turn at once.
+    /// — a clean `Complete` ends its exchange at once.
     #[test]
     fn root_completion_is_never_reply_nudged() {
         let mut reg = Registry::new();
         let mut log = fresh_log("root-complete");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Complete("answer to the user".into())),
+                &Ok(deliberate::Outcome::Complete("answer to the user".into())),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
@@ -576,7 +576,7 @@ mod tests {
         };
         let msg = reg
             .react(
-                &Ok(TurnOutcome::Replied(FOValue::String {
+                &Ok(deliberate::Outcome::Replied(FOValue::String {
                     value: "done".into(),
                 })),
                 &ctx(),
@@ -603,7 +603,7 @@ mod tests {
         };
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(FOValue::String {
+                &Ok(deliberate::Outcome::Replied(FOValue::String {
                     value: "first".into()
                 })),
                 &ctx(),
@@ -615,7 +615,7 @@ mod tests {
         );
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(FOValue::String {
+                &Ok(deliberate::Outcome::Replied(FOValue::String {
                     value: "second, verified".into(),
                 })),
                 &ctx(),
@@ -637,7 +637,7 @@ mod tests {
         let mut log = fresh_log("verify-peer");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Replied(FOValue::String {
+                &Ok(deliberate::Outcome::Replied(FOValue::String {
                     value: "findings".into()
                 })),
                 &NudgeCtx {
@@ -673,7 +673,7 @@ mod tests {
         for _ in 0..3 {
             let msg = reg
                 .react(
-                    &Ok(TurnOutcome::Complete("done".into())),
+                    &Ok(deliberate::Outcome::Complete("done".into())),
                     &ctx(),
                     &emit(),
                     &mut log,
@@ -693,7 +693,7 @@ mod tests {
         let mut log = fresh_log("pinned-state-waiting");
         assert!(
             reg.react(
-                &Ok(TurnOutcome::Complete("waiting on a descendant".into())),
+                &Ok(deliberate::Outcome::Complete("waiting on a descendant".into())),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,
@@ -726,7 +726,7 @@ mod tests {
         };
         let msg = reg
             .react(
-                &Ok(TurnOutcome::Complete("prose, no reply".into())),
+                &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
                 &ctx(),
                 &emit(),
                 &mut log,
@@ -743,8 +743,8 @@ mod tests {
         assert_eq!(reg.used, 1, "only the reply half spends budget");
     }
 
-    /// [`Registry::reset`] clears the per-turn budget, so a fresh
-    /// turn-boundary message starts with a full budget.
+    /// [`Registry::reset`] clears the per-exchange budget, so a fresh
+    /// exchange-boundary item starts with a full budget.
     #[test]
     fn reset_clears_budget() {
         let mut reg = Registry::new();
@@ -756,18 +756,18 @@ mod tests {
             waiting_on_children: false,
         };
         // Spend a unit of budget.
-        let _ = reg.react(&Ok(TurnOutcome::Empty), &ctx(), &emit(), &mut log);
+        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx(), &emit(), &mut log);
         assert!(reg.used >= 1);
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
     }
 
     /// With nothing pinned, the periodic reminder nudges toward `set-goal` /
-    /// `add-task` every `REMIND_EVERY` turns instead of the pinned-state
-    /// message — firing exactly once per `REMIND_EVERY`-turn window, not on
-    /// every turn in between.
+    /// `add-task` every `REMIND_EVERY` exchanges instead of the pinned-state
+    /// message — firing exactly once per `REMIND_EVERY`-exchange window, not on
+    /// every exchange in between.
     #[test]
-    fn no_pins_reminder_fires_every_remind_every_turns() {
+    fn no_pins_reminder_fires_every_remind_every_exchanges() {
         let mut reg = Registry::new();
         let mut log = fresh_log("no-pin-reminder");
         let ctx = || NudgeCtx {
@@ -777,17 +777,17 @@ mod tests {
             waiting_on_children: false,
         };
         let mut fires = 0;
-        for turn in 1..=(REMIND_EVERY + 3) {
+        for exchange in 1..=(REMIND_EVERY + 3) {
             reg.reset();
             if let Some(msg) = reg.react(
-                &Ok(TurnOutcome::Complete("x".into())),
+                &Ok(deliberate::Outcome::Complete("x".into())),
                 &ctx(),
                 &emit(),
                 &mut log,
             ) {
                 assert_eq!(
-                    turn, REMIND_EVERY,
-                    "no-pins reminder should only fire on the {REMIND_EVERY}th turn"
+                    exchange, REMIND_EVERY,
+                    "no-pins reminder should only fire on the {REMIND_EVERY}th exchange"
                 );
                 assert!(msg.contains("set-goal"));
                 fires += 1;

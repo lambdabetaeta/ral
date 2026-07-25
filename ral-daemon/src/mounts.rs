@@ -29,7 +29,7 @@
 //! daemon checks: [`root_filesystem`] reads `/proc/mounts` and says what the
 //! kernel actually handed us, so a mis-assembled boot artifact is named on
 //! the host's log at second zero instead of surfacing as a baffling `EROFS`
-//! in the middle of a turn.
+//! in the middle of a run.
 
 use std::ffi::CStr;
 

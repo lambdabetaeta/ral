@@ -1008,7 +1008,7 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
 ///
 /// A bare top-level `service-handle N` result cannot cross the host seam —
 /// a `Handle` is not ground — by design: it exists to be composed with an
-/// eliminator in the same turn.
+/// eliminator in the same run.
 fn builtin_service_handle(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "service-handle")?;
     let id = match args[0].as_int() {
@@ -1254,25 +1254,25 @@ mod tests {
         body: BuiltinBody::Static(builtin_test_block_forever),
     }];
 
-    /// Run `src` as one top-level turn with no deferred lease (so nothing
+    /// Run `src` as one top-level run with no deferred lease (so nothing
     /// races a reap during the test) and no deferred sink (the tests below
     /// never care where a deferred surface batch would land). Panics on a
     /// static (parse/type) failure or a runtime error — every source this
     /// helper runs is expected to compile and complete cleanly.
     fn run_top_level(shell: &mut Shell, src: &str) {
-        use ral_core::transport::{Program, Turn};
-        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
-        let req = TurnRequest {
-            turn: Turn {
+        use ral_core::transport::{Program, Run};
+        use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+        let req = RunRequest {
+            run: Run {
                 program: Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
-                turn_limit: None,
+                wall: None,
                 deferred_lease: None,
                 worker_cap: None,
-                io: TurnIo::Capture,
+                io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
-                stdin: TurnStdin::Empty,
+                stdin: RunStdin::Empty,
             },
             surface: None,
             deferred: None,
@@ -1280,11 +1280,11 @@ mod tests {
             nursery: None,
             lifecycle: Box::new(()),
         };
-        match shell.run_turn(req) {
-            TurnReport::Ran { result, .. } => {
+        match shell.run(req) {
+            RunReport::Ran { result, .. } => {
                 result.expect("worker-registry fixture source must run cleanly");
             }
-            TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+            RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
         }
     }
 
@@ -1533,21 +1533,21 @@ mod tests {
     /// carries none.
     #[test]
     fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
-        use ral_core::transport::{Program, Turn};
-        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+        use ral_core::transport::{Program, Run};
+        use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
         let run_help = |shell: &mut Shell| -> String {
-            let req = TurnRequest {
-                turn: Turn {
+            let req = RunRequest {
+                run: Run {
                     program: Program::Source("help".to_string()),
                     script_name: "<test>".to_string(),
                     caps: ral_core::types::Capabilities::root(),
-                    turn_limit: None,
+                    wall: None,
                     deferred_lease: None,
                     worker_cap: None,
-                    io: TurnIo::Capture,
+                    io: RunIo::Capture,
                     terminal: RequestedTerminalAccess::Denied,
-                    stdin: TurnStdin::Empty,
+                    stdin: RunStdin::Empty,
                 },
                 surface: None,
                 deferred: None,
@@ -1555,15 +1555,15 @@ mod tests {
                 nursery: None,
                 lifecycle: Box::new(()),
             };
-            match shell.run_turn(req) {
-                TurnReport::Ran {
+            match shell.run(req) {
+                RunReport::Ran {
                     result, captured, ..
                 } => {
                     result.expect("`help` must run cleanly");
                     String::from_utf8(captured.expect("Capture io yields captured bytes").stdout)
                         .expect("help output is UTF-8")
                 }
-                TurnReport::Static { .. } => panic!("`help` must compile"),
+                RunReport::Static { .. } => panic!("`help` must compile"),
             }
         };
 

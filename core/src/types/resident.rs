@@ -1,6 +1,6 @@
 //! The resident signature (`decisions/260705_session-ledger`): the small,
 //! chapter-agnostic interface every session-lived, capability-reachable
-//! "thing that stays alive between turns" answers, so the folds built
+//! "thing that stays alive between runs" answers, so the folds built
 //! against it — listing, the exit warning, cancellation, `/resources` —
 //! are written once instead of once per chapter.
 //!

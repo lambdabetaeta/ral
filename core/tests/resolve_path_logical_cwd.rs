@@ -13,9 +13,9 @@
 
 mod common;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Shell, Value};
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -25,17 +25,17 @@ fn fresh_shell() -> Shell {
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Value {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -43,8 +43,8 @@ fn top_level(shell: &mut Shell, source: &str) -> Value {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result.expect("evaluation succeeds"),
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result.expect("evaluation succeeds"),
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 

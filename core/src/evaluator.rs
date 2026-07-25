@@ -1,9 +1,9 @@
 //! CBPV evaluator for `ral`.
 //!
-//! The turn/block evaluation verbs and the tail-absorption seam they share;
+//! The run/block evaluation verbs and the tail-absorption seam they share;
 //! per-verb contract detail lives on each function's own doc.
 //!
-//! - [`eval_top_level`] (`pub(crate)`) — runs a top-level turn, installing
+//! - [`eval_top_level`] (`pub(crate)`) — runs a top-level run, installing
 //!   the post-run [`Mobile`](crate::types::Mobile) on the parent shell on
 //!   every outcome.
 //! - [`evaluate`] — a bare tail-absorbed run with no mobile contract, for
@@ -50,7 +50,7 @@ pub(crate) fn absorb_tail(raw: crate::types::Raw<Value>, shell: &mut Shell) -> S
     }
 }
 
-/// Tail-absorbed run of `comp` against `shell` in place.  Not a turn:
+/// Tail-absorbed run of `comp` against `shell` in place.  Not a run:
 /// no mobile install or discard, no scope frame, no transport dispatch.
 ///
 /// Evaluated under a non-trivial continuation ([`Tail::No`]): the caller
@@ -59,7 +59,7 @@ pub(crate) fn absorb_tail(raw: crate::types::Raw<Value>, shell: &mut Shell) -> S
 ///
 /// For callers already inside an active session — module loading,
 /// prelude bootstrap, capability profiles, REPL plugin / config files.
-/// Wrapping them in a turn boundary would round-trip a mobile they
+/// Wrapping them in a run boundary would round-trip a mobile they
 /// never wanted snapshotted.
 ///
 /// # Errors
@@ -85,16 +85,16 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 // projection, so a `grant [net:false] { <pure ral> }` fails closed only
 // when a child is actually spawned, not at body entry.
 
-/// Run `comp` as a top-level turn.  Installs the post-run [`Mobile`]
+/// Run `comp` as a top-level run.  Installs the post-run [`Mobile`]
 /// on `shell` for every outcome — Ok, Error, Exit — so a `let`
 /// followed by a failing command still leaves the binding visible to
-/// the next turn.
+/// the next run.
 ///
-/// The turn's program is its sole computation, evaluated under a
+/// The run's program is its sole computation, evaluated under a
 /// trivial continuation ([`Tail::Yes`]): its value is handed straight
-/// back to the [`Shell::run_turn`](crate::Shell::run_turn) door that
-/// drove it, which relays it to the host.  The turn's mobile is swapped
-/// in for the run, so any terminal tail call is absorbed under it.
+/// back to the [`Shell::run`](crate::Shell::run) door that
+/// drove it, which relays it to the host.  The run's mobile is swapped
+/// in for its duration, so any terminal tail call is absorbed under it.
 pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
     let mobile = shell.mobile();
     let (post, outcome) = shell.run_with_mobile(mobile, |shell| {
@@ -145,7 +145,7 @@ mod tests {
     use super::*;
 
     /// A `let` followed by `exit` must still leave the binding
-    /// installed for the next turn.
+    /// installed for the next run.
     #[test]
     fn top_level_persists_let_on_error() {
         let source = "let persist_top = 41; exit 7";

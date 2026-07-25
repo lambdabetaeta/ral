@@ -297,7 +297,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |x| $x }");
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         let err = builtin_map(&[func, ints(500)], &mut shell)
@@ -310,7 +310,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |x| $[0 == 0] }");
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         let err = builtin_filter(&[func, ints(500)], &mut shell)
@@ -323,7 +323,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |acc x| $x }");
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         let err = builtin_fold(&[func, Value::Int(0), ints(500)], &mut shell)
@@ -336,7 +336,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |x| $x }");
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         let err = builtin_each(&[func, ints(500)], &mut shell)
@@ -350,7 +350,7 @@ mod tests {
     fn long_range_polls_past_the_chunk() {
         let shell = Shell::new(crate::io::TerminalState::default());
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &shell)
@@ -365,7 +365,7 @@ mod tests {
     fn short_range_pays_no_poll() {
         let shell = Shell::new(crate::io::TerminalState::default());
         shell
-            .turn
+            .run
             .cancel
             .cancel(crate::process::CancelCause::Interrupt);
         let v = builtin_range(&[Value::Int(0), Value::Int(10)], &shell)

@@ -6,24 +6,24 @@
 //! local and sandbox-confined transport.
 //!
 //! These tests exercise the **documented** semantics of the top-level
-//! turn and the block contract beneath it.  They drive the public
-//! `run_turn` door the same way a REPL turn (`ral`), a tool call
+//! run and the block contract beneath it.  They drive the public
+//! `run` door the same way a REPL run (`ral`), a tool call
 //! (`exarch`), or a forced thunk inside a `grant { ... }` body would —
 //! never reach into internal types.
 //!
 //! The two-call harness mirrors what exarch's `shell_eval::run_shell`
 //! does between consecutive tool calls and what the ral REPL's
-//! `execute_input` does between consecutive prompt turns: hold a single
+//! `execute_input` does between consecutive prompt runs: hold a single
 //! [`Shell`] across calls and route each body through the public
-//! `run_turn` door, which checks against the live session before running.
+//! `run` door, which checks against the live session before running.
 
 mod common;
 
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 #[cfg(unix)]
 use ral_core::types::FsPolicy;
 use ral_core::types::{Capabilities, Settled, Shell};
-use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ fn fresh_shell() -> Shell {
     )
 }
 
-/// Run one top-level turn against `shell` through the public `run_turn`
+/// Run one top-level run against `shell` through the public `run`
 /// door, matching exarch's per-tool flow: the door checks `source`
 /// against the live env, then evaluates it.  Returns whatever the body
 /// returned (or the body's error).  Every test below picks source it
@@ -49,28 +49,28 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
     top_level_under_request(shell, Capabilities::root(), source)
 }
 
-/// Run one top-level turn under an attenuated `Capabilities` frame,
-/// carried into the `run_turn` door's [`TurnRequest`] exactly as exarch
-/// attenuates its tool turns.  Used by the sandbox-parity tests below.
+/// Run one top-level run under an attenuated `Capabilities` frame,
+/// carried into the `run` door's [`RunRequest`] exactly as exarch
+/// attenuates its tool runs.  Used by the sandbox-parity tests below.
 #[cfg(unix)]
 fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
     top_level_under_request(shell, caps, source)
 }
 
 /// Shared body of [`top_level`] and [`top_level_under`]: drive the public
-/// `run_turn` door under `caps` and return the body's `Settled<Value>`.
+/// `run` door under `caps` and return the body's `Settled<Value>`.
 fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
             caps,
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -78,8 +78,8 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
 
@@ -119,37 +119,37 @@ fn display_no_trailing_sep(path: &std::path::Path) -> String {
 
 /// Two sequential top-level calls share state: a `let` from the first
 /// call is visible in the second.  This is the load-bearing property of
-/// the turn's install-mobile-on-Ok rule, and the whole reason exarch's
-/// tool-call harness routes through the top-level turn door instead of
+/// the run's install-mobile-on-Ok rule, and the whole reason exarch's
+/// tool-call harness routes through the top-level run door instead of
 /// the block boundary.
 #[test]
 fn top_level_let_persists_across_calls() {
     let mut shell = fresh_shell();
-    top_level(&mut shell, "let persist_n = 41").expect("first turn");
-    let result = top_level(&mut shell, "return $[$persist_n + 1]").expect("second turn");
+    top_level(&mut shell, "let persist_n = 41").expect("first run");
+    let result = top_level(&mut shell, "return $[$persist_n + 1]").expect("second run");
     assert_eq!(result, Value::Int(42));
 }
 
 // ── (2) Top-level partial effects ───────────────────────────────────────
 
-/// A top-level turn that fails partway through still installs the
-/// mobile mutations made before the failure.  This locks in the turn's
+/// A top-level run that fails partway through still installs the
+/// mobile mutations made before the failure.  This locks in the run's
 /// install-on-Error rule: bindings made before a fatal command survive
-/// into the next turn; bindings *after* the failure do not exist because
+/// into the next run; bindings *after* the failure do not exist because
 /// that line never ran.
 #[test]
 fn top_level_partial_effects_persist_on_error() {
     let mut shell = fresh_shell();
     // `cat /nonexistent` fails between the two `let` lines.  The whole
-    // turn returns Err, but the pre-failure binding is in the mobile,
-    // which the top-level turn installs unconditionally.
+    // run returns Err, but the pre-failure binding is in the mobile,
+    // which the top-level run installs unconditionally.
     let _ = top_level(
         &mut shell,
         "let pre_fail_x = 1\ncat /nonexistent\nlet post_fail_y = 2",
     );
     assert!(
         shell.scope_lookup("pre_fail_x").is_some(),
-        "pre-failure `let` must survive into the next turn"
+        "pre-failure `let` must survive into the next run"
     );
     assert!(
         shell.scope_lookup("post_fail_y").is_none(),
@@ -159,7 +159,7 @@ fn top_level_partial_effects_persist_on_error() {
 
 // ── (3) Top-level cwd ───────────────────────────────────────────────────
 
-/// `cd` in one top-level turn is visible to subsequent turns: a later
+/// `cd` in one top-level run is visible to subsequent runs: a later
 /// `cwd` reflects the directory set by the earlier `cd`.  This locks
 /// in that `logical_cwd` lives in the mobile and rides the top-level
 /// install-mobile contract.
@@ -314,8 +314,8 @@ fn block_grant_does_not_leak_cd() {
 fn sandbox_parity_top_level_persistence() {
     let mut shell = fresh_shell();
     let caps = projecting_caps();
-    top_level_under(&mut shell, caps.clone(), "let parity_n = 41").expect("first turn");
-    let result = top_level_under(&mut shell, caps, "return $[$parity_n + 1]").expect("second turn");
+    top_level_under(&mut shell, caps.clone(), "let parity_n = 41").expect("first run");
+    let result = top_level_under(&mut shell, caps, "return $[$parity_n + 1]").expect("second run");
     assert_eq!(
         result,
         Value::Int(42),
@@ -513,7 +513,7 @@ fn poll_on_a_cancelled_handle_errors() {
     assert_eq!(result, Value::Bool(true));
 }
 
-/// `cd` under an active fs projection persists into the next turn, same
+/// `cd` under an active fs projection persists into the next run, same
 /// as without one.  Validates that `logical_cwd` rides the mobile through
 /// the (now always local) top-level dispatch under a projection.
 #[cfg(unix)]
@@ -540,7 +540,7 @@ fn sandbox_parity_top_level_cd() {
 // ── (9) Same-thread β-step flow matrix: lambda vs forced block ───────────
 //
 // A forced block (`!{ … }`) and an applied lambda (`f x`) both run their
-// body in place on the caller's shell, sharing turn / session / local
+// body in place on the caller's shell, sharing run / session / local
 // state by identity
 // (`decisions/260620_same-thread-body-shares-the-session`).  They differ in
 // exactly two observable places — the entry `$?` and the fold-back set —

@@ -3,7 +3,7 @@
 //! A same-thread β-step — forcing a block or applying a lambda — runs the
 //! body *in* the caller's [`Shell`] ([`Shell::with_thunk_body`]): only the
 //! [`Mobile`] is swapped for one rescoped to the closure's captured
-//! environment, while [`TurnState`](super::TurnState),
+//! environment, while [`RunState`](super::RunState),
 //! [`SessionState`](super::SessionState), and
 //! [`LocalState`](super::LocalState) are shared by identity.  The body
 //! therefore observes the caller's audit trail, byte sinks, builtin table,
@@ -31,8 +31,8 @@
 //!   machinery; the child is an independent sibling with no flow-back.
 //! - **Host session fork** (sub-agent): [`Shell::fork_session`] is the
 //!   session-scoped specialisation of `child_from` — it snapshots the whole
-//!   scope, context, and builtin table into a child session that runs its
-//!   own turns, with fresh control counters and no flow-back.
+//!   scope, context, and builtin table into a child session that performs its
+//!   own runs, with fresh control counters and no flow-back.
 //!
 //! Each fork starts from a freshly-defaulted
 //! [`SessionState`](super::SessionState) and so holds no terminal authority
@@ -41,15 +41,15 @@
 //!
 //! [`Shell::inherit_from`] and [`Shell::return_to`] are the per-substate
 //! manifests the cross-process stage leans on: `mobile.context` clones
-//! whole; `mobile.control`, the [`TurnState`](super::TurnState) substates
-//! (via [`TurnState::inherit_from`](super::TurnState::inherit_from)
-//! / [`return_to`](super::TurnState::return_to)), `local.audit`, and
+//! whole; `mobile.control`, the [`RunState`](super::RunState) substates
+//! (via [`RunState::inherit_from`](super::RunState::inherit_from)
+//! / [`return_to`](super::RunState::return_to)), `local.audit`, and
 //! `local.repl` each carry their own inherit / return rule; `session.builtins`,
 //! `session.library_docs`, `session.root`, and `session.guest_jail` are shared
 //! so dispatch, the `help`/`explain` index, the cancel root, and (on a guest)
 //! the jail's uid counter reach the child.  The
 //! asymmetry between the two manifests is the flow matrix — the source
-//! cursor (`turn.loc`) and the `within`-attenuable bits do not flow back,
+//! cursor (`run.loc`) and the `within`-attenuable bits do not flow back,
 //! but `context.cwd` does.
 
 use super::{Mobile, Shell};
@@ -143,7 +143,7 @@ impl Shell {
     /// (via [`Self::run_with_mobile`], for both a lambda and a block) and
     /// returns the post-body mobile alongside its result; this routine then
     /// folds the [`ThunkBody`]-specific set back onto the caller's mobile.
-    /// The store — `turn`, `session`, `local` — is shared by identity (see
+    /// The store — `run`, `session`, `local` — is shared by identity (see
     /// the module doc); this is the single in-place routine block and lambda
     /// elimination meet at.
     ///
@@ -215,7 +215,7 @@ impl Shell {
     /// REPL aside (prompt, hook shell): clone context state from
     /// `parent` without touching its IO / audit / REPL editor
     /// context.  The child is an independent sibling; no flow-back is
-    /// needed.  The source cursor (`turn.loc`), the builtin table
+    /// needed.  The source cursor (`run.loc`), the builtin table
     /// (`session.builtins`), and the library doc index
     /// (`session.library_docs`) are copied alongside the context clone so the
     /// aside resolves names, renders positions, and describes itself exactly
@@ -223,7 +223,7 @@ impl Shell {
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();
-        child.turn.loc = parent.turn.loc.clone();
+        child.run.loc = parent.run.loc.clone();
         child.session.builtins = parent.session.builtins.clone();
         child
             .session
@@ -237,7 +237,7 @@ impl Shell {
     }
 
     /// Fork this shell into an independent child *session* — the primitive a
-    /// host uses to spawn a sub-agent that runs its own turns.
+    /// host uses to spawn a sub-agent that executes its own runs.
     ///
     /// The session-scoped specialisation of [`Self::child_from`]: the child
     /// snapshots this shell's whole lexical `scope` (prelude, libraries, and
@@ -271,7 +271,7 @@ impl Shell {
     ///
     /// The worker runs under a [`child`](crate::process::DurableRoot::child)
     /// of the **durable root**, not the swappable foreground scope, so a
-    /// foreground cancel — a turn timeout or a Ctrl-C on `turn.cancel` —
+    /// foreground cancel — a run timeout or a Ctrl-C on `run.cancel` —
     /// does not reach it.  Only a
     /// [`RootAbort`](crate::process::CancelCause::RootAbort) on the root,
     /// or a cancel on the worker's own returned scope (via `cancel` /
@@ -294,8 +294,8 @@ impl Shell {
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
-        let deferred_lease = self.turn.deferred_lease;
-        let worker_cap = self.turn.worker_cap;
+        let deferred_lease = self.run.deferred_lease;
+        let worker_cap = self.run.worker_cap;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let library_docs = self.session.library_docs.clone();
@@ -306,9 +306,9 @@ impl Shell {
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
-            child.turn.deferred_lease = deferred_lease;
-            child.turn.worker_cap = worker_cap;
-            child.turn.cancel = cancel;
+            child.run.deferred_lease = deferred_lease;
+            child.run.worker_cap = worker_cap;
+            child.run.cancel = cancel;
             child.session.root = root;
             child.session.builtins = builtins;
             child.session.library_docs = library_docs;
@@ -328,7 +328,7 @@ impl Shell {
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.mobile.context = parent.mobile.context.clone();
         self.mobile.control.inherit_from(&parent.mobile.control);
-        self.turn.inherit_from(&mut parent.turn);
+        self.run.inherit_from(&mut parent.run);
         self.local.audit.inherit_from(&mut parent.local.audit);
         self.local.repl.inherit_from(&mut parent.local.repl);
         self.session.builtins = parent.session.builtins.clone();
@@ -338,7 +338,7 @@ impl Shell {
     }
 
     /// Flow mutations made by a child computation back to `parent`.
-    /// Per-substate return rules.  The source cursor (`turn.loc`) and the
+    /// Per-substate return rules.  The source cursor (`run.loc`) and the
     /// `within`-attenuable bits do not flow back; the asymmetry is
     /// the point.
     ///
@@ -349,7 +349,7 @@ impl Shell {
         self.mobile.control.return_to(&mut parent.mobile.control);
         self.local.audit.return_to(&mut parent.local.audit);
         self.local.repl.return_to(&mut parent.local.repl);
-        self.turn.return_to(&mut parent.turn);
+        self.run.return_to(&mut parent.run);
         parent.mobile.context.cwd.current = self.mobile.context.cwd.current.take();
         parent.mobile.context.cwd.previous = self.mobile.context.cwd.previous.take();
     }
@@ -368,14 +368,14 @@ mod tests {
     /// observes the session-owned terminal lease *by identity* — not by a
     /// manifest remembering to copy a witness into a fresh `SessionState`.
     /// A foreground external inside a function / alias / handler body can
-    /// therefore take the controlling terminal whenever the turn is
+    /// therefore take the controlling terminal whenever the run is
     /// `Leased`, and the lease is plainly still held after the body since it
     /// never moved.
     #[test]
     fn lambda_body_shares_the_session_terminal_lease() {
         let mut shell = Shell::default();
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        shell.turn.terminal_access = TerminalAccess::Leased;
+        shell.run.terminal_access = TerminalAccess::Leased;
         assert!(
             shell.terminal_lease().is_some(),
             "precondition: the session holds a Leased lease",
@@ -399,7 +399,7 @@ mod tests {
 
     /// A forked session is not the foreground session, so it holds no terminal
     /// authority — even when forked from a parent that does, and even if the
-    /// child's own turn later claims `Leased` access.  `fork_session` builds
+    /// child's own run later claims `Leased` access.  `fork_session` builds
     /// the child over a freshly-defaulted `SessionState`, which mints no lease
     /// witness, so a sub-agent can never foreground an external command and
     /// seize the controlling terminal the host's TUI owns.
@@ -407,14 +407,14 @@ mod tests {
     fn fork_session_holds_no_terminal_authority() {
         let mut parent = Shell::default();
         parent.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        parent.turn.terminal_access = TerminalAccess::Leased;
+        parent.run.terminal_access = TerminalAccess::Leased;
         assert!(
             parent.terminal_lease().is_some(),
             "precondition: the parent holds a Leased lease",
         );
 
         let mut child = parent.fork_session();
-        child.turn.terminal_access = TerminalAccess::Leased;
+        child.run.terminal_access = TerminalAccess::Leased;
         assert!(
             child.terminal_lease().is_none(),
             "a forked session minted no lease witness, so it cannot foreground",

@@ -66,11 +66,11 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 
 /// Discover skills from both roots, filter by `caps` readability, and
 /// parse frontmatter — for the prompt's Skills section.  Called once at
-/// startup (pre-turn); file reads here are `silent`, gated by the static
+/// startup (pre-run); file reads here are `silent`, gated by the static
 /// capability set rather than a live shell.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-turn, gated by caps"
+    reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by caps"
 )]
 pub fn discover_metadata(
     cwd: &Path,
@@ -126,7 +126,7 @@ fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
 
 /// Read `dir`'s `SKILL.md` and parse its frontmatter into a [`Skill`].
 /// `dir_name` is the expected skill name (the parent directory).  Called
-/// at turn time by `skill-list`, gated by `check_fs_read` at the call site.
+/// at run time by `skill-list`, gated by `check_fs_read` at the call site.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
@@ -137,7 +137,7 @@ pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
 }
 
 /// Read the Markdown body of `SKILL.md` — everything after the
-/// frontmatter.  Called by the `skill` builtin at turn time, gated by
+/// frontmatter.  Called by the `skill` builtin at run time, gated by
 /// `check_fs_read` at the call site.
 #[allow(
     clippy::disallowed_methods,

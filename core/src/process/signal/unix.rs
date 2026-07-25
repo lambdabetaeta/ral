@@ -57,7 +57,7 @@ extern "C" fn handler(sig: libc::c_int) {
     }
     // Translate the signal into a cause on the published cancel slots —
     // async-signal-safe (a slot load plus a `fetch_max`).  SIGINT is an
-    // interrupt of the current foreground turn; SIGTERM/SIGHUP are a
+    // interrupt of the current foreground run; SIGTERM/SIGHUP are a
     // shutdown request and land on the durable root, reaching detached
     // workers too.  Every wait loop already polls its scope, so this is
     // what preempts a blocked external child.
@@ -89,8 +89,8 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
 // with CAS; the handler iterates all slots and sends to any non-zero entry.
 // The handler is installed once at startup and never removed, so there is no
 // install/uninstall race.  Beyond the relay, the handler also cancels the
-// current turn's foreground scope so an in-process foreground computation
-// unwinds on Ctrl-C; between turns that cancel is a no-op and the relay slots
+// current run's foreground scope so an in-process foreground computation
+// unwinds on Ctrl-C; between runs that cancel is a no-op and the relay slots
 // are typically empty, so an idle Ctrl-C at the prompt is left to the line
 // editor.
 
@@ -113,8 +113,8 @@ fn relay_signal_to_groups(sig: libc::c_int) {
 }
 
 extern "C" fn sigint_relay(_: libc::c_int) {
-    // Cancel the current turn's foreground scope so in-process foreground
-    // work unwinds at its next poll; a no-op between turns (idle Ctrl-C at
+    // Cancel the current run's foreground scope so in-process foreground
+    // work unwinds at its next poll; a no-op between runs (idle Ctrl-C at
     // the prompt is still handled by the line editor). Detached workers poll
     // their own scopes, not the foreground, so they are spared.
     request_foreground_cancel(CancelCause::Interrupt);
@@ -128,8 +128,8 @@ pub fn relay_handler() -> extern "C" fn(libc::c_int) {
 
 extern "C" fn sigquit_handler(_: libc::c_int) {
     // Ctrl-\ in cooked mode: reap the whole session. Cancel the durable
-    // root, reaching the foreground turn and every detached worker. A no-op
-    // between turns (null slot), so an idle Ctrl-\ does not core-dump.
+    // root, reaching the foreground run and every detached worker. A no-op
+    // between runs (null slot), so an idle Ctrl-\ does not core-dump.
     request_root_cancel(CancelCause::RootAbort);
 }
 
@@ -905,7 +905,7 @@ mod tests {
 
     /// The batch/term handler translates SIGINT into a foreground
     /// [`Interrupt`](crate::process::CancelCause::Interrupt): the current
-    /// turn unwinds (and its blocked external wakes at the next scope
+    /// run unwinds (and its blocked external wakes at the next scope
     /// poll), while the durable root — and with it every detached
     /// worker — is left untouched.  The delivery also ticks the
     /// escalation ladder, which is what backs the third-signal `_exit`.
@@ -936,7 +936,7 @@ mod tests {
 
     /// SIGTERM and SIGHUP are shutdown requests: the handler translates
     /// them into a root [`Terminate`](crate::process::CancelCause::Terminate),
-    /// reaching the foreground turn *and* every detached worker parented
+    /// reaching the foreground run *and* every detached worker parented
     /// under the durable root — the semantics a `timeout(1)`- or
     /// systemd-style SIGTERM expects.  The foreground slot itself is not
     /// written; the foreground observes the cause through its root

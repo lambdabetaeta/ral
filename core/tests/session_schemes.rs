@@ -1,19 +1,19 @@
 //! The ADR session-scheme-continuity Verify list, exercised end-to-end.
 //!
-//! Each turn's static check is seeded from the live session: the schemes
-//! the checker inferred for turn *N*'s top-level binds live on the runtime
+//! Each run's static check is seeded from the live session: the schemes
+//! the checker inferred for run *N*'s top-level binds live on the runtime
 //! bindings (and the alias arms' schemes on the persistent handler frames),
-//! so turn *N+1*'s check sees them.  The harness mirrors the REPL loop in
+//! so run *N+1*'s check sees them.  The harness mirrors the REPL loop in
 //! `ral/src/repl/exec.rs`: `check` seeds `compile_and_typecheck` from the
-//! live `session_schemes()`, and `turn` drives the public `run_turn` door.
+//! live `session_schemes()`, and `run` drives the public `run` door.
 
 mod common;
 
 use ral_core::source::FileId;
-use ral_core::transport::{Program, Turn};
+use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Settled};
 use ral_core::{
-    CompileOutcome, RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin,
+    CompileOutcome, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
     TypeError, Value, builtins, compile_and_typecheck,
     typecheck::{TypeErrorKind, fmt_scheme},
 };
@@ -24,22 +24,22 @@ fn shell() -> Shell {
     s
 }
 
-/// One REPL turn through the public `run_turn` door, which checks `src`
+/// One REPL run through the public `run` door, which checks `src`
 /// against the live session before evaluating it.  Panics on parse / type
-/// failure — callers that expect a clean turn pick source that compiles;
+/// failure — callers that expect a clean run pick source that compiles;
 /// callers probing an *eval* failure get the body's `Settled` back.
-fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
-    match shell.run_turn(TurnRequest {
-        turn: Turn {
+fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
+    match shell.run(RunRequest {
+        run: Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
             caps: Capabilities::root(),
-            turn_limit: None,
+            wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: TurnIo::Inherit,
+            io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
-            stdin: TurnStdin::Inherit,
+            stdin: RunStdin::Inherit,
         },
         surface: None,
         deferred: None,
@@ -47,13 +47,13 @@ fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        TurnReport::Ran { result, .. } => result,
-        TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+        RunReport::Ran { result, .. } => result,
+        RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
     }
 }
 
 /// Check `src` against the live session without evaluating it — the
-/// errors a turn would surface before running.
+/// errors a run would surface before running.
 fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
     match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY) {
         CompileOutcome::Compiled(_) => Vec::new(),
@@ -71,16 +71,16 @@ fn is_mode_mismatch(errs: &[TypeError]) -> bool {
 
 /// `let f = { return 3 }` then `$f | from-json`: the value producer's
 /// `∅` output feeding `from-json`'s ground `Bytes` input is the
-/// `∅`-into-`Bytes` edge.  The next turn's check reports it (T0012)
+/// `∅`-into-`Bytes` edge.  The next run's check reports it (T0012)
 /// before evaluation, with the binding's session scheme as the seed.
 #[test]
-fn value_producer_into_decoder_is_static_mode_mismatch_cross_turn() {
+fn value_producer_into_decoder_is_static_mode_mismatch_cross_run() {
     let mut sh = shell();
-    turn(&mut sh, "let f = { return 3 }").unwrap();
+    run(&mut sh, "let f = { return 3 }").unwrap();
     let errs = check_errors(&sh, "$f | from-json");
     assert!(
         is_mode_mismatch(&errs),
-        "expected a cross-turn ModeMismatch (T0012), got: {:?}",
+        "expected a cross-run ModeMismatch (T0012), got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -99,12 +99,12 @@ fn value_producer_into_decoder_is_static_mode_mismatch_cross_turn() {
 /// Part-1 rule: a stage whose input resolves to ground `Bytes` takes the
 /// channel edge regardless of how polymorphic its return value is.
 #[test]
-fn value_producer_into_decoder_is_static_mode_mismatch_in_turn() {
+fn value_producer_into_decoder_is_static_mode_mismatch_in_run() {
     let sh = shell();
     let errs = check_errors(&sh, "let f = { return 3 }\n$f | from-json");
     assert!(
         is_mode_mismatch(&errs),
-        "expected an in-turn ModeMismatch (T0012), got: {:?}",
+        "expected an in-run ModeMismatch (T0012), got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -119,10 +119,10 @@ fn value_producer_into_decoder_is_static_mode_mismatch_in_turn() {
 #[test]
 fn byte_producer_into_byte_consumer_typechecks() {
     let mut sh = shell();
-    turn(&mut sh, "let f = { echo hi }").unwrap();
+    run(&mut sh, "let f = { echo hi }").unwrap();
     assert!(
         check_errors(&sh, "$f | wc -l").is_empty(),
-        "expected a clean byte→byte pipeline across turns, got: {:?}",
+        "expected a clean byte→byte pipeline across runs, got: {:?}",
         check_errors(&sh, "$f | wc -l")
             .iter()
             .map(|e| e.kind.render_message())
@@ -130,22 +130,22 @@ fn byte_producer_into_byte_consumer_typechecks() {
     );
 }
 
-// ─── (3) cross-turn value-type error ─────────────────────────────────────────
+// ─── (3) cross-run value-type error ─────────────────────────────────────────
 
-/// A turn-*N* binding used at a clashing value type in turn *N+1* is
+/// A run-*N* binding used at a clashing value type in run *N+1* is
 /// reported statically: `x` is `String` (the literal `'hello'`), so
 /// `$x + 1` is a String-vs-Int mismatch.  The suite's established clash
 /// is `String + Int` (see `typecheck.rs`), not the `Int + "hi"` the ADR
 /// sketches — the language has no string literal inside `$[…]`.
 #[test]
-fn cross_turn_value_type_error_is_static() {
+fn cross_run_value_type_error_is_static() {
     let mut sh = shell();
-    turn(&mut sh, "let xv = 'hello'").unwrap();
+    run(&mut sh, "let xv = 'hello'").unwrap();
     let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
         errs.iter()
             .any(|e| e.kind.render_message().contains("couldn't match")),
-        "expected a cross-turn value-type mismatch, got: {:?}",
+        "expected a cross-run value-type mismatch, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -155,7 +155,7 @@ fn cross_turn_value_type_error_is_static() {
 // ─── (4) rebind retypes the name ─────────────────────────────────────────────
 
 /// `let x = 3` then `let x = 'hello'`: the rebind replaces the scheme,
-/// so the next turn checks `$x` against `String`.  `$[$x + 1]` is then a
+/// so the next run checks `$x` against `String`.  `$[$x + 1]` is then a
 /// mismatch, while passing `$x` to the String-consuming builtin `upper`
 /// is clean.  The bare `x = …` assignment form the ADR sketches parses
 /// as a command application, not a rebind, so the rebind is spelled
@@ -164,8 +164,8 @@ fn cross_turn_value_type_error_is_static() {
 #[test]
 fn rebind_retypes_the_name() {
     let mut sh = shell();
-    turn(&mut sh, "let xv = 3").unwrap();
-    turn(&mut sh, "let xv = 'hello'").unwrap();
+    run(&mut sh, "let xv = 3").unwrap();
+    run(&mut sh, "let xv = 'hello'").unwrap();
     let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
         errs.iter()
@@ -187,18 +187,18 @@ fn rebind_retypes_the_name() {
 
 // ─── (5) a failed statement installs nothing ─────────────────────────────────
 
-/// `let x = 1` then a turn `nonexistent-command-zz; let x = hello` that
+/// `let x = 1` then a run `nonexistent-command-zz; let x = hello` that
 /// fails before the rebind: `$x` keeps the `Int` scheme.  The failed
 /// statement installed neither value nor scheme.  The rebind is spelled
 /// `let` (bare `x = …` is a command application, not a rebind); the eval
-/// turn is expected to error, and the binding must survive unchanged.
+/// run is expected to error, and the binding must survive unchanged.
 #[test]
 fn failed_statement_installs_no_scheme() {
     let mut sh = shell();
-    turn(&mut sh, "let xv = 1").unwrap();
-    // The bad command aborts the turn before the rebind runs.
-    let outcome = turn(&mut sh, "nonexistent-command-zz\nlet xv = hello");
-    assert!(outcome.is_err(), "the bad command must abort the turn");
+    run(&mut sh, "let xv = 1").unwrap();
+    // The bad command aborts the run before the rebind runs.
+    let outcome = run(&mut sh, "nonexistent-command-zz\nlet xv = hello");
+    assert!(outcome.is_err(), "the bad command must abort the run");
     // `xv` is still Int, so Int arithmetic is clean.
     assert!(
         check_errors(&sh, "return $[$xv + 1]").is_empty(),
@@ -212,14 +212,14 @@ fn failed_statement_installs_no_scheme() {
 
 // ─── (6) pattern binds carry no scheme ───────────────────────────────────────
 
-/// `let [a, b] = [1, 2]` then `$a + 1`: cross-turn use of a pattern-bound
+/// `let [a, b] = [1, 2]` then `$a + 1`: cross-run use of a pattern-bound
 /// name neither errors spuriously nor sees a scheme — the destructuring
 /// components are monomorphic and cannot be closed, so they carry no
 /// scheme and elaborate as a bare variable at a fresh type.
 #[test]
 fn pattern_binds_carry_no_scheme() {
     let mut sh = shell();
-    turn(&mut sh, "let [a, bb] = [1, 2]").unwrap();
+    run(&mut sh, "let [a, bb] = [1, 2]").unwrap();
     assert!(
         check_errors(&sh, "return $[$a + 1]").is_empty(),
         "expected pattern-bound $a to check cleanly, got: {:?}",
@@ -233,7 +233,7 @@ fn pattern_binds_carry_no_scheme() {
         "a pattern-bound name must carry no scheme"
     );
     // A plain `let` binding does carry a scheme.
-    turn(&mut sh, "let n = 3").unwrap();
+    run(&mut sh, "let n = 3").unwrap();
     assert!(
         sh.binding_scheme("n").is_some(),
         "a plain let binding must carry a scheme"
@@ -242,16 +242,16 @@ fn pattern_binds_carry_no_scheme() {
 
 // ─── (7) alias visibility ────────────────────────────────────────────────────
 
-/// `alias three { |args| echo 3; return 3 }` is visible to the next turn's
+/// `alias three { |args| echo 3; return 3 }` is visible to the next run's
 /// check: the arm preserves `three`'s external byte-output mode while its
 /// scheme records the `Int` value type, so `$[!{three} + 0]` typechecks
 /// (the scheme says `Int`), while `three` alone is clean too.  After
 /// `unalias three` the name falls back to external typing — a `String`
 /// result — so the same arithmetic probe now clashes.
 #[test]
-fn alias_visible_to_next_turn() {
+fn alias_visible_to_next_run() {
     let mut sh = shell();
-    turn(&mut sh, "alias three { |args| echo 3; return 3 }").unwrap();
+    run(&mut sh, "alias three { |args| echo 3; return 3 }").unwrap();
     assert!(
         check_errors(&sh, "three").is_empty(),
         "expected the alias used alone to be clean, got: {:?}",
@@ -268,7 +268,7 @@ fn alias_visible_to_next_turn() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
-    turn(&mut sh, "unalias three").unwrap();
+    run(&mut sh, "unalias three").unwrap();
     let errs = check_errors(&sh, "return $[!{three} + 0]");
     assert!(
         !errs.is_empty(),
@@ -278,7 +278,7 @@ fn alias_visible_to_next_turn() {
 }
 
 /// A value-output alias body defines the unknown head's modes, so the
-/// definition draws no mismatch at the next turn's check; the `∅` output is
+/// definition draws no mismatch at the next run's check; the `∅` output is
 /// rejected only where it feeds a byte consumer (`docs/SPEC.md` §4.2.1), as
 /// `three | from-json` shows.
 #[test]
@@ -302,7 +302,7 @@ fn value_output_alias_is_use_site_mode_mismatch() {
     );
 }
 
-// ─── (8) bake/turn harvest unity ─────────────────────────────────────────────
+// ─── (8) bake/run harvest unity ─────────────────────────────────────────────
 
 /// The scheme installed on a live scope binding renders identically to
 /// the baked entry harvested at build time — both come from the same
