@@ -206,7 +206,7 @@ pub(super) trait Frontend {
     /// keybinding dispatch, continuation reads, line-erase escapes, and
     /// flushing deferred plugin diagnostics before returning.
     ///
-    /// `jobs` is the session's shared [`JobTable`] (Unix only — pgid jobs
+    /// `jobs` is the session's shared `JobTable` (Unix only — pgid jobs
     /// are a Unix concept), threaded so the structural surface can project
     /// stopped/running pgid jobs in its handles matrix alongside the
     /// env-held [`Value::Handle`](ral_core::Value::Handle) spawns.  Passed

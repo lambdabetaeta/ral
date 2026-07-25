@@ -48,8 +48,8 @@
 //! `install` replaces the disposition with a handler that sets the current
 //! root token *and* forwards directly into ral's own handlers, so
 //! statement-level unwinding still works.  A forwarded SIGINT goes to ral's
-//! *non-escalating* [`relay_handler`](ral_core::process::relay_handler),
-//! not the [`term_handler`](ral_core::process::term_handler) whose third signal `_exit`s: a SIGINT reaching
+//! *non-escalating* `relay_handler`,
+//! not the `term_handler` whose third signal `_exit`s: a SIGINT reaching
 //! the supervising TUI — from a stray child, another process, anything —
 //! must only cancel the current exchange, never force-exit exarch.  SIGTERM/SIGHUP
 //! keep ral's `term_handler`, since those are deliberate termination
@@ -59,8 +59,8 @@
 //! `Terminate` cause, so a park reading the token agrees with ral's root
 //! about why the agent is ending.  By convention `install` still runs after
 //! `ral_core::process::install_handlers`, but the forwarding targets are the
-//! static accessors [`relay_handler`](ral_core::process::relay_handler)/
-//! [`term_handler`](ral_core::process::term_handler) rather than a
+//! static accessors `relay_handler`/
+//! `term_handler` rather than a
 //! captured disposition, so that ordering is documentation, not a
 //! correctness requirement.  [`crate::bootstrap::boot_shell`] owns that
 //! ceremony for exarch session shells, including `/clear` rebuilds.
@@ -77,7 +77,7 @@
 //! [`raise`] and `ral_core::process::relay_interrupt` directly: the
 //! non-escalating relay that cancels the current run's foreground scope
 //! and fans a Ctrl-Break out to every live, non-detached pipeline group,
-//! the same contract Unix's [`relay_handler`](ral_core::process::relay_handler) gives a forwarded SIGINT.  It
+//! the same contract Unix's `relay_handler` gives a forwarded SIGINT.  It
 //! then returns `TRUE` ("handled"), so ral's own `ctrlc`-installed
 //! disposition — whose ladder ticks a counter toward `TerminateJobObject`
 //! and `ExitProcess` — never runs for these two events: a trunk interrupt
@@ -87,7 +87,7 @@
 //! [`cancels_exchange`] answers `false` for those, exarch's handler returns
 //! `FALSE` in turn, and ral's escalating disposition runs exactly as it
 //! would without exarch installed — the Windows analogue of SIGTERM/SIGHUP
-//! staying on Unix's escalating [`term_handler`](ral_core::process::term_handler).
+//! staying on Unix's escalating `term_handler`.
 //!
 //! The Esc key never reaches `SetConsoleCtrlHandler` at all: the TUI's own
 //! read loop captures it as a raw key event (raw mode disables
@@ -250,8 +250,8 @@ pub fn raise_interrupt() {
 ///
 /// By convention runs *after* [`ral_core::process::install_handlers`], though
 /// [`chained`] forwards into ral's handlers via the static accessors
-/// [`relay_handler`](ral_core::process::relay_handler)/
-/// [`term_handler`](ral_core::process::term_handler) rather than a captured
+/// `relay_handler`/
+/// `term_handler` rather than a captured
 /// disposition, so the ordering is documentation, not a correctness
 /// requirement.  SIGINT forwards into the non-escalating `relay_handler`,
 /// which requests the cooperative foreground unwind and relays to external

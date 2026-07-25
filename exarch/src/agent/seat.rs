@@ -35,7 +35,6 @@ pub(crate) enum Seat {
     /// slot to fill or retire. No scratch: the session's real one lives
     /// inside the guest this transport dials. No nursery: sub-agent forks
     /// are refused at the desk (fuel 0), so there is nothing to adopt into.
-    #[cfg(unix)]
     Wire {
         transport: Box<ral_core::transport::WireTransport>,
     },
@@ -63,7 +62,6 @@ impl Drop for RunGuard<'_> {
                 transport.set_desk(Arc::new(AbsentDesk));
                 transport.clear_nursery();
             }
-            #[cfg(unix)]
             Seat::Wire { .. } => {}
         }
     }
@@ -94,7 +92,6 @@ impl Seat {
     /// since under a VM the workspace is a guest path this host cannot even
     /// resolve — tagged with exarch's compiled-in builtin installer, then
     /// seat it with no per-call install yet.
-    #[cfg(unix)]
     pub(crate) fn wire(
         transport: ral_core::transport::WireTransport,
         cwd: std::path::PathBuf,
@@ -119,7 +116,6 @@ impl Seat {
     pub(crate) fn transport(&self) -> &dyn Transport {
         match self {
             Self::Identity { transport, .. } => &**transport,
-            #[cfg(unix)]
             Self::Wire { transport, .. } => &**transport,
         }
     }
@@ -130,7 +126,6 @@ impl Seat {
     pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::transport::EngineInner> {
         match self {
             Self::Identity { transport, .. } => transport.shell_mut(),
-            #[cfg(unix)]
             Self::Wire { .. } => panic!(
                 "direct engine-state access has no meaning on a wire seat: the engine lives in \
                  a separate process, reachable only through Transport's dispatch/probe/control \
@@ -158,7 +153,6 @@ impl Seat {
                     apply: install.apply,
                 }));
             }
-            #[cfg(unix)]
             Self::Wire { .. } => {}
         }
         RunGuard(self)
@@ -175,7 +169,6 @@ impl Seat {
                 eval_root: transport.shell_mut().shell.cancel_handle(),
                 run_scope: run_scope.clone(),
             },
-            #[cfg(unix)]
             Self::Wire { transport, .. } => EvalReach::Wire(transport.control().clone()),
         }
     }
@@ -200,7 +193,6 @@ impl Seat {
                     cwd.clone(),
                 );
             }
-            #[cfg(unix)]
             Self::Wire { .. } => panic!(
                 "/clear has no meaning on a wire seat as a transport swap: session-is-a-process \
                  says a wire session clears by killing its engine process and booting a fresh \

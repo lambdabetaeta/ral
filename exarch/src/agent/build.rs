@@ -139,7 +139,6 @@ pub enum RootSeat {
     /// it, an adopted control-plane stream into a guest VM. `cwd`/`home` are
     /// the caller's own, since under a VM the workspace is a guest path this
     /// process cannot resolve for itself.
-    #[cfg(unix)]
     Wire {
         transport: Box<ral_core::transport::WireTransport>,
         cwd: std::path::PathBuf,
@@ -276,7 +275,6 @@ impl Agent {
             RootSeat::Identity { scratch, cwd } => {
                 Some(seat::boot_root_shell(scratch, cwd.clone()))
             }
-            #[cfg(unix)]
             RootSeat::Wire { .. } => None,
         };
         let sessions_root = run_dir.join("sessions");
@@ -309,7 +307,6 @@ impl Agent {
                 cwd,
                 &log,
             ),
-            #[cfg(unix)]
             RootSeat::Wire {
                 transport,
                 cwd,
@@ -437,7 +434,6 @@ impl Agent {
             Seat::Identity { scratch, cwd, .. } => {
                 Seat::identity(shell, scratch.clone(), cwd.clone(), &log)
             }
-            #[cfg(unix)]
             Seat::Wire { .. } => {
                 unreachable!("shell_mut already panicked above for a wire seat")
             }

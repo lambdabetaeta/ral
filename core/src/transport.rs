@@ -18,18 +18,17 @@
 //!
 //! See [[decisions/260628_host-seam-transport-parametric]].
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(unix)]
 use std::sync::Mutex;
-#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+// The same-host engine child is a Unix handoff (a socketpair end inherited on
+// fd 3), so its handle — and only it — stays platform-gated; every other part
+// of the wire transport is the frame protocol, which is not.
 #[cfg(unix)]
 use crate::process::ChildHandle;
 use crate::serial::FOValue;
@@ -690,7 +689,6 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 pub struct ControlSender {
     /// When `Some`, writes `Control` frames to a `WireChannel`.
     /// When `None`, acts directly on the in-process foreground scope.
-    #[cfg(unix)]
     wire: Option<Arc<Mutex<crate::wire::WireChannel>>>,
     /// The transport's own record of the in-flight dispatch id (`0` = none),
     /// shared with whichever bookkeeping the transport already keeps for
@@ -702,13 +700,11 @@ pub struct ControlSender {
 impl ControlSender {
     pub(crate) fn new(current_dispatch: Arc<std::sync::atomic::AtomicU64>) -> Self {
         Self {
-            #[cfg(unix)]
             wire: None,
             current_dispatch,
         }
     }
 
-    #[cfg(unix)]
     pub(crate) fn new_wire(
         ch: Arc<Mutex<crate::wire::WireChannel>>,
         current_dispatch: Arc<std::sync::atomic::AtomicU64>,
@@ -744,10 +740,9 @@ impl ControlSender {
     /// Panics if the wire-channel mutex is poisoned.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "the `#[cfg(unix)]` wire arm moves `ctrl` into the `Frame` it writes, and `Control` is not `Copy`; only the identity fallback below merely reads it"
+        reason = "the wire arm moves `ctrl` into the `Frame` it writes, and `Control` is not `Copy`; only the identity fallback below merely reads it"
     )]
     pub fn send(&self, ctrl: Control) {
-        #[cfg(unix)]
         if let Some(ch) = &self.wire {
             let frame = Frame::Control(ctrl);
             // Phase 2 Task 8: EPIPE here means the engine died.
@@ -1228,7 +1223,6 @@ impl Transport for IdentityTransport {
 /// interval must be comfortably shorter than the deadline: several pings
 /// (and their pongs) fall inside one deadline window, and a single dropped
 /// exchange never condemns a live peer.
-#[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 pub struct Liveness {
     /// The cadence at which the front-end manufactures `Ping` traffic.
@@ -1237,7 +1231,6 @@ pub struct Liveness {
     pub deadline: Duration,
 }
 
-#[cfg(unix)]
 impl Default for Liveness {
     fn default() -> Self {
         Self {
@@ -1250,9 +1243,10 @@ impl Default for Liveness {
 /// The out-of-process transport: the engine runs across a duplex stream,
 /// frames crossing on a `WireChannel` (length-prefixed JSON).
 ///
-/// Two constructors give it two lives. [`WireTransport::new`] spawns the
-/// engine as a same-host child over a socketpair, where the child's death
-/// is a kernel-guaranteed EOF and heartbeats would be noise.
+/// Two constructors give it two lives. `WireTransport::new` — Unix only, since
+/// what it does is hand a socketpair end to a child on fd 3 — spawns the engine
+/// as a same-host child, where the child's death is a kernel-guaranteed EOF and
+/// heartbeats would be noise.
 /// [`WireTransport::adopt`] drives the protocol over an *existing* stream —
 /// in production the virtual-socket connection to a guest VM — whose failure
 /// mode is silence rather than EOF, and so runs a heartbeat ticker that
@@ -1264,7 +1258,6 @@ impl Default for Liveness {
 /// frame so the ticker can tell silence from life.  Writes — `Dispatch`,
 /// `Attach`, `Detach`, `Control`, and the ticker's `Ping` — go through a
 /// shared `Mutex<WireChannel>` so they are concurrent-safe with each other.
-#[cfg(unix)]
 pub struct WireTransport {
     /// Event receiver fed by the reader thread.
     events_recv: EventReceiver,
@@ -1276,7 +1269,9 @@ pub struct WireTransport {
     /// `Some` under [`WireTransport::new`], whose engine is a same-host
     /// child to be killed and reaped on drop; `None` under
     /// [`WireTransport::adopt`], which drives a stream it does not own the
-    /// far end of.
+    /// far end of — and so the only field of this transport that is a
+    /// platform's, rather than the protocol's.
+    #[cfg(unix)]
     child: Option<ChildHandle>,
     /// Reader thread handle (never joined — the thread exits when the
     /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
@@ -1306,7 +1301,6 @@ pub struct WireTransport {
 /// read error, or an already-set death flag — set `death` before exiting,
 /// so `dead()` is honest under every teardown path and dropping `event_tx`
 /// closes the event channel that fails the in-flight dispatch's `recv`.
-#[cfg(unix)]
 fn spawn_wire_reader(
     mut reader_ch: crate::wire::WireChannel,
     event_tx: mpsc::Sender<(DispatchId, Event)>,
@@ -1345,7 +1339,6 @@ fn spawn_wire_reader(
 /// wire down, so the parked reader wakes, drops its `event_tx`, and closes
 /// the event channel whose `recv` returning `None` is what fails the
 /// in-flight dispatch. Never joined.
-#[cfg(unix)]
 fn spawn_heartbeat(
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
     death: Arc<AtomicBool>,
@@ -1379,7 +1372,6 @@ fn spawn_heartbeat(
     });
 }
 
-#[cfg(unix)]
 impl WireTransport {
     /// Spawn the engine child and set up the wire channel.
     ///
@@ -1395,6 +1387,7 @@ impl WireTransport {
     /// Returns `Err` if creating the socketpair fails, if duplicating the
     /// front-end fd fails, if resolving the current executable path fails, or
     /// if spawning the engine child process fails.
+    #[cfg(unix)]
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
@@ -1459,19 +1452,25 @@ impl WireTransport {
 
     /// Drive the protocol over an existing duplex `stream` — no child spawn.
     ///
-    /// This is the guest-VM path: `stream` is the virtual-socket connection
-    /// to the engine running in the guest, handed over as a `UnixStream`.
-    /// Such a stream can fall silent without ever tearing (a dead host
-    /// produces no EOF), so the first [`Transport::attach`] — not this
-    /// constructor — spawns a heartbeat ticker under `liveness`, whose
-    /// declared death shuts the wire down and closes the event channel:
-    /// the mechanism that fails an in-flight dispatch as cancelled and
-    /// marks the session detached.
+    /// This is the guest-VM path, and the one constructor both platforms have:
+    /// `stream` is the virtual-socket connection to the engine running in the
+    /// guest — an `AF_VSOCK` descriptor under Virtualization.framework, an
+    /// `AF_HYPERV` socket under Hyper-V — adopted through
+    /// [`crate::wire::WireStream`], whose docs say why std's stream types can
+    /// carry either.  Such a stream can fall silent without ever tearing (a
+    /// dead host produces no EOF), so the first [`Transport::attach`] — not
+    /// this constructor — spawns a heartbeat ticker under `liveness`, whose
+    /// declared death shuts the wire down and closes the event channel: the
+    /// mechanism that fails an in-flight dispatch as cancelled and marks the
+    /// session detached.
     ///
     /// # Errors
     /// Returns `Err` if the stream cannot be duplicated into separate read
     /// and write handles.
-    pub fn adopt(stream: std::os::unix::net::UnixStream, liveness: Liveness) -> io::Result<Self> {
+    pub fn adopt(
+        stream: impl Into<crate::wire::WireStream>,
+        liveness: Liveness,
+    ) -> io::Result<Self> {
         let reader_ch = crate::wire::WireChannel::from_stream(stream);
         // A duplicate fd so the reader can park in `read_frame` while the
         // ticker and the front-end write concurrently on the same socket.
@@ -1490,6 +1489,7 @@ impl WireTransport {
             events_recv: EventReceiver::new(event_rx),
             control,
             write_tx,
+            #[cfg(unix)]
             child: None,
             _reader: Mutex::new(Some(reader)),
             death,
@@ -1521,7 +1521,6 @@ impl WireTransport {
     }
 }
 
-#[cfg(unix)]
 impl Drop for WireTransport {
     fn drop(&mut self) {
         // Declare death and shut the socket down: this wakes both the reader
@@ -1531,7 +1530,9 @@ impl Drop for WireTransport {
         self.write_tx.lock().unwrap().shutdown();
         // A same-host child (`new`) is additionally killed and reaped; an
         // adopted stream (`adopt`) has no child to own — its far end is a
-        // guest VM the session manager reaps.
+        // guest VM the session manager reaps.  Only Unix has the former, so
+        // only Unix has anything to reap here.
+        #[cfg(unix)]
         if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait_handling_stop(None, false);
@@ -1539,7 +1540,6 @@ impl Drop for WireTransport {
     }
 }
 
-#[cfg(unix)]
 impl Transport for WireTransport {
     fn dispatch(&self, id: DispatchId, run: Run) {
         self.current_dispatch

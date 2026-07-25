@@ -107,7 +107,6 @@ pub(crate) enum EvalReach {
     /// actually has a child today (a wire session's `agent-start` is always
     /// refused), so this variant is unreached in production but must still
     /// answer both calls honestly.
-    #[cfg(unix)]
     Wire(ral_core::transport::ControlSender),
 }
 
@@ -122,7 +121,6 @@ impl EvalReach {
                     scope.cancel(CancelCause::Interrupt);
                 }
             }
-            #[cfg(unix)]
             Self::Wire(ctrl) => ctrl.cancel_in_flight(),
         }
     }
@@ -135,7 +133,6 @@ impl EvalReach {
     pub(crate) fn terminate(&self, cause: CancelCause) {
         match self {
             Self::Identity { eval_root, .. } => eval_root.cancel(cause),
-            #[cfg(unix)]
             Self::Wire(ctrl) => ctrl.cancel_in_flight(),
         }
     }

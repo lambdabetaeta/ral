@@ -62,8 +62,11 @@ pub mod text;
 pub mod transport;
 pub mod typecheck;
 pub mod types;
-#[cfg(unix)]
-pub(crate) mod wire;
+// Public because it is part of the host seam, not an implementation detail of
+// one side of it: [`transport::WireTransport::adopt`] names [`wire::WireStream`]
+// in its own signature, so a front-end handing over a booted guest's control
+// plane (`synod`) has to be able to name what it is handing over.
+pub mod wire;
 
 // The crate-root host surface: the run seam, the host-embedding re-exec
 // helpers, the typed-compile API, and ordinary value / rendering / diagnostic

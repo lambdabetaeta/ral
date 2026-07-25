@@ -141,7 +141,6 @@ impl Agent {
         // wire session's fuel is always 0 (session-is-a-process).
         let scratch = match &self.seat {
             Seat::Identity { scratch, .. } => Some(scratch.clone()),
-            #[cfg(unix)]
             Seat::Wire { .. } => None,
         };
         desk::HostServices {

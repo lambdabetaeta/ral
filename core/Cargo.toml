@@ -135,6 +135,9 @@ uu_tac       = { version = "0.9", optional = true }
 ctrlc        = "3"
 windows-sys  = { workspace = true, features = [
     "Win32_Foundation",
+    # WSAPoll — the readability primitive `wire::WireChannel::poll_readable`
+    # measures a silent peer against, and the only Winsock call core makes.
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",

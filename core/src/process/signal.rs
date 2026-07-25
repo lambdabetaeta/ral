@@ -15,7 +15,9 @@
 //!     fresh group / join an existing group as a non-leader" applied via
 //!     `pre_exec` before `execve` at spawn time.
 //!
-//! Platform-specific machinery lives in [`unix`] and `windows`; this
+//! Platform-specific machinery lives in `unix` and `windows` — each a module
+//! that exists only on its own platform, so neither can be linked from a page
+//! the other one builds; this
 //! file re-exports the items each platform provides and keeps the
 //! portable data types and the unwind-poll path here.
 
