@@ -14,7 +14,7 @@ use ral_core::transport::{IdentityTransport, Transport};
 use std::sync::{Arc, Mutex};
 
 /// One agent's engine-side attachment.  A closed enum, not a trait object:
-/// the operations that differ per seat live off the `Transport` trait.
+/// the operations that differ per seat live off the [`Transport`] trait.
 pub(crate) enum Seat {
     /// In-process: owns the session [`Scratch`] (`/clear` reboots from it),
     /// the working directory the shell is re-seeded with on every such
@@ -31,7 +31,7 @@ pub(crate) enum Seat {
     /// and applier ride
     /// [`Agent::run_shell`](crate::agent::Agent::run_shell)'s own arguments
     /// into the drain loop's enquiry arm — the engine asks over
-    /// `Event::Enquiry`, never a direct call, so there is no engine-side
+    /// [`ral_core::transport::Event::Enquiry`], never a direct call, so there is no engine-side
     /// slot to fill or retire. No scratch: the session's real one lives
     /// inside the guest this transport dials. No nursery: sub-agent forks
     /// are refused at the desk (fuel 0), so there is nothing to adopt into.
@@ -51,9 +51,9 @@ pub(crate) struct RunInstall {
 }
 
 /// Retires the install on drop — [`AbsentDesk`] back in, nursery cleared —
-/// on *every* exit, including a panic `Agent::attend` recovers from, where
+/// on *every* exit, including a panic [`crate::agent::Agent::attend`] recovers from, where
 /// straight-line teardown would leave the desk's whole capture (its
-/// `Emitter` included) installed for the rest of the session.
+/// [`crate::bus::Emitter`] included) installed for the rest of the session.
 pub(crate) struct RunGuard<'s>(&'s Seat);
 
 impl Drop for RunGuard<'_> {
@@ -125,7 +125,7 @@ impl Seat {
     }
 
     /// Direct engine-state access, identity-only — the test suite's state
-    /// inspection door and `fork_with`'s `fork_session` reach. Panics on a
+    /// inspection door and [`crate::agent::Agent::fork_with`]'s [`Shell::fork_session`] reach. Panics on a
     /// wire seat (see the panic message).
     pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::transport::EngineInner> {
         let Self::Identity { transport, .. } = self else {
@@ -214,7 +214,7 @@ impl Seat {
 
 /// Boot a root session shell: the shared exarch boot plus `cwd` seeded as
 /// its logical working directory and the scratch's env/binding seeding.
-/// Forks instead snapshot their parent through `Shell::fork_session`,
+/// Forks instead snapshot their parent through [`Shell::fork_session`],
 /// inheriting the seeding.
 pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> Shell {
     let mut shell = crate::bootstrap::boot_shell();
@@ -228,7 +228,7 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> She
 /// shell behind a fresh transport observing `run_scope` and attach the
 /// host endpoint.
 /// `cwd` is the same directory [`boot_root_shell`] seeded onto the shell —
-/// restated here only because `attach`'s signature is shared with the wire
+/// restated here only because [`Transport::attach`]'s signature is shared with the wire
 /// transport, which does read its `cwd` argument.
 fn identity_ceremony(
     mut shell: Shell,

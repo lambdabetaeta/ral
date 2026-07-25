@@ -5,11 +5,10 @@
 //! caret lands on the offending sub-expression, not somewhere generic
 //! like the `return` keyword or the start of the file.
 //!
-//! Each entry in [`span_cases`] is `(source, expected_underlined_text)`.
-//! The test asserts that the type error's span, sliced out of the
-//! source, equals `expected_underlined_text`.  When a mistake produces
-//! multiple errors we only pin the first one — that is the entry the
-//! user sees first and acts on.
+//! Each entry in [`span_cases`] is a [`SpanCase`] `{ src, expected, tag }`.
+//! The test asserts that the type error's span, sliced out of `src`,
+//! equals `expected`.  When a mistake produces multiple errors we only
+//! pin the first one — that is the entry the user sees first and acts on.
 
 mod common;
 

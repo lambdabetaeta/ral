@@ -61,10 +61,10 @@ use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
-    ral_core::driver::boot_shell(
+    ral_core::boot::boot_shell(
         ral_core::io::TerminalState::default(),
         common::prelude(),
-        &ral_core::driver::HostSurface::default(),
+        &ral_core::boot::HostSurface::default(),
     )
 }
 

@@ -189,9 +189,9 @@ pub enum SessionEvent {
     /// A model-visible message inherited from a parent agent's context when a
     /// mnemon child is born.  It is replayed verbatim to the provider but
     /// does not drive the local protocol state machine; the child's fresh
-    /// `UserPrompt` remains the turn it must answer.
+    /// [`Self::UserPrompt`] remains the turn it must answer.
     ContextMessage { message: ChatMessage },
-    /// Marks the start of one inner step of `Agent::deliberate`.  Several
+    /// Marks the start of one inner step of [`crate::agent::Agent::deliberate`].  Several
     /// steps may share a single user prompt when the model issues tool
     /// calls.
     StepStarted { n: u32, tuning: Tuning },
@@ -207,12 +207,12 @@ pub enum SessionEvent {
     },
     /// All tool results for the most recent assistant turn, joined into
     /// one event.  IDs must match the `pending_tool_ids` of the
-    /// preceding `AssistantMessage`.
+    /// preceding [`Self::AssistantMessage`].
     ToolResults { results: Vec<ToolResult> },
     /// Per-step token / dollar usage as reported by the provider.
     UsageDelta { usage: UsageDelta },
     /// The user pressed Ctrl-C / Esc mid-exchange.  Whatever events were
-    /// pending have been synthesised back to a `ReadyForUser` state by
+    /// pending have been synthesised back to a [`State::ReadyForUser`] state by
     /// [`AgentLog::quiesce`].
     Cancelled,
     /// History was compacted.  The live model view (the summary plus the
@@ -238,7 +238,7 @@ pub enum SessionEvent {
     /// reconstructable from events.json.
     ProviderError { error: ProviderErrorRecord },
     /// Bookend at the tail.  Written by [`Agent`](crate::agent::Agent)'s
-    /// `Drop` impl, the one funnel every teardown path — a settled `reply`,
+    /// [`Drop`] impl, the one funnel every teardown path — a settled `reply`,
     /// the subtree cascade, or the trunk's own end-of-`attend` teardown —
     /// runs through.
     SessionEnded,
@@ -281,7 +281,7 @@ enum State {
     AwaitingAssistantAfterToolResults,
 }
 
-/// Why an exchange is being wound back to `ReadyForUser` without a natural
+/// Why an exchange is being wound back to [`State::ReadyForUser`] without a natural
 /// assistant reply — selects the synthetic stub text recorded in the
 /// transcript so a post-mortem reads the cause in place.
 #[derive(Clone, Copy)]
@@ -293,7 +293,7 @@ pub enum QuiesceReason {
     Aborted,
     /// A sub-agent called `reply`: the last round-trip dispatched the reply
     /// and its result but never asked for a closing assistant message, so the
-    /// machine sits in `AwaitingAssistantAfterToolResults`.  This winds it
+    /// machine sits in [`State::AwaitingAssistantAfterToolResults`].  This winds it
     /// back cleanly — the exchange ended on purpose, not on an error.
     Replied,
 }
@@ -303,13 +303,13 @@ pub enum QuiesceReason {
 /// Holds the in-memory event vector, the
 /// on-disk writer, the protocol state machine, and the static origin
 /// metadata (model, provider, sessions root) needed to (re)record
-/// `SessionStarted` on `clear` and to set up forked children — keyed
+/// [`SessionEvent::SessionStarted`] on `clear` and to set up forked children — keyed
 /// throughout to one [`AgentId`].
 pub struct AgentLog {
     id: AgentId,
     dir: PathBuf,
     /// Append-only writer over `events.json`.  Held open so each
-    /// `record` is a buffered append + flush — no reopen-per-event cost,
+    /// [`Self::record`] is a buffered append + flush — no reopen-per-event cost,
     /// and the file is always tail-able.
     events_file: BufWriter<File>,
     /// In-memory mirror of every event written to disk.  Reads back to
@@ -318,7 +318,7 @@ pub struct AgentLog {
     events: Vec<SessionEvent>,
     state: State,
     /// Active compaction, if any — see [`Compaction`] for the invariant.
-    /// In-memory only (logs are per-run); the on-disk `Compacted` event is
+    /// In-memory only (logs are per-run); the on-disk [`SessionEvent::Compacted`] event is
     /// the archival breadcrumb.
     compaction: Option<Compaction>,
     /// Model identifier this log records.  Stored so `clear` can
@@ -501,7 +501,7 @@ impl AgentLog {
     /// Import parent context messages without appending a prompt.
     ///
     /// A `mnemon` child receives its launch prompt through its inbox, so
-    /// the attend loop commits it through [`append_user`] at deliberate time: the
+    /// the attend loop commits it through [`Self::append_user`] at deliberate time: the
     /// same path every other exchange takes.
     ///
     /// # Errors
@@ -542,7 +542,7 @@ impl AgentLog {
     /// Append a user steering message after a complete tool-result batch, before
     /// the next provider request.  This is the only mid-exchange user ingress: the
     /// tool protocol is first brought back to
-    /// `AwaitingAssistantAfterToolResults`, then the queued prompt becomes the
+    /// [`State::AwaitingAssistantAfterToolResults`], then the queued prompt becomes the
     /// next model-visible message.
     ///
     /// # Errors
@@ -626,7 +626,7 @@ impl AgentLog {
         Ok(())
     }
 
-    /// Drive the session back to `ReadyForUser`, synthesising whatever
+    /// Drive the session back to [`State::ReadyForUser`], synthesising whatever
     /// tool-result and assistant events the role-alternation invariant
     /// needs.  Called whenever an exchange ends without a natural assistant
     /// reply — a user cancellation or a surfaced error.  `reason`
@@ -636,7 +636,7 @@ impl AgentLog {
     /// swallowed ([`Self::record_lossy`]) rather than left unresolved,
     /// since the caller has no fallback state to quiesce *to* — the
     /// in-memory mirror still advances so the state machine reaches
-    /// `ReadyForUser` regardless of `events.json`'s fate.
+    /// [`State::ReadyForUser`] regardless of `events.json`'s fate.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
         let already_ready = self.is_ready();
         let (tool_stub, assistant_stub, stop_label) = match reason {
@@ -917,16 +917,16 @@ impl AgentLog {
         Ok(())
     }
 
-    /// `record` lifted into `Result<(), String>` for the protocol-mutation
+    /// [`Self::record`] lifted into `Result<(), String>` for the protocol-mutation
     /// methods, which already plumb string errors back to the caller.
     fn record_or_string_err(&mut self, ev: SessionEvent) -> Result<(), String> {
         self.record(ev).map_err(|e| e.to_string())
     }
 
-    /// Best-effort `record`: push to the in-memory mirror regardless of
+    /// Best-effort [`Self::record`]: push to the in-memory mirror regardless of
     /// whether the disk write succeeds.  Used only by [`Self::quiesce`],
     /// which has no fallback state to leave the machine in — the
-    /// protocol must reach `ReadyForUser` even when `events.json` can't
+    /// protocol must reach [`State::ReadyForUser`] even when `events.json` can't
     /// be written.
     fn record_lossy(&mut self, ev: SessionEvent) {
         let _ = self.write_event(&ev);

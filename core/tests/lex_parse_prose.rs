@@ -4,7 +4,7 @@
 //! panic on any input — we throw both grammar-shaped noise and pure random
 //! bytes at `parse()` and require an `Ok` or an `Err`, never an unwind.
 //! That contract is shared with the older hand-curated suite in
-//! `core/tests/fuzz.rs`; the random side here is its broader, less
+//! `core/tests/eval_fuzz.rs`; the random side here is its broader, less
 //! ergonomic complement.
 //!
 //! Second — and this is the bar the user actually cares about — every
@@ -22,7 +22,7 @@
 //! - The rendered ariadne report stays jargon-free under the same scan
 //!   (this is what the human actually sees on stderr).
 //!
-//! The curated table near the bottom (`reachable_diagnostics`) names each
+//! The curated table near the bottom (`REACHABLE`) names each
 //! diagnostic by an English tag and pins down a fragment we expect to see
 //! — refactors that silently lose a message will fail loudly.
 
@@ -45,7 +45,7 @@ use ral_core::syntax::parser::parse;
 /// user-facing message might legitimately use.  "atom" appears in
 /// "expected expression atom"; that's still jargon for a beginner, but
 /// the spelled-out alternative ("number, variable, or parenthesised
-/// expression") is exactly the form we want — see `prose_expects_atom`.
+/// expression") is exactly the form we want — see `parse_expr_bad_atom`.
 const JARGON_FRAGMENTS: &[&str] = &[
     // Rust-internal: structural give-aways of an unintended Debug print.
     "ParseError {",

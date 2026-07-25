@@ -1,16 +1,16 @@
 //! Exarch's per-exchange cancellation, layered on top of ral's SIGINT handling.
 //!
 //! ral's `signal::install_handlers` translates a delivered signal into a
-//! [`CancelCause`](ral_core::process::CancelCause) on the published
+//! [`CancelCause`] on the published
 //! cancel slots, so the evaluator unwinds at its next poll; that
 //! interrupts an in-flight tool call but leaves exarch's attend loop free
 //! to keep going.  Here we add a cancellation [`Token`]: every agent holds one sticky token for its
 //! life (registered in the fleet so the subtree cascade always reaches the
 //! live exchange), and the attend loop [`reset`](Token::reset)s its flag at each
 //! genuine exchange boundary so a prior exchange's Esc never bleeds into the next.
-//! The token is threaded down through `deliberate` → `run_batch` → tools, cancelled
+//! The token is threaded down through [`crate::agent::Agent::deliberate`] → [`crate::agent::Agent::run_batch`] → tools, cancelled
 //! by the chained signal handler, by a per-tab exchange interrupt
-//! (`AgentRegistry::interrupt`), by the registry cascade (`agent-cancel`, the
+//! ([`crate::fleet::registry::AgentRegistry::interrupt`]), by the registry cascade (`agent-cancel`, the
 //! ceiling, `/clear`), and raced by the HTTP request future, so one
 //! cancellation stops the exchange and returns to the prompt.  The cause a token
 //! carries decides how far it reaches: an
@@ -23,7 +23,7 @@
 //! published token and asks ral to cancel the current run's foreground scope
 //! with [`CancelCause::Interrupt`](ral_core::process::CancelCause), so the
 //! foreground evaluation unwinds at its next poll; on any other focused tab
-//! they route through `AgentRegistry::interrupt`, which cancels that agent's
+//! they route through [`crate::fleet::registry::AgentRegistry::interrupt`], which cancels that agent's
 //! own token *and* its session's durable root with the same cause (only the
 //! trunk's session publishes the process signal slots; a sub-agent's eval is
 //! reached through that per-session handle).  No global counter is ticked on
@@ -48,8 +48,8 @@
 //! `install` replaces the disposition with a handler that sets the current
 //! root token *and* forwards directly into ral's own handlers, so
 //! statement-level unwinding still works.  A forwarded SIGINT goes to ral's
-//! *non-escalating* [`relay_handler`] (`ral_core::process::relay_handler`),
-//! not the [`term_handler`] whose third signal `_exit`s: a SIGINT reaching
+//! *non-escalating* [`relay_handler`](ral_core::process::relay_handler),
+//! not the [`term_handler`](ral_core::process::term_handler) whose third signal `_exit`s: a SIGINT reaching
 //! the supervising TUI — from a stray child, another process, anything —
 //! must only cancel the current exchange, never force-exit exarch.  SIGTERM/SIGHUP
 //! keep ral's `term_handler`, since those are deliberate termination
@@ -59,7 +59,8 @@
 //! `Terminate` cause, so a park reading the token agrees with ral's root
 //! about why the agent is ending.  By convention `install` still runs after
 //! `ral_core::process::install_handlers`, but the forwarding targets are the
-//! static accessors [`relay_handler`]/[`term_handler`] rather than a
+//! static accessors [`relay_handler`](ral_core::process::relay_handler)/
+//! [`term_handler`](ral_core::process::term_handler) rather than a
 //! captured disposition, so that ordering is documentation, not a
 //! correctness requirement.  [`crate::bootstrap::boot_shell`] owns that
 //! ceremony for exarch session shells, including `/clear` rebuilds.
@@ -73,10 +74,10 @@
 //! genuine correctness requirement here, since the list position decides
 //! which routine runs first.  On Ctrl-C or
 //! Ctrl-Break — the same two events [`cancels_exchange`] recognises — it calls
-//! [`raise`] and [`ral_core::process::relay_interrupt`] directly: the
+//! [`raise`] and `ral_core::process::relay_interrupt` directly: the
 //! non-escalating relay that cancels the current run's foreground scope
 //! and fans a Ctrl-Break out to every live, non-detached pipeline group,
-//! the same contract Unix's [`relay_handler`] gives a forwarded SIGINT.  It
+//! the same contract Unix's [`relay_handler`](ral_core::process::relay_handler) gives a forwarded SIGINT.  It
 //! then returns `TRUE` ("handled"), so ral's own `ctrlc`-installed
 //! disposition — whose ladder ticks a counter toward `TerminateJobObject`
 //! and `ExitProcess` — never runs for these two events: a trunk interrupt
@@ -86,7 +87,7 @@
 //! [`cancels_exchange`] answers `false` for those, exarch's handler returns
 //! `FALSE` in turn, and ral's escalating disposition runs exactly as it
 //! would without exarch installed — the Windows analogue of SIGTERM/SIGHUP
-//! staying on Unix's escalating [`term_handler`].
+//! staying on Unix's escalating [`term_handler`](ral_core::process::term_handler).
 //!
 //! The Esc key never reaches `SetConsoleCtrlHandler` at all: the TUI's own
 //! read loop captures it as a raw key event (raw mode disables
@@ -136,7 +137,7 @@ impl Token {
 
     /// Cancel this token and every share of it, recording `cause`.  Raises
     /// the flag to the maximum of its current value and `cause` — the same
-    /// monotone escalation `CancelScope::cancel` gives ral's own scopes — so
+    /// monotone escalation [`ral_core::process::CancelScope::cancel`] gives ral's own scopes — so
     /// a later, weaker cause (an Esc `Interrupt` arriving after an
     /// `agent-cancel` `Explicit`) can never mask a stronger one already in
     /// force.
@@ -237,7 +238,7 @@ fn raise(cause: CancelCause) {
 /// The trunk-only half of Esc/Ctrl-C: cancel the trunk's published token
 /// with `Interrupt` and unwind its current exchange via [`deliver_interrupt`].
 ///
-/// Any other focused tab instead goes through `AgentRegistry::interrupt`,
+/// Any other focused tab instead goes through [`crate::fleet::registry::AgentRegistry::interrupt`],
 /// which reaches that agent's own token directly rather than the slot (see
 /// the module doc).
 pub fn raise_interrupt() {
@@ -247,8 +248,8 @@ pub fn raise_interrupt() {
 
 /// Install the chained signal handler.
 ///
-/// By convention runs *after* `ral_core::process::install_handlers`, though
-/// `chained` forwards into ral's handlers via the static accessors
+/// By convention runs *after* [`ral_core::process::install_handlers`], though
+/// [`chained`] forwards into ral's handlers via the static accessors
 /// [`relay_handler`](ral_core::process::relay_handler)/
 /// [`term_handler`](ral_core::process::term_handler) rather than a captured
 /// disposition, so the ordering is documentation, not a correctness
@@ -289,7 +290,7 @@ extern "C" fn chained(sig: libc::c_int) {
 /// scope so the evaluator unwinds the foreground at its next poll.
 ///
 /// A foreground external child still gets a real SIGINT via its own
-/// process group (`interrupt_foreground_child`) — killing *another* group
+/// process group ([`ral_core::process::interrupt_foreground_child`]) — killing *another* group
 /// carries no escalation.  For ral itself we cancel the current run's
 /// foreground scope with [`CancelCause::Interrupt`](ral_core::process::CancelCause):
 /// the evaluator unwinds the foreground at its next poll, while detached

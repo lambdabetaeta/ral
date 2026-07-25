@@ -6,9 +6,9 @@
 //! handler from ever taking the session lock. [`ExarchDesk`] answers one enquiry
 //! against that capture; [`DeskBinding`] is the identity-transport adapter
 //! that keeps a handler's own chrome from outrunning the run's earlier
-//! surface output. Step 0 of `dev/docs/260715_tools_to_builtins.md` wired
-//! both desk bindings answering every enquiry class alike, with the
-//! extension law's unrecognised-class error; this module now also carries
+//! surface output. Step 0 wired both desk bindings answering every enquiry
+//! class alike, with the extension law's unrecognised-class error; this
+//! module now also carries
 //! Step 1, the agent family (`` `agent-start ``, `` `agent-list ``,
 //! `` `agent-cancel ``, `` `message ``), Step 2, the schedule family
 //! (`` `schedule ``, `` `schedule-list ``, `` `unschedule ``), Step 3,
@@ -30,10 +30,10 @@ use std::time::Duration;
 
 /// Everything a desk handler may read off `&Agent`, snapshotted fresh at
 /// every [`crate::agent::Agent::run_shell`] install
-/// (`crate::agent::Agent::host_services`) so a handler never reaches back
+/// ([`crate::agent::Agent::host_services`]) so a handler never reaches back
 /// through `&mut Agent`/`&mut Shell` to get it. Mirrors
 /// [`crate::agent::Build`] minus the seat, plus the handles the harness
-/// verbs need that `Build` has no reason to carry (the registry, the
+/// verbs need that [`Build`] has no reason to carry (the registry, the
 /// parent's mailbox, the nursery, …).
 ///
 /// `agent-start`/`agent-list`/`agent-cancel`/`message` (Step 1),
@@ -44,7 +44,7 @@ pub(crate) struct HostServices {
     pub registry: AgentRegistry,
     /// The session scratch a spawned child's identity seat shares with its
     /// parent — `None` on a wire seat, which owns no host-side scratch at
-    /// all (`Agent::host_services`).
+    /// all ([`Agent::host_services`]).
     pub scratch: Option<Arc<crate::bootstrap::Scratch>>,
     /// This run's agent: the child's upward edge for `agent-start`'s
     /// receipt and the descendant check `message`/`agent-cancel` enforce.
@@ -52,16 +52,16 @@ pub(crate) struct HostServices {
     /// The parent's own inbox — where a spawned child's eventual result and
     /// a `message` delivery land.
     pub mailbox: Mailbox,
-    /// Rail chrome plus child-tab derivation for a spawn's `Kind::HarnessCall`
-    /// line and the acting verbs' `HarnessCall`/`HarnessResult` pair.
+    /// Rail chrome plus child-tab derivation for a spawn's [`Kind::HarnessCall`]
+    /// line and the acting verbs' [`Kind::HarnessCall`]/[`Kind::HarnessResult`] pair.
     pub emit: Emitter,
     /// The parent's hot-swappable provider handle, seeded into a spawned
     /// child's own handle.
     pub provider: ProviderHandle,
-    /// The parent ceiling `policy::narrow` attenuates against for
+    /// The parent ceiling [`crate::policy::narrow`] attenuates against for
     /// `agent-start`'s `permissions` argument.
     pub caps: Capabilities,
-    /// The working directory frozen at install, for `policy::narrow` and
+    /// The working directory frozen at install, for [`crate::policy::narrow`] and
     /// any handler that needs a path root.
     pub cwd: PathBuf,
     /// The depth-budget snapshot for this run, immutable for its extent:
@@ -74,8 +74,8 @@ pub(crate) struct HostServices {
     /// family's handlers refuse without it.
     pub allow_schedule: bool,
     /// The shared slot the `reply` handler stages a returning agent's
-    /// return value into — a fresh cell `Agent::run_shell` mints for this
-    /// one call and harvests back into `Agent::reply` once the desk
+    /// return value into — a fresh cell [`Agent::run_shell`] mints for this
+    /// one call and harvests back into [`Agent::reply`] once the desk
     /// retires; the handler never holds `&mut Agent` to write it any other
     /// way.
     pub reply: ReplyCell,
@@ -84,7 +84,7 @@ pub(crate) struct HostServices {
     /// This session's canonical event log — `mnemon`'s context-inheriting
     /// fork reads it.
     pub log: LogCell,
-    /// The system prompt *template* a spawned child's own `Build::system`
+    /// The system prompt *template* a spawned child's own [`Build::system`]
     /// is fed from — still carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`]
     /// rather than a baked-in builtin index, since the index is filtered
     /// per agent and this template is agent-invariant. [`Agent::assemble`]
@@ -97,14 +97,14 @@ pub(crate) struct HostServices {
     /// Whether a human is attached to the fleet, inherited by every spawn.
     pub interactive: bool,
     /// The adoption end of this run's body-side session forks
-    /// (`Shell::fork_into_nursery`) — `agent-start` redeems a
+    /// ([`ral_core::Shell::fork_into_nursery`]) — `agent-start` redeems a
     /// [`ral_core::types::NurseryId`] here.
     pub nursery: Nursery,
     /// The agent registry's generation at install, so a desk installed
     /// before `/clear` can refuse an `agent-start` raised after it.
     pub generation: u64,
     /// The operator's disk-warn ceiling, threaded verbatim into a spawned
-    /// child's own `Build` exactly as `Agent::fork_with` does — a host
+    /// child's own [`Build`] exactly as `Agent::fork_with` does — a host
     /// setting, not a per-agent choice.
     pub disk_warn_bytes: Option<u64>,
     /// The IT-set fetch-url policy, audit ledger, and rate budget —
@@ -115,8 +115,8 @@ pub(crate) struct HostServices {
 
 /// The exarch enquiry desk: answers one [`FOValue`] enquiry against a
 /// captured [`HostServices`]. Installed fresh per `ral` call
-/// (`crate::agent::Agent::run_shell`), wrapped in [`DeskBinding`] for the
-/// identity transport and passed bare into `shell_eval::run_shell`'s
+/// ([`crate::agent::Agent::run_shell`]), wrapped in [`DeskBinding`] for the
+/// identity transport and passed bare into [`crate::shell_eval::run_shell`]'s
 /// `on_enquiry` binding for the wire-future path — one handler, two
 /// bindings.
 pub(crate) struct ExarchDesk {
@@ -253,8 +253,9 @@ fn payload_label(v: FOValue, class: &str) -> Result<Option<String>, Error> {
 /// The parameters that vary across `agent-start`'s two spawn kinds
 /// (`amnemon`/`mnemon`, the `agent` builtin's `type` argument). Every other
 /// step of the spawn spine (the generation guard, the fuel guard, the
-/// uniqueness pre-check, `nursery.adopt`, `policy::narrow`, the parent-log
-/// fork, `Agent::assemble`'s `Build` literal, `spawn_async`'s
+/// uniqueness pre-check, [`Nursery::adopt`], [`crate::policy::narrow`], the parent-log
+/// fork, [`Agent::assemble`]'s `Build` literal,
+/// [`spawn_async`](crate::shell_eval::tools::agent::spawn_async)'s
 /// register/detach/settle mechanics, and the `` `started `` receipt) is
 /// identical for both and lives once in [`ExarchDesk::launch`].
 struct Launch<'a> {
@@ -553,7 +554,7 @@ impl ExarchDesk {
 
     /// `` `agent-cancel `` — the desk half of `agent-cancel`: resolve a live
     /// descendant by name and cancel it, scoped exactly as
-    /// `AgentRegistry::cancel_scoped` enforces.
+    /// [`AgentRegistry::cancel_scoped`] enforces.
     fn agent_cancel(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
         let [name] = payload_list(payload, "agent-cancel", "[name]")?;
@@ -820,8 +821,8 @@ impl ExarchDesk {
     }
 
     /// `` `reply `` — the desk half of the `reply` builtin: stage the
-    /// payload into the reply cell for `Agent::deliberate`'s drain to lift into
-    /// a `Replied` terminal once the batch drains, and put the `reply` act
+    /// payload into the reply cell for [`Agent::deliberate`]'s drain to lift into
+    /// a [`crate::agent::deliberate::Outcome::Replied`] terminal once the batch drains, and put the `reply` act
     /// on the rail. Refused on every non-returning agent — the conversing
     /// trunk and each `/branch` child alike — keyed on the captured
     /// `returns` bit, never on trunk-ness.
@@ -890,7 +891,7 @@ impl ExarchDesk {
     /// `` `fetch-url `` — the desk half of the `fetch-url` builtin: resolve,
     /// allowlist-check, rate-check, and fetch (see [`Self::resolve_and_fetch`]),
     /// recording exactly one audit line either way before answering — the
-    /// same act-row-after-the-fact discipline `agent_cancel`/`message` follow.
+    /// same act-row-after-the-fact discipline [`Self::agent_cancel`]/[`Self::message`] follow.
     fn fetch_url(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
         let [url] = payload_list(payload, "fetch-url", "[url]")?;
@@ -930,11 +931,10 @@ impl ExarchDesk {
 
 /// [`SurfaceApplier::live`]/[`SurfaceApplier::deferred`] apply one surfaced
 /// value or deferred batch, decoding it and folding a `` `pin ``/`` `unpin ``
-/// disposition into the pin mirror exactly as `shell_eval::run_shell`'s own
+/// disposition into the pin mirror exactly as [`crate::shell_eval::run_shell`]'s own
 /// drain loop does — because it *is* that loop's logic, extracted so
 /// [`DeskBinding`] can share it rather than risk a second copy drifting
-/// from the first (`dev/docs/260715_tools_to_builtins.md`, "`HostServices`
-/// and the desk").
+/// from the first.
 pub(crate) struct SurfaceApplier {
     pub(crate) emit: Emitter,
     pub(crate) pins: Option<PinDigests>,
@@ -978,10 +978,10 @@ impl SurfaceApplier {
 
 /// The inert desk the run guard ([`crate::agent::seat::RunGuard`])
 /// installs once a call's real desk retires, so nothing keeps that call's
-/// `Emitter` (and the rest of its `HostServices` capture) alive past the
+/// [`Emitter`] (and the rest of its [`HostServices`] capture) alive past the
 /// call that owns it — `engine.desk` is unobservable between calls, since
 /// nothing dispatches without a fresh real desk installed first. Answers
-/// the same honest absence `Shell::enquire` itself gives when no desk is
+/// the same honest absence [`ral_core::Shell::enquire`] itself gives when no desk is
 /// installed at all, in the unreachable case something reads it directly.
 pub(crate) struct AbsentDesk;
 
@@ -993,9 +993,9 @@ impl EnquiryDesk for AbsentDesk {
 
 /// The identity transport's drain-then-handle adapter.
 ///
-/// Under `IdentityTransport`, `Shell::enquire` calls straight into whatever
+/// Under [`ral_core::transport::IdentityTransport`], [`ral_core::Shell::enquire`] calls straight into whatever
 /// desk is installed, synchronously, mid-`dispatch` — before
-/// `dispatch_to_report`'s own drain loop ever runs, since that loop only
+/// [`ral_core::transport::dispatch_to_report`]'s own drain loop ever runs, since that loop only
 /// starts once `dispatch` returns. Any surface frames this run already
 /// emitted are therefore still queued, undrained, on the transport's event
 /// channel; answering the enquiry before applying them would let a
@@ -1201,12 +1201,12 @@ mod tests {
     }
 
     /// A root shell to fork children off of — booted exactly once per test,
-    /// never re-booted per spawn. `boot_shell` resets process-global signal
-    /// state (`ral_core::process::clear`/`install_handlers`,
-    /// `cancel::install`), the same ceremony `Agent::root` runs exactly
+    /// never re-booted per spawn. [`crate::bootstrap::boot_shell`] resets process-global signal
+    /// state ([`ral_core::process::clear`]/[`ral_core::process::install_handlers`],
+    /// [`crate::agent::cancel::install`]), the same ceremony [`Agent::root`] runs exactly
     /// once for the whole fleet; every fork in production reaches its shell
-    /// through `Shell::fork_session` on that one already-booted root, never
-    /// by re-booting. A test that instead calls `boot_shell` once per spawn
+    /// through [`ral_core::Shell::fork_session`] on that one already-booted root, never
+    /// by re-booting. A test that instead calls [`crate::bootstrap::boot_shell`] once per spawn
     /// races that global reset against whichever sibling child's run is
     /// already in flight on its own worker thread, and deadlocks rather
     /// than erroring.
@@ -1251,18 +1251,18 @@ mod tests {
         );
     }
 
-    /// `DeskBinding` drains every surface frame already queued on the
+    /// [`DeskBinding`] drains every surface frame already queued on the
     /// transport's event channel before it hands the request to the inner
     /// desk — the drain-then-handle adapter's law: a handler's own chrome
     /// must never jump ahead of the run's earlier surface output.
     ///
-    /// Dispatches a real run through a real `IdentityTransport` that
+    /// Dispatches a real run through a real [`ral_core::transport::IdentityTransport`] that
     /// surfaces an `` `unpin `` event via the ground `surface` builtin —
     /// the actual path a surfaced value takes onto the transport's event
     /// queue, left undrained until something calls `events().try_recv()`.
-    /// `DeskBinding::enquire` is then called directly (bare, off the
+    /// [`DeskBinding::enquire`] is then called directly (bare, off the
     /// dispatching thread — this test exercises the adapter's own drain
-    /// logic, not `Shell::enquire`'s routing, which core's own suite
+    /// logic, not [`ral_core::Shell::enquire`]'s routing, which core's own suite
     /// covers) and both effects of one call are checked: the queued
     /// surface reached the bus, and the inner desk answered.
     #[test]
@@ -1410,7 +1410,7 @@ mod tests {
     }
 
     /// Read the recorded `system_prompt_bytes` off a session's
-    /// `SessionStarted` bookend — the first event in its `events.json`.
+    /// [`crate::agent::event::SessionEvent::SessionStarted`] bookend — the first event in its `events.json`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
         let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
         let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
@@ -1427,10 +1427,10 @@ mod tests {
         }
     }
 
-    /// A desk-spawned child's `SessionStarted` bookend must record its own
-    /// resolved system prompt length — `ExarchDesk::launch` fixes every
+    /// A desk-spawned child's [`crate::agent::event::SessionEvent::SessionStarted`] bookend must record its own
+    /// resolved system prompt length — [`ExarchDesk::launch`] fixes every
     /// spawn's bits at `returns: true, allow_schedule: services.allow_schedule`,
-    /// never the raw `HostServices.system_template` `Self::launch` forks
+    /// never the raw `HostServices.system_template` [`ExarchDesk::launch`] forks
     /// the child's log from.
     #[test]
     fn agent_start_bookend_records_the_childs_resolved_length() {
@@ -1763,7 +1763,7 @@ mod tests {
         );
     }
 
-    /// A refusal that happens after `nursery.adopt` (a bad permissions
+    /// A refusal that happens after [`Nursery::adopt`] (a bad permissions
     /// label) simply drops the adopted `Shell` like any other owned value —
     /// never left in the nursery to be adopted twice.
     #[test]
@@ -1810,7 +1810,7 @@ mod tests {
 
     /// `message`/`agent-cancel` may only reach a proper descendant of the
     /// calling agent — never a sibling, an ancestor, or itself — mirroring
-    /// `AgentRegistry`'s own scoping tests at the desk entry point.
+    /// [`AgentRegistry`]'s own scoping tests at the desk entry point.
     #[test]
     fn message_and_cancel_scope_to_descendants() {
         let (desk_root, registry, _root_inbox) = spawnable_desk(3);
@@ -1914,7 +1914,7 @@ mod tests {
     /// law — exercised here with a real `agent` spawn rather than
     /// the stub `probe` class `desk_binding_drains_pending_surfaces_before_handling`
     /// uses: the surfaced `` `unpin `` must reach the bus before the
-    /// spawn's own `Kind::HarnessCall` chrome line.
+    /// spawn's own [`Kind::HarnessCall`] chrome line.
     #[test]
     fn surface_then_spawn_observes_the_surface_first() {
         let dir = tmp("surface-then-spawn");
@@ -2340,9 +2340,9 @@ mod tests {
     // ── P3: engaged-child lifecycle, desk-integration scale ────────────────
 
     /// Register `child` under `parent_id` with `lease`, mirroring the
-    /// registration half of `shell_eval::tools::agent::spawn_async` — but
+    /// registration half of [`crate::shell_eval::tools::agent::spawn_async`] — but
     /// with a caller-chosen lease, since a production spawn always arms the
-    /// fixed `AGENT_LEASE_IDLE` and a millisecond lease is the only way
+    /// fixed [`crate::fleet::registry::AGENT_LEASE_IDLE`] and a millisecond lease is the only way
     /// these tests can exercise a real reap without waiting out the real
     /// constant.
     fn register_lease_child(
@@ -2369,7 +2369,7 @@ mod tests {
 
     /// Attend an already-registered `child` to completion on a detached
     /// thread and deliver its result to `parent_mailbox`, exactly as
-    /// `spawn_async`'s own worker epilogue does (deliver, then settle).
+    /// [`spawn_async`](crate::shell_eval::tools::agent::spawn_async)'s own worker epilogue does (deliver, then settle).
     fn attend_and_deliver(
         mut child: Agent,
         name: &str,
@@ -2403,9 +2403,9 @@ mod tests {
     }
 
     /// Register a live, never-attended child under `parent_id` — just enough
-    /// for `AgentRegistry::has_children` to read true, so `parent_id` parks
-    /// `HeldByChildren` rather than quiescing before either steer lands (or,
-    /// once engaged, so `Engaged` outranks `HeldByChildren` regardless — the
+    /// for [`AgentRegistry::has_children`] to read true, so `parent_id` parks
+    /// [`crate::bus::ParkMode::HeldByChildren`] rather than quiescing before either steer lands (or,
+    /// once engaged, so [`crate::bus::ParkMode::Engaged`] outranks [`crate::bus::ParkMode::HeldByChildren`] regardless — the
     /// P3 plan's own §5 edge case). Never touched again by the test.
     fn register_keepalive(registry: &AgentRegistry, parent_id: AgentId, log_dir: &std::path::Path) {
         let _ = registry.register(Registration {
@@ -2423,7 +2423,7 @@ mod tests {
 
     /// Poll `path`'s contents until they contain `needle` or `timeout`
     /// elapses. The child's own `events.json` records every turn
-    /// (`SessionEvent::AssistantMessage`), so a substring poll proves a
+    /// ([`crate::agent::event::SessionEvent::AssistantMessage`]), so a substring poll proves a
     /// turn actually ran, without any other side channel into a thread the
     /// test does not otherwise touch mid-flight.
     fn eventually_logged(path: &std::path::Path, needle: &str, timeout: Duration) -> bool {
@@ -2441,8 +2441,8 @@ mod tests {
 
     /// An engaged child answers a second steer after the human's attention
     /// has moved elsewhere — the lifecycle depends on nothing but
-    /// `AgentRegistry::steer`'s own delivery, no notion of TUI focus at all.
-    /// A fake grandchild keeps the child parked `HeldByChildren` rather than
+    /// [`AgentRegistry::steer`]'s own delivery, no notion of TUI focus at all.
+    /// A fake grandchild keeps the child parked [`crate::bus::ParkMode::HeldByChildren`] rather than
     /// quiescing before it is ever engaged, so both steers land
     /// deterministically instead of racing the child's own attend loop.
     #[test]
@@ -2504,7 +2504,7 @@ mod tests {
     }
 
     /// A millisecond-lease child that is never renewed is reaped mid-exchange
-    /// and delivers exactly one `AgentOutcome::Cancelled` to the parent
+    /// and delivers exactly one [`crate::bus::AgentOutcome::Cancelled`] to the parent
     /// inbox; a sibling renewed partway through the same ttl survives past
     /// it. Child A runs a long, cheap tool-call sequence so the lease has
     /// something to interrupt mid-flight, comfortably inside the round-trip
@@ -2621,9 +2621,8 @@ mod tests {
     }
 
     /// The plain-English refusal register every refusal message below is
-    /// checked against — mirroring synod's own `NO_BOUNDARY` register test:
-    /// no implementation jargon, ever, in a message the model (and, via
-    /// transcripts, a person) may read.
+    /// checked against: no implementation jargon, ever, in a message the
+    /// model (and, via transcripts, a person) may read.
     const FETCH_URL_JARGON: &[&str] = &[
         "VM",
         "sandbox",
@@ -2644,7 +2643,7 @@ mod tests {
     }
 
     /// The identity-seat half of the "one answering function, two seats"
-    /// claim: `ExarchDesk::handle` directly, no wire/engine involved. An
+    /// claim: [`ExarchDesk::handle`] directly, no wire/engine involved. An
     /// allowed domain's `fetch-url` returns the served bytes and the audit
     /// ledger gains exactly one record.
     #[test]

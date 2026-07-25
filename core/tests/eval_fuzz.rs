@@ -2798,7 +2798,7 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
 /// `from-string` value crosses a value edge into the `length` helper
 /// stage, where it is forced once.  `"abc\n"` has four characters, so a
 /// correct single force yields 4 — a missing or double force would not.
-/// (`scope_escapes::pipeline_non_final_stage_is_not_tail_emitting` pins
+/// (`scope_escapes.rs::pipeline_non_final_stage_is_not_tail_emitting` pins
 /// the same equation for the *in-process* `PureValue` fold; this is its
 /// cross-process counterpart.)
 #[cfg(unix)]
@@ -3081,8 +3081,8 @@ fn expr_non_bool_operand_to_and_is_error() {
 /// `Exec` heads carrying trailing redirects must elaborate to a plain
 /// `Exec` with `redirects` populated — `CompKind::Exec` is the only
 /// place redirects-on-shell-call live, and the pipeline analyser
-/// relies on that exclusivity at `pipeline/analysis.rs` (its External
-/// fast path destructures `CompKind::Exec` directly).
+/// relies on that exclusivity at `runtime/pipeline/resolve.rs` (its
+/// External fast path destructures `CompKind::Exec` directly).
 #[test]
 fn elaborator_never_wraps_exec_in_redirect() {
     use ral_core::ir::CompKind;

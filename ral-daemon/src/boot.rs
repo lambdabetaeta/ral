@@ -32,7 +32,7 @@ const MAX_TAG: usize = 36;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Boot {
     /// The virtiofs tag naming the granted folder's device.  The guest
-    /// mounts it at [`crate::mounts::WORK`]; the host chooses the tag and
+    /// mounts it at `crate::mounts::WORK`; the host chooses the tag and
     /// the two agree only through this word.
     pub workspace: String,
     /// The host's `AF_VSOCK` port for the control plane.  The daemon

@@ -87,7 +87,7 @@ pub struct HighlightSpan {
     pub style: std::string::String,
 }
 
-/// Execution context for `_editor` and `_plugin` builtins.
+/// Execution context for plugin hooks and keybinding handlers.
 ///
 /// Read-only information the runtime supplies before a plugin handler runs.
 #[derive(Debug, Clone, Default)]

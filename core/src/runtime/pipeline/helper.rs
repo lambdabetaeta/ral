@@ -493,8 +493,9 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
 /// then the OS sandbox is already entered, so the tool runs confined.
 /// The child reads no `ChildEvalRequest` and emits no `ChildEvalResponse`:
 /// its inherited env/cwd/stdio/process-group/sandbox are the execution
-/// context.  The exit code comes from [`uutils::invoke_bundled`] — the same
-/// bundled-tool exit-code protocol the inline `run_uutils_in_process` uses.
+/// context.  The exit code comes from
+/// [`crate::builtins::uutils::invoke_bundled`] — the same bundled-tool
+/// exit-code protocol the inline `run_uutils_in_process` uses.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     use crate::builtins::uutils;

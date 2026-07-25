@@ -265,7 +265,7 @@ pub(crate) fn install_shell_mobile(
 
 /// Build the shell for a re-exec'd helper child: a fresh `Shell::new`
 /// (which carries only `CORE_BUILTINS`), the host's
-/// [`HostSurface`](crate::driver::HostSurface) reinstalled through the
+/// [`HostSurface`](crate::boot::HostSurface) reinstalled through the
 /// child-shell-extension hook, then the wire
 /// mobile snapshot overlaid.  The pipeline-stage / child-eval helper —
 /// the remaining re-exec path — constructs its shell here, so it cannot

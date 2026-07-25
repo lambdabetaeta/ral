@@ -3,7 +3,7 @@
 //!
 //! An exarch run is a *fleet* of these arranged in a tree; the
 //! [`Fleet`](crate::fleet::Fleet) holds what is shared (the registry, the one
-//! event bus, the transport engine), and each `Agent` is one node.
+//! event bus, the transport engine), and each [`Agent`] is one node.
 //!
 //! No node is privileged by special-case code; the distinctions reduce to
 //! *position*: the parent-less **trunk** publishes its cancel token for the
@@ -18,21 +18,21 @@
 //! sibling modules, each a descendant that reaches those private fields
 //! directly rather than through accessors:
 //!
-//! - `build` — construction, the fork/branch descent, `/clear`'s rebuild, and
-//!   the `Drop` teardown.
-//! - `attend` — the one loop: pull the next inbox item, take it up, do the
+//! - [`build`] — construction, the fork/branch descent, `/clear`'s rebuild, and
+//!   the [`Drop`] teardown.
+//! - [`attend`] — the one loop: pull the next inbox item, take it up, do the
 //!   ready-boundary housekeeping, and turn a nudge-worthy outcome into a
 //!   self-posted [`Post::Nudge`](crate::bus::Post).
 //!   [`Agent::attend_backlog`] is its bounded, per-exchange twin for a
-//!   converse session, sharing every per-item `take_up` rather than looping a
+//!   converse session, sharing every per-item [`Agent::take_up`] rather than looping a
 //!   second way.
-//! - `deliberate` — one prompt run to quiescence against the provider: the
+//! - [`deliberate`] — one prompt run to quiescence against the provider: the
 //!   step loop under its ceiling, the tool-call batch, the compaction step,
 //!   and the outcome constructors behind [`deliberate::Outcome`].
-//! - `shell` — the desk seam: the host services installed for the extent of one
+//! - [`shell`] — the desk seam: the host services installed for the extent of one
 //!   `ral` call, and the two cells through which the desk handler thread writes
 //!   while the attend thread sits parked inside it.
-//! - `probe` — engine state decoded back across the probe rail, since a live
+//! - [`probe`] — engine state decoded back across the probe rail, since a live
 //!   worker handle is not transportable.
 
 mod attend;
@@ -82,13 +82,13 @@ pub struct Agent {
     /// baked-in builtin index, since the index is filtered per agent and
     /// this template is agent-invariant. Read only by [`Self::fork_with`]
     /// and [`Self::host_services`], which pass it on as a child's own
-    /// `Build::system` (in-thread and desk-spawned alike) so that child
+    /// [`Build::system`] (in-thread and desk-spawned alike) so that child
     /// resolves its own index from its own `returns`/`allow_schedule`,
     /// never its parent's.
     system_base: String,
     /// The fleet-shared builtin-index table ([`crate::prompt::BuiltinIndexes`]),
     /// resolved once at the trunk's construction and inherited by every
-    /// fork, so resolving a child's own index never needs a live `Shell`.
+    /// fork, so resolving a child's own index never needs a live [`Shell`](ral_core::Shell).
     indexes: Arc<crate::prompt::BuiltinIndexes>,
     /// This session's canonical event log.  Its own lock, never the session
     /// lock, so a per-call desk can capture it off `&mut Agent` — but
@@ -119,7 +119,7 @@ pub struct Agent {
     /// own `fuel` as one less — an agent may start any number of children
     /// without spending its own fuel.  Zero makes the desk refuse
     /// `agent-start` with the exhaustion text
-    /// (`crate::fleet::desk::ExarchDesk`'s spawn spine), so a chain terminates by
+    /// ([`crate::fleet::desk::ExarchDesk`]'s spawn spine), so a chain terminates by
     /// refusal rather than recursing forever.  The trunk starts at whatever
     /// [`RootConfig::fuel`] its launch site chose — [`SPAWN_FUEL`] for
     /// exarch, `0` for synod, which asks and answers, never fleets.
@@ -243,7 +243,7 @@ pub struct Agent {
 /// The depth budget exarch's own trunks start with, passed as
 /// [`RootConfig::fuel`]; each [`Agent::fork_with`] hands its child one less,
 /// and a `fuel == 0` agent's `agent-start` calls are refused at the desk
-/// (`ExarchDesk::launch`, `crate::fleet::desk`). Bounds how many generations
+/// ([`crate::fleet::desk::ExarchDesk::launch`]). Bounds how many generations
 /// deep a delegation chain may recurse — a few hops covers legitimate
 /// delegation — while stopping a runaway spawn-calling chain from exhausting
 /// threads instead of the process. Fan-out is a separate, unbounded axis:
@@ -371,7 +371,7 @@ impl Agent {
     }
 
     /// This session's *live* working directory — read through the probe so
-    /// a prior `cd` is reflected. The seat's own `cwd` field (`Seat::Identity`)
+    /// a prior `cd` is reflected. The seat's own `cwd` field ([`Seat::Identity`])
     /// is not this: it is fixed at construction and read only to reseed the
     /// shell on `/clear`, so it never moves with the model's own `cd`s. The
     /// one caller, [`Self::host_services`], needs exactly the live value: a
@@ -387,8 +387,8 @@ impl Agent {
     }
 
     /// This session's ambient authority.  Production spawns read the private
-    /// `caps` field directly (`Self::fork_with`, `Self::branch`) or narrow
-    /// the desk's own captured snapshot (`policy::narrow`); this accessor is
+    /// `caps` field directly ([`Self::fork_with`], [`Self::branch`]) or narrow
+    /// the desk's own captured snapshot ([`crate::policy::narrow`]); this accessor is
     /// exercised only by tests building a fork off a live agent's own
     /// capabilities.
     #[cfg(test)]

@@ -17,10 +17,10 @@ use ral_core::types::{Capabilities, Settled, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 fn fresh_shell() -> Shell {
-    ral_core::driver::boot_shell(
+    ral_core::boot::boot_shell(
         TerminalState::default(),
         common::prelude(),
-        &ral_core::driver::HostSurface::default(),
+        &ral_core::boot::HostSurface::default(),
     )
 }
 

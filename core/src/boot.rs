@@ -1,4 +1,4 @@
-//! Embedding and driving a `Shell` in a host process.
+//! Embedding and booting a `Shell` in a host process.
 //!
 //! A host (the interactive `ral` REPL, `exarch`, a test binary) needs the
 //! same four things before it evaluates any run: the prelude as a baked
@@ -10,21 +10,12 @@
 //! code is checked — so the typechecker's builtin table and the runtime's
 //! agree by construction.  Everything else host-specific — terminal
 //! handling, output capture, watchdogs, capability frames, rc files — is
-//! interposed by the host before or after the call.
+//! interposed by the host before or after the call.  Evaluating anything
+//! on the booted shell goes through the run door, [`crate::run`].
 //!
-//! This is about *driving* a `Shell` in a host process; probing the
+//! This is about *booting* a `Shell` in a host process; probing the
 //! underlying host *machine* (OS, architecture, cwd, git state,
 //! wall-clock) lives in [`crate::host`].
-//!
-//! Beyond the embedding, this module holds the host's synchronous
-//! run-entry seam. [`Shell::run`] runs one whole
-//! [`Run`](crate::transport::Run) — source text or a registered hook —
-//! to a flat [`RunReport`], and [`Shell::register_hook`] populates the
-//! session-lived hook table those [`Program::Hook`](crate::transport::Program)
-//! runs dispatch against.  The types a host describes run policy with
-//! ([`RunIo`], [`RunStdin`], [`RequestedTerminalAccess`],
-//! [`RunRequest`]) live here; the run's spine — compile, build, and
-//! run-framed — is orchestrated in [`crate::run`].
 //!
 //! The prelude is baked ahead of time: the host's build script calls
 //! [`bake_prelude_to_out_dir`], which parses, elaborates, and
@@ -35,18 +26,10 @@
 //! the crate it is building — so a test binary, which has no build-time
 //! blob, takes [`BakedPrelude::bake_runtime`] instead.
 
-use crate::io::{Source, TerminalState};
+use crate::io::TerminalState;
 use crate::ir::Comp;
-use crate::process::CancelCause;
-use crate::run::{RunLifecycle, StaticDiagnostics};
-use crate::source::Span;
-use crate::transport::{Program, Run};
 use crate::typecheck::Scheme;
-use crate::types::{
-    BuiltinEntry, BuiltinTable, DeferredSink, Desk, Nursery, Settled, Shell, SurfaceSink, Value,
-};
-use crate::types::{DefaultPolicy, Hook, HookName, HookSig, RegisterError, TerminalPolicy};
-use serde::{Deserialize, Serialize};
+use crate::types::{BuiltinEntry, BuiltinTable, Shell};
 use std::sync::{Arc, OnceLock};
 
 /// A build-time-baked prelude: the two postcard blobs and their
@@ -116,7 +99,7 @@ impl BakedPrelude {
 }
 
 /// Expand in a host crate whose build script called
-/// [`bake_prelude_to_out_dir`](crate::driver::bake_prelude_to_out_dir).
+/// [`bake_prelude_to_out_dir`](crate::boot::bake_prelude_to_out_dir).
 ///
 /// The `include_bytes!` must expand in the host crate, against its own
 /// `OUT_DIR`; pinning the filename contract here keeps it in the same
@@ -124,7 +107,7 @@ impl BakedPrelude {
 #[macro_export]
 macro_rules! baked_prelude {
     () => {
-        $crate::driver::BakedPrelude::from_blobs(
+        $crate::boot::BakedPrelude::from_blobs(
             include_bytes!(concat!(env!("OUT_DIR"), "/prelude_baked.bin")),
             include_bytes!(concat!(env!("OUT_DIR"), "/prelude_schemes.bin")),
         )
@@ -145,7 +128,8 @@ pub struct HostSurface {
 }
 
 impl HostSurface {
-    /// The builtin table this surface presents: [`CORE_BUILTINS`]
+    /// The builtin table this surface presents:
+    /// [`CORE_BUILTINS`](crate::builtins::CORE_BUILTINS)
     /// (via [`core_builtin_table`](crate::builtins::core_builtin_table))
     /// plus every set here — exactly what a shell booted with this
     /// surface dispatches.  Seeds
@@ -241,462 +225,4 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_baked.bin");
     std::fs::write(out.join("prelude_schemes.bin"), scheme_bytes)
         .expect("failed to write prelude_schemes.bin");
-}
-
-// ── The run entry: one synchronous, runtime-agnostic host seam ──────────────
-//
-// Hosts start an evaluation through exactly one door:
-// `Shell::run(RunRequest)` runs one whole `Run` — its `Program` is
-// either source text or a registered hook applied to first-order arguments
-// (`Shell::register_hook` stores compiled hooks by name in the session-lived
-// hook table).  It returns one flat `RunReport`.  Hosts describe *policy*
-// (the protocol `Run`, `RunIo`, `SurfaceSink`, lifecycle hooks); core owns
-// *resources* (`Sink`, `Source`, `RunState`, guards, buffers, signal
-// slots).  Completion is the call returning — never a channel disconnecting
-// — so a deferred worker holding a surface clone cannot keep a run from
-// ending.  This door is the only way into evaluation: the reduction
-// primitive behind it is crate-private, so a host cannot start an unframed
-// evaluation that would foreground or capture against a stale frame.
-
-/// The IO regime of a run: intent, materialised into resources by the run
-/// doors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunIo {
-    /// Run on the session's live streams: the run's byte sinks are cloned
-    /// from the ambient `shell.run`. The interactive REPL (whose stdout is
-    /// the external printer) and batch (the process streams).
-    Inherit,
-    /// Mint fresh stdout/stderr buffers core returns in
-    /// [`RunReport::Ran`]'s `captured`. Independent of [`RunStdin`]: byte
-    /// output regime and byte input source are separate choices. exarch's tool
-    /// capture.
-    Capture,
-}
-
-/// Whether a run may hand the controlling terminal to a child.
-///
-/// The host-facing half of the terminal lease: the host states the run's
-/// authority, and core decides whether the session's
-/// [`TerminalLease`](crate::process::TerminalLease) is reachable from it (see
-/// [`Shell::terminal_lease`]). `ExplicitLoan` is deliberately absent — a host
-/// cannot seed it; it is a within-run elevation a loan token raises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RequestedTerminalAccess {
-    /// No child/job foreground handoff in this run. exarch tool runs and any
-    /// launch that does not own the terminal foreground.
-    Denied,
-    /// This run may foreground terminal-bound children. The interactive REPL
-    /// and a terminal-launched script.
-    Leased,
-}
-
-/// The byte source a run's stdin reads from.
-///
-/// Orthogonal to [`RunIo`] (the *output* regime) and to
-/// [`RequestedTerminalAccess`] (foreground authority): a piped `ral -c` is
-/// `Denied` foreground yet still reads its inherited pipe (`Inherit`), while an
-/// exarch tool run is `Denied` *and* reads no terminal (`Empty`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunStdin {
-    /// Use the session stdin source — the inherited fd 0, which may be a
-    /// terminal, a pipe, or a redirected file.
-    Inherit,
-    /// Install an empty source: reads as immediate EOF, a child's stdin wires
-    /// to `/dev/null`, and there is no fall-through to fd 0.
-    Empty,
-}
-
-/// The engine door for one run: the protocol [`Run`] plus the live,
-/// non-transportable handles the host lends it.
-///
-/// Composition, not
-/// mirroring — a field added to [`Run`] crosses the seam and reaches the
-/// engine in one declaration.
-pub struct RunRequest<'a> {
-    /// The run, exactly as it crosses (or would cross) the host seam.
-    pub run: Run,
-    /// The run-local structured-event sink, installed only for this run.
-    /// `None` is the identity (a bare REPL). Same-thread children inherit it;
-    /// deferred workers buffer into bounded deferred storage instead.
-    pub surface: Option<SurfaceSink>,
-    /// The session-lived destination a deferred worker delivers its surface
-    /// batch to when it settles, rendered by the host at the next run
-    /// boundary. `None` outside an agent host (a bare REPL): then a deferred
-    /// worker's surface reaches a sink only via `await`/`race`.
-    pub deferred: Option<Arc<dyn DeferredSink>>,
-    /// The run-local enquiry desk, installed only for this run. `None` is
-    /// the honest absence a host that answers no enquiries reports (a bare
-    /// REPL, and exarch until the migration installs its desk). Same-thread
-    /// children inherit it; deferred workers never receive it.
-    pub desk: Option<Desk>,
-    /// The run-local nursery for engine-side session forks, installed only
-    /// for this run. `None` outside a host that installs one. Same-thread
-    /// children inherit it; deferred workers never receive it.
-    pub nursery: Option<Nursery>,
-    /// Per-run lifecycle hooks; `Box::new(())` for a host with none.
-    pub lifecycle: Box<dyn RunLifecycle + 'a>,
-}
-
-/// The byte streams captured under [`RunIo::Capture`], returned in
-/// [`RunReport::Ran`] and carried verbatim on the protocol
-/// [`Report`](crate::transport::Report).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Captured {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
-/// One flat result the host matches once. `captured`/`timed_out` live on
-/// `Ran`, where they mean something — a `Static` run never ran.
-pub enum RunReport {
-    /// A parse/type failure: the run never reached evaluation. The host
-    /// renders the diagnostics and treats the run as status 1.
-    Static { diagnostics: StaticDiagnostics },
-    /// A compiled run ran. `status` is the transport status computed once;
-    /// `single_command` is whether the source compiled to a single command
-    /// (for runtime-error rendering); `captured` is `Some` under
-    /// [`RunIo::Capture`]; `timed_out` is whether the wall fired.
-    Ran {
-        result: Settled<Value>,
-        status: i32,
-        single_command: bool,
-        captured: Option<Captured>,
-        timed_out: bool,
-    },
-}
-
-/// Resolve a run's armed wall clock from every source that can bind it:
-/// the host's requested `wall` and — for a hook run — its
-/// registered budget. Both bind the same foreground scope, tightest wins
-/// (`min`, not `or`), so a host wall can never be silently widened by a
-/// hook's own budget or vice versa. `None` from both leaves the run
-/// unarmed, exactly as before.
-fn arm_wall(
-    wall: Option<std::time::Duration>,
-    hook_budget: Option<std::time::Duration>,
-    foreground: &crate::process::ForegroundScope,
-) -> Option<crate::process::Deadline> {
-    let effective = match (wall, hook_budget) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (None, None) => None,
-    };
-    effective.map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d))
-}
-
-/// The message of a recovered panic payload, for either string shape.
-fn panic_text(payload: &dyn std::any::Any) -> String {
-    payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| payload.downcast_ref::<&'static str>().map(|s| (*s).into()))
-        .unwrap_or_else(|| "non-string payload".into())
-}
-
-impl Shell {
-    /// Run one whole [`Run`] under `req`, synchronously, and return one
-    /// flat [`RunReport`]. The single run door: the run's
-    /// [`Program`] is resolved here — source text compiles and typechecks
-    /// against the live session, a hook resolves in the session-lived hook
-    /// table — and either program then runs through the shared framed
-    /// scaffold ([`Self::run_built`]): materialising the IO regime, minting
-    /// the run's foreground scope and arming its wall, installing the
-    /// run-local surface, evaluating under the capability ceiling, and
-    /// folding in the captured bytes and `timed_out`.
-    ///
-    /// Run completion is *this call returning* — never a channel
-    /// disconnecting. A deferred worker may hold a clone of the surface sink
-    /// forever; it changes nothing, because nothing waits on that sink to
-    /// decide the run is over.
-    ///
-    /// The run door is also the durability boundary
-    /// (`decisions/260706_enquiry-channel` §5): the shell checkpoints its
-    /// [`Mobile`](crate::types::Mobile) at entry and a panic anywhere in the
-    /// run — compile, eval, hook body, desk handler, ready-boundary
-    /// housekeeping — restores it, so a panicked run reports as a failed
-    /// run with the shell already rolled back. State-owner rollback, one
-    /// mechanism for every transport and host; a snapshot never crosses the
-    /// seam.
-    pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
-        let checkpoint = self.mobile.clone();
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(req))) {
-            Ok(report) => report,
-            Err(payload) => {
-                self.mobile = checkpoint;
-                RunReport::Static {
-                    diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                        format!("run panicked: {}", panic_text(payload.as_ref())),
-                        101,
-                    )),
-                }
-            }
-        }
-    }
-
-    /// [`Self::run`]'s body, separated so the durability wrapper above
-    /// is the only way through the door.
-    fn dispatch(&mut self, mut req: RunRequest<'_>) -> RunReport {
-        match req.run.program {
-            Program::Source(ref src) => {
-                // The two session ledgers' committed-run clock: one tick
-                // per source dispatch, whether or not it goes on to compile —
-                // a failed run ages the ledgers' scratch without renewing it
-                // (`decisions/260629_agent-binding-reaping`). No-ops when
-                // unarmed, so the REPL/batch pay two branches and nothing
-                // else.
-                self.local.bindings.tick();
-                self.local.workers.tick_epoch();
-
-                // Mint the run's foreground scope and arm its wall *before*
-                // compiling, so the limit bounds the whole run — compile and
-                // typecheck included, not only evaluation. `compile_run`'s
-                // `process::clear` touches only the signal count, never the
-                // reaper, so an entry armed here survives the compile. The
-                // `Deadline` guard disarms when `wall` drops, so an early
-                // `Static` return leaves no pending reaper entry.
-                let foreground = self.durable_root().child();
-                let wall = arm_wall(req.run.wall, None, &foreground);
-
-                let (comp, single_command) = match crate::run::compile_run(self, src) {
-                    Ok(parts) => parts,
-                    Err(diagnostics) => return RunReport::Static { diagnostics },
-                };
-
-                // "Committed" = reached evaluation: harvest the compiled
-                // program's referenced names and renew every one that is
-                // already leased. Gated on `armed()` so an unarmed host
-                // (REPL, batch) never pays for the walk.
-                if self.local.bindings.armed() {
-                    self.local
-                        .bindings
-                        .renew(crate::ir::referenced_names(&comp));
-                }
-
-                self.run_built(req, &foreground, wall, single_command, |s| {
-                    crate::evaluator::eval_top_level(&comp, s)
-                })
-            }
-            Program::Hook { ref name, ref args } => {
-                let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
-                    return RunReport::Static {
-                        diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                            format!("hook '{name}' is not registered"),
-                            1,
-                        )),
-                    };
-                };
-
-                // The host conveys data, not closures, across the dispatch
-                // boundary: hook args are first-order by type (`FOValue`).
-                let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
-
-                let foreground = self.durable_root().child();
-                let wall = arm_wall(req.run.wall, hook.policy.budget, &foreground);
-
-                // Fold the hook's registered `DefaultPolicy` into the run's
-                // conditions: capture, terminal authority, and budget are the
-                // hook's to decide, not the dispatching host's.
-                if hook.policy.capture {
-                    req.run.io = RunIo::Capture;
-                }
-                req.run.terminal = match hook.policy.terminal {
-                    TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
-                    TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
-                };
-
-                self.run_built(req, &foreground, wall, false, |s| {
-                    crate::builtins::apply(&hook.binding.value, &args, s)
-                })
-            }
-        }
-    }
-
-    /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
-    /// as a named run-entry point in the session-lived hook table.
-    ///
-    /// The hook is stored by `name`; it is never readable as `$name`
-    /// and never invokable as a command — it fires only when the host
-    /// dispatches a [`Program::Hook`] run at a lifecycle moment (prompt
-    /// render, startup, plugin hook, keybinding).
-    ///
-    /// A re-registration of an already-registered `name` short-circuits
-    /// before any scheme inference.  Otherwise the hook is built with the
-    /// same scheme-inference path an ordinary session `let` uses, and
-    /// [`Hook::validate`] is the single check that `value` is a `Block` or
-    /// `Lambda` of the arity `sig` expects.  On success the hook is
-    /// inserted into `context.hooks`, keyed by `name`; on failure the
-    /// caller renders the [`RegisterError`] as a diagnostic at `origin`.
-    ///
-    /// # Errors
-    /// Returns [`RegisterError::AlreadyRegistered`] if a hook named `name`
-    /// already exists, or whatever [`Hook::validate`] raises if `value` is
-    /// not a `Block`/`Lambda` or its arity does not match `sig`.
-    pub fn register_hook(
-        &mut self,
-        name: HookName,
-        value: Value,
-        sig: HookSig,
-        policy: DefaultPolicy,
-        origin: Span,
-    ) -> Result<(), RegisterError> {
-        // Re-registration short-circuits before any scheme inference.
-        if self.mobile.context.hooks.contains_key(&name) {
-            return Err(RegisterError::AlreadyRegistered { name, origin });
-        }
-
-        // Build the Binding with the same scheme inference an ordinary
-        // session `let` uses. A non-thunk value gets no scheme; the
-        // `validate` below is the one gate that rejects it.
-        let arm = match &value {
-            Value::Lambda { param, body, .. } => Some((Some(param), body)),
-            Value::Block { body, .. } => Some((None, body)),
-            _ => None,
-        };
-        let scheme = arm.map(|(param, body)| {
-            crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
-        });
-        use crate::types::Binding;
-        let binding = Binding { value, scheme };
-
-        let hook = Hook {
-            binding,
-            sig,
-            policy,
-            origin,
-        };
-        hook.validate(&name)?;
-
-        self.mobile.context.hooks.insert(name, hook);
-        Ok(())
-    }
-
-    /// Return true when a hook with the given `name` is registered.
-    pub fn has_hook(&self, name: &HookName) -> bool {
-        self.mobile.context.hooks.contains_key(name)
-    }
-
-    /// Remove a single registered hook by name, returning whether one was
-    /// present.  The inverse of [`register_hook`] for a one-shot entry
-    /// point (a plugin factory) once it has served its purpose.
-    pub fn unregister_hook(&mut self, name: &HookName) -> bool {
-        self.mobile.context.hooks.remove(name).is_some()
-    }
-
-    /// Remove every hook registered under a plugin's namespace, returning
-    /// the number dropped.  A plugin's hook events and keybinding handlers
-    /// all live under `Namespace::Plugin(plugin_id)`; unloading the plugin
-    /// removes them in one sweep so no dispatchable entry point outlives the
-    /// plugin that owned it.  This is also the rollback path for a load that
-    /// fails after some of its hooks were committed.
-    pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
-        let before = self.mobile.context.hooks.len();
-        self.mobile.context.hooks.retain(|name, _| {
-            !matches!(&name.namespace, crate::types::Namespace::Plugin(id) if id == plugin_id)
-        });
-        before - self.mobile.context.hooks.len()
-    }
-
-    /// The framed scaffold behind the run door: materialise the IO regime
-    /// from the run's conditions, build and install the run frame on the
-    /// pre-minted `foreground`, evaluate `body` under the capability ceiling
-    /// and lifecycle hooks, then disarm the `wall` and fold the captured
-    /// bytes and `timed_out` into the report. `body` is the run's resolved
-    /// program — the source arm's `eval_top_level`, the hook arm's in-frame
-    /// `apply`.
-    fn run_built(
-        &mut self,
-        req: RunRequest<'_>,
-        foreground: &crate::process::ForegroundScope,
-        wall: Option<crate::process::Deadline>,
-        single_command: bool,
-        body: impl FnOnce(&mut Self) -> Settled<Value>,
-    ) -> RunReport {
-        let RunRequest {
-            run,
-            surface,
-            deferred,
-            desk,
-            nursery,
-            lifecycle,
-        } = req;
-
-        // The source text the lifecycle hooks and root context see: the
-        // program itself for a source run, empty for a hook run (whose
-        // program is an already-compiled value, not text).
-        let src = match &run.program {
-            Program::Source(src) => src.as_str(),
-            Program::Hook { .. } => "",
-        };
-
-        // Materialise the IO regime: `Capture` mints buffers we read back,
-        // `Inherit` leaves the ambient streams to flow through `build_run`.
-        let (capture, capture_bufs) = match run.io {
-            RunIo::Inherit => (None, None),
-            RunIo::Capture => {
-                let (stdout_sink, stdout_buf) = crate::io::new_buffer();
-                let (stderr_sink, stderr_buf) = crate::io::new_buffer();
-                (
-                    Some((stdout_sink, stderr_sink)),
-                    Some((stdout_buf, stderr_buf)),
-                )
-            }
-        };
-
-        // Stdin source and terminal authority are independent of the output
-        // regime: `Capture` no longer implies `Source::Terminal`. A tool run
-        // is `Denied` + `Empty`; a piped `ral -c` is `Denied` + `Inherit`.
-        let stdin = match run.stdin {
-            RunStdin::Inherit => Source::Terminal,
-            RunStdin::Empty => Source::Empty,
-        };
-        let terminal_access = match run.terminal {
-            RequestedTerminalAccess::Leased => crate::types::TerminalAccess::Leased,
-            RequestedTerminalAccess::Denied => crate::types::TerminalAccess::Denied,
-        };
-
-        let next = crate::run::build_run(
-            self,
-            capture,
-            stdin,
-            terminal_access,
-            foreground.clone(),
-            run.deferred_lease,
-            run.worker_cap,
-            surface,
-            deferred,
-            desk,
-            nursery,
-        );
-        let (result, status) = crate::run::run_framed(
-            self,
-            next,
-            &run.script_name,
-            src,
-            run.caps.clone(),
-            lifecycle,
-            body,
-        );
-
-        // Disarm the wall before reading the cause. While it stays armed the
-        // reaper can still fire; classifying against a live ceiling lets a run
-        // that finished inside its budget be misread as timed out should the
-        // reaper trip in the gap between eval returning and this read. Dropping
-        // the guard removes the entry, so `cause` is `Deadline` below only for a
-        // deadline that genuinely elapsed during the run.
-        drop(wall);
-
-        let timed_out = foreground.cause() == Some(CancelCause::Deadline);
-        let captured = capture_bufs.map(|(out, err)| Captured {
-            stdout: crate::io::take_buffer(&out),
-            stderr: crate::io::take_buffer(&err),
-        });
-
-        RunReport::Ran {
-            result,
-            status,
-            single_command,
-            captured,
-            timed_out,
-        }
-    }
 }

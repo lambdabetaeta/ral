@@ -323,7 +323,7 @@ impl ProviderError {
 
     /// A single-line human summary, for a failure that crosses an agent
     /// boundary as a flat string — a sub-agent's outcome a parent receives.
-    /// The full structured [`crate::tui::line::provider_error`] block is
+    /// The full structured `crate::tui::line::provider_error` block is
     /// unreachable there, and the verbose [`fmt::Display`] (which splices the
     /// raw HTTP `Body:` JSON into `cause`) would land as an unreadable wall in
     /// the one-line breadcrumb.  So this prefers the provider's own parsed

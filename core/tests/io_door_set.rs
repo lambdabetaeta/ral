@@ -76,7 +76,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/builtins/uutils.rs", "io-door:silent:diff-read"),
     ("core/build.rs", "io-door:silent:prelude-bake-build"),
     ("core/src/capability/load.rs", "io-door:silent:cap-load"),
-    ("core/src/driver.rs", "io-door:silent:prelude-bake"),
+    ("core/src/boot.rs", "io-door:silent:prelude-bake"),
     ("core/src/host.rs", "io-door:silent:date-launch"),
     ("core/src/host.rs", "io-door:silent:git-launch"),
     ("core/src/path/which.rs", "io-door:silent:which-readdir"),

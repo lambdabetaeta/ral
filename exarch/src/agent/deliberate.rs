@@ -32,8 +32,8 @@ use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, To
 use ral_core::serial::FOValue;
 use std::sync::Arc;
 
-/// Outcome of one [`Agent::deliberate`].  Degenerate cases (`Empty`,
-/// `Stopped`) become nudges; `Cancelled` and `Capped` do not; hard
+/// Outcome of one [`Agent::deliberate`].  Degenerate cases ([`Self::Empty`],
+/// [`Self::Stopped`]) become nudges; [`Self::Cancelled`] and [`Self::Capped`] do not; hard
 /// failures travel through [`ProviderError`].
 #[derive(Debug)]
 pub enum Outcome {
@@ -424,7 +424,7 @@ impl Agent {
     /// cancelled results the instant the token trips.  Every call returns its
     /// result synchronously — a spawn inside the `ral` eval launches a
     /// detached peer and answers with a start receipt — so there is no join
-    /// phase and no `thread::scope`.  Answers with the batch's results and the
+    /// phase and no [`std::thread::scope`].  Answers with the batch's results and the
     /// items admitted at the tool boundary while it ran.
     fn run_batch(
         &mut self,
@@ -499,8 +499,8 @@ impl Agent {
     /// Reached at the top of the round-trip loop once the step count
     /// would exceed [`MAX_STEPS`].  The history is mid-protocol (the last
     /// step appended its tool results); `attend`'s single exit winds it
-    /// back to `ReadyForUser`.  `note_error` is the user-facing line and
-    /// the forensic breadcrumb; the `StopReason` surfaces in the headless
+    /// back to `ReadyForUser`.  [`Self::note_error`] is the user-facing line and
+    /// the forensic breadcrumb; the [`StopReason`] surfaces in the headless
     /// JSON result so a benchmark harness can tell a capped run from a
     /// completed one.
     fn capped(&self, emit: &Emitter) -> Outcome {

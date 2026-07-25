@@ -437,7 +437,7 @@ impl Unifier {
     /// Walks via `apply_ty_inner` so that mid-cycle roots — pushed onto
     /// the recursion stack but not yet returned as back-edges in the
     /// applied output — are still captured (`apply_*_inner` tags them
-    /// via `mark_stack_cyclic` on cycle detection).
+    /// on cycle detection).
     pub fn cyclic_comp_roots_in_ty(&mut self, ty: &Ty) -> Vec<u32> {
         let mut visited = Visited::default();
         let _applied = self.apply_ty_inner(ty, &mut visited);

@@ -15,10 +15,10 @@
 //! so this program is also the mechanism behind `boot.img`'s claim to carry
 //! "kernel + ral-daemon + ral engine as one artifact": neither binary is
 //! baked into the read-only rootfs, they are installed fresh onto the
-//! writable overlay upper on every boot (see [`plan::INSTALLS`]).
+//! writable overlay upper on every boot (see `plan::INSTALLS`).
 //!
-//! Following `mounts.rs`'s own split: [`plan`] is what to do, named as data
-//! and unit-tested without a virtual machine; [`init`] is the syscall
+//! Following `mounts.rs`'s own split: `plan` is what to do, named as data
+//! and unit-tested without a virtual machine; `init` is the syscall
 //! sequence that carries it out, exercisable only inside a real guest.
 
 #![allow(

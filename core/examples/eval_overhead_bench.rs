@@ -12,7 +12,7 @@
 //!
 //! Run:
 //!     docker exec shell-dev bash -c \
-//!       'cd /work && cargo run --release --example `eval_overhead_bench`'
+//!       'cd /work && cargo run --release --example eval_overhead_bench'
 
 use ral_core::Shell;
 use ral_core::io::TerminalState;

@@ -2,7 +2,7 @@
 //! jail actually touches the kernel — cgroup files, the uid/gid drop,
 //! `NO_NEW_PRIVS` — lives here and nowhere else.  Structurally absent from
 //! the module tree on macOS/Windows, the same split `sandbox/linux.rs` and
-//! `signal/unix.rs` already use for a platform-only edge.
+//! `process/signal/unix.rs` already use for a platform-only edge.
 
 use super::{JailCgroup, JailPlan};
 use std::io;

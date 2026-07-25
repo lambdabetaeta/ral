@@ -180,7 +180,7 @@ pub(crate) struct Cli {
 impl Cli {
     /// Distil the parsed flags into the right [`Mode`] variant.
     ///
-    /// The login bit (`-l` or a `-`-prefixed argv[0]) does not short-circuit: a
+    /// The login bit (`-l` or a `-`-prefixed `argv[0]`) does not short-circuit: a
     /// login shell invoked with `-c` or a script positional must still run that
     /// command rather than dropping it for an interactive REPL. Login therefore
     /// only selects between the two interactive variants, decided after
@@ -339,7 +339,7 @@ fn is_code_flag(arg: &str) -> bool {
         .is_some_and(|rest| rest.ends_with('c'))
 }
 
-/// True when argv[0] starts with `-`, the POSIX convention indicating that the
+/// True when `argv[0]` starts with `-`, the POSIX convention indicating that the
 /// shell was invoked as a login shell.
 fn is_login_shell_argv0() -> bool {
     std::env::args()

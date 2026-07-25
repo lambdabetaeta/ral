@@ -155,11 +155,11 @@ pub struct Run {
     /// freely.
     pub worker_cap: Option<usize>,
     /// The byte IO regime.
-    pub io: crate::driver::RunIo,
+    pub io: crate::run::RunIo,
     /// Whether the run may hand the controlling terminal to a child.
-    pub terminal: crate::driver::RequestedTerminalAccess,
+    pub terminal: crate::run::RequestedTerminalAccess,
     /// Stdin source.
-    pub stdin: crate::driver::RunStdin,
+    pub stdin: crate::run::RunStdin,
 }
 
 /// What a run runs: source text compiled and typechecked against the live
@@ -250,8 +250,8 @@ impl Clone for TerminalEndpoint {
 // ── The terminal frame ────────────────────────────────────────────────
 
 /// The run's terminal frame: the protocol projection of the engine's
-/// [`RunReport`](crate::driver::RunReport), produced by
-/// [`RunReport::into_report`].
+/// [`RunReport`](crate::run::RunReport), produced by
+/// [`RunReport::into_report`](crate::run::RunReport::into_report).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Report {
     /// Parse/type/host failure: the run never reached evaluation. The host
@@ -260,7 +260,7 @@ pub enum Report {
     /// The run ran to a settled result. `status` is the transport status
     /// computed once; `single_command` is whether the source compiled to a
     /// single command (for runtime-error rendering); `captured` is `Some`
-    /// under [`RunIo::Capture`](crate::driver::RunIo); `timed_out` is
+    /// under [`RunIo::Capture`](crate::run::RunIo); `timed_out` is
     /// whether the wall fired.
     Ran {
         /// The run's settled result. `Ok` carries a [`FOValue`] so a
@@ -269,7 +269,7 @@ pub enum Report {
         result: Result<FOValue, Break>,
         status: i32,
         single_command: bool,
-        captured: Option<crate::driver::Captured>,
+        captured: Option<crate::run::Captured>,
         timed_out: bool,
     },
 }
@@ -288,7 +288,8 @@ pub enum Diagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Break {
     /// A caught runtime error, already rendered to its full diagnostic string
-    /// (see [`RunReport::into_report`]) — the host prints it verbatim.
+    /// (see [`RunReport::into_report`](crate::run::RunReport::into_report)) —
+    /// the host prints it verbatim.
     /// `command_exit` carries the one classification a host's own didactics
     /// need — whether the status was an external command's non-zero exit,
     /// as opposed to a raised error — as a fact beside the rendering, since
@@ -339,7 +340,7 @@ fn render_break(
     }
 }
 
-impl crate::driver::RunReport {
+impl crate::run::RunReport {
     /// Project into the protocol [`Report`]: the live `Value` becomes a
     /// first-order [`FOValue`] (a non-transportable result — e.g. a live
     /// `Handle` — is reported as an error rather than dropped silently),
@@ -1157,7 +1158,7 @@ impl Transport for IdentityTransport {
             Some(cell) => Box::new(ForegroundCapture(cell.clone())),
             None => Box::new(()),
         };
-        let req = crate::driver::RunRequest {
+        let req = crate::run::RunRequest {
             run,
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
@@ -1641,8 +1642,9 @@ impl Transport for WireTransport {
 #[cfg(test)]
 mod enquiry_tests {
     use super::*;
-    use crate::driver::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-    use crate::run::RunLifecycle;
+    use crate::run::{
+        RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest, RunStdin,
+    };
     use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Shell};
     use std::sync::Mutex;
 
@@ -1878,9 +1880,9 @@ mod durability_tests {
             wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: crate::driver::RunIo::Capture,
-            terminal: crate::driver::RequestedTerminalAccess::Denied,
-            stdin: crate::driver::RunStdin::Empty,
+            io: crate::run::RunIo::Capture,
+            terminal: crate::run::RequestedTerminalAccess::Denied,
+            stdin: crate::run::RunStdin::Empty,
         }
     }
 

@@ -17,7 +17,7 @@
 //! 3. **Read the kernel command line** into a [`boot::Boot`] — the only
 //!    thing the host has told the guest at this point.
 //! 4. **Report what `/` actually is.**  The root overlay of §7 is assembled
-//!    by the stage before this one (see [`mounts`]); the daemon names what
+//!    by the stage before this one (see `mounts`); the daemon names what
 //!    it was handed rather than assuming.
 //! 5. **Take the host's time.**  The guest has no real-time clock worth
 //!    trusting; the host wrote its own on the command line and the daemon
@@ -26,8 +26,8 @@
 //!    hypervisor's timekeeping drifts by.  When that starts to matter the
 //!    place to fix it is a periodic correction over the protocol, not a
 //!    second clock authority down here.
-//! 6. **Mount everything else**, in the order [`mounts::plan`] fixes.
-//! 7. **Apply the guest-wide sysctls** ([`sysctl::plan`]) the engine's jail
+//! 6. **Mount everything else**, in the order `mounts::plan` fixes.
+//! 7. **Apply the guest-wide sysctls** (`sysctl::plan`) the engine's jail
 //!    (§5) depends on — user namespaces off — before any external code gets
 //!    a chance to run.
 //! 8. **Listen for the end.**  PID 1 has no default signal dispositions, so

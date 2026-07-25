@@ -2,7 +2,7 @@
 //! that build on them.
 //!
 //! Both flavours defer to the single resolver,
-//! [`resolve_xdg`](super::basedir::resolve_xdg), so the directories
+//! [`resolve_xdg`], so the directories
 //! they report match the ones the `xdg:` grant sigil expands to:
 //! an absolute `$XDG_*_HOME` override, else the home-joined Linux
 //! default (`.config`, `.local/share`) on every platform.  A base

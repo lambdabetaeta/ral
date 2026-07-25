@@ -14,7 +14,7 @@
 //!     tail.  Infallible: returns the input as-is when no ancestor
 //!     exists.  Use for grant prefixes (a write may target a path
 //!     that does not yet exist) and for the cwd/tmp injection that
-//!     `runtime_fs_policy` performs.
+//!     [`super::sigil::freeze_one`] performs.
 //!
 //! Plus one path-equivalence helper:
 //!

@@ -1,6 +1,6 @@
 //! The desk / `ral`-call seam: for the span of one [`Agent::run_shell`]
 //! call, the attend thread installs a fresh [`desk::HostServices`] and then
-//! sits parked inside `shell_eval::run_shell`, off to one side of the seat,
+//! sits parked inside [`shell_eval::run_shell`], off to one side of the seat,
 //! while a desk handler thread runs on the other. [`ReplyCell`] and
 //! [`LogCell`] are the two `Arc`-shared cells that window exists to make
 //! safe: each rides in the capture [`Agent::host_services`] hands a
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 /// cell for each call and hands a clone into [`Agent::host_services`]; the
 /// desk's `reply` handler ([`Self::set`]) is the cell's only writer, running
 /// on the handler thread while the attend thread sits parked inside
-/// `run_shell`'s `shell_eval::run_shell` — the very window
+/// [`Agent::run_shell`]'s [`shell_eval::run_shell`] — the very window
 /// [`desk::HostServices`] as a whole depends on.  The instant the
 /// desk is retired, `run_shell` harvests the cell by ownership
 /// ([`Self::take`]) into [`Agent::reply`], the plain field that then carries
@@ -39,8 +39,8 @@ pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
 
 impl ReplyCell {
     /// Lock the cell — the sole accessor, every method below goes through
-    /// this.  `WouldBlock` means a desk handler ran outside the one window
-    /// it is ever entitled to; `Poisoned` means a prior holder panicked
+    /// this.  [`std::sync::TryLockError::WouldBlock`] means a desk handler ran outside the one window
+    /// it is ever entitled to; [`std::sync::TryLockError::Poisoned`] means a prior holder panicked
     /// while holding it.  Both are fatal, but only the first names the
     /// scheduling law being violated — the same discipline [`LogCell::lock`]
     /// applies to its own lock.
@@ -70,7 +70,7 @@ impl ReplyCell {
 
 /// [`Agent::log`]'s lock: taken only by the attend thread between calls or by
 /// a desk handler while the attend thread sits parked inside
-/// [`Agent::run_shell`]'s `shell_eval::run_shell` — the same window
+/// [`Agent::run_shell`]'s [`shell_eval::run_shell`] — the same window
 /// [`ReplyCell`] and [`desk::HostServices`] as a whole depend on.  Concurrent
 /// access from both threads at once is a scheduling bug, not a legitimate
 /// wait, so [`Self::lock`] `try_lock`s and panics didactically rather than
@@ -86,8 +86,8 @@ impl LogCell {
     }
 
     /// Lock the log — the sole accessor, every call site in the crate goes
-    /// through this.  `WouldBlock` means the attend thread and a desk handler
-    /// touched the log at once; `Poisoned` means a prior holder panicked
+    /// through this.  [`std::sync::TryLockError::WouldBlock`] means the attend thread and a desk handler
+    /// touched the log at once; [`std::sync::TryLockError::Poisoned`] means a prior holder panicked
     /// while holding it.  Both are fatal, but only the first names the
     /// scheduling law being violated.
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, AgentLog> {
@@ -125,7 +125,7 @@ impl Agent {
     /// `&mut Agent`/`&mut Shell` to get it. Built fresh at every
     /// [`Self::run_shell`] install, beside the deferred sink, so the
     /// generation, fuel, caps, and grant a handler captures can never go
-    /// stale — the same reasoning `set_deferred_sink` documents. `reply` is
+    /// stale — the same reasoning [`ral_core::transport::IdentityTransport::set_deferred_sink`] documents. `reply` is
     /// `run_shell`'s own fresh [`ReplyCell`] for this one call, not a clone
     /// of [`Self::reply`] — `run_shell` keeps its own handle to harvest back
     /// once the desk retires.

@@ -114,7 +114,7 @@ fn try_does_not_swallow_exit() {
 /// `f 2 -> f 1 -> f 0`, and the final `cd /tmp` must be denied by the
 /// outer `grant`.
 ///
-/// The denial message comes from `core/src/capability/effective.rs`
+/// The denial message comes from `core/src/capability/enforce.rs`
 /// (`"denied: cd requires shell.chdir"`).  We pin to a substring of that
 /// — `"shell.chdir"` is the most specific token and is unlikely to drift.
 #[test]
@@ -128,7 +128,7 @@ gg 2";
     match result {
         Err(Break::Error(e)) => {
             // Pin to the specific denial wording in
-            // `core/src/capability/effective.rs::check_shell_chdir`.
+            // `core/src/capability/enforce.rs::check_shell_chdir`.
             // If that wording changes, this assertion (intentionally)
             // breaks and points the maintainer at the renamed message.
             assert!(
@@ -166,7 +166,7 @@ gg 2";
 ///
 /// Fixed in commit `2646ccf` (elaborator: flip control-operator
 /// lowering onto structural IR), which switched `with_scope` to
-/// `push_scope_node` (the flag-less variant).  Commit `c323f32` then
+/// `Audit::push` (the flag-less variant).  Commit `c323f32` then
 /// removed the `scope_pushed` field, `push_scope`, `mark_scope_pushed`,
 /// and `take_scope_pushed` outright; reintroducing the bug would
 /// require restoring at least the flag and the flag-setting variant of

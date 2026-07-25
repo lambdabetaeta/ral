@@ -4,7 +4,7 @@
 //! [`GuestJail::plan`] decides who a spawned command becomes — a fresh
 //! unprivileged uid/gid and a fresh transient cgroup — from nothing but
 //! an atomic counter; it performs no syscall, so it is exercised directly
-//! in unit tests on every platform.  [`linux`] is the thin edge that
+//! in unit tests on every platform.  `linux` is the thin edge that
 //! turns one [`JailPlan`] into the mkdir/write/setuid sequence the kernel
 //! enforces, mirroring the `sandbox/linux.rs` / `signal/unix.rs` split of
 //! a platform-only edge from a portable decision.  [`JailCgroup`] is

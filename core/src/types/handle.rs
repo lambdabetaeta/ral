@@ -78,9 +78,9 @@ pub type SurfaceBuffer = Arc<Mutex<Vec<crate::serial::FOValue>>>;
 #[derive(Debug, Clone)]
 #[allow(clippy::type_complexity)]
 pub struct HandleInner {
-    /// Result channel: worker sends [`Settled<Value>`] (the worker's
-    /// trampoline absorbs any terminal tail call before the value
-    /// reaches the channel — `Tail` cannot cross a thread boundary).
+    /// Result channel: worker sends [`Settled<Value>`](super::flow::Settled)
+    /// (the worker's trampoline absorbs any terminal tail call before the
+    /// value reaches the channel — `Tail` cannot cross a thread boundary).
     pub result: Arc<Mutex<Option<std::sync::mpsc::Receiver<super::flow::Settled<Value>>>>>,
     /// Cached outcome after first observation (§13.3: a second await
     /// returns the cached bytes + result).  `None` until the block

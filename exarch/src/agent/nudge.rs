@@ -5,11 +5,11 @@
 //! error on the way out) or hand back a synthetic next prompt for the attend
 //! loop to post to itself as a [`Post::Nudge`](crate::bus::Post).
 //! Records each nudge to both the `events.json` breadcrumb and the operational
-//! trace (`Kind::Nudge`); the display decides whether to surface it.
+//! trace ([`Kind::Nudge`]); the display decides whether to surface it.
 //!
 //! The registry is **per-session** ([`Agent::nudges`]): the attend loop runs
 //! one [`Agent::deliberate`] per inbox item, not one whole exchange, so the
-//! per-exchange state must outlive a single `deliberate`.  It resets on a genuine
+//! per-exchange state must outlive a single [`Agent::deliberate`].  It resets on a genuine
 //! exchange-boundary item via [`Registry::reset`], never on a self-nudge.
 //!
 //! [`Agent::deliberate`]: crate::agent::Agent::deliberate
@@ -226,7 +226,7 @@ impl Registry {
 }
 
 /// Record a nudge to both views: the `events.json` forensic breadcrumb and the
-/// operational trace (`Kind::Nudge`, which the display surfaces as it sees fit).
+/// operational trace ([`Kind::Nudge`], which the display surfaces as it sees fit).
 fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
     let _ = log.record_nudge(used, BUDGET, cause.clone());
     emit.emit(Kind::Nudge {

@@ -13,14 +13,16 @@
 //!
 //! The methods on [`Shell`] live in submodules grouped by concern:
 //!
-//! - `init` — construction and the startup env-var seeding pass.
-//! - `context` — the [`Context`] impl: dynamic-context verbs.
-//! - `scope` — `with_*` scope guards (`within` / `grant`), alias
+//! - [`init`] — construction and the startup env-var seeding pass.
+//! - [`context`] — the [`Context`] impl: dynamic-context verbs.
+//! - [`scope`] — `with_*` scope guards (`within` / `grant`), alias
 //!   frames, audit-subtree combinators.
-//! - `checks` — capability-check forwarders to the
+//! - [`checks`] — capability-check forwarders to the
 //!   `capability::check_*(&Context, …)` decisions.
-//! - `cwd` — logical working directory and path resolution.
-//! - `inherit` — state transfer between parent and child Shells
+//! - [`cwd`] — logical working directory and path resolution.
+//! - [`hooks`] — the hook table's types and the session's registration
+//!   surface ([`Shell::register_hook`] and its inverses).
+//! - [`inherit`] — state transfer between parent and child Shells
 //!   ([`Shell::with_thunk_body`] for same-thread bodies;
 //!   [`Shell::spawn_thread`], [`Shell::child_of`], [`Shell::child_from`]
 //!   for forks, plus [`Shell::inherit_from`] / [`Shell::return_to`]).
@@ -101,8 +103,9 @@ pub struct Context {
     /// Process env-var overrides set by `within [shell: …]`.
     /// `pub(crate)` so two privileged callers — the
     /// [`Shell::with_env`] restore step and the child-eval mobile
-    /// reconstruction (`WireMobile::into_runtime`) — can install a
-    /// vetted whole map.  Per-key mutation
+    /// reconstruction
+    /// ([`WireMobile::into_runtime`](crate::subprocess::WireMobile::into_runtime)) —
+    /// can install a vetted whole map.  Per-key mutation
     /// goes through [`Context::set_env_var`] (and friends).  `PWD` /
     /// `OLDPWD` are excluded: those keys live on `context.cwd`, and a
     /// copy here would shadow the canonical pair and drift on the next
@@ -161,7 +164,7 @@ pub struct Mobile {
     /// `recursion_limit`.  Different
     /// fields obey different flow rules — see
     /// [`Shell::inherit_from`] / [`Shell::return_to`] and
-    /// `types/control.rs`.
+    /// `types/shell/control.rs`.
     pub control: ControlState,
     /// The clone-into-child dynamic context: env/cwd/grants, handlers,
     /// args, and module-loader state.  No source cursor, no builtin table.
@@ -302,7 +305,7 @@ pub trait DeferredSink: Send + Sync {
 /// This run's authority to hand the controlling terminal to a child.
 ///
 /// The internal (per-run) form of the host-facing
-/// [`RequestedTerminalAccess`](crate::driver::RequestedTerminalAccess): it carries
+/// [`RequestedTerminalAccess`](crate::run::RequestedTerminalAccess): it carries
 /// the extra `ExplicitLoan` state that `_ed-tui` raises mid-run and that a host
 /// cannot request at a run door. Read by
 /// [`Shell::terminal_lease`](Shell::terminal_lease), which yields the session's
@@ -321,7 +324,7 @@ pub(crate) enum TerminalAccess {
     /// A within-run elevation of a `Leased` run: a foreground handoff fires
     /// even though stdout is a buffer, because the body (`_ed-tui`'s `fzf`)
     /// draws on `/dev/tty` and must own the foreground pgid. Set by the host
-    /// loan token, never by a `RunRequest`.
+    /// loan token, never by a [`RunRequest`](crate::run::RunRequest).
     ExplicitLoan,
 }
 
@@ -364,7 +367,8 @@ pub struct RunState {
     /// ([`Nursery::clear`]), so a fork parked and never adopted before the
     /// run ends leaks nothing. Never folds back, like `surface`.
     pub(crate) nursery: Option<Nursery>,
-    /// The run's foreground work scope.  `signal::check` consults it between
+    /// The run's foreground work scope.
+    /// [`signal::check`](crate::process::signal::check) consults it between
     /// effectful steps; a foreground cancel (run timeout, Ctrl-C) unwinds
     /// the same-thread work that shares it.  Always a descendant of
     /// [`SessionState::root`] by construction.
@@ -457,7 +461,7 @@ pub struct SessionState {
     /// Host-installed command dispatch table.  Builtin bodies are Rust fn
     /// pointers or captured host closures — process-local dispatch state, not
     /// serialised ral values, so the receiver of a wire mobile supplies its
-    /// own rather than shipping it in a `WireMobile`.
+    /// own rather than shipping it in a [`WireMobile`](crate::subprocess::WireMobile).
     pub(crate) builtins: BuiltinTable,
     /// Host-installed `name -> doc` entries for a sourced closure library
     /// (exarch's agent helpers) that `help`/`explain` cannot otherwise see —
@@ -495,7 +499,7 @@ pub struct LocalState {
     /// Directory of every worker (`spawn`, `watch`, `service`) detached
     /// from this shell, keyed by nothing but the handle it registered with — see
     /// `types/shell/workers.rs`.  One registry per `Shell`, i.e. one per
-    /// agent; `Shell::spawn_thread` shares it into a spawned worker's own
+    /// agent; [`Shell::spawn_thread`] shares it into a spawned worker's own
     /// shell (so a nested `spawn` registers alongside its parent), but a
     /// sub-agent fork starts with a fresh one.
     pub(crate) workers: WorkerRegistry,

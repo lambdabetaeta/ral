@@ -970,8 +970,9 @@ fn split_prompt(prompt: &PromptText) -> PromptLines {
     }
 }
 
-/// The editor's own visible row count: one row per logical line.  (The
-/// `WrapMode::None` editor does not soft-wrap, so logical lines are rows.)
+/// The editor's own visible row count: one row per logical line.  (This
+/// surface constructs [`PromptEditor`] with `wrap` off, so it does not
+/// soft-wrap and logical lines are rows.)
 fn prompt_rows(prompt: &PromptEditor) -> u16 {
     #[allow(
         clippy::cast_possible_truncation,

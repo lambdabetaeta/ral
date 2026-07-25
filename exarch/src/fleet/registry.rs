@@ -12,8 +12,9 @@
 //!     (`agent-cancel`);
 //!   * the **subtree cascade**: [`AgentRegistry::cancel`] cancels an agent
 //!     *and every descendant*, behind `agent-cancel` and the per-agent
-//!     idle lease; `/clear` and `/close` reap a subtree through `clear_subtree`
-//!     and `remove_subtree`, and `terminate_entry` is the per-entry primitive
+//!     idle lease; `/clear` and `/close` reap a subtree through
+//!     [`AgentRegistry::clear_subtree`] and [`AgentRegistry::remove_subtree`],
+//!     and [`terminate_entry`] is the per-entry primitive
 //!     all of them share.  Each
 //!     node is cancelled across both layers — the cooperative [`Token`] its
 //!     attend loop polls, and its own session's durable root, so an
@@ -22,20 +23,20 @@
 //!     whole story for the node's own detached `ral` workers, too: a
 //!     worker's cancel scope is a child of its shell's durable root
 //!     (the cascade law: "cancelling a resident cancels what it owns"), and
-//!     every `CancelScope::is_cancelled`
+//!     every [`ral_core::process::CancelScope::is_cancelled`]
 //!     walks its ancestors, so the cascade reaches them with no extra edge
 //!     of its own. A node that is never cancelled — the ordinary `reply`/
 //!     settle path, or the trunk's own end-of-`attend` `deregister` — takes
 //!     a different route to the same law: [`crate::agent::Agent`]'s `Drop`
 //!     cancels its own workers and clears its own schedules unconditionally,
 //!     so a settled agent leaks neither. `/clear` is the third route,
-//!     explicit and immediate on the outgoing shell (`Agent::clear`), since
+//!     explicit and immediate on the outgoing shell ([`crate::agent::Agent::clear`]), since
 //!     it rebuilds the agent in place rather than ending it;
 //!   * a **per-run interrupt**, distinct from the terminate cascade above:
 //!     [`AgentRegistry::interrupt`] unwinds exactly one entry's in-flight
 //!     run through [`interrupt_entry`], which cancels the [`Token`] *and*
 //!     interrupts through the entry's [`EvalReach`] — which cancels whatever
-//!     [`ForegroundScope`](ral_core::process::ForegroundScope) the
+//!     [`ForegroundScope`] the
 //!     [`RunScope`] cell currently holds, the scope `exarch`'s own
 //!     transport captures fresh at the start of every run. Cancelling that
 //!     scope reaches an in-flight eval exactly as terminating would, but
@@ -43,7 +44,7 @@
 //!     durable root, so an interrupt never poisons a later run.  The
 //!     terminate layer stays [`EvalReach::terminate`]'s alone;
 //!   * an **idle lease** (children only), armed on the shared
-//!     `process::reaper` as a self-re-arming `Run` deadline against the
+//!     [`process::reaper`] as a self-re-arming `Run` deadline against the
 //!     agent's exchange clock, so an abandoned child — never engaged, or
 //!     engaged and then dropped — is reaped rather than running forever;
 //!     the trunk, never abandoned, carries none;
@@ -54,7 +55,7 @@
 //!     against it (`Agent::admits`), a detached worker's deferred surface
 //!     batch admits against it (`InboxDeferred`, `shell_eval.rs`), and a
 //!     schedule takes the stronger route of unconditional removal
-//!     (`ScheduleRegistry::clear`, ordered before the inbox sweep) rather
+//!     ([`crate::fleet::schedule::ScheduleRegistry::clear`], ordered before the inbox sweep) rather
 //!     than carrying the generation at all — nothing settles across a
 //!     `/clear`, regardless of which edge a chapter uses to say so.
 //!
@@ -73,7 +74,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// A live agent's current-run foreground scope, refreshed by its own
-/// `IdentityTransport` at the start of every run
+/// [`ral_core::transport::IdentityTransport`] at the start of every run
 /// ([`ral_core::transport::IdentityTransport::observe_foreground`]).  Lives
 /// outside the registry's own lock, so [`AgentRegistry::interrupt`] can
 /// cancel whatever the *in-flight* run installed without contending with a
@@ -87,7 +88,7 @@ pub(crate) type RunScope = Arc<Mutex<Option<ForegroundScope>>>;
 /// [`Self::terminate`] ends the agent's eval for good, [`Self::interrupt`]
 /// unwinds exactly the in-flight run and leaves every later run clean.
 pub(crate) enum EvalReach {
-    /// The in-process reach: the durable root of the agent's own `Shell`
+    /// The in-process reach: the durable root of the agent's own [`Shell`](ral_core::Shell)
     /// (the terminate cascade's handle — cancelling it also reaches the
     /// agent's detached workers through the cancel-scope ancestor chain),
     /// and the run-scope cell its transport refreshes each run (the
@@ -99,7 +100,7 @@ pub(crate) enum EvalReach {
         run_scope: RunScope,
     },
     /// The wire reach: a wire session's only host-reachable cancel primitive
-    /// is `Control::Cancel` on its own in-flight dispatch — there is no
+    /// is [`ral_core::transport::Control::Cancel`] on its own in-flight dispatch — there is no
     /// host-side run scope or durable root to reach separately, so both
     /// [`Self::interrupt`] and [`Self::terminate`] resolve to the same
     /// [`ControlSender::cancel_in_flight`]. A wire-seated agent never
@@ -214,7 +215,7 @@ struct Entry {
     cancel: Token,
     /// The eval-layer cancel reach ([`EvalReach`]).  A tripped [`Token`]
     /// alone cannot stop an in-flight `ral` tool call (the attend loop reads
-    /// it only between steps, and `run_shell` blocks until the engine
+    /// it only between steps, and [`crate::shell_eval::run_shell`] blocks until the engine
     /// reports), so the cascade also [`terminate`](EvalReach::terminate)s
     /// through this reach, and a per-tab interrupt
     /// [`interrupt`](EvalReach::interrupt)s through it.  `None` for the
@@ -302,8 +303,8 @@ impl AgentRegistry {
     /// Cancel and reap `root`'s proper descendants, leaving `root` live.
     /// A settling parent (`reply`) uses this to abandon live children without
     /// declaring a new context generation for unrelated agents; the `/clear`
-    /// UI gesture uses it for the same reason on the trunk. `Agent::clear`
-    /// rebuilds the trunk's context in place rather than ending it, so the
+    /// UI gesture uses it for the same reason on the trunk.
+    /// [`crate::agent::Agent::clear`] rebuilds the trunk's context in place rather than ending it, so the
     /// reap must never reach the trunk's own entry: a terminate-class cause
     /// stamped on its sticky [`Token`] would be permanent ([`Token::reset`]
     /// only ever clears a bare [`CancelCause::Interrupt`]), which is exactly
@@ -524,10 +525,10 @@ impl AgentRegistry {
     /// consumer's inbox mutex.
     ///
     /// # Errors
-    /// Returns `Err` if `from` or `to` is not a live agent (`UnknownSender` /
-    /// `UnknownRecipient`), if `to` is not a proper descendant of `from`
-    /// (`NotADescendant`), or if the recipient's inbox is at quota
-    /// (`RecipientInboxFull`).
+    /// Returns `Err` if `from` or `to` is not a live agent ([`MessageError::UnknownSender`] /
+    /// [`MessageError::UnknownRecipient`]), if `to` is not a proper descendant of `from`
+    /// ([`NotADescendant`]), or if the recipient's inbox is at quota
+    /// ([`MessageError::RecipientInboxFull`]).
     pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
         let (mailbox, from_name) = {
             let g = self.lock();
@@ -602,8 +603,8 @@ impl AgentRegistry {
     }
 
     /// [`Self::cancel`]'s shared implementation, parameterised on the cause
-    /// so an expired lease can report `Deadline` ("timed out") rather than
-    /// `Explicit` ("cancelled") without a second cascade to maintain.
+    /// so an expired lease can report [`CancelCause::Deadline`] ("timed out") rather than
+    /// [`CancelCause::Explicit`] ("cancelled") without a second cascade to maintain.
     fn cancel_cause(&self, id: AgentId, cause: CancelCause) -> bool {
         let g = self.lock();
         let existed = g.entries.contains_key(&id);
@@ -976,7 +977,7 @@ mod tests {
     }
 
     /// `/clear` and a settling `reply` reap descendants through
-    /// `cancel_and_remove`: each reaped worker is cancelled across both
+    /// [`cancel_and_remove`]: each reaped worker is cancelled across both
     /// layers, so an in-flight eval unwinds instead of grinding on as an
     /// orphan whose result nobody will collect.
     #[test]
@@ -1007,14 +1008,14 @@ mod tests {
         );
     }
 
-    /// The invariant the `/clear` UI handler leans on: `Agent::clear`
-    /// rebuilds the trunk's context in place rather than ending it, and a
+    /// The invariant the `/clear` UI handler leans on:
+    /// [`crate::agent::Agent::clear`] rebuilds the trunk's context in place rather than ending it, and a
     /// sticky [`Token`] never forgets a terminate-class cause once one lands
     /// — [`Token::reset`] only ever clears a bare [`CancelCause::Interrupt`].
     /// So no gesture that leaves the trunk live may stamp a terminate cause
-    /// on the trunk's own token: `cancel_descendants` is the primitive that
+    /// on the trunk's own token: [`AgentRegistry::cancel_descendants`] is the primitive that
     /// guarantees it, in contrast to [`AgentRegistry::cancel`]'s inclusive
-    /// cascade, which would stamp `Explicit` on the trunk too and fail every
+    /// cascade, which would stamp [`CancelCause::Explicit`] on the trunk too and fail every
     /// run after it forever.
     #[test]
     fn clear_gesture_reaps_descendants_but_spares_the_trunks_token() {
@@ -1073,7 +1074,7 @@ mod tests {
         );
     }
 
-    /// `/close` routes to `remove_subtree`, the inclusive twin of the `/clear`
+    /// `/close` routes to [`AgentRegistry::remove_subtree`], the inclusive twin of the `/clear`
     /// reap: it cancels and drops the whole subtree *including* its root — a
     /// branch and any agents it spawned — where the `/clear` reap would have
     /// left the root live.  The trunk above the closed subtree is untouched.
@@ -1136,14 +1137,14 @@ mod tests {
     }
 
     /// `interrupt` is the per-tab run interrupt, not the subtree cascade: it
-    /// trips exactly one entry's token and whatever `ForegroundScope` its
+    /// trips exactly one entry's token and whatever [`ForegroundScope`] its
     /// `run_scope` cell holds — simulating the transport's per-run
     /// capture — walks no descendants, and deregisters nothing.  So the
-    /// child's token is `is_cancelled` but not `terminated` (an interrupt
+    /// child's token is [`Token::is_cancelled`] but not `terminated` (an interrupt
     /// drops the run, it does not end the agent), the interrupt reaches the
     /// cell's scope, the grandchild is untouched, and both entries stay
     /// live.  Contrast `cancel(1)`, which would trip the grandchild too and
-    /// with a terminate cause (`Explicit`), settling the whole subtree.
+    /// with a terminate cause ([`CancelCause::Explicit`]), settling the whole subtree.
     ///
     /// `eval_root` itself is never touched, so it stays uncancelled — pinned
     /// again by [`interrupt_never_poisons_the_next_run`].
@@ -1220,7 +1221,8 @@ mod tests {
     /// An interrupted agent's *next* run must run uncancelled: `interrupt`
     /// reaches only the run-scope cell, never `eval_root`, and core's cancel
     /// scopes are monotone — so a foreground scope minted from `eval_root`
-    /// for the next run (exactly what `IdentityTransport::observe_foreground`
+    /// for the next run (exactly what
+    /// [`ral_core::transport::IdentityTransport::observe_foreground`]
     /// captures at the start of every dispatch) starts clean.
     #[test]
     fn interrupt_never_poisons_the_next_run() {
@@ -1635,7 +1637,7 @@ mod tests {
     /// The authoritative half of the spawn-uniqueness rule: two
     /// registrations bearing the same name never both succeed, even when
     /// nothing has settled between them — the desk's own pre-check
-    /// (`name_live`) is only the cheap, didactic half; this is the check
+    /// ([`AgentRegistry::name_live`]) is only the cheap, didactic half; this is the check
     /// that actually closes the race.
     #[test]
     fn register_refuses_a_name_already_borne_by_a_live_entry() {
@@ -1687,9 +1689,9 @@ mod tests {
         );
     }
 
-    /// A lease reap's cascade must report `Deadline` ("timed out"), not
-    /// `Explicit` ("cancelled") — a reaped agent and an `agent-cancel`ed one
-    /// hit the same shared cascade (`cancel_cause`), distinguished only by
+    /// A lease reap's cascade must report [`CancelCause::Deadline`] ("timed out"), not
+    /// [`CancelCause::Explicit`] ("cancelled") — a reaped agent and an `agent-cancel`ed one
+    /// hit the same shared cascade ([`AgentRegistry::cancel_cause`]), distinguished only by
     /// which cause each caller passes.  This is the cascade the lease chain
     /// itself uses ([`lease_fire`]); this test pins the cause directly,
     /// independent of the chain's own timing.
@@ -1720,7 +1722,7 @@ mod tests {
         );
     }
 
-    /// `settle` is restructured so a stale-generation worker can never leave
+    /// [`AgentRegistry::settle`] is restructured so a stale-generation worker can never leave
     /// a zombie entry: it always reaps its own entry, whether or not the
     /// generation still matches, delivering only when it does.  In
     /// production `/clear`'s own cascade already removes every worker it
@@ -1816,7 +1818,7 @@ mod tests {
         );
     }
 
-    /// `clear_subtree` outranks a still-armed lease: the reap is immediate
+    /// [`AgentRegistry::clear_subtree`] outranks a still-armed lease: the reap is immediate
     /// and the lease's later fire, finding no entry, never overwrites the
     /// cause `/clear` already stamped.
     #[test]
@@ -1898,7 +1900,7 @@ mod tests {
         );
     }
 
-    /// `steer` is the registry's one human-delivery door: it renews the idle
+    /// [`AgentRegistry::steer`] is the registry's one human-delivery door: it renews the idle
     /// lease (`engaged` flips true, `idle` resets) and the text actually
     /// lands on the agent's own queue, in one call.  A dead id is refused
     /// without panicking, and delivers nothing.

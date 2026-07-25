@@ -17,9 +17,9 @@
 //!   (`exarch/src/tui/tui_loop.rs`, `std::thread::Builder::spawn_scoped`),
 //!   headless's single `pump` worker thread (`exarch/src/headless.rs`), and
 //!   each `agent`-tool spawn's own dedicated thread
-//!   (`exarch/src/tools/agent.rs`) for a fork. No two threads ever hold the
-//!   same `Agent`, and an `Agent` (with it, its `Shell`) never migrates
-//!   threads mid-life.
+//!   (`exarch/src/shell_eval/tools/agent.rs`) for a fork. No two threads
+//!   ever hold the same `Agent`, and an `Agent` (with it, its `Shell`)
+//!   never migrates threads mid-life.
 //! - `/clear` and `/resources` do not bypass this: both route as
 //!   `Post::Command` through `Agent::attend`'s loop, handled by
 //!   `Control::command` — called from *inside* `attend`, on the agent's own
@@ -373,7 +373,7 @@ mod tests {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod chokepoint_tests {
-    use crate::driver::BakedPrelude;
+    use crate::boot::BakedPrelude;
     use crate::transport::{Program, Run};
     use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
     use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
@@ -399,10 +399,10 @@ mod chokepoint_tests {
     /// [`armed_shell`], with an explicit `large_binding_bytes` threshold for
     /// the large-binding tests below.
     fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
-        let mut shell = crate::driver::boot_shell(
+        let mut shell = crate::boot::boot_shell(
             crate::io::TerminalState::default(),
             prelude(),
-            &crate::driver::HostSurface::default(),
+            &crate::boot::HostSurface::default(),
         );
         shell.arm_binding_lease(BindingLease {
             idle_calls,
@@ -582,14 +582,14 @@ mod chokepoint_tests {
     }
 
     /// A prelude name and a host-seeded name (a host verb call preceding
-    /// arming, mirroring `seed_session_dir`/rc `bindings:`) are both baseline
+    /// arming, mirroring `seed_var`/rc `bindings:`) are both baseline
     /// — visible at arm time, so never lease candidates.
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
-        let mut shell = crate::driver::boot_shell(
+        let mut shell = crate::boot::boot_shell(
             crate::io::TerminalState::default(),
             prelude(),
-            &crate::driver::HostSurface::default(),
+            &crate::boot::HostSurface::default(),
         );
         let (prelude_name, _) = shell
             .bindings()

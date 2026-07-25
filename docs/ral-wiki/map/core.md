@@ -44,7 +44,7 @@ reduction primitive behind it. A host states policy; core owns resources.
 
 The crate splits driving a `Shell` from probing the machine it runs on.
 
-- `driver` embeds and drives a `Shell` in a host process: `boot_shell` constructs,
+- `boot` embeds a `Shell` in a host process: `boot_shell` constructs,
   seeds, loads it from a `BakedPrelude`, and installs the host's `HostSurface` —
   the builtin surface beyond the core set — at construction, so a half-dressed
   production shell is unrepresentable. The prelude is baked ahead of time

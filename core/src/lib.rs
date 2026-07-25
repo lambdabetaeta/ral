@@ -8,25 +8,23 @@
 //! # Hosting a `Shell`
 //!
 //! Embedding the language in a host process — the interactive `ral`
-//! REPL, `exarch`, a test binary — goes through [`driver`].  The prelude
+//! REPL, `exarch`, a test binary — goes through [`boot`].  The prelude
 //! is baked ahead of time into a [`postcard`] blob (the annotated IR plus
 //! the typed [`typecheck::Scheme`] list) by the host's build script and
-//! embedded at compile time; [`driver::boot_shell`] then constructs, seeds,
+//! embedded at compile time; [`boot::boot_shell`] then constructs, seeds,
 //! and loads it into a fresh [`Shell`].  The single encode site
-//! ([`driver::bake_prelude_to_out_dir`]) and the single decode site
-//! ([`driver::BakedPrelude`]) live next to one rerun-if-changed list, so
+//! ([`boot::bake_prelude_to_out_dir`]) and the single decode site
+//! ([`boot::BakedPrelude`]) live next to one rerun-if-changed list, so
 //! the schema-evolution hazard — postcard carries no schema, and a field
 //! added to the IR or scheme vocabulary silently invalidates an old bake
 //! — is contained in one file rather than spread across each host.
 
-#![deny(rustdoc::broken_intra_doc_links)]
-
 pub mod ansi;
+pub mod boot;
 pub mod builtins;
 pub mod capability;
 pub(crate) mod child_eval;
 pub mod diagnostic;
-pub mod driver;
 pub mod elaborator;
 pub mod evaluator;
 pub mod exit_hints;
@@ -46,6 +44,7 @@ pub(crate) mod prelude_manifest {
 #[cfg(unix)]
 pub mod engine;
 pub mod process;
+pub mod run;
 pub(crate) mod runtime;
 pub mod sandbox;
 pub mod serial;
@@ -61,7 +60,6 @@ pub(crate) mod test_env;
 pub mod test_helper;
 pub mod text;
 pub mod transport;
-pub mod run;
 pub mod typecheck;
 pub mod types;
 #[cfg(unix)]
@@ -71,11 +69,12 @@ pub(crate) mod wire;
 // helpers, the typed-compile API, and ordinary value / rendering / diagnostic
 // types.  A host imports a run from here; it does not reach the evaluator or
 // syntax layers through the crate root.
-pub use driver::{
-    Captured, HostSurface, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
+pub use boot::HostSurface;
+pub use run::{
+    Captured, RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest, RunStdin,
+    StaticDiagnostics,
 };
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
-pub use run::{StaticDiagnostics, RunLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
     Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError, Settled,

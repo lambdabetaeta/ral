@@ -17,7 +17,7 @@ use batch::run_batch;
 use cli::{BatchOpts, Cli, InteractiveOpts, Mode, inject_arg_terminator};
 
 /// The prelude baked into this binary at build time by `build.rs`.
-pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
+pub(crate) static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelude!();
 
 /// The tag the REPL's `Transport::attach` names as its builtin installer.
 /// The REPL captures its host builtins (`jobs`/`fg`/`bg`/…) as boot-time
@@ -31,7 +31,7 @@ pub(crate) const ENGINE_INSTALLER_TAG: &str = "repl";
 /// surface — the honest absence above, as a full shell.
 #[cfg(unix)]
 fn engine_boot_shell() -> ral_core::Shell {
-    ral_core::driver::boot_shell(
+    ral_core::boot::boot_shell(
         ral_core::io::TerminalState::default(),
         &PRELUDE,
         &ral_core::HostSurface::default(),

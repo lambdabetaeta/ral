@@ -2,7 +2,7 @@
 //! pure/effectful verdict, retained across runs.
 //!
 //! This is substrate extension #2 of the structural-surface design
-//! ([`260620_repl-as-structural-surface`], §2 "The Reactive Worksheet").
+//! (`260620_repl-as-structural-surface`, §2 "The Reactive Worksheet").
 //! After evaluation the `Env` stores [`Value`](ral_core::Value)s, not ASTs,
 //! so the free-reference edges between bindings — computed at compile time —
 //! are discarded.  The worksheet projection needs them back.  Rather than
@@ -16,12 +16,12 @@
 //!
 //! Neither analysis is reimplemented here.  The edges reuse
 //! [`Ast::free_refs`](ral_core::syntax::ast) — the same free-variable
-//! analysis [`crate::syntax::group`] uses to form `LetRec` groups.  The
-//! effect verdict reuses the checker's own IR: a binding whose RHS compiles
-//! to a [`CompKind::Exec`] or [`CompKind::Scope`], or whose `Bind` node
-//! carries a non-[`ByteMode::Empty`] output mode (`rhs_output`), is
-//! effectful — pure otherwise.  This is the mode-system verdict the
-//! typechecker already records, not a new heuristic.
+//! analysis `syntax::group` (private to `ral_core`) uses to form `LetRec`
+//! groups.  The effect verdict reuses the checker's own IR: a binding
+//! whose RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or
+//! whose `Bind` node carries a non-[`ByteMode::Empty`] output mode
+//! (`rhs_output`), is effectful — pure otherwise.  This is the mode-system
+//! verdict the typechecker already records, not a new heuristic.
 //!
 //! The re-flow, node selection/edit-to-rebind, pinning, and fork that the
 //! design also describes are later parcels.  This model is read-only
@@ -141,7 +141,8 @@ impl Worksheet {
 /// A top-level `let name = rhs` with a simple `Name` pattern, yielding the
 /// bound name and its RHS AST.  Destructuring patterns (`let [a, b] = …`)
 /// bind multiple names and are not single worksheet nodes — they are
-/// ignored, matching how [`crate::syntax::group`] only knots `Name` lets.
+/// ignored, matching how `syntax::group` (private to `ral_core`) only
+/// knots `Name` lets.
 fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
     ast.as_name_let()
         .map(|(name, value)| (name, value.item.as_ref()))

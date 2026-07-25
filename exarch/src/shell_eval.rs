@@ -69,7 +69,7 @@ pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
 pub(crate) const LARGE_BINDING_BYTES: u64 = 1024 * 1024;
 
 /// The prelude baked into this binary at build time by `build.rs`.
-pub static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
+pub static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelude!();
 
 /// A successful tool run, broken into named pieces so the caller can
 /// render twice (full / capped) without parsing the rendered form.
@@ -382,7 +382,7 @@ pub(crate) fn run_shell(
             captured,
             timed_out,
         } => {
-            let captured = captured.unwrap_or(ral_core::driver::Captured {
+            let captured = captured.unwrap_or(ral_core::Captured {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             });
@@ -604,7 +604,7 @@ mod tests {
     /// signal-handler installation (which is global, racey under
     /// `cargo test`, and not under test here).
     fn fresh_shell() -> Shell {
-        let mut shell = ral_core::driver::boot_shell(
+        let mut shell = ral_core::boot::boot_shell(
             ral_core::io::TerminalState::default(),
             &PRELUDE,
             &builtins::host_surface(),

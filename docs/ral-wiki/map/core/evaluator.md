@@ -12,7 +12,7 @@ machine's own verbs are crate-private.** Two reach outside the module:
 
 - `eval_top_level(comp, shell)` (`pub(crate)`) — the run-evaluation verb a tool
   call, a REPL run, or a script line settles through. Hosts never call it: they
-  enter through the framed `Shell::run` door (`core/src/driver.rs`, over
+  enter through the framed `Shell::run` door (`core/src/run.rs`, over
   the run spine in `core/src/run.rs`), the sole way into evaluation — its
   `Run` carries a `Program` of source text or a registered hook
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],

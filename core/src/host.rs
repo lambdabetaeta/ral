@@ -3,7 +3,7 @@
 //! The one place to ask what kind of machine ral is running on: the OS,
 //! the architecture and family, the current directory, the user and
 //! their home, the git working-tree state, and the wall-clock time.
-//! Distinct from [`crate::driver`], which embeds and *drives* a `Shell`
+//! Distinct from [`crate::boot`], which embeds and *boots* a `Shell`
 //! in a host *process* — this module reports facts about the host, it
 //! does not run anything in it.
 //!

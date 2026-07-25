@@ -57,7 +57,7 @@ so the seed never drifts from the values it describes.
 The prelude is baked once at build time as a schema-less `postcard` blob of this
 same IR, so any field added to `Comp`, `Val`, or `Pattern` invalidates every
 emitted blob — a hazard pinned with `cargo:rerun-if-changed` in *one* place,
-`bake_prelude_to_out_dir` (`core/src/driver.rs`), since the only encode site and
+`bake_prelude_to_out_dir` (`core/src/boot.rs`), since the only encode site and
 the only decode site (`BakedPrelude`) live there together as the host-embedding
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`

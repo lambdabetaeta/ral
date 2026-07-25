@@ -98,7 +98,7 @@ impl Shell {
     ///
     /// `deny_names` is the broad identity set consulted for vetoes;
     /// `policy_names` is the narrow set that may admit.  See
-    /// [`CommandIdentity::deny_names`](crate::runtime::command::CommandIdentity::deny_names).
+    /// [`CommandIdentity::deny_names_from`](crate::runtime::command::CommandIdentity::deny_names_from).
     ///
     /// # Errors
     /// Returns `Err` if the active grant denies the command outright, or

@@ -4,7 +4,7 @@
 //! ([`Agent::reconcile_service_pins`], [`Agent::check_disk_warn`]), and turn
 //! a nudge-worthy outcome into a self-posted [`Post::Nudge`].
 //!
-//! Stepping the model to quiescence over one item is `agent::deliberate`'s
+//! Stepping the model to quiescence over one item is [`super::deliberate`]'s
 //! job ([`Agent::deliberate`]); this module is what calls it, over and over,
 //! once per item, until the node parks or terminates.  No node is privileged
 //! by special-case code; the distinctions reduce to *position*: the
@@ -87,10 +87,10 @@ impl Agent {
     /// trunk or an engaged returning agent) holds it; a live schedule holds it
     /// until cancelled; otherwise it terminates at quiescence.
     ///
-    /// Per-item panic recovery lives here — the `catch_unwind` records the
+    /// Per-item panic recovery lives here — the [`std::panic::catch_unwind`] records the
     /// failure and continues the loop, so one crashing deliberation never
     /// sinks the agent; eval-side state is already safe, rolled back at the
-    /// engine's own run door (`Shell::run`).  Returns the final
+    /// engine's own run door ([`ral_core::Shell::run`]).  Returns the final
     /// `(outcome, payload)`, where `payload` is the faithful [`FOValue`] a
     /// `reply` carried (else `None`); the interactive trunk ignores it, a
     /// child's spawn site renders it to text, and the headless sink projects
@@ -327,17 +327,17 @@ impl Agent {
     /// registry entry (deliver-then-retire, so a parked parent can never
     /// observe "no live child" without the result already queued) — which
     /// means the worker cannot check staleness itself.  A deferred `spawn`'s
-    /// surface batch (`InboxDeferred`, `shell_eval.rs`) carries the same
+    /// surface batch ([`crate::shell_eval::InboxDeferred`]) carries the same
     /// birth generation for the identical reason: its compose and its push are
     /// two separate steps a `/clear` can fall between, so it cannot decide its
     /// own staleness either.  The consuming edge decides both: a generation
     /// that predates the live registry generation settled across a `/clear`
     /// and belongs to a context that no longer exists.  A `ScheduledWakeup`
     /// is checked earlier, at the inbox's own pop boundary
-    /// (`pop_item`/`to_item`, `bus.rs`), against that inbox's local
+    /// ([`crate::bus::pop_item`]/[`crate::bus::to_item`]), against that inbox's local
     /// clear-epoch rather than this fleet-wide registry generation — its only
     /// producer (the schedule reaper) never has a handle to this registry, so
-    /// staleness is settled before an `Item` is even minted; by the time one
+    /// staleness is settled before an [`Item`] is even minted; by the time one
     /// reaches here it is already current.  Every other item source is
     /// generation-free and admitted unconditionally.
     pub(super) fn admits(&self, item: &Item) -> bool {
@@ -348,7 +348,7 @@ impl Agent {
         }
     }
 
-    /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
+    /// The `park_mode` predicate ([`ParkMode`]), recomputed on every wake.  A
     /// *conversing* agent (interactive and holding no `reply`, so it never
     /// returns) parks [`ParkMode::Held`], immune to cancellation; a returning
     /// agent a human has exchanged a message with instead parks
@@ -399,8 +399,8 @@ impl Agent {
     /// worker registry at the attend loop's ready-boundary pass: one card lists every currently-running durable
     /// service, re-pinned whenever at least one is alive; the pin drops the
     /// moment none remain (cancelled, or settled and reaped). The model
-    /// cannot write or clear this pin itself — `shell_eval::
-    /// reject_protected_pin` refuses that key — so this is the one writer.
+    /// cannot write or clear this pin itself —
+    /// [`shell_eval::reject_protected_pin`] refuses that key — so this is the one writer.
     fn reconcile_service_pins(&self, emit: &Emitter) {
         let live: Vec<crate::agent::ProbedWorker> = self
             .probe_workers()
@@ -435,7 +435,7 @@ impl Agent {
     }
 
     /// Warn once per excursion above the operator's disk-warn ceiling,
-    /// through the operational-note vocabulary (`Kind::SystemNote`) — never
+    /// through the operational-note vocabulary ([`Kind::SystemNote`]) — never
     /// rotates or deletes. A no-op by construction when unconfigured: no
     /// walk, no warning, ever. Amortized to once every
     /// [`DISK_WARN_CHECK_INTERVAL`] ral calls (tracked on the same
@@ -514,11 +514,11 @@ pub(super) fn announce(item: &Item, emit: &Emitter) {
 /// returning agent's result carries — the one place the reduction happens.
 /// Only a deliberate `reply` carries a value up, and it travels as the
 /// faithful [`FOValue`] the model passed; the consuming edge renders it (a
-/// unit or empty-string value settles `Empty`).  A tool-call-free prose
+/// unit or empty-string value settles [`AgentOutcome::Empty`]).  A tool-call-free prose
 /// finish is **not** harvested — there is no scrape — and because `reply` is
 /// the sole return path, a returning agent that never replied did not
 /// complete its contract: it (like a genuinely empty finish) settles
-/// `Failed`.  Every other shape carries only its tag.
+/// [`AgentOutcome::Failed`].  Every other shape carries only its tag.
 fn agent_outcome(
     r: &Result<deliberate::Outcome, ProviderError>,
 ) -> (AgentOutcome, Option<FOValue>) {

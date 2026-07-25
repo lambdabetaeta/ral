@@ -18,6 +18,7 @@
 
 use crate::source::Span;
 use crate::types::Binding;
+use crate::types::Shell;
 use crate::types::Value;
 
 use serde::{Deserialize, Serialize};
@@ -267,5 +268,94 @@ impl fmt::Display for RegisterError {
                 write!(f, "hook '{name}' is already registered")
             }
         }
+    }
+}
+
+// ── The session's registration surface ──────────────────────────────────
+
+impl Shell {
+    /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
+    /// as a named run-entry point in the session-lived hook table.
+    ///
+    /// The hook is stored by `name`; it is never readable as `$name`
+    /// and never invokable as a command — it fires only when the host
+    /// dispatches a [`Program::Hook`](crate::transport::Program) run at a
+    /// lifecycle moment (prompt render, startup, plugin hook, keybinding).
+    ///
+    /// A re-registration of an already-registered `name` short-circuits
+    /// before any scheme inference.  Otherwise the hook is built with the
+    /// same scheme-inference path an ordinary session `let` uses, and
+    /// [`Hook::validate`] is the single check that `value` is a `Block` or
+    /// `Lambda` of the arity `sig` expects.  On success the hook is
+    /// inserted into `context.hooks`, keyed by `name`; on failure the
+    /// caller renders the [`RegisterError`] as a diagnostic at `origin`.
+    ///
+    /// # Errors
+    /// Returns [`RegisterError::AlreadyRegistered`] if a hook named `name`
+    /// already exists, or whatever [`Hook::validate`] raises if `value` is
+    /// not a `Block`/`Lambda` or its arity does not match `sig`.
+    pub fn register_hook(
+        &mut self,
+        name: HookName,
+        value: Value,
+        sig: HookSig,
+        policy: DefaultPolicy,
+        origin: Span,
+    ) -> Result<(), RegisterError> {
+        // Re-registration short-circuits before any scheme inference.
+        if self.mobile.context.hooks.contains_key(&name) {
+            return Err(RegisterError::AlreadyRegistered { name, origin });
+        }
+
+        // Build the Binding with the same scheme inference an ordinary
+        // session `let` uses. A non-thunk value gets no scheme; the
+        // `validate` below is the one gate that rejects it.
+        let arm = match &value {
+            Value::Lambda { param, body, .. } => Some((Some(param), body)),
+            Value::Block { body, .. } => Some((None, body)),
+            _ => None,
+        };
+        let scheme = arm.map(|(param, body)| {
+            crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
+        });
+        let binding = Binding { value, scheme };
+
+        let hook = Hook {
+            binding,
+            sig,
+            policy,
+            origin,
+        };
+        hook.validate(&name)?;
+
+        self.mobile.context.hooks.insert(name, hook);
+        Ok(())
+    }
+
+    /// Return true when a hook with the given `name` is registered.
+    pub fn has_hook(&self, name: &HookName) -> bool {
+        self.mobile.context.hooks.contains_key(name)
+    }
+
+    /// Remove a single registered hook by name, returning whether one was
+    /// present.  The inverse of [`Self::register_hook`] for a one-shot entry
+    /// point (a plugin factory) once it has served its purpose.
+    pub fn unregister_hook(&mut self, name: &HookName) -> bool {
+        self.mobile.context.hooks.remove(name).is_some()
+    }
+
+    /// Remove every hook registered under a plugin's namespace, returning
+    /// the number dropped.  A plugin's hook events and keybinding handlers
+    /// all live under `Namespace::Plugin(plugin_id)`; unloading the plugin
+    /// removes them in one sweep so no dispatchable entry point outlives the
+    /// plugin that owned it.  This is also the rollback path for a load that
+    /// fails after some of its hooks were committed.
+    pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
+        let before = self.mobile.context.hooks.len();
+        self.mobile
+            .context
+            .hooks
+            .retain(|name, _| !matches!(&name.namespace, Namespace::Plugin(id) if id == plugin_id));
+        before - self.mobile.context.hooks.len()
     }
 }

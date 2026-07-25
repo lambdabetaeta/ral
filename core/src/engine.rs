@@ -399,7 +399,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
                     // frames correlate to the run that raised them.
                     worker_current_dispatch.store(id.0, Ordering::Relaxed);
 
-                    let req = crate::driver::RunRequest {
+                    let req = crate::run::RunRequest {
                         run: *run,
                         surface: Some(surface.clone() as SurfaceSink),
                         deferred: Some(deferred.clone() as Arc<dyn DeferredSink>),
@@ -796,12 +796,11 @@ mod engine_session_tests {
     const WAIT: Duration = Duration::from_secs(20);
 
     fn boot() -> Shell {
-        static PRELUDE: std::sync::OnceLock<crate::driver::BakedPrelude> =
-            std::sync::OnceLock::new();
-        crate::driver::boot_shell(
+        static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
+        crate::boot::boot_shell(
             crate::io::TerminalState::default(),
-            PRELUDE.get_or_init(crate::driver::BakedPrelude::bake_runtime),
-            &crate::driver::HostSurface::default(),
+            PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime),
+            &crate::boot::HostSurface::default(),
         )
     }
 
@@ -816,9 +815,9 @@ mod engine_session_tests {
             wall: None,
             deferred_lease: None,
             worker_cap: None,
-            io: crate::driver::RunIo::Capture,
-            terminal: crate::driver::RequestedTerminalAccess::Denied,
-            stdin: crate::driver::RunStdin::Empty,
+            io: crate::run::RunIo::Capture,
+            terminal: crate::run::RequestedTerminalAccess::Denied,
+            stdin: crate::run::RunStdin::Empty,
         }
     }
 

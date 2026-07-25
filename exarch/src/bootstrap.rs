@@ -51,7 +51,7 @@ pub fn boot_shell() -> Shell {
 /// Panics if the embedded agent library fails to load.
 pub(crate) fn exarch_shell(terminal: TerminalState) -> Shell {
     let mut shell =
-        ral_core::driver::boot_shell(terminal, &shell_eval::PRELUDE, &builtins::host_surface());
+        ral_core::boot::boot_shell(terminal, &shell_eval::PRELUDE, &builtins::host_surface());
     builtins::install_agent_library(&mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
     seed_no_color(&mut shell);

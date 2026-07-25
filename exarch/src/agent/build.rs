@@ -38,9 +38,9 @@ const TRUNK_NAME: &str = "main";
 /// The launch configuration threaded into [`Agent::assemble`] — bundled so
 /// the one constructor reads at the call site rather than as a wall of bare
 /// fields.  Fields are `pub(crate)`: a desk handler assembles a spawned
-/// child's `Build` literal directly from its captured `HostServices` (the
+/// child's [`Build`] literal directly from its captured [`crate::fleet::desk::HostServices`] (the
 /// one place lawfully holding the adopted nursery shell), not through
-/// `Agent::fork`/`fork_with`, which stay the ordinary in-thread path.
+/// [`Agent::fork`]/[`Agent::fork_with`], which stay the ordinary in-thread path.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, tool_enabled); not a candidate for a combined enum"
@@ -52,15 +52,15 @@ pub(crate) struct Build {
     /// agent's own children to resolve from in turn.
     pub(crate) system: String,
     /// `system` resolved by [`crate::prompt::BuiltinIndexes::apply`] against
-    /// this same `Build`'s shell, `returns`, and `allow_schedule` — what
+    /// this same [`Build`]'s shell, `returns`, and `allow_schedule` — what
     /// actually reaches the model as [`Agent::system`]. The caller resolves
-    /// it because it needs the resolved length anyway, before this `Build`
-    /// even exists: the log's `SessionStarted` bookend records it, and the
+    /// it because it needs the resolved length anyway, before this [`Build`]
+    /// even exists: the log's [`crate::agent::event::SessionEvent::SessionStarted`] bookend records it, and the
     /// log must exist before the agent it describes does. Resolving once at
     /// the construction site keeps the bookend and the prompt the model
     /// sees structurally the same string.
     pub(crate) system_prompt: String,
-    /// The fleet-shared builtin-index table `system_prompt` was resolved
+    /// The fleet-shared builtin-index table [`Self::system_prompt`] was resolved
     /// from, carried on so the constructed agent's own forks resolve
     /// theirs without a shell.
     pub(crate) indexes: Arc<crate::prompt::BuiltinIndexes>,
@@ -82,7 +82,7 @@ pub(crate) struct Build {
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
     pub(crate) agents: AgentRegistry,
-    /// The operator's disk-warn ceiling, threaded from `config::disk_warn_bytes`
+    /// The operator's disk-warn ceiling, threaded from [`crate::config::disk_warn_bytes`]
     /// at the trunk's construction and inherited verbatim by every fork — a
     /// host setting, not a per-agent choice.
     pub(crate) disk_warn_bytes: Option<u64>,
@@ -487,7 +487,7 @@ impl Agent {
     }
 
     /// Import the creator's model-visible context into `child`, mnemon-style —
-    /// the shared step behind `branch()`.
+    /// the shared step behind [`Self::branch`].
     fn inherit_context(&self, child: &Self) -> io::Result<()> {
         let messages = self.log.lock().inherited_context_messages();
         child
@@ -507,7 +507,7 @@ impl Agent {
     /// Build a trunk against a throwaway sessions root under `dir`, with
     /// default (unrestricted) capabilities, a baked shell, and an empty
     /// scripted provider (tests that drive set their own).  The harness in
-    /// `tests/` uses this to drive [`Self::apply`] and [`Self::attend`] through
+    /// `tests/` uses this to drive [`Self::deliberate`] and [`Self::attend`] through
     /// a [`Provider::scripted`] backend.  Non-interactive, so it terminates at
     /// quiescence like any returning agent and `attend` never blocks.
     ///
@@ -575,11 +575,11 @@ impl Agent {
 impl Drop for Agent {
     /// The one place every teardown path funnels through, whatever got it
     /// here — a normal `reply`/settle, the subtree cascade, or the trunk's
-    /// own `deregister` at end of `attend`. `/clear` never reaches this (it
-    /// rebuilds the shell in place through `Seat::clear`), so it keeps its
+    /// own [`crate::fleet::registry::AgentRegistry::deregister`] at end of `attend`. `/clear` never reaches this (it
+    /// rebuilds the shell in place through [`Seat::clear`]), so it keeps its
     /// own explicit `schedules.clear`; every *other*
     /// teardown has no such call site of its own, and a subtree cascade
-    /// (`AgentRegistry::cancel`/`clear_subtree`) only ever cancels an
+    /// ([`crate::fleet::registry::AgentRegistry::cancel`]/[`crate::fleet::registry::AgentRegistry::clear_subtree`]) only ever cancels an
     /// agent's *eval root* — which reaches a still-running worker
     /// cooperatively through the cancel-scope ancestor chain, but leaves
     /// the registry entries and any armed self-schedule sitting there until

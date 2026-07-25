@@ -40,7 +40,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 /// Host-supplied constructor that a re-exec'd child calls to recover its
-/// [`HostSurface`](crate::driver::HostSurface) and install it on its fresh
+/// [`HostSurface`](crate::boot::HostSurface) and install it on its fresh
 /// shell, so host-owned builtin sets join `CORE_BUILTINS` before any body
 /// is evaluated.
 ///
@@ -59,11 +59,11 @@ use std::sync::OnceLock;
 /// `OnceLock` makes the registration last for the process lifetime
 /// and idempotent on second-time calls — handy for test harnesses
 /// that exercise `main` more than once.
-static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::driver::HostSurface> = OnceLock::new();
+static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::boot::HostSurface> = OnceLock::new();
 
 /// Register the host's builtin surface for re-exec'd children.  Must be
 /// called before [`early_init`]; subsequent calls are silently ignored.
-pub fn set_child_shell_extension(surface: fn() -> crate::driver::HostSurface) {
+pub fn set_child_shell_extension(surface: fn() -> crate::boot::HostSurface) {
     let _ = CHILD_SHELL_HOOK.set(surface);
 }
 
@@ -179,7 +179,7 @@ pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
 /// On Unix the limits are applied before exec via a `pre_exec` hook in
 /// `make_command`; this function is a no-op there.  On Windows, where
 /// `pre_exec` does not exist, a Job Object is attached post-spawn to cap
-/// the process tree at [`ACTIVE_PROCESS_CAP`] processes (preventing fork
+/// the process tree at `ACTIVE_PROCESS_CAP` processes (preventing fork
 /// bombs).
 pub fn apply_child_limits(_child: &crate::process::ChildHandle) {
     #[cfg(windows)]

@@ -58,10 +58,10 @@ use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
-    ral_core::driver::boot_shell(
+    ral_core::boot::boot_shell(
         ral_core::io::TerminalState::default(),
         common::prelude(),
-        &ral_core::driver::HostSurface::default(),
+        &ral_core::boot::HostSurface::default(),
     )
 }
 
@@ -218,8 +218,8 @@ fn external_write_outside_grant_denied_in_block_body() {
 
 /// When the confined external fails, the top-level run installs the
 /// child's failing status into the parent's mobile, not the previous
-/// run's value. Pins the `finish_top_level` "install the chosen status"
-/// step: the parent's `$?` reports the confined failure.
+/// run's value. Pins `eval_top_level`'s `install_mobile` step: the
+/// parent's `$?` reports the confined failure.
 #[test]
 fn denied_external_installs_failing_status_into_mobile() {
     let work = unique_workdir("stat");

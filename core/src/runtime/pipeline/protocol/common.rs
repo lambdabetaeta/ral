@@ -105,7 +105,7 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
 /// connected to the child's read fd / handle, payload is the
 /// serialized message that releases the gate.  The launcher collects
 /// these in a `Vec` and writes them all once after `claim_foreground` /
-/// `release_gate`, so every stage starts together.
+/// `PendingFrame::release`, so every stage starts together.
 pub(crate) struct PendingFrame<T> {
     writer: platform::Channel,
     payload: T,

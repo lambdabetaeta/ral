@@ -21,5 +21,5 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=RAL_VERSION_SUFFIX={suffix}");
 
-    ral_core::driver::bake_prelude_to_out_dir();
+    ral_core::boot::bake_prelude_to_out_dir();
 }

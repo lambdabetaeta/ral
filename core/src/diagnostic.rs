@@ -59,7 +59,7 @@ pub struct CallSite {
 /// source text of the current script for structured spans.
 ///
 /// The durable registry it resolves against — the
-/// [`SourceDb`](crate::source::SourceDb) keyed by [`FileId`] — is session
+/// [`SourceDb`] keyed by [`FileId`] — is session
 /// state, not part of this cursor: the cursor is installed by the current run
 /// and discarded on teardown, while the registry survives so a run's runtime
 /// error still renders after the run returns.

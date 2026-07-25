@@ -1,7 +1,7 @@
 //! REPL session state machine.
 //!
 //! [`Session`] owns the long-lived state of an interactive shell — the
-//! evaluator [`Shell`], the [`JobTable`](crate::jobs::JobTable), the
+//! evaluator [`Shell`](ral_core::Shell), the [`JobTable`](crate::jobs::JobTable), the
 //! line-editing [`Frontend`], any pending buffer queued for re-edit, and
 //! the exit code that will be returned to the OS.
 //!
@@ -80,7 +80,7 @@ impl Session {
         // captured job-control/plugin-lifecycle commands — rides the boot:
         // the typechecker reads this shell's builtin table, and plugins
         // loaded from rc are checked against it.
-        let mut shell = ral_core::driver::boot_shell(
+        let mut shell = ral_core::boot::boot_shell(
             terminal,
             &crate::PRELUDE,
             &ral_core::HostSurface {

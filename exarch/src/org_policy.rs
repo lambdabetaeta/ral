@@ -9,7 +9,7 @@
 //! reads the user's own unusual-provider config — the same vetted shape,
 //! applied to a policy that is IT's rather than the user's. Absent, it
 //! falls back to a small built-in default (mirrors
-//! [`crate::policy::base`]'s embedded capability scripts).
+//! `crate::policy::base`'s embedded capability scripts).
 //!
 //! One file for every front-end on this machine: `` `fetch-url ``'s host
 //! answering function is shared by exarch and synod alike

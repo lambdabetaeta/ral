@@ -9,7 +9,7 @@ anchors: [run, Program, register_hook, RunRequest, RunReport, RunIo, RunState, R
 **A *run* is one top-level evaluation against a persistent `Shell`, and every
 host starts it through one synchronous, runtime-agnostic door** —
 `Shell::run(RunRequest) -> RunReport` in
-[`core/src/driver.rs`](../../../core/src/driver.rs). The request's `Run`
+[`core/src/run.rs`](../../../core/src/run.rs). The request's `Run`
 carries a `Program` sum naming what runs: source text, or a *registered hook*
 applied to first-order arguments — a `Block`/`Lambda` the host stored by name
 in the session-lived hook table (`Shell::register_hook`), so the host conveys

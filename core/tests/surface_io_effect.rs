@@ -42,7 +42,7 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
 }
 
 /// Run one run of `source` with a recording surface sink and return the
-/// settled value alongside the captured events.  Unlike `surface_effect`'s
+/// settled value alongside the captured events.  Unlike `surface_effect.rs`'s
 /// helper this tolerates a failing run result, since several I/O doors
 /// (a failed exec, an aborted write) emit their event *and* surface an
 /// error.

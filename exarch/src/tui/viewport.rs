@@ -507,7 +507,7 @@ impl Viewport {
 
     /// Attach a tool result's magnitude — `text.lines().count()` — to the
     /// call it belongs to: the most-recent call-bearing block, searched
-    /// backward from the tail since `Patch` / `Wrote` side effects may land
+    /// backward from the tail since a `Card` side effect may land
     /// between a call and its result.  The search halts at the first
     /// [`Block::is_call`] — a dialable tool call *or* a plain tool call —
     /// so a plain call's result stops there and never reaches past it to clobber an

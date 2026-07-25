@@ -11,7 +11,7 @@
 //! provider-config ADR.
 //!
 //! The `key` is optional: omitting it declares a **no-auth** local endpoint
-//! (Ollama, llama.cpp, LM Studio), which [`crate::credential`] resolves to an
+//! (Ollama, llama.cpp, LM Studio), which [`crate::provider::credential`] resolves to an
 //! inert placeholder bearer that such servers ignore.
 //!
 //! The config is source-code, so it is evaluated, not parsed: a hand-written
@@ -86,7 +86,7 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
 ///
 /// The config evaluates in a throwaway shell, never the session shell: the
 /// config is a value to compute, not bindings to leak into the agent's scope.
-/// This mirrors [`crate::policy::base`]'s built-in-profile loader, which
+/// This mirrors `crate::policy::base`'s built-in-profile loader, which
 /// likewise runs a capability `.ral` script in a fresh `Shell::new`.
 ///
 /// # Errors

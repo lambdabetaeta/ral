@@ -64,6 +64,16 @@ similar_names = "allow"
 many_single_char_names = "allow"
 disallowed_methods = "deny"
 
+# These docs cite symbols constantly, so a citation has to be checkable.
+# A bracketed link naming an item that does not exist is a rot signal, not a
+# style nit: it is the only way a rename or deletion gets caught mechanically,
+# so it fails the build.  Linking a private item is the opposite case — the
+# link resolves, and prose explaining internal structure has every reason to
+# name internal items; those pages are read with `--document-private-items`.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "allow"
+
 [profile.release]
 lto = true
 codegen-units = 1

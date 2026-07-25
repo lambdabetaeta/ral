@@ -949,7 +949,7 @@ impl Elaborator {
     /// hoisted into `binds` exactly like `to_val` does for other effectful
     /// sub-expressions, so `$[a + b > 0]` unfolds to a flat sequence of
     /// `Comp::Bind` nodes at the enclosing statement boundary, with
-    /// `PrimOp` leaves at the bottom.  There is no specialised IR for
+    /// primitive-operator leaves at the bottom.  There is no specialised IR for
     /// expressions — complex values decompose into CBPV primitives.
     fn lower_expr(&mut self, expr: &Expr, binds: &mut Vec<(IrPattern, Comp)>) -> Comp {
         // `And` / `Or` are the only short-circuiting forms; everything

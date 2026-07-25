@@ -299,7 +299,7 @@ impl WorkerRegistry {
     /// its handle — cannot be raced by a sibling `reserve` reading the same
     /// free seat in the gap before it does. The measure is running entries
     /// (`handle.state` still [`HandleState::Running`], each briefly locked
-    /// under the registry lock — the order [`Self::advance_epoch`]
+    /// under the registry lock — the order [`Self::sweep_retention`]
     /// documents) plus every seat already reserved and not yet filed or
     /// released. Under `cap = Some(c)` a reservation is refused once that
     /// count reaches `c`; under `cap = None` (an uncapped frame — the

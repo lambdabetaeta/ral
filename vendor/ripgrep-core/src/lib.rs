@@ -41,7 +41,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Run the vendored ripgrep core with explicit argv entries.
 ///
-/// `rawargs` should not include argv[0]; pass only the user arguments.
+/// `rawargs` should not include `argv[0]`; pass only the user arguments.
 pub fn run_cli<I, O>(rawargs: I) -> u8
 where
     I: IntoIterator<Item = O>,

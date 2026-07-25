@@ -20,7 +20,7 @@ use super::vet::{ExecImage, SpawnPlan};
 /// `apply_env` exactly like a host external.
 ///
 /// Invoked by [`super::run`] and by the pipeline stage builder
-/// (`launch_external_stage`); it is never spawned here.
+/// (`launch_external_stage_direct`); it is never spawned here.
 pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::process::Launch> {
     // A guest jail IS the guest's sandbox: bwrap needs unprivileged user
     // namespaces, which the guest's boot-time sysctl turns off, so a

@@ -327,7 +327,7 @@ impl Row {
 /// this same diff through the one [`value_to_io`]/[`io_card`] decode,
 /// whatever wrote it: a `>` redirect (core composes the `` `io `` value
 /// itself) or `edit-hash`/`edit-replace` (`shell_eval/builtins.rs`'s
-/// `surface_write` composes the identical value by hand, since those
+/// [`crate::shell_eval::builtins::surface_write`] composes the identical value by hand, since those
 /// builtins write below the redirect frame and so must self-report).
 pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     use similar::{ChangeTag, TextDiff};
@@ -511,7 +511,7 @@ pub enum IoEvent {
 
 /// Which `|>` effect a surfaced observation is — the census bucket it counts
 /// toward when a coalesced run reduces to its tally (the L0 census in
-/// [`super::tui`]).
+/// `tui::group`).
 ///
 /// Reads, execs, and greps fold into a run and tally here; a
 /// write is a barrier that ends a run, so it is not an observation kind — it is
@@ -751,7 +751,7 @@ pub fn reads_card(reads: &[String]) -> Option<Card> {
 /// grep -rn, git status`), and a per-command status would be per-event noise
 /// on that line.  The status is not lost — it rides the bus in each
 /// `Kind::Io`'s structured event and reaches the transcript via
-/// `transcript::event_record`; only this grouped *presentation* omits it.
+/// [`crate::agent::transcript::event_record`]; only this grouped *presentation* omits it.
 pub fn execs_card(execs: &[IoEvent]) -> Option<Card> {
     if execs.is_empty() {
         return None;
@@ -1040,7 +1040,7 @@ fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
 /// Compose every live durable service into one ledger card — one
 /// [`Mark::Fields`] row per service, labelled by the id `service-handle`
 /// takes and valued by its birth description and age.  Host-authored only
-/// (`Agent::reconcile_service_pins`): a durable service's whole bound is
+/// ([`Agent::reconcile_service_pins`](crate::agent::Agent::reconcile_service_pins)): a durable service's whole bound is
 /// legibility, and this pin is what makes the live set legible.
 pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card {
     let rows = services

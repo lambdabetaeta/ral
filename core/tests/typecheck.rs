@@ -938,7 +938,7 @@ fn within_handler_arity_mismatch_is_static_error() {
 /// Non-literal handler value falls through gracefully.
 ///
 /// The value `$h` is a `Val::Variable`, not a literal `Val::Thunk`, so
-/// `collect_within_handler_bindings` produces no binding for `foo`.  The
+/// `infer_within_opts` produces no binding for `foo`.  The
 /// body's call `foo 1` falls through to the builtin registry / external
 /// path and typechecks without error (the name is unrecognised so a fresh
 /// type is assigned).

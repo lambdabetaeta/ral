@@ -469,7 +469,7 @@ pub(super) fn try_error_record() -> Ty {
 }
 
 /// The audit-node record produced by `audit { … }`.  Mirrors the value
-/// shape `AuditNode::to_value` materialises at runtime: every audit
+/// shape `ExecNode::to_value` materialises at runtime: every audit
 /// frame's metadata plus the body's return value (typed `α`) and a list
 /// of child nodes (each typed as a fresh map for forward compatibility).
 pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {

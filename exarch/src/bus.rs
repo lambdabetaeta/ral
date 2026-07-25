@@ -5,19 +5,19 @@
 //!
 //! The attend loop evaluates its park verdict *while holding its inbox queue
 //! mutex* — [`Inbox::next_or_idle`] recomputes it under the lock on every
-//! wake — and the verdict reads the fleet's `AgentRegistry` and the
-//! session's `ScheduleRegistry`.  The process-wide lock order is therefore
+//! wake — and the verdict reads the fleet's [`crate::fleet::registry::AgentRegistry`] and the
+//! session's [`crate::fleet::schedule::ScheduleRegistry`].  The process-wide lock order is therefore
 //! **inbox → registry**, and the converse is forbidden: never post to or
 //! wake a [`Mailbox`] while holding a registry lock.  Clone the mailbox out,
-//! drop the guard, then push — `AgentRegistry::message` and
-//! `ScheduleRegistry::fire` are the pattern.
+//! drop the guard, then push — [`crate::fleet::registry::AgentRegistry::message`] and
+//! [`crate::fleet::schedule::ScheduleRegistry::fire`] are the pattern.
 //!
 //! The two locks also shape how a producer must *sequence* its effects.
-//! Each `next_or_idle` iteration computes the verdict first and pops the
+//! Each [`Inbox::next_or_idle`] iteration computes the verdict first and pops the
 //! queue second, so a producer whose settling both changes a verdict input
 //! and delivers a message — a child retiring its registry entry and posting
 //! its result — must deliver first (deliver-then-retire,
-//! `tools::agent::spawn_async`): whichever side of the retirement the
+//! [`crate::shell_eval::tools::agent::spawn_async`]): whichever side of the retirement the
 //! verdict reads, the consumer either still parks for the child or finds
 //! the result already queued, and can never quiesce between the two facts.
 pub mod card;
@@ -69,7 +69,7 @@ pub enum Boundary {
 }
 
 /// How [`Inbox::next_or_idle`] should treat an empty inbox — the computed
-/// `should_park` verdict.
+/// [`Agent::park_mode`](crate::agent::Agent::park_mode) verdict.
 ///
 /// Re-evaluated on every wake: a human exchange engages a parked agent, a
 /// live child settles, or a schedule can arm or disarm.
@@ -128,7 +128,7 @@ pub enum AgentOutcome {
 impl AgentOutcome {
     /// The `(body, error)` a `↘` subagent breadcrumb shows: body text on a
     /// completed run, the reason in the header suffix otherwise.  Used by both
-    /// the synchronous child's `Kind::SubagentDone` and the async result's
+    /// the synchronous child's [`Kind::SubagentDone`] and the async result's
     /// fresh item, so the two render as the identical dialable block.
     pub fn breadcrumb(&self, text: &str) -> (String, Option<String>) {
         match self {
@@ -241,7 +241,7 @@ pub enum Post {
         /// waits is dropped rather than stacked.
         pending: Arc<AtomicBool>,
         /// This inbox's own clear-epoch ([`Mailbox::epoch`]) at the moment
-        /// the reaper thread composed this message (`ScheduleRegistry::fire`,
+        /// the reaper thread composed this message ([`crate::fleet::schedule::ScheduleRegistry::fire`],
         /// `schedule.rs`) — read and stamped before the registry lock that
         /// guards the entry is dropped, so a fire that then straddles a
         /// `/clear` before it reaches `push` still carries the epoch as it
@@ -288,7 +288,7 @@ pub enum Post {
         /// The fleet `AgentRegistry` generation the deferred sink captured at
         /// construction (`InboxDeferred`, `shell_eval.rs`) — the same birth
         /// generation an [`AgentResult`] carries. Checked at the same
-        /// consuming edge ([`Agent::admits`](crate::agent::Agent)) against the
+        /// consuming edge ([`Agent::admits`](crate::agent::Agent::admits)) against the
         /// live generation, so a batch flushed after a `/clear` is dropped
         /// there rather than posted-or-withheld by the worker thread itself.
         generation: u64,
@@ -398,9 +398,9 @@ impl std::fmt::Display for InboxReject {
 /// worker settles un-awaited: which spawn finished, how it settled, and where
 /// its output now lives.  This is the "host notifies, don't poll" wake — terse
 /// and in the register the model already sees from a subagent breadcrumb.  The
-/// worker's surfaced cards have already reached the rail through the
-/// `commit_turn` decode; the value record (a return value, captured bytes) is
-/// pulled on demand with `await $h`.
+/// worker's surfaced cards have already reached the rail through
+/// `agent::attend::announce`'s decode; the value record (a return
+/// value, captured bytes) is pulled on demand with `await $h`.
 fn surface_notice(values: &[Value]) -> String {
     use crate::bus::card::DoneOutcome;
     let settled = match values
@@ -450,15 +450,16 @@ pub enum Item {
     /// [`Control`]: crate::agent::Control
     Command(String),
     /// A detached `spawn` worker flushed its deferred `surface` batch at
-    /// completion.  The `commit_turn` arm decodes `values` with the shared
-    /// surface decoder and feeds the resulting cards/io into the *root*
-    /// viewport (the carried `id`) exactly as a live tool run would; the
-    /// model is woken with [`Self::text`]'s notice.
+    /// completion.  `agent::attend::announce`'s arm for this variant
+    /// decodes `values` with the shared surface decoder and feeds the
+    /// resulting cards/io into the *root* viewport (the carried `id`) exactly
+    /// as a live tool run would; the model is woken with [`Self::text`]'s
+    /// notice.
     Surface {
         id: AgentId,
         values: Vec<Value>,
         /// The batch's birth generation, carried through unchanged from
-        /// [`Post::Surface`] for [`Agent::admits`](crate::agent::Agent) to
+        /// [`Post::Surface`] for [`Agent::admits`](crate::agent::Agent::admits) to
         /// check.
         generation: u64,
     },
@@ -503,7 +504,7 @@ struct Shared {
     waiting_for_input: AtomicBool,
     /// This inbox's clear-epoch, bumped by [`Inbox::clear`] under the same
     /// queue mutex as the drain it runs alongside. A [`ScheduledWakeup`]
-    /// composed on the reaper thread (`ScheduleRegistry::fire`, `schedule.rs`)
+    /// composed on the reaper thread ([`crate::fleet::schedule::ScheduleRegistry::fire`], `schedule.rs`)
     /// cannot check staleness itself — its compose and its push are two
     /// separate steps that a `/clear` can fall between — so it stamps
     /// [`Mailbox::epoch`]'s value at compose time instead, and the pop-time
@@ -532,7 +533,8 @@ impl Shared {
     /// panicked holder leaves the queue in a perfectly usable state; the
     /// alternative (propagating the poison to every subsequent producer)
     /// would turn one unrelated panic into a permanently dead inbox for the
-    /// whole fleet.  The same policy as `ScheduleRegistry::lock`
+    /// whole fleet.  The same policy as
+    /// [`crate::fleet::schedule::ScheduleRegistry::lock`]
     /// (`schedule.rs`).
     fn lock(&self) -> MutexGuard<'_, VecDeque<Post>> {
         self.queue.lock_ignore_poison()
@@ -625,7 +627,7 @@ const PARK_POLL: Duration = Duration::from_millis(100);
 /// Producers hold a
 /// `Mailbox`, never the [`Inbox`]: a schedule re-arms through its own
 /// session's `Mailbox`, a finishing child posts its one result through its
-/// parent's `Mailbox` ([`Agent::outbox`](crate::agent::Agent)), a
+/// parent's `Mailbox` ([`Agent::mailbox`](crate::agent::Agent::mailbox)), a
 /// `spawn` worker flushes its surface batch through the owning session's
 /// `Mailbox`.  The registry holds each peer's `Mailbox` so the frontend can
 /// steer a focused tab and the `message` tool can deliver a marked note
@@ -1061,7 +1063,7 @@ pub struct Event {
     pub kind: Kind,
 }
 
-/// Prefix of the `Kind::Error` message [`pump`] emits when the worker thread
+/// Prefix of the [`Kind::Error`] message [`pump`] emits when the worker thread
 /// unwinds.
 ///
 /// Shared so a sink can recognise a recovered panic without
@@ -1093,7 +1095,7 @@ pub enum Kind {
     Thinking(String),
     /// Ends the current streaming step: the frontend flushes whatever
     /// `Token`/`Thinking` text is still open into a committed block
-    /// (`viewport::close_boundary`) before the next step or exchange begins.
+    /// (`tui::viewport::close_boundary`) before the next step or exchange begins.
     /// Interactive-only chrome — no transcript record, since it carries no
     /// content of its own.
     Boundary,
@@ -1109,7 +1111,7 @@ pub enum Kind {
         /// Steps in the current segment: restarts at 1 each time this
         /// attend loop resumes (e.g. after an async-spawned block settles),
         /// so a run-wide step count is the consumer's own running tally
-        /// (`headless::Headless::steps`), not this field.
+        /// ([`crate::headless::Headless::steps`]), not this field.
         n: u32,
         tuning: Tuning,
     },
@@ -1164,7 +1166,7 @@ pub enum Kind {
     /// [`crate::agent::transcript`].
     HarnessResult(String),
     /// The text of an item as it enters context — a human prompt, a wakeup,
-    /// or a peer agent message alike (`agent::announce`), despite the name;
+    /// or a peer agent message alike (`agent::attend::announce`), despite the name;
     /// an agent result renders through [`Kind::SubagentDone`] instead.
     /// Interactive-only: no transcript record, and the TUI disarms its
     /// post-cancel drain guard on the first one after a clear.
@@ -1189,7 +1191,7 @@ pub enum Kind {
     },
     ProviderError(ProviderErrorRecord),
     /// Emitted by the `agent` tool when a subagent finishes — *after*
-    /// the child's own `Kind::Died` and *before* the spawn rejoins the
+    /// the child's own [`Kind::Died`] and *before* the spawn rejoins the
     /// parent's tool result.  The event's session id is the parent
     /// (typically root); the TUI lands the breadcrumb in root's
     /// scrollback regardless of nesting depth, since subagent output
@@ -1908,7 +1910,7 @@ pub(crate) enum Pass {
 
 /// One pass of the explicit-done completion contract — the single place that
 /// decides when an exchange's event loop ends, shared by the headless default
-/// [`Sink::drive`] and the TUI's `drive_events`.
+/// [`Sink::drive`] and the TUI's `tui_loop::ui_loop`.
 ///
 /// Drains up to `max` available events through `handle`, then reports the
 /// channel's state. **Completion is `done` being set — the worker finished —
@@ -2252,7 +2254,7 @@ mod tests {
         );
     }
 
-    /// `ParkMode::Engaged` — a non-conversing agent a human has exchanged a
+    /// [`ParkMode::Engaged`] — a non-conversing agent a human has exchanged a
     /// message with — grants no cancellation immunity: `agent-cancel`/the
     /// lease expiring while the exchange is recent must still kill it, or
     /// its `HeldByChildren` parent would sit waiting on a cancelled-result
@@ -2332,8 +2334,8 @@ mod tests {
         );
     }
 
-    /// The headless default [`Sink::drive`] and the TUI's `drive_events` share
-    /// one completion contract: [`drain_pass`]. It stops when the worker is
+    /// The headless default [`Sink::drive`] and the TUI's `tui_loop::ui_loop`
+    /// share one completion contract: [`drain_pass`]. It stops when the worker is
     /// *done*, never when the channel empties or disconnects — so a detached
     /// worker holding a sender clone cannot keep an exchange alive. Pinning the
     /// shared primitive directly is what keeps the two drivers from drifting on
@@ -2740,8 +2742,8 @@ mod tests {
 
     /// The run meter counts a muted child's usage.  Accounting follows the
     /// event, not its emitter: a muted child's display channel is dead (its
-    /// receiver dropped, so a sink never sees its `Kind::Usage`), yet it shares
-    /// the root's run meter through `muted_child`, so `bus.usage_total()` sums
+    /// receiver dropped, so a sink never sees its [`Kind::Usage`]), yet it shares
+    /// the root's run meter through [`Emitter::muted_child`], so `bus.usage_total()` sums
     /// the root *and* the muted child — exactly the headless under-reporting
     /// this fixes.
     #[test]
@@ -2830,7 +2832,7 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// The schedule race (`ScheduleRegistry::fire`, `schedule.rs`): a wakeup
+    /// The schedule race ([`crate::fleet::schedule::ScheduleRegistry::fire`], `schedule.rs`): a wakeup
     /// composed while a stale epoch was still current, then pushed after an
     /// intervening `/clear` already bumped it, is refused at the pop rather
     /// than surfacing into the rebuilt context.
@@ -3085,7 +3087,7 @@ mod tests {
     }
 
     /// A send past a dropped receiver is rejected, not silently grown — the
-    /// `Emitter::muted_child` pattern relies on this to swallow a display
+    /// [`Emitter::muted_child`] pattern relies on this to swallow a display
     /// stream forever without leaking the queue behind it.
     #[test]
     fn bus_sender_send_past_dropped_receiver_is_rejected_not_grown() {

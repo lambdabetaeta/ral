@@ -65,7 +65,7 @@ pub(crate) enum Surface {
 /// Buffer state to pre-fill the editor with on the next [`Frontend::read`].
 ///
 /// `cursor` is a **character** offset into `text` — matching the units
-/// [`ral_core::types::EditorState`] uses on the plugin surface.  The
+/// [`crate::repl::plugin_editor::EditorState`] uses on the plugin surface.  The
 /// frontend converts to a byte offset at the rustyline boundary;
 /// out-of-range values are clamped.
 #[derive(Clone, Debug, Default)]

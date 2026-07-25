@@ -741,7 +741,7 @@ impl Drop for ForegroundGuard {
 /// (its pgid differs from ours) this recreates that delivery, so the
 /// child dies and the evaluator's blocking `wait` returns.  When the
 /// shell itself owns the terminal there is no external process to
-/// signal — the frontend's cooperative [`interrupt`](super::interrupt)
+/// signal — the frontend's cooperative [`check`](super::check)
 /// unwinds the in-process eval instead.
 ///
 /// Signalling *another* group never touches ral's own escalating

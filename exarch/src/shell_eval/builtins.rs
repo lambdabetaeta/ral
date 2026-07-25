@@ -604,7 +604,7 @@ fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 
 /// The largest either snapshot of an edit may reach before its `write` card
 /// falls back to a plain listing instead of a whole-file diff — mirrors core's
-/// write-preview cap (`PREVIEW_CAP` in `runtime/command/redirect.rs`), so an
+/// write-preview cap (`PREVIEW_CAP` in `core/src/runtime/command/redirect.rs`), so an
 /// `edit-hash`/`edit-replace` write and a committed `>` over the same file make the
 /// identical diff-vs-listing choice.
 const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;

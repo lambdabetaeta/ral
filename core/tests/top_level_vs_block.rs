@@ -33,10 +33,10 @@ use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, 
 /// `exarch::bootstrap::boot_shell()` without the TUI / signal-handler
 /// pieces, which are irrelevant to boundary semantics.
 fn fresh_shell() -> Shell {
-    ral_core::driver::boot_shell(
+    ral_core::boot::boot_shell(
         ral_core::io::TerminalState::default(),
         common::prelude(),
-        &ral_core::driver::HostSurface::default(),
+        &ral_core::boot::HostSurface::default(),
     )
 }
 
@@ -161,7 +161,7 @@ fn top_level_partial_effects_persist_on_error() {
 
 /// `cd` in one top-level run is visible to subsequent runs: a later
 /// `cwd` reflects the directory set by the earlier `cd`.  This locks
-/// in that `logical_cwd` lives in the mobile and rides the top-level
+/// in that `context.cwd` lives in the mobile and rides the top-level
 /// install-mobile contract.
 #[test]
 fn top_level_cd_persists_across_calls() {
@@ -514,7 +514,7 @@ fn poll_on_a_cancelled_handle_errors() {
 }
 
 /// `cd` under an active fs projection persists into the next run, same
-/// as without one.  Validates that `logical_cwd` rides the mobile through
+/// as without one.  Validates that `context.cwd` rides the mobile through
 /// the (now always local) top-level dispatch under a projection.
 #[cfg(unix)]
 #[test]

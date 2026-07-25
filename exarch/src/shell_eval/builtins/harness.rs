@@ -683,7 +683,7 @@ mod tests {
         assert!(permission_label(&v).is_err());
     }
 
-    /// A unique scratch directory per test, mirroring `tests/agent_apply.rs`'s
+    /// A unique scratch directory per test, mirroring `tests/agent_deliberate.rs`'s
     /// own `tmp` helper.
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p =

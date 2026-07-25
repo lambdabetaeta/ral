@@ -158,8 +158,8 @@ pub struct ExecMap {
 /// Filesystem access policy within a `grant` block.
 ///
 /// `deny_paths` carves out subtrees that no read, write, link, or
-/// rename may touch, even when a covering `read_prefix` or
-/// `write_prefix` would otherwise admit them.  Treated as subpath
+/// rename may touch, even when a covering `read_prefixes` or
+/// `write_prefixes` entry would otherwise admit them.  Treated as subpath
 /// matches: a single file path denies just that file, a directory
 /// path denies everything under it.
 ///

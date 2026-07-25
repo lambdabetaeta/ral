@@ -3,7 +3,7 @@
 //! Everywhere else in the workspace that needs to retarget fd 0/1/2 (or a
 //! shell-dictated redirect fd) routes through [`clobber_slot`] rather than
 //! calling `libc::dup2` directly — the shell's redirect engine
-//! ([`crate::runtime::command::redirect`]) and exarch's stderr-to-log
+//! ([`crate::runtime::command::apply_redirects`]) and exarch's stderr-to-log
 //! guard both go through here.
 
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
