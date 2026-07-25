@@ -14,7 +14,7 @@ use rustix::process::{Pid, Signal, getpid, kill_process_group};
 use rustix::system::{RebootCommand, reboot};
 use rustix::time::{ClockId, Timespec, clock_settime};
 
-use crate::boot::Boot;
+use crate::boot::{Boot, Export};
 use crate::engine;
 use crate::mounts;
 use crate::reap::{self, Waking};
@@ -86,11 +86,18 @@ pub fn serve() -> Result<Infallible, String> {
     for filesystem in mounts::plan(&boot) {
         filesystem.apply()?;
     }
+    // Which of the two the host chose is worth one line in its own log: it is
+    // the difference between the two hypervisors of §2, and the first thing
+    // to know when the workspace misbehaves.
+    let export = match &boot.workspace {
+        Export::Virtiofs { tag } => format!("virtiofs tag `{tag}`"),
+        Export::Plan9 { name, port } => {
+            format!("the host's 9p share `{name}`, over vsock port {port}")
+        }
+    };
     eprintln!(
-        "ral-daemon: guest filesystems up; the granted folder is mounted at {} from virtiofs tag \
-         `{}`",
-        mounts::WORK,
-        boot.workspace
+        "ral-daemon: guest filesystems up; the granted folder is mounted at {} from {export}",
+        mounts::WORK
     );
 
     // Before any external code can run: the jail's whole cross-uid-ptrace
@@ -188,7 +195,8 @@ fn halt(engine: Option<Pid>, why: &str) -> Result<Infallible, String> {
         let _ = kill_process_group(engine, Signal::KILL);
     }
     // Everything the guest wrote to the workspace should reach the host
-    // before the virtiofs export goes away with the machine.
+    // before the export carrying it — a virtiofs share or a 9p connection —
+    // goes away with the machine.
     rustix::fs::sync();
     reboot(RebootCommand::PowerOff)
         .map_err(|err| format!("could not power the machine off: {err}"))?;

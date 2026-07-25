@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 #
-# Build the synod guest rootfs image: an Ubuntu 26.04 LTS (resolute) arm64
-# "office userland" ext4 image (SYNOD.md §7). The guest has no network, so this
-# image is the whole package manager — everything office work needs must already
-# be inside it.
+# Build the synod guest rootfs image: an Ubuntu 26.04 LTS (resolute) "office
+# userland" ext4 image (SYNOD.md §7), for either of §2's two guests — arm64
+# for Virtualization.framework on macOS, or amd64 for Hyper-V on Windows.
+# `ARCH` selects which, arm64 by default; the package set is identical, because
+# the userland is identical. The guest has no network, so this image is the
+# whole package manager — everything office work needs must already be inside
+# it.
 #
-# The entire build runs inside one native-arm64 ubuntu:24.04 container (macOS
-# has no mmdebstrap or ext4 tooling). Inside it: mmdebstrap assembles the rootfs
-# tree from packages.txt, then `mkfs.ext4 -d` turns that directory straight into
-# an image with no loop mount and no host privileges on the *image* step. The
-# container itself is --privileged only because mmdebstrap's root mode and the
-# chroot spot-checks bind-mount /proc,/sys,/dev.
+# The entire build runs inside one ubuntu:24.04 container of the image's own
+# architecture (neither macOS nor Windows has mmdebstrap or ext4 tooling). That
+# base is multi-arch, so podman pulls the host's native build, and the first
+# check inside refuses a mismatch: mmdebstrap can assemble a foreign tree, but
+# the `fc-cache` pass and every chroot spot-check below EXECUTE guest binaries,
+# which without qemu-user under binfmt they cannot. Inside it: mmdebstrap
+# assembles the rootfs tree from packages.txt, then `mkfs.ext4 -d` turns that
+# directory straight into an image with no loop mount and no host privileges on
+# the *image* step. The container itself is --privileged only because
+# mmdebstrap's root mode and the chroot spot-checks bind-mount /proc,/sys,/dev.
 #
-# Outputs (in vm-image/out/, on the Mac via a bind mount):
+# The output is a raw ext4 image on BOTH arches, deliberately: Hyper-V needs the
+# image wrapped as a fixed VHD, and that wrapping — a footer appended to these
+# very bytes — is done in Rust by the Windows backend at first boot, not here.
+# See README ("What this pipeline does NOT do") before adding it a second time.
+#
+# Outputs (in vm-image/out/, on the host via a bind mount):
 #   rootfs.img               the ext4 image
 #   rootfs.img.sha256        its checksum
 #   packages-manifest.txt    dpkg -l capture — the exact version pin record
@@ -27,14 +39,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="$SCRIPT_DIR/out"
 
 # --- Knobs (env-overridable) -------------------------------------------------
-# arm64 lives on ports.ubuntu.com, NOT archive.ubuntu.com. For bit-for-bit
-# reproducibility, point MIRROR at a snapshot.ubuntu.com timestamp instead; the
-# live ports mirror is used by default for reliability, and packages-manifest.txt
-# records the exact versions that were pulled either way.
 SUITE="${SUITE:-resolute}"   # Ubuntu 26.04 LTS (the current LTS)
-MIRROR="${MIRROR:-http://ports.ubuntu.com/ubuntu-ports}"
-ARCH="${ARCH:-arm64}"
+ARCH="${ARCH:-arm64}"        # arm64 (macOS/VZ) | amd64 (Windows/Hyper-V)
 BASE_IMAGE="${BASE_IMAGE:-docker.io/library/ubuntu:24.04}"
+# The mirror follows from the architecture, and the split is not symmetric:
+# arm64 lives on ports.ubuntu.com and amd64 on archive.ubuntu.com, and neither
+# serves the other. Derived here, exactly as build-boot.sh derives it, so the
+# two pipelines cannot disagree about where one suite comes from. For
+# bit-for-bit reproducibility, point MIRROR at a snapshot.ubuntu.com timestamp
+# instead — an explicit MIRROR always wins over the derived one — and
+# packages-manifest.txt records the exact versions that were pulled either way.
+case "$ARCH" in
+  arm64) ARCH_MIRROR="http://ports.ubuntu.com/ubuntu-ports" ;;
+  amd64) ARCH_MIRROR="http://archive.ubuntu.com/ubuntu" ;;
+  *) echo "ARCH=$ARCH is neither of synod's two guests (SYNOD.md §2)." >&2
+     echo "Did you mean ARCH=arm64 (macOS, Virtualization.framework) or" >&2
+     echo "ARCH=amd64 (Windows, Hyper-V)? Debian architecture names, not" >&2
+     echo "uname's: 'amd64', not 'x86_64'." >&2
+     exit 1 ;;
+esac
+MIRROR="${MIRROR:-$ARCH_MIRROR}"
 # rootfs.img is the RO overlay LOWER layer (§7): immutable at the block layer,
 # it never grows — all guest writes land in the overlay UPPER on session.img.
 # So the image is sized SNUGLY: mkfs at a generous size, then `resize2fs -M`
@@ -51,6 +75,16 @@ export SUITE MIRROR ARCH ZSTD_LEVEL FS_UUID SOURCE_DATE_EPOCH
 
 command -v podman >/dev/null || { echo "podman not found" >&2; exit 1; }
 
+# See the same block in `build-boot.sh` for why a Windows host needs both of
+# these: MSYS would rewrite the container side of every `-v` argument, and
+# podman wants the host side in Windows' own spelling.  A no-op off Windows.
+if command -v cygpath >/dev/null 2>&1; then
+  export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+  host_path() { cygpath -w "$1"; }
+else
+  host_path() { printf '%s' "$1"; }
+fi
+
 echo ">> building $SUITE/$ARCH office rootfs via $BASE_IMAGE"
 echo ">> mirror: $MIRROR"
 START=$(date +%s)
@@ -59,8 +93,8 @@ podman run --rm -i \
   --privileged \
   --security-opt label=disable \
   -e SUITE -e MIRROR -e ARCH -e ZSTD_LEVEL -e FS_UUID -e SOURCE_DATE_EPOCH \
-  -v "$OUT_DIR:/out" \
-  -v "$SCRIPT_DIR/packages.txt:/packages.txt:ro" \
+  -v "$(host_path "$OUT_DIR"):/out" \
+  -v "$(host_path "$SCRIPT_DIR/packages.txt"):/packages.txt:ro" \
   "$BASE_IMAGE" \
   bash -euo pipefail -s <<'INNER'
 export DEBIAN_FRONTEND=noninteractive
@@ -68,6 +102,25 @@ export DEBIAN_FRONTEND=noninteractive
 echo ">> [container] installing build tooling"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends mmdebstrap e2fsprogs zstd >/dev/null
+
+# --- The container must BE the image's architecture --------------------------
+# mmdebstrap alone would happily assemble a foreign-architecture tree, but this
+# build does not stop at a tree: `fc-cache -f` and every spot-check below run
+# guest binaries under chroot, and a foreign binary there fails with a bare
+# "Exec format error" unless qemu-user is registered with binfmt_misc on the
+# podman machine. Better to say so here, in one sentence, than to leave that
+# error to be deciphered twenty minutes into an apt run.
+NATIVE_ARCH=$(dpkg --print-architecture)
+if [ "$NATIVE_ARCH" != "$ARCH" ]; then
+  printf 'error: ARCH=%s was asked for, but this container is %s.\n' "$ARCH" "$NATIVE_ARCH" >&2
+  printf '%s\n' \
+    "The rootfs is built on the host that will boot it — arm64 on an" \
+    "Apple-silicon Mac, amd64 on an x86_64 host (a Linux box, or WSL2 on the" \
+    "Windows machine) — because fc-cache and the chroot spot-checks execute" \
+    "the guest's own binaries. Build the $ARCH image there, or drop ARCH to" \
+    "build for this host." >&2
+  exit 1
+fi
 
 # Package list: strip comments and blanks, comma-join for mmdebstrap --include.
 INCLUDE=$(grep -v '^#' /packages.txt | grep -v '^[[:space:]]*$' | paste -sd,)

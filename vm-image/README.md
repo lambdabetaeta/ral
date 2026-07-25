@@ -1,8 +1,9 @@
 # vm-image — the synod guest rootfs
 
 This directory builds `rootfs.img`: the **read-only Ubuntu 26.04 LTS (resolute)
-arm64 office userland** that synod boots inside its guest VM. It is one of the
-three disks in SYNOD.md §7's stack:
+office userland** that synod boots inside its guest VM, for either of §2's two
+guests — **arm64** for Virtualization.framework on macOS, **amd64** for Hyper-V
+on Windows. It is one of the three disks in SYNOD.md §7's stack:
 
 > §7 pins **26.04 LTS**, the current LTS — a question this pipeline settled by
 > validating the package set identically against 24.04 and 26.04. The suite
@@ -11,8 +12,8 @@ three disks in SYNOD.md §7's stack:
 
 ```
 session.img  (RW, per-session)   overlayfs upper: /work + guest scratch
-rootfs.img   (RO, pinned)   <--   THIS DIRECTORY BUILDS THIS ONE
-boot.img     (ships w/ app)      kernel + ral-daemon + ral engine (NOT here)
+rootfs.img   (RO, pinned)   <--   build.sh BUILDS THIS ONE
+boot.img     (ships w/ app)      kernel + ral-daemon + ral engine (build-boot.sh)
 ```
 
 ## Why the image is the package manager
@@ -30,13 +31,47 @@ from."
 No ral binaries live here either; the daemon and engine ship in `boot.img`,
 versioned with the app so the `Attach` handshake can enforce the pairing (§7).
 
+## Two guests, one recipe
+
+§2 fixes the platform matrix: macOS runs Virtualization.framework on arm64,
+Windows runs Hyper-V on x86_64. The *userland* does not care — an office
+userland is an office userland — so both scripts here take a single `ARCH`
+knob (`arm64`, the default, or `amd64`) and derive everything else from it:
+
+| | `ARCH=arm64` | `ARCH=amd64` |
+|---|---|---|
+| Host that builds it | Apple-silicon Mac | x86_64 Linux, or WSL2 on the Windows box |
+| Mirror | `ports.ubuntu.com/ubuntu-ports` | `archive.ubuntu.com/ubuntu` |
+| Rust target (boot media) | `aarch64-unknown-linux-musl` | `x86_64-unknown-linux-musl` |
+| Kernel handed to the loader | raw ARM64 `Image` | x86 `bzImage` |
+| Guest device model | virtio | Hyper-V VMBus |
+
+Two consequences worth stating before they surprise anyone:
+
+- **The mirrors are not interchangeable.** arm64 packages live only on
+  `ports.ubuntu.com`, amd64 packages only on `archive.ubuntu.com`. Both
+  scripts derive the mirror from `ARCH`, so the pair cannot disagree, and an
+  explicit `MIRROR` still wins (for a `snapshot.ubuntu.com` pin).
+- **You build the media for the host that will boot it.** The container is the
+  image's own architecture, and each script refuses a mismatch on its first
+  step rather than fail obscurely later: apt resolves the kernel package for
+  the container's native architecture, and the `fc-cache` pass and every
+  spot-check *execute* guest binaries. Nothing here is cross-architecture, and
+  no qemu is involved on either host.
+
+Because a developer builds one guest at a time, `out/` deliberately does **not**
+encode the architecture in any path — `synod/src/boot.rs` and the bundles'
+resource maps look in the one fixed place. `out/boot/boot-manifest.txt`'s
+leading `arch=` line is how you know which guest is currently sitting there.
+
 ## Contents
 
 | File | What it is |
 |------|-----------|
 | `packages.txt` | The pinned package set, one per line, grouped to mirror §7's rationale. Comments and blanks are stripped by the build. |
-| `build.sh` | The whole pipeline: one strict-mode script that runs a container and emits the image, checksum, manifest, and verification. |
-| `out/` | Build products (git-ignored). |
+| `build.sh` | The rootfs pipeline: one strict-mode script that runs a container and emits the image, checksum, manifest, and verification. |
+| `build-boot.sh` | The boot-media pipeline: Ubuntu's kernel plus this repo's initramfs, with `ral-daemon` and the engine inside it (see the last section). |
+| `out/` | Build products (git-ignored), for whichever architecture was built last. |
 
 Build products in `out/`:
 
@@ -49,9 +84,11 @@ Build products in `out/`:
 
 ## How the pipeline works
 
-macOS has neither `mmdebstrap` nor ext4 tooling, so the build runs entirely
-inside a **native-arm64 `ubuntu:24.04` container** (arm64 is this Mac's native
-arch, so no qemu emulation is involved). The 24.04 base only supplies the build
+Neither macOS nor Windows has `mmdebstrap` or ext4 tooling, so the build runs
+entirely inside a **`ubuntu:24.04` container of the image's own architecture**.
+That base image is multi-arch, so podman pulls the host's native build and no
+qemu emulation is involved either way; the container asserts as much before it
+starts (see *Two guests, one recipe*). The 24.04 base only supplies the build
 *tooling* — `mmdebstrap` builds any suite, and its shipped keyring already
 verifies 26.04's archive signature. Inside it:
 
@@ -79,13 +116,28 @@ chroot checks bind-mount `/proc,/sys,/dev` — not for the image creation itself
 Run it:
 
 ```sh
-./build.sh
+./build.sh                 # arm64, the macOS guest
+ARCH=amd64 ./build.sh      # x86_64, the Windows guest
+just guest-rootfs          # the same two, from the repo root
+just guest-rootfs amd64
 ```
 
 Everything is env-overridable (`SUITE`, `MIRROR`, `ARCH`, `ZSTD_LEVEL`,
 `FS_UUID`, `BASE_IMAGE`). The multi-GB tree and apt cache live only in the
 container's ephemeral layer (`--rm`) and are reclaimed on exit; only the final
-artifacts are written to `out/` (a bind mount onto the Mac).
+artifacts are written to `out/` (a bind mount onto the host).
+
+### What this pipeline does NOT do
+
+**It does not produce a VHD or VHDX.** The output is a raw ext4 image on both
+architectures, which is what §7 fixes as the on-disk format and what the
+overlayfs lower/upper split is described against. Hyper-V does need the image
+wrapped — as a *fixed* VHD, which is that same byte stream with a 512-byte
+footer appended — and that wrapping is done **in Rust by the Windows backend at
+first boot**, from these very bytes. Doing it here as well would ship a second
+format, double the download, and give the two platforms two different artifacts
+to checksum for no gain. If you came here to add it: it is already done, one
+layer up.
 
 ### mmdebstrap over debootstrap; `minbase`; Recommends off
 
@@ -110,9 +162,11 @@ initialisation, so rebuilds do not churn the bytes for cosmetic reasons. The
 suite and package set are pinned, and `packages-manifest.txt` records the exact
 version of every package pulled — that file *is* the pin. For bit-for-bit
 reproducibility, point `MIRROR` at a `snapshot.ubuntu.com` timestamp instead of
-the live `ports.ubuntu.com` mirror; the manifest then documents which snapshot.
-(arm64 packages are served from `ports.ubuntu.com/ubuntu-ports`, **not**
-`archive.ubuntu.com` — a common trap.)
+the live mirror; the manifest then documents which snapshot. (The live mirror
+depends on the architecture and the two do not overlap: arm64 packages are
+served from `ports.ubuntu.com/ubuntu-ports` and amd64 packages from
+`archive.ubuntu.com/ubuntu` — a common trap, which is why both scripts derive
+the mirror from `ARCH` rather than let a caller pair them wrongly.)
 
 ## Corrections to §7's package names
 
@@ -151,7 +205,9 @@ the live `ports.ubuntu.com` mirror; the manifest then documents which snapshot.
 ## Sizes and results
 
 As built on an Apple-Silicon Mac (podman, native arm64), Ubuntu 26.04 LTS
-(resolute) / arm64:
+(resolute) / arm64. The amd64 image is the same package set from the same
+suite, so the numbers should land close — but no figure below has been measured
+on x86_64, and none is asserted for it:
 
 | Quantity | Value |
 |----------|-------|
@@ -191,10 +247,11 @@ The lower layer is read-only, so a **squashfs** image would be the natural fit:
 compressed on disk (much smaller at rest than even a snug ext4), mounted
 directly with no unpack step, and inherently immutable. We are **not** taking it
 now for one concrete reason: §7 fixes the on-disk format as *raw ext4 images*
-because the Windows path wraps that same image as a **VHDX** at install time,
-and the overlayfs lower/upper split is described against ext4 block devices.
-A squashfs lower would need the VHDX-wrapping and overlay stories re-examined on
-Windows. It stays a live option — the `.zst` we ship already recovers most of
+because the Windows path hands Hyper-V the same bytes wrapped as a **fixed VHD**
+(a footer, appended at first boot — see *What this pipeline does NOT do*), and
+the overlayfs lower/upper split is described against ext4 block devices. A
+squashfs lower would need both the wrapping and the overlay stories re-examined
+on Windows. It stays a live option — the `.zst` we ship already recovers most of
 the at-rest size win for the download — but the format is load-bearing for the
 Windows port, so changing it is not a rootfs-only decision.
 
@@ -225,9 +282,10 @@ The pipeline is already **reproducible-ish**: fixed suite + package set, a
 churn. To make it **byte-for-byte** deterministic — the precondition for the
 verify-by-shared-sha256 story above — the recipe would additionally need:
 
-- **`snapshot.ubuntu.com` pinning** instead of the live `ports.ubuntu.com`
-  archive, so the exact package bytes are frozen at a timestamp rather than
-  whatever the mirror serves today (point `MIRROR` at a snapshot URL).
+- **`snapshot.ubuntu.com` pinning** instead of whichever live archive the
+  architecture selects, so the exact package bytes are frozen at a timestamp
+  rather than whatever the mirror serves today (point `MIRROR` at a snapshot
+  URL; it overrides the derived one on both arches).
 - **`SOURCE_DATE_EPOCH`** honoured through every stage that stamps a time
   (mmdebstrap supports it; it is already pinned as an env var here) so
   timestamps in the tree are fixed.
@@ -244,33 +302,50 @@ archive for reliability and records versions in the manifest.
 `rootfs.img` is only the userland; to boot, the guest also needs `boot.img` —
 still **built by a different script** (`build-boot.sh`, this directory) since
 it ships with the synod app rather than being downloaded like `rootfs.img`
-(§7), but resolved here because the two pipelines share one pinned suite and
-one native-arm64 container.
+(§7), but resolved here because the two pipelines share one pinned suite, one
+`ARCH` knob, and one container of the guest's own architecture.
 
-**The kernel is Ubuntu's stock `linux-generic` arm64 build, unmodified —
-not a custom kernel.** It is already built, signed, and validated by
-Canonical's own pipeline across the exact virtio + Hyper-V (`CONFIG_HYPERV`,
-`CONFIG_HYPERV_VSOCKETS`) + overlayfs + ext4 feature set both hypervisor
-paths need, so lifting it trades zero engineering cost for a small boot-time
-module-load cost that a from-scratch kernel config and rebuild would only
-marginally improve — while creating a liability (kernel config maintenance,
-security patch tracking) this project would then own forever. `build-boot.sh`
-extracts `vmlinuz` and the needed `.ko` set straight from the pinned suite's
-own `linux-image-generic` arm64 package, inside the same native-arm64
-container that builds `rootfs.img`, so kernel and userland share one pinned
-suite and mirror — and unwraps `vmlinuz` (a unified-image PE, an EFI zboot
-PE, and a compressed payload, nested per suite) down to the raw ARM64
-`Image`, the only form `VZLinuxBootLoader` boots on Apple silicon.
+**The kernel is Ubuntu's stock `linux-generic` build for the guest's
+architecture, unmodified — not a custom kernel.** It is already built, signed,
+and validated by Canonical's own pipeline across the exact feature set the two
+hypervisor paths need between them — virtio and virtiofs on one side, Hyper-V
+(`CONFIG_HYPERV`, `CONFIG_HYPERV_VSOCKETS`) and 9p on the other, `vsock`,
+overlayfs and ext4 on both — so lifting it trades zero engineering cost for a
+small boot-time module-load cost that a from-scratch kernel config and rebuild
+would only marginally improve — while creating a liability (kernel config
+maintenance, security patch tracking) this project would then own forever.
+`build-boot.sh` extracts `vmlinuz` and the needed `.ko` set straight from the
+pinned suite's own `linux-image-generic` package for that architecture, inside
+the same container that builds `rootfs.img`, so kernel and userland share one
+pinned suite and mirror.
+
+**What the two loaders want differs, and the script is asymmetric on purpose:**
+
+- **arm64.** `VZLinuxBootLoader` on Apple silicon boots only a raw
+  uncompressed ARM64 `Image`, and Ubuntu ships `vmlinuz` wrapped — a
+  unified-image PE whose kernel is its `.linux` section, an EFI zboot PE, and a
+  compressed payload, nested differently per suite. So the arm64 path *peels*:
+  one layer at a time, refusing any format it does not recognise, until `file`
+  agrees it is an `ARM64 boot executable`.
+- **amd64.** Hyper-V's `LinuxKernelDirect` loader boots a **bzImage**, and
+  Ubuntu's `vmlinuz-*-generic` for amd64 already *is* one. So the amd64 path
+  unwraps **nothing**: the bytes are copied through and asserted to be a "Linux
+  kernel x86 boot executable bzImage". Peeling here would be actively wrong —
+  it would yield a bare ELF `vmlinux` that no loader will start.
+
+That asymmetry is the kind of thing that reads as an oversight, so it is spelled
+out in the script at the point of use as well as here.
 
 **Neither `ral-daemon` nor the engine live in `rootfs.img`** (this directory's
 own build never puts them there). What makes `boot.img`'s "kernel +
 ral-daemon + ral engine as one artifact" true is a small hand-written
 initramfs, `ral-initramfs` (a workspace crate, `libc` + `rustix` only, the
 same dependency shape as `ral-daemon`): its job is fixed and narrow enough —
-two known virtio-blk disks in vm-manager's own fixed attach order, one
-overlay, one binary-install step, one `switch_root` — that a general-purpose
-tool like dracut or mkinitramfs would be solving a hardware-discovery problem
-this guest does not have. On every boot it:
+two known disks in the backend's own fixed attach order (virtio-blk on macOS,
+two LUNs of one SCSI controller on Hyper-V, so the *names* are probed while the
+order is not), one overlay, one binary-install step, one `switch_root` — that a
+general-purpose tool like dracut or mkinitramfs would be solving a
+hardware-discovery problem this guest does not have. On every boot it:
 
 1. mounts the kernel's device nodes at `/dev` (claimed, not assumed from a
    devtmpfs automount) and loads whichever kernel modules the pinned kernel
@@ -289,11 +364,13 @@ this guest does not have. On every boot it:
 5. `switch_root`s into the assembled overlay and execs `/sbin/ral-daemon` as
    the new pid 1.
 
-Both `ral-daemon` and `exarch` are cross-built for `aarch64-unknown-linux-musl`
-*inside* the same native-arm64 container (rustup + `musl-tools`, the recipe
-`build-binaries.yml`'s `build-exarch-linux-arm64` job already uses — no
-`cross-rs` container needed, since neither binary pulls `jemalloc-sys` or a C
-dependency). `mke2fs` is the one non-Rust piece the initramfs carries: it is
+Both `ral-daemon` and `exarch` are cross-built for the guest's musl target
+(`aarch64-unknown-linux-musl` or `x86_64-unknown-linux-musl`) *inside* the same
+container (rustup + `musl-tools`, the recipe `build-binaries.yml`'s
+`build-exarch-linux-arm64` job already uses — no `cross-rs` container needed,
+since neither binary pulls `jemalloc-sys` or a C dependency), and the build
+refuses any of the three that is not a static binary of the guest's own
+architecture. `mke2fs` is the one non-Rust piece the initramfs carries: it is
 vendored from the container's own `e2fsprogs` package together with every
 shared library `ldd` reports, resolved in the same pinned container so glibc
 versions match exactly — the technique every distro's own initramfs tooling
@@ -303,23 +380,97 @@ already uses internally.
 `kernel_command_line()` need no changes for any of this: the command line
 already never sets `ral.engine=`, so as long as `build-boot.sh` installs the
 engine at `ral-daemon`'s own `DEFAULT_ENGINE` path, the existing contract
-holds untouched.
+holds untouched — and the Windows backend takes that same `BootArtifact`, three
+paths and nothing hypervisor-shaped about them.
 
-Run it (`vm-image/build-boot.sh`); outputs land in `vm-image/out/boot/`:
-`kernel`, `initramfs.img`, a `.sha256` for each, `boot-manifest.txt` (the
-kernel package version plus the git commit hash of the ral-daemon/exarch
-source built in — recording the hash only here, not in a `build.rs`, is the
-whole of the version-stamping decision), `kernel-config-check.txt` (the real
-`CONFIG_*` values the config-grep pass found), `verify.txt`, and `build.log`.
+### Which modules each guest carries, and why
 
-**Smoke-boot is human-in-the-loop, not CI**: build `rootfs.img` and
+The module set is the one part of `boot.img` that is genuinely per-guest, so it
+is *derived*, never asserted: `build-boot.sh` records the real `CONFIG_*` value
+of every symbol it cares about into `kernel-config-check.txt`, ships only the
+ones the pinned kernel package built as `=m` (a `=y` needs nothing shipped),
+orders them by `modules.dep`'s own transitive lines, and **fails the build** if
+a name in its table is `=m` yet absent from `modules.dep` — the signature of a
+module renamed under a kernel bump, caught at build time instead of at
+`mount(2)` in a guest nobody can log into.
+
+So the table below is the *question* the build asks of the kernel config, not a
+list of files: a driver named here is carried only if this kernel built it as a
+module, and several are compiled in.
+
+| Concern | arm64 (Virtualization.framework) | amd64 (Hyper-V) |
+|---|---|---|
+| Bus / devices | `virtio`, `virtio_ring`, `virtio_mmio`, `virtio_pci`, `virtio_blk` | `hv_vmbus`, `hv_storvsc`, `hv_utils`, `hv_balloon` |
+| Control plane (`AF_VSOCK`) | `vsock` + `vmw_vsock_virtio_transport` | `vsock` + `hv_sock` |
+| Granted folder | `virtiofs` | `9p` + `9pnet` + `9pnet_fd` |
+| Overlay + disks | `overlay`, `ext4` | `overlay`, `ext4`, `scsi_mod`, `sd_mod` |
+| Console | `hvc0` (`virtio_console`) | `ttyS0` (8250, compiled in) |
+
+The amd64 column earns its differences one at a time:
+
+- **`hv_vmbus` is the bus.** Nothing else in that column is reachable until it
+  has enumerated; `hv_storvsc` is the SCSI HBA both disks arrive behind,
+  `hv_utils` the KVP/shutdown/timesync services the host expects a well-behaved
+  guest to answer, `hv_balloon` its dynamic-memory client.
+- **There is deliberately no `hv_netvsc`.** Ubuntu builds it, and this guest has
+  **no network device at all** (§6) — so shipping its driver would load code for
+  hardware that is not there. `CONFIG_HYPERV_NET` is still *recorded* in
+  `kernel-config-check.txt`, so the artifact shows a decision rather than an
+  omission.
+- **The transports are mirror images.** `CONFIG_HYPERV_VSOCKETS` is recorded and
+  declined on arm64; `CONFIG_VIRTIO_VSOCKETS` is recorded and declined on amd64.
+  Above either one the guest speaks the same `AF_VSOCK` API, which is the whole
+  reason §2 can promise "the guest-side code is identical on both".
+- **The workspace arrives differently.** There is no virtiofs on Hyper-V, so the
+  granted folder is a **9p (9p2000.L) share the host serves over a vsock port**:
+  `9p` (the filesystem) over `9pnet` (the protocol core) over **`9pnet_fd`**.
+  That last module is the trap worth naming: `trans=fd` used to be compiled
+  *inside* `9pnet`, and in a kernel new enough to have split it out
+  (`CONFIG_NET_9P_FD`, upstream `9pnet_fd-objs := trans_fd.o`) a mount with
+  `9pnet` loaded and `9pnet_fd` missing fails with a bare `ENODEV`. Ubuntu's
+  resolute kernel (7.0.0) builds all three as modules, and `9p` pulls the
+  `netfs` core in through its own `modules.dep` line — so a resolute amd64 build
+  ships eleven files: `hv_vmbus`, `hv_storvsc`, `hv_utils`, `hv_balloon`,
+  `vsock`, `hv_sock`, `9pnet`, `9pnet_fd`, `netfs`, `9p`, `overlay`.
+- **SCSI and ext4 are compiled in.** `CONFIG_SCSI`, `CONFIG_BLK_DEV_SD` and
+  `CONFIG_EXT4_FS` are `=y` in Ubuntu's amd64 config, so nothing is shipped for
+  them — but they are named in the table anyway, so that a kernel which makes
+  any of them a module ships it, resolved from `modules.dep` like everything
+  else rather than assumed absent forever.
+- **The console needs nothing.** `CONFIG_SERIAL_8250` is `=y`, and the *host*
+  writes the kernel command line, so `boot.img` is neutral about whether it is
+  handed `console=hvc0` or `console=ttyS0`.
+
+Run it; outputs land in `vm-image/out/boot/`:
+
+```sh
+./build-boot.sh                 # arm64, for Virtualization.framework
+ARCH=amd64 ./build-boot.sh      # x86_64, for Hyper-V
+just guest-boot                 # the same two, from the repo root
+just guest-boot amd64
+```
+
+The products are `kernel`, `initramfs.img`, a `.sha256` for each,
+`boot-manifest.txt` (the architecture, on its own leading line, plus the kernel
+package version and the git commit hash of the ral-daemon/exarch source built in
+— recording the hash only here, not in a `build.rs`, is the whole of the
+version-stamping decision), `kernel-config-check.txt` (the real `CONFIG_*`
+values the config-grep pass found), `verify.txt` (which asserts the kernel's
+format, the three binaries' architecture and static linkage, and lists the
+shipped modules in load order), and `build.log`.
+
+**Smoke-boot is human-in-the-loop, not CI**: on macOS, build `rootfs.img` and
 `boot.img`, run `dev/scripts/sign-virtualization.sh` against the debug
 `vm-manager`/`synod` binaries (macOS invalidates the ad-hoc signature on every
 rebuild), then boot via `vm-manager/examples/boot-smoke.rs` with the three
 real artifacts, and confirm on stdout `ral-daemon`'s own `eprintln` lines
 (`guest filesystems up`, `engine running as pid`), that `announce_root()`
 reports the session overlay rather than a fallback, and that the guest dials
-the host's vsock control port within `vz.rs`'s 30s `BOOT_TIMEOUT`.
+the host's vsock control port within `vz.rs`'s 30s `BOOT_TIMEOUT`. On Windows
+the same smoke-boot needs a machine with Hyper-V enabled (Pro, Education, or
+Enterprise — §2) and an elevated shell, since creating a machine through the
+Host Compute System API is an administrative act; the media itself is verified
+without booting either way (`verify.txt`).
 
 ### Open past this point
 
@@ -330,7 +481,15 @@ the host's vsock control port within `vz.rs`'s 30s `BOOT_TIMEOUT`.
   is confirmed only by the smoke-boot above, not by this non-booting pass —
   both are shipped if both are modules, so whichever it is, is already
   loaded.
-- **Windows boot path**: the same kernel wrapped as a Gen-2 UEFI unified
-  kernel image, and an initramfs equivalent for the Hyper-V transport
-  (`hv_storvsc`, `hv_sock`) — parked until the fleet has a Windows box to
-  validate against (§10).
+- **The amd64 table's provenance**: every module name in it was checked against
+  the file list Ubuntu's own `linux-modules-7.0.0-14-generic` (amd64, resolute)
+  ships and against that kernel's `debian.master/config/annotations` for `=m`
+  versus `=y` — not against a `modules.dep` produced by a build here, because
+  no amd64 build has been run yet on the fleet. That is exactly what the
+  build's hard failure exists for: a drifted name stops the build, and it
+  cannot ship a boot artifact that would fail at `mount(2)` instead.
+- **Windows boot path**: no longer a Gen-2 UEFI unified kernel image. Hyper-V's
+  `LinuxKernelDirect` loader takes the bzImage and this initramfs directly, the
+  way `VZLinuxBootLoader` takes the `Image` — so the UKI step §2 anticipated is
+  simply not needed. What remains open is validation on real hardware: a
+  Windows box with Hyper-V, per §10.

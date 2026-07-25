@@ -26,7 +26,10 @@
 //!    hypervisor's timekeeping drifts by.  When that starts to matter the
 //!    place to fix it is a periodic correction over the protocol, not a
 //!    second clock authority down here.
-//! 6. **Mount everything else**, in the order `mounts::plan` fixes.
+//! 6. **Mount everything else**, in the order `mounts::plan` fixes — which,
+//!    where the host runs a hypervisor with no virtiofs, includes dialling
+//!    the host for the workspace's own 9p transport (§2).  Whether it does is
+//!    a fact the command line carried, not one the guest guesses at.
 //! 7. **Apply the guest-wide sysctls** (`sysctl::plan`) the engine's jail
 //!    (§5) depends on — user namespaces off — before any external code gets
 //!    a chance to run.
@@ -75,6 +78,8 @@ pub mod sysctl;
 
 #[cfg(target_os = "linux")]
 mod init;
+#[cfg(target_os = "linux")]
+mod vsock;
 
 #[cfg(target_os = "linux")]
 pub use init::serve;

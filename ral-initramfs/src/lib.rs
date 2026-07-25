@@ -5,10 +5,10 @@
 //! before it: a final root, already assembled, before `switch_root` hands
 //! off to it — "the initramfs, which mounts the two images, stacks the
 //! overlay, and `switch_root`s into it." This crate *is* that stage, and
-//! its job is exactly as fixed as that sentence: two known virtio-blk disks
-//! (`plan::ROOTFS_DEVICE`, `plan::SESSION_DEVICE` — vm-manager's `vz.rs`
-//! attaches them in this order and never another), one overlay, one
-//! binary-install step, one `switch_root`.
+//! its job is exactly as fixed as that sentence: two disks, in the order the
+//! host attached them and under whichever device model its hypervisor
+//! presents them by (`plan::CANDIDATES`, `plan::resolve_disks`), one overlay,
+//! one binary-install step, one `switch_root`.
 //!
 //! `rootfs.img` carries no ral binaries at all, and `ral-daemon`'s own
 //! `DEFAULT_ENGINE` names a path inside the tree `switch_root` moves into —

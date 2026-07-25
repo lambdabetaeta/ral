@@ -29,7 +29,7 @@
 //! quietly wrong.
 
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,7 @@ use rustix::process::Pid;
 use crate::boot::Boot;
 use crate::mounts::WORK;
 use crate::reap::Death;
+use crate::vsock;
 
 /// The descriptor the engine reads its protocol from.  Fixed by
 /// `run_engine`, which adopts fd 3 unconditionally.
@@ -94,7 +95,9 @@ pub fn command_line(boot: &Boot) -> Vec<String> {
 /// named — rather than listening for it.  A connection that exists is then
 /// proof the host is there, and the daemon needs no accept loop, no
 /// readiness handshake of its own, and no opinion about what travels over
-/// it.
+/// it.  The dial itself is [`vsock::dial_host`], shared with the workspace's
+/// 9p transport; what belongs to the control plane alone is the patience
+/// below.
 ///
 /// # Errors
 /// Returns a sentence naming the port when the host cannot be reached within
@@ -102,7 +105,7 @@ pub fn command_line(boot: &Boot) -> Vec<String> {
 pub fn control_plane(port: u32) -> Result<OwnedFd, String> {
     let deadline = Instant::now() + PATIENCE;
     loop {
-        match dial(port) {
+        match vsock::dial_host(port) {
             Ok(socket) => return Ok(socket),
             Err(err) => {
                 if Instant::now() >= deadline {
@@ -117,36 +120,6 @@ pub fn control_plane(port: u32) -> Result<OwnedFd, String> {
             }
         }
     }
-}
-
-/// One `socket`/`connect` attempt at the host's control plane.
-fn dial(port: u32) -> io::Result<OwnedFd> {
-    // SAFETY: a plain `socket(2)`; the returned descriptor is adopted by an
-    // `OwnedFd` immediately, so it is closed on every path out of here.
-    let raw = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `raw` is a fresh descriptor this call owns.
-    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
-
-    let addr = libc::sockaddr_vm {
-        svm_family: libc::sa_family_t::try_from(libc::AF_VSOCK)
-            .expect("AF_VSOCK is a small positive address family"),
-        svm_reserved1: 0,
-        svm_port: port,
-        svm_cid: libc::VMADDR_CID_HOST,
-        svm_zero: [0; 4],
-    };
-    let len = libc::socklen_t::try_from(size_of::<libc::sockaddr_vm>())
-        .expect("a socket address is far smaller than socklen_t's range");
-    // SAFETY: `addr` is a fully initialised `sockaddr_vm` and `len` is its
-    // own size, which is what `connect(2)` reads.
-    let rc = unsafe { libc::connect(socket.as_raw_fd(), std::ptr::from_ref(&addr).cast(), len) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(socket)
 }
 
 /// Start the engine on `control`, and return its pid.
@@ -229,7 +202,7 @@ mod tests {
 
     fn boot() -> Boot {
         Boot {
-            workspace: "work".into(),
+            workspace: crate::boot::Export::Virtiofs { tag: "work".into() },
             port: 1729,
             epoch: 0,
             engine: "/usr/libexec/ral/engine".into(),

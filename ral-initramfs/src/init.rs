@@ -22,9 +22,11 @@ use rustix::system::finit_module;
 
 use crate::plan::{self, Install, Mount};
 
-/// Be the guest's `/init`: format the session disk, assemble the overlay
-/// root, install the two binaries `rootfs.img` does not carry, and hand
-/// off to `ral-daemon` as the new pid 1.
+/// Be the guest's `/init`.
+///
+/// Find the session's two disks, format the writable one, assemble the
+/// overlay root, install the two binaries `rootfs.img` does not carry, and
+/// hand off to `ral-daemon` as the new pid 1.
 ///
 /// Returns only on failure — success replaces this process image with
 /// `ral-daemon` inside [`switch_root`], so there is nothing to return to.
@@ -35,8 +37,12 @@ pub fn run() -> Result<Infallible, String> {
     apply(&plan::DEV)?;
     load_modules()?;
     adopt_console()?;
-    format_session()?;
-    for disk in plan::DISKS {
+    // Only now can the disks be found: the nodes exist because `devtmpfs` is
+    // up and the block driver is loaded.  The console comes first too, so a
+    // machine with no disks says so somewhere a maintainer can read it.
+    let disks = await_disks()?;
+    format_session(disks.session)?;
+    for disk in plan::disk_mounts(disks) {
         apply(&disk)?;
     }
     for dir in [plan::UPPER, plan::WORKDIR] {
@@ -55,22 +61,73 @@ pub fn run() -> Result<Infallible, String> {
 /// A missing [`plan::MODULE_MANIFEST`] means the pinned kernel builds every
 /// needed driver in rather than as a module — a legitimate outcome, not a
 /// failure, so it is skipped rather than refused. A manifest that names a
-/// module this initramfs did not carry, or that the kernel refuses to load,
-/// is: nothing past this point can work without it. The image carries only
+/// module this initramfs did not carry, or that the kernel will not load at
+/// all, is: nothing past this point can work without it. The image carries only
 /// the modules its own hypervisor's transport needs (`build-boot.sh` ships
 /// virtio's for the arm64 image, Hyper-V's for the Windows one), so every
-/// module named here is required and any failure to load it is fatal.
+/// module named here is required.
+///
+/// # The order in the manifest is a hint, not a contract
+///
+/// `build-boot.sh` computes the manifest as a topological order over the
+/// dependency graph `modules.dep` describes, so in the ordinary case one pass
+/// loads everything. It is not trusted to, because it has been wrong: it once
+/// listed `9pnet` before `netfs`, whose symbols `9pnet` needs — a modules.dep
+/// line lists a module's dependencies as a set, and reading that set as a load
+/// order killed the guest at `Attempted to kill init!` a hundred milliseconds
+/// into its boot. What that order rests on is the kernel's own metadata about
+/// which module exports which symbol, none of which this repository can check.
+/// So loading does not depend on it. A module whose dependencies are not yet in
+/// the kernel fails with `ENOENT` — the kernel's way of saying "unknown symbol"
+/// — and the very same module loads without complaint once whatever exports
+/// that symbol is in. Passes are therefore repeated while they make progress:
+/// convergence takes as many passes as the dependency chain is deep, and a pass
+/// that loads nothing ends it. Whether a metadata file got the order right is
+/// the sort of thing to be wrong about; whether a symbol resolves is not.
 fn load_modules() -> Result<(), String> {
     let Ok(manifest) = fs::read_to_string(plan::MODULE_MANIFEST) else {
         return Ok(());
     };
-    for name in manifest.lines().filter(|line| !line.is_empty()) {
-        let path = format!("{}/{name}", plan::MODULE_DIR);
-        let file = fs::File::open(&path).map_err(|err| format!("could not open {path}: {err}"))?;
-        finit_module(&file, c"", 0)
-            .map_err(|err| format!("could not load kernel module {name}: {err}"))?;
+    let mut pending: Vec<&str> = manifest.lines().filter(|line| !line.is_empty()).collect();
+    let mut errors: Vec<String> = Vec::new();
+
+    while !pending.is_empty() {
+        let mut stuck = Vec::new();
+        errors.clear();
+        for name in &pending {
+            let path = format!("{}/{name}", plan::MODULE_DIR);
+            let file =
+                fs::File::open(&path).map_err(|err| format!("could not open {path}: {err}"))?;
+            match finit_module(&file, c"", 0) {
+                // Already in the kernel — built in after all, or pulled in by a
+                // driver the kernel bound itself.  The point of loading a module
+                // is that it *be* loaded, so finding it there is the goal
+                // reached early, not a failure.
+                Ok(()) | Err(Errno::EXIST) => {}
+                Err(err) => {
+                    errors.push(format!("{name} ({err})"));
+                    stuck.push(*name);
+                }
+            }
+        }
+        // A pass that loaded nothing will load nothing next time either: the
+        // kernel state it would need is exactly the state this pass failed to
+        // produce.  Anything less than that is progress, and worth another pass.
+        if stuck.len() == pending.len() {
+            break;
+        }
+        pending = stuck;
     }
-    Ok(())
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "these kernel modules would not load, and nothing past this point works without \
+             them: {}",
+            errors.join(", ")
+        ))
+    }
 }
 
 /// Point this process — and everything it execs — at the real console.
@@ -88,23 +145,64 @@ fn adopt_console() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a device node is there, which is the whole of what
+/// [`plan::resolve_disks`] needs to know and the only impure part of the
+/// probe.
+fn device_present(device: &str) -> bool {
+    stat(device).is_ok()
+}
+
+/// How long the disks are given to appear, and how often they are looked for.
+///
+/// Loading a block driver does not mean its disks exist yet: the driver
+/// registers, the bus enumerates, and the nodes arrive when the scan reaches
+/// them.  Under virtio that is fast enough to look like part of the module
+/// load; under Hyper-V the storage driver's devices come over `VMBus` and are
+/// scanned asynchronously, so a single look can lose a race it will win
+/// milliseconds later.  Both are covered by waiting — briefly, because a
+/// machine that really has no disks must still say so at second zero rather
+/// than after a minute of silence.
+const DISK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+const DISK_PULSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The disks, once they exist — [`plan::resolve_disks`] against a devtmpfs that
+/// may still be filling in.
+///
+/// The refusal on timeout is the resolver's own, naming every candidate it
+/// looked for, so a machine with the wrong device model reads the same way
+/// whether the nodes were late or absent.
+///
+/// # Errors
+/// Returns [`plan::resolve_disks`]'s sentence if no candidate pair has appeared
+/// within [`DISK_PATIENCE`].
+fn await_disks() -> Result<plan::Disks, String> {
+    let deadline = std::time::Instant::now() + DISK_PATIENCE;
+    loop {
+        match plan::resolve_disks(device_present) {
+            Ok(disks) => return Ok(disks),
+            Err(refusal) if std::time::Instant::now() >= deadline => return Err(refusal),
+            Err(_) => std::thread::sleep(DISK_PULSE),
+        }
+    }
+}
+
 /// Format the session disk unconditionally: it arrives as a bare
 /// zero-filled sparse file, so there is no existing filesystem to detect
 /// and nothing to decide.
-fn format_session() -> Result<(), String> {
+///
+/// `device` is the session disk [`plan::resolve_disks`] chose, never a
+/// constant: formatting the wrong half of a pair would erase the rootfs image
+/// this boot is about to mount.
+fn format_session(device: &str) -> Result<(), String> {
     let status = Command::new(plan::MKE2FS)
         .args(plan::FORMAT_SESSION_ARGS)
-        .arg(plan::SESSION_DEVICE)
+        .arg(device)
         .status()
         .map_err(|err| format!("could not run {}: {err}", plan::MKE2FS))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "{} on {} exited {status}",
-            plan::MKE2FS,
-            plan::SESSION_DEVICE
-        ))
+        Err(format!("{} on {device} exited {status}", plan::MKE2FS))
     }
 }
 
