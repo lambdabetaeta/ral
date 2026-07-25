@@ -242,16 +242,6 @@
       border-radius: 8px;
     }
 
-    .btn-outline {
-      background: var(--raised);
-      color: var(--ink);
-      border-color: var(--line-strong);
-      font-size: 14.5px;
-      font-weight: 550;
-      padding: 10px 16px;
-    }
-    .btn-outline:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
-
     .btn-quiet {
       background: transparent;
       color: var(--ink-soft);
@@ -533,7 +523,7 @@
     /* A rebuilt element stands in for one already on screen: the entrance
        animation belongs to a block's first appearance, never to a
        replacement. */
-    .msg.settled, .dial.settled { animation: none; }
+    .msg.settled, .dial.settled, .card.settled { animation: none; }
     .dial-head {
       display: flex;
       align-items: center;
@@ -630,9 +620,12 @@
        wears its shadow; a process card inside a dial stays flat. */
     .msg .mark-card { box-shadow: var(--shadow-soft); }
 
+    /* Hue is spent on severity and on the accent, which means "you can act on
+       this"; machine text is marked by the mono grain instead, since an
+       accent-tinted path invites a click that does nothing. */
     .mark-text { margin: 0; line-height: 1.55; }
     .role-plain { color: var(--ink); }
-    .role-path { font-family: var(--mono); color: var(--accent); }
+    .role-path { font-family: var(--mono); color: var(--ink); }
     .role-code { font-family: var(--mono); color: var(--ink); }
     .role-ok { color: var(--accept); }
     .role-warn { color: var(--conflict); }
@@ -827,80 +820,112 @@
     .bulk {
       display: flex; gap: 10px; align-items: center;
       margin: 16px 0 4px;
-      padding: 12px 14px;
+      padding: 8px 10px;
       background: var(--raised-2);
       border: 1px solid var(--line);
-      border-radius: 12px;
+      border-radius: 10px;
     }
-    .bulk .count { flex: 1; font-size: 13.5px; color: var(--ink-soft); }
+    .bulk .count { flex: 1; font-size: 13px; color: var(--ink-soft); }
 
-    .cards { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+    .cards { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 
+    /* The folder a run of rows sits in, named once above them: position says
+       where a file is, so the row itself is free to be just the file. */
+    .group {
+      margin: 10px 0 0 2px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--ink-faint);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .group:first-child { margin-top: 0; }
+
+    /* One changed file, one row. Shape carries the kind — a nominal fact hue
+       could not order anyway — leaving hue to mean "this one needs you",
+       which here is the conflict tint alone. */
     .card {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       background: var(--raised);
       border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: var(--shadow-soft);
-      padding: 16px 18px;
+      border-radius: 10px;
+      padding: 5px 8px 5px 10px;
       animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
     }
-    .card.settled { opacity: 0.62; }
-    .card.conflict { border-color: var(--conflict-line); background: var(--conflict-bg); }
+    /* The one row that says more than it can fit: the note takes a line of
+       its own and the choices fall below it. */
+    .card.conflict {
+      border-color: var(--conflict-line);
+      background: var(--conflict-bg);
+      flex-wrap: wrap;
+    }
 
-    .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-    .kind {
-      display: inline-flex; align-items: center; gap: 7px;
-      font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    .glyph {
+      flex: none;
+      width: 1.1ch;
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 700;
       color: var(--ink-soft);
+      user-select: none;
     }
-    .kind .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
-    .kind.created .dot { background: var(--accept); }
-    .kind.modified .dot { background: #c6902f; }
-    .kind.deleted .dot { background: var(--discard); }
-    .kind.renamed .dot { background: #5b83b0; }
 
-    .card h3 {
-      font-family: var(--serif);
-      font-weight: 600;
-      font-size: 16.5px;
-      line-height: 1.35;
-      margin: 2px 0 0;
+    /* The name holds the row's give, and its two parts shrink by wildly
+       different weights: the context in front ellipsizes away first, so the
+       file's own name keeps its glyphs. */
+    .card .name {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      font-family: var(--mono);
+      font-size: 13px;
+      white-space: nowrap;
     }
-    .card h3 .name { font-family: var(--mono); font-size: 14.5px; font-weight: 600; }
+    .card .name .lead {
+      flex: 0 999 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--ink-faint);
+    }
+    .card .name .base {
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--ink);
+    }
 
     .conflict-note {
-      margin: 10px 0 0;
-      padding: 10px 12px;
-      border: 1px solid var(--conflict-line);
-      border-radius: 10px;
+      flex-basis: 100%;
+      margin: 4px 0 2px;
       color: var(--conflict);
-      font-size: 13.5px;
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+
+    /* Quiet, and small enough that the row stays a row. */
+    .btn-mini {
+      flex: none;
+      background: transparent;
+      color: var(--ink-soft);
+      border-color: var(--line);
+      font-size: 12.5px;
       font-weight: 550;
-      line-height: 1.5;
+      padding: 5px 10px;
+      border-radius: 8px;
     }
-
-    .card-actions {
-      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-      margin-top: 12px;
+    .btn-mini:not(:disabled):hover { color: var(--accent); border-color: var(--accent); }
+    .btn-mini.keep {
+      background: var(--accept);
+      border-color: transparent;
+      color: var(--accent-ink);
     }
-    .card-actions .spacer { flex: 1; }
-
-    .btn-accept {
-      background: var(--accept); color: var(--accent-ink);
-      font-size: 13.5px; font-weight: 600; padding: 9px 15px;
-    }
-    .btn-accept:hover { background: var(--accent-hover); }
-    .btn-open {
-      background: transparent; color: var(--ink-soft);
-      border-color: var(--line); font-size: 12.5px; font-weight: 550; padding: 8px 12px;
-    }
-    .btn-open:hover { color: var(--accent); border-color: var(--accent); }
-
-    .verdict {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 13px; font-weight: 650;
-    }
-    .verdict.discarded { color: var(--ink-faint); }
+    .btn-mini.keep:not(:disabled):hover { background: var(--accent-hover); color: var(--accent-ink); }
 
     .banner {
       margin-top: 14px; padding: 12px 14px;
@@ -976,7 +1001,7 @@
 
           <div class="bulk" id="bulk" style="display: none;">
             <span class="count" id="review-count"></span>
-            <button type="button" class="btn-outline" id="undo-all">Put everything back</button>
+            <button type="button" class="btn-mini" id="undo-all">Revert all</button>
           </div>
 
           <div class="cards" id="cards"></div>
@@ -1494,11 +1519,10 @@
     // Muted telemetry (usage, steps, stop reasons) has no trigger of its own
     // — it only folds into a dial a call/harness/card already opened in this
     // gap, and is dropped when there is none, since it has nothing to say on
-    // its own; it shows only at the last rung. A warn/bad note (a retry, a
+    // its own; it shows only at the last rung. A warn/bad note (an error, a
     // provider error) is never swallowed: it joins the entries in temporal
-    // order, visible at every rung, and opens a dial when none is — a nudge
-    // that reruns a step would otherwise double the step's entries with
-    // nothing between them saying why.
+    // order, visible at every rung, and opens a dial when none is, since a
+    // failed exchange must never look like a quiet one.
     function dialAddNote(text, cls) {
       const urgent = cls === "warn" || cls === "bad";
       const dial = urgent ? ensureDial() : openDial;
@@ -1719,12 +1743,6 @@
           break;
         case "error":
           dialAddNote("error: " + p.message, "bad");
-          break;
-        case "system_note":
-          dialAddNote(p.text, "muted");
-          break;
-        case "nudge":
-          dialAddNote("[retry " + p.used + "/" + p.max + ": " + p.cause + "]", "warn");
           break;
         case "provider_error":
           dialAddNote(formatProviderError(p.record), providerErrorClass(p.record));
@@ -2014,17 +2032,24 @@
     });
 
     // ---- The change-report panel ----------------------------------------
+    // The kind is marked by shape; the verb names the glyph to a reader who
+    // hovers the row, and to a screen reader.
     const KINDS = {
-      created: { cls: "created", verb: "Created" },
-      modified: { cls: "modified", verb: "Modified" },
-      deleted: { cls: "deleted", verb: "Deleted" },
-      renamed: { cls: "renamed", verb: "Renamed" },
+      created: { glyph: "+", verb: "Created" },
+      modified: { glyph: "~", verb: "Modified" },
+      deleted: { glyph: "−", verb: "Deleted" },
+      renamed: { glyph: "→", verb: "Renamed" },
     };
+    const UNKNOWN_KIND = { glyph: "·", verb: "Changed" };
 
     // Server commands (job_report, undo_file, undo_all) replace this
-    // wholesale; "Keep your version" at a conflict is a local
-    // acknowledgement, so it mutates this copy directly.
+    // wholesale; "Keep mine" at a conflict is a local acknowledgement, so it
+    // mutates this copy directly.
     let report = { files: [] };
+
+    // The rows already on screen: a revert rebuilds the whole list, and the
+    // survivors flashing in again would read as fresh work.
+    let shownRows = new Set();
 
     async function refreshReport() {
       try {
@@ -2041,95 +2066,115 @@
       b.classList.add("show");
     }
 
-    function strong(text, mono) {
-      const el = document.createElement(mono ? "span" : "strong");
-      if (mono) el.className = "name";
-      el.textContent = text;
-      return el;
-    }
-
-    function headline(file) {
-      const h = document.createElement("h3");
-      const k = KINDS[file.kind] || { verb: "Changed" };
-      if (file.kind === "renamed" && file.renameFrom) {
-        h.append("Renamed ", strong(file.renameFrom, true), " to ", strong(file.path, true));
-      } else {
-        h.append(k.verb + " ", strong(file.path, true));
-      }
-      return h;
-    }
-
+    // The column answers one question: what stands changed in the folder
+    // right now. A reverted file is no longer changed, so its row leaves.
     function renderReport() {
       $("review-banner").classList.remove("show");
       const files = report.files || [];
-      $("report-empty").style.display = files.length === 0 ? "" : "none";
-      const inPlace = files.filter((f) => f.status === "applied").length;
-      $("bulk").style.display = files.length === 0 ? "none" : "";
-      $("review-count").textContent = inPlace === 0
-        ? "Everything has been put back the way it was."
-        : inPlace === 1 ? "1 change is in place" : inPlace + " changes are in place";
-      $("undo-all").disabled = inPlace === 0;
+      const inPlace = files.filter((f) => f.status === "applied");
 
+      const empty = $("report-empty");
+      empty.style.display = inPlace.length === 0 ? "" : "none";
+      empty.textContent = files.length === 0
+        ? "Nothing has changed in this folder yet."
+        : "Everything has been reverted.";
+
+      $("bulk").style.display = inPlace.length === 0 ? "none" : "";
+      $("review-count").textContent = inPlace.length === 1
+        ? "1 change is in place"
+        : inPlace.length + " changes are in place";
+
+      const shown = shownRows;
+      shownRows = new Set(inPlace.map((f) => f.id));
       const list = $("cards");
       list.innerHTML = "";
-      for (const file of files) list.appendChild(renderCard(file));
+      // Sorted by folder, then by name, so each folder is named exactly once.
+      inPlace.sort((a, b) => dirOf(a.path).localeCompare(dirOf(b.path))
+        || baseOf(a.path).localeCompare(baseOf(b.path)));
+      let group = null;
+      for (const file of inPlace) {
+        const dir = dirOf(file.path);
+        if (dir !== group) {
+          group = dir;
+          list.appendChild(groupHeading(dir));
+        }
+        list.appendChild(renderCard(file, shown.has(file.id)));
+      }
     }
 
-    function renderCard(file) {
-      const card = document.createElement("div");
-      const k = KINDS[file.kind] || { cls: "" };
-      const putBack = file.status !== "applied";
-      const conflicted = file.conflict && !putBack;
-      card.className = "card" + (putBack ? " settled" : "") + (conflicted ? " conflict" : "");
+    const dirOf = (path) => path.slice(0, path.lastIndexOf("/") + 1);
+    const baseOf = (path) => path.slice(path.lastIndexOf("/") + 1);
 
-      const top = document.createElement("div");
-      top.className = "card-top";
-      const kind = document.createElement("span");
-      kind.className = "kind " + k.cls;
-      const dot = document.createElement("span"); dot.className = "dot"; dot.setAttribute("aria-hidden", "true");
-      kind.append(dot, (KINDS[file.kind] || {}).verb || "Changed");
-      top.appendChild(kind);
-      card.appendChild(top);
+    // The chosen folder's own name stands for the top level, so a file lying
+    // loose in it is not left under a heading that says nothing.
+    function groupHeading(dir) {
+      const el = document.createElement("div");
+      el.className = "group";
+      el.textContent = dir || baseOf(state.folder.replace(/\/+$/, "")) + "/";
+      el.title = dir || state.folder;
+      return el;
+    }
 
-      card.appendChild(headline(file));
+    // `settled` says the row was already on screen before this render.
+    function renderCard(file, settled) {
+      const k = KINDS[file.kind] || UNKNOWN_KIND;
+      const row = document.createElement("div");
+      row.className = "card" + (file.conflict ? " conflict" : "") + (settled ? " settled" : "");
+      row.title = file.kind === "renamed" && file.renameFrom
+        ? "Renamed " + file.renameFrom + " to " + file.path
+        : k.verb + " " + file.path;
 
-      if (conflicted) {
+      const glyph = document.createElement("span");
+      glyph.className = "glyph";
+      glyph.textContent = k.glyph;
+      glyph.setAttribute("role", "img");
+      glyph.setAttribute("aria-label", k.verb);
+
+      row.append(glyph, nameCell(file));
+
+      if (file.conflict) {
         const note = document.createElement("p");
         note.className = "conflict-note";
         note.textContent = "You've changed this file yourself since the assistant finished. "
-          + "Putting the older one back would replace your newer version. Open both to compare, then choose.";
-        card.appendChild(note);
+          + "Reverting would replace your newer version with the older one.";
+        row.appendChild(note);
       }
 
-      const actions = document.createElement("div");
-      actions.className = "card-actions";
-
-      if (file.currentPath) actions.appendChild(openButton("Open", "open_file", { path: file.currentPath }));
-      if (conflicted && file.beforePath) {
-        actions.appendChild(openButton("Open the older one", "open_earlier",
-          { folder: state.folder, path: file.beforePath }));
-      }
-
-      const spacer = document.createElement("div"); spacer.className = "spacer"; actions.appendChild(spacer);
-
-      if (putBack) {
-        const v = document.createElement("span");
-        v.className = "verdict discarded";
-        v.append("↩ Put back");
-        actions.appendChild(v);
-      } else if (conflicted) {
-        actions.appendChild(actionButton("Keep your version", "btn-accept", () => keepMine(file.id)));
-        actions.appendChild(actionButton("Put back the older one", "btn-outline", () => undo("undo_file", file.id, true)));
+      if (file.currentPath) row.appendChild(openButton("Open", "open_file", { path: file.currentPath }));
+      if (file.conflict) {
+        if (file.beforePath) {
+          row.appendChild(openButton("Open the older one", "open_earlier",
+            { folder: state.folder, path: file.beforePath }));
+        }
+        row.appendChild(actionButton("Keep mine", "btn-mini keep", () => keepMine(file.id)));
+        row.appendChild(actionButton("Revert anyway", "btn-mini", () => undo("undo_file", file.id, true)));
       } else {
-        actions.appendChild(actionButton("Put it back how it was", "btn-outline", () => undo("undo_file", file.id, false)));
+        row.appendChild(actionButton("Revert", "btn-mini", () => undo("undo_file", file.id, false)));
       }
+      return row;
+    }
 
-      card.appendChild(actions);
-      return card;
+    // The file's own name — its folder is the heading above it. A rename
+    // carries the name it had before, which gives way first if the row is
+    // short of room.
+    function nameCell(file) {
+      const cell = document.createElement("span");
+      cell.className = "name";
+      if (file.kind === "renamed" && file.renameFrom) {
+        const lead = document.createElement("span");
+        lead.className = "lead";
+        lead.textContent = baseOf(file.renameFrom) + " → ";
+        cell.appendChild(lead);
+      }
+      const base = document.createElement("span");
+      base.className = "base";
+      base.textContent = baseOf(file.path);
+      cell.appendChild(base);
+      return cell;
     }
 
     function openButton(label, cmd, args) {
-      return actionButton(label, "btn-open", async () => {
+      return actionButton(label, "btn-mini", async () => {
         try { await invoke(cmd, args); }
         catch (err) { showBanner(String(err)); }
       });

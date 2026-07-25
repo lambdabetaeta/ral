@@ -227,6 +227,18 @@ own stack, so the agent's sandbox is `grant` — in-language, not a wrapper
 around a binary. Five profiles ship in the binary, from `dangerous` to
 `confined`. See [exarch/README.md](exarch/README.md).
 
+**synod.** A second product over the same engine, an office-work delegate where
+exarch is a coding one: you grant it one folder, describe the job in plain
+language, and it works in that folder in place, under a checkpoint before, a
+report of what changed after, and per-file or whole-job undo. Every conversation
+boots a real virtual machine from shipped boot media — macOS only, on
+Virtualization.framework — and the engine runs inside the guest. `just
+synod-app` bundles it into a runnable `.app` under `target/release/bundle/`; it
+needs the Tauri CLI (`cargo install tauri-cli`) and a built guest image under
+`vm-image/out/`. A bare `cargo build` product cannot boot a machine — the
+virtualization entitlement arrives with the bundle's signature, or, for a
+development binary, from `dev/scripts/sign-virtualization.sh`.
+
 **Plugins.** The interactive shell is extended in ral itself:
 [plugins/](plugins) has autosuggestions, fzf-backed history, file, and
 directory pickers, `**`-trigger fzf completion, and zoxide integration.

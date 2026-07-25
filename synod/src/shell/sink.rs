@@ -102,14 +102,6 @@ pub enum SynodEvent {
     Error {
         message: String,
     },
-    SystemNote {
-        text: String,
-    },
-    Nudge {
-        used: u32,
-        max: u32,
-        cause: String,
-    },
     ProviderError {
         record: ProviderErrorRecord,
     },
@@ -169,8 +161,6 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         },
         Kind::StopReason(reason) => SynodEvent::StopReason { reason },
         Kind::Error(message) => SynodEvent::Error { message },
-        Kind::SystemNote(text) => SynodEvent::SystemNote { text },
-        Kind::Nudge { used, max, cause } => SynodEvent::Nudge { used, max, cause },
         Kind::ProviderError(record) => SynodEvent::ProviderError { record },
         // `fuel: 0` means synod's root never has a sub-agent, so
         // `SubagentDone` can never arrive on this bus; `Born`/`Died` name a
@@ -181,10 +171,15 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         // add.  `ToolResult`/`HarnessResult` are forensic pairings for
         // their call, kept in the transcript for post-mortem, never shown
         // live.  `Pin`/`Unpin` write a TUI register slot synod does not
-        // have.
+        // have.  `Nudge` and `SystemNote` are the harness minding itself — an
+        // empty-turn correction, a truncation recovery, a compaction's byte
+        // counts — named in the operator's terms, so the window is not told;
+        // the phase a compaction announces is its whole user-facing surface.
         Kind::Born { .. }
         | Kind::Died
         | Kind::Boundary
+        | Kind::Nudge { .. }
+        | Kind::SystemNote(_)
         | Kind::Reasoning { .. }
         | Kind::UserPromptEcho(_)
         | Kind::ToolResult(_)
@@ -289,28 +284,6 @@ mod tests {
             };
             assert!(marks.is_empty());
         }
-    }
-
-    #[test]
-    fn presentation_kinds_project_to_none() {
-        assert!(project(Kind::Boundary).is_none());
-        assert!(project(Kind::Died).is_none());
-        assert!(project(Kind::UserPromptEcho("hi".to_string())).is_none());
-        assert!(project(Kind::ToolResult("ok".to_string())).is_none());
-        assert!(project(Kind::HarnessResult("ok".to_string())).is_none());
-        assert!(
-            project(Kind::Pin {
-                key: "k".to_string(),
-                card: Card(vec![]),
-            })
-            .is_none()
-        );
-        assert!(
-            project(Kind::Unpin {
-                key: "k".to_string(),
-            })
-            .is_none()
-        );
     }
 
     #[test]
