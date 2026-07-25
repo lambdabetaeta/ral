@@ -239,7 +239,21 @@ case "$ARCH" in
     # in Ubuntu's config, so there is no module to ship — and the host writes
     # the kernel command line either way, so this image is neutral about which
     # console it is handed.
-    CHECK_SYMS=(CONFIG_HYPERV CONFIG_HYPERV_STORAGE CONFIG_HYPERV_UTILS
+    #
+    # CONFIG_HYPERV and CONFIG_HYPERV_VMBUS are two different questions, and
+    # conflating them cost this script the one module nothing else is reachable
+    # without. The first is the umbrella bool for guest support — the arch code
+    # under it (CONFIG_HYPERV_TIMER, CONFIG_HYPERV_IOMMU) is `y` and has no
+    # module — while the *bus driver* has its own tristate, and in this kernel
+    # CONFIG_HYPERV_VMBUS=m. Mapping `hv_vmbus` to the umbrella therefore read
+    # its `y` as "built in, nothing to ship", and hv_vmbus reached the guest only
+    # because hv_storvsc, hv_utils, hv_balloon and hv_sock each name it on their
+    # own modules.dep lines. That is true today and is not a thing to rely on: a
+    # config that made those four `y` and left the bus a module would ship a
+    # guest that cannot see its disks. Both symbols are recorded, and it is the
+    # tristate that carries the module name.
+    CHECK_SYMS=(CONFIG_HYPERV CONFIG_HYPERV_VMBUS CONFIG_HYPERV_STORAGE
+                CONFIG_HYPERV_UTILS
                 CONFIG_HYPERV_BALLOON CONFIG_HYPERV_NET CONFIG_VSOCKETS
                 CONFIG_HYPERV_VSOCKETS CONFIG_VIRTIO_VSOCKETS CONFIG_9P_FS
                 CONFIG_NET_9P CONFIG_NET_9P_FD CONFIG_SCSI CONFIG_BLK_DEV_SD
@@ -250,7 +264,7 @@ case "$ARCH" in
     # `9p`, not `9pfs`). `9p` pulls the netfs core in through its own
     # modules.dep line, the way the virtio transport pulls `vsock` in on arm64.
     declare -A MODNAME=(
-      [CONFIG_HYPERV]=hv_vmbus [CONFIG_HYPERV_STORAGE]=hv_storvsc
+      [CONFIG_HYPERV_VMBUS]=hv_vmbus [CONFIG_HYPERV_STORAGE]=hv_storvsc
       [CONFIG_HYPERV_UTILS]=hv_utils [CONFIG_HYPERV_BALLOON]=hv_balloon
       [CONFIG_VSOCKETS]=vsock [CONFIG_HYPERV_VSOCKETS]=hv_sock
       [CONFIG_9P_FS]=9p [CONFIG_NET_9P]=9pnet [CONFIG_NET_9P_FD]=9pnet_fd
