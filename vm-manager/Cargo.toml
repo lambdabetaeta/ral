@@ -27,5 +27,41 @@ objc2-virtualization = "0.3"
 block2              = "0.6"
 dispatch2           = { version = "0.3", features = ["block2"] }
 
+# The Windows backend ([`hcs`]) speaks to the Host Compute System API, which
+# has no Rust binding at all: `computecore.dll`'s entry points are declared and
+# loaded by hand (see `hcs::api`), and everything around them — the `AF_HYPERV`
+# control-plane socket, the console named pipe, the sparse session disk, the
+# security descriptors naming who may use the guest's socket — is plain Win32.
+# So this is the Win32 surface itself rather than a wrapper over it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    # The control plane: an AF_HYPERV stream socket, and SOCKADDR_HV to name it.
+    "Win32_Networking_WinSock",
+    "Win32_System_Hypervisor",
+    # HcsGrantVmAccess's SID, and the SDDL naming this user on the guest's socket.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    # ProcessPrng — the VM identifier has to be unguessable, not merely fresh.
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+    # FormatMessageW: Windows' own words for an HRESULT the backend refuses on.
+    "Win32_System_Diagnostics_Debug",
+    # computecore.dll / computestorage.dll, loaded rather than linked.
+    "Win32_System_LibraryLoader",
+    # The broker: the service-controller handshake a Windows service is killed
+    # for not completing, and the named pipe an unprivileged client asks over.
+    "Win32_System_Services",
+    # LocalFree: how an HCS result document is released.
+    "Win32_System_Memory",
+    # The guest console: a named pipe the VM's COM port dials, read here.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    # FSCTL_SET_SPARSE on the per-session disk, so an 8 GiB image costs what it
+    # holds rather than what it promises.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
 [dev-dependencies]
 tempfile = "3.27"

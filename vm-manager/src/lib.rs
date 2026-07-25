@@ -28,10 +28,22 @@
 //!
 //! # Backends
 //!
-//! - [`vz`] — Apple's Virtualization.framework, macOS only.  It starts
-//!   machines only in a signed process carrying the virtualization
-//!   entitlement and handed real boot media, which is exactly what
-//!   [`detect`] checks before answering with it.
+//! Each is compiled only on the platform it speaks for, so neither is
+//! nameable as a link from a page the other one builds; they are cited here by
+//! module file.
+//!
+//! - `vz` (`vm-manager/src/vz.rs`) — Apple's Virtualization.framework, macOS
+//!   only.  It starts machines only in a signed process carrying the
+//!   virtualization entitlement and handed real boot media, which is exactly
+//!   what [`detect`] checks before answering with it.
+//! - `hcs` (`vm-manager/src/hcs/`) — Hyper-V through the Host Compute System
+//!   API, Windows only.  It starts machines only for a user the compute service
+//!   serves — an administrator or a member of the *Hyper-V Administrators*
+//!   group — and handed real boot media, which is what [`detect`] checks there.
+//!
+//! The two are the same machine assembled from different parts, and the guest
+//! cannot tell which one booted it; `hcs`'s own module docs carry the table of
+//! correspondences.
 
 use std::fmt;
 use std::io;
@@ -39,6 +51,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+pub mod broker;
+#[cfg(windows)]
+pub mod hcs;
 #[cfg(target_os = "macos")]
 pub mod vz;
 
@@ -114,7 +130,13 @@ impl MachineSpec {
                 least_mib: Self::LEAST_MEMORY_MIB,
             });
         }
-        if !self.workspace.guest_path.is_absolute() {
+        // Judged by Linux's rule, deliberately, and not `Path::is_absolute` —
+        // which answers with the *host's*.  The guest is Linux under every
+        // backend, so `/work` is an absolute path in the only namespace this
+        // field names; on Windows `Path::is_absolute` would say otherwise
+        // (nothing without a drive letter or a UNC prefix is absolute there)
+        // and refuse every well-formed spec on that platform alone.
+        if !self.workspace.guest_path.to_string_lossy().starts_with('/') {
             return Err(Error::GuestPathNotAbsolute(
                 self.workspace.guest_path.clone(),
             ));
@@ -155,6 +177,42 @@ pub struct BootArtifact {
     pub rootfs: PathBuf,
 }
 
+impl BootArtifact {
+    /// Resolve every file to an absolute path, following symbolic links.
+    ///
+    /// Every backend calls this before it commits a single resource, for the
+    /// same reason [`MachineSpec::resolve`] exists — but the reason is sharper
+    /// here, because these paths are read by *another process*.  A hypervisor's
+    /// service or framework opens the kernel itself, from its own working
+    /// directory: `vmcompute` runs in `C:\Windows\System32`, so a relative path
+    /// that resolved perfectly for the caller names nothing at all by the time
+    /// the machine is built, and the failure arrives as a bare "the system
+    /// cannot find the path specified" with no clue which path was meant.
+    ///
+    /// # Errors
+    /// Returns [`Error::MissingBootFile`] naming the first file that is not
+    /// there or cannot be read.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: resolving the boot media before a machine exists, exactly as \
+                  `MachineSpec::resolve` resolves the granted folder — host-side setup with no \
+                  Shell to route through and no run to raise a card in."
+    )]
+    pub fn resolve(&self) -> Result<Self, Error> {
+        let resolve_one = |path: &PathBuf| {
+            std::fs::canonicalize(path).map_err(|cause| Error::MissingBootFile {
+                path: path.clone(),
+                cause,
+            })
+        };
+        Ok(Self {
+            kernel: resolve_one(&self.kernel)?,
+            initramfs: resolve_one(&self.initramfs)?,
+            rootfs: resolve_one(&self.rootfs)?,
+        })
+    }
+}
+
 /// Something that can start a machine.
 pub trait Hypervisor {
     /// The backend's name, fit to show a user: `"Virtualization.framework"`.
@@ -182,9 +240,13 @@ pub trait Machine {
     /// at boot; taking it transfers ownership away from the machine, so a
     /// caller may ask for it no more than once.
     ///
-    /// Unix only: a control plane here is an `AF_VSOCK` stream, named by its
-    /// file descriptor.  The Windows Hyper-V backend will choose its own
-    /// socket type once it exists; this signature does not presume it.
+    /// The handle differs by platform because the socket does, and neither
+    /// platform's owner type is the other's: on Unix a control plane is an
+    /// `AF_VSOCK` stream named by its file descriptor, on Windows an
+    /// `AF_HYPERV` socket.  Both are adopted into the same frame channel by
+    /// [`ral_core::wire::WireStream`](../../core/src/wire.rs), whose docs
+    /// explain why std's stream types can carry either; what does *not* vary is
+    /// that a machine has exactly one, and that taking it transfers ownership.
     ///
     /// # Panics
     /// Implementations panic if asked twice — a caller's error, not a
@@ -193,6 +255,15 @@ pub trait Machine {
     /// after boot.
     #[cfg(unix)]
     fn take_control(&mut self) -> std::os::fd::OwnedFd;
+
+    /// The host end of this machine's control-plane connection — see the Unix
+    /// twin above for the whole contract, which this shares but for the
+    /// handle's type.
+    ///
+    /// # Panics
+    /// Implementations panic if asked twice.
+    #[cfg(windows)]
+    fn take_control(&mut self) -> std::os::windows::io::OwnedSocket;
 
     /// Stop the machine and release what it holds.
     ///
@@ -205,29 +276,15 @@ pub trait Machine {
 }
 
 /// Shown by [`detect`] on every platform this crate has no backend for at
-/// all — today, anything but an Apple Silicon Mac — whatever boot media it
-/// was given.
-///
-/// One name, two sentences, because the honest refusal differs by where it
-/// is read. On Windows a backend is a *stated intention*, not an absence:
-/// [`Machine::take_control`] already holds the socket question open for it.
-/// A person there is owed the truth that synod is unfinished, not the
-/// suggestion that their computer is the wrong one. Anywhere else there is
-/// no such intention to name, so the sentence says only what runs today.
-#[cfg(windows)]
-const NO_BACKEND: &str = "synod cannot start its virtual machine on Windows yet — the part of \
-                          synod that would make one has not been built. For now synod runs \
-                          only on an Apple Silicon Mac";
-
-/// Shown by [`detect`] on every platform this crate has no backend for at
-/// all — see the Windows definition above for why there are two.
+/// all — anything but an Apple Silicon Mac or a Windows with the Virtual
+/// Machine Platform — whatever boot media it was given.
 #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
-const NO_BACKEND: &str =
-    "this computer cannot run synod's virtual machine — it only starts on an Apple Silicon Mac";
+const NO_BACKEND: &str = "this computer cannot run synod's virtual machine — it starts on an \
+                          Apple Silicon Mac, or on Windows with the Virtual Machine Platform";
 
 /// Shown by [`detect`] when the platform could run a machine, but this
 /// build shipped with no boot media to start one from.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
 const NO_BOOT_MEDIA: &str = "synod could not find the virtual-machine image it ships with — \
                               ask your IT department to reinstall it";
 
@@ -246,15 +303,63 @@ const UNENTITLED: &str = "this copy of synod is not signed with the entitlement 
 ///
 /// This build has no backend at all, so the refusal is the platform itself
 /// and nothing downstream of it is ever weighed — the boot media goes
-/// unread. The two refusals the Apple Silicon overload can additionally
-/// give are its own, and named in its doc.
+/// unread. The refusals the two real overloads can additionally give are
+/// their own, and named in their docs.
 ///
 /// # Errors
 /// Always, with [`NO_BACKEND`].
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
 pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
     drop(boot);
     Err(NO_BACKEND.to_string())
+}
+
+/// Start the one backend this build can actually run, given the boot media
+/// the application ships.
+///
+/// On Windows the platform check the no-backend overload makes always passes,
+/// and what remains are two questions about *this* computer rather than about
+/// the operating system: is there an image to boot, and will the compute
+/// service serve this user (see [`hcs::available`], which names the Virtual
+/// Machine Platform feature or the Hyper-V Administrators group as the case
+/// requires).
+///
+/// The order is deliberate and matches the macOS overload's: the missing image
+/// is asked about first, because it is the answer a fresh install is most
+/// likely to need and the cheaper question to ask.
+///
+/// # Errors
+/// Returns [`NO_BOOT_MEDIA`] if there is no service and `boot` is `None`, or
+/// [`hcs::available`]'s own sentence — with the service named beside it — if
+/// this Windows will not host a guest for this user directly either.
+#[cfg(windows)]
+pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
+    // The broker first, always: an installed synod runs unprivileged, and the
+    // service is what makes that possible (`broker`'s own docs carry the
+    // argument).  It needs no boot media from this process — it has its own,
+    // installed beside it — so the question of media does not even arise on the
+    // path a user is on.
+    if broker::client::Brokered::available() {
+        return Ok(Box::new(broker::client::Brokered));
+    }
+
+    // No service: this is a checkout, not an installation.  Fall back to
+    // creating the machine here, which works for whoever the compute service
+    // already serves — a maintainer in an elevated shell, or in the group.
+    let Some(artifact) = boot else {
+        return Err(NO_BOOT_MEDIA.to_string());
+    };
+    hcs::available().map_err(|why| {
+        format!(
+            "{why}. (Synod's own installer avoids this entirely: it registers a service that \
+             holds that one privilege so the application does not have to. This copy of synod is \
+             running without it.)"
+        )
+    })?;
+    Ok(Box::new(hcs::Hyperv::new(
+        artifact,
+        hcs::Hyperv::default_cache(),
+    )))
 }
 
 /// Start the one backend this build can actually run, given the boot media
@@ -290,6 +395,8 @@ pub enum Error {
     NotAFolder(PathBuf),
     /// The granted folder is there but could not be read.
     FolderUnreadable { path: PathBuf, cause: io::Error },
+    /// A file of the boot media this build ships is missing or unreadable.
+    MissingBootFile { path: PathBuf, cause: io::Error },
     /// The workspace's mount point inside the guest is not an absolute path.
     GuestPathNotAbsolute(PathBuf),
     /// The spec asked for a machine with no processors.
@@ -321,6 +428,12 @@ impl fmt::Display for Error {
                 "the folder {} could not be opened: {cause}. Do you have permission to open it?",
                 path.display()
             ),
+            Self::MissingBootFile { path, cause } => write!(
+                f,
+                "synod's virtual-machine image is missing a file it needs to start: {} ({cause}). \
+                 Ask your IT department to reinstall synod.",
+                path.display()
+            ),
             Self::GuestPathNotAbsolute(path) => write!(
                 f,
                 "the folder has to appear inside the machine at a full path such as {}, but {} is not one",
@@ -347,7 +460,9 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::FolderUnreadable { cause, .. } => Some(cause),
+            Self::FolderUnreadable { cause, .. } | Self::MissingBootFile { cause, .. } => {
+                Some(cause)
+            }
             _ => None,
         }
     }
@@ -357,6 +472,36 @@ impl std::error::Error for Error {
 mod tests {
     use super::*;
 
+    /// The conventional spec for a real folder resolves on every platform.
+    ///
+    /// It is worth a test of its own because the two paths in a spec live in
+    /// different namespaces — the granted folder is the host's, the mount point
+    /// is the guest's — and judging the guest's by the host's rule refused every
+    /// spec on Windows, where `/work` is not an absolute path. A boot cannot
+    /// begin until this passes, so the failure looked like a hypervisor problem
+    /// rather than an arithmetic one.
+    #[test]
+    fn a_conventional_spec_resolves_on_this_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = MachineSpec::for_folder(dir.path());
+        assert_eq!(spec.workspace.guest_path, PathBuf::from("/work"));
+        let root = spec.resolve().expect("a real folder and the /work mount");
+        assert!(root.is_dir());
+    }
+
+    /// A mount point that is not a path in the guest's own namespace is
+    /// refused — including one that a *host* would call absolute.
+    #[test]
+    fn a_guest_path_is_judged_by_the_guests_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = MachineSpec::for_folder(dir.path());
+        spec.workspace.guest_path = PathBuf::from(r"C:\work");
+        assert!(matches!(
+            spec.resolve(),
+            Err(Error::GuestPathNotAbsolute(_))
+        ));
+    }
+
     fn artifact() -> BootArtifact {
         BootArtifact {
             kernel: PathBuf::from("/boot/kernel"),
@@ -365,13 +510,70 @@ mod tests {
         }
     }
 
-    /// Off Apple Silicon, `detect` refuses outright — media or not, since
-    /// this crate has no backend for the platform at all.
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    /// On a platform with no backend at all, `detect` refuses outright —
+    /// media or not, since there is nothing downstream of the platform to
+    /// weigh.
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     #[test]
-    fn off_apple_silicon_detect_refuses_regardless_of_media() {
+    fn without_a_backend_detect_refuses_regardless_of_media() {
         assert!(detect(None).is_err());
         assert!(detect(Some(artifact())).is_err());
+    }
+
+    /// On Windows, no media is its own refusal — asked before the compute
+    /// service is troubled at all.
+    ///
+    /// Unless there is a machine service, which has media of its own and needs
+    /// none from this process. That is not a caveat to the law but the law's
+    /// other half, and it is reachable in this very test binary: the broker's
+    /// own test opens a real pipe that outlives it, so whether this assertion
+    /// applies depends on which tests have run — which is exactly why it asks
+    /// rather than assumes.
+    #[cfg(windows)]
+    #[test]
+    fn without_media_detect_refuses_by_name() {
+        if broker::client::Brokered::available() {
+            assert!(detect(None).is_ok(), "a service carries its own media");
+            return;
+        }
+        let message = detect(None).err().unwrap();
+        assert!(message.contains("could not find"), "{message}");
+    }
+
+    /// With media, the answer follows what this computer will actually do:
+    /// a machine whose user the compute service serves gets a backend, and one
+    /// whose user it refuses gets the sentence naming the remedy. The law under
+    /// test is agreement between the two, not either fixed answer — a developer
+    /// box outside the Hyper-V Administrators group and a deployed one inside
+    /// it must both be described correctly.
+    #[cfg(windows)]
+    #[test]
+    fn with_media_detect_follows_what_this_computer_permits() {
+        // A computer with the service installed needs nothing else: the broker
+        // is preferred over creating the machine here, and it carries its own
+        // media, so the artifact goes unread.
+        if broker::client::Brokered::available() {
+            assert!(detect(Some(artifact())).is_ok());
+            assert!(
+                detect(None).is_ok(),
+                "the service has its own boot media, so this process needs none"
+            );
+            return;
+        }
+        match (hcs::available(), detect(Some(artifact()))) {
+            (Ok(()), answer) => assert!(answer.is_ok(), "a permitted computer must get a backend"),
+            (Err(why), answer) => {
+                let message = answer.err().expect("a refused computer must be refused");
+                assert!(
+                    message.starts_with(&why),
+                    "the refusal must carry the machine layer's own words: {message}"
+                );
+                assert!(
+                    message.contains("installer"),
+                    "and name the way out of it: {message}"
+                );
+            }
+        }
     }
 
     /// On the eligible platform, no media is its own refusal.
