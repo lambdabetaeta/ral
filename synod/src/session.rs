@@ -262,8 +262,8 @@ pub struct Choice {
     pub effort: Option<String>,
 }
 
-/// What the window shows before the first message: who is answering, and
-/// the ~2GiB warning when the folder is that large.
+/// What the window shows before the first message: who is answering, at
+/// what effort, and the ~2GiB warning when the folder is that large.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Opening {
@@ -271,6 +271,11 @@ pub struct Opening {
     pub account: String,
     /// The model that account is driving.
     pub model: String,
+    /// The [`provider::EFFORT_LADDER`] label of the effort actually in
+    /// force, after [`resolve_tuning`]'s masking — not what was asked for,
+    /// which the window already knows and which a model that takes no
+    /// reasoning control never receives.
+    pub effort: String,
     /// The ~2GiB warning sentence, when the folder is that large.
     pub large_folder_line: Option<String>,
 }
@@ -311,7 +316,9 @@ impl Conversation {
     /// Panics if the chosen provider is absent from `store` — an invariant
     /// [`choose`] upholds by choosing only among available ones, and
     /// [`resolve_pinned_provider`] upholds by resolving only against the
-    /// same list.
+    /// same list — or if the resolved tuning's effort is one
+    /// [`provider::EFFORT_LADDER`] does not name, which
+    /// [`resolve_tuning`] cannot produce.
     pub fn begin(
         folder: &Path,
         store: &CredentialStore,
@@ -357,6 +364,9 @@ impl Conversation {
         let account = id.label().to_string();
         let announced_model = model.clone();
         let tuning = resolve_tuning(effort, &model)?;
+        let announced_effort = provider::effort_label(&tuning.effort)
+            .expect("resolve_tuning yields only efforts the ladder names")
+            .to_string();
 
         let run_dir = SYNOD
             .log_run_dir(&grant.root().to_string_lossy())
@@ -505,6 +515,7 @@ impl Conversation {
             let opening = Opening {
                 account,
                 model: announced_model,
+                effort: announced_effort,
                 large_folder_line,
             };
 

@@ -184,7 +184,11 @@ impl App {
         self.status_model = if p.model().is_empty() {
             format!("{status_provider} · no model — run /model")
         } else {
-            format!("{status_provider}/{}", p.model())
+            // The rung in force, in the picker's own ladder label — read off
+            // the tuning, so a model the catalog says takes no reasoning
+            // control reads `auto`, which is what goes on the wire.
+            let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
+            format!("{status_provider}/{} ({effort})", p.model())
         };
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
     }

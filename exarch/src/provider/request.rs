@@ -69,6 +69,24 @@ pub fn effort_by_label(label: &str) -> Result<Option<ReasoningEffort>, String> {
         })
 }
 
+/// The ladder label naming `effort` — the inverse of [`effort_by_label`],
+/// for a front-end reporting back which rung is in force.
+///
+/// `None` for an effort the ladder does not name: the deliberately omitted
+/// `Budget`/`Minimal` variants, which no ladder round trip can produce.
+/// Matches by [`ReasoningEffort::variant_name`], the same coarse key
+/// [`Tuning`]'s `PartialEq` uses.
+pub fn effort_label(effort: &Option<ReasoningEffort>) -> Option<&'static str> {
+    EFFORT_LADDER
+        .iter()
+        .find(|(_, rung)| match (rung, effort) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.variant_name() == b.variant_name(),
+            _ => false,
+        })
+        .map(|(label, _)| *label)
+}
+
 /// The ladder label whose effort matches [`Tuning::initial`].
 ///
 /// The rung a freshly-opened control should land on, read off the ladder
@@ -79,16 +97,8 @@ pub fn effort_by_label(label: &str) -> Result<Option<ReasoningEffort>, String> {
 /// Panics if no ladder entry's effort matches [`Tuning::initial`]'s — a
 /// broken invariant of this module, not a condition a caller can trigger.
 pub fn default_effort_label() -> &'static str {
-    let initial = Tuning::initial().effort;
-    let (label, _) = EFFORT_LADDER
-        .iter()
-        .find(|(_, effort)| match (effort, &initial) {
-            (None, None) => true,
-            (Some(a), Some(b)) => a.variant_name() == b.variant_name(),
-            _ => false,
-        })
-        .expect("Tuning::initial()'s effort must appear on the effort ladder");
-    label
+    effort_label(&Tuning::initial().effort)
+        .expect("Tuning::initial()'s effort must appear on the effort ladder")
 }
 
 /// Manual impl: genai's `ReasoningEffort` has no derived `PartialEq`, so

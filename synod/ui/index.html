@@ -268,18 +268,28 @@
       height: 100%;
     }
 
+    /* Three zones, in this order: the standing facts (left, constant), the
+       status (its right edge fixed), and the one control (far right). The
+       status is the only thing that changes while the assistant works, and
+       it is the only flexible item's neighbour — so it grows leftward into
+       the folder line's slack and never shifts the button beside it. */
     .topbar {
       display: flex;
       align-items: center;
       gap: 14px;
-      padding: 14px 22px;
+      padding: 10px 22px;
       border-bottom: 1px solid var(--line);
       background: var(--raised);
       flex: none;
     }
-    .topbar .folder {
+    .topbar .meta {
       flex: 1;
       min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .topbar .folder {
       font-family: var(--mono);
       font-size: 13px;
       color: var(--ink-soft);
@@ -287,26 +297,45 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .topbar .model {
+    .topbar .facts { display: flex; gap: 18px; min-width: 0; }
+    /* Hidden, not absent, until the opening names them: the labels alone
+       already hold the row's height, so the values arriving shifts nothing. */
+    .topbar .facts:not(.ready) { visibility: hidden; }
+    .topbar .fact { display: flex; align-items: baseline; gap: 6px; flex: none; }
+    /* Only the model name is long enough to need the give. */
+    .topbar .fact.model { flex: 0 1 auto; min-width: 0; }
+    .topbar .fact-label {
       flex: none;
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      color: var(--ink-faint);
+    }
+    .topbar .fact-value {
       font-family: var(--mono);
       font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      color: var(--ink-faint);
-      padding: 3px 9px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
+      color: var(--ink);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .topbar .model:empty { display: none; }
     .topbar .status {
+      flex: none;
       font-size: 12.5px;
       font-weight: 600;
       letter-spacing: 0.03em;
       color: var(--ink-faint);
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 6px;
+      white-space: nowrap;
+    }
+    .topbar-rule {
+      flex: none;
+      align-self: stretch;
+      width: 1px;
+      background: var(--line);
     }
     .topbar .status .spinner {
       width: 9px; height: 9px; border-radius: 50%;
@@ -918,9 +947,21 @@
     <!-- ============ CONVERSATION ============ -->
     <section id="screen-conversation" class="screen">
       <div class="topbar">
-        <span class="folder" id="convo-folder"></span>
-        <span class="model" id="convo-model"></span>
+        <div class="meta">
+          <span class="folder" id="convo-folder"></span>
+          <div class="facts" id="convo-facts">
+            <span class="fact model">
+              <span class="fact-label">model:</span>
+              <span class="fact-value" id="convo-model"></span>
+            </span>
+            <span class="fact">
+              <span class="fact-label">effort level:</span>
+              <span class="fact-value" id="convo-effort"></span>
+            </span>
+          </div>
+        </div>
         <span class="status" id="convo-status"></span>
+        <span class="topbar-rule" aria-hidden="true"></span>
         <button type="button" class="btn-quiet" id="start-again">Start again</button>
       </div>
 
@@ -1155,9 +1196,24 @@
     // the first folder pick (which then starts the assistant) and a restart
     // (whose assistant is already started by the time this runs: the window
     // must never start a second one on top of it).
+    // The standing facts of a conversation, written only from the opening
+    // the backend narrates — the model and effort actually in force, which
+    // is not always what the start screen asked for (a model that takes no
+    // reasoning control is sent none). `null` clears them, for the gap
+    // between a restart and its opening.
+    function setFacts(opening) {
+      const model = opening ? opening.model || "" : "";
+      const account = opening ? opening.account || "" : "";
+      $("convo-model").textContent = model;
+      $("convo-effort").textContent = opening ? opening.effort || "" : "";
+      $("convo-model").title = account ? account + " · " + model : "";
+      $("convo-facts").classList.toggle("ready", Boolean(opening));
+    }
+
     function resetTranscript(folder) {
       state.folder = folder;
       $("convo-folder").textContent = folder;
+      setFacts(null);
       blocks = [];
       streamingProse = null;
       openDial = null;
@@ -1613,9 +1669,7 @@
     }
 
     function onOpening(p) {
-      const model = $("convo-model");
-      model.textContent = p.model || "";
-      model.title = p.account ? p.account + " · " + (p.model || "") : "";
+      setFacts(p);
       if (p.largeFolderLine) addNoticeMessage(p.largeFolderLine);
     }
 
