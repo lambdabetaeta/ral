@@ -21,7 +21,7 @@ fn main() {
 
     use ral_core::io::TerminalState;
     use ral_core::transport::{
-        EnquiryError, Liveness, Program, Report, TerminalEndpoint, Transport, Run, WireTransport,
+        EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport,
         dispatch_to_report,
     };
     use ral_core::types::Capabilities;
