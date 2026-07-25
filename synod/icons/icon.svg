@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="field" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6a2a3c"/>
+      <stop offset="1" stop-color="#43182a"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".14"/>
+      <stop offset=".42" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0dca0"/>
+      <stop offset="1" stop-color="#bf9a4e"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#field)"/>
+  <rect width="512" height="512" rx="112" fill="url(#gloss)"/>
+  <g stroke="url(#gold)" stroke-width="13" stroke-linecap="round" opacity=".5">
+    <line x1="256" y1="256" x2="406" y2="256"/><line x1="256" y1="256" x2="362" y2="362"/>
+    <line x1="256" y1="256" x2="256" y2="406"/><line x1="256" y1="256" x2="150" y2="362"/>
+    <line x1="256" y1="256" x2="106" y2="256"/><line x1="256" y1="256" x2="150" y2="150"/>
+    <line x1="256" y1="256" x2="256" y2="106"/><line x1="256" y1="256" x2="362" y2="150"/>
+  </g>
+  <g fill="url(#gold)">
+    <circle cx="406" cy="256" r="26"/><circle cx="362" cy="362" r="26"/>
+    <circle cx="256" cy="406" r="26"/><circle cx="150" cy="362" r="26"/>
+    <circle cx="106" cy="256" r="26"/><circle cx="150" cy="150" r="26"/>
+    <circle cx="256" cy="106" r="26"/><circle cx="362" cy="150" r="26"/>
+  </g>
+  <rect x="198" y="198" width="116" height="116" rx="30" fill="url(#gold)"/>
+</svg>
