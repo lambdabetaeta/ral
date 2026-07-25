@@ -1,0 +1,5 @@
+# Tauri regenerates synod/gen/schemas/*.json on every `cargo tauri build`.
+# On Windows it writes them with CRLF, so without this every Windows build
+# leaves them staged-looking with no content change at all.  Pinning the
+# checkout to LF makes a rebuild a no-op there, as it already is elsewhere.
+synod/gen/schemas/*.json text eol=lf

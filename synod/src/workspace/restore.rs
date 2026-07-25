@@ -176,7 +176,8 @@ pub(crate) fn restore(
                     .map_err(|e| format!("Synod could not put back {}: {e}.", target.display()))?;
                 #[cfg(not(unix))]
                 return Err(format!(
-                    "Synod cannot put back the link {} on this computer.",
+                    "Synod cannot put back the link {} — it pointed at {text}, and this \
+                     computer does not make links Synod can write.",
                     target.display()
                 ));
             }

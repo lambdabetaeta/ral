@@ -433,10 +433,15 @@ impl Agent {
         // session scratch (the forked shell already inherited its seeding).
         // `shell_mut` above already panicked on a wire seat, so reaching
         // here means `self.seat` is an identity seat.
-        let Seat::Identity { scratch, cwd, .. } = &self.seat else {
-            unreachable!("shell_mut already panicked above for a wire seat")
+        let seat = match &self.seat {
+            Seat::Identity { scratch, cwd, .. } => {
+                Seat::identity(shell, scratch.clone(), cwd.clone(), &log)
+            }
+            #[cfg(unix)]
+            Seat::Wire { .. } => {
+                unreachable!("shell_mut already panicked above for a wire seat")
+            }
         };
-        let seat = Seat::identity(shell, scratch.clone(), cwd.clone(), &log);
         Self::assemble(Build {
             // The unresolved template: the child's own children resolve
             // their indices from it in turn.

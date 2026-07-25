@@ -15,6 +15,16 @@
 #
 # Run `just` with no arguments to list recipes.
 
+# just runs every recipe through `sh -cu`, and a Windows box has no `sh`
+# — without this, no recipe here runs there at all, not even `build`.
+# PowerShell is the one shell Windows always has (`powershell.exe`, not
+# `pwsh`, which ships separately).  This costs nothing on Unix, where the
+# setting is ignored, and the recipes that matter on Windows are single
+# `cargo` invocations that read identically under either shell.  The two
+# that are not — `check-windows`, with its POSIX `VAR=value cmd` prefix,
+# and the `.ral` script delegations — are Unix-host recipes by design.
+set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
+
 # Show the recipe list.
 default:
     @just --list
@@ -84,5 +94,29 @@ run *args:
 # virtualization entitlement, so the .app creates VMs locally with no
 # Apple Developer account; distributing it to other Macs additionally
 # needs a Developer ID signature and notarization.
+[working-directory('synod')]
 synod-app:
-    cd synod && cargo tauri build
+    cargo tauri build
+
+# Bundle synod into a Windows installer (.msi) under
+# target/release/bundle/msi/.  One prerequisite this recipe does not
+# install for you: the Tauri CLI (`cargo install tauri-cli`).  The WiX
+# toolset it drives is not a prerequisite — the CLI fetches that itself
+# on first use.
+#
+# Unlike `synod-app` there is no guest image to build first, because the
+# Windows bundle ships none: `tauri.windows.conf.json` sets `resources`
+# to null.  Two reasons, either sufficient.  vm-manager has no Windows
+# backend — `detect` refuses off Apple Silicon before it so much as looks
+# at the media — and the image `vm-image/` builds is an arm64 Linux
+# rootfs, which an x86_64 Windows host could not boot even given one.
+#
+# So what this installs is synod's window and its whole host-side half —
+# the grant, the prompt, the folder's before/after checkpoint, the change
+# report, the undo — over a machine layer that refuses every job and says
+# plainly that the part of synod which would start one has not been built
+# (vm-manager's `NO_BACKEND`).  The recipe exists so the packaging is
+# ready for that backend rather than trailing it.
+[working-directory('synod')]
+synod-msi:
+    cargo tauri build

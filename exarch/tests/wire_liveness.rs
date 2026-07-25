@@ -1,3 +1,8 @@
+// The whole file is Unix-only: it stands a `socketpair` in for the vsock
+// stream, and both the stand-in and the [`WireTransport`] under test exist
+// only there.  An empty test binary on Windows is the honest outcome — the
+// laws below are laws about a transport that platform does not have.
+#![cfg(unix)]
 #![allow(clippy::disallowed_methods)]
 
 //! §3 frame protocol over vsock — the heartbeat and run-durability laws

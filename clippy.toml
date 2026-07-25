@@ -127,5 +127,10 @@ disallowed-methods = [
     { path = "std::fs::copy", reason = "I/O goes through a known door. A file copy is reasoned-silent infrastructure unless it is the model's own exec image; #[allow] with a reason." },
     { path = "std::fs::set_permissions", reason = "I/O goes through a known door. The atomic-commit mode restore is a surfacing write door's sub-step; other chmods are reasoned-silent. #[allow] with a reason naming which." },
     { path = "std::process::Command::new", reason = "Process spawning goes through a known door. The model's external exec is the door in runtime/command.rs (build_command) that surfaces an exec card; every other Command::new (sandbox respawn, which probes, infra subprocesses) is reasoned-silent and #[allow]s with a reason." },
-    { path = "std::os::unix::process::CommandExt::exec", reason = "An exec image replaces the process and must be a known door. The sandbox respawn exec is reasoned-silent (the surface fired before the handoff); #[allow] with a reason." },
+    # `allow-invalid` because the path is unix-only: on a Windows build the
+    # trait does not exist, and clippy warns about every entry it cannot
+    # resolve.  The ban still has to be written — the door it guards is real
+    # wherever there is an `exec` to guard — so the entry stays and the
+    # unresolvable-here case is declared rather than warned about.
+    { path = "std::os::unix::process::CommandExt::exec", allow-invalid = true, reason = "An exec image replaces the process and must be a known door. The sandbox respawn exec is reasoned-silent (the surface fired before the handoff); #[allow] with a reason." },
 ]

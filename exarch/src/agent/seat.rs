@@ -128,14 +128,15 @@ impl Seat {
     /// inspection door and [`crate::agent::Agent::fork_with`]'s [`Shell::fork_session`] reach. Panics on a
     /// wire seat (see the panic message).
     pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::transport::EngineInner> {
-        let Self::Identity { transport, .. } = self else {
-            panic!(
+        match self {
+            Self::Identity { transport, .. } => transport.shell_mut(),
+            #[cfg(unix)]
+            Self::Wire { .. } => panic!(
                 "direct engine-state access has no meaning on a wire seat: the engine lives in \
                  a separate process, reachable only through Transport's dispatch/probe/control \
                  frames — docs/ral-wiki/decisions/260722_session-is-a-process.md"
-            );
-        };
-        transport.shell_mut()
+            ),
+        }
     }
 
     /// Install one call's capture set; the guard retires it on every exit.

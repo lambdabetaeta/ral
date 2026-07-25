@@ -207,17 +207,33 @@ pub trait Machine {
 /// Shown by [`detect`] on every platform this crate has no backend for at
 /// all — today, anything but an Apple Silicon Mac — whatever boot media it
 /// was given.
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-const NOT_APPLE_SILICON: &str =
+///
+/// One name, two sentences, because the honest refusal differs by where it
+/// is read. On Windows a backend is a *stated intention*, not an absence:
+/// [`Machine::take_control`] already holds the socket question open for it.
+/// A person there is owed the truth that synod is unfinished, not the
+/// suggestion that their computer is the wrong one. Anywhere else there is
+/// no such intention to name, so the sentence says only what runs today.
+#[cfg(windows)]
+const NO_BACKEND: &str = "synod cannot start its virtual machine on Windows yet — the part of \
+                          synod that would make one has not been built. For now synod runs \
+                          only on an Apple Silicon Mac";
+
+/// Shown by [`detect`] on every platform this crate has no backend for at
+/// all — see the Windows definition above for why there are two.
+#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
+const NO_BACKEND: &str =
     "this computer cannot run synod's virtual machine — it only starts on an Apple Silicon Mac";
 
 /// Shown by [`detect`] when the platform could run a machine, but this
 /// build shipped with no boot media to start one from.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const NO_BOOT_MEDIA: &str = "synod could not find the virtual-machine image it ships with — \
                               ask your IT department to reinstall it";
 
 /// Shown by [`detect`] when boot media is present but this process is not
 /// signed with the entitlement Virtualization.framework demands.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const UNENTITLED: &str = "this copy of synod is not signed with the entitlement it needs to \
                            start a virtual machine — ask your IT department for a properly \
                            signed build";
@@ -228,17 +244,17 @@ const UNENTITLED: &str = "this copy of synod is not signed with the entitlement 
 /// There is no fallback: a synod that cannot boot a real machine refuses to
 /// start.
 ///
+/// This build has no backend at all, so the refusal is the platform itself
+/// and nothing downstream of it is ever weighed — the boot media goes
+/// unread. The two refusals the Apple Silicon overload can additionally
+/// give are its own, and named in its doc.
+///
 /// # Errors
-/// Returns a sentence for the person running synod — not a programmer —
-/// naming whichever of these stood in the way: this computer is not an
-/// Apple Silicon Mac ([`NOT_APPLE_SILICON`]); it is one, but `boot` is
-/// `None` ([`NO_BOOT_MEDIA`]); or it is one with media in hand, but this
-/// process is not signed with the virtualization entitlement
-/// ([`UNENTITLED`]).
+/// Always, with [`NO_BACKEND`].
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 pub fn detect(boot: Option<BootArtifact>) -> Result<Box<dyn Hypervisor>, String> {
-    let _ = boot;
-    Err(NOT_APPLE_SILICON.to_string())
+    drop(boot);
+    Err(NO_BACKEND.to_string())
 }
 
 /// Start the one backend this build can actually run, given the boot media

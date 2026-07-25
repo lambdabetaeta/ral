@@ -474,7 +474,6 @@ impl Conversation {
                 })
             };
 
-            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
                 format!(
                     "could not start a machine for {}: {e}",
@@ -496,36 +495,7 @@ impl Conversation {
             // workspace is a guest path — never a directory this host process
             // could `chdir` into; the trunk drives it over the wire the
             // machine hands back.
-            #[cfg(unix)]
-            let root_seat = {
-                let fd = machine.take_control();
-                exarch::agent::RootSeat::Wire {
-                    transport: Box::new(
-                        ral_core::transport::WireTransport::adopt(
-                            std::os::unix::net::UnixStream::from(fd),
-                            ral_core::transport::Liveness::default(),
-                        )
-                        .map_err(|e| format!("could not take control of the machine: {e}"))?,
-                    ),
-                    cwd: workspace,
-                    // Home is the guest scratch, not the workspace: `$HOME` is
-                    // where XDG-defaulting tools drop caches and dotfiles, and
-                    // pointed at `/work` that litter would land among the
-                    // user's own documents — and in every change report.
-                    home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
-                }
-            };
-            // `WireTransport` is unix-only, and so is every seat that can drive
-            // one: there is no non-unix way to reach the machine's control
-            // plane, so a build for this platform can only refuse honestly.
-            #[cfg(not(unix))]
-            let root_seat: exarch::agent::RootSeat = {
-                return Err(
-                    "synod reaches its virtual machine over a socket this operating \
-                         system does not provide — synod cannot run here"
-                        .to_string(),
-                );
-            };
+            let root_seat = control_seat(&mut machine, workspace)?;
 
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
@@ -714,6 +684,70 @@ fn resolve_account(
     // store's business.
     drop(store);
     Ok((id, model, effort, cred))
+}
+
+/// The seat the trunk drives the guest's engine from: the machine's own
+/// control plane, adopted as a wire, working at `cwd`.
+///
+/// Split out of [`Conversation::begin`] because it is the one step whose
+/// very existence is platform-conditional, and a `#[cfg]` around a `return`
+/// inside that long body would leave every line after it dead. Here the
+/// condition is a whole function, so `begin` has one body on every platform
+/// and the refusal arrives as an ordinary `Err`.
+///
+/// # Errors
+/// Returns `Err` if the control plane cannot be adopted as a wire.
+///
+/// # Panics
+/// Panics if the machine's control plane was already taken — see
+/// [`vm_manager::Machine::take_control`]. `begin` is its only caller and
+/// takes it once.
+#[cfg(unix)]
+fn control_seat(
+    machine: &mut Box<dyn vm_manager::Machine>,
+    cwd: std::path::PathBuf,
+) -> Result<exarch::agent::RootSeat, String> {
+    let fd = machine.take_control();
+    Ok(exarch::agent::RootSeat::Wire {
+        transport: Box::new(
+            ral_core::transport::WireTransport::adopt(
+                std::os::unix::net::UnixStream::from(fd),
+                ral_core::transport::Liveness::default(),
+            )
+            .map_err(|e| format!("could not take control of the machine: {e}"))?,
+        ),
+        cwd,
+        // Home is the guest scratch, not the workspace: `$HOME` is where
+        // XDG-defaulting tools drop caches and dotfiles, and pointed at
+        // `/work` that litter would land among the user's own documents —
+        // and in every change report.
+        home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
+    })
+}
+
+/// The refusal a non-Unix build can only give.
+///
+/// [`ral_core::transport::WireTransport`] is Unix-only, and so is every
+/// seat that could drive one — [`vm_manager::Machine::take_control`] does
+/// not even exist here. There is no non-Unix way to reach a machine's
+/// control plane, so this build says so rather than pretend.
+///
+/// In practice no caller reaches this: [`vm_manager::detect`] has already
+/// refused, several statements earlier, on every platform that is not an
+/// Apple Silicon Mac. It stands for the day a Windows backend lands and
+/// that refusal lifts, leaving this one to name the piece still missing.
+///
+/// # Errors
+/// Always.
+#[cfg(not(unix))]
+fn control_seat(
+    machine: &mut Box<dyn vm_manager::Machine>,
+    cwd: std::path::PathBuf,
+) -> Result<exarch::agent::RootSeat, String> {
+    drop((machine, cwd));
+    Err("synod cannot yet talk to a virtual machine on this kind of computer — the part \
+         of synod that would carry the conversation has not been built"
+        .to_string())
 }
 
 /// The provider and model for a run whose [`Choice`] left both unnamed:
