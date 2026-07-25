@@ -148,16 +148,16 @@ pub fn list_models(
     accounts: State<'_, crate::Accounts>,
     gate: State<'_, crate::RefreshGate>,
 ) -> Result<synod::session::ModelMenu, String> {
-    let (store, catalog_mutex) = accounts.0.as_ref().map_err(Clone::clone)?;
-    let instant = synod::session::menu(store, catalog_mutex);
+    let (store, catalog) = accounts.0.as_ref().map_err(Clone::clone)?;
+    let instant = synod::session::menu(store, catalog);
 
     if !gate.0.swap(true, Ordering::SeqCst) {
         std::thread::spawn(move || {
             let accounts = app.state::<crate::Accounts>();
-            let Ok((store, catalog_mutex)) = &accounts.0 else {
+            let Ok((store, catalog)) = &accounts.0 else {
                 return;
             };
-            let menu = synod::session::refresh_menu(store, catalog_mutex);
+            let menu = synod::session::refresh_menu(store, catalog);
             let _ = app.emit("models-refreshed", menu);
         });
     }

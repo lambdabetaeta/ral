@@ -17,6 +17,13 @@
 //! either named by the window (a menu choice) or resolved the old way —
 //! whichever one account is set up on this computer, and its default
 //! model.
+//!
+//! The store the whole module reads is held behind a [`Mutex`] because
+//! [`sign_in`] can add to it: a `ChatGPT` plan signed in from the window
+//! becomes available to the very next [`menu`] and conversation, with no
+//! restart.  Every function here that takes it locks it only for as long
+//! as it takes to read the account list — never across a network fetch or
+//! a machine boot.
 
 use crate::grant::Grant;
 use crate::workspace;
@@ -24,12 +31,13 @@ use exarch::agent::Agent;
 use exarch::bootstrap;
 use exarch::provider::{
     self, Engine, Provider, ProviderId,
-    credential::CredentialStore,
+    credential::{Credential, CredentialStore},
     listing::Listing,
-    models::{ModelCatalog, ModelSource, resolve_pinned_provider},
-    pricing,
+    models::{LiveSource, ModelCatalog, ModelSource, resolve_pinned_provider},
+    oauth, pricing,
 };
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use vm_manager::Machine;
 
@@ -107,11 +115,12 @@ pub struct ModelMenu {
 /// provider with no cache still offers its one well-known model.
 /// [`refresh_menu`] is the complete listing, fetched live; this is the
 /// instant one the window shows while that runs.
-pub fn menu<S>(store: &CredentialStore, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
+pub fn menu<S>(store: &Mutex<CredentialStore>, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
 where
     S: ModelSource,
 {
-    menu_from(&store.available(), &mut lock(catalog))
+    let available = lock(store).available();
+    menu_from(&available, &mut lock(catalog))
 }
 
 /// The complete provider picker: every available provider's live model
@@ -122,11 +131,16 @@ where
 /// once to fold the fetches' results back in — never while
 /// [`Listing::settle`] blocks on the network in between, so a concurrent
 /// instant [`menu`] call is never held up behind this one's fetches.
-pub fn refresh_menu<S>(store: &CredentialStore, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
+/// `store` is read once, up front, for the account list alone: a sign-in
+/// running alongside this fetch waits on nothing.
+pub fn refresh_menu<S>(
+    store: &Mutex<CredentialStore>,
+    catalog: &Mutex<ModelCatalog<S>>,
+) -> ModelMenu
 where
     S: ModelSource + Clone + Send + 'static,
 {
-    let available = store.available();
+    let available = lock(store).available();
     refresh_menu_for(&available, catalog)
 }
 
@@ -215,6 +229,99 @@ fn merged_models(default: Option<&str>, cached: Vec<String>) -> Vec<String> {
 fn to_model_choice(name: String) -> ModelChoice {
     let reasoning = pricing::caps_or_default(&name).supports("reasoning");
     ModelChoice { name, reasoning }
+}
+
+/// One step of a sign-in in progress, in the words the window says out
+/// loud.
+#[derive(Clone, serde::Serialize)]
+pub struct SignInStep {
+    /// What the window should say while this is the step in hand.
+    pub say: String,
+    /// The sign-in link, when the window has to offer it itself rather
+    /// than the browser having been opened on the user's behalf.
+    pub link: Option<String>,
+}
+
+impl From<oauth::LoginPhase> for SignInStep {
+    fn from(phase: oauth::LoginPhase) -> Self {
+        match phase {
+            oauth::LoginPhase::AwaitingBrowser { opened: true, .. } => Self {
+                say: "Finish signing in, in the browser window that just opened.".to_string(),
+                link: None,
+            },
+            oauth::LoginPhase::AwaitingBrowser { url, opened: false } => Self {
+                say: "Synod could not open your browser.  Follow this link to sign in:".to_string(),
+                link: Some(url),
+            },
+            // The window never runs the device flow — a sign-in in a window
+            // is a sign-in on the machine the browser is on — so this arm
+            // completes the phase vocabulary rather than describing
+            // anything synod shows.
+            oauth::LoginPhase::AwaitingDevice {
+                user_code,
+                url,
+                expires_in,
+            } => Self {
+                say: format!(
+                    "Follow this link and enter the code {user_code} to sign in.  \
+                     The code expires in {expires_in}."
+                ),
+                link: Some(url),
+            },
+            oauth::LoginPhase::ExchangingCode => Self {
+                say: "Signing you in…".to_string(),
+                link: None,
+            },
+        }
+    }
+}
+
+/// A finished sign-in, as the window reports it.
+#[derive(Clone, serde::Serialize)]
+pub struct SignedIn {
+    /// The account now signed in — the label [`menu`] lists it under.
+    pub account: String,
+    /// Whether this refreshed the login for an account already set up here,
+    /// rather than adding a new one.
+    pub replaced: bool,
+}
+
+/// Sign in to a `ChatGPT` plan and admit the account to this run.
+///
+/// The flow is exarch's ([`oauth::login_flow`]): it opens the user's
+/// browser, waits on the loopback callback, exchanges the code, and stores
+/// the token where `exarch login` stores it, so a computer signed in here
+/// is signed in for both.  It blocks — for as long as the user takes at
+/// their browser — so the caller runs it on a thread of its own,
+/// `on_phase` carrying each step to the window and `cancel` the abandon
+/// flag the flow's waits poll.
+///
+/// The last step is synod's own: the fresh token goes into the live store
+/// and into the catalog built from it, so the account appears in the very
+/// next [`menu`] and can open the very next conversation.  Nothing here
+/// re-runs [`prepare`] — its scrub is only safe on a single-threaded
+/// process, and this one has long since stopped being one — which is why
+/// the account is admitted rather than re-resolved.
+///
+/// # Errors
+/// Returns the flow's own sentence: a refused or abandoned sign-in, a
+/// browser that never came back, a network that would not carry the
+/// exchange.
+pub fn sign_in(
+    store: &Mutex<CredentialStore>,
+    catalog: &Mutex<ModelCatalog<LiveSource>>,
+    on_phase: impl Fn(SignInStep),
+    cancel: &Arc<AtomicBool>,
+) -> Result<SignedIn, String> {
+    let (token, replaced) = oauth::login_flow(
+        oauth::LoginMethod::Browser,
+        |phase| on_phase(SignInStep::from(phase)),
+        cancel,
+    )?;
+    let (id, credential) = lock(store).add_oauth(&token);
+    let account = id.label().to_string();
+    lock(catalog).add_credential(id, credential);
+    Ok(SignedIn { account, replaced })
 }
 
 /// Lock `m`, recovering the guard even if a prior holder panicked — the
@@ -321,7 +428,7 @@ impl Conversation {
     /// [`resolve_tuning`] cannot produce.
     pub fn begin(
         folder: &Path,
-        store: &CredentialStore,
+        store: &Mutex<CredentialStore>,
         choice: Option<Choice>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
@@ -335,32 +442,7 @@ impl Conversation {
         // file regardless of which front-end is running, opened once here.
         let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
 
-        let available = store.available();
-        if available.is_empty() {
-            return Err(
-                "no model account is set up on this computer — ask your IT department \
-                    to set a provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
-                    .into(),
-            );
-        }
-        let (id, model, effort) = if let Some(Choice {
-            provider,
-            model,
-            effort,
-        }) = choice
-        {
-            (
-                resolve_pinned_provider(&provider, &available)?,
-                model,
-                effort,
-            )
-        } else {
-            let (id, model) = choose(&available)?;
-            (id, model, None)
-        };
-        let cred = store
-            .get(&id)
-            .expect("the chosen provider is one of the available ones");
+        let (id, model, effort, cred) = resolve_account(store, choice)?;
         let account = id.label().to_string();
         let announced_model = model.clone();
         let tuning = resolve_tuning(effort, &model)?;
@@ -450,7 +532,7 @@ impl Conversation {
                 engine.clone(),
                 &id,
                 model.clone(),
-                cred,
+                &cred,
                 None,
                 tuning,
                 None,
@@ -578,6 +660,60 @@ impl Conversation {
             .shutdown()
             .map_err(|e| format!("the machine did not stop cleanly: {e}"))
     }
+}
+
+/// The whole of what a conversation needs from the credential store — the
+/// account it runs on, the model, the effort asked for, and the credential
+/// it authenticates with — read under one brief lock.
+///
+/// Everything slow in [`Conversation::begin`] (the machine's boot, the
+/// folder's safety copy) happens after this returns, so a sign-in in the
+/// window is never held up behind a conversation opening, nor the other way
+/// round.  The credential is cloned rather than borrowed for the same
+/// reason, and clones as what it already is — a `ChatGPT` login's shared
+/// cell, so a token refreshed later is still the one this conversation
+/// sends.
+///
+/// # Errors
+/// Returns `Err` if this computer has no account set up, if `choice` names
+/// one that has since gone, or if the sole account names no default model.
+fn resolve_account(
+    store: &Mutex<CredentialStore>,
+    choice: Option<Choice>,
+) -> Result<(ProviderId, String, Option<String>, Credential), String> {
+    let store = lock(store);
+    let available = store.available();
+    if available.is_empty() {
+        return Err(
+            "no assistant account is set up on this computer — sign in with ChatGPT on the \
+             opening screen, or ask your IT department to set a provider API key \
+             (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
+                .into(),
+        );
+    }
+    let (id, model, effort) = if let Some(Choice {
+        provider,
+        model,
+        effort,
+    }) = choice
+    {
+        (
+            resolve_pinned_provider(&provider, &available)?,
+            model,
+            effort,
+        )
+    } else {
+        let (id, model) = choose(&available)?;
+        (id, model, None)
+    };
+    let cred = store
+        .get(&id)
+        .expect("the chosen provider is one of the available ones")
+        .clone();
+    // Everything the caller does next is slow, and none of it is the
+    // store's business.
+    drop(store);
+    Ok((id, model, effort, cred))
 }
 
 /// The provider and model for a run whose [`Choice`] left both unnamed:

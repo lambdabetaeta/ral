@@ -212,6 +212,48 @@
     }
     #assistant-select:hover, #effort-select:hover { border-color: var(--accent); }
     #effort-select:disabled { cursor: default; opacity: 0.5; }
+
+    /* The two ways in: choose a folder, or sign in first. Only one of them
+       leads at a time — with no account set up there is nothing a folder
+       could be worked on with, so the sign-in takes the primary style and
+       goes first (column-reverse, so the reading order stays the same as the
+       markup's). */
+    .actions {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .actions.needs-sign-in { flex-direction: column-reverse; }
+    #no-account {
+      font-size: 15px;
+      line-height: 1.55;
+      color: var(--ink-soft);
+      margin: -14px 0 22px;
+      display: none;
+    }
+    #no-account.show { display: block; }
+    /* The sign-in's own line: what it is waiting for, and — when the browser
+       could not be opened — the link the user has to follow themselves. */
+    #sign-in-say {
+      font-size: 14px;
+      line-height: 1.55;
+      color: var(--ink-soft);
+      margin: 14px 0 0;
+      display: none;
+    }
+    #sign-in-say.show { display: block; }
+    #sign-in-link {
+      display: inline-block;
+      margin-top: 4px;
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: underline;
+      overflow-wrap: anywhere;
+      user-select: text;
+    }
     #start-error {
       margin-top: 18px;
       padding: 12px 16px;
@@ -964,7 +1006,13 @@
           <label for="effort-select" class="field-label">Thinking</label>
           <select id="effort-select"></select>
         </div>
-        <button type="button" class="btn-primary" id="pick-folder">Choose a folder…</button>
+        <p id="no-account">No assistant account is set up on this computer yet.
+          Sign in with your ChatGPT plan to begin.</p>
+        <div class="actions" id="actions">
+          <button type="button" class="btn-primary" id="pick-folder">Choose a folder…</button>
+          <button type="button" class="btn-quiet" id="sign-in">Sign in with ChatGPT</button>
+        </div>
+        <p id="sign-in-say"></p>
         <div id="start-error"></div>
       </div>
     </section>
@@ -1157,6 +1205,17 @@
       // offer it for, regardless of how many models that account lists.
       $("effort-field").style.display = providers.length > 0 ? "" : "none";
 
+      // Nothing to answer with is nothing to start: with no assistant on
+      // offer the folder button waits, and the sign-in becomes the way in.
+      // (An account whose models could not be listed at all lands here too,
+      // and signing in again is the honest thing to offer it as well.)
+      const nothingToRunWith = assistantOptions.length === 0;
+      $("no-account").classList.toggle("show", nothingToRunWith);
+      $("actions").classList.toggle("needs-sign-in", nothingToRunWith);
+      $("pick-folder").disabled = nothingToRunWith;
+      $("pick-folder").className = nothingToRunWith ? "btn-quiet" : "btn-primary";
+      $("sign-in").className = nothingToRunWith ? "btn-primary" : "btn-quiet";
+
       updateEffortDisabled();
     }
 
@@ -1177,7 +1236,9 @@
       try {
         menu = await invoke("list_models");
       } catch (err) {
-        menu = null;
+        // The credential scrub's own failure — a config this computer cannot
+        // read. No sign-in mends that, so it is shown rather than swallowed.
+        showStartError(String(err));
       }
       renderPicker(menu);
       listen("models-refreshed", (event) => renderPicker(event.payload));
@@ -1201,17 +1262,94 @@
       return { provider: opt.key, model: opt.model, effort };
     }
 
+    // The start screen's one error line, shared by the folder picker and the
+    // sign-in — only ever one of them is being answered at a time.
+    function showStartError(text) {
+      $("start-error").textContent = text;
+      $("start-error").classList.add("show");
+    }
+
     $("pick-folder").addEventListener("click", async () => {
       $("start-error").classList.remove("show");
       let chosen;
       try {
         chosen = await invoke("choose_folder");
       } catch (err) {
-        $("start-error").textContent = String(err);
-        $("start-error").classList.add("show");
+        showStartError(String(err));
         return;
       }
       if (chosen) enterConversation(chosen, currentChoice());
+    });
+
+    // ---- Signing in with ChatGPT ----------------------------------------
+
+    // While a sign-in is running the one button abandons it rather than
+    // starting a second: two sign-ins would want the same loopback port, and
+    // the backend refuses the second anyway.
+    let signingIn = false;
+
+    function setSigningIn(running) {
+      signingIn = running;
+      $("sign-in").textContent = running ? "Stop signing in" : "Sign in with ChatGPT";
+    }
+
+    // The sign-in's own line: a sentence, and — only when the browser could
+    // not be opened for the user — the link they have to follow themselves,
+    // both clickable and selectable so either door works.
+    function saySignIn(text, link) {
+      const el = $("sign-in-say");
+      el.textContent = text || "";
+      if (text && link) {
+        const anchor = document.createElement("span");
+        anchor.id = "sign-in-link";
+        anchor.textContent = link;
+        anchor.addEventListener("click", () => {
+          invoke("open_url", { url: link }).catch((err) => showStartError(String(err)));
+        });
+        el.appendChild(document.createElement("br"));
+        el.appendChild(anchor);
+      }
+      el.classList.toggle("show", Boolean(text));
+    }
+
+    $("sign-in").addEventListener("click", async () => {
+      if (signingIn) {
+        invoke("cancel_sign_in").catch((err) => showStartError(String(err)));
+        return;
+      }
+      $("start-error").classList.remove("show");
+      setSigningIn(true);
+      saySignIn("Opening your browser…");
+      try {
+        await invoke("sign_in");
+      } catch (err) {
+        setSigningIn(false);
+        saySignIn("");
+        showStartError(String(err));
+      }
+    });
+
+    listen("sign-in-step", (event) => {
+      const step = event.payload || {};
+      saySignIn(step.say, step.link);
+    });
+
+    // The menu arrives just before this, as a `models-refreshed` the picker
+    // renders through its one path — so by the time the account is named
+    // here, it is already one of the assistants on offer.
+    listen("sign-in-done", (event) => {
+      const done = event.payload || {};
+      setSigningIn(false);
+      if (done.outcome === "signed_in") {
+        saySignIn(
+          done.replaced
+            ? "Signed in again as " + done.account + "."
+            : "Signed in as " + done.account + "."
+        );
+      } else {
+        saySignIn("");
+        showStartError(done.reason || "The sign-in did not finish.");
+      }
     });
 
     // ---- Conversation screen --------------------------------------------

@@ -25,6 +25,8 @@
 //! - the folder picker, the model menu, the conversation itself, sending it
 //!   messages, starting again, and opening files with the user's own
 //!   applications, in [`shell::commands`];
+//! - signing in to a `ChatGPT` plan from the opening screen, in
+//!   [`shell::signin`];
 //! - the change report and the undo actions, in [`shell::review`], over the
 //!   workspace vocabulary in `synod::workspace` — the checkpoint, the
 //!   change set, and the conflict-checked restore.
@@ -48,7 +50,7 @@
 
 mod shell;
 
-use shell::{commands, review};
+use shell::{commands, review, signin};
 
 use exarch::provider::credential::CredentialStore;
 use exarch::provider::models::{LiveSource, ModelCatalog};
@@ -63,10 +65,16 @@ use tauri::Manager;
 /// surfaces the `Err` as its own plain-sentence failure rather than
 /// re-running or second-guessing it; the pairing makes "no catalog without
 /// credentials" a type fact instead of a runtime invariant the two halves
-/// could drift out of sync on.  The [`Mutex`] is [`synod::session::menu`]
-/// and [`synod::session::refresh_menu`]'s own — both take it locked only
-/// briefly, never across a network call.
-struct Accounts(Result<(CredentialStore, Mutex<ModelCatalog<LiveSource>>), String>);
+/// could drift out of sync on.
+///
+/// Both halves are behind a [`Mutex`] because both grow: a sign-in from the
+/// window ([`synod::session::sign_in`]) admits a fresh `ChatGPT` account to
+/// the store and its credential to the catalog, and the scrub that built
+/// them cannot be re-run in a process that is no longer single-threaded.
+/// Every holder in `synod::session` takes them locked only briefly — for an
+/// account list, a cached model list, an admission — never across a network
+/// call or a machine boot.
+struct Accounts(Result<(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String>);
 
 /// Whether this run has already started its one background model refresh.
 ///
@@ -88,7 +96,7 @@ fn main() {
             LiveSource::new(&store),
             synod::session::SYNOD,
         ));
-        (store, catalog)
+        (Mutex::new(store), catalog)
     }));
 
     tauri::Builder::default()
@@ -98,6 +106,7 @@ fn main() {
         .manage(accounts)
         .manage(RefreshGate(AtomicBool::new(false)))
         .manage(review::Review::default())
+        .manage(signin::SignIn::default())
         .invoke_handler(tauri::generate_handler![
             commands::choose_folder,
             commands::list_models,
@@ -105,6 +114,8 @@ fn main() {
             commands::send_message,
             commands::open_file,
             commands::open_url,
+            signin::sign_in,
+            signin::cancel_sign_in,
             review::open_earlier,
             review::job_report,
             review::undo_file,

@@ -45,7 +45,12 @@ engine process per session, driven over the design's §3 wire
   failed run; `end` closes the wire, and the guest halts itself. The model
   picker lives here too: `menu`/`refresh_menu` list what the computer's
   credentials can reach (cached-instant and fetched-complete), and a
-  `Choice` names provider, model, and effort.
+  `Choice` names provider, model, and effort. `sign_in` drives exarch's
+  browser login flow (`exarch::provider::oauth::login_flow`) and admits the
+  fresh account to the live store and catalog, so a ChatGPT plan signed in
+  from the window is usable without a restart — the credential store is
+  behind a `Mutex` for exactly that reason, taken only for an account list
+  or an admission, never across a fetch or a boot.
 
 ## synod/src/workspace/ — the safety net
 
@@ -78,7 +83,13 @@ job; watch the assistant work, its narration streamed in; then read what
 changed and put anything back. `commands.rs` holds the folder picker, the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
-with the user's own applications; `review.rs` translates the workspace
+with the user's own applications; `signin.rs` runs the opening screen's
+"Sign in with ChatGPT" button — one sign-in at a time, cancellable, its
+progress and outcome events (`sign-in-step`, `sign-in-done`) rendered beneath
+the button, and the account it wins arriving as the same `models-refreshed`
+the picker already renders through; with no account set up the sign-in is the
+screen's primary button and the folder picker waits for it; `review.rs`
+translates the workspace
 vocabulary into cards and runs the gentle-then-explicit conflict flow;
 `main.rs` runs exarch's `dispatch_pre_main` re-exec trampoline first, like
 every [[invariants/single-binary|multicall]] binary here.
