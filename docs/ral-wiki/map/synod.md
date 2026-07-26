@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e6224a0
-generated_at_date: 2026-07-25
+generated_at_commit: 7ebf4fd
+generated_at_date: 2026-07-26
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
 ---
 
@@ -112,6 +112,29 @@ translates the workspace
 vocabulary into cards and runs the gentle-then-explicit conflict flow;
 `main.rs` runs exarch's `dispatch_pre_main` re-exec trampoline first, like
 every [[invariants/single-binary|multicall]] binary here.
+
+The frontend is one file, `ui/index.html` — markup, style and script
+together — beside the three libraries it vendors and the nothing it fetches:
+`marked.min.js` (GFM), `purify.min.js`, and `katex/` (KaTeX 0.18.1, its
+stylesheet and its twenty `woff2` faces; the only web fonts the app ships).
+Assistant prose is markdown with TeX, and `renderAssistantMarkdown` is the
+single path model text takes to the DOM. Its order is the load-bearing part:
+each formula is **lifted out before marked sees it** — markdown would read
+`x_1 * x_2` as emphasis, and `breaks: true` would cut a multi-line `$$` with
+a `<br>` — leaving a private-use sentinel that the prose carries through
+marked and DOMPurify unharmed; the typeset formula is put back into the
+scrubbed tree afterwards, because DOMPurify's CSS filter would strip the
+inline metrics KaTeX's layout is made of. That is safe only because KaTeX
+runs with `trust` off, where it can emit neither a link nor a raw node: the
+scrub still covers everything that came from the model as markup. An
+unterminated formula is not one, which is what keeps a half-streamed `$$`
+from flashing red while it arrives; a `$` inside code, beside a space, or
+against a digit (`$5-$10`) is a dollar sign, not a delimiter. Code is judged
+twice, because it must be: the scan before marked knows only fences and
+backticks — whether four spaces open a code block or continue a list item is
+a question only a block parser can answer — so a sentinel that marked put
+inside a `<code>` is handed back as the text it was written as. No message
+wears a name above it — who spoke is said by the bubble's side and colour.
 
 ## vm-manager/ — the machine
 
