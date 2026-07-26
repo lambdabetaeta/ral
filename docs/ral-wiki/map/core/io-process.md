@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: a1791c5
+generated_at_date: 2026-07-26
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -91,7 +91,9 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   polled cooperatively in hot loops
   ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]), with the
   process-global `CancelSlot` publications that let a signal handler or TUI
-  thread cancel a scope it cannot hold.
+  thread cancel a scope it cannot hold — `publish` leaking one strong share of
+  the published scope so the handler's dereference can never dangle
+  ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]]).
 - `signal.rs` — *signals are causes*: the platform handlers translate each
   delivered signal into a `CancelCause` on the published slots — SIGINT →
   foreground `Interrupt`, SIGTERM/SIGHUP → root `Terminate` — so one

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
+verified_at_commit: a1791c5
+verified_at_date: 2026-07-26
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, publishes_signal_slots, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
@@ -95,8 +95,8 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 ## The signal-reachable slots
 
 A signal handler must not lock and cannot hold a `CancelScope` by value. Two
-process-global `AtomicPtr<AtomicU8>` slots publish a *borrowed pointer* into the
-live scope's flag for the async edge to set.
+process-global `AtomicPtr<AtomicU8>` slots publish a pointer into the live
+scope's flag for the async edge to set.
 
 - **`FOREGROUND_SCOPE`** and **`DURABLE_ROOT_SCOPE`** are published together, for
   the run's whole extent, by `RunGuard::install` (`core/src/run.rs`), which swaps
@@ -110,15 +110,21 @@ live scope's flag for the async edge to set.
   forked session (`Shell::fork_session` — exarch's sub-agents) never publishes;
   its host cancels it through a clonable handle on its durable root
   (`Shell::cancel_handle`)
-  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
+  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]). This is a
+  *delivery* invariant: violating it drops or mistargets a cancellation, never
+  more ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]]).
 - **`request_foreground_cancel(cause)`** / **`request_root_cancel(cause)`** load
-  the slot and `fetch_max` the cause onto the borrowed flag — the *exact* store
+  the slot and `fetch_max` the cause onto the published flag — the *exact* store
   `scope.cancel(cause)` performs, and itself async-signal-safe. A null slot
   (between runs) makes the request a no-op, so an idle Ctrl-C or Ctrl-`\` touches
   nothing.
-- Drop order is the safety argument: `RunGuard` declares the slot guards *before*
-  the displaced frame, so they un-publish before the scope `Arc` they borrow can
-  free — a slot never points at a freed flag.
+- **The published flag is immortal.** A handler loads the slot at one instant and
+  dereferences it at another, so no un-publication discipline can make a
+  borrowed pointer safe; `publish` leaks one strong share of the scope's `Arc`
+  instead — 32 bytes per publishing run, for the life of the process. The
+  guards therefore bound only *when* a slot fires
+  ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]], which also records
+  the redesigns still open).
 
 The slots are the seam the
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] ADR calls the
@@ -261,6 +267,8 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
   per-agent token and its exchange-boundary reset.
 - [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] — the original
   cooperative-poll insight.
+- [[decisions/260726_cancel-slot-leak|cancel-slot-leak]] — why the published flag
+  is leaked, and the pointer-free redesigns still under evaluation.
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] and
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.

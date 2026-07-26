@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: a1791c5
+generated_at_date: 2026-07-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 

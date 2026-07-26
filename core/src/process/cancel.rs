@@ -172,8 +172,9 @@ impl CancelScope {
     }
 
     /// A raw pointer to this scope's own flag, for publishing into a
-    /// signal-reachable slot. The flag lives in the scope's `Arc`; the
-    /// caller must keep the scope alive for the slot's tenure.
+    /// signal-reachable slot. The flag lives in the scope's `Arc`, which
+    /// [`publish`] makes immortal before handing the pointer to the async
+    /// edge.
     fn flag_ptr(&self) -> *const AtomicU8 {
         &raw const self.0.flag
     }
@@ -191,7 +192,8 @@ impl Default for CancelScope {
 // thread — cannot reach the foreground run's scope or the session's
 // durable root directly.  As exarch's `cancel.rs` does for its per-exchange
 // `Token`, we bridge the gap with process-global `AtomicPtr` slots holding
-// a borrowed pointer into each scope's flag.  A scope's flag is an
+// a pointer into each scope's flag, kept dereferenceable forever by the
+// leak [`publish`] performs.  A scope's flag is an
 // `AtomicU8` and `cancel` is a `fetch_max`, so the translation is itself
 // async-signal-safe: the signal/input path loads the slot and `fetch_max`es
 // the cause onto the flag, exactly the store `cancel` performs.
@@ -211,12 +213,17 @@ static DURABLE_ROOT_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_m
 /// Minted by [`publish_foreground`] / [`publish_durable_root`]; the prior
 /// publication is saved and restored on drop — a swap, not a clear — so a
 /// re-entrant run nests its scope above the outer run's and reveals it again
-/// when the inner guard drops. That save/restore discipline (and the safety of
-/// [`request_foreground_cancel`] reading the slot) requires publications to
-/// nest LIFO on a single thread: at most one session per process publishes —
-/// the signal-facing one, marked by `SessionState::publishes_signal_slots`. A
-/// forked session's runs never publish; hosts cancel them through their own
-/// scope handles. The scope the slot points at must outlive the guard.
+/// when the inner guard drops. The guard bounds only *when* the slot fires,
+/// never how long the flag behind it lives: [`publish`] makes the pointee
+/// immortal, so a restored slot leaves nothing dangling.
+///
+/// The save/restore is blind, so it reads back the intended predecessor only
+/// for publications that nest LIFO on a single thread. At most one session per
+/// process publishes — the signal-facing one, marked by
+/// `SessionState::publishes_signal_slots` — so that holds, and a signal
+/// targets the primary session's run rather than whichever session dispatched
+/// last. A forked session's runs never publish; hosts cancel them through
+/// their own scope handles.
 pub struct CancelSlot {
     slot: &'static AtomicPtr<AtomicU8>,
     prev: *mut AtomicU8,
@@ -230,7 +237,28 @@ impl Drop for CancelSlot {
 
 /// Publish `scope`'s flag into `slot`, saving the prior pointer for the
 /// returned guard to restore on drop.
+///
+/// One strong share of the scope's `Arc` is leaked, making the published
+/// allocation immortal.  A process-directed signal lands on an arbitrary
+/// unblocked thread, so a handler may load the slot's pointer at one instant
+/// and dereference it at any later one — after a publisher restored the slot
+/// and the scope was dropped.  The pointee must therefore outlive the guard,
+/// not merely the publishing interval.  Leaking also retires that race's
+/// observed symptom: a freed flag byte re-read as a stale cause, surfacing as
+/// a spurious `cancelled` at status 130.  A dead run's leaked flag is polled
+/// by nobody.
+///
+/// The cost is one scope node — 32 bytes on a 64-bit host — per publishing
+/// run, for the life of the process; re-publishing an already-immortal scope
+/// (the durable root, every run) leaks a count, not an allocation.
+///
+/// It does *not* fix the dropped-signal case: two threads publishing
+/// concurrently can leave the blind save/restore aiming the slot at a
+/// finished run, so a cancellation is *missed* rather than delivered.  Never
+/// memory corruption, and unreachable while every publisher runs on one
+/// thread (`SessionState::publishes_signal_slots`).
 fn publish(slot: &'static AtomicPtr<AtomicU8>, scope: &CancelScope) -> CancelSlot {
+    std::mem::forget(scope.0.clone());
     let prev = slot.swap(scope.flag_ptr().cast_mut(), Ordering::Release);
     CancelSlot { slot, prev }
 }
@@ -242,9 +270,8 @@ fn publish(slot: &'static AtomicPtr<AtomicU8>, scope: &CancelScope) -> CancelSlo
 fn request(slot: &AtomicPtr<AtomicU8>, cause: CancelCause) {
     let p = slot.load(Ordering::Acquire);
     if !p.is_null() {
-        // SAFETY: a non-null slot points into the live scope's `Arc` (the
-        // publishing guard restores the prior pointer before that scope can
-        // drop), so the flag is valid for this RMW.
+        // SAFETY: a non-null slot points into an allocation `publish` leaked,
+        // so the pointee is live for the rest of the process.
         unsafe {
             (*p).fetch_max(cause as u8, Ordering::Release);
         }
@@ -293,8 +320,8 @@ pub fn foreground_cancel_cause() -> Option<CancelCause> {
     if p.is_null() {
         return None;
     }
-    // SAFETY: as in `request` — a non-null slot points into the live
-    // foreground scope's flag for the reader's whole call.
+    // SAFETY: as in `request` — a non-null slot points into an allocation
+    // `publish` leaked, so the pointee is live for the rest of the process.
     let flag = unsafe { (*p).load(Ordering::Acquire) };
     CancelCause::from_u8(flag)
 }

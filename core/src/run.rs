@@ -463,14 +463,10 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
 /// ([`Shell::cancel_handle`](crate::types::Shell::cancel_handle)).
 ///
 /// The slot publications point at raw flags inside the installed frame's
-/// cancel scope. `Drop::drop` swaps that frame into `saved`, whose scope is
-/// freed when `saved` itself drops; the slots must un-publish before that
-/// happens. Rust runs `Drop::drop` first, then drops fields in declaration
-/// order, so the slots — declared before `saved` — un-publish before the
-/// displaced frame's scope is freed, and a signal slot never points at a
-/// freed flag.
+/// cancel scope, which [`publish_foreground`](crate::process::publish_foreground)
+/// makes immortal. The guards therefore bound only *when* a slot fires: a slot
+/// outliving the frame it names is stale, never dangling.
 struct RunGuard<'s> {
-    // Declared before `saved` for the drop order the type doc explains.
     _fg: Option<CancelSlot>,
     _root: Option<CancelSlot>,
     shell: &'s mut Shell,
