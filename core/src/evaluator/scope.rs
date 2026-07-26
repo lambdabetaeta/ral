@@ -19,8 +19,8 @@
 
 use crate::ir::Val;
 use crate::types::{
-    BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry, HandlerRole, Map, Raw, Settled,
-    Shell, Value, as_map, sig, validate_handler_arity,
+    BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry, HandlerRole, Map, Mooring, Raw,
+    Settled, Shell, Value, as_map, sig, validate_handler_arity,
 };
 
 use crate::evaluator::val::eval_val;
@@ -218,18 +218,28 @@ impl WithinScope {
 
 // ── Lifted `eval_comp` arms ──────────────────────────────────────────────
 
-pub(crate) fn eval_within(opts: &Val, body: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn eval_within(
+    opts: &Val,
+    body: &Val,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     let opts_val = eval_val(opts, shell)?;
     let opts_map = as_map(&opts_val, "within")?;
     let scope = WithinScope::parse(&opts_map, shell)?;
     let body = eval_val(body, shell)?;
     audit::with_scope(shell, "within", |shell| {
-        scope.enter(shell, |shell| apply(body, vec![], shell))
+        scope.enter(shell, |shell| apply(body, vec![], mooring, shell))
     })
     .map_err(Into::into)
 }
 
-pub(crate) fn eval_grant(caps: &Val, body: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn eval_grant(
+    caps: &Val,
+    body: &Val,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     let caps_val = eval_val(caps, shell)?;
     let home = shell.mobile.context.home();
     let cwd = shell.cwd();
@@ -240,12 +250,17 @@ pub(crate) fn eval_grant(caps: &Val, body: &Val, shell: &mut Shell) -> Raw<Value
     let caps = crate::capability::decode_capability_map(&caps_val, "grant", &ctx)?;
     let body = eval_val(body, shell)?;
     audit::with_scope(shell, "grant", |shell| {
-        shell.with_capabilities(caps, |shell| apply(body, vec![], shell))
+        shell.with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))
     })
     .map_err(Into::into)
 }
 
-pub(crate) fn eval_try(body: &Val, handler: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn eval_try(
+    body: &Val,
+    handler: &Val,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     // `try` is pure control flow: bytes still flow through fd 1/2, so
     // the capture policy is `None`.  `record_scope` still collects
     // children (forced) so we can name the failing command in the
@@ -257,7 +272,7 @@ pub(crate) fn eval_try(body: &Val, handler: &Val, shell: &mut Shell) -> Raw<Valu
     let body_val = eval_val(body, shell)?;
     let handler_val = eval_val(handler, shell)?;
     let record = audit::record_scope(shell, "try", CapturePolicy::Off, |s| {
-        apply(body_val, vec![], s)
+        apply(body_val, vec![], mooring, s)
     })?;
 
     let outcome = classify(&record.body, &record.node.children, call_line, call_col);
@@ -293,15 +308,20 @@ pub(crate) fn eval_try(body: &Val, handler: &Val, shell: &mut Shell) -> Raw<Valu
     if outcome.ok {
         Ok(outcome.value)
     } else {
-        apply(handler_val, vec![err_record], shell).map_err(Into::into)
+        apply(handler_val, vec![err_record], mooring, shell).map_err(Into::into)
     }
 }
 
-pub(crate) fn eval_guard(body: &Val, cleanup: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn eval_guard(
+    body: &Val,
+    cleanup: &Val,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     let body_val = eval_val(body, shell)?;
     let cleanup_val = eval_val(cleanup, shell)?;
     audit::with_scope(shell, "guard", |shell| {
-        let body_result = apply(body_val, vec![], shell);
+        let body_result = apply(body_val, vec![], mooring, shell);
         // Cleanup is the guard's finalizer, run after the body whatever
         // the body did. A cleanup *error* is catchable and best-effort:
         // it is logged and the body's result stands, so an ordinary
@@ -310,7 +330,7 @@ pub(crate) fn eval_guard(body: &Val, cleanup: &Val, shell: &mut Shell) -> Raw<Va
         // must not be swallowed — dropping `Stopped` orphans a stopped
         // process group (pgid lost, never resumable or reapable) — so it
         // takes priority over the body result and propagates.
-        match apply(cleanup_val, vec![], shell) {
+        match apply(cleanup_val, vec![], mooring, shell) {
             Ok(_) => body_result,
             Err(Break::Error(err)) => {
                 crate::diagnostic::cmd_error("guard", &format!("cleanup failed: {err}"));
@@ -322,12 +342,12 @@ pub(crate) fn eval_guard(body: &Val, cleanup: &Val, shell: &mut Shell) -> Raw<Va
     .map_err(Into::into)
 }
 
-pub(crate) fn eval_audit(body: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     // Exit / Stopped propagate as `Err(Escape)` from `record_scope`;
     // `?` lifts via `From<Escape> for Control` without classification.
     let body_val = eval_val(body, shell)?;
     let record = audit::record_scope(shell, "audit", CapturePolicy::Bytes, |s| {
-        apply(body_val, vec![], s)
+        apply(body_val, vec![], mooring, s)
     })?;
     let node = record.node;
     let status = node.status;

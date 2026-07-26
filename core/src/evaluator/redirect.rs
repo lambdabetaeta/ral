@@ -17,7 +17,7 @@ use crate::ir::{RedirectV, ValRedirectTarget};
 use crate::runtime::command::io_event::{self, WriteOutcome};
 use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Control, Error, Raw, Settled, Shell, Value};
+use crate::types::{Break, Control, Error, Mooring, Raw, Settled, Shell, Value};
 
 /// Evaluates redirect targets to their concrete forms — file paths
 /// or numeric fds. Used by [`super::call::eval_call_parts`] for
@@ -61,6 +61,7 @@ pub(crate) fn eval_redirects(
 /// nested scope carries trailing I/O redirects.
 pub(crate) fn within_redirect_frame<F>(
     redirects: &[RedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
     body: F,
 ) -> Raw<Value>
@@ -71,8 +72,8 @@ where
         return body(shell);
     }
     let evaluated = eval_redirects(redirects, shell)?;
-    with_redirects(&evaluated, shell, |shell| {
-        absorb_tail(body(shell), shell).map_err(Control::Break)
+    with_redirects(&evaluated, mooring, shell, |shell| {
+        absorb_tail(body(shell), mooring, shell).map_err(Control::Break)
     })
 }
 
@@ -96,6 +97,7 @@ struct WriteIntent {
 /// are a local, collected fresh from `fd_guard`'s restore rather than
 /// accumulated on the frame.
 struct RedirectFrame<'a> {
+    mooring: &'a Mooring,
     shell: &'a mut Shell,
     stdin_guard: Option<command::StdinRedirectGuard>,
     fd_guard: Option<command::RedirectGuard>,
@@ -207,9 +209,9 @@ fn install_sink_redirects(
 /// Surface every recorded write intent as a `failed` write event and
 /// drop it — the door for the open-error and frame-entry-error paths,
 /// where no body runs and any already-opened atomic temp is discarded.
-fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
+fn emit_writes_failed(mooring: &Mooring, intents: Vec<WriteIntent>) {
     for intent in intents {
-        shell.emit_io(&io_event::write(
+        mooring.emit_io(&io_event::write(
             &intent.path,
             intent.mode,
             WriteOutcome::Failed,
@@ -220,11 +222,11 @@ fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
 }
 
 impl<'a> RedirectFrame<'a> {
-    fn enter(redirects: &[EvalRedirectV], shell: &'a mut Shell) -> Raw<Self> {
+    fn enter(redirects: &[EvalRedirectV], mooring: &'a Mooring, shell: &'a mut Shell) -> Raw<Self> {
         // `install_stdin_redirect` owns its own RAII unwind through
         // the explicit `restore` API; we hold its guard alongside
         // the rest.
-        let stdin_guard = command::install_stdin_redirect(redirects, shell)?;
+        let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
         // The stdin guard is not yet attached to a `RedirectFrame`,
         // so an error from `apply_redirects` will not trigger its
         // Drop. Restore it manually before propagating.
@@ -235,7 +237,7 @@ impl<'a> RedirectFrame<'a> {
                 // A write target failed to open (or a later one did,
                 // after this one opened): no body runs, so every
                 // recorded intent is a failed write.
-                emit_writes_failed(shell, write_intents);
+                emit_writes_failed(mooring, write_intents);
                 stdin_guard.restore(shell);
                 return Err(e);
             }
@@ -243,7 +245,7 @@ impl<'a> RedirectFrame<'a> {
         let fd_guard = match command::apply_redirects(&sink_redirects.unhandled, shell) {
             Ok(g) => g,
             Err(e) => {
-                emit_writes_failed(shell, write_intents);
+                emit_writes_failed(mooring, write_intents);
                 if let Some(s) = sink_redirects.prev_stdout {
                     shell.run.io.stdout = s;
                 }
@@ -255,6 +257,7 @@ impl<'a> RedirectFrame<'a> {
             }
         };
         Ok(Self {
+            mooring,
             shell,
             stdin_guard: Some(stdin_guard),
             fd_guard: Some(fd_guard),
@@ -301,7 +304,7 @@ impl<'a> RedirectFrame<'a> {
                 outcome = WriteOutcome::Committed;
                 new_bytes = None;
             }
-            self.shell.emit_io(&io_event::write(
+            self.mooring.emit_io(&io_event::write(
                 &intent.path,
                 intent.mode,
                 outcome,
@@ -376,6 +379,7 @@ impl Drop for RedirectFrame<'_> {
 /// `Terminal`, which truly means "fall through to the inherited fd 0".
 pub(crate) fn with_redirects<F>(
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
     body: F,
 ) -> Raw<Value>
@@ -385,7 +389,7 @@ where
     if redirects.is_empty() {
         return body(shell);
     }
-    let mut frame = RedirectFrame::enter(redirects, shell)?;
+    let mut frame = RedirectFrame::enter(redirects, mooring, shell)?;
     let result = body(frame.shell);
     // Tear down explicitly so the pending atomic commits are
     // captured; `frame` then drops as a no-op because `tear_down`

@@ -52,7 +52,7 @@ pub fn boot_shell() -> Shell {
 pub(crate) fn exarch_shell(terminal: TerminalState) -> Shell {
     let mut shell =
         ral_core::boot::boot_shell(terminal, &shell_eval::PRELUDE, &builtins::host_surface());
-    builtins::install_agent_library(&mut shell)
+    builtins::install_agent_library(&ral_core::types::Mooring::adrift(), &mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
     seed_no_color(&mut shell);
     shell.set_exit_hints(ral_core::exit_hints::ExitHints::from_text(include_str!(

@@ -16,7 +16,7 @@
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
 ))]
 use {
-    crate::types::{Break, Error, Settled, Shell, Value},
+    crate::types::{Break, Error, Mooring, Settled, Shell, Value},
     std::io::Write,
 };
 
@@ -102,6 +102,7 @@ static INLINE_UUTILS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) fn run_uutils_in_process(
     tool: &str,
     arg_strs: &[String],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     use crate::builtins::uutils;
@@ -159,7 +160,7 @@ pub(crate) fn run_uutils_in_process(
         // so this completion door fires exactly once, like the normal
         // branch below.
         drop(exit_code_guard);
-        shell.emit_io(&super::io_event::exec(tool, arg_strs, 1));
+        mooring.emit_io(&super::io_event::exec(tool, arg_strs, 1));
         return Err(Break::Error(
             Error::new(format!("bundled tool '{tool}' panicked"), 1)
                 .at_loc(shell.run.loc.source_loc(0)),
@@ -173,7 +174,7 @@ pub(crate) fn run_uutils_in_process(
     // Door 3 — EXEC (inline bundled completion): the sole inline-uutils
     // door.  The caller (`command::run`) returns before its spawn path for
     // this image, so no external exec event double-fires for this call.
-    shell.emit_io(&super::io_event::exec(tool, arg_strs, exit_code));
+    mooring.emit_io(&super::io_event::exec(tool, arg_strs, exit_code));
     shell.mobile.control.last_status = exit_code;
     if exit_code == 0 {
         Ok(Value::Unit)

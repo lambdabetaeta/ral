@@ -29,7 +29,7 @@ pub(crate) mod trampoline;
 pub(crate) mod val;
 
 use crate::ir::Comp;
-use crate::types::{Control, Env, Settled, Shell, Tail, TailCall, ThunkBody, Value};
+use crate::types::{Control, Env, Mooring, Settled, Shell, Tail, TailCall, ThunkBody, Value};
 use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
@@ -42,10 +42,14 @@ pub(crate) use trampoline::apply;
 /// through verbatim.  The seam every absorption point funnels through
 /// to turn a `Raw<Value>` into a `Settled<Value>` — boundary verbs,
 /// thread-worker roots, IPC seams, pipeline stage helpers.
-pub(crate) fn absorb_tail(raw: crate::types::Raw<Value>, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn absorb_tail(
+    raw: crate::types::Raw<Value>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     match raw {
         Ok(v) => Ok(v),
-        Err(Control::Tail(TailCall { callee, args })) => apply(callee, args, shell),
+        Err(Control::Tail(TailCall { callee, args })) => apply(callee, args, mooring, shell),
         Err(Control::Break(b)) => Err(b),
     }
 }
@@ -66,12 +70,16 @@ pub(crate) fn absorb_tail(raw: crate::types::Raw<Value>, shell: &mut Shell) -> S
 /// Returns `Err` if evaluating `comp` raises a `Break` — a recoverable
 /// runtime error (`Break::Error`) or a non-local escape (`Break::Escape`,
 /// e.g. `exit`).
-pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
+pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     debug_assert!(
         !shell.mobile.context.grants.is_empty(),
         "grants must be non-empty; Shell::new pre-pushes root"
     );
-    absorb_tail(comp::eval_comp(comp, shell, Tail::No), shell)
+    absorb_tail(
+        comp::eval_comp(comp, mooring, shell, Tail::No),
+        mooring,
+        shell,
+    )
 }
 
 // ── Boundary verbs ───────────────────────────────────────────────────────
@@ -95,10 +103,18 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 /// back to the [`Shell::run`](crate::Shell::run) door that
 /// drove it, which relays it to the host.  The run's mobile is swapped
 /// in for its duration, so any terminal tail call is absorbed under it.
-pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn eval_top_level(
+    comp: &Arc<Comp>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let mobile = shell.mobile();
     let (post, outcome) = shell.run_with_mobile(mobile, |shell| {
-        absorb_tail(comp::eval_comp(comp, shell, Tail::Yes), shell)
+        absorb_tail(
+            comp::eval_comp(comp, mooring, shell, Tail::Yes),
+            mooring,
+            shell,
+        )
     });
     shell.install_mobile(post);
     outcome
@@ -131,11 +147,12 @@ pub(crate) fn eval_block(
     body: &Arc<Comp>,
     captured: &Arc<Env>,
     tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     shell.with_thunk_body(ThunkBody::Block, captured, |shell, mobile| {
         shell.run_with_mobile(mobile, |shell| {
-            absorb_tail(comp::eval_comp(body, shell, tail), shell)
+            absorb_tail(comp::eval_comp(body, mooring, shell, tail), mooring, shell)
         })
     })
 }
@@ -151,7 +168,7 @@ mod tests {
         let source = "let persist_top = 41; exit 7";
         let comp = Arc::new(crate::compile(source).expect("compile"));
         let mut shell = Shell::default();
-        let _ = eval_top_level(&comp, &mut shell);
+        let _ = eval_top_level(&comp, &Mooring::adrift(), &mut shell);
         assert!(
             shell.mobile.scope.get("persist_top").is_some(),
             "top-level mobile must persist `let` bindings even on Exit"
@@ -165,7 +182,7 @@ mod tests {
         let body = Arc::new(crate::compile(source).expect("compile"));
         let mut shell = Shell::default();
         let captured = shell.snapshot();
-        let _ = eval_block(&body, &captured, Tail::No, &mut shell);
+        let _ = eval_block(&body, &captured, Tail::No, &Mooring::adrift(), &mut shell);
         assert!(
             shell.mobile.scope.get("leak_block").is_none(),
             "block boundary must discard `let` bindings"

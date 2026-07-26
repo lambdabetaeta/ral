@@ -5,10 +5,14 @@
 //!
 //! - [`Mobile`] — the persistable bundle (scope + control + context) that
 //!   crosses evaluation boundaries and thread spawns.
-//! - [`RunState`] — the dynamic frame a top-level run installs (IO, surface
-//!   sink, foreground cancel scope, source cursor) and restores on teardown.
+//! - [`Disposition`] — the mutable residue of the frame a top-level run
+//!   installs (IO, source cursor, terminal authority) and restores on
+//!   teardown.  Its run-invariant other half, [`Mooring`], is deliberately
+//!   *not* a field here: it lives on the run's Rust stack frame and reaches
+//!   callees as `&Mooring`, disjoint from `&mut Shell`.
 //! - [`SessionState`] — state that survives every run (durable cancel root,
-//!   source registry, exit hints, builtin table).
+//!   the anchor top-level runs nest under, source registry, exit hints,
+//!   builtin table).
 //! - [`LocalState`] — host-local scratch with its own flow rules (audit, REPL).
 //!
 //! The methods on [`Shell`] live in submodules grouped by concern:
@@ -97,8 +101,8 @@ pub const DEFAULT_RECURSION_LIMIT: usize = 1024;
 ///   bulk-inherited from parent.
 /// - `control` (sibling on [`Mobile`]): per-field flow rules in
 ///   [`ControlState::inherit_from`]; `last_status` reset on a spawned thread.
-/// - the [`RunState`] substates (`io`, `surface`, `cancel`, `loc`): installed
-///   afresh per run, flowed per their own manifest, never clone-shared blind.
+/// - the run's own frame ([`Mooring`], [`Disposition`]): installed afresh per
+///   run, flowed per their own manifest, never clone-shared blind.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     // ── attenuable by within / grant ─────────────────────────────────────
@@ -250,11 +254,11 @@ struct NurseryState {
 /// fork happens in the builtin body — the one place lawfully holding
 /// `&mut Shell` — via [`Shell::fork_into_nursery`], and crosses to the
 /// handler as a [`NurseryId`] the handler later [`adopt`](Self::adopt)s.
-/// Run-scoped like [`Desk`]: cloned into same-thread bodies via
-/// [`RunState::inherit_from`], left `None` on a spawned worker, and
-/// emptied by the run guard at teardown so a fork nobody adopted — an
-/// enquiry that was refused, or a run that ended before the handler ran —
-/// never survives past its run.
+/// Run-scoped like [`Desk`]: shared into same-thread bodies by the run's
+/// [`Mooring`] borrow, left `None` on a spawned worker, and emptied by that
+/// mooring's [`Drop`] so a fork nobody adopted — an enquiry that was
+/// refused, or a run that ended before the handler ran — never survives
+/// past its run.
 #[derive(Clone, Default)]
 pub struct Nursery(Arc<Mutex<NurseryState>>);
 
@@ -336,96 +340,216 @@ pub(crate) enum TerminalAccess {
     ExplicitLoan,
 }
 
-/// The whole dynamic frame a top-level run installs.
+/// The run-invariant half of the frame a run installs: where its events go,
+/// who answers it, and what stops it.
 ///
-/// A run builds one,
-/// swaps it into `shell.run`, runs, and restores the previous one on
-/// teardown; the field is the invariant "the run-local part" used to be a
-/// scattered save/restore.  Same-thread bodies flow these through
-/// [`RunState::inherit_from`] / [`RunState::return_to`]; a spawned worker
-/// builds a fresh one under the durable root.
-pub struct RunState {
-    /// Pipeline-stage IO: streams, value channel, terminal state, flags.
-    pub(crate) io: Io,
+/// Nothing here changes between the run's first and last step, so nothing
+/// here needs saving and restoring.  It is an owned local on the run's own
+/// Rust stack frame ([`Shell::run`](crate::Shell::run)) and reaches every
+/// callee as `&Mooring` — scoped sharing, which a borrow gives for free —
+/// so an outer run's mooring is restored by the stack unwinding rather than
+/// by a guard.  Deliberately *not* a field of [`Shell`]: `&shell.mooring`
+/// would borrow the whole shell immutably while every callee wants
+/// `&mut Shell`, whereas `&Mooring` and `&mut Shell` are disjoint.
+///
+/// A child that is a genuine fork — a deferred worker, a cross-process
+/// pipeline stage — never shares its parent's: it rebuilds through
+/// [`Self::for_worker`] / [`Self::for_stage`], which differ in nearly every
+/// field.  A same-thread body shares the parent's by borrow.
+///
+/// Not [`Clone`], and that is load-bearing: [`Drop`] empties the nursery, so
+/// a second owner would empty it while the first still ran.
+pub struct Mooring {
     /// Host-installed sink for structured events surfaced by the `surface`
     /// builtin.  `None` outside a host (e.g. a bare REPL), in which case
-    /// `surface` is the identity.  Cloned into thunk bodies and spawned
-    /// stages — the `Arc` is shared, never folded back.
+    /// [`Self::surface`] is the identity.
     pub(crate) surface: Option<SurfaceSink>,
     /// Host-installed destination for a deferred worker's surface batch.
-    /// `None` outside an agent host (e.g. a bare REPL).  Cloned into thunk
-    /// bodies and spawned workers so a nested `spawn` delivers at its own
-    /// completion; like `surface` it never folds back.
+    /// `None` outside an agent host (e.g. a bare REPL).  Carried into
+    /// spawned workers by [`Self::for_worker`] so a nested `spawn` delivers
+    /// at its own completion.
     pub(crate) deferred: Option<Arc<dyn DeferredSink>>,
     /// Host-installed desk answering this run's enquiries (§3 of the
-    /// enquiry-channel ADR).  Run-local like `surface`: cloned into
-    /// same-thread bodies so a nested call enquires through the same desk,
-    /// `None` outside a host that answers enquiries (a bare REPL, or any
-    /// host before the migration installs its desk) and left `None` on a
-    /// deferred worker — a worker outlives its run's Report, so a worker
-    /// that could enquire would break the ordering law and the deferred
-    /// rail's attenuation.  Never folds back, like `surface`.
+    /// enquiry-channel ADR).  `None` outside a host that answers enquiries
+    /// (a bare REPL, or any host before the migration installs its desk),
+    /// and never given to a deferred worker — a worker outlives its run's
+    /// Report, so a worker that could enquire would break the ordering law
+    /// and the deferred rail's attenuation.
     pub(crate) desk: Option<Desk>,
     /// The run-local nursery for engine-side session forks, crossing the
     /// reentrancy boundary the same way `desk` does (§"Core additions: the
-    /// nursery" of the tools-to-builtins migration). Run-local like `desk`:
-    /// cloned into same-thread bodies, `None` outside a host that installs
-    /// one, and left `None` on a deferred worker. Unlike `desk` it is not
-    /// merely restored at run teardown — the run guard also empties it
-    /// ([`Nursery::clear`]), so a fork parked and never adopted before the
-    /// run ends leaks nothing. Never folds back, like `surface`.
+    /// nursery" of the tools-to-builtins migration). `None` outside a host
+    /// that installs one, and never given to a deferred worker.  Emptied by
+    /// this type's [`Drop`], so a fork parked and never adopted before the
+    /// run ends leaks nothing.
     pub(crate) nursery: Option<Nursery>,
     /// The run's foreground work scope.
     /// [`signal::check`](crate::process::signal::check) consults it between
     /// effectful steps; a foreground cancel (run timeout, Ctrl-C) unwinds
     /// the same-thread work that shares it.  Always a descendant of
-    /// [`SessionState::root`] by construction.
-    pub(crate) cancel: ForegroundScope,
-    /// Run-local source cursor: every non-registry source-position field.
-    /// Read when building a [`SourceLoc`](crate::diagnostic::SourceLoc);
-    /// resolved at render time against [`SessionState::sources`].
-    pub(crate) loc: LocationCursor,
+    /// [`SessionState::root`] by construction.  The one `pub` member: a host
+    /// clones a deadline child of it, or cancels it to interrupt the
+    /// foreground work.
+    pub cancel: ForegroundScope,
     /// The lease governing workers this run defers at the durable root.
     /// `None` (an interactive host) leaves a worker until `cancel`, root
     /// abort, or session exit; `Some(lease)` (an agent host) reaps a
     /// still-running worker once it has gone `lease.idle` unobserved —
     /// every `poll` and `await`/`race` sweep renews it — under the
-    /// `lease.backstop` absolute ceiling no observation extends.  Supplied
-    /// by the frame and flowed into same-thread bodies and spawned workers
-    /// so a `spawn` nested in a thunk sees the same lease.
+    /// `lease.backstop` absolute ceiling no observation extends.  Carried
+    /// into a spawned worker so a `spawn` nested in one sees the same lease.
     pub(crate) deferred_lease: Option<WorkerLease>,
     /// Admission cap on concurrently *running* workers, enforced at the
     /// spawn door: with `Some(cap)`, a birth is refused while `cap` entries
     /// of any class are still `Running` — settled entries lingering under
     /// retention never block admission.  `None` (an interactive host)
-    /// admits freely.  Flows exactly as `deferred_lease` does — into
-    /// same-thread bodies and spawned workers — so a nested `spawn` cannot
-    /// evade the cap its frame set.
+    /// admits freely.  Carried exactly as `deferred_lease` is, so a nested
+    /// `spawn` cannot evade the cap its run set.
     pub(crate) worker_cap: Option<usize>,
+}
+
+/// Empty the nursery when the run's mooring goes out of scope: a fork parked
+/// during the run and never adopted (a refused enquiry, or a run that ended
+/// before its handler ran) must not survive the run that parked it.  Drop of
+/// an owned local fires on unwind too, so a panicking run leaks no fork
+/// either.  A worker's or a stage's mooring carries `nursery: None`, so its
+/// drop is inert.
+impl Drop for Mooring {
+    fn drop(&mut self) {
+        if let Some(nursery) = self.nursery.as_ref() {
+            nursery.clear();
+        }
+    }
+}
+
+impl Mooring {
+    /// The mooring a detached worker runs under.
+    ///
+    /// A worker *rebuilds* rather than sharing `parent`: it differs in
+    /// nearly every field, and sharing would hand it the run's cancel scope
+    /// (a foreground cancel would reach a worker that must outlive the run)
+    /// and the run's desk and nursery (both barred to a worker, which
+    /// outlives its run's Report).  It keeps `surface` — its own buffering
+    /// one, supplied here — and the deferred rail, lease, and cap, so a
+    /// `spawn` nested in the body delivers and is governed like its parent.
+    /// Its scope is a [`worker`](DurableRoot::worker) of the session root:
+    /// a SIGTERM still reaches it, a Ctrl-C does not.
+    pub(crate) fn for_worker(parent: &Self, root: &DurableRoot, surface: SurfaceSink) -> Self {
+        Self {
+            surface: Some(surface),
+            deferred: parent.deferred.clone(),
+            desk: None,
+            nursery: None,
+            cancel: root.worker(),
+            deferred_lease: parent.deferred_lease,
+            worker_cap: parent.worker_cap,
+        }
+    }
+
+    /// The mooring a cross-process pipeline stage runs under, in the helper
+    /// process ([`crate::child_eval`]).  Nothing crosses the process
+    /// boundary, so there is no parent to rebuild from: the stage answers no
+    /// enquiries, adopts no forks, defers to no rail, and surfaces into
+    /// `surface` — the no-op `()` sink, which discards the `surface` calls a
+    /// stage body may still make.
+    pub(crate) fn for_stage(root: &DurableRoot, surface: SurfaceSink) -> Self {
+        Self {
+            surface: Some(surface),
+            deferred: None,
+            desk: None,
+            nursery: None,
+            cancel: root.worker(),
+            deferred_lease: None,
+            worker_cap: None,
+        }
+    }
+
+    /// A mooring tied to no run: no surface, no rail, no desk, no nursery,
+    /// and a scope under a root nothing else holds.
+    ///
+    /// The one core does not mint at a run door, and the one a host reaches
+    /// for when it calls a builtin body outside a run — a host-embedding
+    /// test, above all.  Cancelling its [`cancel`](Self::cancel) is how such
+    /// a caller drives a builtin's poll points.
+    pub fn adrift() -> Self {
+        Self {
+            surface: None,
+            deferred: None,
+            desk: None,
+            nursery: None,
+            cancel: DurableRoot::default().worker(),
+            deferred_lease: None,
+            worker_cap: None,
+        }
+    }
+
+    /// Forward any structured-event [`Value`] onto this run's surface sink, if
+    /// one is installed; inert when none is.  The public door host builtins use
+    /// to surface their own events — a Rust exarch `edit` raising its write
+    /// card, a `grep-files` announcing its search.  Core names no event shape
+    /// here: the caller hands a fully-formed `Value`, encoded once at this door
+    /// into the first-order [`FOValue`](crate::serial::FOValue) the sink
+    /// actually carries.  A value that is not first-order (a closure, a handle)
+    /// cannot cross the rail; core has no host vocabulary to report that in (an
+    /// exarch `Kind::SystemNote` would leak host concepts into core), so the
+    /// drop is a `dbg_trace`, not a silent no-op.
+    pub fn surface(&self, ev: &Value) {
+        match crate::serial::FOValue::try_from(ev) {
+            Ok(fo) => {
+                if let Some(sink) = self.surface.as_ref() {
+                    sink.emit(&fo);
+                }
+            }
+            Err(_) => {
+                crate::dbg_trace!("surface", "dropping non-first-order surface value");
+            }
+        }
+    }
+
+    /// Emit a structural I/O event onto this run's surface sink, if one is
+    /// installed.  This is the single door through which every redirect
+    /// read/write and every exec completion announces itself to the host;
+    /// with no surface installed it is inert.  The event is a plain
+    /// [`Value::Map`] whose shape (`{io: …, …}`) the host decodes — core
+    /// names no card type.
+    pub(crate) fn emit_io(&self, ev: &Value) {
+        self.surface(ev);
+    }
+}
+
+/// The mutable residue of the frame a run installs: what genuinely differs
+/// between one step of a run and the next.
+///
+/// A run builds one, swaps it into `shell.run`, runs, and restores the
+/// previous one on teardown — the save/restore the run-invariant
+/// [`Mooring`] no longer needs.  Same-thread bodies flow these through
+/// [`Disposition::inherit_from`] / [`Disposition::return_to`].
+pub struct Disposition {
+    /// Pipeline-stage IO: streams, value channel, terminal state, flags.
+    pub(crate) io: Io,
+    /// Run-local source cursor: every non-registry source-position field.
+    /// Read when building a [`SourceLoc`](crate::diagnostic::SourceLoc);
+    /// resolved at render time against [`SessionState::sources`].
+    pub(crate) loc: LocationCursor,
     /// This run's terminal-foreground authority. Gates whether a
     /// child/job foreground handoff can borrow the session's
     /// [`TerminalLease`](crate::process::TerminalLease); see
-    /// [`Shell::terminal_lease`]. Restored with the rest of the frame by the
-    /// run guard; flows into same-thread bodies (so a pipeline launched inside
-    /// an `_ed-tui` loan still foregrounds) and is left `Denied` on a spawned
-    /// worker.
+    /// [`Shell::terminal_lease`].  Mutates within a run — a loan token
+    /// raises it and surrenders it back ([`Shell::begin_terminal_loan`]) —
+    /// which is why it is residue and not mooring.  Restored with the rest
+    /// by the run guard; flows into same-thread bodies (so a pipeline
+    /// launched inside an `_ed-tui` loan still foregrounds) and is left
+    /// `Denied` on a spawned worker.
     pub(crate) terminal_access: TerminalAccess,
 }
 
-impl RunState {
+impl Disposition {
     /// Same-thread child flow-in: clone the byte sinks, move the read-once
-    /// stdin out of the parent, and share the foreground scope and source
-    /// cursor.  Mirror of [`Self::return_to`].
+    /// stdin out of the parent, and share the source cursor.  Mirror of
+    /// [`Self::return_to`].
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.io.inherit_from(&mut parent.io);
-        self.surface = parent.surface.clone();
-        self.deferred = parent.deferred.clone();
-        self.desk = parent.desk.clone();
-        self.nursery = parent.nursery.clone();
-        self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
-        self.deferred_lease = parent.deferred_lease;
-        self.worker_cap = parent.worker_cap;
         // Terminal access flows in so a pipeline launched inside an `_ed-tui`
         // loan (or any same-thread body of a Leased run) sees the parent's
         // authority. It does not flow back in `return_to`: the parent retains
@@ -434,8 +558,8 @@ impl RunState {
     }
 
     /// Same-thread child flow-out: return the read-once stdin to the parent
-    /// so sibling calls see the unconsumed pipe.  The cursor and foreground
-    /// do not flow back — the asymmetry is the point.
+    /// so sibling calls see the unconsumed pipe.  The cursor does not flow
+    /// back — the asymmetry is the point.
     pub fn return_to(&mut self, parent: &mut Self) {
         self.io.return_to(&mut parent.io);
     }
@@ -445,17 +569,27 @@ impl RunState {
 pub struct SessionState {
     /// The session's durable cancel root.  Detached workers (`spawn`,
     /// `watch`, `par`) parent under this rather than under the swappable
-    /// foreground [`RunState::cancel`], so a foreground cancel never reaches
+    /// foreground [`Mooring::cancel`], so a foreground cancel never reaches
     /// them.  Only a [`RootAbort`](crate::process::CancelCause::RootAbort) on
     /// the root, or a cancel on the worker's own scope, stops such a worker.
     /// Minted deaf to the ambient causes; [`Shell::face_signals`] re-mints
     /// it facing, for the one host that owns the process's signals.  Shared,
     /// not re-minted, by an aside ([`Shell::join_session`]).
     pub(crate) root: DurableRoot,
+    /// The scope a *top-level* run nests its foreground frame under — the
+    /// role the boot frame's `run.cancel` played while the frame lived on
+    /// the `Shell`.  Re-minted wherever the root is
+    /// ([`Shell::new`], [`Shell::face_signals`], [`Shell::join_session`]),
+    /// and never afterwards: a run entered through
+    /// [`Shell::run`](crate::Shell::run) hangs off it, while one entered
+    /// through [`Shell::run_nested`](crate::Shell::run_nested) hangs off the
+    /// mooring of the run it nests in, so the tree is the LIFO extent it
+    /// claims to be.
+    pub(crate) anchor: ForegroundScope,
     /// Durable source registry, keyed by [`FileId`](crate::source::FileId).
     /// A run resets and seeds it at run start, module loads append to it,
     /// and hosts read it after the run returns to render runtime errors.
-    /// Durable across the teardown of [`RunState::loc`], not across all
+    /// Durable across the teardown of [`Disposition::loc`], not across all
     /// future runs.  Skipped by IPC/serde — it is render state, not mobile.
     pub(crate) sources: SourceDb,
     /// Exit-code hint table — loaded once at startup from the data directory.
@@ -558,9 +692,11 @@ impl Drop for LocalState {
 
 /// The runtime, partitioned by lifetime.
 ///
-/// A field either moves as a run
-/// ([`RunState`]), survives a run ([`SessionState`]), crosses evaluation
-/// boundaries ([`Mobile`]), or stays as host scratch ([`LocalState`]).
+/// A field either changes within a run
+/// ([`Disposition`]), survives a run ([`SessionState`]), crosses evaluation
+/// boundaries ([`Mobile`]), or stays as host scratch ([`LocalState`]).  What
+/// a run fixes once and never changes is not here at all: it is the
+/// [`Mooring`] the run door owns on its stack.
 ///
 /// Every field is `pub(crate)`: the partition that encodes run safety,
 /// capability attenuation, and mobile framing is core's invariant, not a
@@ -571,7 +707,7 @@ impl Drop for LocalState {
 /// checkpoints and rolls back the [`Mobile`] around every run.
 pub struct Shell {
     pub(crate) mobile: Mobile,
-    pub(crate) run: RunState,
+    pub(crate) run: Disposition,
     pub(crate) session: SessionState,
     pub(crate) local: LocalState,
 }
@@ -589,31 +725,7 @@ impl Shell {
             .with_hint(hint)
     }
 
-    /// Forward any structured-event [`Value`] onto this run's surface sink, if
-    /// one is installed; inert when none is.  The public door host builtins use
-    /// to surface their own events — a Rust exarch `edit` raising its write
-    /// card, a `grep-files` announcing its search — since `run.surface` is `pub(crate)`
-    /// and so unreachable from a host crate.  Core names no event shape here: the
-    /// caller hands a fully-formed `Value`, encoded once at this door into the
-    /// first-order [`FOValue`](crate::serial::FOValue) the sink actually
-    /// carries.  A value that is not first-order (a closure, a handle) cannot
-    /// cross the rail; core has no host vocabulary to report that in (an
-    /// exarch `Kind::SystemNote` would leak host concepts into core), so the
-    /// drop is a `dbg_trace`, not a silent no-op.
-    pub fn surface(&self, ev: &Value) {
-        match crate::serial::FOValue::try_from(ev) {
-            Ok(fo) => {
-                if let Some(sink) = self.run.surface.as_ref() {
-                    sink.emit(&fo);
-                }
-            }
-            Err(_) => {
-                crate::dbg_trace!("surface", "dropping non-first-order surface value");
-            }
-        }
-    }
-
-    /// Put one enquiry to this run's host desk and block for the answer.
+    /// Put one enquiry to `mooring`'s host desk and block for the answer.
     /// The absent-desk error is the honest answer of a host that answers none
     /// (the bare REPL, and any host before the migration installs its desk).
     ///
@@ -622,16 +734,17 @@ impl Shell {
     /// installed desk's [`EnquiryDesk::enquire`] returns one.
     pub fn enquire(
         &self,
+        mooring: &Mooring,
         req: crate::serial::FOValue,
     ) -> Result<crate::serial::FOValue, crate::types::Error> {
-        match self.run.desk.as_ref() {
-            Some(desk) => desk.enquire(req, self.run.cancel.as_scope()),
+        match mooring.desk.as_ref() {
+            Some(desk) => desk.enquire(req, mooring.cancel.as_scope()),
             None => Err(self.err("this host answers no enquiries", 1)),
         }
     }
 
-    /// Fork this shell ([`Self::fork_session`]) and park the fork in this
-    /// run's nursery, returning the [`NurseryId`] a desk handler — barred
+    /// Fork this shell ([`Self::fork_session`]) and park the fork in
+    /// `mooring`'s nursery, returning the [`NurseryId`] a desk handler — barred
     /// by the reentrancy law from holding `&mut Shell` itself — later
     /// redeems with [`Nursery::adopt`]. The absent-nursery error is the
     /// honest answer of a host that adopts no forked sessions (the bare
@@ -639,23 +752,13 @@ impl Shell {
     ///
     /// # Errors
     /// Returns `Err` if no nursery is installed on this run.
-    pub fn fork_into_nursery(&self) -> crate::types::Settled<NurseryId> {
-        match self.run.nursery.as_ref() {
+    pub fn fork_into_nursery(&self, mooring: &Mooring) -> crate::types::Settled<NurseryId> {
+        match mooring.nursery.as_ref() {
             Some(nursery) => Ok(nursery.park(self.fork_session())),
             None => Err(crate::types::Break::Error(
                 self.err("this host adopts no forked sessions", 1),
             )),
         }
-    }
-
-    /// Emit a structural I/O event onto this run's surface sink, if one is
-    /// installed.  This is the single door through which every redirect
-    /// read/write and every exec completion announces itself to the host;
-    /// with no surface installed it is inert.  The event is a plain
-    /// [`Value::Map`] whose shape (`{io: …, …}`) the host decodes — core
-    /// names no card type.
-    pub(crate) fn emit_io(&self, ev: &Value) {
-        self.surface(ev);
     }
 
     /// Atomically overwrite `path` with `bytes` through core's full
@@ -907,7 +1010,7 @@ mod tests {
     fn fork_into_nursery_errors_honestly_without_a_nursery() {
         let shell = Shell::new(crate::io::TerminalState::default());
         match shell
-            .fork_into_nursery()
+            .fork_into_nursery(&Mooring::adrift())
             .expect_err("no nursery is installed")
         {
             crate::types::Break::Error(e) => {
@@ -933,9 +1036,21 @@ mod tests {
             .scope
             .set("parent_binding".to_string(), Value::Int(42));
         let nursery = Nursery::default();
-        shell.run.nursery = Some(nursery.clone());
+        // `Mooring` is `Drop`, so `..base` update syntax is illegal: every
+        // literal spells all seven members.
+        let mooring = Mooring {
+            surface: None,
+            deferred: None,
+            desk: None,
+            nursery: Some(nursery.clone()),
+            cancel: shell.session.root.worker(),
+            deferred_lease: None,
+            worker_cap: None,
+        };
 
-        let id = shell.fork_into_nursery().expect("a nursery is installed");
+        let id = shell
+            .fork_into_nursery(&mooring)
+            .expect("a nursery is installed");
         let child = nursery
             .adopt(id)
             .expect("the parked fork must be adoptable");

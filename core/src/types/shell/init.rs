@@ -8,7 +8,7 @@
 //! consult shell state instead of resyscalling.  That function's doc
 //! lists the seeded variables.
 
-use super::{Context, LocalState, Mobile, RunState, SessionState, Shell};
+use super::{Context, Disposition, LocalState, Mobile, SessionState, Shell};
 use crate::types::{ControlState, Env, GrantStack, LocationCursor};
 use std::path::PathBuf;
 
@@ -27,7 +27,7 @@ impl Shell {
     /// The session faces no signals: its cancel scopes fold neither ambient
     /// cause, so a Ctrl-C or a SIGTERM passes it by. The host that owns the
     /// process's signals declares itself with [`Self::face_signals`].  Its
-    /// boot frame is the root of the run tree every later frame nests under.
+    /// anchor is the root of the run tree every later frame nests under.
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
@@ -39,25 +39,20 @@ impl Shell {
                     ..Context::default()
                 },
             },
-            run: RunState {
+            run: Disposition {
                 io: crate::io::Io {
                     terminal,
                     ..Default::default()
                 },
-                surface: None,
-                deferred: None,
-                desk: None,
-                nursery: None,
-                cancel: root.worker(),
                 loc: LocationCursor::default(),
-                deferred_lease: None,
-                worker_cap: None,
-                // The boot frame holds no terminal authority; a host states it
-                // per run via `RunRequest::terminal`. `Denied` is the safe
-                // default so a frame with no stated policy never foregrounds.
+                // A shell between runs holds no terminal authority; a host
+                // states it per run via `RunRequest::terminal`. `Denied` is the
+                // safe default so a frame with no stated policy never
+                // foregrounds.
                 terminal_access: crate::types::TerminalAccess::Denied,
             },
             session: SessionState {
+                anchor: root.worker(),
                 root,
                 sources: crate::source::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
@@ -92,7 +87,7 @@ impl Shell {
     /// caller.
     pub fn face_signals(&mut self) {
         self.session.root = crate::process::DurableRoot::signal_facing();
-        self.run.cancel = self.session.root.worker();
+        self.session.anchor = self.session.root.worker();
     }
 
     /// Adopt the host process env at startup.

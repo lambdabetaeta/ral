@@ -52,6 +52,7 @@ fn print_result(val: &Value) {
 fn pre_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, src: &str) {
     run_lifecycle_hook(
         runtime,
+        &ral_core::types::Mooring::adrift(),
         shell,
         "pre-exec",
         &[Value::String(src.to_string())],
@@ -70,6 +71,7 @@ fn post_exec(
     if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
         run_lifecycle_hook(
             runtime,
+            &ral_core::types::Mooring::adrift(),
             shell,
             "chpwd",
             &[Value::map(vec![
@@ -86,6 +88,7 @@ fn post_exec(
     }
     run_lifecycle_hook(
         runtime,
+        &ral_core::types::Mooring::adrift(),
         shell,
         "post-exec",
         &[

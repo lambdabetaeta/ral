@@ -13,27 +13,40 @@ use std::fmt;
 use std::sync::Arc;
 
 /// Runtime closure backing a captured builtin body, carrying host state.
-pub type CapturedBuiltinFn =
-    Arc<dyn Fn(&[Value], &mut crate::types::Shell) -> Settled<Value> + Send + Sync>;
+pub type CapturedBuiltinFn = Arc<
+    dyn Fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>
+        + Send
+        + Sync,
+>;
 
 /// Host implementation of a builtin command binding.
+///
+/// The [`Mooring`](crate::types::Mooring) sits between the arguments and the
+/// shell in every spelling: it is the run's fixed conditions (where events
+/// go, who answers, what stops it), borrowed rather than owned, and so
+/// disjoint from the `&mut Shell` the body mutates.
 #[derive(Clone)]
 pub enum BuiltinBody {
     /// Process-static function pointer.
-    Static(fn(&[Value], &mut crate::types::Shell) -> Settled<Value>),
+    Static(fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>),
     /// Runtime closure with host state captured by the frontend.
     Captured(CapturedBuiltinFn),
 }
 
 impl BuiltinBody {
-    /// Call the body with the given arguments and shell.
+    /// Call the body with the given arguments, mooring, and shell.
     ///
     /// # Errors
     /// Returns `Err` if the invoked body raises a runtime `Break`.
-    pub fn call(&self, args: &[Value], shell: &mut crate::types::Shell) -> Settled<Value> {
+    pub fn call(
+        &self,
+        args: &[Value],
+        mooring: &crate::types::Mooring,
+        shell: &mut crate::types::Shell,
+    ) -> Settled<Value> {
         match self {
-            Self::Static(f) => f(args, shell),
-            Self::Captured(f) => f(args, shell),
+            Self::Static(f) => f(args, mooring, shell),
+            Self::Captured(f) => f(args, mooring, shell),
         }
     }
 }

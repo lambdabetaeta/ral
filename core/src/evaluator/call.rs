@@ -4,7 +4,7 @@
 //! stage into the call's argument list.
 
 use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
-use crate::types::{Error, Raw, Shell, Tail, TailCall, Value};
+use crate::types::{Error, Mooring, Raw, Shell, Tail, TailCall, Value};
 use std::sync::Arc;
 
 use super::comp::eval_comp;
@@ -21,6 +21,7 @@ pub(crate) fn invoke(
     comp: &Arc<Comp>,
     upstream: Option<Value>,
     tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     match &comp.item {
@@ -28,7 +29,7 @@ pub(crate) fn invoke(
             let (mut arg_vals, redir_eval) = eval_call_parts(&e.args, &e.redirects, shell)?;
             // Append the value from the previous pipeline stage, if any.
             arg_vals.extend(upstream);
-            command_call::run_call(&e.head, &arg_vals, &redir_eval, shell)
+            command_call::run_call(&e.head, &arg_vals, &redir_eval, mooring, shell)
         }
 
         CompKind::App {
@@ -38,7 +39,7 @@ pub(crate) fn invoke(
         } => {
             // The head and arguments are evaluated, not tail-called:
             // they produce values the application consumes.
-            let head_val = eval_comp(head, shell, Tail::No)?;
+            let head_val = eval_comp(head, mooring, shell, Tail::No)?;
             let mut arg_vals = eval_call_args(app_args, shell)?;
             arg_vals.extend(upstream);
             // CBPV application requires at least one argument; a spread
@@ -48,18 +49,18 @@ pub(crate) fn invoke(
             if arg_vals.is_empty() {
                 Ok(head_val)
             } else {
-                eval_app(head_val, arg_vals, tail, shell)
+                eval_app(head_val, arg_vals, tail, mooring, shell)
             }
         }
 
         CompKind::Scope(ScopeOp::Redirect { body, redirects }) => {
-            redirect::within_redirect_frame(redirects, shell, |shell| {
-                invoke(body, upstream, tail, shell)
+            redirect::within_redirect_frame(redirects, mooring, shell, |shell| {
+                invoke(body, upstream, tail, mooring, shell)
             })
         }
 
         _ => {
-            let result = eval_comp(comp, shell, Tail::No)?;
+            let result = eval_comp(comp, mooring, shell, Tail::No)?;
             match upstream {
                 None => Ok(result),
                 // Applying the upstream value to a bare-value stage (a
@@ -67,7 +68,7 @@ pub(crate) fn invoke(
                 // stage's tail call: route through `eval_app` so a
                 // granted tail position emits a [`TailCall`] and a final
                 // pipeline stage trampolines rather than recurses.
-                Some(v) => eval_app(result, vec![v], tail, shell),
+                Some(v) => eval_app(result, vec![v], tail, mooring, shell),
             }
         }
     }
@@ -77,7 +78,13 @@ pub(crate) fn invoke(
 /// [`Tail::Yes`] emits [`TailCall`] for the trampoline; otherwise it
 /// applies directly. Any other value is a type error. The caller
 /// guarantees `args` is non-empty.
-fn eval_app(name: Value, args: Vec<Value>, tail: Tail, shell: &mut Shell) -> Raw<Value> {
+fn eval_app(
+    name: Value,
+    args: Vec<Value>,
+    tail: Tail,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     debug_assert!(
         !args.is_empty(),
         "App with empty args reached the evaluator"
@@ -86,7 +93,7 @@ fn eval_app(name: Value, args: Vec<Value>, tail: Tail, shell: &mut Shell) -> Raw
         Value::Lambda { .. } | Value::Block { .. } if tail == Tail::Yes => {
             Err(TailCall { callee: name, args }.into())
         }
-        _ => apply(name, args, shell).map_err(Into::into),
+        _ => apply(name, args, mooring, shell).map_err(Into::into),
     }
 }
 

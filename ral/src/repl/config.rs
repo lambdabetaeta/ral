@@ -6,7 +6,7 @@
 //! Unknown keys are silently ignored so future versions can add knobs without
 //! breaking older configs.
 
-use ral_core::types::{DefaultPolicy, HookName, HookSig};
+use ral_core::types::{DefaultPolicy, HookName, HookSig, Mooring};
 use ral_core::{Map, Shell, Value};
 
 use super::frontend::Surface;
@@ -292,7 +292,15 @@ fn parse_and_load_rc_plugin(
          expected [plugin: 'name', options: [...]]"
             .to_string()
     })?;
-    match super::plugin::load::load_plugin(&name, options.as_ref(), shell, runtime) {
+    // rc loading runs at session bring-up, with no run in hand, so the
+    // plugin file evaluates moored adrift.
+    match super::plugin::load::load_plugin(
+        &name,
+        options.as_ref(),
+        &Mooring::adrift(),
+        shell,
+        runtime,
+    ) {
         Err(ral_core::types::Break::Error(e)) => Err(format!("plugin '{name}': {}", e.message)),
         _ => Ok(()),
     }
@@ -348,7 +356,7 @@ mod tests {
             &ast,
             std::collections::HashSet::default(),
         ));
-        let config = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
+        let config = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
         let mut mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
         let mut surface = Surface::default();

@@ -14,7 +14,7 @@ use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
 use ral_core::typecheck::{Scheme, Ty, Unifier};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, sig};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -69,13 +69,17 @@ pub fn host_surface() -> HostSurface {
 /// # Errors
 /// Returns `Err` if sourcing the embedded library raises a ral error
 /// (re-surfaced as a signal) or propagates a non-error escape.
-pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
-    let result =
-        ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>")
-            .map_err(|e| match e {
-                Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
-                other @ Break::Escape(_) => other,
-            })?;
+pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let result = ral_core::builtins::modules::evaluate_source(
+        mooring,
+        shell,
+        AGENT_SOURCE,
+        "<exarch:agent>",
+    )
+    .map_err(|e| match e {
+        Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
+        other @ Break::Escape(_) => other,
+    })?;
     shell.install_library_docs(agent_library_docs());
     Ok(result)
 }
@@ -248,8 +252,8 @@ fn rows_of(body: &str) -> Vec<String> {
 /// own read card — one logical surface per read, matching the shape the
 /// redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
 /// exception: they read silently and speak only their `write` event.
-fn surface_read(shell: &Shell, path: &str) {
-    shell.surface(&Value::map(vec![
+fn surface_read(mooring: &Mooring, path: &str) {
+    mooring.surface(&Value::map(vec![
         ("io".into(), Value::String("read".into())),
         ("path".into(), Value::String(path.to_string())),
     ]));
@@ -278,14 +282,14 @@ fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
 /// the file, each line tagged `<line-no>\t<hash>\t<text>`.  Reads the whole file
 /// (its witnesses depend on file-wide uniqueness), hashes it, and writes the
 /// requested slice; surfaces one read card.
-fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "view-text")?;
     let path = args[0].to_string();
     let start = view_bound(&args[1], "start")?;
     let end = view_bound(&args[2], "end")?;
 
     let body = read_text_file(shell, &path, "view-text")?;
-    surface_read(shell, &path);
+    surface_read(mooring, &path);
     let rows = rows_of(&body);
     let hashes = window_hashes(&rows);
     let n = rows.len();
@@ -354,7 +358,7 @@ fn readable(shell: &mut Shell, rel: &str) -> bool {
     clippy::disallowed_methods,
     reason = "[io-door:surface:grep-read] The grep door's per-matched-file read, in Rust below the ral line so it never reaches the redirect frame; the logical search emits exactly one `grep` surface (scope + pattern), not one read card per file."
 )]
-fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
+fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
         .build(pattern)
         .map_err(|e| sig(regex_err("grep-files", pattern, &e.to_string())))?;
@@ -366,7 +370,7 @@ fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
 
     let mut results = Vec::new();
     for raw in cancellable(WalkBuilder::new(&root).git_global(false)) {
-        ral_core::process::check(shell)?;
+        ral_core::process::check(mooring, shell)?;
         let entry = match raw {
             Ok(e) if e.file_type().is_some_and(|ft| ft.is_file()) => e,
             _ => continue,
@@ -404,18 +408,18 @@ fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
 /// `grep-files PATTERN` — search the cwd in one read per matched file (see
 /// [`search_tree`]).  Returns `[{file, line, text}]`; emits exactly one `grep`
 /// surface naming the scope and pattern.
-fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "grep-files")?;
     let pattern = args[0].to_string();
 
     // One logical search, one surface — the scope is the cwd the walk roots at.
-    shell.surface(&Value::map(vec![
+    mooring.surface(&Value::map(vec![
         ("io".into(), Value::String("grep".into())),
         ("scope".into(), Value::String(".".into())),
         ("pattern".into(), Value::String(pattern.clone())),
     ]));
 
-    let results = search_tree(shell, &pattern)?
+    let results = search_tree(mooring, shell, &pattern)?
         .into_iter()
         .map(|hit| {
             #[allow(
@@ -490,7 +494,7 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 /// A commit also notes what changed on stderr (see [`note_edit`]), with a
 /// warning if a `line` looks like it carries an unintended `\n`/`\t`-style
 /// escape rather than the literal character (see [`has_suspicious_escapes`]).
-fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "edit-hash")?;
     let path = args[0].to_string();
     let edits = match &args[1] {
@@ -587,7 +591,7 @@ fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     }
     let final_text = out.join("\n");
     shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_write(shell, &path, &body, &final_text);
+    surface_write(mooring, &path, &body, &final_text);
 
     let mut line_nums: Vec<usize> = resolved.iter().map(|r| r.at + 1).collect();
     line_nums.sort_unstable();
@@ -617,7 +621,7 @@ const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
 /// falls back to a listing preview rather than an unwieldy diff — the same gate
 /// core's `old_snapshot_for_diff` applies to the redirect path.  `new_bytes` is
 /// capped to that prefix too, since past the cap it only ever seeds the listing.
-fn surface_write(shell: &Shell, path: &str, old: &str, new: &str) {
+fn surface_write(mooring: &Mooring, path: &str, old: &str, new: &str) {
     let fits = old.len() <= DIFF_SNAPSHOT_CAP && new.len() <= DIFF_SNAPSHOT_CAP;
     let new_prefix = new.as_bytes()[..new.len().min(DIFF_SNAPSHOT_CAP)].to_vec();
     let mut fields = vec![
@@ -630,7 +634,7 @@ fn surface_write(shell: &Shell, path: &str, old: &str, new: &str) {
     if fits {
         fields.push(("old_bytes".into(), Value::Bytes(old.as_bytes().to_vec())));
     }
-    shell.surface(&Value::map(fields));
+    mooring.surface(&Value::map(fields));
 }
 
 /// Read a file as a UTF-8 string for the witness layer, gating the read through
@@ -665,7 +669,7 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// whose old/new snapshots the write card renders as a whole-file diff.  It
 /// notes the change on stderr the same way `edit-hash` does, with the line range
 /// computed from where the match started (see [`note_edit`]).
-fn builtin_edit_replace(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "edit-replace")?;
     let path = args[0].to_string();
     let from = args[1].to_string();
@@ -679,7 +683,7 @@ fn builtin_edit_replace(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     .map_err(relabel_string_replace)?;
     let final_text = replaced.to_string();
     shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_write(shell, &path, &body, &final_text);
+    surface_write(mooring, &path, &body, &final_text);
 
     // `string_replace` above already proved `from` matches exactly once, so
     // the same offset it used is the one match here — safe to relocate for
@@ -724,7 +728,7 @@ fn relabel_string_replace(b: Break) -> Break {
 /// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) up to `DEPTH`,
 /// via the one sanctioned walk site ([`cancellable`]); a denied entry is
 /// skipped, not fatal, the same policy [`search_tree`] applies to its hits.
-fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "explore-dir")?;
     let depth: usize = match &args[0] {
         Value::Int(n) if *n >= 0 => {
@@ -757,7 +761,7 @@ fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut results = Vec::new();
 
     for result in walker {
-        ral_core::process::check(shell)?;
+        ral_core::process::check(mooring, shell)?;
         match result {
             Ok(entry) => {
                 if entry.depth() == 0 {
@@ -868,7 +872,7 @@ const DEFAULT_LIMIT: usize = 50;
 
 /// `fff QUERY` — fuzzy file-name search (frecency-ranked) over the
 /// working tree, returning a list of matching paths.
-fn builtin_fff(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "fff")?;
     let query = args[0].to_string();
     let cwd = checked_read_path(shell, ".")?;
@@ -905,7 +909,7 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
 
 /// `skill NAME` — load the full SKILL.md body of a skill (fresh scan at
 /// each call — picks up skills added or edited mid-session).
-fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "skill")?;
     let name = args[0].to_string();
     // A malformed name can never name a discoverable skill, and rejecting it
@@ -925,7 +929,7 @@ fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             };
             // Surface only once the body is in hand, so the card never claims
             // a load that did not happen.
-            shell.surface(&Value::map(vec![
+            mooring.surface(&Value::map(vec![
                 ("io".into(), Value::String("skill".into())),
                 ("name".into(), Value::String(name)),
                 (
@@ -953,7 +957,7 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body."
 )]
-fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let cwd = shell.cwd();
     let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let all = skill::discover_all(&cwd, &config_dir);
@@ -975,7 +979,7 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
         reason = "skill-list line count bounded; no i64 wrap"
     )]
     let count = out.lines().count() as i64;
-    shell.surface(&Value::map(vec![
+    mooring.surface(&Value::map(vec![
         ("io".into(), Value::String("skill-list".into())),
         ("count".into(), Value::Int(count)),
     ]));
@@ -1009,7 +1013,7 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
 /// A bare top-level `service-handle N` result cannot cross the host seam —
 /// a `Handle` is not ground — by design: it exists to be composed with an
 /// eliminator in the same run.
-fn builtin_service_handle(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "service-handle")?;
     let id = match args[0].as_int() {
         Some(n) if n >= 0 => {
@@ -1208,10 +1212,9 @@ mod tests {
     #[test]
     fn search_files_honours_a_cancelled_scope() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell
-            .foreground()
-            .cancel(ral_core::process::CancelCause::Interrupt);
-        let err = builtin_grep_files(&[Value::String("x".into())], &mut shell)
+        let m = Mooring::adrift();
+        m.cancel.cancel(ral_core::process::CancelCause::Interrupt);
+        let err = builtin_grep_files(&[Value::String("x".into())], &m, &mut shell)
             .expect_err("a cancelled scope must abort the search walk");
         assert_eq!(status(err), 130);
     }
@@ -1221,10 +1224,9 @@ mod tests {
     #[test]
     fn explore_dir_honours_a_cancelled_scope() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell
-            .foreground()
-            .cancel(ral_core::process::CancelCause::Interrupt);
-        let err = builtin_explore_dir(&[Value::Int(3)], &mut shell)
+        let m = Mooring::adrift();
+        m.cancel.cancel(ral_core::process::CancelCause::Interrupt);
+        let err = builtin_explore_dir(&[Value::Int(3)], &m, &mut shell)
             .expect_err("a cancelled scope must abort the directory walk");
         assert_eq!(status(err), 130);
     }
@@ -1236,9 +1238,13 @@ mod tests {
     /// (rather than completing instantly). Named distinctly from
     /// `agent.rs`'s own test-only blocker (`test-clear-block-forever`) so
     /// registering both in the same test binary never collides on name.
-    fn builtin_test_block_forever(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    fn builtin_test_block_forever(
+        _args: &[Value],
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Value> {
         loop {
-            ral_core::process::check(shell)?;
+            ral_core::process::check(mooring, shell)?;
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
@@ -1357,7 +1363,8 @@ mod tests {
             reason = "test WorkerId is small; no i64 wrap"
         )]
         let id = entry.id.0 as i64;
-        let handle = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
+        let m = Mooring::adrift();
+        let handle = match builtin_service_handle(&[Value::Int(id)], &m, &mut shell) {
             Ok(Value::Handle(h)) => h,
             other => panic!("service-handle must return a Handle, got {other:?}"),
         };
@@ -1366,7 +1373,7 @@ mod tests {
             .expect("core must register `await`");
         let result = await_fn
             .body
-            .call(&[Value::Handle(handle)], &mut shell)
+            .call(&[Value::Handle(handle)], &m, &mut shell)
             .expect("await on the reacquired handle must succeed");
         let Value::Map(record) = result else {
             panic!("await must return a record");
@@ -1408,7 +1415,8 @@ mod tests {
             reason = "test WorkerId is small; no i64 wrap"
         )]
         let id = entry.id.0 as i64;
-        let handle = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
+        let m = Mooring::adrift();
+        let handle = match builtin_service_handle(&[Value::Int(id)], &m, &mut shell) {
             Ok(Value::Handle(h)) => h,
             other => panic!("a settled-but-retained service must still resolve, got {other:?}"),
         };
@@ -1417,7 +1425,7 @@ mod tests {
             .expect("core must register `await`");
         let result = await_fn
             .body
-            .call(&[Value::Handle(handle)], &mut shell)
+            .call(&[Value::Handle(handle)], &m, &mut shell)
             .expect("await on a retaken, already-settled handle must deliver the cached result");
         let Value::Map(record) = result else {
             panic!("await must return a record");
@@ -1430,10 +1438,11 @@ mod tests {
     fn service_handle_errors_on_an_unknown_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         dress(&mut shell);
-        let err = match builtin_service_handle(&[Value::Int(999_999)], &mut shell) {
-            Err(Break::Error(e)) => e,
-            other => panic!("an unknown id must error, got {other:?}"),
-        };
+        let err =
+            match builtin_service_handle(&[Value::Int(999_999)], &Mooring::adrift(), &mut shell) {
+                Err(Break::Error(e)) => e,
+                other => panic!("an unknown id must error, got {other:?}"),
+            };
         assert!(err.message.contains("no durable service"));
     }
 
@@ -1456,7 +1465,7 @@ mod tests {
             reason = "test WorkerId is small; no i64 wrap"
         )]
         let id = entry.id.0 as i64;
-        let err = match builtin_service_handle(&[Value::Int(id)], &mut shell) {
+        let err = match builtin_service_handle(&[Value::Int(id)], &Mooring::adrift(), &mut shell) {
             Err(Break::Error(e)) => e,
             other => panic!("an ephemeral worker's id must be refused, got {other:?}"),
         };
@@ -1701,7 +1710,7 @@ mod tests {
 
         let mut dressed = Shell::new(ral_core::io::TerminalState::default());
         dress(&mut dressed);
-        install_agent_library(&mut dressed).expect("embedded agent library");
+        install_agent_library(&Mooring::adrift(), &mut dressed).expect("embedded agent library");
         let dressed_out = run_help(&mut dressed);
         assert!(
             dressed_out.contains("Library:"),

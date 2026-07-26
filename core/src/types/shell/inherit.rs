@@ -3,9 +3,10 @@
 //! A same-thread β-step — forcing a block or applying a lambda — runs the
 //! body *in* the caller's [`Shell`] ([`Shell::with_thunk_body`]): only the
 //! [`Mobile`] is swapped for one rescoped to the closure's captured
-//! environment, while [`RunState`](super::RunState),
+//! environment, while [`Disposition`](super::Disposition),
 //! [`SessionState`](super::SessionState), and
-//! [`LocalState`](super::LocalState) are shared by identity.  The body
+//! [`LocalState`](super::LocalState) are shared by identity — and the
+//! caller's [`Mooring`] simply stays borrowed.  The body
 //! therefore observes the caller's audit trail, byte sinks, builtin table,
 //! cancel root, and terminal lease without any of them being copied or
 //! re-attached — there is no second store to drift from the first.
@@ -44,18 +45,19 @@
 //!
 //! [`Shell::inherit_from`] and [`Shell::return_to`] are the per-substate
 //! manifests the cross-process stage leans on: `mobile.context` clones
-//! whole; `mobile.control`, the [`RunState`](super::RunState) substates
-//! (via [`RunState::inherit_from`](super::RunState::inherit_from)
-//! / [`return_to`](super::RunState::return_to)), `local.audit`, and
+//! whole; `mobile.control`, the [`Disposition`](super::Disposition) substates
+//! (via [`Disposition::inherit_from`](super::Disposition::inherit_from)
+//! / [`return_to`](super::Disposition::return_to)), `local.audit`, and
 //! `local.repl` each carry their own inherit / return rule; `session.builtins`,
-//! `session.library_docs`, `session.root`, and `session.guest_jail` are shared
-//! so dispatch, the `help`/`explain` index, the cancel root, and (on a guest)
-//! the jail's uid counter reach the child.  The
+//! `session.library_docs`, `session.root`, `session.anchor`, and
+//! `session.guest_jail` are shared
+//! so dispatch, the `help`/`explain` index, the cancel root and anchor, and (on
+//! a guest) the jail's uid counter reach the child.  The
 //! asymmetry between the two manifests is the flow matrix — the source
 //! cursor (`run.loc`) and the `within`-attenuable bits do not flow back,
 //! but `context.cwd` does.
 
-use super::{Mobile, Shell};
+use super::{Mobile, Mooring, Shell, SurfaceSink};
 use crate::types::{ControlState, Env};
 use std::sync::Arc;
 
@@ -285,23 +287,25 @@ impl Shell {
     pub fn join_session(&self) -> Self {
         let mut aside = Self::child_from(&self.mobile.scope, self);
         aside.session.root = self.session.root.clone();
-        aside.run.cancel = aside.session.root.worker();
+        aside.session.anchor = aside.session.root.worker();
         aside
     }
 
-    /// Spawn `f` on a fresh OS thread with a cloned child shell.  The
-    /// caller supplies `scopes` — the thunk's captured closure scope
-    /// for `spawn` / `par`, or the caller's own scope for pipeline
-    /// stages — and this shell's [`Context`](super::Context) subtree
-    /// is cloned and installed on the new thread.  Per-fork IO setup
-    /// lives inside `f`.  The one and only thread-spawn primitive.
+    /// Spawn `f` on a fresh OS thread with a cloned child shell and a
+    /// [`Mooring`] rebuilt from `parent` for a worker.  The caller supplies
+    /// `scopes` — the thunk's captured closure scope — and `surface`, the
+    /// buffering sink the worker surfaces into instead of the spawning run's
+    /// live one; this shell's [`Context`](super::Context) subtree is cloned
+    /// and installed on the new thread.  Per-fork IO setup lives inside `f`.
+    /// The one and only thread-spawn primitive.
     ///
-    /// The worker runs under a [`worker`](crate::process::DurableRoot::worker)
-    /// scope of the **durable root**, not the swappable foreground scope, so a
-    /// foreground cancel — a run timeout or a Ctrl-C on `run.cancel` —
-    /// does not reach it: it folds the ambient shutdown cause through the
-    /// root, so a SIGTERM still reaches a detached worker, and never the
-    /// ambient interrupt.  Only a
+    /// The mooring is minted here rather than inside the thread so the
+    /// worker's scope can be returned to the caller, and it is a *rebuild*
+    /// ([`Mooring::for_worker`]), never a share: the worker runs under a
+    /// [`worker`](crate::process::DurableRoot::worker) scope of the **durable
+    /// root**, not the spawning run's foreground scope, so a foreground
+    /// cancel — a run timeout or a Ctrl-C — does not reach it, while the
+    /// ambient shutdown cause folded through the root does.  Only a
     /// [`RootAbort`](crate::process::CancelCause::RootAbort) on the root,
     /// or a cancel on the worker's own returned scope (via `cancel` /
     /// `race`), stops it.  That returned child scope is stored on the
@@ -317,30 +321,28 @@ impl Shell {
     /// body spends the owning session's births rather than a copy.
     pub fn spawn_thread<F, R>(
         &self,
+        parent: &Mooring,
+        surface: SurfaceSink,
         scopes: Arc<Env>,
         f: F,
     ) -> (std::thread::JoinHandle<R>, crate::process::CancelScope)
     where
-        F: FnOnce(&mut Self) -> R + Send + 'static,
+        F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
-        let deferred_lease = self.run.deferred_lease;
-        let worker_cap = self.run.worker_cap;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let library_docs = self.session.library_docs.clone();
         let guest_jail = self.session.guest_jail.clone();
         let workers = self.local.workers.clone();
         let detach = self.local.detach.clone();
-        let cancel = root.worker();
-        let worker_cancel = cancel.as_scope().clone();
+        let mooring = Mooring::for_worker(parent, &root, surface);
+        let worker_cancel = mooring.cancel.as_scope().clone();
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
-            child.run.deferred_lease = deferred_lease;
-            child.run.worker_cap = worker_cap;
-            child.run.cancel = cancel;
+            child.session.anchor = mooring.cancel.clone();
             child.session.root = root;
             child.session.builtins = builtins;
             child.session.library_docs = library_docs;
@@ -350,7 +352,7 @@ impl Shell {
             // Shared, not owned: this worker's shell dropping must not
             // cancel the parent's whole registry.
             child.local.workers_owned = false;
-            f(&mut child)
+            f(&mooring, &mut child)
         });
         (handle, worker_cancel)
     }
@@ -367,6 +369,7 @@ impl Shell {
         self.session.builtins = parent.session.builtins.clone();
         self.session.library_docs = parent.session.library_docs.clone();
         self.session.root = parent.session.root.clone();
+        self.session.anchor = parent.session.anchor.clone();
         self.session.guest_jail = parent.session.guest_jail.clone();
     }
 

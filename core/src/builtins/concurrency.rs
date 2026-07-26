@@ -31,7 +31,7 @@ use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
 use crate::types::{
     Break, CapReached, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink, HandleInner,
-    HandleState, LeaseClass, Raw, ReapCause, Settled, Shell, SurfaceBuffer, Tail, Value,
+    HandleState, LeaseClass, Mooring, Raw, ReapCause, Settled, Shell, SurfaceBuffer, Tail, Value,
     WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
 use std::sync::mpsc::TryRecvError;
@@ -196,6 +196,7 @@ impl Drop for FlushGuard {
 /// is still filling as free.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
+    mooring: &Mooring,
     shell: &Shell,
     io_mode: ChildIoMode,
     class: LeaseClass,
@@ -203,7 +204,7 @@ pub(super) fn spawn_child<F>(
     work: F,
 ) -> Settled<HandleInner>
 where
-    F: FnOnce(&mut Shell) -> Raw<Value> + Send + 'static,
+    F: FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static,
 {
     // Admission: under a frame that caps live workers, the birth reserves
     // its seat at the door — before any thread exists or any entry
@@ -217,7 +218,7 @@ where
     // to the `register` call near the end; every early return in between —
     // the `Watch` arm's clone failure included — releases it through
     // `Reservation`'s own drop.
-    let reservation = match shell.local.workers.reserve(shell.run.worker_cap) {
+    let reservation = match shell.local.workers.reserve(mooring.worker_cap) {
         Ok(reservation) => reservation,
         Err(CapReached(cap)) => {
             return Err(sig(format!(
@@ -239,15 +240,14 @@ where
     // delivers a clone to the deferred sink at completion.
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
     // The session-lived deferred sink the worker delivers to at completion,
-    // captured from the spawning run so it survives that run's teardown and
-    // a nested `spawn` inside the worker inherits it.  The worker's
-    // `DeferredSurface` holds both the buffer and this destination; the
-    // `joined` latch is shared with the eliminators so whichever renders
-    // first wins the deliver-once test.
-    let deferred = shell.run.deferred.clone();
+    // taken from the spawning run's mooring so it survives that run's
+    // teardown; the worker's own mooring keeps it, so a nested `spawn` inside
+    // the worker inherits it.  The worker's `DeferredSurface` holds both the
+    // buffer and this destination; the `joined` latch is shared with the
+    // eliminators so whichever renders first wins the deliver-once test.
     let worker_surface = Arc::new(DeferredSurface {
         buf: surface_buf.clone(),
-        deferred: deferred.clone(),
+        deferred: mooring.deferred.clone(),
     });
     let joined = Arc::new(Mutex::new(false));
     let worker_joined = joined.clone();
@@ -284,71 +284,71 @@ where
     let state = Arc::new(Mutex::new(HandleState::Running));
     let worker_state = state.clone();
 
-    let (_join, cancel) = shell.spawn_thread(snap, move |child_env| {
-        child_env.run.io.capture_outer = None;
-        child_env.run.io.stdout = stdout;
-        child_env.run.io.stderr = stderr;
-        // A detached worker is a background computation with no terminal: its
-        // stdout/stderr are buffers, and its stdin must not fall through to
-        // fd 0.  `spawn_thread` builds the worker from a defaulted `Io`
-        // (`Source::Terminal`), so without this an external in the body — a
-        // `cargo test` exercising signal code, say — would inherit the real
-        // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
-        // it.  `Empty` wires fd 0 to `/dev/null`.
-        child_env.run.io.stdin = crate::io::Source::Empty;
-        // The deferred sink flows onto the worker's run so a nested `spawn`
-        // inside the body installs its own `DeferredSurface` with the same
-        // sink and delivers at *its* own completion.
-        child_env.run.deferred = deferred;
-        child_env.run.surface = Some(worker_surface.clone());
+    let (_join, cancel) = shell.spawn_thread(
+        mooring,
+        worker_surface.clone(),
+        snap,
+        move |mooring, child_env| {
+            child_env.run.io.capture_outer = None;
+            child_env.run.io.stdout = stdout;
+            child_env.run.io.stderr = stderr;
+            // A detached worker is a background computation with no terminal: its
+            // stdout/stderr are buffers, and its stdin must not fall through to
+            // fd 0.  `spawn_thread` builds the worker from a defaulted `Io`
+            // (`Source::Terminal`), so without this an external in the body — a
+            // `cargo test` exercising signal code, say — would inherit the real
+            // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
+            // it.  `Empty` wires fd 0 to `/dev/null`.
+            child_env.run.io.stdin = crate::io::Source::Empty;
 
-        // Arm the flush guard before the body runs: a panicking body unwinds
-        // through it (a `` `panic `` batch, then the unwind continues to drop
-        // `tx` unsent), while the clean path disarms it with the body's
-        // outcome.  When no boundary is installed it is inert on every path.
-        let guard = FlushGuard {
-            surface: worker_surface,
-            joined: worker_joined,
-            cmd: worker_cmd,
-            armed: true,
-        };
+            // Arm the flush guard before the body runs: a panicking body unwinds
+            // through it (a `` `panic `` batch, then the unwind continues to drop
+            // `tx` unsent), while the clean path disarms it with the body's
+            // outcome.  When no boundary is installed it is inert on every path.
+            let guard = FlushGuard {
+                surface: worker_surface,
+                joined: worker_joined,
+                cmd: worker_cmd,
+                armed: true,
+            };
 
-        // Worker absorption point: a tail call cannot cross the thread
-        // boundary, so the worker root settles it into the channel
-        // result.  `work` returns `Raw<Value>` precisely so a terminal
-        // tail call surfaces here rather than collapsing inside.
-        let result = absorb_tail(work(child_env), child_env);
-        if flush_pending {
-            let _ = child_env.run.io.stdout.flush_pending();
-            let _ = child_env.run.io.stderr.flush_pending();
-        }
-        // Flush the boundary's clone before sending the result, so its copy is
-        // independent of `complete_handle`'s later `mem::take` of the buffer.
-        let outcome = match &result {
-            Ok(_) => Value::Variant {
-                label: "ok".into(),
-                payload: Some(Box::new(Value::Unit)),
-            },
-            Err(e) => Value::Variant {
-                label: "err".into(),
-                payload: Some(Box::new(break_record(e))),
-            },
-        };
-        guard.settle(&outcome);
-        let _ = tx.send(result);
-        // The worker's own settle mark, strictly *after* the send so
-        // `Completed` always implies an observable outcome in the channel
-        // — an eliminator that reads the state mid-transition can still
-        // settle.  Guarded: an eliminator's `complete_handle` may have won
-        // the transition already, and a `cancel`'s `Cancelled` must never
-        // be overwritten.  A panicking body never reaches here; its state
-        // stays `Running` until an observer settles the disconnect as a
-        // panic, or the lease chain reaps the dead thread's scope.
-        let mut settled_state = worker_state.lock().unwrap();
-        if *settled_state == HandleState::Running {
-            *settled_state = HandleState::Completed;
-        }
-    });
+            // Worker absorption point: a tail call cannot cross the thread
+            // boundary, so the worker root settles it into the channel
+            // result.  `work` returns `Raw<Value>` precisely so a terminal
+            // tail call surfaces here rather than collapsing inside.
+            let result = absorb_tail(work(mooring, child_env), mooring, child_env);
+            if flush_pending {
+                let _ = child_env.run.io.stdout.flush_pending();
+                let _ = child_env.run.io.stderr.flush_pending();
+            }
+            // Flush the boundary's clone before sending the result, so its copy is
+            // independent of `complete_handle`'s later `mem::take` of the buffer.
+            let outcome = match &result {
+                Ok(_) => Value::Variant {
+                    label: "ok".into(),
+                    payload: Some(Box::new(Value::Unit)),
+                },
+                Err(e) => Value::Variant {
+                    label: "err".into(),
+                    payload: Some(Box::new(break_record(e))),
+                },
+            };
+            guard.settle(&outcome);
+            let _ = tx.send(result);
+            // The worker's own settle mark, strictly *after* the send so
+            // `Completed` always implies an observable outcome in the channel
+            // — an eliminator that reads the state mid-transition can still
+            // settle.  Guarded: an eliminator's `complete_handle` may have won
+            // the transition already, and a `cancel`'s `Cancelled` must never
+            // be overwritten.  A panicking body never reaches here; its state
+            // stays `Running` until an observer settles the disconnect as a
+            // panic, or the lease chain reaps the dead thread's scope.
+            let mut settled_state = worker_state.lock().unwrap();
+            if *settled_state == HandleState::Running {
+                *settled_state = HandleState::Completed;
+            }
+        },
+    );
 
     let handle = HandleInner {
         result: Arc::new(Mutex::new(Some(rx))),
@@ -390,7 +390,7 @@ where
     // no chain at all — no reaper entry ever exists for it, which is the
     // whole durable policy.
     if class == LeaseClass::Worker
-        && let Some(lease) = shell.run.deferred_lease
+        && let Some(lease) = mooring.deferred_lease
     {
         let chain = LeaseChain {
             scope: handle.cancel.clone(),
@@ -475,15 +475,15 @@ fn lease_fire(chain: &LeaseChain) {
 /// runs at [`Tail::Yes`].
 fn worker_body(
     body: Arc<crate::ir::Comp>,
-) -> impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static {
-    move |child_env| with_scope(child_env, |s| eval_comp(&body, s, Tail::Yes))
+) -> impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static {
+    move |mooring, child_env| with_scope(child_env, |s| eval_comp(&body, mooring, s, Tail::Yes))
 }
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
-pub(crate) fn builtin_spawn(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_spawn(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     check_arity(args, 1, "spawn")?;
     let (body, captured) = expect_thunk(&args[0], "spawn")?;
-    spawn_buffered(body, captured, shell)
+    spawn_buffered(body, captured, mooring, shell)
 }
 
 /// Buffered spawn (§13.3 replay rule).  The child's stdout/stderr accumulate
@@ -499,9 +499,15 @@ pub(crate) fn builtin_spawn(args: &[Value], shell: &Shell) -> Settled<Value> {
 /// the thread's natural lifecycle; and the OS sandbox (if any) wraps
 /// the worker by virtue of wrapping the parent process, so no confined
 /// re-exec is attempted from a worker thread.
-fn spawn_buffered(body: Arc<crate::ir::Comp>, captured: Arc<Env>, shell: &Shell) -> Settled<Value> {
+fn spawn_buffered(
+    body: Arc<crate::ir::Comp>,
+    captured: Arc<Env>,
+    mooring: &Mooring,
+    shell: &Shell,
+) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
+        mooring,
         shell,
         ChildIoMode::Buffered,
         LeaseClass::Worker,
@@ -523,7 +529,11 @@ fn spawn_buffered(body: Arc<crate::ir::Comp>, captured: Arc<Env>, shell: &Shell)
 /// streams are per-call capture buffers (exarch) leaves it uninstalled, so
 /// naming `watch` there is an unknown-name diagnostic rather than a runtime
 /// refusal.
-pub(super) fn builtin_watch(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_watch(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "watch")?;
     let label = match &args[0] {
         Value::String(s) => s.clone(),
@@ -535,7 +545,7 @@ pub(super) fn builtin_watch(args: &[Value], shell: &mut Shell) -> Settled<Value>
         }
     };
     let (body, captured) = expect_thunk(&args[1], "watch")?;
-    spawn_labelled(body, captured, label, shell)
+    spawn_labelled(body, captured, label, mooring, shell)
 }
 
 /// Line-framed spawn.  The child writes to a `Sink::LineFramed` wrapping a
@@ -552,10 +562,12 @@ fn spawn_labelled(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
     label: std::string::String,
+    mooring: &Mooring,
     shell: &Shell,
 ) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
+        mooring,
         shell,
         ChildIoMode::Watch { label },
         LeaseClass::Worker,
@@ -603,12 +615,17 @@ fn one_line_desc(arg: &Value, verb: &str) -> Settled<String> {
 /// hosts leave it uninstalled — they grant no lease, so every one of their
 /// spawns already lives until cancel or exit and a durable class would
 /// distinguish nothing.
-pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_service(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "service")?;
     let desc = one_line_desc(&args[0], "service")?;
     let (body, captured) = expect_thunk(&args[1], "service")?;
     Ok(Value::Handle(spawn_child(
         captured,
+        mooring,
         shell,
         ChildIoMode::Buffered,
         LeaseClass::Durable,
@@ -638,10 +655,14 @@ pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Valu
 /// is an unknown-name diagnostic rather than a builtin that resolves and
 /// refuses.
 #[cfg(unix)]
-pub(super) fn builtin_detach(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_detach(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "detach")?;
     let desc = one_line_desc(&args[0], "detach")?;
-    crate::runtime::command::detach(&desc, &args[1], &args[2..], shell)
+    crate::runtime::command::detach(&desc, &args[1], &args[2..], mooring, shell)
 }
 
 /// Stop a handle: the one policy shared by `cancel` and `race`'s loser
@@ -728,7 +749,7 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
 /// them.  A detached worker's `surface` calls are buffered (never on the
 /// possibly-ended spawning run's sink), so this is where they finally surface
 /// — on whichever run observes the handle.
-fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, shell: &Shell) {
+fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mooring: &Mooring) {
     {
         let mut joined = handle.joined.lock().unwrap();
         if *joined {
@@ -736,7 +757,7 @@ fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, sh
         }
         *joined = true;
     }
-    if let Some(sink) = shell.run.surface.as_ref() {
+    if let Some(sink) = mooring.surface.as_ref() {
         for ev in &completed.surface {
             sink.emit(ev);
         }
@@ -764,6 +785,7 @@ fn project_completed(completed: CompletedHandle) -> Settled<Value> {
 /// cut-short wait leaves them alive to be observed on a later run.
 fn wait_first_settled<'a>(
     handles: &[&'a HandleInner],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<(&'a HandleInner, CompletedHandle)> {
     loop {
@@ -786,7 +808,7 @@ fn wait_first_settled<'a>(
         if !saw_running {
             return Err(sig("no live handles to wait for"));
         }
-        crate::process::check(shell)?;
+        crate::process::check(mooring, shell)?;
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
@@ -796,19 +818,27 @@ fn wait_first_settled<'a>(
 /// cancelled, and re-raises a failed block.  The wait shares `race`'s
 /// cancel-aware loop rather than a bare `recv`: a foreground deadline or
 /// interrupt unwinds it, but the root-scoped worker survives the run.
-pub(super) fn await_handle(handle: &HandleInner, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn await_handle(
+    handle: &HandleInner,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     ensure_live(handle, shell)?;
-    let (_, completed) = wait_first_settled(&[handle], shell)?;
+    let (_, completed) = wait_first_settled(&[handle], mooring, shell)?;
     shell.local.workers.remove(handle);
-    replay_deferred_surface(handle, &completed, shell);
+    replay_deferred_surface(handle, &completed, mooring);
     project_completed(completed)
 }
 
 /// `await <handle>` -- wait for a concurrent block to complete and return its result record.
-pub(super) fn builtin_await(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_await(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 1, "await")?;
     let handle = expect_handle(&args[0], "await")?;
-    await_handle(handle, shell)
+    await_handle(handle, mooring, shell)
 }
 
 /// `poll <handle>` -- non-blocking, total sample of a concurrent block.
@@ -883,7 +913,7 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 /// `race <handles>` -- wait for the first of several tasks to finish.
 /// Cancels remaining handles once a winner is found, then projects the
 /// winner's outcome to the `await` record (re-raising a failed winner).
-pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     if args.is_empty() {
         return Err(sig("race requires 1 argument (list of handles)"));
     }
@@ -893,7 +923,7 @@ pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         handles.push(expect_handle(v, "race")?);
     }
 
-    let (winner, completed) = wait_first_settled(&handles, shell)?;
+    let (winner, completed) = wait_first_settled(&handles, mooring, shell)?;
     shell.local.workers.remove(winner);
     for &h in &handles {
         if !Arc::ptr_eq(&h.result, &winner.result) {
@@ -901,7 +931,7 @@ pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> 
             shell.local.workers.remove(h);
         }
     }
-    replay_deferred_surface(winner, &completed, shell);
+    replay_deferred_surface(winner, &completed, mooring);
     project_completed(completed)
 }
 
@@ -1134,16 +1164,21 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        let (_join, worker_cancel) = shell.spawn_thread(snap, move |child| {
-            ready_tx.send(()).unwrap();
-            loop {
-                if let Err(b) = crate::process::check(child) {
-                    done_tx.send(status(b)).unwrap();
-                    return;
+        let (_join, worker_cancel) = shell.spawn_thread(
+            &Mooring::adrift(),
+            Arc::new(()),
+            snap,
+            move |mooring, child| {
+                ready_tx.send(()).unwrap();
+                loop {
+                    if let Err(b) = crate::process::check(mooring, child) {
+                        done_tx.send(status(b)).unwrap();
+                        return;
+                    }
+                    std::thread::yield_now();
                 }
-                std::thread::yield_now();
-            }
-        });
+            },
+        );
         ready_rx.recv().unwrap();
         cancel_via(&worker_cancel);
         (done_rx.recv().unwrap(), worker_cancel)
@@ -1160,7 +1195,12 @@ mod tests {
     #[test]
     fn worker_scope_cancel_stops_the_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        let (_idle_join, sibling) = shell.spawn_thread(Arc::new(shell.mobile().scope), |_| ());
+        let (_idle_join, sibling) = shell.spawn_thread(
+            &Mooring::adrift(),
+            Arc::new(()),
+            Arc::new(shell.mobile().scope),
+            |_, _| (),
+        );
         let (observed, worker_scope) = spawn_polling_worker(&shell, |c| {
             c.cancel(crate::process::CancelCause::Explicit);
         });
@@ -1195,7 +1235,7 @@ mod tests {
 
     /// A foreground cancel spares a detached worker: the worker parents
     /// under the durable root, not the swappable foreground scope, so
-    /// cancelling `run.cancel` does not reach it.  This is the
+    /// cancelling the mooring's `cancel` does not reach it.  This is the
     /// collateral-kill fix made executable — a run timeout on the
     /// foreground must not reap a `spawn`/`watch` worker meant to outlive
     /// the run.
@@ -1203,11 +1243,9 @@ mod tests {
     fn foreground_cancel_spares_detached_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
-        let (_join, worker_scope) = shell.spawn_thread(snap, |_| ());
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
+        let m = Mooring::adrift();
+        let (_join, worker_scope) = shell.spawn_thread(&m, Arc::new(()), snap, |_, _| ());
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
         assert!(
             !worker_scope.is_cancelled(),
             "a foreground cancel must not reach a detached worker"
@@ -1246,12 +1284,10 @@ mod tests {
         };
 
         // Cancel the foreground (run deadline / interrupt), not the root.
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
+        let m = Mooring::adrift();
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
 
-        let err = await_handle(&handle, &mut shell)
+        let err = await_handle(&handle, &m, &mut shell)
             .expect_err("await must unwind on a foreground cancel, not block");
         assert!(matches!(err, Break::Error(_)));
         assert!(
@@ -1271,9 +1307,9 @@ mod tests {
     /// A worker body that stays `Running` until cancelled: it polls
     /// `process::check` so a lease reap genuinely unwinds the thread (with
     /// the cancel's 130), not merely flags a scope nobody reads.
-    fn check_loop(child: &mut Shell) -> Raw<Value> {
+    fn check_loop(mooring: &Mooring, child: &mut Shell) -> Raw<Value> {
         loop {
-            crate::process::check(child)?;
+            crate::process::check(mooring, child)?;
             std::thread::yield_now();
         }
     }
@@ -1299,11 +1335,13 @@ mod tests {
     /// `process::check` loop, so the reap actually unwinds the thread.
     #[test]
     fn unobserved_worker_is_reaped_at_its_idle_lease() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(40, 10_000));
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
@@ -1348,14 +1386,16 @@ mod tests {
     #[test]
     fn spawn_under_interactive_frame_arms_no_lease() {
         let shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
         let scope = handle.cancel;
@@ -1401,18 +1441,20 @@ mod tests {
     /// park.
     #[test]
     fn spawned_worker_never_receives_the_enquiry_desk() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
         let snap = Arc::new(shell.mobile().scope);
         let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
-            move |child| {
-                let outcome = child.enquire(crate::serial::FOValue::Unit);
+            move |mooring, child| {
+                let outcome = child.enquire(mooring, crate::serial::FOValue::Unit);
                 let _ = tx.send(outcome);
                 Ok(Value::Unit)
             },
@@ -1436,18 +1478,20 @@ mod tests {
     /// `Nursery`, and never park.
     #[test]
     fn spawned_worker_never_receives_the_nursery() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.nursery = Some(crate::types::Nursery::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.nursery = Some(crate::types::Nursery::default());
         let snap = Arc::new(shell.mobile().scope);
         let (tx, rx) = mpsc::channel::<crate::types::Settled<crate::types::NurseryId>>();
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
-            move |child| {
-                let outcome = child.fork_into_nursery();
+            move |mooring, child| {
+                let outcome = child.fork_into_nursery(mooring);
                 let _ = tx.send(outcome);
                 Ok(Value::Unit)
             },
@@ -1471,16 +1515,18 @@ mod tests {
     #[test]
     fn polled_worker_survives_past_its_idle_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(200, 10_000));
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(200, 10_000));
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<babysat>",
-            move |_c| {
+            move |_, _c| {
                 gate_rx.recv().unwrap();
                 Ok(Value::Unit)
             },
@@ -1500,7 +1546,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 1, "the babysat entry stays");
 
         gate_tx.send(()).unwrap();
-        await_handle(&handle, &mut shell).expect("await after the gate opens");
+        await_handle(&handle, &m, &mut shell).expect("await after the gate opens");
         assert!(!scope.is_cancelled(), "the worker finished by itself");
     }
 
@@ -1511,10 +1557,12 @@ mod tests {
     #[test]
     fn backstop_reaps_a_ritually_polled_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(150, 400));
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(150, 400));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
@@ -1549,16 +1597,18 @@ mod tests {
     /// result, and no notice is recorded.
     #[test]
     fn completed_unobserved_worker_is_not_reaped() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(100, 10_000));
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(100, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
@@ -1593,11 +1643,13 @@ mod tests {
     /// touch nothing — so the lease is renewed only by the eliminators.
     #[test]
     fn listing_does_not_renew_the_lease() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(40, 10_000));
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
@@ -1633,12 +1685,14 @@ mod tests {
     /// sibling, never the durable worker.
     #[test]
     fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(40, 150));
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(40, 150));
 
         let snap = Arc::new(shell.mobile().scope);
         let durable = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Durable,
@@ -1650,6 +1704,7 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let sibling = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
@@ -1696,10 +1751,12 @@ mod tests {
     #[test]
     fn cancel_through_the_handle_ends_a_durable_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.deferred_lease = Some(lease_ms(10_000, 20_000));
+        let mut m = Mooring::adrift();
+        m.deferred_lease = Some(lease_ms(10_000, 20_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Durable,
@@ -1951,7 +2008,8 @@ mod tests {
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let log = Arc::new(Mutex::new(Vec::new()));
-        shell.run.surface = Some(Arc::new(Rec(log.clone())));
+        let mut m = Mooring::adrift();
+        m.surface = Some(Arc::new(Rec(log.clone())));
 
         // A settled handle carrying one buffered surface event, modelling a
         // detached worker that called `surface` once and returned.  The
@@ -1983,7 +2041,7 @@ mod tests {
         assert_eq!(log.lock().unwrap().len(), 0, "poll must not replay surface");
 
         // The first `await` replays the buffered card exactly once.
-        await_handle(&handle, &mut shell).expect("await ok");
+        await_handle(&handle, &m, &mut shell).expect("await ok");
         assert_eq!(
             log.lock().unwrap().len(),
             1,
@@ -1991,7 +2049,7 @@ mod tests {
         );
 
         // A second `await` reads the cache and must not duplicate it.
-        await_handle(&handle, &mut shell).expect("await ok");
+        await_handle(&handle, &m, &mut shell).expect("await ok");
         assert_eq!(
             log.lock().unwrap().len(),
             1,
@@ -2047,16 +2105,20 @@ mod tests {
     /// return, raised `Err`, panic — stamps the matching `done` label.
     #[test]
     fn detached_worker_flushes_done_to_deferred_sink() {
-        fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<FOValue> {
-            let mut shell = Shell::new(crate::io::TerminalState::default());
+        fn run(
+            work: impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static,
+        ) -> Vec<FOValue> {
+            let shell = Shell::new(crate::io::TerminalState::default());
             let batches = Arc::new(Mutex::new(Vec::new()));
-            shell.run.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+            let mut m = Mooring::adrift();
+            m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
             let snap = Arc::new(shell.mobile().scope);
             // Hold the handle (and its receiver) so the channel stays connected
             // until the worker has flushed; never observed, so no eliminator
             // competes for the `joined` latch.
             let _handle = spawn_child(
                 snap,
+                &m,
                 &shell,
                 ChildIoMode::Buffered,
                 LeaseClass::Worker,
@@ -2071,7 +2133,7 @@ mod tests {
 
         // Clean return: a `` `done `` whose outcome is `` `ok ``, carrying the
         // handle's cmd.
-        let ok = run(|_child| Ok(Value::Unit));
+        let ok = run(|_, _child| Ok(Value::Unit));
         assert_eq!(ok.len(), 1, "an empty body's batch is just the `done event");
         let done = &ok[0];
         assert_eq!(done_outcome_label(done), "ok");
@@ -2084,11 +2146,11 @@ mod tests {
         );
 
         // Raised `Err`: a `` `done `` whose outcome is `` `err ``.
-        let err = run(|_child| Err(sig("boom").into()));
+        let err = run(|_, _child| Err(sig("boom").into()));
         assert_eq!(done_outcome_label(&err[0]), "err");
 
         // Panic: the guard fires on the unwind with a `` `panic `` outcome.
-        let panicked = run(|_child| panic!("worker exploded"));
+        let panicked = run(|_, _child| panic!("worker exploded"));
         assert_eq!(done_outcome_label(&panicked[0]), "panic");
     }
 
@@ -2101,7 +2163,8 @@ mod tests {
     fn deferred_batch_carries_body_surface_before_done() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
-        shell.run.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+        let mut m = Mooring::adrift();
+        m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
 
         // A worker that surfaces one card, then panics: the buffered card must
@@ -2109,12 +2172,13 @@ mod tests {
         // panic when observed.
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
-            |child| {
-                if let Some(sink) = child.run.surface.as_ref() {
+            |mooring, _child| {
+                if let Some(sink) = mooring.surface.as_ref() {
                     sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
@@ -2155,16 +2219,18 @@ mod tests {
     #[test]
     fn no_deferred_sink_means_no_delivery() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        assert!(shell.run.deferred.is_none(), "a bare REPL installs none");
+        let mut m = Mooring::adrift();
+        assert!(m.deferred.is_none(), "a bare REPL installs none");
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
-            |child| {
-                if let Some(sink) = child.run.surface.as_ref() {
+            |mooring, _child| {
+                if let Some(sink) = mooring.surface.as_ref() {
                     sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
@@ -2186,8 +2252,8 @@ mod tests {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
-        shell.run.surface = Some(Arc::new(Rec(log.clone())));
-        await_handle(&handle, &mut shell).expect("await ok");
+        m.surface = Some(Arc::new(Rec(log.clone())));
+        await_handle(&handle, &m, &mut shell).expect("await ok");
         let replayed = log.lock().unwrap().clone();
         assert_eq!(
             replayed.as_slice(),
@@ -2207,16 +2273,18 @@ mod tests {
     fn deferred_delivery_suppresses_a_later_await_replay() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
-        shell.run.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+        let mut m = Mooring::adrift();
+        m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
-            |child| {
-                if let Some(sink) = child.run.surface.as_ref() {
+            |mooring, _child| {
+                if let Some(sink) = mooring.surface.as_ref() {
                     sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
@@ -2243,8 +2311,8 @@ mod tests {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
-        shell.run.surface = Some(Arc::new(Rec(log.clone())));
-        await_handle(&handle, &mut shell).expect("await still returns the result record");
+        m.surface = Some(Arc::new(Rec(log.clone())));
+        await_handle(&handle, &m, &mut shell).expect("await still returns the result record");
         assert_eq!(
             log.lock().unwrap().len(),
             0,
@@ -2261,14 +2329,16 @@ mod tests {
     #[test]
     fn spawn_child_registers_one_entry_with_matching_handle() {
         let shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test-cmd>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
 
@@ -2294,18 +2364,17 @@ mod tests {
     #[test]
     fn spawn_child_registers_with_no_deferred_lease_granted() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        assert!(
-            shell.run.deferred_lease.is_none(),
-            "precondition: no lease granted"
-        );
+        let m = Mooring::adrift();
+        assert!(m.deferred_lease.is_none(), "precondition: no lease granted");
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<repl>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
         assert_eq!(shell.local.workers.count(), 1);
@@ -2320,30 +2389,33 @@ mod tests {
     #[test]
     fn eliminators_remove_the_entry_except_a_pending_poll() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
 
         // `await` removes.
         let snap = Arc::new(shell.mobile().scope);
         let h1 = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<a>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .unwrap();
-        await_handle(&h1, &mut shell).expect("await ok");
+        await_handle(&h1, &m, &mut shell).expect("await ok");
         assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
         // `cancel` removes.
         let snap = Arc::new(shell.mobile().scope);
         let h2 = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<b>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
@@ -2354,11 +2426,12 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let h3 = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<c>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .unwrap();
         loop {
@@ -2381,11 +2454,12 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let h4 = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<d>",
-            move |_c| {
+            move |_, _c| {
                 unblock_rx.recv().unwrap();
                 Ok(Value::Unit)
             },
@@ -2403,7 +2477,7 @@ mod tests {
             "a pending poll must not touch the registry"
         );
         unblock_tx.send(()).unwrap();
-        await_handle(&h4, &mut shell).expect("await ok");
+        await_handle(&h4, &m, &mut shell).expect("await ok");
     }
 
     /// `race` removes both the winner (a settled observation) and every
@@ -2413,14 +2487,16 @@ mod tests {
     #[test]
     fn race_removes_winner_and_cancelled_losers() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let winner = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<winner>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .unwrap();
 
@@ -2430,11 +2506,12 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let loser1 = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<loser1>",
-            move |_c| {
+            move |_, _c| {
                 let _ = l1_rx.recv();
                 Ok(Value::Unit)
             },
@@ -2444,11 +2521,12 @@ mod tests {
         let snap = Arc::new(shell.mobile().scope);
         let loser2 = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<loser2>",
-            move |_c| {
+            move |_, _c| {
                 let _ = l2_rx.recv();
                 Ok(Value::Unit)
             },
@@ -2461,7 +2539,7 @@ mod tests {
             Value::Handle(loser1),
             Value::Handle(loser2),
         ])];
-        builtin_race(&args, &mut shell).expect("race must succeed");
+        builtin_race(&args, &m, &mut shell).expect("race must succeed");
         assert_eq!(
             shell.local.workers.count(),
             0,
@@ -2490,25 +2568,28 @@ mod tests {
     #[test]
     fn nested_spawn_registers_into_the_owning_shells_registry() {
         let shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let (go_tx, go_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<usize>();
         let _outer = spawn_child(
             snap,
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<outer>",
-            move |child_shell| {
+            move |mooring, child_shell| {
                 go_rx.recv().unwrap();
                 let child_snap = Arc::new(child_shell.mobile().scope);
                 let _inner = spawn_child(
                     child_snap,
+                    mooring,
                     child_shell,
                     ChildIoMode::Buffered,
                     LeaseClass::Worker,
                     "<inner>",
-                    |_c| Ok(Value::Unit),
+                    |_, _c| Ok(Value::Unit),
                 )
                 .unwrap();
                 // Sent right after the nested spawn registers, with the
@@ -2551,14 +2632,16 @@ mod tests {
     #[test]
     fn retention_stamps_then_expires_an_unclaimed_settled_entry() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         shell.arm_worker_retention(2);
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
         wait_settled(&handle);
@@ -2599,14 +2682,16 @@ mod tests {
     #[test]
     fn dropping_a_shell_cancels_its_workers() {
         let shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let _handle = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<gated>",
-            move |_c| {
+            move |_, _c| {
                 gate_rx.recv().unwrap();
                 Ok(Value::Unit)
             },
@@ -2636,13 +2721,15 @@ mod tests {
     #[test]
     fn unarmed_sweep_retains_settled_entries_indefinitely() {
         let shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<kept>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
         wait_settled(&handle);
@@ -2663,13 +2750,15 @@ mod tests {
     #[test]
     fn observation_beats_retention() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<claimed>",
-            |_child| Ok(Value::Unit),
+            |_, _child| Ok(Value::Unit),
         )
         .expect("spawn must succeed");
         wait_settled(&handle);
@@ -2701,14 +2790,16 @@ mod tests {
     #[test]
     fn running_entries_are_never_stamped_or_expired() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<live>",
-            move |_c| {
+            move |_, _c| {
                 gate_rx.recv().unwrap();
                 Ok(Value::Unit)
             },
@@ -2729,7 +2820,7 @@ mod tests {
         assert!(shell.take_worker_reap_notices().is_empty());
 
         gate_tx.send(()).unwrap();
-        await_handle(&handle, &mut shell).expect("await after the gate opens");
+        await_handle(&handle, &m, &mut shell).expect("await after the gate opens");
     }
 
     // ── the admission cap ────────────────────────────────────────────────
@@ -2742,7 +2833,8 @@ mod tests {
     #[test]
     fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.worker_cap = Some(2);
+        let mut m = Mooring::adrift();
+        m.worker_cap = Some(2);
 
         let mut gates = Vec::new();
         let mut handles = Vec::new();
@@ -2750,11 +2842,12 @@ mod tests {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             let handle = spawn_child(
                 Arc::new(shell.mobile().scope),
+                &m,
                 &shell,
                 ChildIoMode::Buffered,
                 LeaseClass::Worker,
                 cmd,
-                move |_c| {
+                move |_, _c| {
                     gate_rx.recv().unwrap();
                     Ok(Value::Unit)
                 },
@@ -2767,11 +2860,12 @@ mod tests {
 
         let refused = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<three>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         );
         let err = match refused {
             Err(Break::Error(e)) => e,
@@ -2793,11 +2887,12 @@ mod tests {
         builtin_cancel(&[Value::Handle(handles[0].clone())], &mut shell).expect("cancel ok");
         spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<after>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .expect("cancelling one frees a seat");
 
@@ -2812,8 +2907,9 @@ mod tests {
     /// entries of every class.
     #[test]
     fn durable_birth_counts_toward_the_cap() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.worker_cap = Some(2);
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.worker_cap = Some(2);
 
         let mut gates = Vec::new();
         for (class, cmd) in [
@@ -2823,11 +2919,12 @@ mod tests {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             spawn_child(
                 Arc::new(shell.mobile().scope),
+                &m,
                 &shell,
                 ChildIoMode::Buffered,
                 class,
                 cmd,
-                move |_c| {
+                move |_, _c| {
                     gate_rx.recv().unwrap();
                     Ok(Value::Unit)
                 },
@@ -2838,11 +2935,12 @@ mod tests {
 
         let refused = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<three>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         );
         assert!(
             matches!(refused, Err(Break::Error(_))),
@@ -2859,15 +2957,17 @@ mod tests {
     /// is admitted — the cap counts running workers, not registry entries.
     #[test]
     fn settled_entries_do_not_block_admission() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.worker_cap = Some(1);
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut m = Mooring::adrift();
+        m.worker_cap = Some(1);
         let first = spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .expect("the first birth is admitted");
         wait_settled(&first);
@@ -2875,11 +2975,12 @@ mod tests {
 
         spawn_child(
             Arc::new(shell.mobile().scope),
+            &m,
             &shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<next>",
-            |_c| Ok(Value::Unit),
+            |_, _c| Ok(Value::Unit),
         )
         .expect("a lingering settled entry must not hold a seat");
     }

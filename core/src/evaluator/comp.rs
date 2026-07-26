@@ -16,7 +16,7 @@ use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
 use crate::mode::{ByteMode, Wire};
 use crate::source::Spanned;
 use crate::typecheck::Scheme;
-use crate::types::{Binding, Break, Control, Error, Raw, Shell, Tail, Value};
+use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
 use std::sync::Arc;
 
 use super::pattern::assign_pattern;
@@ -46,7 +46,12 @@ use crate::runtime::pipeline;
 /// A [`TailCall`] may therefore escape via the [`Raw`] return type;
 /// the caller (or [`super::evaluate`]) must land it through the
 /// trampoline. The `pub(crate)` visibility matches `Raw`'s privacy.
-pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<Value> {
+pub(crate) fn eval_comp(
+    comp: &Arc<Comp>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+    tail: Tail,
+) -> Raw<Value> {
     // Update source position from the node's span.
     if let Some(span) = comp.span {
         if let Some(src) = shell.run.loc.source.as_ref() {
@@ -87,7 +92,7 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
 
         CompKind::LetRec { slot, bindings } => eval_letrec(*slot, bindings, shell),
 
-        CompKind::Force(val) => step_force(val, shell),
+        CompKind::Force(val) => step_force(val, mooring, shell),
 
         CompKind::Interpolation(parts) => eval_interpolation(parts, shell),
 
@@ -102,22 +107,35 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
             rest,
             scheme,
             rhs_output,
-        } => eval_bind(m, pattern, rest, scheme.as_deref(), *rhs_output, tail, shell),
+        } => eval_bind(
+            m,
+            pattern,
+            rest,
+            scheme.as_deref(),
+            *rhs_output,
+            tail,
+            mooring,
+            shell,
+        ),
 
         // `App` and `Exec` dispatch through `invoke` — the same call
         // evaluator that pipelines use, here applied at the empty
         // upstream.  The call sits in this computation's tail position,
         // so `tail` flows through to the application eliminator.
-        CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, None, tail, shell),
+        CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, None, tail, mooring, shell),
 
-        CompKind::Pipeline { stages, wires, .. } => eval_pipeline(stages, wires, tail, shell),
+        CompKind::Pipeline { stages, wires, .. } => {
+            eval_pipeline(stages, wires, tail, mooring, shell)
+        }
 
-        CompKind::Chain(parts) => eval_chain(parts, tail, shell),
+        CompKind::Chain(parts) => eval_chain(parts, tail, mooring, shell),
 
-        CompKind::If { cond, then, else_ } => eval_if(&cond.item, then, else_, tail, shell),
+        CompKind::If { cond, then, else_ } => {
+            eval_if(&cond.item, then, else_, tail, mooring, shell)
+        }
 
         CompKind::Case { scrutinee, table } => {
-            case::eval_case(&scrutinee.item, &table.item, tail, shell)
+            case::eval_case(&scrutinee.item, &table.item, tail, mooring, shell)
         }
 
         CompKind::Scope(op) => match op {
@@ -125,19 +143,19 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
             // tail call escaping the frame; it is dispatched through
             // `invoke` so it shares the trampoline-absorption shape.
             // The body sits in the redirect's tail position.
-            ScopeOp::Redirect { .. } => call::invoke(comp, None, tail, shell),
+            ScopeOp::Redirect { .. } => call::invoke(comp, None, tail, mooring, shell),
             // The scope brackets apply their body thunk through the
             // trampoline (`apply`), which absorbs any terminal tail
             // call inside the `with_*` frame, so the body's tail-ness
             // never escapes the bracket — these arms grant nothing.
-            ScopeOp::Within { opts, body } => scope::eval_within(opts, body, shell),
-            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, shell),
-            ScopeOp::Try { body, handler } => scope::eval_try(body, handler, shell),
-            ScopeOp::Guard { body, cleanup } => scope::eval_guard(body, cleanup, shell),
-            ScopeOp::Audit { body } => scope::eval_audit(body, shell),
+            ScopeOp::Within { opts, body } => scope::eval_within(opts, body, mooring, shell),
+            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, mooring, shell),
+            ScopeOp::Try { body, handler } => scope::eval_try(body, handler, mooring, shell),
+            ScopeOp::Guard { body, cleanup } => scope::eval_guard(body, cleanup, mooring, shell),
+            ScopeOp::Audit { body } => scope::eval_audit(body, mooring, shell),
         },
 
-        CompKind::Seq(comps) => eval_seq(comps, tail, shell),
+        CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),
     }
 }
 
@@ -242,12 +260,14 @@ fn eval_letrec(
 /// [`Value::Lambda`] is itself a value (the function), so it is
 /// returned unchanged — the trampoline applies it when the call site
 /// supplies arguments. Other runtime types are a type error.
-pub(crate) fn step_force(val: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let v = eval_val(val, shell)?;
     let result = match v {
         // `!{ … }` eliminates a thunk to its value, which the caller
         // threads onward — a non-trivial continuation, so `Tail::No`.
-        Value::Block { body, captured } => super::eval_block(&body, &captured, Tail::No, shell)?,
+        Value::Block { body, captured } => {
+            super::eval_block(&body, &captured, Tail::No, mooring, shell)?
+        }
         lam @ Value::Lambda { .. } => lam,
         other => {
             return Err(shell
@@ -297,12 +317,17 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
 /// byte-mode so a command that writes bytes and returns `Unit` binds the
 /// decoded bytes.  Commands with a proper return value bind that value;
 /// non-final byte effects in a sequence are flushed by [`eval_seq`].
-fn eval_bind_rhs(m: &Arc<Comp>, rhs_output: ByteMode, shell: &mut Shell) -> Raw<Value> {
+fn eval_bind_rhs(
+    m: &Arc<Comp>,
+    rhs_output: ByteMode,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     if rhs_output != ByteMode::Bytes {
-        return eval_comp(m, shell, Tail::No);
+        return eval_comp(m, mooring, shell, Tail::No);
     }
     let (result, mut bytes) =
-        super::capture::with_capture(shell, |shell| eval_comp(m, shell, Tail::No));
+        super::capture::with_capture(shell, |shell| eval_comp(m, mooring, shell, Tail::No));
     // The RHS errored partway through: flush whatever it already wrote
     // before propagating, so a partial write (`echo HALF; exit 3`) stays
     // visible instead of vanishing with the buffer — matching `eval_seq`,
@@ -340,6 +365,10 @@ fn eval_bind_rhs(m: &Arc<Comp>, rhs_output: ByteMode, shell: &mut Shell) -> Raw<
 /// The bound computation `m` runs under a non-trivial continuation;
 /// the continuation `rest` inherits the bind's own tail position, so a
 /// tail call in `rest` is the whole expression's tail call.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the bind rule's operands, threaded; grouping them would hide the rule's shape"
+)]
 fn eval_bind(
     m: &Arc<Comp>,
     pattern: &IrPattern,
@@ -347,14 +376,15 @@ fn eval_bind(
     scheme: Option<&Scheme>,
     rhs_output: ByteMode,
     tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    crate::process::check(shell)?;
+    crate::process::check(mooring, shell)?;
     super::pattern::check_pattern_shadow(pattern, shell)?;
-    let val = eval_bind_rhs(m, rhs_output, shell)?;
+    let val = eval_bind_rhs(m, rhs_output, mooring, shell)?;
     set_status_from_value(&val, shell);
-    assign_pattern(pattern, &val, scheme, shell)?;
-    eval_comp(rest, shell, tail)
+    assign_pattern(pattern, &val, scheme, mooring, shell)?;
+    eval_comp(rest, mooring, shell, tail)
 }
 
 /// Pipeline: a typed dataflow edge selects the machine.
@@ -372,12 +402,13 @@ fn eval_pipeline(
     stages: &[Arc<Comp>],
     wires: &[Wire],
     tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     if stages.len() == 1 {
-        return eval_comp(&stages[0], shell, tail);
+        return eval_comp(&stages[0], mooring, shell, tail);
     }
-    pipeline::run_pipeline(stages, wires, tail, shell)
+    pipeline::run_pipeline(stages, wires, tail, mooring, shell)
 }
 
 /// `a ? b ? c` — fallback chain.
@@ -396,13 +427,13 @@ fn eval_pipeline(
 /// Each arm runs under its own [`with_scope`] bracket — the same one
 /// `eval_if` uses for its branches — so a `let` inside an arm's block
 /// cannot leak into the enclosing scope.
-fn eval_chain(parts: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
+fn eval_chain(parts: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let mut last_err: Option<Error> = None;
     let last = parts.len().saturating_sub(1);
     for (i, part) in parts.iter().enumerate() {
-        crate::process::check(shell)?;
+        crate::process::check(mooring, shell)?;
         let arm_tail = if i == last { tail } else { Tail::No };
-        match with_scope(shell, |shell| eval_comp(part, shell, arm_tail)) {
+        match with_scope(shell, |shell| eval_comp(part, mooring, shell, arm_tail)) {
             Ok(result) => return Ok(result),
             Err(Control::Break(Break::Error(e))) => {
                 shell.mobile.control.last_status = e.exit_code();
@@ -428,6 +459,7 @@ fn eval_if(
     then: &Arc<Comp>,
     else_: &Arc<Comp>,
     tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     let cond_val = eval_val(cond, shell)?;
@@ -444,7 +476,7 @@ fn eval_if(
     };
     shell.set_status_from_bool(b);
     let branch = if b { then } else { else_ };
-    with_scope(shell, |shell| eval_comp(branch, shell, tail))
+    with_scope(shell, |shell| eval_comp(branch, mooring, shell, tail))
 }
 
 /// Sequence of computations — the last value is the result.
@@ -454,14 +486,14 @@ fn eval_if(
 /// never observe themselves as tail-called.  When a sequence runs under
 /// a capture, non-final bytes are effects: flush them to the visible
 /// outer stream so the sequence's value is still just its final value.
-fn eval_seq(comps: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
+fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let mut result = Value::Unit;
     let len = comps.len();
     for (i, c) in comps.iter().enumerate() {
-        crate::process::check(shell)?;
+        crate::process::check(mooring, shell)?;
         let last = i == len - 1;
         let elem_tail = if last { tail } else { Tail::No };
-        result = eval_comp(c, shell, elem_tail)?;
+        result = eval_comp(c, mooring, shell, elem_tail)?;
         if !last && let Some(outer) = &shell.run.io.capture_outer {
             shell
                 .run

@@ -64,17 +64,22 @@ pub(super) fn resolve_base(
     };
     let mut shell = Shell::new(TerminalState::default());
     let virtual_path = format!("<built-in:{name}>");
-    let mut caps =
-        ral_core::capability::load_capabilities_from_str(&mut shell, text, &virtual_path, ctx)
-            .map_err(|e| match e {
-                ral_core::types::Break::Error(err) => format!(
-                    "exarch: built-in base '{name}' failed to parse: {}",
-                    err.message
-                ),
-                other @ ral_core::types::Break::Escape(_) => {
-                    format!("exarch: built-in base '{name}' failed: {other:?}")
-                }
-            })?;
+    let mut caps = ral_core::capability::load_capabilities_from_str(
+        &ral_core::types::Mooring::adrift(),
+        &mut shell,
+        text,
+        &virtual_path,
+        ctx,
+    )
+    .map_err(|e| match e {
+        ral_core::types::Break::Error(err) => format!(
+            "exarch: built-in base '{name}' failed to parse: {}",
+            err.message
+        ),
+        other @ ral_core::types::Break::Escape(_) => {
+            format!("exarch: built-in base '{name}' failed: {other:?}")
+        }
+    })?;
     drop_dead_exec_grants(&mut caps, cfg!(unix));
     Ok(caps)
 }
@@ -135,6 +140,7 @@ mod tests {
     fn load(name: &str, text: &str, ctx: &FreezeCtx<'_>) -> Capabilities {
         let mut shell = Shell::new(TerminalState::default());
         ral_core::capability::load_capabilities_from_str(
+            &ral_core::types::Mooring::adrift(),
             &mut shell,
             text,
             &format!("<test-base:{name}>"),

@@ -274,12 +274,16 @@ mod tests {
     use ral_core::Value;
     use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
-    use ral_core::types::{BuiltinBody, BuiltinEntry, Settled};
+    use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
 
     /// A nullary builtin whose body panics — stands in for any Rust panic
     /// the evaluator can raise mid-tool-eval.
-    fn builtin_panic_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
+    fn builtin_panic_now(
+        _args: &[Value],
+        _mooring: &Mooring,
+        _shell: &mut Shell,
+    ) -> Settled<Value> {
         panic!("a4 test: deliberate mid-eval panic");
     }
 

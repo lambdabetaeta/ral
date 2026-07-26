@@ -35,7 +35,7 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 pub(super) use self::router::parse_key_notation;
 
 use ral_core::transport::{Program, Run};
-use ral_core::types::{Break, Capabilities, Settled};
+use ral_core::types::{Break, Capabilities, Mooring, Settled};
 use ral_core::{
     HookName, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
     StaticDiagnostics, Value, diagnostic,
@@ -318,16 +318,17 @@ const BUFFER_CHANGE_FAULT_LIMIT: u32 = 3;
 ///     terminal loan can elevate to foreground the body's pipeline; the others
 ///     pass `Denied`, since they never hand the terminal to a child.
 ///   - [`HookFraming::InFrame`] — lifecycle hooks (`pre-exec`, `post-exec`,
-///     `chpwd`) fire from inside the command's own run frame. A second frame
-///     would nest, so the handler is applied in place.
+///     `chpwd`) bracket the command rather than belonging to it, so they are
+///     applied in place under the caller's mooring; framing each one would
+///     make it a run in its own right, with its own status and streams.
 #[derive(Clone, Copy)]
-pub(super) enum HookFraming {
+pub(super) enum HookFraming<'a> {
     /// Establish a fresh run frame before applying the handler. Inherits the
     /// session streams and runs no lifecycle hooks; the [`FramedHook`] carries
     /// the rest of the per-hook policy.
     Framed(FramedHook),
-    /// Apply the handler in place — already inside the command's run frame.
-    InFrame,
+    /// Apply the handler in place, under the mooring it carries.
+    InFrame(&'a Mooring),
 }
 
 /// The per-hook policy for a [`HookFraming::Framed`] call.
@@ -369,18 +370,18 @@ pub(super) fn call_plugin_hook(
     hook: &HookName,
     args: &[Value],
     ctx_in: Option<PluginContext>,
-    framing: HookFraming,
+    framing: HookFraming<'_>,
 ) -> HookResult {
     let prev = shell.repl_mut().plugin_context.take();
     if let Some(ctx) = ctx_in {
         shell.repl_mut().plugin_context = Some(Box::new(ctx));
     }
     let (result, rendered_error, timed_out) = match framing {
-        HookFraming::InFrame => {
+        HookFraming::InFrame(mooring) => {
             // Lifecycle hook: resolve the hook from the table and
             // apply it directly inside the existing command frame.
             let result = match shell.mobile().context.hooks.get(hook) {
-                Some(prog) => ral_core::builtins::apply(&prog.binding.value, args, shell),
+                Some(prog) => ral_core::builtins::apply(&prog.binding.value, args, mooring, shell),
                 None => Err(Break::Error(ral_core::types::Error::new(
                     format!("hook '{hook}' is not registered"),
                     1,
@@ -920,18 +921,26 @@ pub(crate) fn fold_hook<T>(
 
 /// Run a named lifecycle hook on all plugins, passing `args` to each handler.
 ///
-/// Lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`) fire from inside the
-/// command's own run frame, so the handler is applied in place
-/// ([`HookFraming::InFrame`]) — a fresh frame would nest inside the live one.
+/// Lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`) apply the handler in
+/// place ([`HookFraming::InFrame`]) rather than framing it; the caller passes
+/// the mooring the handler runs under.
 pub(crate) fn run_lifecycle_hook(
     runtime: &Arc<Mutex<PluginRuntime>>,
+    mooring: &Mooring,
     shell: &mut Shell,
     hook_name: &str,
     args: &[Value],
 ) {
     fold_hook(runtime, shell, hook_name, (), |shell, plugin, hook, ()| {
         let plugin_name = plugin.name.to_string();
-        let hr = call_plugin_hook(shell, plugin, hook, args, None, HookFraming::InFrame);
+        let hr = call_plugin_hook(
+            shell,
+            plugin,
+            hook,
+            args,
+            None,
+            HookFraming::InFrame(mooring),
+        );
         if let Err(Break::Error(e)) = &hr.result {
             plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
         }

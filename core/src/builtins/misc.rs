@@ -2,7 +2,7 @@
 //! failure and exit (`fail`, `exit`), the structured-event `surface`, and
 //! the interactive `ask` prompt.
 
-use crate::types::{Break, Error, Escape, Settled, Shell, Value, sig};
+use crate::types::{Break, Error, Escape, Mooring, Settled, Shell, Value, sig};
 
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 /// `ESC c` (RIS, Reset to Initial State): resets the terminal but leaves
@@ -111,9 +111,9 @@ pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
     clippy::unnecessary_wraps,
     reason = "builtin dispatched through the fn-pointer table in builtins.rs; the uniform `Settled<Value>` return is fixed by the registry, not by this body."
 )]
-pub(super) fn builtin_surface(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &Shell) -> Settled<Value> {
     if let Some(event) = args.first() {
-        shell.surface(event);
+        mooring.surface(event);
     }
     Ok(Value::Unit)
 }

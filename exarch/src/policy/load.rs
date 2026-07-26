@@ -6,7 +6,7 @@
 //! `absolute_in` path helper that `for_invocation` uses to make
 //! user-supplied relative paths absolute against the session cwd.
 
-use ral_core::types::{Break, Capabilities, Escape, Shell};
+use ral_core::types::{Break, Capabilities, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
@@ -23,6 +23,7 @@ use ral_core::path;
 /// it, before composition can discard it; that rejection surfaces as a
 /// [`Break::Error`], not an [`Break::Escape`].
 pub(super) fn load_capabilities_ral(
+    mooring: &Mooring,
     shell: &mut Shell,
     path: &Path,
     flag: &str,
@@ -34,7 +35,7 @@ pub(super) fn load_capabilities_ral(
             path.display()
         ));
     }
-    ral_core::capability::load_capabilities_from_path(shell, path, ctx).map_err(|e| {
+    ral_core::capability::load_capabilities_from_path(mooring, shell, path, ctx).map_err(|e| {
         let detail = match e {
             Break::Error(err) => err.message,
             Break::Escape(Escape::Exit(code)) => format!("exit {code}"),

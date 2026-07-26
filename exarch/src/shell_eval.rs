@@ -618,7 +618,8 @@ mod tests {
             &PRELUDE,
             &builtins::host_surface(),
         );
-        builtins::install_agent_library(&mut shell).expect("embedded agent library");
+        builtins::install_agent_library(&ral_core::types::Mooring::adrift(), &mut shell)
+            .expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);
         shell
     }

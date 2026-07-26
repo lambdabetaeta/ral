@@ -12,7 +12,7 @@
 
 use ral_core::source::Span;
 use ral_core::transport::Program;
-use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Settled};
+use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Mooring, Settled};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +31,7 @@ use super::{PluginRuntime, framed_run_request, load_err, lock, unload_err};
 pub(crate) fn load_plugin(
     name_or_path: &str,
     options: Option<&Value>,
+    mooring: &Mooring,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> Settled<()> {
@@ -60,7 +61,7 @@ pub(crate) fn load_plugin(
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
     let value = shell.in_fresh_scope(|shell| {
-        ral_core::builtins::modules::evaluate_source(shell, &source, &path)
+        ral_core::builtins::modules::evaluate_source(mooring, shell, &source, &path)
     })?;
     let module = instantiate(value, options, name_or_path, shell)?;
     check_is_manifest(&module, name_or_path)?;

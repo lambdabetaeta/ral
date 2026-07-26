@@ -21,7 +21,7 @@ use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
 use ral_core::typecheck::{Row, Scheme, Ty, Unifier};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Settled, sig};
+use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
@@ -200,7 +200,7 @@ fn spawn_receipt(answer: FOValue) -> Settled<Value> {
 /// the `else` arms below stay didactic anyway, matching [`builtin_schedule`]'s
 /// own style: a defensive door costs nothing and never has to trust the
 /// type checker alone.
-fn builtin_agent(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent")?;
     let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
@@ -240,29 +240,32 @@ fn builtin_agent(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let grant = permission_label(grant)?;
     let prompt = prompt.to_string();
 
-    let session = shell.fork_into_nursery()?;
+    let session = shell.fork_into_nursery(mooring)?;
     // A NurseryId is a small monotonic per-run counter; `unwrap_or` never
     // actually saturates in practice, but keeps this door total without an
     // `as` cast's silent wraparound.
     let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
-    let answer = shell.enquire(FOValue::Variant {
-        label: "agent-start".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![
-                FOValue::Int { value: session_id },
-                FOValue::Variant {
-                    label: kind,
-                    payload: None,
-                },
-                FOValue::String { value: prompt },
-                FOValue::String { value: name },
-                FOValue::Variant {
-                    label: grant,
-                    payload: None,
-                },
-            ],
-        })),
-    })?;
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "agent-start".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::Int { value: session_id },
+                    FOValue::Variant {
+                        label: kind,
+                        payload: None,
+                    },
+                    FOValue::String { value: prompt },
+                    FOValue::String { value: name },
+                    FOValue::Variant {
+                        label: grant,
+                        payload: None,
+                    },
+                ],
+            })),
+        },
+    )?;
     spawn_receipt(answer)
 }
 
@@ -272,11 +275,14 @@ fn builtin_agent(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body"
 )]
-fn builtin_agents(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let answer = shell.enquire(FOValue::Variant {
-        label: "agent-list".to_string(),
-        payload: None,
-    })?;
+fn builtin_agents(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "agent-list".to_string(),
+            payload: None,
+        },
+    )?;
     let FOValue::List { items } = answer else {
         return Err(sig(
             "agents: host answered an unexpected shape for the listing",
@@ -288,34 +294,40 @@ fn builtin_agents(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// `message <name> <text>` — passes `name` through as the recipient's
 /// identity, then enquires `` `message ``; resolution, descendant-scoping,
 /// and delivery errors are the desk's.
-fn builtin_message(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_message(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "message")?;
     let name = args[0].to_string();
     let text = args[1].to_string();
-    shell.enquire(FOValue::Variant {
-        label: "message".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![
-                FOValue::String { value: name },
-                FOValue::String { value: text },
-            ],
-        })),
-    })?;
+    shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "message".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::String { value: name },
+                    FOValue::String { value: text },
+                ],
+            })),
+        },
+    )?;
     Ok(Value::Unit)
 }
 
 /// `agent-cancel <name>` — passes `name` through as the target's identity,
 /// then enquires `` `agent-cancel ``; resolution and descendant-scoping are
 /// the desk's.
-fn builtin_agent_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_agent_cancel(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent-cancel")?;
     let name = args[0].to_string();
-    shell.enquire(FOValue::Variant {
-        label: "agent-cancel".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::String { value: name }],
-        })),
-    })?;
+    shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "agent-cancel".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String { value: name }],
+            })),
+        },
+    )?;
     Ok(Value::Unit)
 }
 
@@ -336,7 +348,7 @@ fn schedule_receipt(answer: FOValue) -> Settled<Value> {
 /// parsers so a malformed expression fails here, not at the desk), then
 /// enquires `` `schedule ``. The grant refusal and the label-uniqueness /
 /// reserved-namespace refusals are the desk's/registry's.
-fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_schedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "schedule")?;
     let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
@@ -363,12 +375,15 @@ fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let label = schedule_label(label)?;
     let prompt = prompt.to_string();
 
-    let answer = shell.enquire(FOValue::Variant {
-        label: "schedule".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![trigger, label, FOValue::String { value: prompt }],
-        })),
-    })?;
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "schedule".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![trigger, label, FOValue::String { value: prompt }],
+            })),
+        },
+    )?;
     schedule_receipt(answer)
 }
 
@@ -378,11 +393,14 @@ fn builtin_schedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body"
 )]
-fn builtin_schedules(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let answer = shell.enquire(FOValue::Variant {
-        label: "schedule-list".to_string(),
-        payload: None,
-    })?;
+fn builtin_schedules(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "schedule-list".to_string(),
+            payload: None,
+        },
+    )?;
     let FOValue::List { items } = answer else {
         return Err(sig(
             "schedules: host answered an unexpected shape for the listing",
@@ -394,22 +412,25 @@ fn builtin_schedules(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// `unschedule <label>` — passes `label` through as the target schedule's
 /// identity, then enquires `` `unschedule ``; resolution (including the
 /// no-op case) and the grant refusal are the desk's/registry's.
-fn builtin_unschedule(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "unschedule")?;
     let label = args[0].to_string();
-    shell.enquire(FOValue::Variant {
-        label: "unschedule".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::String { value: label }],
-        })),
-    })?;
+    shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "unschedule".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String { value: label }],
+            })),
+        },
+    )?;
     Ok(Value::Unit)
 }
 
 /// `reply <value>` — the first-orderness door runs [`FOValue::try_from`]
 /// before any enquiry crosses, so a violation fails only this call,
 /// engine-side; the non-returning refusal is the desk's.
-fn builtin_reply(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_reply(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "reply")?;
     let payload = FOValue::try_from(&args[0]).map_err(|_| {
         sig(
@@ -417,12 +438,15 @@ fn builtin_reply(args: &[Value], shell: &mut Shell) -> Settled<Value> {
              environments — since it crosses to whoever spawned you as plain data",
         )
     })?;
-    shell.enquire(FOValue::Variant {
-        label: "reply".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![payload],
-        })),
-    })?;
+    shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "reply".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![payload],
+            })),
+        },
+    )?;
     Ok(Value::Unit)
 }
 

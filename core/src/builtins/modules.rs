@@ -25,7 +25,7 @@ use std::path::Path;
 
 use crate::ir::Comp;
 use crate::source::{FileId, Source};
-use crate::types::{Break, Settled, Shell, Value, sig};
+use crate::types::{Break, Mooring, Settled, Shell, Value, sig};
 
 use super::util::arg0_str;
 
@@ -105,6 +105,7 @@ impl Drop for ScriptContextGuard<'_> {
 /// circular dependency), if the recursion-depth limit is exceeded, or if
 /// evaluating `comp` fails.
 pub fn evaluate_checked(
+    mooring: &Mooring,
     shell: &mut Shell,
     comp: &std::sync::Arc<Comp>,
     source: &str,
@@ -133,7 +134,7 @@ pub fn evaluate_checked(
     let mut ctx = ScriptContextGuard::enter(shell, virtual_path, source);
     ctx.shell_mut().mobile.context.modules.stack.push(key);
     ctx.shell_mut().mobile.context.modules.depth += 1;
-    let result = crate::evaluate(comp, ctx.shell_mut());
+    let result = crate::evaluate(comp, mooring, ctx.shell_mut());
     ctx.shell_mut().mobile.context.modules.depth -= 1;
     ctx.shell_mut().mobile.context.modules.stack.pop();
     result
@@ -157,9 +158,14 @@ pub fn evaluate_checked(
 /// Returns `Err` if parsing, elaboration, or typechecking `source` fails,
 /// or if the subsequent guarded evaluation fails (see
 /// [`evaluate_checked`]).
-pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> Settled<Value> {
+pub fn evaluate_source(
+    mooring: &Mooring,
+    shell: &mut Shell,
+    source: &str,
+    virtual_path: &str,
+) -> Settled<Value> {
     let comp = check_source(source, shell)?;
-    evaluate_checked(shell, &comp, source, virtual_path)
+    evaluate_checked(mooring, shell, &comp, source, virtual_path)
 }
 
 /// Parse, elaborate, and check `source` against the live session before
@@ -243,7 +249,11 @@ fn tag_loader_error(who: &str, e: Break) -> Break {
     }
 }
 
-pub(super) fn builtin_source(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_source(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let path = arg0_str(args, "source")?;
     let resolved = resolve_relative_to_current_script(&path, shell);
     let abs_path = shell
@@ -254,10 +264,10 @@ pub(super) fn builtin_source(args: &[Value], shell: &mut Shell) -> Settled<Value
             |p| p.to_string_lossy().into_owned(),
         );
     let source = read_and_normalize(&resolved, &abs_path, "source", shell)?;
-    evaluate_source(shell, &source, &abs_path).map_err(|e| tag_loader_error("source", e))
+    evaluate_source(mooring, shell, &source, &abs_path).map_err(|e| tag_loader_error("source", e))
 }
 
-pub(crate) fn builtin_use(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = arg0_str(args, "use")?;
     let resolved = resolve_relative_to_current_script(&path, shell);
     let abs_path = shell
@@ -270,7 +280,7 @@ pub(crate) fn builtin_use(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
 
     shell.mobile.scope.push_scope();
-    let evaluated = evaluate_source(shell, &source, &abs_path);
+    let evaluated = evaluate_source(mooring, shell, &source, &abs_path);
     let result = evaluated.map(|_| {
         let bindings: Vec<(String, Value)> = shell
             .mobile

@@ -5,7 +5,7 @@
 //! through the same `Source` channel.
 
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Error, Settled, Shell};
+use crate::types::{Break, Error, Mooring, Settled, Shell};
 
 use super::io_event;
 
@@ -767,6 +767,7 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
 )]
 pub(crate) fn install_stdin_redirect(
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<StdinRedirectGuard> {
     let Some((mode, word)) = redirects.iter().rev().find_map(|r| match r {
@@ -788,7 +789,7 @@ pub(crate) fn install_stdin_redirect(
             // precedes the body/exec it feeds (e.g. the read card before
             // exec in `cat < a`).  Read has no outcome: a failed open
             // returns above before this point.
-            shell.emit_io(&io_event::read(word));
+            mooring.emit_io(&io_event::read(word));
             crate::io::Source::File(f)
         }
         RedirectMode::HereString => {

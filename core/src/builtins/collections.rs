@@ -9,7 +9,7 @@
 //! their per-element applications directly, so those children land in the
 //! enclosing trail without a wrapping combinator node.
 
-use crate::types::{Break, Settled, Shell, Value, as_list, sig};
+use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};
 
 use super::apply;
 use super::util::{check_arity, value_ordering};
@@ -32,17 +32,17 @@ const RANGE_INITIAL_CAP: usize = 1 << 16;
 
 /// `each <fn> <list>` -- call `fn` on each element for side effects.
 /// Returns the result of the last application, or `Unit` for an empty list.
-pub(super) fn builtin_each(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "each")?;
     let func = &args[0];
     let items = as_list(&args[1], "each")?;
     iterate_audited("for", shell, |shell| {
         let mut last = Value::Unit;
         for item in &items {
-            if let Err(e) = crate::process::check(shell) {
+            if let Err(e) = crate::process::check(mooring, shell) {
                 return (last, Some(e));
             }
-            match apply(func, std::slice::from_ref(item), shell) {
+            match apply(func, std::slice::from_ref(item), mooring, shell) {
                 Ok(v) => last = v,
                 Err(e) => return (last, Some(e)),
             }
@@ -52,17 +52,17 @@ pub(super) fn builtin_each(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 }
 
 /// `map <fn> <list>` -- apply `fn` to each element, return a new list.
-pub(super) fn builtin_map(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "map")?;
     let func = &args[0];
     let items = as_list(&args[1], "map")?;
     iterate_audited("map", shell, |shell| {
         let mut out = Vec::with_capacity(items.len());
         for item in &items {
-            if let Err(e) = crate::process::check(shell) {
+            if let Err(e) = crate::process::check(mooring, shell) {
                 return (Value::list(out), Some(e));
             }
-            match apply(func, std::slice::from_ref(item), shell) {
+            match apply(func, std::slice::from_ref(item), mooring, shell) {
                 Ok(v) => out.push(v),
                 Err(e) => return (Value::list(out), Some(e)),
             }
@@ -116,14 +116,18 @@ fn iterate_audited(
 }
 
 /// `filter <fn> <list>` -- keep elements where `fn` returns `true`.
-pub(super) fn builtin_filter(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_filter(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "filter")?;
     let func = &args[0];
     let items = as_list(&args[1], "filter")?;
     let mut results = Vec::new();
     for item in &items {
-        crate::process::check(shell)?;
-        let result = apply(func, std::slice::from_ref(item), shell)?;
+        crate::process::check(mooring, shell)?;
+        let result = apply(func, std::slice::from_ref(item), mooring, shell)?;
         let keep = match &result {
             Value::Bool(b) => *b,
             _ => {
@@ -173,15 +177,19 @@ pub(super) fn builtin_sort(args: &[Value]) -> Settled<Value> {
 /// `sort-list-by <fn> <list>` -- sort by a key function.
 /// Applies `fn` to each element to obtain a sort key, then sorts into
 /// ascending order of those keys.
-pub(super) fn builtin_sort_by(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_sort_by(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "sort-list-by")?;
     let func = &args[0];
     let items = as_list(&args[1], "sort-list-by")?;
     let keyed: Vec<(Value, Value)> = items
         .into_iter()
         .map(|item| {
-            crate::process::check(shell)?;
-            let key = apply(func, std::slice::from_ref(&item), shell)?;
+            crate::process::check(mooring, shell)?;
+            let key = apply(func, std::slice::from_ref(&item), mooring, shell)?;
             Ok((key, item))
         })
         .collect::<Settled<Vec<_>>>()?;
@@ -189,7 +197,7 @@ pub(super) fn builtin_sort_by(args: &[Value], shell: &mut Shell) -> Settled<Valu
 }
 
 /// `range <start> <end>` -- generate a list of integers from start (inclusive) to end (exclusive).
-pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_range(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     check_arity(args, 2, "range")?;
     let start = match &args[0] {
         Value::Int(n) => *n,
@@ -228,7 +236,7 @@ pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
         i += 1;
         since_poll += 1;
         if since_poll == INTERRUPT_POLL_CHUNK {
-            crate::process::check(shell)?;
+            crate::process::check(mooring, shell)?;
             since_poll = 0;
         }
     }
@@ -236,14 +244,14 @@ pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
 }
 
 /// `fold <fn> <init> <list>` — left fold, data-last.
-pub(super) fn builtin_fold(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "fold")?;
     let func = &args[0];
     let mut acc = args[1].clone();
     let items = as_list(&args[2], "fold")?;
     for item in &items {
-        crate::process::check(shell)?;
-        acc = apply(func, &[acc, item.clone()], shell)?;
+        crate::process::check(mooring, shell)?;
+        acc = apply(func, &[acc, item.clone()], mooring, shell)?;
     }
     Ok(acc)
 }
@@ -251,12 +259,16 @@ pub(super) fn builtin_fold(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 /// `fold-lines <fn> <init>` — left fold over stdin lines, the channel-fed
 /// sibling of `fold`: the data comes one line at a time from the byte
 /// channel rather than an in-hand list.
-pub(super) fn builtin_fold_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_fold_lines(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "fold-lines")?;
     let func = args[0].clone();
     let mut acc = args[1].clone();
     super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {
-        acc = apply(&func, &[acc.clone(), Value::String(line)], shell)?;
+        acc = apply(&func, &[acc.clone(), Value::String(line)], mooring, shell)?;
         Ok(())
     })?;
     Ok(acc)
@@ -272,9 +284,9 @@ mod tests {
     /// so *applying* the lambda reaches no statement-level poll point —
     /// the only checkpoint a combinator can hit is the one it now performs
     /// itself, which is exactly what these tests pin.
-    fn lambda(shell: &mut Shell, src: &str) -> Value {
+    fn lambda(mooring: &Mooring, shell: &mut Shell, src: &str) -> Value {
         let comp = Arc::new(crate::compile(src).expect("compile lambda"));
-        crate::evaluator::eval_top_level(&comp, shell).expect("lambda value")
+        crate::evaluator::eval_top_level(&comp, mooring, shell).expect("lambda value")
     }
 
     fn ints(n: i64) -> Value {
@@ -295,12 +307,10 @@ mod tests {
     #[test]
     fn map_polls_cancellation_within_its_loop() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let func = lambda(&mut shell, "{ |x| $x }");
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_map(&[func, ints(500)], &mut shell)
+        let m = Mooring::adrift();
+        let func = lambda(&m, &mut shell, "{ |x| $x }");
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
+        let err = builtin_map(&[func, ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort map");
         assert_eq!(status(err), 130);
     }
@@ -308,12 +318,10 @@ mod tests {
     #[test]
     fn filter_polls_cancellation_within_its_loop() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let func = lambda(&mut shell, "{ |x| $[0 == 0] }");
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_filter(&[func, ints(500)], &mut shell)
+        let m = Mooring::adrift();
+        let func = lambda(&m, &mut shell, "{ |x| $[0 == 0] }");
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
+        let err = builtin_filter(&[func, ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort filter");
         assert_eq!(status(err), 130);
     }
@@ -321,12 +329,10 @@ mod tests {
     #[test]
     fn fold_polls_cancellation_within_its_loop() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let func = lambda(&mut shell, "{ |acc x| $x }");
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_fold(&[func, Value::Int(0), ints(500)], &mut shell)
+        let m = Mooring::adrift();
+        let func = lambda(&m, &mut shell, "{ |acc x| $x }");
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
+        let err = builtin_fold(&[func, Value::Int(0), ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort fold");
         assert_eq!(status(err), 130);
     }
@@ -334,12 +340,10 @@ mod tests {
     #[test]
     fn each_polls_cancellation_within_its_loop() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let func = lambda(&mut shell, "{ |x| $x }");
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_each(&[func, ints(500)], &mut shell)
+        let m = Mooring::adrift();
+        let func = lambda(&m, &mut shell, "{ |x| $x }");
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
+        let err = builtin_each(&[func, ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort each");
         assert_eq!(status(err), 130);
     }
@@ -349,11 +353,9 @@ mod tests {
     #[test]
     fn long_range_polls_past_the_chunk() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &shell)
+        let m = Mooring::adrift();
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
+        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &m, &shell)
             .expect_err("a long range under a cancelled scope must abort");
         assert_eq!(status(err), 130);
     }
@@ -364,11 +366,9 @@ mod tests {
     #[test]
     fn short_range_pays_no_poll() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        shell
-            .run
-            .cancel
-            .cancel(crate::process::CancelCause::Interrupt);
-        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &shell)
+        let m = Mooring::adrift();
+        m.cancel.cancel(crate::process::CancelCause::Interrupt);
+        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &m, &shell)
             .expect("a short range pays no poll and completes");
         assert_eq!(as_list(&v, "range").expect("list").len(), 10);
     }

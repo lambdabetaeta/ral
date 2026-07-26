@@ -8,7 +8,7 @@
 
 use ral_core::exit_hints::ExitHints;
 use ral_core::io::{InteractiveMode, TerminalState};
-use ral_core::types::{Break, Escape};
+use ral_core::types::{Break, Escape, Mooring};
 use ral_core::{Shell, diagnostic};
 use std::process::ExitCode;
 
@@ -77,7 +77,9 @@ pub(crate) fn apply_session_capabilities(
     shell: &mut Shell,
     paths: &[std::path::PathBuf],
 ) -> Result<(), ExitCode> {
-    match ral_core::capability::apply_session_profiles(shell, paths) {
+    // Session bring-up: no run is in hand yet, so the profiles evaluate
+    // moored adrift — no surface, no desk, no nursery.
+    match ral_core::capability::apply_session_profiles(&Mooring::adrift(), shell, paths) {
         Ok(()) => Ok(()),
         Err(Break::Error(e)) => {
             diagnostic::cmd_error("ral", &format!("--capabilities: {}", e.message));

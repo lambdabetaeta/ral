@@ -22,7 +22,7 @@ mod common;
 use ral_core::builtins::CORE_BUILTINS;
 use ral_core::typecheck::builtins::BuiltinTypeRule;
 use ral_core::typecheck::{CompTy, Ty, Unifier};
-use ral_core::types::{Map, Shell, Value};
+use ral_core::types::{Map, Mooring, Shell, Value};
 use ral_core::{Break, builtins};
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
@@ -150,7 +150,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         };
 
         let mut shell = fresh_shell();
-        match entry.body.call(&args, &mut shell) {
+        match entry.body.call(&args, &Mooring::adrift(), &mut shell) {
             Ok(result) => {
                 assert!(
                     inhabits(&result, &ret_ty),

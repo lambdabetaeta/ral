@@ -8,7 +8,7 @@ use super::comp::eval_comp;
 use super::pattern::assign_pattern;
 use crate::ir::IrPattern;
 use crate::types::{
-    Break, Control, Env, Error, Raw, Settled, Shell, Tail, TailCall, ThunkBody, Value,
+    Break, Control, Env, Error, Mooring, Raw, Settled, Shell, Tail, TailCall, ThunkBody, Value,
 };
 
 /// One lambda call frame: evaluate the body *in place* on the caller's
@@ -35,12 +35,13 @@ fn apply_lambda_frame(
     captured: &Env,
     pat: &IrPattern,
     arg: &Value,
+    mooring: &Mooring,
     shell: &mut Shell,
     body: impl FnOnce(&mut Shell) -> Raw<Value>,
 ) -> Raw<Value> {
     shell.with_thunk_body(ThunkBody::Lambda, captured, |shell, mobile| {
         shell.run_with_mobile(mobile, |shell| {
-            assign_pattern(pat, arg, None, shell)?;
+            assign_pattern(pat, arg, None, mooring, shell)?;
             body(shell)
         })
     })
@@ -55,7 +56,12 @@ fn apply_lambda_frame(
 /// against the cap. The cap defaults to `DEFAULT_RECURSION_LIMIT`
 /// and is overridden by the rc `recursion_limit:` key or the
 /// `--recursion-limit` flag.
-pub(crate) fn apply(callee: Value, args: Vec<Value>, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn apply(
+    callee: Value,
+    args: Vec<Value>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     if shell.mobile.control.call_depth >= shell.mobile.control.recursion_limit {
         return Err(Break::Error(
             Error::new(
@@ -72,12 +78,17 @@ pub(crate) fn apply(callee: Value, args: Vec<Value>, shell: &mut Shell) -> Settl
         ));
     }
     shell.mobile.control.call_depth += 1;
-    let result = apply_inner(callee, args, shell);
+    let result = apply_inner(callee, args, mooring, shell);
     shell.mobile.control.call_depth -= 1;
     result
 }
 
-fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Settled<Value> {
+fn apply_inner(
+    mut callee: Value,
+    mut args: Vec<Value>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     loop {
         match &callee {
             // Lambda — apply one arg per iteration; with no args, the
@@ -106,13 +117,13 @@ fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Se
                 // which would wrongly raise the "bare lambda in
                 // computation position" error for a legitimate curried
                 // application.
-                let result = apply_lambda_frame(&captured, &param, &arg, shell, |child| {
+                let result = apply_lambda_frame(&captured, &param, &arg, mooring, shell, |child| {
                     match super::val::close_lam(&body, child) {
                         Some(lam) => Ok(lam),
-                        None => eval_comp(&body, child, body_tail),
+                        None => eval_comp(&body, mooring, child, body_tail),
                     }
                 });
-                if let Some(done) = step(result, &mut callee, &mut args, shell) {
+                if let Some(done) = step(result, &mut callee, &mut args, mooring, shell) {
                     return done;
                 }
             }
@@ -127,9 +138,9 @@ fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Se
             Value::Block { body, captured } => {
                 let block_tail = if args.is_empty() { Tail::Yes } else { Tail::No };
                 let body = body.clone();
-                let result =
-                    super::eval_block(&body, captured, block_tail, shell).map_err(Control::from);
-                if let Some(done) = step(result, &mut callee, &mut args, shell) {
+                let result = super::eval_block(&body, captured, block_tail, mooring, shell)
+                    .map_err(Control::from);
+                if let Some(done) = step(result, &mut callee, &mut args, mooring, shell) {
                     return done;
                 }
             }
@@ -160,6 +171,7 @@ fn step(
     result: Raw<Value>,
     callee: &mut Value,
     args: &mut Vec<Value>,
+    mooring: &Mooring,
     shell: &Shell,
 ) -> Option<Settled<Value>> {
     match result {
@@ -169,7 +181,7 @@ fn step(
             None
         }
         Err(Control::Tail(TailCall { callee: c, args: a })) => {
-            if let Err(b) = crate::process::check(shell) {
+            if let Err(b) = crate::process::check(mooring, shell) {
                 return Some(Err(b));
             }
             *callee = c;
@@ -196,7 +208,12 @@ mod tests {
         let mut shell = Shell::new(TerminalState::default());
         shell.mobile.control.recursion_limit = 8;
         shell.mobile.control.call_depth = 8;
-        let result = apply(Value::Unit, vec![Value::Unit], &mut shell);
+        let result = apply(
+            Value::Unit,
+            vec![Value::Unit],
+            &Mooring::adrift(),
+            &mut shell,
+        );
         match result {
             Err(Break::Error(e)) => {
                 assert!(
@@ -219,7 +236,7 @@ mod tests {
         shell.mobile.control.recursion_limit = 8;
         shell.mobile.control.call_depth = 7;
         // Value::Unit with no args returns Ok(Unit) without recursing.
-        let _ = apply(Value::Unit, vec![], &mut shell);
+        let _ = apply(Value::Unit, vec![], &Mooring::adrift(), &mut shell);
         assert_eq!(shell.mobile.control.call_depth, 7);
     }
 }

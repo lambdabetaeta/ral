@@ -21,7 +21,7 @@ use ral_core::typecheck::builtins::{
 };
 use ral_core::typecheck::{CompTy, PipeMode, PipeSpec, Row, Scheme, Ty, Unifier};
 use ral_core::types::as_list;
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, as_map, sig};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
@@ -67,7 +67,7 @@ fn split_at_cursor(text: &str, cursor: usize) -> (String, String) {
 // ─── State read ──────────────────────────────────────────────────────────────
 
 /// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
-pub fn builtin_ed_get(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_get(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-get")?;
     require_interactive("_ed-get", shell)?;
     shell.check_editor_read("get")?;
@@ -88,7 +88,7 @@ pub fn builtin_ed_get(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-text` → `Str` — current buffer text.
-pub fn builtin_ed_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_text(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-text")?;
     require_interactive("_ed-text", shell)?;
     shell.check_editor_read("text")?;
@@ -97,7 +97,7 @@ pub fn builtin_ed_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-cursor` → `Int` — current cursor offset (chars).
-pub fn builtin_ed_cursor(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_cursor(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-cursor")?;
     require_interactive("_ed-cursor", shell)?;
     shell.check_editor_read("cursor")?;
@@ -111,7 +111,7 @@ pub fn builtin_ed_cursor(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-keymap` → `Str` — current keymap name.
-pub fn builtin_ed_keymap(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_keymap(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-keymap")?;
     require_interactive("_ed-keymap", shell)?;
     shell.check_editor_read("keymap")?;
@@ -120,7 +120,7 @@ pub fn builtin_ed_keymap(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-lbuffer` → `Str` — text to the left of the cursor.
-pub fn builtin_ed_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_lbuffer(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-lbuffer")?;
     require_interactive("_ed-lbuffer", shell)?;
     shell.check_editor_read("lbuffer")?;
@@ -133,7 +133,7 @@ pub fn builtin_ed_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 
 /// `_ed-set [text?: Str, cursor?: Int]` — row-polymorphic partial write.
 /// Unknown fields are ignored.
-pub fn builtin_ed_set(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_set(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "_ed-set")?;
     require_interactive("_ed-set", shell)?;
     shell.check_editor_write("set")?;
@@ -166,7 +166,11 @@ pub fn builtin_ed_set(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-set-lbuffer <l>` — replace text left of cursor; right side preserved.
-pub fn builtin_ed_set_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_set_lbuffer(
+    args: &[Value],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 1, "_ed-set-lbuffer")?;
     require_interactive("_ed-set-lbuffer", shell)?;
     shell.check_editor_write("set-lbuffer")?;
@@ -180,7 +184,7 @@ pub fn builtin_ed_set_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Valu
 }
 
 /// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
-pub fn builtin_ed_insert(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_insert(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "_ed-insert")?;
     require_interactive("_ed-insert", shell)?;
     shell.check_editor_write("insert")?;
@@ -195,7 +199,7 @@ pub fn builtin_ed_insert(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-push` — save buffer to stack, clear.
-pub fn builtin_ed_push(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_push(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-push")?;
     require_interactive("_ed-push", shell)?;
     shell.check_editor_write("push")?;
@@ -208,7 +212,7 @@ pub fn builtin_ed_push(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 /// `_ed-accept` — mark buffer for immediate execution.
-pub fn builtin_ed_accept(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_accept(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-accept")?;
     require_interactive("_ed-accept", shell)?;
     shell.check_editor_write("accept")?;
@@ -254,7 +258,7 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// `_ed-tui`'s body in the foreground process group despite the captured
 /// stdout pipe — and the matching `end_terminal_loan` restores it;
 /// `in_terminal_loan` is the re-entrancy guard.
-pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "_ed-tui")?;
     require_interactive("_ed-tui", shell)?;
     shell.check_editor_tui()?;
@@ -275,7 +279,7 @@ pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     }
     let loan = shell.begin_terminal_loan();
     let (result, bytes) = ral_core::evaluator::with_capture(shell, |shell| {
-        ral_core::builtins::apply(&args[0], &[], shell)
+        ral_core::builtins::apply(&args[0], &[], mooring, shell)
     });
     shell.end_terminal_loan(loan);
     match result {
@@ -298,7 +302,7 @@ pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
 /// `_ed-history <prefix> <limit>` — prefix search over history; `limit=0` for unbounded.
-pub fn builtin_ed_history(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_history(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "_ed-history")?;
     require_interactive("_ed-history", shell)?;
     shell.check_editor_read("history")?;
@@ -367,7 +371,7 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
 }
 
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — tokenize buffer at cursor.
-pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_parse(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-parse")?;
     require_interactive("_ed-parse", shell)?;
     shell.check_editor_read("parse")?;
@@ -434,7 +438,7 @@ pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 // ─── Output channels ─────────────────────────────────────────────────────────
 
 /// `_ed-ghost <text>` — set ghost text (empty string clears).
-pub fn builtin_ed_ghost(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_ghost(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "_ed-ghost")?;
     require_interactive("_ed-ghost", shell)?;
     shell.check_editor_write("ghost")?;
@@ -455,7 +459,11 @@ pub fn builtin_ed_ghost(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 ///
 /// No `editor.write` check: this is a string-shaping operation, not a
 /// side effect on editor or system state.
-pub fn builtin_ed_hyperlink(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_hyperlink(
+    args: &[Value],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 2, "_ed-hyperlink")?;
     require_interactive("_ed-hyperlink", shell)?;
     let uri = args[0].to_string();
@@ -481,7 +489,11 @@ pub fn builtin_ed_hyperlink(args: &[Value], shell: &mut Shell) -> Settled<Value>
 /// active rustyline display.  This matches the `write_terminal_title`
 /// precedent.  IO errors are swallowed — a failed copy is recoverable
 /// and shouldn't tear down the plugin handler.
-pub fn builtin_ed_clipboard(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_clipboard(
+    args: &[Value],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 1, "_ed-clipboard")?;
     require_interactive("_ed-clipboard", shell)?;
     shell.check_editor_write("clipboard")?;
@@ -501,7 +513,11 @@ pub fn builtin_ed_clipboard(args: &[Value], shell: &mut Shell) -> Settled<Value>
 }
 
 /// `_ed-highlight <spans>` — set highlight spans (empty list clears).
-pub fn builtin_ed_highlight(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_highlight(
+    args: &[Value],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     check_arity(args, 1, "_ed-highlight")?;
     require_interactive("_ed-highlight", shell)?;
     shell.check_editor_write("highlight")?;
@@ -552,7 +568,7 @@ pub fn builtin_ed_highlight(args: &[Value], shell: &mut Shell) -> Settled<Value>
 /// `_ed-state <default> <updater>` — read-modify-write on the plugin's
 /// persistent cell.  `default` is used on first call; `updater` is invoked
 /// with the current value and its return becomes the new value.
-pub fn builtin_ed_state(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_state(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "_ed-state")?;
     require_interactive("_ed-state", shell)?;
     shell.check_editor_write("state")?;
@@ -566,7 +582,7 @@ pub fn builtin_ed_state(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             default.clone()
         }
     };
-    let new_val = ral_core::builtins::apply(updater, &[current], shell)?;
+    let new_val = ral_core::builtins::apply(updater, &[current], mooring, shell)?;
     let pc = ctx_mut(shell)?;
     pc.state_cell = Some(new_val.clone());
     pc.state_default_used = true;
@@ -878,7 +894,7 @@ mod tests {
             ("text".into(), Value::String("hello world".into())),
             ("cursor".into(), Value::Int(11)),
         ]);
-        builtin_ed_set(&[arg], &mut shell).unwrap();
+        builtin_ed_set(&[arg], &Mooring::adrift(), &mut shell).unwrap();
         let st = editor_state(&shell);
         assert_eq!(st.text, "hello world");
         assert_eq!(st.cursor, 11);
@@ -892,7 +908,7 @@ mod tests {
             ("text".into(), Value::String("abc".into())),
             ("cursor".into(), Value::Int(99)),
         ]);
-        builtin_ed_set(&[arg], &mut shell).unwrap();
+        builtin_ed_set(&[arg], &Mooring::adrift(), &mut shell).unwrap();
         assert_eq!(editor_state(&shell).cursor, 3);
     }
 
@@ -904,7 +920,7 @@ mod tests {
             ("text".into(), Value::String("new".into())),
             ("cursor".into(), Value::String("3".into())),
         ]);
-        assert!(builtin_ed_set(&[arg], &mut shell).is_err());
+        assert!(builtin_ed_set(&[arg], &Mooring::adrift(), &mut shell).is_err());
         let st = editor_state(&shell);
         assert_eq!(st.text, "old");
     }

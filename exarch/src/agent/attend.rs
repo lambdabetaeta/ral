@@ -841,6 +841,7 @@ mod tests {
             .body
             .call(
                 &[Value::Handle(entry.handle)],
+                &ral_core::types::Mooring::adrift(),
                 &mut session.seat.shell_mut().shell,
             )
             .expect("cancel must succeed");

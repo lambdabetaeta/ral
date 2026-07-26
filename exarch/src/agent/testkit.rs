@@ -20,7 +20,7 @@ use ral_core::Value;
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Settled};
+use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -136,10 +136,11 @@ pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOu
 /// same test binary never collides on name.
 pub(crate) fn builtin_test_clear_block_forever(
     _args: &[Value],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     loop {
-        ral_core::process::check(shell)?;
+        ral_core::process::check(mooring, shell)?;
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
@@ -163,11 +164,12 @@ pub(crate) static CLEAR_RELEASE: std::sync::atomic::AtomicBool =
 /// settling on it at the next poll after that.
 pub(crate) fn builtin_test_clear_block_until_released(
     _args: &[Value],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     loop {
         if CLEAR_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
-            ral_core::process::check(shell)?;
+            ral_core::process::check(mooring, shell)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }

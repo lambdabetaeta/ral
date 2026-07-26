@@ -238,7 +238,9 @@ mod tests {
             &ast,
             std::collections::HashSet::default(),
         ));
-        let prompt = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
+        let prompt =
+            ral_core::evaluator::evaluate(&comp, &ral_core::types::Mooring::adrift(), &mut shell)
+                .unwrap();
         assert!(
             matches!(prompt, Value::Lambda { .. } | Value::Block { .. }),
             "expected thunk"

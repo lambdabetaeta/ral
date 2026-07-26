@@ -18,13 +18,19 @@ use super::apply;
 use super::val::eval_val;
 use crate::ir::Val;
 use crate::syntax::tag::tag_row_label;
-use crate::types::{Raw, Shell, Tail, TailCall, Value};
+use crate::types::{Mooring, Raw, Shell, Tail, TailCall, Value};
 
 /// Evaluate `case scrutinee table`: force the matching handler thunk on
 /// the variant's payload (or `Unit` for nullary tags).
 ///
 /// The selected arm inherits the case's tail position.
-pub(crate) fn eval_case(scrutinee: &Val, table: &Val, tail: Tail, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn eval_case(
+    scrutinee: &Val,
+    table: &Val,
+    tail: Tail,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     let scrutinee_val = eval_val(scrutinee, shell)?;
     let (label, payload) = match scrutinee_val {
         Value::Variant { label, payload } => (label, payload),
@@ -79,5 +85,5 @@ pub(crate) fn eval_case(scrutinee: &Val, table: &Val, tail: Tail, shell: &mut Sh
         .into());
     }
 
-    apply(handler, vec![payload_val], shell).map_err(Into::into)
+    apply(handler, vec![payload_val], mooring, shell).map_err(Into::into)
 }

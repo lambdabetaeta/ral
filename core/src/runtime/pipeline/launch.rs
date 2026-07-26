@@ -20,7 +20,7 @@ use super::route::{ByteIn, ByteOut, FinalValue, StageRoute, open_stage_routes};
 use super::stage::{HelperStageHandle, launch_helper_stage};
 use crate::child_eval::pack_request;
 use crate::io::Sink;
-use crate::types::{Break, Settled, Shell};
+use crate::types::{Break, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -145,11 +145,16 @@ pub(super) fn wire_stage_stdio(
 /// capability layer is active, and assemble a [`command::RunningChild`]
 /// with the parent-side pumps attached.  One funnel for both external
 /// and ral stages so the post-spawn boilerplate cannot drift.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the single funnel for post-spawn assembly; splitting it would scatter the same parameters"
+)]
 pub(super) fn spawn_into_group(
     group: &mut PipelineGroup,
     cmd: &mut crate::process::Launch,
     name: String,
     plumbing: command::ExternalPlumbing,
+    mooring: &Mooring,
     shell: &Shell,
     park_on_stop: bool,
     spawn_error: impl FnOnce(std::io::Error) -> Break,
@@ -171,13 +176,14 @@ pub(super) fn spawn_into_group(
         // Pipeline stages borrow the group; `PipelineGroup::Drop`
         // owns the release.
         command::GroupOwner::BorrowedByPipeline,
-        shell.run.cancel.as_scope().clone(),
+        mooring.cancel.as_scope().clone(),
         jail,
     ))
 }
 
 /// Per-stage launch context borrowed by [`spawn_stage`].
 struct LaunchCx<'a> {
+    mooring: &'a Mooring,
     shell: &'a mut Shell,
     group: &'a mut PipelineGroup,
     park_on_stop: bool,
@@ -210,8 +216,14 @@ fn spawn_stage(
 ) -> Settled<SpawnedStage> {
     let request = match &spec.launch {
         StageLaunch::Direct(ext) => {
-            let handle =
-                launch_external_stage_direct(ext, route, cx.shell, cx.group, cx.park_on_stop)?;
+            let handle = launch_external_stage_direct(
+                ext,
+                route,
+                cx.mooring,
+                cx.shell,
+                cx.group,
+                cx.park_on_stop,
+            )?;
             return Ok(SpawnedStage {
                 handle: StageHandle::External(handle),
                 gate: None,
@@ -232,8 +244,15 @@ fn spawn_stage(
             )?
         }
     };
-    let (handle, deferred) =
-        launch_helper_stage(request, spec, route, cx.shell, cx.group, cx.park_on_stop)?;
+    let (handle, deferred) = launch_helper_stage(
+        request,
+        spec,
+        route,
+        cx.mooring,
+        cx.shell,
+        cx.group,
+        cx.park_on_stop,
+    )?;
     Ok(SpawnedStage {
         handle: StageHandle::Helper(handle),
         gate: Some(deferred),
@@ -317,6 +336,7 @@ impl PipelineBuild {
         &mut self,
         stage: &Arc<crate::ir::Comp>,
         spec: &StageSpec,
+        mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<()> {
         let route = self
@@ -325,6 +345,7 @@ impl PipelineBuild {
             .pop_front()
             .expect("one route per stage");
         let cx = LaunchCx {
+            mooring,
             shell,
             group: &mut self.resources.group,
             park_on_stop: self.park_on_stop,
@@ -385,6 +406,7 @@ impl PipelineBuild {
 fn launch_external_stage_direct(
     ext: &ExternalStage,
     route: StageRoute,
+    mooring: &Mooring,
     shell: &mut Shell,
     group: &mut PipelineGroup,
     park_on_stop: bool,
@@ -405,6 +427,7 @@ fn launch_external_stage_direct(
         &mut cmd,
         rc.shown.clone(),
         plumbing,
+        mooring,
         shell,
         park_on_stop,
         |e| command::spawn_error(&rc.shown, &e),
@@ -424,11 +447,12 @@ fn spawn_all_stages(
     build: &mut PipelineBuild,
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
     for (ix, stage) in stages.iter().enumerate() {
-        crate::process::check(shell)?;
-        build.step(stage, &plan.specs[ix], shell)?;
+        crate::process::check(mooring, shell)?;
+        build.step(stage, &plan.specs[ix], mooring, shell)?;
     }
     Ok(())
 }
@@ -443,11 +467,12 @@ fn spawn_all_stages(
 pub(super) fn launch_pipeline(
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Result<(PipelineGroup, RunningPipeline), Break> {
     let routes = open_stage_routes(plan)?.into();
     let mut build = PipelineBuild::new(plan, routes, shell)?;
-    match spawn_all_stages(&mut build, stages, plan, shell) {
+    match spawn_all_stages(&mut build, stages, plan, mooring, shell) {
         Ok(()) => build.finish(shell),
         Err(e) => {
             build.abort();

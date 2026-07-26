@@ -8,6 +8,7 @@
 //! REPL and exarch actually need — while [`Shell::mobile`](super::Shell) stays
 //! the public embedding seam.
 
+use super::Mooring;
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
@@ -16,7 +17,7 @@ use super::repl::ReplScratch;
 use super::workers::ReapCause;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
-use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
+use crate::process::{DurableRoot, TerminalLease};
 use crate::source::SourceDb;
 use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, WorkerId};
 use std::io::Write;
@@ -42,10 +43,10 @@ impl Shell {
     }
 
     /// The session's durable cancel root.  A run door mints a run's
-    /// foreground scope from it, under the frame the run displaces
-    /// (`self.durable_root().foreground(&self.run.cancel)`); the typed
-    /// relation keeps that scope rooted here.  Crate-private: frame
-    /// assembly lives behind the run doors.
+    /// foreground scope from it, under the session anchor or under the
+    /// mooring of the run it nests in; the typed relation keeps that scope
+    /// rooted here.  Crate-private: frame assembly lives behind the run
+    /// doors.
     pub(crate) fn durable_root(&self) -> &DurableRoot {
         &self.session.root
     }
@@ -59,12 +60,6 @@ impl Shell {
     /// *only* way to stop a running eval.
     pub fn cancel_handle(&self) -> DurableRoot {
         self.session.root.clone()
-    }
-
-    /// The current run's foreground scope.  A host clones a deadline child
-    /// of it, or cancels it to interrupt the foreground work.
-    pub fn foreground(&self) -> &ForegroundScope {
-        &self.run.cancel
     }
 
     /// Install the startup-loaded exit-code hint table.
@@ -293,7 +288,7 @@ impl Shell {
     /// exarch host decodes back (`card::value_to_notice`); `cause` travels
     /// as the same lowercase tag exarch's transcript writer already used, so
     /// the wire word and the forensic-record word are one word.
-    pub(crate) fn emit_ready_boundary_notices(&mut self) {
+    pub(crate) fn emit_ready_boundary_notices(&mut self, mooring: &Mooring) {
         // The retention sweep runs before the sink guard: expiry is a fact
         // regardless of anyone listening, and its notice waits in the
         // ledger for the next sinked run either way.
@@ -310,7 +305,7 @@ impl Shell {
             );
             let _ = self.run.io.stderr.write_all(line.as_bytes());
         }
-        if self.run.surface.is_none() {
+        if mooring.surface.is_none() {
             return;
         }
         for notice in self.take_worker_reap_notices() {
@@ -319,7 +314,7 @@ impl Shell {
                 ReapCause::Backstop => "backstop",
                 ReapCause::Retention => "retention",
             };
-            self.surface(&Value::Variant {
+            mooring.surface(&Value::Variant {
                 label: "notice".into(),
                 payload: Some(Box::new(Value::map(vec![
                     (
@@ -336,7 +331,7 @@ impl Shell {
         }
         let pruned = self.prune_idle_bindings();
         if !pruned.is_empty() {
-            self.surface(&Value::Variant {
+            mooring.surface(&Value::Variant {
                 label: "notice".into(),
                 payload: Some(Box::new(Value::map(vec![
                     (

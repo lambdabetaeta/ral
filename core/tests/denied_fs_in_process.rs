@@ -29,6 +29,7 @@
 mod common;
 
 use ral_core::builtins;
+use ral_core::types::Mooring;
 use ral_core::{
     Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
     typecheck,
@@ -61,7 +62,7 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
     };
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     builtins::register(&mut shell, common::prelude_comp());
-    evaluate(&comp, &mut shell)
+    evaluate(&comp, &Mooring::adrift(), &mut shell)
 }
 
 fn must_succeed(input: &str) -> Value {

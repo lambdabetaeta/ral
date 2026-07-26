@@ -6,7 +6,9 @@
 
 use ral_core::diagnostic;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, HandleState, Resident, WorkerEntry};
+use ral_core::types::{
+    Break, BuiltinBody, BuiltinEntry, HandleState, Mooring, Resident, WorkerEntry,
+};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -132,7 +134,7 @@ fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         doc: "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
               detached worker handles (spawn/watch/&) marked [wN], done once settled until \
               observed.",
-        body: BuiltinBody::Captured(Arc::new(move |_args, shell| {
+        body: BuiltinBody::Captured(Arc::new(move |_args, _mooring, shell| {
             let jt = jobs.lock().unwrap();
             let workers = shell.workers();
             for line in render_jobs(&jt, &workers) {
@@ -151,7 +153,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
         doc: "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
-        body: BuiltinBody::Captured(Arc::new(move |args, shell| {
+        body: BuiltinBody::Captured(Arc::new(move |args, _mooring, shell| {
             let (id, pgid) = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -186,7 +188,7 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
         doc: "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
               pgid-only: a worker handle already runs detached — see `jobs`.",
-        body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
+        body: BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let resumed = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -211,7 +213,7 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
         doc: "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
-        body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
+        body: BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let removed = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -242,18 +244,20 @@ fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
         name: Cow::Borrowed("load-plugin"),
         type_rule: BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
         doc: "load-plugin <name>  — load a REPL plugin by name or path.",
-        body: BuiltinBody::Captured(Arc::new(move |args, shell: &mut Shell| {
-            let Some(name) = plugin_name_arg(args) else {
-                diagnostic::cmd_error("load-plugin", "missing plugin name");
-                return Ok(Value::Unit);
-            };
-            if let Err(Break::Error(e)) =
-                super::plugin::load::load_plugin(&name, None, shell, &runtime)
-            {
-                diagnostic::cmd_error("load-plugin", &e.message);
-            }
-            Ok(Value::Unit)
-        })),
+        body: BuiltinBody::Captured(Arc::new(
+            move |args, mooring: &Mooring, shell: &mut Shell| {
+                let Some(name) = plugin_name_arg(args) else {
+                    diagnostic::cmd_error("load-plugin", "missing plugin name");
+                    return Ok(Value::Unit);
+                };
+                if let Err(Break::Error(e)) =
+                    super::plugin::load::load_plugin(&name, None, mooring, shell, &runtime)
+                {
+                    diagnostic::cmd_error("load-plugin", &e.message);
+                }
+                Ok(Value::Unit)
+            },
+        )),
     }
 }
 
@@ -264,16 +268,18 @@ fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
         name: Cow::Borrowed("unload-plugin"),
         type_rule: BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
         doc: "unload-plugin <name>  — unload a previously loaded REPL plugin.",
-        body: BuiltinBody::Captured(Arc::new(move |args, shell: &mut Shell| {
-            let Some(name) = plugin_name_arg(args) else {
-                diagnostic::cmd_error("unload-plugin", "missing plugin name");
-                return Ok(Value::Unit);
-            };
-            if let Err(e) = super::plugin::load::unload_plugin(&name, shell, &runtime) {
-                diagnostic::cmd_error("unload-plugin", &e.message);
-            }
-            Ok(Value::Unit)
-        })),
+        body: BuiltinBody::Captured(Arc::new(
+            move |args, _mooring: &Mooring, shell: &mut Shell| {
+                let Some(name) = plugin_name_arg(args) else {
+                    diagnostic::cmd_error("unload-plugin", "missing plugin name");
+                    return Ok(Value::Unit);
+                };
+                if let Err(e) = super::plugin::load::unload_plugin(&name, shell, &runtime) {
+                    diagnostic::cmd_error("unload-plugin", &e.message);
+                }
+                Ok(Value::Unit)
+            },
+        )),
     }
 }
 
@@ -425,7 +431,7 @@ mod tests {
             &ast,
             std::collections::HashSet::default(),
         ));
-        let thunk = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
+        let thunk = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
 
         let err = shell
             .install_alias("jobs".to_string(), thunk)

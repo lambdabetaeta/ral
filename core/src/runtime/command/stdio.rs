@@ -4,7 +4,7 @@
 //! plumbing for `> file` is delegated to [`super::redirect::open_file`].
 
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Error, Settled, Shell};
+use crate::types::{Break, Error, Mooring, Settled, Shell};
 
 use super::io_event;
 use super::io_event::WriteOutcome;
@@ -211,6 +211,7 @@ pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
 pub(super) fn wire_stdout_file(
     command: &mut crate::process::Launch,
     plan: &RedirectPlan,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<(Option<AtomicCommit>, Option<crate::process::StdioSpec>)> {
     let Some((path, mode)) = &plan.stdout_file else {
@@ -218,7 +219,7 @@ pub(super) fn wire_stdout_file(
     };
     let (file, commit) = open_file(path, *mode, shell)?;
     if commit.is_none() {
-        shell.emit_io(&io_event::write(
+        mooring.emit_io(&io_event::write(
             path,
             *mode,
             WriteOutcome::Committed,
@@ -269,6 +270,7 @@ pub(super) fn wire_stderr(
     plan: &RedirectPlan,
     inherit_tty: bool,
     stdout_file_dup: Option<crate::process::StdioSpec>,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<bool> {
     match &plan.stderr_route {
@@ -325,7 +327,7 @@ pub(super) fn wire_stderr(
             // to streaming), so the write door completes the moment the
             // open succeeds — same reasoning as the non-atomic stdout case
             // in `wire_stdout_file`.
-            shell.emit_io(&io_event::write(
+            mooring.emit_io(&io_event::write(
                 path,
                 effective_mode,
                 WriteOutcome::Committed,

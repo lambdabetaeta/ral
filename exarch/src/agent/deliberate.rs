@@ -581,7 +581,7 @@ mod tests {
     use ral_core::Value;
     use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
-    use ral_core::types::{BuiltinBody, BuiltinEntry, Settled};
+    use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
 
     /// A sub-agent returns through `reply`: its markdown payload is the value
@@ -796,7 +796,11 @@ mod tests {
         clippy::unnecessary_wraps,
         reason = "fixed BuiltinBody::Static signature"
     )]
-    fn builtin_t2_cancel_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
+    fn builtin_t2_cancel_now(
+        _args: &[Value],
+        _mooring: &Mooring,
+        _shell: &mut Shell,
+    ) -> Settled<Value> {
         T2_CANCEL_TOKEN.with(|cell| {
             if let Some(token) = cell.borrow().as_ref() {
                 token.cancel(ral_core::process::CancelCause::Explicit);

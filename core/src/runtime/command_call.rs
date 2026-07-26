@@ -7,7 +7,8 @@
 
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
-    Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, Map, Raw, Settled, Shell, Value,
+    Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, Map, Mooring, Raw, Settled,
+    Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -151,6 +152,7 @@ pub(crate) fn run_call(
     head: &CommandWord,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
@@ -158,14 +160,16 @@ pub(crate) fn run_call(
     }
 
     match classify_command(head, shell)? {
-        Resolution::Env(value) => with_redirects(redirects, shell, |shell| {
-            crate::evaluator::apply(value, args.to_vec(), shell).map_err(Into::into)
+        Resolution::Env(value) => with_redirects(redirects, mooring, shell, |shell| {
+            crate::evaluator::apply(value, args.to_vec(), mooring, shell).map_err(Into::into)
         }),
-        Resolution::Builtin(entry) => run_builtin(&entry, args, redirects, shell),
-        Resolution::Handler { entry, depth } => with_redirects(redirects, shell, |shell| {
-            run_handler(&entry, depth, args, shell).map_err(Into::into)
-        }),
-        Resolution::External(id) => run_external(id, args, redirects, shell),
+        Resolution::Builtin(entry) => run_builtin(&entry, args, redirects, mooring, shell),
+        Resolution::Handler { entry, depth } => {
+            with_redirects(redirects, mooring, shell, |shell| {
+                run_handler(&entry, depth, args, mooring, shell).map_err(Into::into)
+            })
+        }
+        Resolution::External(id) => run_external(id, args, redirects, mooring, shell),
     }
 }
 
@@ -174,11 +178,12 @@ fn run_builtin(
     entry: &BuiltinEntry,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     let body = entry.body.clone();
-    run_host_thunk(&entry.name, args, redirects, shell, move |a, s| {
-        body.call(a, s)
+    run_host_thunk(&entry.name, args, redirects, mooring, shell, move |a, s| {
+        body.call(a, mooring, s)
     })
 }
 
@@ -221,6 +226,7 @@ pub(crate) fn run_handler(
     entry: &HandlerEntry,
     depth: usize,
     args: &[Value],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     let thunk = entry.thunk.clone();
@@ -232,7 +238,7 @@ pub(crate) fn run_handler(
         HandlerArity::Unary => vec![Value::list(args.to_vec())],
     };
     let masked = MaskedHandler::strip(shell, depth);
-    let result = crate::evaluator::apply(thunk, call_args, masked.shell);
+    let result = crate::evaluator::apply(thunk, call_args, mooring, masked.shell);
     drop(masked);
     result
 }
@@ -241,11 +247,14 @@ fn run_host_thunk(
     name: &str,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
     f: impl FnOnce(&[Value], &mut Shell) -> Settled<Value>,
 ) -> Raw<Value> {
     audit::frame_call(name, args, shell, |shell| {
-        with_redirects(redirects, shell, |shell| f(args, shell).map_err(Into::into))
+        with_redirects(redirects, mooring, shell, |shell| {
+            f(args, shell).map_err(Into::into)
+        })
     })
 }
 
@@ -254,12 +263,13 @@ fn run_external(
     id: CommandIdentity,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let stdin_guard = command::install_stdin_redirect(redirects, shell)?;
+    let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
     let shown = id.shown.clone();
     let result = audit::frame_call(&shown, args, shell, move |shell| {
-        command::run(&id, args, redirects, shell)
+        command::run(&id, args, redirects, mooring, shell)
     });
     stdin_guard.restore(shell);
     result

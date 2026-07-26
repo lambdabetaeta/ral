@@ -226,7 +226,7 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 
 /// Check whether the current evaluation should unwind.
 ///
-/// Fires when the shell's [`CancelScope`](crate::process::CancelScope) (or any
+/// Fires when the mooring's [`CancelScope`](crate::process::CancelScope) (or any
 /// of its ancestors) has been cancelled: a signal translated by the platform
 /// handler (SIGINT → foreground `Interrupt`, SIGTERM / SIGHUP → root
 /// `Terminate`), a run deadline ([`reaper`](crate::process::reaper)), an
@@ -238,12 +238,19 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 /// They never carry a tail call, hence the `Break` return type rather
 /// than the richer `Control`.
 ///
+/// The scope is the mooring's; the location the error is stamped with is the
+/// shell's live cursor — the two halves of the frame, read from where each
+/// now lives.
+///
 /// # Errors
-/// Returns `Err` if the shell's cancel scope (or any ancestor) is
+/// Returns `Err` if the mooring's cancel scope (or any ancestor) is
 /// cancelled, carrying the strongest cause's message and exit code; `Ok(())`
 /// while the chain is uncancelled.
-pub fn check(shell: &crate::types::Shell) -> Result<(), crate::types::Break> {
-    if let Some(cause) = shell.run.cancel.cause() {
+pub fn check(
+    mooring: &crate::types::Mooring,
+    shell: &crate::types::Shell,
+) -> Result<(), crate::types::Break> {
+    if let Some(cause) = mooring.cancel.cause() {
         return Err(crate::types::Break::Error(
             crate::types::Error::new(cause.message(), cause.exit_code())
                 .at_loc(shell.run.loc.source_loc(0)),

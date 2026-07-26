@@ -70,6 +70,7 @@ pub fn for_invocation(
     if let Some(path) = extend_base {
         let abs = absolute_in(cwd, path);
         caps = caps.join(load_capabilities_ral(
+            &ral_core::types::Mooring::adrift(),
             &mut load_shell,
             &abs,
             "--extend-base",
@@ -80,6 +81,7 @@ pub fn for_invocation(
     let restricts: Vec<PathBuf> = restrict_files.iter().map(|p| absolute_in(cwd, p)).collect();
     for path in &restricts {
         caps = caps.meet(load_capabilities_ral(
+            &ral_core::types::Mooring::adrift(),
             &mut load_shell,
             path,
             "--restrict",

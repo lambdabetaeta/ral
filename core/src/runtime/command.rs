@@ -33,7 +33,7 @@
 //! the same `build_command` / `spawn` primitives directly through
 //! [`super::pipeline::run_pipeline`].
 
-use crate::types::{Break, Error, Raw, Shell, Value};
+use crate::types::{Break, Error, Mooring, Raw, Shell, Value};
 
 mod child;
 #[cfg(unix)]
@@ -78,6 +78,7 @@ pub(crate) fn run(
     id: &CommandIdentity,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     let rc = vet(id, args, shell)?;
@@ -101,7 +102,7 @@ pub(crate) fn run(
         && redirects.is_empty()
         && uutils::can_run_uutils_in_process(shell)
     {
-        return uutils::run_uutils_in_process(tool, &rc.args, shell)
+        return uutils::run_uutils_in_process(tool, &rc.args, mooring, shell)
             .map_err(crate::types::Control::from);
     }
 
@@ -109,7 +110,8 @@ pub(crate) fn run(
 
     let plan = classify_redirects(redirects)?;
     command.stdin(wire_stdin(shell).into_stdio());
-    let (mut atomic_commit, stdout_file_dup) = wire_stdout_file(&mut command, &plan, shell)?;
+    let (mut atomic_commit, stdout_file_dup) =
+        wire_stdout_file(&mut command, &plan, mooring, shell)?;
     let inherit_tty = inherit_tty(&plan, shell);
 
     // Wire stdout before stderr: on Windows, `wire_stderr`'s `2>&1`
@@ -129,7 +131,14 @@ pub(crate) fn run(
     };
     let needs_pump = stdout_plan.is_some();
 
-    let stderr_piped = wire_stderr(&mut command, &plan, inherit_tty, stdout_file_dup, shell)?;
+    let stderr_piped = wire_stderr(
+        &mut command,
+        &plan,
+        inherit_tty,
+        stdout_file_dup,
+        mooring,
+        shell,
+    )?;
 
     // Stderr pump destination: clone `shell.run.io.stderr` (which
     // may itself be a Tee under dispatch-level audit capture) when
@@ -168,7 +177,7 @@ pub(crate) fn run(
                 Break::Error(err) => err.exit_code(),
                 Break::Escape(_) => 127,
             };
-            shell.emit_io(&io_event::exec(&cmd_name, &rc.args, status));
+            mooring.emit_io(&io_event::exec(&cmd_name, &rc.args, status));
             return Err(failure.into());
         }
     };
@@ -217,7 +226,7 @@ pub(crate) fn run(
         },
         park_on_stop,
         group_owner,
-        shell.run.cancel.as_scope().clone(),
+        mooring.cancel.as_scope().clone(),
         jail,
     );
 
@@ -243,7 +252,7 @@ pub(crate) fn run(
             let preview = commit.temp_preview();
             match commit.commit() {
                 Ok(()) => {
-                    shell.emit_io(&io_event::write(
+                    mooring.emit_io(&io_event::write(
                         path,
                         *mode,
                         io_event::WriteOutcome::Committed,
@@ -253,7 +262,7 @@ pub(crate) fn run(
                     Ok(())
                 }
                 Err(e) => {
-                    shell.emit_io(&io_event::write(
+                    mooring.emit_io(&io_event::write(
                         path,
                         *mode,
                         io_event::WriteOutcome::Failed,
@@ -266,7 +275,7 @@ pub(crate) fn run(
         } else {
             // The command did not succeed: the write door did not
             // complete. `commit` drops here, discarding the staged temp.
-            shell.emit_io(&io_event::write(
+            mooring.emit_io(&io_event::write(
                 path,
                 *mode,
                 io_event::WriteOutcome::Aborted,
@@ -290,7 +299,7 @@ pub(crate) fn run(
     // bundled fast path returned long before the spawn above, so this door
     // covers only the Host and spawned `BundledTool` images.  `code` is the
     // user-visible exit status; outcome is "ok" iff it is zero.
-    shell.emit_io(&io_event::exec(&cmd_name, &rc.args, code));
+    mooring.emit_io(&io_event::exec(&cmd_name, &rc.args, code));
     commit_result?;
     // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
     // pipeline helper subprocess) forgives SIGPIPE — the reader ended the

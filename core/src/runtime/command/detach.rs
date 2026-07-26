@@ -20,7 +20,7 @@
 use crate::ir::CommandName;
 use crate::path::tilde::TildePath;
 use crate::process::StdioSpec;
-use crate::types::{Settled, Shell, Value, sig};
+use crate::types::{Mooring, Settled, Shell, Value, sig};
 
 use super::identity::CommandIdentity;
 use super::io_event;
@@ -41,6 +41,7 @@ pub(crate) fn detach(
     desc: &str,
     head: &Value,
     argv: &[Value],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     let spelled = head.to_string();
@@ -61,7 +62,7 @@ pub(crate) fn detach(
         // `lookup_handler` answers for both passes of the handler stack, so a
         // catch-all frame intercepts here exactly as a per-name one does.
         if let Some((entry, depth)) = shell.lookup_handler(bare) {
-            return crate::runtime::command_call::run_handler(&entry, depth, argv, shell);
+            return crate::runtime::command_call::run_handler(&entry, depth, argv, mooring, shell);
         }
     }
     // Nothing is bypassed: existence (127/126), argv shape, and the grant's
@@ -97,7 +98,7 @@ pub(crate) fn detach(
         .spawn_detached()
         .map_err(|e| sig(format!("detach: cannot launch '{}': {e}", plan.shown)))?;
 
-    shell.emit_io(&io_event::exec(&plan.shown, &plan.args, 0));
+    mooring.emit_io(&io_event::exec(&plan.shown, &plan.args, 0));
     shell.mobile.control.last_status = 0;
     Ok(Value::map(vec![
         ("pid".into(), Value::Int(i64::from(pid))),

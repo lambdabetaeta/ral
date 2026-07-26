@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use crate::types::{Break, Capabilities, Settled, Shell, sig};
+use crate::types::{Break, Capabilities, Mooring, Settled, Shell, sig};
 
 /// Evaluate `source` as a `.ral` script and walk its terminal value
 /// into a frozen [`Capabilities`], resolving sigils against `ctx`.
@@ -35,12 +35,13 @@ use crate::types::{Break, Capabilities, Settled, Shell, sig};
 /// a sigil that fails to freeze). A propagated escape (`exit`, a stopped
 /// child) passes through unchanged.
 pub fn load_capabilities_from_str(
+    mooring: &Mooring,
     shell: &mut Shell,
     source: &str,
     virtual_path: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Settled<Capabilities> {
-    let value = crate::builtins::modules::evaluate_source(shell, source, virtual_path)
+    let value = crate::builtins::modules::evaluate_source(mooring, shell, source, virtual_path)
         .map_err(|e| wrap(virtual_path, e))?;
     let prefix = format!("capability file {virtual_path}");
     crate::capability::decode_capability_map(&value, &prefix, ctx)
@@ -57,6 +58,7 @@ pub fn load_capabilities_from_str(
     reason = "[io-door:silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
 )]
 pub fn load_capabilities_from_path(
+    mooring: &Mooring,
     shell: &mut Shell,
     path: &Path,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
@@ -75,7 +77,7 @@ pub fn load_capabilities_from_path(
         .canonicalise_strict()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or(display);
-    load_capabilities_from_str(shell, &source, &abs, ctx)
+    load_capabilities_from_str(mooring, shell, &source, &abs, ctx)
 }
 
 /// Load, `meet`-compose, and install a session-wide capability ceiling.
@@ -99,7 +101,11 @@ pub fn load_capabilities_from_path(
 /// Returns `Err` at the first profile that fails to load — a missing file,
 /// or a decode/freeze error (an `xdg:` path escaping `$HOME`) — or forwards
 /// an escape raised while a profile evaluates.
-pub fn apply_session_profiles(shell: &mut Shell, paths: &[std::path::PathBuf]) -> Settled<()> {
+pub fn apply_session_profiles(
+    mooring: &Mooring,
+    shell: &mut Shell,
+    paths: &[std::path::PathBuf],
+) -> Settled<()> {
     if paths.is_empty() {
         return Ok(());
     }
@@ -111,7 +117,7 @@ pub fn apply_session_profiles(shell: &mut Shell, paths: &[std::path::PathBuf]) -
     };
     let mut composed = Capabilities::default();
     for path in paths {
-        composed = composed.meet(load_capabilities_from_path(shell, path, &ctx)?);
+        composed = composed.meet(load_capabilities_from_path(mooring, shell, path, &ctx)?);
     }
     shell.push_session_capabilities(composed);
     Ok(())
@@ -148,6 +154,7 @@ mod tests {
     fn loads_minimal_exec_only_profile() {
         let mut shell = shell();
         let caps = load_capabilities_from_str(
+            &Mooring::adrift(),
             &mut shell,
             "return [exec: [ls: 'allow']]",
             "<test:minimal>",
@@ -169,6 +176,7 @@ mod tests {
     fn audit_flag_propagates_through_loader() {
         let mut shell = shell();
         let caps = load_capabilities_from_str(
+            &Mooring::adrift(),
             &mut shell,
             "return [audit: true, net: false]",
             "<test:audit>",
@@ -183,6 +191,7 @@ mod tests {
     fn deny_string_produces_sticky_deny_policy() {
         let mut shell = shell();
         let caps = load_capabilities_from_str(
+            &Mooring::adrift(),
             &mut shell,
             "return [exec: [bash: 'deny']]",
             "<test:deny>",
@@ -200,8 +209,14 @@ mod tests {
     #[test]
     fn non_map_return_value_errors_with_file_path() {
         let mut shell = shell();
-        let err = load_capabilities_from_str(&mut shell, "return 42", "<test:nonmap>", &ctx())
-            .unwrap_err();
+        let err = load_capabilities_from_str(
+            &Mooring::adrift(),
+            &mut shell,
+            "return 42",
+            "<test:nonmap>",
+            &ctx(),
+        )
+        .unwrap_err();
         let msg = match err {
             Break::Error(e) => e.message,
             other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
@@ -216,6 +231,7 @@ mod tests {
     fn unknown_top_level_key_errors() {
         let mut shell = shell();
         let err = load_capabilities_from_str(
+            &Mooring::adrift(),
             &mut shell,
             "return [fss: [read: ['/tmp']]]",
             "<test:typo>",
@@ -234,8 +250,14 @@ mod tests {
     #[test]
     fn exit_in_profile_propagates_as_escape() {
         let mut shell = shell();
-        let err =
-            load_capabilities_from_str(&mut shell, "exit 3", "<test:exit>", &ctx()).unwrap_err();
+        let err = load_capabilities_from_str(
+            &Mooring::adrift(),
+            &mut shell,
+            "exit 3",
+            "<test:exit>",
+            &ctx(),
+        )
+        .unwrap_err();
         match err {
             Break::Escape(crate::types::Escape::Exit(3)) => {}
             other => panic!("expected Escape::Exit(3), got {other:?}"),

@@ -29,7 +29,7 @@ mod route;
 mod stage;
 
 use crate::ir::Comp;
-use crate::types::{Error, Raw, Settled, Shell, Tail, Value};
+use crate::types::{Error, Mooring, Raw, Settled, Shell, Tail, Value};
 use std::sync::Arc;
 
 use launch::launch_pipeline;
@@ -51,6 +51,7 @@ pub(crate) fn run_pipeline(
     stages: &[Arc<Comp>],
     wires: &[crate::mode::Wire],
     tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     // A SIGINT delivered before the first signal-checked seam (a
@@ -59,10 +60,10 @@ pub(crate) fn run_pipeline(
     // but RELAY_PGIDS is empty, so the pipeline launches anyway and
     // collect blocks on a long-running consumer that never received
     // the signal.  Bail here instead.
-    crate::process::check(shell)?;
+    crate::process::check(mooring, shell)?;
     let plan = resolve_pipeline(stages, wires, shell)?;
     if plan.kind == PipelineKind::PureValue {
-        return run_value_fold(stages, tail, shell);
+        return run_value_fold(stages, tail, mooring, shell);
     }
 
     // Wall-window start for the sandbox-denial reader, anchored before
@@ -79,7 +80,7 @@ pub(crate) fn run_pipeline(
     // Earlier SIGINTs only cancel the run's foreground scope, which
     // the per-stage `signal::check` inside `launch_pipeline` observes
     // to abort promptly.
-    let (_group, running) = launch_pipeline(stages, &plan, shell)?;
+    let (_group, running) = launch_pipeline(stages, &plan, mooring, shell)?;
 
     // The last value-typed helper carries its own value back inside
     // its `ChildEvalResponse` frame; collect recovers the value after waiting
@@ -138,14 +139,19 @@ fn augment_stage_failure(err: Error, shell: &Shell, started: std::time::Instant)
 /// ([`Tail::No`]): its value must cross the value edge into the next
 /// stage, so its tail call must not escape as a [`TailCall`] that
 /// discards every downstream stage.
-fn run_value_fold(stages: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
+fn run_value_fold(
+    stages: &[Arc<Comp>],
+    tail: Tail,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
     let mut acc: Option<Value> = None;
     let last = stages.len() - 1;
     for (i, stage) in stages.iter().enumerate() {
         let stage_tail = if i == last { tail } else { Tail::No };
-        let value = crate::evaluator::call::invoke(stage, acc.take(), stage_tail, shell)?;
+        let value = crate::evaluator::call::invoke(stage, acc.take(), stage_tail, mooring, shell)?;
         let value = if i < last {
-            force_pipe_value(value, shell)?
+            force_pipe_value(value, mooring, shell)?
         } else {
             value
         };
@@ -165,12 +171,16 @@ fn run_value_fold(stages: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Va
 /// process-staged stage's re-exec child
 /// ([`run_child_eval`](crate::child_eval::run_child_eval)) call it, so the
 /// two cannot drift.
-pub(crate) fn force_pipe_value(value: Value, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn force_pipe_value(
+    value: Value,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     match value {
         // The forced producer's value crosses the value edge into the
         // next stage — a non-trivial continuation, so [`Tail::No`].
         Value::Block { body, captured } => {
-            crate::evaluator::eval_block(&body, &captured, Tail::No, shell)
+            crate::evaluator::eval_block(&body, &captured, Tail::No, mooring, shell)
         }
         other => Ok(other),
     }

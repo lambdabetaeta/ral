@@ -45,7 +45,7 @@
 use crate::provider::CustomProvider;
 use genai::adapter::AdapterKind;
 use ral_core::Shell;
-use ral_core::types::{Break, Capabilities, Value};
+use ral_core::types::{Break, Capabilities, Mooring, Value};
 
 /// The config file name under `$XDG_CONFIG_HOME/exarch/`.
 const CONFIG_FILE: &str = "config.ral";
@@ -145,9 +145,12 @@ pub(crate) fn evaluate_no_authority(
     display: &str,
     label: &str,
 ) -> Result<Value, String> {
+    // No run is in hand here — a throwaway shell computing a value — so the
+    // evaluation is moored adrift: no surface, no desk, no nursery.
+    let mooring = Mooring::adrift();
     shell
         .with_capabilities(Capabilities::deny_all(), |sh| {
-            ral_core::builtins::modules::evaluate_source(sh, source, display)
+            ral_core::builtins::modules::evaluate_source(&mooring, sh, source, display)
         })
         .map_err(|e| match e {
             Break::Error(err) => format!("{label} {display}: {}", err.message),

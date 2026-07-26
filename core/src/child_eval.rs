@@ -23,7 +23,7 @@ use crate::source::FileId;
 use crate::subprocess::{WireMobile, reexec_child_shell};
 use crate::types::{
     Break, CapturePolicy, Env, Error, Escape, ExecNode, ExecNodeKind, LocationCursor, Mobile,
-    Settled, Shell, Status, Tail, Value,
+    Mooring, Settled, Shell, Status, Tail, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -314,7 +314,7 @@ fn eval_request(
     }
     // The stage child has no surface sink to replay to, but the body may
     // still call `surface`; the no-op `()` sink discards those calls.
-    shell.run.surface = Some(Arc::new(()));
+    let mooring = Mooring::for_stage(shell.durable_root(), Arc::new(()));
     crate::dbg_trace!(
         "child-eval",
         "pre-eval: audit.active={}",
@@ -337,13 +337,16 @@ fn eval_request(
     // space), so settle it here; the stage's tail-ness has no effect
     // across the boundary ([`Tail::No`]).
     let result = absorb_tail(
-        call::invoke(&body, upstream, Tail::No, &mut child),
+        call::invoke(&body, upstream, Tail::No, &mooring, &mut child),
+        &mooring,
         &mut child,
     );
     // `x | f = f !{x}`: a value-edge producer's output is forced once
     // before it ships, via the shared value-edge `!{x}`.
     let result = if force_output {
-        result.and_then(|value| crate::runtime::pipeline::force_pipe_value(value, &mut child))
+        result.and_then(|value| {
+            crate::runtime::pipeline::force_pipe_value(value, &mooring, &mut child)
+        })
     } else {
         result
     };
@@ -568,7 +571,7 @@ mod tests {
     }
 
     fn eval_value(source: &str, shell: &mut Shell) -> Value {
-        evaluate(&compile_one(source), shell).expect("eval")
+        evaluate(&compile_one(source), &Mooring::adrift(), shell).expect("eval")
     }
 
     /// Pack a pipeline-stage request from a freshly captured snapshot.

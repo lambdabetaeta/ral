@@ -8,7 +8,7 @@ use ral_core::builtins::util::check_arity;
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, fun, mk_scheme as scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Settled, sig};
+use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
@@ -18,15 +18,18 @@ use std::borrow::Cow;
 /// dispatch). The refusal itself — a blocked domain, a rate cap, an
 /// over-size response — is the desk's, and reaches here as an ordinary
 /// call error.
-fn builtin_fetch_url(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn builtin_fetch_url(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "fetch-url")?;
     let url = args[0].to_string();
-    let answer = shell.enquire(FOValue::Variant {
-        label: "fetch-url".to_string(),
-        payload: Some(Box::new(FOValue::List {
-            items: vec![FOValue::String { value: url }],
-        })),
-    })?;
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "fetch-url".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String { value: url }],
+            })),
+        },
+    )?;
     match answer {
         FOValue::Bytes { value } => Ok(Value::Bytes(value)),
         other => Err(sig(format!(

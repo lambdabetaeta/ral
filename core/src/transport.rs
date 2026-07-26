@@ -1124,11 +1124,16 @@ impl IdentityTransport {
 struct ForegroundCapture(Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>);
 
 impl crate::run::RunLifecycle for ForegroundCapture {
-    fn pre_exec(&mut self, shell: &mut crate::types::Shell, _src: &str) {
+    fn pre_exec(
+        &mut self,
+        mooring: &crate::types::Mooring,
+        _shell: &mut crate::types::Shell,
+        _src: &str,
+    ) {
         *self
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shell.foreground().clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mooring.cancel.clone());
     }
 }
 
@@ -1648,7 +1653,7 @@ mod enquiry_tests {
     use crate::run::{
         RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest, RunStdin,
     };
-    use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Shell};
+    use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Mooring, Shell};
     use std::sync::Mutex;
 
     /// The minimal capturing request under the ⊤ capability ceiling: no
@@ -1681,7 +1686,7 @@ mod enquiry_tests {
     fn absent_desk_answers_the_honest_error() {
         let shell = Shell::new(crate::io::TerminalState::default());
         let err = shell
-            .enquire(FOValue::Unit)
+            .enquire(&Mooring::adrift(), FOValue::Unit)
             .expect_err("no desk is installed");
         assert_eq!(err.message, "this host answers no enquiries");
     }
@@ -1709,8 +1714,8 @@ mod enquiry_tests {
         answer: std::sync::Arc<Mutex<Option<Result<FOValue, Error>>>>,
     }
     impl RunLifecycle for AskDuringRun {
-        fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
-            *self.answer.lock().unwrap() = Some(shell.enquire(self.req.clone()));
+        fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
+            *self.answer.lock().unwrap() = Some(shell.enquire(mooring, self.req.clone()));
         }
     }
 
@@ -1772,9 +1777,10 @@ mod enquiry_tests {
             crate::io::TerminalState::default(),
         )));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
-        let _ = shell.enquire(FOValue::Unit);
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut mooring = Mooring::adrift();
+        mooring.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
+        let _ = shell.enquire(&mooring, FOValue::Unit);
     }
 
     /// The `dispatch` variant of the same law: a desk handler that reaches
@@ -1812,9 +1818,10 @@ mod enquiry_tests {
             crate::io::TerminalState::default(),
         )));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
-        let _ = shell.enquire(FOValue::Unit);
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut mooring = Mooring::adrift();
+        mooring.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
+        let _ = shell.enquire(&mooring, FOValue::Unit);
     }
 
     /// `IdentityTransport::set_desk` installs the desk that `dispatch` hands
@@ -1870,6 +1877,7 @@ mod durability_tests {
 
     fn builtin_panic_now(
         _args: &[crate::types::Value],
+        _mooring: &crate::types::Mooring,
         _shell: &mut Shell,
     ) -> crate::types::Settled<crate::types::Value> {
         panic!("transport test: deliberate mid-eval panic");

@@ -7,7 +7,7 @@ mod common;
 
 use ral_core::builtins;
 #[cfg(unix)]
-use ral_core::types::{Capabilities, ExecMap, ExecPolicy};
+use ral_core::types::{Capabilities, ExecMap, ExecPolicy, Mooring};
 use ral_core::{
     Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
     typecheck,
@@ -44,7 +44,7 @@ fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_env_var("PATH", path);
     builtins::register(&mut shell, common::prelude_comp());
-    evaluate(&comp, &mut shell)
+    evaluate(&comp, &Mooring::adrift(), &mut shell)
 }
 
 /// Evaluate independently of whichever tools happen to be installed on the
@@ -1287,6 +1287,7 @@ fn script_args_are_not_polluted_by_runner_argv() {
             &parse("return $args").unwrap(),
             std::collections::HashSet::default(),
         )),
+        &Mooring::adrift(),
         &mut shell,
     )
     .expect("evaluate $args");
@@ -1309,6 +1310,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
             &parse("return $env[RAL_TEST_ENV]").unwrap(),
             std::collections::HashSet::default(),
         )),
+        &Mooring::adrift(),
         &mut shell,
     )
     .expect("evaluate $env");

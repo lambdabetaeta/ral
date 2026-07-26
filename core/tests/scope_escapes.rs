@@ -12,7 +12,7 @@
 mod common;
 
 use ral_core::transport::{Program, Run};
-use ral_core::types::{Capabilities, Escape, Settled, Shell};
+use ral_core::types::{Capabilities, Escape, Mooring, Settled, Shell};
 use ral_core::{
     Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins,
 };
@@ -524,7 +524,11 @@ fn audit_tree_has_cmd(node: &Value, name: &str) -> bool {
 /// only by the test below, it is the panic trigger the RAII guard needs:
 /// no shipped builtin should panic, so the test owns one rather than
 /// leaning on whichever builtin happens to be panic-prone.
-fn panic_builtin(_args: &[Value], _shell: &mut Shell) -> ral_core::types::Settled<Value> {
+fn panic_builtin(
+    _args: &[Value],
+    _mooring: &Mooring,
+    _shell: &mut Shell,
+) -> ral_core::types::Settled<Value> {
     panic!("__test-panic builtin invoked");
 }
 
