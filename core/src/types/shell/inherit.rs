@@ -302,6 +302,11 @@ impl Shell {
     /// and installed on the new thread.  Per-fork IO setup lives inside `f`.
     /// The one and only thread-spawn primitive.
     ///
+    /// The worker's control counters start fresh — `call_depth` and `$?` at
+    /// zero, since it is no continuation of the spawning call stack — but the
+    /// `recursion_limit` ceiling is the parent's: a limit set by rc or CLI
+    /// belongs to the session, not to one stack.
+    ///
     /// The mooring is minted here rather than inside the thread so the
     /// worker's scope can be returned to the caller, and it is a *rebuild*
     /// ([`Mooring::for_worker`]), never a share: the worker runs under a
@@ -334,6 +339,7 @@ impl Shell {
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
+        let recursion_limit = self.mobile.control.recursion_limit;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let library_docs = self.session.library_docs.clone();
@@ -345,6 +351,7 @@ impl Shell {
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
+            child.mobile.control.recursion_limit = recursion_limit;
             child.session.anchor = mooring.cancel.clone();
             child.session.root = root;
             child.session.builtins = builtins;
@@ -401,7 +408,7 @@ impl Shell {
 mod tests {
     use super::*;
     use crate::process::TerminalLease;
-    use crate::types::shell::TerminalAccess;
+    use crate::types::shell::{DEFAULT_RECURSION_LIMIT, TerminalAccess};
 
     /// A same-thread lambda body runs in place on the caller's shell, so it
     /// observes the session-owned terminal lease *by identity* — not by a
@@ -458,5 +465,25 @@ mod tests {
             child.terminal_lease().is_none(),
             "a forked session minted no lease witness, so it cannot foreground",
         );
+    }
+
+    /// A worker's counters start fresh but its recursion ceiling is the
+    /// parent's: an rc `recursion_limit:` key or a `--recursion-limit` flag
+    /// configures the session, so a `spawn` / `par` / `watch` body must not
+    /// silently fall back to the compile-time default.
+    #[test]
+    fn spawned_worker_inherits_the_recursion_limit() {
+        let mut parent = Shell::default();
+        parent.set_recursion_limit(DEFAULT_RECURSION_LIMIT + 7);
+        let scopes = Arc::new(parent.mobile().scope);
+        let (join, _cancel) =
+            parent.spawn_thread(&Mooring::adrift(), Arc::new(()), scopes, |_, child| {
+                child.mobile.control.clone()
+            });
+
+        let control = join.join().expect("worker thread");
+        assert_eq!(control.recursion_limit, DEFAULT_RECURSION_LIMIT + 7);
+        assert_eq!(control.call_depth, 0, "a worker starts a fresh call stack");
+        assert_eq!(control.last_status, 0, "a worker starts with a fresh `$?`");
     }
 }
