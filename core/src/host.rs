@@ -15,6 +15,31 @@
 
 use std::process::Command;
 
+/// Ask Windows not to give this child a console window.
+///
+/// Both probes below run a console program, and either may be called from
+/// a process that has no console of its own: synod is a desktop
+/// application (`windows_subsystem = "windows"` in `synod/src/main.rs`).
+/// Windows answers a console child in a windowless parent by allocating a
+/// console *with* a window, which blinks open and shut for as long as the
+/// child lives — one black rectangle across the screen at the start of
+/// every session, from a probe whose whole purpose is a line of prompt
+/// text.  `CREATE_NO_WINDOW` grants the console and withholds the window.
+///
+/// Nothing else changes: both callers read the child through
+/// [`Command::output`], and a redirected pipe is unaffected by whether a
+/// console window exists.  Off Windows there is nothing to suppress — a
+/// child inherits its parent's terminal and no window is created for it —
+/// so this hands the command straight back.
+fn without_a_console_window(mut cmd: Command) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// The git working-tree state of the current directory: the checked-out
 /// branch and whether the tree carries uncommitted changes.
 pub struct GitStatus {
@@ -34,7 +59,7 @@ pub struct GitStatus {
     reason = "[io-door:silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
 )]
 pub fn git() -> Option<GitStatus> {
-    let head = Command::new("git")
+    let head = without_a_console_window(Command::new("git"))
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
@@ -42,7 +67,7 @@ pub fn git() -> Option<GitStatus> {
         return None;
     }
     let branch = String::from_utf8(head.stdout).ok()?.trim().to_string();
-    let porcelain = Command::new("git")
+    let porcelain = without_a_console_window(Command::new("git"))
         .args(["status", "--porcelain"])
         .output()
         .ok()?;
@@ -81,7 +106,7 @@ pub fn family() -> &'static str {
     reason = "[io-door:silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
 )]
 pub fn now() -> Option<String> {
-    let out = Command::new("date")
+    let out = without_a_console_window(Command::new("date"))
         .arg("+%Y-%m-%d %H:%M:%S %Z")
         .output()
         .ok()?;

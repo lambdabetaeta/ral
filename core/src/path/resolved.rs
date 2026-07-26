@@ -16,6 +16,15 @@
 //! access-side path and a grant-side prefix compare like-for-like
 //! under [`super::path_within`].
 //!
+//! One door answers to a different operating system:
+//! [`NormalizedPrefix::from_guest`], for a prefix this process mints but
+//! never matches, because the gate that matches it runs inside a Linux
+//! guest.  It runs the same law in the guest's namespace
+//! ([`super::lex::fold_dots_posix`]).  The like-for-like promise above is
+//! unchanged and is exactly why the second door has to exist: the pairing
+//! is per-namespace, and a Windows host folding `/work` with its own
+//! kernel would hand the guest a prefix matching nothing.
+//!
 //! Canonicalisation against `realpath(3)` is anchored on this normal
 //! form: [`ResolvedPath::canonicalise_strict`] /
 //! [`ResolvedPath::canonicalise_lenient`] take an already-resolved
@@ -105,7 +114,9 @@ impl ResolvedPath {
 /// Held as a `String`
 /// because grant prefixes freeze against a different cwd/home than the
 /// access, but minted by the same `fold_dots` kernel so they match
-/// like-for-like.  Private field; sole constructor is the freeze lexer.
+/// like-for-like.  Private field; the grant-side door is the freeze
+/// lexer, save for a prefix bound for another OS's namespace — see
+/// [`NormalizedPrefix::from_guest`].
 ///
 /// `Serialize`/`Deserialize` are transparent — the wire form is the
 /// bare inner `String`.  Decoding bypasses the freeze constructor
@@ -134,6 +145,43 @@ impl NormalizedPrefix {
     /// access-side [`ResolvedPath`] and the grant-side freeze do.
     pub fn from_surface(path: impl AsRef<Path>) -> Self {
         Self::freeze(path.as_ref())
+    }
+
+    /// Mint a prefix that names a path inside the Linux guest, whichever
+    /// host is doing the minting.
+    ///
+    /// Synod is the case this exists for: the granted folder is admitted
+    /// at its guest mount point (`/work`), and the gate that will match
+    /// against the prefix runs *inside* the machine.  So the normaliser
+    /// that has to agree with the access side is Linux's, not this
+    /// process's — see [`fold_dots_posix`](super::lex::fold_dots_posix)
+    /// for what the host's own does to `/work` on Windows, and
+    /// `MachineSpec::resolve` for the same reasoning applied to
+    /// absoluteness (judged with `starts_with('/')`, never
+    /// `Path::is_absolute`).
+    ///
+    /// Not a general-purpose door, and not interchangeable with
+    /// [`from_surface`](Self::from_surface): a prefix that will be matched
+    /// on *this* computer must go through that one, which is why it takes
+    /// an `AsRef<Path>` and this takes a `&str`.  There is no host whose
+    /// paths this normalises correctly except by coincidence.
+    ///
+    /// One constraint travels with a prefix minted here: it must not be
+    /// *reduced* on the host.  `FsPolicy::meet` re-mints its result
+    /// through `from_surface` (via [`PrefixSet::surface`](super::PrefixSet::surface)),
+    /// which would fold `/work` straight back to `\work` on Windows.
+    /// Synod never reaches that path — its trunk runs with `fuel: 0`, so
+    /// no sub-agent ever narrows its grant — and a nested `grant` block
+    /// inside the machine is reduced *there*, by the guest's own kernel,
+    /// which is the right one.  A guest-namespace policy that ever does
+    /// need narrowing needs the meet to learn which namespace it is in.
+    #[must_use]
+    pub fn from_guest(path: &str) -> Self {
+        debug_assert!(
+            path.starts_with('/'),
+            "a guest prefix must be absolute in the guest's namespace, got {path}"
+        );
+        Self(super::lex::fold_dots_posix(path))
     }
 
     /// The prefix as a borrow, for containment matching.
@@ -197,5 +245,28 @@ impl PartialEq<&str> for NormalizedPrefix {
 impl PartialEq<String> for NormalizedPrefix {
     fn eq(&self, other: &String) -> bool {
         &self.0 == other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NormalizedPrefix;
+
+    /// A guest prefix survives being minted on this computer, whichever
+    /// computer this is.  The assertion is on the *bytes*, deliberately:
+    /// a test that instead checked whether the prefix admits
+    /// `/work/letter.docx` would pass on Windows even when both sides are
+    /// mangled, because the access side folds with the same host kernel.
+    /// Only the spelling shows the split, because only the spelling is
+    /// what crosses to the guest.
+    #[test]
+    fn a_guest_prefix_is_spelled_the_guests_way_on_every_host() {
+        assert_eq!(NormalizedPrefix::from_guest("/work").as_str(), "/work");
+        assert_eq!(NormalizedPrefix::from_guest("/tmp").as_str(), "/tmp");
+        assert_eq!(
+            NormalizedPrefix::from_guest("/work/./letters/../letters").as_str(),
+            "/work/letters",
+            "the folding is still done — it is only done in the right namespace"
+        );
     }
 }

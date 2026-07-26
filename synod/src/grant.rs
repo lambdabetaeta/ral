@@ -289,6 +289,9 @@ impl Grant {
     /// guest, on top of the wall around it.  Because the gate runs *there*,
     /// the paths are guest paths: the folder at its mount point, never the
     /// host path the user picked, which names nothing inside the machine.
+    /// They are also *spelled* there — minted through
+    /// [`NormalizedPrefix::from_guest`], because a host that writes its
+    /// separator `\` must not be the one to write the guest's.
     ///
     /// - **fs** — the granted folder at
     ///   [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
@@ -322,10 +325,17 @@ impl Grant {
     /// reported change is easier to trust beside the record of what the
     /// agent was allowed to do while producing it.
     pub fn capabilities(&self) -> Capabilities {
+        // Minted by the guest's rule, not this host's: `from_guest` folds
+        // `/work` in the namespace the gate will match it in.  The ordinary
+        // door would fold it with the *host's* kernel, which on Windows
+        // rebuilds it as `\work` — and the agent would then be denied the
+        // one folder it was given, by a grant that reads as if it had been
+        // granted.  The same distinction `MachineSpec::resolve` draws when
+        // it judges a guest path absolute with `starts_with('/')`.
         let prefixes = || {
             vec![
-                NormalizedPrefix::from_surface(vm_manager::MachineSpec::GUEST_WORKSPACE),
-                NormalizedPrefix::from_surface(GUEST_SCRATCH),
+                NormalizedPrefix::from_guest(vm_manager::MachineSpec::GUEST_WORKSPACE),
+                NormalizedPrefix::from_guest(GUEST_SCRATCH),
             ]
         };
         Capabilities {
@@ -479,6 +489,35 @@ mod tests {
                 "the granted folder's host path must not be writable"
             );
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bytes the guest will be handed, which the test above cannot
+    /// see and this one exists for.
+    ///
+    /// That test runs the grant through ral's gate *on the host*, so both
+    /// sides of the comparison fold with the host's kernel and agree even
+    /// when both are wrong: on Windows it passed while the shipped product
+    /// denied `/work` on the first read, because the real access side is
+    /// the engine inside the machine and it folds like Linux.  A host-side
+    /// simulation of a guest-side gate cannot catch a host/guest
+    /// normaliser split — only the spelling can, because the spelling is
+    /// the whole of what crosses the wire.
+    #[test]
+    fn the_guest_prefixes_are_spelled_the_guests_way_on_every_host() {
+        let (dir, grant) = granted("grant-guest-spelling");
+        let fs = grant
+            .capabilities()
+            .fs
+            .expect("the office grant restricts the filesystem");
+        let guest = [vm_manager::MachineSpec::GUEST_WORKSPACE, GUEST_SCRATCH];
+        for (which, prefixes) in [("read", &fs.read_prefixes), ("write", &fs.write_prefixes)] {
+            let spelled: Vec<&str> = prefixes.iter().map(NormalizedPrefix::as_str).collect();
+            assert_eq!(
+                spelled, guest,
+                "the fs {which} set must name the guest's paths as the guest spells them"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

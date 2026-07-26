@@ -242,6 +242,48 @@ pub(crate) fn fold_dots(path: &Path) -> PathBuf {
     normalized
 }
 
+/// [`fold_dots`] in the *guest's* namespace: the same law, for a path
+/// whose separator is `/` no matter which host is folding it.
+///
+/// [`fold_dots`] rebuilds its answer by pushing components into a
+/// `PathBuf`, which is right for a host path — on Windows it also
+/// normalises `C:/x` to `C:\x` — and wrong for a path that names
+/// something inside the Linux guest.  There, `Component::RootDir` renders
+/// as `\`, so `/work` comes back as `\work`: not a spelling variant but a
+/// *relative* path in the namespace it claims to name, matching nothing
+/// the engine inside the machine will ever resolve.  Hence a second
+/// kernel rather than a flag on the first — the two answer to different
+/// operating systems, and the caller always knows which one it means.
+///
+/// Every rule is [`fold_dots`]'s, including the one that reads like an
+/// oversight: a `..` that cannot pop is dropped on a rooted path and kept
+/// on a relative one, so a second leading `..` pops the first back off
+/// (`../../a` folds to `a`).  Grant prefixes are absolute, so that corner
+/// is unreachable from the only caller
+/// ([`NormalizedPrefix::from_guest`](super::NormalizedPrefix::from_guest));
+/// it is mirrored anyway, because two normalisers that agree except in
+/// the dark are worse than one.
+pub(crate) fn fold_dots_posix(path: &str) -> String {
+    let rooted = path.starts_with('/');
+    let mut folded: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            // `Path::components` yields neither empty components nor
+            // `.`; splitting on the separator yields both, so this arm is
+            // what makes the two iterations comparable.
+            "" | "." => {}
+            ".." => {
+                if folded.pop().is_none() && !rooted {
+                    folded.push("..");
+                }
+            }
+            other => folded.push(other),
+        }
+    }
+    let joined = folded.join("/");
+    if rooted { format!("/{joined}") } else { joined }
+}
+
 /// Like [`resolve_path`], but takes the cwd as a string.  Thin
 /// wrapper for cross-crate callers (exarch policy loading) that
 /// hold the cwd as a `&str` and would otherwise reach for
@@ -383,6 +425,57 @@ mod tests {
     fn fold_dots_keeps_leading_dotdot_on_relative_path() {
         assert_eq!(fold_dots(Path::new("../x")), pb("../x"));
         assert_eq!(fold_dots(Path::new("a/../../x")), pb("../x"));
+    }
+
+    // The guest kernel's whole reason to exist, pinned on every host
+    // including the one it was written for: a guest path folds to a guest
+    // path, separator intact.  On Windows `fold_dots` answers `\work` here
+    // — see `fold_dots_posix`'s own docs — which is why synod's prefixes
+    // do not go through it.
+    #[test]
+    fn fold_dots_posix_keeps_the_guests_separator() {
+        assert_eq!(fold_dots_posix("/work"), "/work");
+        assert_eq!(
+            fold_dots_posix("/work/./drafts/../letters"),
+            "/work/letters"
+        );
+        assert_eq!(fold_dots_posix("/work/"), "/work");
+        assert_eq!(fold_dots_posix("/"), "/");
+        // Rooted `..` at the root is dropped, as in `fold_dots`.
+        assert_eq!(fold_dots_posix("/.."), "/");
+        assert_eq!(fold_dots_posix("/a/../../x"), "/x");
+        // And a relative `..` survives for a later join, likewise.
+        assert_eq!(fold_dots_posix("../x"), "../x");
+        assert_eq!(fold_dots_posix("a/../../x"), "../x");
+    }
+
+    // Where the host *is* the guest's namespace, the two kernels must be
+    // one function.  This is the check that keeps `fold_dots_posix` from
+    // drifting into a second, subtly different law: any divergence in the
+    // shared table shows up here, on the platform that can see both.
+    #[cfg(unix)]
+    #[test]
+    fn fold_dots_posix_agrees_with_fold_dots_where_the_host_is_posix() {
+        for input in [
+            "/work",
+            "/work/",
+            "/work/./drafts/../letters",
+            "/",
+            "/..",
+            "/../..",
+            "/a/../../x",
+            "../x",
+            "a/../../x",
+            "../../a",
+            "a/b/c",
+            "",
+        ] {
+            assert_eq!(
+                fold_dots_posix(input),
+                fold_dots(Path::new(input)).to_string_lossy(),
+                "the two kernels disagree on {input:?}"
+            );
+        }
     }
 
     // Fixed-outcome on every host: `windows` is a parameter, so the
