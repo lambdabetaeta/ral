@@ -188,13 +188,21 @@ If you truly have nothing else to do, `await` the handle with a long timeout.
 
 Like `audit`, deferred blocks turn errors into data. They are idempotent, so you can await the same handle across turns.
 
-Use `cancel $h` to stop a thread thread that is no longer required.
+Use `cancel $h` to stop a thread that is no longer required.
 
-For work that is meant to run indefinitely, use `service`:
+`service` keeps work running for as long as this session lasts:
 
     let h = service #'watch the test log'# { tail -f test.log }
 
-The first argument is a mandatory single-line description of the task; the second is a block to run as a server. `service-handle ID` can be used to acquire a durable worker's handle by its id, so you can `await` or `cancel` it in a if you have forgotten the binding.
+The first argument is a mandatory single-line description of the task; the second is a block to run as a server. `service-handle ID` can be used to acquire a durable worker's handle by its id, so you can `await` or `cancel` it if you have forgotten the binding.
+
+That lifetime ends where the session does. Every thread — `defer`, `service` alike — is meant to die when exarch exits, so a grader, a test, or a person who looks *after you finish* finds nothing running. Work that must still be there then is `detach`, which hands the process to the OS and stops owning it:
+
+    let d = within [dir: #'/app'#] { detach #'gRPC KV store on port 5328'# python server.py }
+
+`detach` takes a mandatory single-line description and then a command line — not a block — and returns a receipt record `[pid, desc]`. That is all it returns, because that is all there is: the process's stdin, stdout and stderr are `/dev/null`, so nothing it prints is kept anywhere. Have the program write its own log if you want one.
+
+A detached process is mute. There is no handle — no `await`, no `poll`, no `cancel` — and no exit status, ever. If it dies a second after birth because the port was taken, the flag was wrong, or an import failed, **nothing tells you**: a receipt means the program was started, never that it is alive or that it worked. The only way to find out is to probe what it serves — connect to the port, fetch the URL, read the file it writes — so check that way before you rely on it, and check again if a later turn depends on it. `pid` is the last name you had for it, not a hold on it. `detach` exists only in a session no OS sandbox confines; where the grant confines you the name is simply absent, and there are only so many births per session, so spend them on work that has to survive you.
 
 ## Within
 

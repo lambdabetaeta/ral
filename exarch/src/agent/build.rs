@@ -129,10 +129,13 @@ pub enum RootSeat {
     /// In-process: the trunk boots its own shell from `scratch` and drives
     /// it through an identity transport. `cwd` is the caller's own, stated
     /// explicitly rather than read from the process: a GUI host has no
-    /// per-conversation process directory to chdir into.
+    /// per-conversation process directory to chdir into. `detach` says
+    /// whether the host judged the verb meaningful here — see
+    /// [`seat::boot_root_shell`](crate::agent::seat::boot_root_shell).
     Identity {
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
+        detach: bool,
     },
     /// Out-of-process: the trunk drives an already-built `transport` whose
     /// engine lives elsewhere — a spawned `--engine` child or, as synod uses
@@ -272,9 +275,11 @@ impl Agent {
         // the boot recipe minus its engine-local scratch — stands in here
         // and is then discarded.
         let identity_shell = match &root_seat {
-            RootSeat::Identity { scratch, cwd } => {
-                Some(seat::boot_root_shell(scratch, cwd.clone()))
-            }
+            RootSeat::Identity {
+                scratch,
+                cwd,
+                detach,
+            } => Some(seat::boot_root_shell(scratch, cwd.clone(), *detach)),
             RootSeat::Wire { .. } => None,
         };
         let sessions_root = run_dir.join("sessions");
@@ -301,10 +306,15 @@ impl Agent {
             system_prompt.len(),
         )?;
         let seat = match root_seat {
-            RootSeat::Identity { scratch, cwd } => Seat::identity(
+            RootSeat::Identity {
+                scratch,
+                cwd,
+                detach,
+            } => Seat::identity(
                 identity_shell.expect("built above for an identity seat"),
                 scratch,
                 cwd,
+                detach,
                 &log,
             ),
             RootSeat::Wire {
@@ -431,8 +441,13 @@ impl Agent {
         // `shell_mut` above already panicked on a wire seat, so reaching
         // here means `self.seat` is an identity seat.
         let seat = match &self.seat {
+            // No detach: a fork does not boot its shell, it snapshots its
+            // parent's, and `fork_session` carries no detach policy across —
+            // so this child has no such authority. Granting it here would
+            // grant nothing now and conjure the verb out of nothing at the
+            // child's first `/clear`, which reboots from the seat.
             Seat::Identity { scratch, cwd, .. } => {
-                Seat::identity(shell, scratch.clone(), cwd.clone(), &log)
+                Seat::identity(shell, scratch.clone(), cwd.clone(), false, &log)
             }
             Seat::Wire { .. } => {
                 unreachable!("shell_mut already panicked above for a wire seat")
@@ -547,7 +562,7 @@ impl Agent {
             crate::provider::scripted::Script::new(),
         )));
         let cwd = std::env::current_dir().expect("test process has a cwd");
-        let seat = Seat::identity(shell, scratch, cwd, &log);
+        let seat = Seat::identity(shell, scratch, cwd, false, &log);
         let agent = Self::assemble(Build {
             system: system.to_string(),
             system_prompt,
@@ -771,6 +786,7 @@ mod tests {
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
                 cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
             },
             scripted("test-model", Script::new()),
         )
@@ -913,6 +929,7 @@ mod tests {
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
                 cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
             },
             scripted("test-model", Script::new()),
         )

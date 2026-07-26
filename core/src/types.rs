@@ -97,6 +97,9 @@ pub(crate) use shell::{TerminalAccess, ThunkBody};
 pub(crate) use shell::workers::{CapReached, WorkerRegistry};
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};
 
+// Per-shell detach authority: the birth budget.
+pub use shell::detached::DetachPolicy;
+
 // Per-shell binding-lease ledger: the idle-call policy and its prune
 // notices.
 pub use shell::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};

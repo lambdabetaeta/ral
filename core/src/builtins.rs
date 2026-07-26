@@ -476,8 +476,33 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("service"),
     type_rule: BuiltinTypeRule::Scheme(Some(2), scheme::service),
-    doc: "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit.",
+    doc: "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit. It does not outlive this process: work that must still be running after this process exits needs `detach`.",
     body: BuiltinBody::Static(concurrency::builtin_service),
+}];
+
+/// `detach` — the ownership-renouncing concurrency builtin.
+///
+/// Kept out of [`CORE_BUILTINS`] beside [`WATCH_BUILTIN`] and
+/// [`SERVICE_BUILTIN`], and carried only by a host that arms a detach policy
+/// ([`crate::types::Shell::arm_detach`]): installing the builtin and arming
+/// the policy are one host act, so absence is an unknown-name diagnostic and
+/// never a veto (`decisions/260617_watch-repl-builtin`).
+///
+/// The other three verbs vary policy over one type; this one changes the
+/// type. It is a variadic effect, not a function — there is no first-class
+/// `$detach` — and it returns a plain record rather than a
+/// [`Value::Handle`](crate::types::Value::Handle), because the process it
+/// births is reparented to init and no eliminator in this session can reach
+/// it (`decisions/260725_survives-exit-is-its-own-verb`).
+///
+/// Unix only: the birth is a double-fork, which Windows has no analogue of,
+/// so on Windows `detach` is simply absent.
+#[cfg(unix)]
+pub static DETACH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
+    name: Cow::Borrowed("detach"),
+    type_rule: BuiltinTypeRule::Sig(sig::DETACH),
+    doc: "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    body: BuiltinBody::Static(concurrency::builtin_detach),
 }];
 
 /// Synthesise a first-class thunk for a [`BuiltinEntry`] so a

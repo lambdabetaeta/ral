@@ -391,13 +391,33 @@ impl ForegroundScope {
     }
 }
 
+/// A serialization-only test lock. The globals it guards are restored by
+/// RAII on unwind ([`CancelSlot`], `PipelineRelay`), so a panicked holder
+/// leaves nothing corrupt: poisoning is shrugged off rather than cascading
+/// one test's failure into every later taker's.
+#[cfg(test)]
+pub(crate) struct Serial(std::sync::Mutex<()>);
+
+#[cfg(test)]
+impl Serial {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::Mutex::new(()))
+    }
+
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Serializes every publisher and asserter of the process-global cancel
 /// slots ([`FOREGROUND_SCOPE`], [`DURABLE_ROOT_SCOPE`]) across the ral-core
-/// test binary. The run tests publish the slots too (every run door
-/// does), so the signal slot tests and the run tests must share one lock to
-/// keep their publications and requests from interleaving.
+/// test binary. Sessions minted in tests do not publish by default
+/// (`SessionState::publishes_signal_slots` is test-false); a test that opts
+/// back in, publishes directly, or requests through the slots holds this.
 #[cfg(test)]
-pub(crate) static SLOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static SLOT_SERIAL: Serial = Serial::new();
 
 #[cfg(test)]
 mod tests {
@@ -475,7 +495,7 @@ mod tests {
     /// and the scope keeps the cause it already recorded.
     #[test]
     fn foreground_request_reaches_published_scope_then_reverts() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let scope = CancelScope::root();
         {
             let _slot = publish_foreground(&scope);
@@ -499,7 +519,7 @@ mod tests {
     /// after a weaker one wins (`fetch_max`).
     #[test]
     fn foreground_request_escalates_monotonically() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let scope = CancelScope::root();
         let _slot = publish_foreground(&scope);
         request_foreground_cancel(CancelCause::Interrupt);
@@ -516,7 +536,7 @@ mod tests {
     /// so a request after the inner drop reaches the outer scope again.
     #[test]
     fn foreground_publications_nest() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let outer = CancelScope::root();
         let inner = CancelScope::root();
         let _outer_slot = publish_foreground(&outer);
@@ -546,7 +566,7 @@ mod tests {
     /// independent: a foreground request must not touch a published root.
     #[test]
     fn root_request_is_independent_of_foreground() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let foreground = CancelScope::root();
         let root = CancelScope::root();
         let _fg = publish_foreground(&foreground);

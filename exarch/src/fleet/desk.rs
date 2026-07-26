@@ -426,7 +426,10 @@ impl ExarchDesk {
                 1,
             ));
         };
-        let seat = crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), &child_log);
+        // No detach, exactly as `Agent::fork_with`: the adopted shell was
+        // forked, not booted, so it carries no detach policy.
+        let seat =
+            crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), false, &child_log);
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,

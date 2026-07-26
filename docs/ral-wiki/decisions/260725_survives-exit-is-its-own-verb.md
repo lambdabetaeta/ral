@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # Durable inside the process is not durable across it: work you stop owning is `detach`, born by double-fork
@@ -306,10 +306,10 @@ accurate string minutes earlier.
 - **`detach` is a distinct verb, not a mode of `service`.** The rejection in
   [[decisions/260617_long-running-work|long-running-work]] stands and is
   strengthened by everything above: the two regimes have different handle types
-  (`Handle` vs none), different observability (`poll`/`await` vs pid and exit
-  status), different lifetimes, and essentially no shared code. `service` keeps
-  its meaning — durable *within* the session, `Handle`-bearing, cancellable,
-  listable, dead with the process.
+  (`Handle` vs none), different observability (`poll`/`await` vs a pid and
+  nothing else), different lifetimes, and no shared code. `service` keeps its meaning —
+  durable *within* the session, `Handle`-bearing, cancellable, listable, and
+  meant to die with the process.
 
 - **Birth, not promote** — carried forward unchanged. You cannot promote an
   in-process thread into a surviving process, so Regime 2 independently
@@ -319,9 +319,9 @@ accurate string minutes earlier.
   identified to escape the chain above; they are not equivalent.
 
   - **(a) Double-fork.** The intermediate child exits immediately; the real
-    server is reparented to pid 1 and its pgid is never observed by
-    `RunningChild`. stdio is redirected to files at birth, so no pump pipe
-    exists.
+    server is reparented away from the session and its pgid is never observed
+    by `RunningChild`. All three standard descriptors are opened on `/dev/null`
+    at birth, so no pump pipe exists.
   - **(b) Register the worker under a cancel scope that is not a descendant of
     the session's `DurableRoot` (`core/src/types/shell/inherit.rs:304`),** so
     `cancel_all` (`core/src/types/shell/workers.rs:492-497`) cannot reach it.
@@ -331,19 +331,111 @@ accurate string minutes earlier.
   for anything that logs, which is most servers. It would produce a capability
   that works in testing (where the server is quiet) and fails in production
   (where it writes an access log): the worst possible failure distribution. (a)
-  fixes the signal and the pipe together, because redirecting stdio to files is
-  part of the same act.
+  fixes the signal and the pipe together, because pointing stdio away from this
+  process is part of the same act. `/dev/null` answers the pipe hazard exactly
+  as a file would: what matters is that no descriptor's far end dies with us.
 
   The evidence that the pipe hazard is real and *separate* from the signal
   hazard: the gRPC server writes nothing to stdout or stderr ever, so it cannot
   have died by `EPIPE` — only a signal explains its death. Both mechanisms
   exist; (b) addresses one.
 
+  Building it surfaced two obligations the sketch above omits, both on the
+  **grandchild**, which severs itself rather than being severed. It calls
+  `setsid()` in its own body: a bare double-fork leaves its pgid naming the
+  intermediate's pid, a number the kernel is free to recycle onto an unrelated
+  process, so the survivor would be addressable by a group it does not own. And
+  its fd 0 is opened on `/dev/null` rather than inherited — no parent remains to
+  hold the other end of anything.
+
 - **No `Handle`, and no pretence of one.** A surviving process is not a ral
   thread. `poll`/`await`/`race`/`cancel` do not apply to it, and giving it a
   `Handle` shape that silently means something different under the same
-  eliminators would be a worse lie than `ral.md:193`. The receipt is data: an
-  id, the pid, the paths its output was redirected to.
+  eliminators would be a worse lie than `ral.md:193`.
+
+- **The birth path shares no code with `spawn_child`, and this is normative.**
+  The tempting implementation is a third `LeaseClass` arm reusing the worker
+  machinery. It would silently reacquire a cancel scope, a registry entry, and a
+  worker thread — every one of the things this verb exists to escape — and each
+  would be a *latent* defect, invisible until a teardown, a reap, or a `/clear`
+  reached the process a caller had been told it no longer owned. The two paths
+  stay separate by construction.
+
+- **The receipt is `{ pid, desc }`, and the verb touches the filesystem
+  nowhere.** Data crosses turns and survives compaction on its own, which is the
+  constraint [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]
+  imposes, and two fields carry everything a later turn can honestly act on: a
+  number to probe by, and a sentence saying what it was for. A harness-invented
+  output directory is *not* the ledger it looks like — a program worth outliving
+  a session configures its own logging, and files nobody reads are litter that
+  nothing rotates, truncates, or caps. The sharper statement is structural: **a
+  detached row cannot implement `Resident` at all.** That trait requires
+  `cancel()` (`core/src/types/resident.rs:59-63`), and every answer is wrong — a
+  no-op lies about the edge, a `kill` re-asserts the very ownership the verb
+  renounces. This is the ADR's own thesis, stated more precisely than its prose
+  manages: ownership is the axis, and a ledger of things you own has no row
+  shape for a thing you do not.
+
+- **A detached process is mute, and the documentation leads with that.** With no
+  output this session can read and no exit status it can ever recover, a birth
+  that fails a second later — the port already bound, a bad flag, a missing
+  import — is unobservable from here. A successful `detach` asserts that the
+  program was `execve`d and nothing more. The only way to learn whether it is
+  alive is to **probe what it serves**, which is precisely the move "the blind
+  spot" above says exarch could not make while it owned the process. The cost is
+  real and it is stated at every introduction site rather than discovered.
+
+- **The surface is `detach <desc> <cmd> <args...>` — an argv, not a block.** The
+  parallel with `service <desc> { … }` invites the block reading, and the block
+  reading is incoherent: a block is a ral computation, and no ral computation
+  outlives the process that evaluates it. So `detach` is a variadic *effect*
+  with no first-class `$detach` form, which [[invariants/fixed-arity|fixed-arity]]
+  admits exactly because a command entry is never applied. Recording the shape
+  here matters as much as recording the semantics — a page whose example reads
+  `detach <desc> { block }` would mislead its next reader precisely as
+  `ral.md:193` misled the model.
+
+  The head is therefore an exec image by definition, and a builtin name is
+  refused: it has no process image to leave running. A name a
+  `within [handlers:]` frame intercepts is **not** refused — it runs its
+  handler, and the handler's value is the value of the `detach`. Resolution is
+  env → builtins → handlers → external (`core/src/runtime/command_call.rs`)
+  everywhere in ral, and a verb where a handled name errored instead of
+  dispatching would be the one exception, which is a worse defect than the
+  escape it was meant to prevent: nothing escapes a handler here, because
+  nothing is born. Admission follows resolution for the same reason — an
+  intercepted call spends no birth.
+
+- **The gate is `engages_sandbox(&caps)`, and its answer is absence, not
+  refusal.** "`--base dangerous` only" names a profile where a property is
+  meant: `--extend-base` and `--restrict` compose capabilities freely, and on
+  macOS an exec attenuation alone raises Seatbelt, so what decides is whether
+  the session's capabilities engage the OS sandbox
+  (`core/src/capability/sandbox.rs:91`) — never the name of the base they came
+  from. Absence and refusal remain different axes, and this lands on the first:
+  the seat installs the builtin only where the gate says yes
+  (`exarch/src/agent/seat.rs`), so under a sandbox, off unix, or on a ral host,
+  naming `detach` is an ordinary unknown-command diagnostic rather than a
+  builtin that resolves and refuses — the
+  [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] discipline again.
+  Naming the verb and arming its budget are deliberately one act, so the name
+  and the budget cannot drift apart.
+
+- **The seat question is void; what is bounded is the act.** A `service` occupies
+  a seat under `LIVE_WORKER_CAP` because the session can see it vacated. A
+  detached process's death is not observable from here, so there is no occupancy
+  to bound and no seat to return. The budget is therefore monotone: a fixed
+  allowance of *births* per session (16 on an agent host), counted upward, never
+  restored, refused at the door on exhaustion.
+
+- **Exit status is unrecoverable, and the documentation says so rather than
+  letting it be discovered.** The session never waits for the grandchild and
+  cannot; what inherits it may not wait either. "Reparented to pid 1, which
+  reaps it" is the common case, not the rule — under `PR_SET_CHILD_SUBREAPER`,
+  a systemd user session, or `docker run` without `--init`, the survivor
+  reparents to something that never calls `wait`. The conclusion is unaffected,
+  and sharper for the receipt above: there is no record of what the process did
+  except the one the process keeps for itself.
 
 - **`exarch/data/ral.md:193` is corrected regardless of whether `detach`
   ships**, and corrected in terms of consequence rather than mechanism. This is
@@ -398,35 +490,14 @@ accurate string minutes earlier.
 
 ## Open questions
 
-- **What `detach`'s receipt contains, and whether it is a value or a ledger row.** The
-  minimum is an id, a pid, and the stdout/stderr paths. Whether reconnection is
-  `service-handle`-shaped (a host-owned pinned row, per the amendment recorded
-  in [[decisions/260617_long-running-work|long-running-work]]'s supersession
-  note) or a plain returned record is undecided. Note the constraint from
-  [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]: whatever it
-  is must survive compaction, since the model loses binding names.
-
-- **Reaping and the zombie question.** A double-forked process is reparented to
-  pid 1, which reaps it — so exit status is *not* recoverable by `waitpid` from
-  exarch. If exit status matters, the intermediate must write it somewhere, or
-  the design accepts "last known state" from the redirected files. This is a
-  real semantic loss relative to `service` and should be stated in the verb's
-  own documentation rather than discovered.
-
 - **Interaction with the sandbox.** Under a granted base,
   `core/src/sandbox/linux.rs:64` applies bwrap's `--die-with-parent`, which
   kills the whole envelope on exarch's death regardless of double-forking.
   `detach` under a sandbox is therefore either impossible or requires escaping
   the envelope — which is a capability question, not a lifetime one, and
   probably wants a [[design/grant|grant]] authority of its own. **Until this is
-  settled, `detach` is a `--base dangerous` capability only.** This deserves
-  its own ADR.
-
-- **Cap accounting.** A `service` counts against `LIVE_WORKER_CAP`
-  (`exarch/src/shell_eval.rs:322`, admission at
-  `core/src/builtins/concurrency.rs:220-228`). A process that outlives the
-  session cannot meaningfully occupy a seat in it — but neither should birthing
-  a hundred of them be free.
+  settled, the verb is not installed at all where `engages_sandbox(&caps)`
+  holds.** This deserves its own ADR.
 
 - **Confirming the race empirically.** One run settles which side wins and how
   reliably: `RAL_DBG=wait` emits `cancel-fired name=… cause=Explicit` from
@@ -447,13 +518,16 @@ Regime 2 "unless a concrete need appears" — this is that need),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (the detached-root model, the death-clock, and the rejected `timeout:` knob),
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] (core supplies the
-mechanism, the host registers the affordance — the pattern `detach` should
-reuse),
+mechanism, the host registers the affordance — the pattern `detach` reuses),
 [[decisions/260629_agent-binding-reaping|agent-binding-reaping]] (why a
 rediscoverable id matters more than a binding),
 [[internals/output-capture-and-detachment|output-capture-and-detachment]] (the
-narrative this amends: `spawn`/`watch`/`service` and the registry),
+narrative this amends: `spawn`/`watch`/`service`, the registry, and the birth
+that files nothing in it),
+[[design/residency|residency]] (the ledger whose `Resident` shape a detached
+process cannot take),
+[[invariants/fixed-arity|fixed-arity]] (why a variadic effect has no `$detach`),
 [[map/repl/jobs|repl/jobs]] (the REPL's sweep and survivor warning, the shape a
 shutdown sweep should copy),
 [[design/grant|grant]] (where the sandbox question lands), and `docs/SPEC.md`
-§13.4.
+§13.4, §13.7.

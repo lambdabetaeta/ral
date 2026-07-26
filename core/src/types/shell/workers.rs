@@ -191,7 +191,7 @@ impl Resident for WorkerEntry {
             LeaseClass::Worker => {
                 "idle-observation lease — idle bound under an absolute backstop, both host-configured".to_string()
             }
-            LeaseClass::Durable => "none — durable; dies by cancel, /clear, or process exit".to_string(),
+            LeaseClass::Durable => "none — durable; dies by cancel, /clear, or process exit, so it does not outlive this process — work that must still be running afterwards needs detach".to_string(),
         }
     }
 

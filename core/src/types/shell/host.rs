@@ -11,6 +11,7 @@
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
+use super::detached::DetachPolicy;
 use super::repl::ReplScratch;
 use super::workers::ReapCause;
 use crate::exit_hints::ExitHints;
@@ -183,6 +184,24 @@ impl Shell {
     /// live entry.
     pub fn worker_by_id(&self, id: WorkerId) -> Option<WorkerEntry> {
         self.local.workers.lookup(id)
+    }
+
+    /// Arm this session's `detach` authority: the number of processes it may
+    /// birth over its whole life.  A host calls this in the same act that
+    /// installs the `detach` builtin — an unarmed shell simply lacks the
+    /// verb. Re-arming replaces the budget and forgets the births spent
+    /// against the old one.
+    pub fn arm_detach(&mut self, budget: u64) {
+        self.local.detach = Some(Arc::new(DetachPolicy {
+            budget,
+            births: std::sync::atomic::AtomicU64::new(0),
+        }));
+    }
+
+    /// This session's detach authority, `None` when no host armed one.
+    /// Survives the shell's teardown through any clone a birth kept.
+    pub fn detach_policy(&self) -> Option<&DetachPolicy> {
+        self.local.detach.as_deref()
     }
 
     /// Number of workers currently registered on this shell.

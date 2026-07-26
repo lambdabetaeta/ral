@@ -48,6 +48,15 @@ pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 /// admission.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
+/// Birth budget on `detach` per session shell: the 17th surviving process
+/// is refused.
+///
+/// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no seat, so no
+/// cap counting *live work this session owns* can bound it — and it needs a
+/// bound of its own precisely because nothing later reclaims it.  Reset by
+/// `/clear`, which reboots the shell this is armed on.
+pub const DETACH_BIRTH_BUDGET: u64 = 16;
+
 /// Retention bound, in ral calls, on a settled worker's unclaimed result:
 /// the entry is swept this many calls after
 /// [`Agent::run_shell`](crate::agent::Agent)'s per-call epoch sweep first

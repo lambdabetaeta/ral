@@ -33,8 +33,8 @@ mod unix;
 #[cfg(unix)]
 pub use unix::{
     ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
-    relay_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
-    termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
+    relay_handler, reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after,
+    term_handler, termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
 };
 
 #[cfg(windows)]

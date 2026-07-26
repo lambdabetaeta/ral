@@ -55,6 +55,8 @@ A command that is simply slow but has nothing to overlap it should run inline wi
 
 Never submit a script that merely sleeps and checks. A turn spent purely waiting has cost the full round trip and bought nothing; if the job is the only work left, `await` it instead of guessing sleep durations.
 
+Long *within* the session and alive *after* it are different problems. `defer` and `service` answer the first, and their threads are meant to end with the process that hosts them. A server that must still answer when a grader, a test, or a person looks once you have finished is `detach`ed instead — handed to the OS, with a receipt naming its pid in place of a handle to await. It is mute once born, so confirm it by probing what it serves rather than by trusting the receipt.
+
 ## Leave the tree in a finished state, always
 
 Whatever grades or ships is the **disk**, not your conversation. As soon as a first complete version of an artifact exists — a script, a config, an answer file — write it out, then iterate on it in place:

@@ -308,6 +308,27 @@ impl Launch {
             self.jail.take(),
         ))
     }
+
+    /// Lower this launch and spawn it *detached*: born by double fork, so
+    /// the survivor is this process's grandchild, reparented onto init and
+    /// alone in a session of its own.  Returns that survivor's pid, and
+    /// nothing else — no child handle, no pgid, no descriptor.  Ownership
+    /// is what it hands over: by construction no teardown path here can
+    /// name the process, which is the whole difference from
+    /// [`Self::spawn`].
+    ///
+    /// Point all three standard streams somewhere that outlives this
+    /// process first — [`StdioSpec::null`] for stdin, files for the rest.
+    /// An inherited stream dies with us and takes the survivor's writes
+    /// with it.
+    ///
+    /// # Errors
+    /// Returns `Err` if either fork or the `execve` fails, or if the
+    /// grandchild's pid does not come back.
+    #[cfg(unix)]
+    pub(crate) fn spawn_detached(&mut self) -> std::io::Result<u32> {
+        crate::process::signal::spawn_detached(&mut self.cmd)
+    }
 }
 
 #[cfg(windows)]

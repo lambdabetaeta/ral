@@ -37,6 +37,7 @@ mod checks;
 mod context;
 pub(crate) mod control;
 pub(crate) mod cwd;
+pub(crate) mod detached;
 pub(crate) mod hooks;
 mod host;
 mod inherit;
@@ -52,6 +53,7 @@ pub(crate) use inherit::ThunkBody;
 use self::bindings::BindingLedger;
 use self::control::ControlState;
 use self::cwd::Cwd;
+use self::detached::DetachPolicy;
 use self::modules::Modules;
 use self::repl::ReplScratch;
 use self::workers::{WorkerLease, WorkerRegistry};
@@ -513,6 +515,13 @@ pub struct LocalState {
     /// `Shell`, i.e. one per agent; a sub-agent fork or spawned worker starts
     /// with a fresh, inert one — nothing shares it, nothing flows back.
     pub(crate) bindings: BindingLedger,
+    /// This session's authority to birth processes that outlive it
+    /// (`types/shell/detached.rs`): `None` until a host arms it, and armed in
+    /// the same act that installs the `detach` builtin, so an unarmed shell
+    /// lacks the verb rather than owning one it cannot budget. `Arc`-shared
+    /// into a spawned worker's shell like [`Self::workers`], so a `detach`
+    /// nested in a `spawn { }` body spends the owning session's budget.
+    pub(crate) detach: Option<Arc<DetachPolicy>>,
     /// Whether this state owns its worker registry. True everywhere but a
     /// [`Shell::spawn_thread`] child, which shares its *parent's* registry
     /// by `Arc` clone — a worker's own shell dropping must not cancel its
@@ -530,6 +539,7 @@ impl Default for LocalState {
             repl: ReplScratch::default(),
             workers: WorkerRegistry::default(),
             bindings: BindingLedger::default(),
+            detach: None,
             workers_owned: true,
         }
     }

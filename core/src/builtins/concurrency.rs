@@ -566,6 +566,30 @@ fn spawn_labelled(
 
 // ── service ──────────────────────────────────────────────────────────────
 
+/// The legibility bound both births that escape the lease chain must carry:
+/// a `String`, non-empty after trimming, on one line.  `service` is tracked
+/// by it in the host's ledger; `detach` has nothing else at all — no handle,
+/// no eliminator, and after compaction no binding — so the description is
+/// the only thing that later says what a surviving pid was for.
+fn one_line_desc(arg: &Value, verb: &str) -> Settled<String> {
+    let Value::String(s) = arg else {
+        return Err(sig(format!(
+            "{verb}: description must be a String, got {}",
+            arg.type_name()
+        )));
+    };
+    let desc = s.trim();
+    if desc.is_empty() {
+        return Err(sig(format!("{verb}: description must be non-empty")));
+    }
+    if desc.contains('\n') {
+        return Err(sig(format!(
+            "{verb}: description must be a single line (no newlines)"
+        )));
+    }
+    Ok(desc.to_string())
+}
+
 /// `service <desc> <thunk>` -- birth a durable worker: an ordinary buffered
 /// spawn except for its [`LeaseClass::Durable`] registration — no idle reap,
 /// no backstop.  Its bound is legibility, not time: `desc` is mandatory,
@@ -581,23 +605,7 @@ fn spawn_labelled(
 /// distinguish nothing.
 pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "service")?;
-    let desc = match &args[0] {
-        Value::String(s) => s.trim().to_string(),
-        other => {
-            return Err(sig(format!(
-                "service: description must be a String, got {}",
-                other.type_name()
-            )));
-        }
-    };
-    if desc.is_empty() {
-        return Err(sig("service: description must be non-empty".to_string()));
-    }
-    if desc.contains('\n') {
-        return Err(sig(
-            "service: description must be a single line (no newlines)".to_string(),
-        ));
-    }
+    let desc = one_line_desc(&args[0], "service")?;
     let (body, captured) = expect_thunk(&args[1], "service")?;
     Ok(Value::Handle(spawn_child(
         captured,
@@ -607,6 +615,33 @@ pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Valu
         &desc,
         worker_body(body),
     )?))
+}
+
+// ── detach ───────────────────────────────────────────────────────────────
+
+/// `detach <desc> <cmd> <args…>` -- birth a process this session stops
+/// owning, and return a receipt rather than a handle.
+///
+/// The only one of the concurrency verbs where the axis is *ownership*:
+/// `spawn`, `watch`, and `service` all reify a [`Value::Handle`] over work
+/// that dies with this process, while a detached program is double-forked
+/// away (`runtime::command::detach`) and reparented to init, so no
+/// eliminator applies to it and no teardown here can reach it.  This door
+/// is the surface discipline only — a mandatory one-line description,
+/// then the head and its argv — and the effect proper, from head
+/// resolution through vetting to the receipt, lives at the exec boundary
+/// where the rest of the external-command machinery is.
+///
+/// Availability is the host's, as for `watch` and `service`: only a host
+/// that arms a detach policy ([`Shell::arm_detach`]) installs
+/// [`crate::builtins::DETACH_BUILTIN`], so naming `detach` anywhere else
+/// is an unknown-name diagnostic rather than a builtin that resolves and
+/// refuses.
+#[cfg(unix)]
+pub(super) fn builtin_detach(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 2, "detach")?;
+    let desc = one_line_desc(&args[0], "detach")?;
+    crate::runtime::command::detach(&desc, &args[1], &args[2..], shell)
 }
 
 /// Stop a handle: the one policy shared by `cancel` and `race`'s loser
@@ -1696,10 +1731,11 @@ mod tests {
 
     // ── `service`'s mandatory description ────────────────────────────────
 
-    /// Run `src` as one capturing top-level run with `SERVICE_BUILTIN`
-    /// installed, returning the runtime result. Panics on a parse/type
-    /// failure — every source these tests run is expected to compile.
-    fn run_service_source(shell: &mut Shell, src: &str) -> Settled<Value> {
+    /// Run `src` as one capturing top-level run on `shell`, whose host
+    /// surface the caller has already dressed, returning the runtime
+    /// result. Panics on a parse/type failure — every source these tests
+    /// run is expected to compile.
+    fn run_source(shell: &mut Shell, src: &str) -> Settled<Value> {
         use crate::transport::{Program, Run};
         use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
         let req = RunRequest {
@@ -1740,7 +1776,7 @@ mod tests {
     #[test]
     fn service_rejects_an_empty_description() {
         let mut shell = service_test_shell();
-        let err = run_service_source(&mut shell, r#"service "   " { 1 }"#)
+        let err = run_source(&mut shell, r#"service "   " { 1 }"#)
             .expect_err("an empty description must be refused");
         assert_eq!(status(err), 1);
     }
@@ -1750,7 +1786,7 @@ mod tests {
     #[test]
     fn service_rejects_a_multiline_description() {
         let mut shell = service_test_shell();
-        let err = run_service_source(&mut shell, "service \"one\ntwo\" { 1 }")
+        let err = run_source(&mut shell, "service \"one\ntwo\" { 1 }")
             .expect_err("a multiline description must be refused");
         assert_eq!(status(err), 1);
     }
@@ -1760,8 +1796,7 @@ mod tests {
     #[test]
     fn service_description_lands_in_the_registry_entry() {
         let mut shell = service_test_shell();
-        let handle = match run_service_source(&mut shell, r#"service "  watch the thing  " { 1 }"#)
-        {
+        let handle = match run_source(&mut shell, r#"service "  watch the thing  " { 1 }"#) {
             Ok(Value::Handle(h)) => h,
             other => panic!("service must return a Handle, got {other:?}"),
         };
@@ -1770,6 +1805,134 @@ mod tests {
         assert_eq!(entries[0].class, LeaseClass::Durable);
         assert_eq!(entries[0].cmd, "watch the thing", "the description trims");
         handle.cancel.cancel(crate::process::CancelCause::Explicit);
+    }
+
+    // ── `detach` ─────────────────────────────────────────────────────────
+
+    /// A shell dressed as a host that has armed a detach policy: the
+    /// builtin installed, with `budget` births available.
+    #[cfg(unix)]
+    fn detach_test_shell(budget: u64) -> Shell {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.install_builtins(crate::builtins::DETACH_BUILTIN);
+        shell.arm_detach(budget);
+        shell
+    }
+
+    /// The description is not optional and neither is the program: a call
+    /// with fewer than two arguments never reaches the exec boundary.
+    #[cfg(unix)]
+    #[test]
+    fn detach_requires_a_description_and_a_command() {
+        let mut shell = detach_test_shell(4);
+        let err = run_source(&mut shell, r#"detach "a server""#)
+            .expect_err("a description alone is not a detach");
+        assert_eq!(status(err), 1);
+    }
+
+    /// The same legibility bound `service` carries, and more load-bearing
+    /// here: an empty or multi-line description is refused before anything
+    /// is born.
+    #[cfg(unix)]
+    #[test]
+    fn detach_rejects_an_illegible_description() {
+        let mut shell = detach_test_shell(4);
+        let empty = run_source(&mut shell, r#"detach "   " /bin/echo hi"#)
+            .expect_err("an empty description must be refused");
+        assert_eq!(status(empty), 1);
+        let multiline = run_source(&mut shell, "detach \"one\ntwo\" /bin/echo hi")
+            .expect_err("a multiline description must be refused");
+        assert_eq!(status(multiline), 1);
+    }
+
+    /// A head a handler in scope intercepts runs its handler, per name and
+    /// by catch-all alike, and the handler's value is the `detach`'s: the
+    /// resolution order holds under this verb as under any call.  The
+    /// budget is zero, so the test also says that an intercepted call
+    /// spends no birth — there is no process for one to have paid for.
+    #[cfg(unix)]
+    #[test]
+    fn detach_runs_a_handler_that_intercepts_its_head() {
+        let mut shell = detach_test_shell(0);
+        let by_name = run_source(
+            &mut shell,
+            r#"within [handlers: [my-server: { |args| $args }]] { detach "a server" my-server up now }"#,
+        )
+        .expect("a per-name handler runs in place of the birth");
+        assert_eq!(
+            by_name,
+            Value::list(vec![
+                Value::String("up".into()),
+                Value::String("now".into())
+            ]),
+            "the handler receives the argv after the head, as an ordinary call would"
+        );
+
+        let catch_all = run_source(
+            &mut shell,
+            r#"within [handler: { |n _a| $n }] { detach "a server" my-server }"#,
+        )
+        .expect("a catch-all handler intercepts the head too");
+        assert_eq!(catch_all, Value::String("my-server".into()));
+    }
+
+    /// A builtin head is refused: there is no process image to detach.
+    #[cfg(unix)]
+    #[test]
+    fn detach_refuses_a_builtin_head() {
+        let mut shell = detach_test_shell(4);
+        let err = run_source(&mut shell, r#"detach "a server" cd /tmp"#)
+            .expect_err("a builtin names no exec image");
+        assert!(format!("{err:?}").contains("builtin"));
+    }
+
+    /// Vetting is reused wholesale, so an unresolvable head surfaces the
+    /// ordinary 127 rather than a detach-specific diagnostic.
+    #[cfg(unix)]
+    #[test]
+    fn detach_reports_an_unknown_command_as_127() {
+        let mut shell = detach_test_shell(4);
+        let err = run_source(
+            &mut shell,
+            r#"detach "a server" definitely-not-a-real-tool-xyz"#,
+        )
+        .expect_err("an unknown head must not be born");
+        assert_eq!(status(err), 127);
+    }
+
+    /// The budget is a hard bound, and its refusal says so without
+    /// pretending there is a remedy inside ral.
+    #[cfg(unix)]
+    #[test]
+    fn detach_refuses_past_its_budget() {
+        let mut shell = detach_test_shell(0);
+        let err = run_source(&mut shell, r#"detach "a server" /bin/echo hi"#)
+            .expect_err("a spent budget must refuse");
+        assert!(format!("{err:?}").contains("budget"));
+    }
+
+    /// The whole of what a birth hands back: the description the caller
+    /// gave and the pid the kernel gave.  There is nothing else to name —
+    /// the survivor's three streams are `/dev/null` and no file is written
+    /// anywhere.
+    #[cfg(unix)]
+    #[test]
+    fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
+        let mut shell = detach_test_shell(4);
+        let born = run_source(&mut shell, r#"detach "the greeter" /bin/echo hello"#)
+            .expect("the birth must succeed");
+        let fields = expect_map(&born);
+        assert_eq!(
+            fields.len(),
+            2,
+            "the receipt is a pid and a desc, and nothing else: {fields:?}"
+        );
+        assert_eq!(
+            fields.get("desc"),
+            Some(&Value::String("the greeter".into()))
+        );
+        assert!(matches!(fields.get("pid"), Some(Value::Int(p)) if *p > 0));
+        assert_eq!(shell.mobile.control.last_status, 0);
     }
 
     /// A detached worker's `surface` events are buffered, not emitted live,

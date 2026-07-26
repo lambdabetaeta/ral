@@ -21,13 +21,85 @@
 ///   2. `serve_sandbox_early_init` — `--sandbox-projection` enters the OS
 ///      sandbox, then runs the confined `--ral-sandbox-exec` host binary
 ///      or `--ral-bundled-tool` tool.
+///   3. [`try_birth_detached`] — [`DETACH_BIRTH_FLAG`] births one `detach`
+///      and exits, so a test can watch what survives a host that is gone.
 ///
 /// Returns `Some(code)` when this process was such a re-exec and must exit
 /// immediately; `None` for a normal test run, which then reaches libtest.
 pub fn run_pre_main_reexec_stages() -> Option<u8> {
     #[cfg(unix)]
     crate::builtins::uutils::init_signal_dispositions();
-    crate::try_run_pipeline_stage_helper().or_else(crate::sandbox::serve_sandbox_early_init)
+    crate::try_run_pipeline_stage_helper()
+        .or_else(crate::sandbox::serve_sandbox_early_init)
+        .or_else(try_birth_detached)
+}
+
+/// Hidden multicall sentinel: birth one detached process and exit at once.
+pub const DETACH_BIRTH_FLAG: &str = "--ral-test-detach-birth";
+
+/// Serve `--ral-test-detach-birth <trace> <marker>`: arm this shell's
+/// `detach` authority with a budget of one, birth a process that appends to
+/// `<trace>` — and writes `<marker>` to both its streams, which go nowhere —
+/// until killed, print its pid, and exit.
+///
+/// The property `detach` exists for is survival across the *full* exit of
+/// the process that birthed it, so the host has to be a whole process a
+/// test can outlive rather than a scope it can leave.  A test re-execs this
+/// binary here, waits for it to be gone, and then reads the pid off the
+/// host's own stdout: the survivor writes nothing this session can name, so
+/// the trace file it keeps for itself is the only sign it is still working.
+///
+/// Exits 1 if the birth failed, so the test sees a dead host rather than a
+/// missing survivor.
+fn try_birth_detached() -> Option<u8> {
+    #[cfg(unix)]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args.next()? != DETACH_BIRTH_FLAG {
+            return None;
+        }
+        let (trace, marker) = (
+            args.next()?.to_string_lossy().into_owned(),
+            args.next()?.to_string_lossy().into_owned(),
+        );
+        let mut shell = crate::boot::boot_shell(
+            crate::io::TerminalState::default(),
+            &crate::boot::BakedPrelude::bake_runtime(),
+            &crate::boot::HostSurface::default(),
+        );
+        shell.install_builtins(crate::builtins::DETACH_BUILTIN);
+        shell.arm_detach(1);
+        let report = shell.run(crate::RunRequest {
+            run: crate::transport::Run {
+                program: crate::transport::Program::Source(format!(
+                    "let d = detach #'the survivor a test outlives'# \
+                     /bin/sh -c 'while :; do echo {marker}; echo {marker} >&2; \
+                     echo {marker} >> {trace}; sleep 0.05; done'; echo $d[pid]"
+                )),
+                script_name: "<detach-birth>".into(),
+                caps: crate::types::Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: crate::RunIo::Inherit,
+                terminal: crate::RequestedTerminalAccess::Leased,
+                stdin: crate::RunStdin::Inherit,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            nursery: None,
+            lifecycle: Box::new(()),
+        });
+        Some(u8::from(!matches!(
+            report,
+            crate::RunReport::Ran { result: Ok(_), .. }
+        )))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 /// Hidden multicall sentinel: emit the helper's own pgid and exit.

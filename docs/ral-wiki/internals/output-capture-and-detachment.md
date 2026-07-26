@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire]
+verified_at_commit: 6ef14dd
+verified_at_date: 2026-07-26
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy]
 ---
 
 # Output capture and detachment
@@ -81,7 +81,10 @@ The escape is detachment — the *handle* is its evidence
 - Every detached worker — `spawn`, `watch`, `service` — files a `WorkerEntry` in
   its shell's `WorkerRegistry` the instant it starts (`core/src/types/shell/workers.rs`):
   a per-shell directory holding the handle itself, not a second by-id control
-  plane. `poll`, `await`, `race`, and `cancel` stay the only verbs that touch a
+  plane. All three classes are meant to end with the host process, and `detach`
+  files nothing here because it is not a worker at all — it is meant to outlive
+  the host ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+  `poll`, `await`, `race`, and `cancel` stay the only verbs that touch a
   worker, and there is no model-facing listing over the registry at all — the
   `workers` builtin was retired, since a listing carrying live `Value::Handle`s
   can never cross the host seam. Rediscovery instead splits by class: an
@@ -114,8 +117,10 @@ The escape is detachment — the *handle* is its evidence
   durable class (`LeaseClass::Durable`): no idle bound, no backstop ever arms
   for it — legibility is the whole bound, structural now that `desc` is a
   mandatory single-line description: the host's `services` pin lists it by
-  id and description, `service-handle <id>` retakes its handle, and it dies
-  only by `/clear`, an explicit `cancel`, or process exit.
+  id and description, `service-handle <id>` retakes its handle, and it dies by
+  `/clear`, an explicit `cancel`, or — by intent rather than by construction,
+  since teardown's cancel flag races the exiting main thread — with the host
+  process.
 - Every reap — idle, backstop, or settled-retention — is atomic with a
   `ReapNotice` recording what fell and why. The engine drains its ledger at
   each run's own ready boundary (`Shell::emit_ready_boundary_notices`, called
@@ -147,11 +152,54 @@ The escape is detachment — the *handle* is its evidence
   — it renews the idle-observation lease. A server known at birth to go long
   stretches unpolled wants `service <desc> { … }` instead: born with no idle bound and
   no backstop, it never reaps for inattention, only by `/clear`, `cancel`, or
-  process exit. To keep a full, unbounded log past the 16 MiB cap, still
+  the host's own exit — and a server that must still be answering *after* that
+  exit is not a worker at all, but a `detach` (below). To keep a full,
+  unbounded log past the 16 MiB cap, still
   redirect inside the block to a file — `spawn { python3 -m http.server >
   srv.log 2>&1 }` — and read the file on later runs.
 
+## `detach` leaves the machine, not just the run
+
+**Every mechanism above is in-process: the pump, the buffer cap, the lease, the
+registry all presuppose a thread the session can still reach.** `detach` gives
+that up — the thing to escape is not the session but the parent's *observation*
+of the child's pgid.
+
+- Everything up to the birth is the ordinary external-command machinery —
+  identity, `vet`, `build_command` (`core/src/runtime/command/detach.rs`), so the
+  grant judges the call exactly as it judges any exec and a head a handler in
+  scope intercepts runs that handler instead, birthing nothing. Only the last
+  act differs: `Launch::spawn_detached` **double-forks**. The intermediate exits at
+  once and hands the grandchild's pid back over a pipe, so no `RunningChild` ever
+  records the pgid both kill paths address. Reaching the same lifetime by hiding
+  a worker outside the session's `DurableRoot` cancel scope was rejected: it
+  defeats the signal but leaves the child holding a pipe that closes at exit,
+  killing anything that logs.
+- The grandchild severs the rest **itself**: `setsid()` in its own body, since a
+  bare double fork leaves its pgid naming the intermediate's recycled pid; and
+  fd 0, fd 1, fd 2 all on `/dev/null`. There is no pump, so none of the
+  drain-to-EOF story above applies, and no `SINK_BUFFER_CAP` — there is nothing
+  to buffer.
+- What comes back is a **receipt** — `{ pid, desc }`, a record rather than a
+  `Value::Handle` — and nothing is written anywhere. So there is nothing for a
+  `LeaseClass` to grade, nothing for `cancel_all` to reach, and no exit status:
+  the session never waited and cannot. The survivor is *mute*: a program worth
+  outliving a session keeps its own log, and the only way to learn whether it is
+  still alive is to probe what it serves.
+- The verb is **absent, not vetoed**, wherever it has no meaning. A host arms a
+  `DetachPolicy` — a birth budget — in the same act that installs the builtin,
+  and does so only off Windows and where the session's capabilities do not
+  `engages_sandbox`: a bwrap envelope dies with its parent however its
+  inhabitants were born.
+- A detached row could not implement `Resident` (`core/src/types/resident.rs`)
+  even if one wanted the ledger's uniformity, because that trait demands
+  `cancel()` and every answer is wrong — a no-op lies about the edge, a `kill`
+  re-asserts the ownership the verb exists to renounce
+  ([[design/residency|residency]]).
+
 See also
+[[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
+(the verb, the race it replaces, and why the type change earns the name),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (why a handle marks detachment, and the doctrine
 leases-and-budgets retired: not
@@ -160,4 +208,4 @@ leases-and-budgets retired: not
 split and the reaper), [[map/exarch/shell-eval|shell-eval]] (the frame that arms the
 wall and captures the bytes), [[internals/binding-leases|binding-leases]] (the
 lease idiom applied to scratch names, the same page's sibling story),
-[[map/core/io-process|io-process]], and `docs/SPEC.md` §13.3.
+[[map/core/io-process|io-process]], and `docs/SPEC.md` §13.3, §13.7.

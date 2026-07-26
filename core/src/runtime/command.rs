@@ -21,6 +21,9 @@
 //!     the `<file → fd 0` handoff.
 //!   * [`child`] — typestated [`RunningChild`] / `WaitedChild` handles
 //!     that own the spawned process and its drainer threads.
+//!   * [`detach`] — birth a process this session stops owning: the
+//!     same vetting, a double-forked child, and a receipt on disk
+//!     instead of a handle.
 //!   * [`foreground`] — the decision to place a standalone external
 //!     in the foreground (`PgidPolicy` + RAII terminal handoff).
 //!   * [`uutils`] — coreutils / diffutils / ripgrep dispatch, bundled
@@ -33,6 +36,8 @@
 use crate::types::{Break, Error, Raw, Shell, Value};
 
 mod child;
+#[cfg(unix)]
+mod detach;
 mod foreground;
 mod identity;
 pub(crate) mod io_event;
@@ -43,6 +48,8 @@ mod uutils;
 mod vet;
 
 pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
+#[cfg(unix)]
+pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{

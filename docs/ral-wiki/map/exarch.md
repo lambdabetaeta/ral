@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 6ef14dd
+generated_at_date: 2026-07-26
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -159,7 +159,9 @@ uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`, `Tasks`,
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
   a nervous probe — define then query, parameterised blocks, records for knobs,
-  blocks as policy, long-running work behind `defer`/`await`.
+  blocks as policy, long-running work behind `defer`/`await`, and work that must
+  outlive the session behind `detach`
+  ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
 - **`Host`** is the environment snapshot (`host::snapshot`, [[#Bootstrap]]) with
   the live grant under it: a static legend (`data/grant-legend.md`) over the
   capability bullets, or one ambient-authority line when nothing is attenuated.

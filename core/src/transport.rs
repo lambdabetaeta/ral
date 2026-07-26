@@ -1895,7 +1895,7 @@ mod durability_tests {
     /// cleanly on the same transport.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock().unwrap();
+        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
         let transport = IdentityTransport::new(shell);

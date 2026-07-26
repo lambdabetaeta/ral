@@ -415,6 +415,16 @@ pub mod sig {
         Some(scheme::explain_op),
     );
 
+    /// `detach`: any argv shape, any result.
+    ///
+    /// The receipt is `{id, pid, desc, stdout, stderr, receipt}`, which the
+    /// checker leaves as a fresh variable rather than a closed record — the
+    /// template vocabulary has no record former, and one builtin does not
+    /// earn it.  Command-only: `$detach` must not exist, since birthing a
+    /// process that outlives the session is not something a partially
+    /// applied value should be able to promise.
+    pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any), None);
+
     pub const INT_TO_UNIT: BuiltinSig =
         command(ArgSig::Exact(ONE_INT), pure(TyTemplate::Unit), None);
 

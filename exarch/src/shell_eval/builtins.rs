@@ -1526,6 +1526,131 @@ mod tests {
         );
     }
 
+    /// Registration hygiene, `service`'s story inverted: `detach` must
+    /// *not* ride the host surface.  [`host_surface`] is a bare fn pointer
+    /// with no capability argument, so a name it carried would resolve
+    /// under every base — including the sandboxed ones, where the envelope
+    /// dies with its parent and a survivor is a promise the OS breaks.  The
+    /// verb is installed per boot instead, by the one act that also arms its
+    /// policy ([`crate::agent::seat::boot_root_shell`]).
+    #[test]
+    fn detach_is_absent_from_the_host_surface() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        dress(&mut shell);
+        assert!(
+            shell.lookup_builtin("detach").is_none(),
+            "the host surface must not carry `detach`: it cannot see the capabilities that \
+             decide whether a survivor is possible at all"
+        );
+    }
+
+    /// Granted the verb, a boot gains the name and the budget in one act —
+    /// so a shell that can name the verb can always spend it, and the two
+    /// cannot drift.
+    #[cfg(unix)]
+    #[test]
+    fn a_boot_granted_detach_gains_the_verb_and_its_budget() {
+        let scratch = crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, "detach-armed")
+            .expect("scratch dir");
+        let shell = crate::agent::seat::boot_root_shell(
+            &scratch,
+            std::env::current_dir().expect("test process has a cwd"),
+            true,
+        );
+        assert!(
+            shell.lookup_builtin("detach").is_some(),
+            "a boot granted detach must install the verb"
+        );
+        assert_eq!(
+            shell
+                .detach_policy()
+                .expect("installing the name and arming the budget is one act")
+                .budget,
+            crate::shell_eval::DETACH_BIRTH_BUDGET
+        );
+    }
+
+    /// The gate is the sandbox *property*, never a base's name, and its
+    /// refusal is absence rather than veto: a capability set that engages
+    /// the OS sandbox is denied the verb (the gate in [`crate::run`]), and a
+    /// boot denied it leaves `detach` an ordinary unknown command — never a
+    /// builtin that resolves and refuses.
+    #[cfg(unix)]
+    #[test]
+    fn a_sandbox_engaging_capability_set_leaves_detach_an_unknown_name() {
+        assert!(
+            ral_core::capability::engages_sandbox(&ral_core::types::Capabilities {
+                net: Some(false),
+                ..Default::default()
+            }),
+            "precondition: a net-deny frame is a restriction an external process must be \
+             confined to, so it engages the sandbox and is denied detach"
+        );
+        assert!(
+            !ral_core::capability::engages_sandbox(&ral_core::types::Capabilities::root()),
+            "precondition: unrestricted authority engages no sandbox, and is the only shape \
+             the verb is granted to"
+        );
+
+        let scratch =
+            crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, "detach-sandboxed")
+                .expect("scratch dir");
+        let shell = crate::agent::seat::boot_root_shell(
+            &scratch,
+            std::env::current_dir().expect("test process has a cwd"),
+            false,
+        );
+        assert!(
+            shell.lookup_builtin("detach").is_none(),
+            "under a sandbox the name must be absent, so calling it reads as an unknown \
+             command rather than a permission denial"
+        );
+        assert!(shell.detach_policy().is_none(), "and no policy is armed");
+    }
+
+    /// `/clear` reboots through the same [`crate::agent::seat::boot_root_shell`], so the fresh
+    /// shell re-gains both the name and the budget from the seat's own
+    /// answer — there is no second install site to keep in step.
+    #[cfg(unix)]
+    #[test]
+    fn clear_reboots_a_shell_that_still_carries_detach() {
+        use crate::agent::event::AgentLog;
+        use crate::agent::seat::{Seat, boot_root_shell};
+
+        let dir = std::env::temp_dir().join(format!("exarch-detach-clear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let log = AgentLog::root(&dir, 0, "test-model", "test", 0).expect("session log");
+        let scratch = std::sync::Arc::new(
+            crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, "detach-clear")
+                .expect("scratch dir"),
+        );
+        let cwd = std::env::current_dir().expect("test process has a cwd");
+        let mut seat = Seat::identity(
+            boot_root_shell(&scratch, cwd.clone(), true),
+            scratch,
+            cwd,
+            true,
+            &log,
+        );
+
+        seat.clear(&log);
+        let engine = seat.shell_mut();
+        assert!(
+            engine.shell.lookup_builtin("detach").is_some(),
+            "the shell `/clear` boots must carry the verb its predecessor had"
+        );
+        assert_eq!(
+            engine
+                .shell
+                .detach_policy()
+                .expect("and the budget armed in the same act")
+                .budget,
+            crate::shell_eval::DETACH_BIRTH_BUDGET
+        );
+        drop(engine);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// `install_agent_library` sources the closures *and* installs their
     /// docs into the same shell in one act — so `help`'s output on an
     /// exarch-dressed shell carries a `Library:` section naming the sourced

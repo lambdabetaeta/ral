@@ -54,7 +54,12 @@ impl Shell {
             },
             session: SessionState {
                 root,
-                publishes_signal_slots: true,
+                // A minted session is the process's signal-facing session —
+                // except in the unit-test binary, where many sessions run
+                // concurrently and the slots' LIFO discipline would not
+                // hold. There, publication is opt-in: the tests that
+                // exercise the slots set this back under `SLOT_SERIAL`.
+                publishes_signal_slots: !cfg!(test),
                 sources: crate::source::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),

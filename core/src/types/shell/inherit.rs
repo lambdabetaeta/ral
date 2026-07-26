@@ -219,7 +219,9 @@ impl Shell {
     /// (`session.builtins`), and the library doc index
     /// (`session.library_docs`) are copied alongside the context clone so the
     /// aside resolves names, renders positions, and describes itself exactly
-    /// as the parent would.
+    /// as the parent would.  The detach policy rides along with the builtin
+    /// table it belongs to: a child that resolves `detach` must also hold the
+    /// budget it spends, and it spends the parent's rather than a fresh one.
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();
@@ -233,6 +235,7 @@ impl Shell {
             .session
             .guest_jail
             .clone_from(&parent.session.guest_jail);
+        child.local.detach.clone_from(&parent.local.detach);
         child
     }
 
@@ -283,7 +286,9 @@ impl Shell {
     /// `session.builtins`, `session.library_docs`, and `session.guest_jail`:
     /// a `spawn` inside `f`'s body registers into the same registry this
     /// shell's own workers
-    /// do, rather than a private one of its own.
+    /// do, rather than a private one of its own.  `local.detach` — the
+    /// detach budget — is shared the same way, so a `detach` inside `f`'s
+    /// body spends the owning session's births rather than a copy.
     pub fn spawn_thread<F, R>(
         &self,
         scopes: Arc<Env>,
@@ -301,6 +306,7 @@ impl Shell {
         let library_docs = self.session.library_docs.clone();
         let guest_jail = self.session.guest_jail.clone();
         let workers = self.local.workers.clone();
+        let detach = self.local.detach.clone();
         let cancel = root.child();
         let worker_cancel = cancel.as_scope().clone();
         let handle = std::thread::spawn(move || {
@@ -314,6 +320,7 @@ impl Shell {
             child.session.library_docs = library_docs;
             child.session.guest_jail = guest_jail;
             child.local.workers = workers;
+            child.local.detach = detach;
             // Shared, not owned: this worker's shell dropping must not
             // cancel the parent's whole registry.
             child.local.workers_owned = false;

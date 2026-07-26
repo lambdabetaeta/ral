@@ -163,7 +163,7 @@ pub(crate) fn run_call(
         }),
         Resolution::Builtin(entry) => run_builtin(&entry, args, redirects, shell),
         Resolution::Handler { entry, depth } => with_redirects(redirects, shell, |shell| {
-            run_handler(&entry, depth, args, shell)
+            run_handler(&entry, depth, args, shell).map_err(Into::into)
         }),
         Resolution::External(id) => run_external(id, args, redirects, shell),
     }
@@ -217,12 +217,12 @@ impl Drop for MaskedHandler<'_> {
 /// Run a user handler entry.  The matched frame is lifted from the
 /// stack for the dynamic extent of the body so a same-name call from
 /// inside reaches the next outer match.
-fn run_handler(
+pub(crate) fn run_handler(
     entry: &HandlerEntry,
     depth: usize,
     args: &[Value],
     shell: &mut Shell,
-) -> Raw<Value> {
+) -> Settled<Value> {
     let thunk = entry.thunk.clone();
     let call_args = match entry.arity {
         HandlerArity::CatchAll => vec![
@@ -234,7 +234,7 @@ fn run_handler(
     let masked = MaskedHandler::strip(shell, depth);
     let result = crate::evaluator::apply(thunk, call_args, masked.shell);
     drop(masked);
-    result.map_err(Into::into)
+    result
 }
 
 fn run_host_thunk(

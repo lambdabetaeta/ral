@@ -600,6 +600,7 @@ mod tests {
             RootSeat::Identity {
                 scratch,
                 cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
             },
             Arc::new(Provider::scripted(
                 "test-model",

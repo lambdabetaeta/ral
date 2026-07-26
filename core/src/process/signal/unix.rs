@@ -11,6 +11,9 @@
 //!   * **Process-group placement** is the discipline applied at fork:
 //!     every external child gets `setpgid` + `reset_child_signals` via a
 //!     single `pre_exec` funnel.
+//!   * **Detached birth** rides that same funnel and forks once more, so
+//!     the surviving process is a grandchild whose process group this
+//!     process never learns and therefore can never signal.
 //!   * **Wait handling** for stopped children polls `waitpid` with
 //!     [`WaitOptions::UNTRACED`] so a SIGSTOP'd child is classified
 //!     (parked or killed-then-reaped) rather than mistaken for still-running.
@@ -375,6 +378,91 @@ where
         }
     };
     Ok((child, leader))
+}
+
+/// Spawn `cmd` so that the surviving process is this process's
+/// *grandchild*, and return its pid.
+///
+/// A double fork, riding the same funnel as every other spawn. `cmd` is
+/// spawned through [`spawn_with_pgid_after`]; the hook forks a second
+/// time, and the intermediate hands the grandchild's pid back over a pipe
+/// and `_exit`s at once. The intermediate is reaped below — it is already
+/// dead, so that wait cannot block and no zombie ever exists — and the
+/// grandchild, orphaned by it, is reparented onto init.
+///
+/// **The intermediate's leader [`Pgid`] is dropped on the floor, and that
+/// discard is the point.** Nothing in this process ever holds a pgid
+/// naming the survivor, so no teardown path can reach it with
+/// `kill(-pgid, …)`. The grandchild's own `setsid` — rather than
+/// `setpgid(0, 0)`, and it cannot fail, since a freshly forked child is
+/// never a group leader — leaves it with pid == pgid == sid, so the dead
+/// intermediate's recyclable pid cannot name its group either.
+///
+/// The survivor holds no descriptor back to us: the handshake fd is
+/// re-armed close-on-exec before `execve`. Its three standard streams are
+/// the caller's to point somewhere that outlives us; an inherited pipe
+/// would die with this process and take the survivor's writes with it.
+///
+/// Exec failure still surfaces as itself. `std` hands the child a
+/// close-on-exec errno pipe and reads it until every copy is shut: the
+/// intermediate `_exit`s without writing, and the grandchild's copy closes
+/// only at a successful `execve`. So `Ok` here is proof the *grandchild*
+/// exec'd, and a bad program name comes back as `NotFound`.
+///
+/// # Errors
+/// Returns `Err` if either fork, the `setsid`, or the `execve` fails, if
+/// the intermediate exits non-zero, or if the pid handshake comes up short.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    let (mut receipt, handshake) = os_pipe::pipe()?;
+    let fd = handshake.as_raw_fd();
+    let (mut intermediate, _its_pgid) =
+        spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
+            // Async-signal-safe throughout: fork, write, _exit, setsid, fcntl.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if pid > 0 {
+                let bytes = pid.to_ne_bytes();
+                unsafe {
+                    let _ = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                    libc::_exit(0);
+                }
+            }
+            if unsafe { libc::setsid() } == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // `std` dup2'd the stdio fds before this hook ran, and dup2 clears
+            // FD_CLOEXEC on its target, so re-arm rather than trust the flag
+            // `os_pipe` set.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })?;
+    drop(handshake);
+    let born = wait_handling_stop(&mut intermediate, None, false)?;
+    if born != crate::process::WaitOutcome::Exited(0) {
+        return Err(std::io::Error::other(format!(
+            "could not detach: the intermediate process ended as {born:?} instead of exiting 0, so nothing here knows the pid of what it started"
+        )));
+    }
+    let mut pid = [0u8; size_of::<libc::pid_t>()];
+    receipt.read_exact(&mut pid).map_err(|err| {
+        std::io::Error::other(format!(
+            "could not detach: the process was started but its pid never came back ({err}); it may be running, with nothing left to name it"
+        ))
+    })?;
+    u32::try_from(libc::pid_t::from_ne_bytes(pid)).map_err(|_| {
+        std::io::Error::other("could not detach: the pid handed back is not a process id")
+    })
 }
 
 // ── Wait handling for stopped children ─────────────────────────────────────
@@ -775,14 +863,14 @@ mod tests {
     use super::super::{clear, escalation_pending};
     use super::*;
     use crate::process::cancel::{
-        CancelScope, SLOT_SERIAL, publish_durable_root, publish_foreground,
+        CancelScope, SLOT_SERIAL, Serial, publish_durable_root, publish_foreground,
     };
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::{Arc, Barrier};
 
     // All relay tests share a process-wide lock because `RELAY_PGIDS` is a
     // global.  Tests run concurrently in the same process by default;
     // without this they would steal each other's slots.
-    static RELAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static RELAY_TEST_LOCK: Serial = Serial::new();
 
     fn sigttou_is_blocked() -> bool {
         SigSet::thread_get_mask()
@@ -804,7 +892,7 @@ mod tests {
 
     #[test]
     fn slots_fill_and_drain() {
-        let _lock = RELAY_TEST_LOCK.lock().unwrap();
+        let _lock = RELAY_TEST_LOCK.lock();
 
         // Claim all 8 slots with distinct pgids.
         #[allow(
@@ -827,7 +915,7 @@ mod tests {
 
     #[test]
     fn released_slot_is_reusable() {
-        let _lock = RELAY_TEST_LOCK.lock().unwrap();
+        let _lock = RELAY_TEST_LOCK.lock();
 
         let g1 = PipelineRelay::install(1).unwrap();
         drop(g1);
@@ -844,7 +932,7 @@ mod tests {
         // 8 threads race to claim all slots simultaneously, hold briefly,
         // release.  Repeat 500 times.  No slot should ever be double-claimed
         // or leaked.
-        let _lock = RELAY_TEST_LOCK.lock().unwrap();
+        let _lock = RELAY_TEST_LOCK.lock();
 
         const ROUNDS: usize = 500;
 
@@ -876,7 +964,7 @@ mod tests {
         // Fill all slots, then hammer install from many threads
         // simultaneously.  Every extra install must return None, never panic
         // or corrupt state.
-        let _lock = RELAY_TEST_LOCK.lock().unwrap();
+        let _lock = RELAY_TEST_LOCK.lock();
 
         #[allow(
             clippy::cast_possible_truncation,
@@ -911,8 +999,8 @@ mod tests {
     /// escalation ladder, which is what backs the third-signal `_exit`.
     #[test]
     fn handler_translates_sigint_into_foreground_interrupt() {
-        let _relay = RELAY_TEST_LOCK.lock().unwrap();
-        let _slots = SLOT_SERIAL.lock().unwrap();
+        let _relay = RELAY_TEST_LOCK.lock();
+        let _slots = SLOT_SERIAL.lock();
         clear();
 
         let foreground = CancelScope::root();
@@ -943,8 +1031,8 @@ mod tests {
     /// ancestry.
     #[test]
     fn handler_translates_sigterm_and_sighup_into_root_terminate() {
-        let _relay = RELAY_TEST_LOCK.lock().unwrap();
-        let _slots = SLOT_SERIAL.lock().unwrap();
+        let _relay = RELAY_TEST_LOCK.lock();
+        let _slots = SLOT_SERIAL.lock();
         clear();
 
         let root = CancelScope::root();
@@ -984,8 +1072,11 @@ mod tests {
         // signal.
         //
         // We use Command + pre_exec rather than fork() to avoid the hazards
-        // of forking inside a multithreaded test binary.
-        let _lock = RELAY_TEST_LOCK.lock().unwrap();
+        // of forking inside a multithreaded test binary.  `sigint_relay`
+        // also requests a foreground cancel through the global slot, so
+        // this test holds `SLOT_SERIAL` alongside the relay lock.
+        let _lock = RELAY_TEST_LOCK.lock();
+        let _slots = SLOT_SERIAL.lock();
 
         use std::os::unix::process::CommandExt;
 
@@ -1012,5 +1103,121 @@ mod tests {
         let status = child.wait().expect("wait");
         // sleep was killed by SIGINT; exit code should be non-zero.
         assert!(!status.success(), "child should have been killed by SIGINT");
+    }
+
+    // ── Detached birth ─────────────────────────────────────────────────────
+
+    /// A `Command` with all three standard streams pointed away from the
+    /// harness, which is the precondition [`spawn_detached`] documents.
+    fn detachable(program: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new(program);
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd
+    }
+
+    /// The survivor belongs to nobody here.  It leads its own process
+    /// group (pid == pgid, from its own `setsid`), it is not waitable
+    /// from this process, and — where `/proc` can say so — its parent is
+    /// no longer us.
+    #[test]
+    fn detached_survivor_is_orphaned_and_leads_its_own_group() {
+        let mut cmd = detachable("sleep");
+        cmd.arg("30");
+        let pid = spawn_detached(&mut cmd).expect("detached birth");
+        let raw = i32::try_from(pid).expect("a live pid fits an i32");
+
+        assert_eq!(
+            unsafe { libc::getpgid(raw) },
+            raw,
+            "the survivor's own setsid must leave pid == pgid == sid"
+        );
+
+        let reaped = unsafe { libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(reaped, -1, "the survivor must not be waitable from here");
+        assert_eq!(
+            errno,
+            Some(libc::ECHILD),
+            "the survivor is a grandchild: no wait here can name it, and none can leak it as a zombie"
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            // /proc/<pid>/stat is `pid (comm) state ppid …`, and `comm`
+            // may itself contain spaces and parens — so read the fields
+            // from past the last ')'.
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("survivor stat");
+            let tail = &stat[stat.rfind(')').expect("stat has a comm field") + 1..];
+            let ppid: i32 = tail
+                .split_whitespace()
+                .nth(1)
+                .expect("stat has a ppid field")
+                .parse()
+                .expect("ppid is a number");
+            assert_ne!(
+                ppid,
+                i32::try_from(std::process::id()).expect("our own pid fits an i32"),
+                "the intermediate's exit must have reparented the survivor away from us"
+            );
+        }
+
+        unsafe { libc::kill(raw, libc::SIGKILL) };
+    }
+
+    /// The intermediate is reaped inside the birth, so the caller is left
+    /// with no child to wait for and no zombie to accumulate: the pid that
+    /// comes back names a live process that this one does not own.
+    #[test]
+    fn detached_birth_leaves_nothing_to_reap() {
+        let mut cmd = detachable("sleep");
+        cmd.arg("30");
+        let pid = spawn_detached(&mut cmd).expect("detached birth");
+        let raw = i32::try_from(pid).expect("a live pid fits an i32");
+
+        assert_eq!(
+            unsafe { libc::kill(raw, 0) },
+            0,
+            "the pid handed back must be the surviving grandchild, not the exited intermediate"
+        );
+        let reaped = unsafe { libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(reaped, -1);
+        assert_eq!(errno, Some(libc::ECHILD));
+
+        unsafe { libc::kill(raw, libc::SIGKILL) };
+    }
+
+    /// Redirected stdio reaches the file.  There is nothing to wait on —
+    /// that is the point of the verb — so the assertion polls.
+    #[test]
+    fn detached_stdout_lands_in_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("out");
+        let mut cmd = detachable("/bin/echo");
+        cmd.arg("hello")
+            .stdout(std::fs::File::create(&out).expect("create the stdout file"));
+        spawn_detached(&mut cmd).expect("detached birth");
+
+        for _ in 0..300 {
+            if std::fs::read_to_string(&out).is_ok_and(|text| text == "hello\n") {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the survivor's stdout never reached {}", out.display());
+    }
+
+    /// A program that does not exist comes back as `NotFound`, not as a
+    /// pid.  This is the proof that `std`'s close-on-exec errno pipe
+    /// survives the second fork: the parent's read of it completes only
+    /// once *every* copy is shut, and the grandchild's closes at a
+    /// successful `execve` — so `Ok` means the grandchild exec'd.
+    #[test]
+    fn detached_missing_program_reports_not_found() {
+        let err = spawn_detached(&mut detachable("ral-no-such-program-exists"))
+            .expect_err("a program that does not exist cannot be born");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }

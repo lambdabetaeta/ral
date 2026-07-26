@@ -606,7 +606,7 @@ mod wire_desk_tests {
     /// the reader loop's `Answer` arm, driven by hand from the peer end.
     #[test]
     fn enquire_round_trips_through_the_rendezvous() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(WireDesk {
             writer: Arc::new(Mutex::new(ours)),
@@ -640,7 +640,7 @@ mod wire_desk_tests {
     /// status the front-end refused with — the both-transports error law.
     #[test]
     fn refused_enquiry_raises_message_and_status() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(WireDesk {
             writer: Arc::new(Mutex::new(ours)),
@@ -676,7 +676,7 @@ mod wire_desk_tests {
     /// slot is removed, so the answer that never came has nowhere to land.
     #[test]
     fn cancel_wakes_a_parked_enquiry() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let (ours, _peer) = WireChannel::pair().expect("socketpair");
         let desk = WireDesk {
             writer: Arc::new(Mutex::new(ours)),
@@ -797,11 +797,18 @@ mod engine_session_tests {
 
     fn boot() -> Shell {
         static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
-        crate::boot::boot_shell(
+        let mut shell = crate::boot::boot_shell(
             crate::io::TerminalState::default(),
             PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime),
             &crate::boot::HostSurface::default(),
-        )
+        );
+        // The engine session is its process's signal-facing session; the
+        // `Control::Cancel` arm reaches an in-flight run through the
+        // published foreground slot. Every dispatching test here holds
+        // `SLOT_SERIAL`, so opting back in (test sessions default out) is
+        // safe.
+        shell.session.publishes_signal_slots = true;
+        shell
     }
 
     static INSTALLERS: &[EngineInstaller] = &[EngineInstaller { tag: "test", boot }];
@@ -938,7 +945,7 @@ mod engine_session_tests {
     /// A dispatch round-trips through `Event::Report`, and detach exits 0.
     #[test]
     fn dispatch_round_trips_to_a_report() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
         assert_eq!(host.detach_and_join(), 0);
@@ -948,7 +955,7 @@ mod engine_session_tests {
     /// "engine busy": the single worker rendezvous, one arm for both riders.
     #[test]
     fn busy_refuses_a_second_dispatch_and_a_probe() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let mut host = start();
         host.dispatch(1, "sleep 15");
         assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
@@ -968,7 +975,7 @@ mod engine_session_tests {
     /// still exits 0.
     #[test]
     fn cancel_settles_an_in_flight_run_promptly() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let mut host = start();
         host.dispatch(1, "sleep 30");
         // Let the worker stamp its dispatch and install its foreground scope.
@@ -981,7 +988,7 @@ mod engine_session_tests {
     /// A deferred worker's boundary batch arrives stamped `DispatchId(0)`.
     #[test]
     fn deferred_batch_is_stamped_dispatch_zero() {
-        let _g = SLOT_SERIAL.lock().unwrap();
+        let _g = SLOT_SERIAL.lock();
         let mut host = start();
         host.run(1, "let h = spawn { sleep 1 }");
         let frame = host.await_frame(|f| matches!(f, Frame::Event(_, Event::DeferredSurface(_))));

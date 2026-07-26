@@ -1728,6 +1728,10 @@ rather than by an explicit discard.  Observations — the return
 value, exit status, audit nodes, buffered stdout/stderr — cross
 back through the handle's `await` record.  Immutability of values
 makes the shared captured environment safe without synchronisation.
+All three are designed to end with the host process.  `detach`
+(§13.7) is designed to outlive it, and is a worker verb in neither
+mechanism nor type: it births an operating-system process and returns
+a receipt.
 
 The surface syntax is a trailing `&` on a pipeline, which yields a
 `Handle α` immediately (where α is the pipeline's value-output
@@ -1740,7 +1744,9 @@ grep pat file & ? echo fallback   # either arm of a ?-chain may be &
 
 `par`, `spawn`, `watch`, and `service` all produce the same kind of
 `Handle`.  `par` is *not* a primitive: it is prelude code over
-`spawn` and `await`.
+`spawn` and `await`.  `detach` (§13.7) produces no `Handle` at all:
+the axis it varies is ownership, and it is the one concurrency verb
+whose work the session stops owning.
 
 ### 13.2  `par` vs `map`
 
@@ -1866,7 +1872,8 @@ losers alike), or by a `` `settled `` `poll` — or is explicitly
 `cancel`led; a `` `pending `` `poll` removes nothing.  A nested
 `spawn` inside a worker registers into the owning shell's registry; a
 pipeline stage or a sub-agent fork starts with an empty one of its
-own.
+own.  `detach` (§13.7) files nothing here; it is not a worker, and a
+registry of live handles has nothing to hold for it.
 
 A worker is stopped by `cancel h`, by a root abort, by host-process
 exit, or by the host's lease policy.  Under a frame that grants a
@@ -1904,8 +1911,17 @@ spawn whose registration carries no idle lease and no backstop — its
 bound is legibility, not time.  The description is mandatory,
 non-empty, and single-line, and becomes the entry's command label in
 listings.  A service still counts toward the cap (live work is live
-work) and dies only by `cancel`, by the host discarding its session
-context, or with the process.  Availability mirrors `watch` (§13.5)
+work) and dies by `cancel`, by the host discarding its session
+context, or with the process.  The first two are designed edges and
+hold; the third is *designed intent, not a guarantee*.  Host teardown
+raises the cancel flag and the worker signals its child when it next
+observes it, which races the exiting process — so a service may
+briefly outlive the host, and a caller must not read either outcome
+as specified.  `service` is durable *within* a session and cannot be
+made durable beyond one: work whose survival must not depend on that
+race, in either direction, is `detach` (§13.7).
+
+Availability mirrors `watch` (§13.5)
 host-wise: an agent host, whose lease would otherwise reap long work,
 installs it; the interactive and batch ral hosts leave it uninstalled
 — they grant no lease, so every one of their spawns is already
@@ -1918,6 +1934,14 @@ session (`setsid`) with no controlling terminal, so nothing it runs
 can `tcgetpgrp` or signal the process that owns the tty.  An
 *interactive* background child keeps sharing the shell's process
 group, so terminal-driven SIGINT still reaches it.
+
+A `detach`ed process (§13.7) is severed the same way, but severs
+itself: the surviving grandchild calls `setsid()` in its own body,
+because a bare double fork leaves its process group named by the
+intermediate's pid — a number the kernel is free to recycle onto an
+unrelated process.  All three of its standard descriptors are opened
+on `/dev/null` rather than inherited, since no parent remains to hold
+the other end of anything.
 
 ### 13.5  Live watching: `watch`
 
@@ -1997,6 +2021,102 @@ serialised to a child-eval helper (such as a pipeline-stage subshell)
 that is a handle errors with `cannot return a handle from sandboxed
 evaluation`, since the worker it names does not exist in that child.
 `await` the handle before its value leaves the process.
+
+`detach` (§13.7) has no place in this picture.  An engaged sandbox
+kills its whole envelope with the process it wraps, however a child
+inside was born, so a detached process under confinement would be a
+receipt for a promise the OS breaks.  The verb is therefore not
+installed at all where the session's capabilities engage the sandbox
+— absent, not vetoed (§13.7).
+
+### 13.7  Handing work away: `detach`
+
+`detach "DESC" CMD ARG...` births an operating-system process the
+session stops owning.  It is an *effect*, not a function: it takes an
+argv, has no first-class `$detach` form (§16), and its work is a
+command line rather than a block — a block is a ral computation, and
+no ral computation outlives the process that evaluates it.  `DESC` is
+a mandatory, non-empty, single-line description, as for `service`.
+
+The birth is a **double fork**.  The intermediate child exits
+immediately, so the grandchild is reparented away from the session
+and its process group is never recorded by any worker.  The
+grandchild then severs the rest itself — `setsid()`, and fd 0, fd 1
+and fd 2 all on `/dev/null` (§13.4) — so nothing it inherits ties it
+to the caller: no controlling terminal to signal, and no pipe whose
+read end closes when the host exits.
+
+The call returns a **receipt**: an ordinary record, not a live
+reference.
+
+```
+{ pid:  Int       # the grandchild's pid, as of birth
+, desc: String    # the description given at the call
+}
+```
+
+That is the whole of it.  The session writes nothing, anywhere: a
+program worth outliving a session configures its own logging, and
+files invented for it would be litter nobody reads.  Being data, the
+receipt crosses turns and survives compaction — and it is all that
+survives, since nothing else about the birth was ever recorded.
+
+**There are no eliminators.**  `await`, `poll`, `race`, and `cancel`
+consume a `Handle α` (§13.3), and a receipt is not one, so none of
+them applies to a detached process.  Its **exit status is
+unrecoverable**: the session never waited for it and cannot, and
+whatever inherits it may or may not — pid 1 on a plain host, but a
+`PR_SET_CHILD_SUBREAPER` ancestor, a user session manager, or an
+init-less container can leave it to a parent that never waits at all.
+`pid` names it but does not hold it: the number may be recycled, and
+reading a receipt confers no authority the reader did not already
+have.
+
+A detached process is therefore **mute**.  It writes nowhere this
+session can read, and it settles nowhere this session can observe: if
+it dies a second after birth — the port already bound, a bad flag, a
+missing import — nothing notices.  A successful `detach` says that
+the program was `execve`d, and no more than that; it does not say the
+program still exists, and it never says the program worked.  The only
+way to learn whether it is running is to **probe what it serves** —
+connect to the port, fetch the URL, read the file the program itself
+writes.  This is the price of the cut, and it is the one thing a
+caller must understand before using the verb.
+
+`detach` is **absent rather than vetoed** wherever it has no meaning,
+and absence is decided once, when the session is built.  It has three
+grounds: the host (the agent host installs it, the interactive and
+batch `ral` hosts do not), the platform (it is born by a POSIX double
+fork, so it does not exist on Windows), and the session's
+capabilities (nothing is installed where they engage the OS sandbox,
+§13.6).  Where any of these holds, naming `detach` is an ordinary
+unknown-command error (§16) rather than a builtin that resolves and
+then refuses — the same discipline `watch` follows (§13.5).  A host
+installs the name and arms its budget in one act, so the two cannot
+be configured apart.
+
+A birth is bounded by a **budget**, not by a seat.  The live-worker
+cap (§13.4) bounds occupancy, and a process the session cannot
+observe occupies nothing; so what is bounded is the *act*.  The
+policy admits a fixed number of births over the session's whole life
+— 16 on an agent host — counted monotonically upward and never
+returned, because a detached process's death is not observable from
+here.  Exhaustion is refused at the door, as the cap's is.  A worker
+shares its owning session's policy, so a `detach` nested in a
+`spawn`ed body spends that session's births rather than a budget of
+its own.
+
+Two surface refusals are raised before anything is born.  `DESC` must
+be non-empty and single-line, as for `service`.  And a builtin head is
+refused: a builtin names no process image to leave running.  A name a
+`within [handlers:]` frame intercepts is *not* refused — it runs its
+handler, and the handler's value is the value of the `detach`.
+Resolution order (§16) holds under this verb as under any call, so no
+process is born on that route and no birth is spent from the budget.
+Everything else about the call — the 127/126 existence verdicts and
+the `exec` capability's judgment on the whole argv (§11.1) — is the
+ordinary external-command path, so a bundled tool falls out as its own
+image with no special case.
 
 ## 14  Scripts
 

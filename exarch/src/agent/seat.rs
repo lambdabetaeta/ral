@@ -18,12 +18,14 @@ use std::sync::{Arc, Mutex};
 pub(crate) enum Seat {
     /// In-process: owns the session [`Scratch`] (`/clear` reboots from it),
     /// the working directory the shell is re-seeded with on every such
-    /// reboot, and the run-scope cell the registry interrupts through,
-    /// which must stay live across a `/clear` rebuild.
+    /// reboot, whether the host granted `detach` (see [`boot_root_shell`]),
+    /// and the run-scope cell the registry interrupts through, which must
+    /// stay live across a `/clear` rebuild.
     Identity {
         transport: Box<IdentityTransport>,
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
+        detach: bool,
         run_scope: RunScope,
     },
     /// Out-of-process: the engine lives on the far end of `transport`, one
@@ -75,6 +77,7 @@ impl Seat {
         shell: Shell,
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
+        detach: bool,
         log: &AgentLog,
     ) -> Self {
         let run_scope: RunScope = Arc::new(Mutex::new(None));
@@ -83,6 +86,7 @@ impl Seat {
             transport,
             scratch,
             cwd,
+            detach,
             run_scope,
         }
     }
@@ -184,10 +188,11 @@ impl Seat {
                 transport,
                 scratch,
                 cwd,
+                detach,
                 run_scope,
             } => {
                 **transport = identity_ceremony(
-                    boot_root_shell(scratch, cwd.clone()),
+                    boot_root_shell(scratch, cwd.clone(), *detach),
                     log,
                     run_scope,
                     cwd.clone(),
@@ -209,10 +214,31 @@ impl Seat {
 /// its logical working directory and the scratch's env/binding seeding.
 /// Forks instead snapshot their parent through [`Shell::fork_session`],
 /// inheriting the seeding.
-pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf) -> Shell {
+///
+/// `detach` says whether the host decided the verb has meaning at all (no OS
+/// sandbox engages, and the platform can double-fork). Naming the verb and
+/// arming its budget is deliberately one act: a shell that has the name
+/// always has the budget, and the two cannot drift. Where `detach` is false
+/// the name is simply absent, and calling it is an ordinary unknown-command
+/// diagnostic rather than a builtin that resolves and refuses. `/clear`
+/// reboots through here, so a fresh shell re-gains both from the seat's own
+/// answer — there is no second install site.
+#[cfg_attr(
+    not(unix),
+    allow(
+        unused_variables,
+        reason = "detach is born by double-fork, a POSIX act: off unix core publishes no builtin to install"
+    )
+)]
+pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach: bool) -> Shell {
     let mut shell = crate::bootstrap::boot_shell();
     shell.seed_cwd(cwd);
     scratch.install_into(&mut shell);
+    #[cfg(unix)]
+    if detach {
+        shell.install_builtins(ral_core::builtins::DETACH_BUILTIN);
+        shell.arm_detach(crate::shell_eval::DETACH_BIRTH_BUDGET);
+    }
     shell
 }
 

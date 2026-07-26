@@ -109,6 +109,7 @@ pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
         RootSeat::Identity {
             scratch: Arc::new(scratch),
             cwd: std::env::current_dir().expect("test process has a cwd"),
+            detach: false,
         },
         scripted("test-model", Script::new()),
     )
