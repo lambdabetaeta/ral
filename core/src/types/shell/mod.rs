@@ -818,7 +818,9 @@ impl Shell {
     /// session registry, returning the [`FileId`] the compiled program's
     /// spans must carry so they resolve to it.
     pub fn install_script_context(&mut self, name: String, text: &str) -> FileId {
-        self.session.sources.register(Source::from_text(&name, text))
+        self.session
+            .sources
+            .register(Source::from_text(&name, text))
     }
 
     /// Install a top-level run's script context after clearing the session

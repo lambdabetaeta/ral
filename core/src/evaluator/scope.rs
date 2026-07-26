@@ -81,7 +81,9 @@ pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) 
         },
         BodyResult::Error(e) => {
             let failing = children.iter().rev().find(|n| n.status != 0);
-            let site = e.span.map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
+            let site = e
+                .span
+                .map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
             Outcome {
                 ok: false,
                 status: e.exit_code(),

@@ -369,4 +369,3 @@ pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let col = source[line_start..safe].chars().count() + 1;
     (line, col)
 }
-
