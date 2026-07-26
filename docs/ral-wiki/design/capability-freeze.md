@@ -116,6 +116,16 @@ a trusted boundary between cooperating ral processes, where the parent has
 already resolved every path. Since a `Capabilities` is always resolved, only
 concrete paths cross; there is no second, sigil-bearing form that could.
 
+A resolved path is resolved *in some namespace*, and one carrier crosses to a
+different one: synod's bundle is frozen on the host and enforced by a gate inside
+a Linux guest, so its prefixes name `/work` and `/tmp` and are folded by the
+guest's rule, not this process's
+([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]] — a
+Windows host folding `/work` with `Path::components` rebuilds it as `\work`).
+The like-for-like promise above is per-namespace and unaffected; what the case
+adds is that "the parent has already resolved every path" must be read as *in the
+namespace the child will match in*.
+
 See also [[design/grant|grant]] (the calculus this resolves into),
 [[design/two-enforcers|two-enforcers]],
 [[decisions/260605_capability-stage-collapse|capability-stage-collapse]] (the
