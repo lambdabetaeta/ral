@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a1791c5
+verified_at_commit: 837cb5c
 verified_at_date: 2026-07-26
-anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, publishes_signal_slots, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
 # Cancellation
@@ -10,10 +10,12 @@ anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, Foregrou
 cause-bearing scope tree* that asks the evaluator to unwind at its next poll
 point — backed by an *escalation ladder* that forces an exit when a user
 insists.** A signal handler or a TUI input thread holds neither a `Shell` nor a
-scope, so process-global *slots* bridge the async edge to the live tree with
-async-signal-safe atomics; the platform handlers *translate* each delivered
-signal into a cause on those slots
-([[decisions/260706_signals-are-causes|signals-are-causes]]). Both live in
+scope, so it *contributes a cause* to one of two process-lifetime **ambient
+causes** that facing scopes fold into their join; the platform handlers
+*translate* each delivered signal into such a contribution
+([[decisions/260706_signals-are-causes|signals-are-causes]],
+[[decisions/260726_cancel-is-a-join|cancel-is-a-join]],
+[[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]). Both live in
 `core/src/process/signal.rs` (see [[map/core/io-process|io-process]]); the
 gestures that drive them differ per host.
 
@@ -50,13 +52,17 @@ and *only* a real delivered signal walks the ladder.
 
 ## The scope tree and its cause lattice
 
-A `CancelScope` is a node in a tree of `Arc`-linked `AtomicU8` flags. A scope is
-cancelled iff its own flag or any ancestor's flag is set.
+A `CancelScope` is a node in a tree of `Arc`-linked `AtomicU8` flags. **Its
+cancellation is a *join*:**
+
+    cancelled(s) = ⨆ over chain(s) of ( flag(n) ⊔ ambient(n.hears) )
 
 - **`cancel(cause)`** is a `fetch_max` — cancellation is one-way and *monotone*: a
   later, weaker cause can never mask a stronger one already in force.
-- **`is_cancelled`** walks the parent chain reading flags; **`cause`** walks it
-  taking the maximum. No mutex, no allocation — one `AtomicU8::load` per ancestor.
+- **One private `fold`** computes the join; `is_cancelled` and `cause` are its
+  only callers, and every part it reads is private to `cancel.rs`, so no
+  observer can see a cancellation except as the whole join. No mutex, no
+  allocation — a handful of atomic loads per ancestor.
 - The cause is an escalation order, `CancelCause`:
 
   | cause | value | meaning | who raises it |
@@ -85,50 +91,61 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - **`ForegroundScope`** (`shell.run.cancel`) is the run's work scope. It can be
   minted *only* from a `DurableRoot` (or by nesting another foreground), so an
   unrelated root can never be installed as a foreground by accident.
-- Children are minted at exactly four sites: shell init (`root.child()` →
-  foreground), `Shell::dispatch` (`durable_root().child()` per run), the
-  concurrency worker (`root.child()` — root-parented, *not* foreground), and the
-  IPC inherit path. **Pipelines mint no scope of their own** — they are bounded by
+- Children are minted by two constructors that also fix which signals reach
+  them: `DurableRoot::foreground` (`Shell::dispatch`, per run) and
+  `DurableRoot::worker` (shell init's boot frame, `spawn_thread`'s detached
+  worker).
+- **The tree is the runs' dynamic extent.** `foreground` nests each entry under
+  the frame the run door displaces, not beside it under the root, so a nested
+  run observes what encloses it — its outer run's interrupt, and its outer
+  run's wall elapsing
+  ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
+  **Pipelines mint no scope of their own** — they are bounded by
   the foreground scope they run under and by `PipelineGroup::Drop`, which group-
   SIGKILLs on teardown (see [[internals/pipeline-execution|pipeline-execution]]).
 
-## The signal-reachable slots
+## The ambient causes
 
-A signal handler must not lock and cannot hold a `CancelScope` by value. Two
-process-global `AtomicPtr<AtomicU8>` slots publish a pointer into the live
-scope's flag for the async edge to set.
+A signal handler must not lock and cannot hold a `CancelScope` by value, so it
+raises a cause on a process-lifetime `static` and lets the tree read it. The
+two are different kinds of proposition, and `Hears` — fixed at mint, one
+variant per kind — says which a node folds
+([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 
-- **`FOREGROUND_SCOPE`** and **`DURABLE_ROOT_SCOPE`** are published together, for
-  the run's whole extent, by `RunGuard::install` (`core/src/run.rs`), which swaps
-  a `RunState` in. Publication is a *swap*, not a store, so a re-entrant run
-  nests its scope above the outer one and reveals it again on drop
-  ([[decisions/260617_turn-local-state|turn-local-state]]).
-- **At most one session per process publishes** — the *signal-facing* one, marked
-  by `SessionState::publishes_signal_slots`. The swap/restore discipline is LIFO
-  on a single thread, which concurrent sessions would violate; and a signal must
-  target the primary session's run, never whichever session dispatched last. A
-  forked session (`Shell::fork_session` — exarch's sub-agents) never publishes;
-  its host cancels it through a clonable handle on its durable root
-  (`Shell::cancel_handle`)
-  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]). This is a
-  *delivery* invariant: violating it drops or mistargets a cancellation, never
-  more ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]]).
-- **`request_foreground_cancel(cause)`** / **`request_root_cancel(cause)`** load
-  the slot and `fetch_max` the cause onto the published flag — the *exact* store
-  `scope.cancel(cause)` performs, and itself async-signal-safe. A null slot
-  (between runs) makes the request a no-op, so an idle Ctrl-C or Ctrl-`\` touches
-  nothing.
-- **The published flag is immortal.** A handler loads the slot at one instant and
-  dereferences it at another, so no un-publication discipline can make a
-  borrowed pointer safe; `publish` leaks one strong share of the scope's `Arc`
-  instead — 32 bytes per publishing run, for the life of the process. The
-  guards therefore bound only *when* a slot fires
-  ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]], which also records
-  the redesigns still open).
+- **Shutdown is absolute.** `request_root_cancel(cause)` is one `fetch_max` on
+  `REQUESTED_ROOT` — the *exact* store `scope.cancel(cause)` performs. Once
+  raised it holds for every observer forever, so a SIGTERM delivered while the
+  session is idle latches and the REPL reads it at its next prompt boundary.
+- **An interrupt is temporal.** `request_foreground_cancel(cause)` ticks
+  `CLOCK` and `fetch_max`es the new instant onto `STAMPED[cause]`; a foreground
+  frame records its birth instant at mint and observes exactly the causes
+  stamped after it. Two lock-free read-modify-writes, no allocation, no
+  `unsafe`. Nothing is ever reset: a Ctrl-C for a settled command is older than
+  the next command's frame, so the next run and the prompt after it are born
+  clean.
+- **Sharing, not shadowing.** A nested run reads its outer run's interrupt
+  through the frame it nests under, so a Ctrl-C mid-nest unwinds the whole
+  nest, as a POSIX shell's does.
+- **`Shell::face_signals`** re-mints a session's `DurableRoot` folding
+  `REQUESTED_ROOT`; its run doors then stamp each foreground frame with a birth
+  instant, *because* the root faces. A forked session (`Shell::fork_session` —
+  exarch's sub-agents) is deaf to both, and its host cancels it through a
+  clonable handle on its durable root (`Shell::cancel_handle`)
+  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
+- **A detached worker folds only the root cause**, through its parent: a
+  SIGTERM reaches it, a Ctrl-C cannot — no node on its chain carries a birth
+  instant, so the watermark is unreadable from it.
+- **An aside is inside the session.** A second `Shell` a host runs beside its
+  session — the REPL's hook shell, which evaluates arbitrary plugin code during
+  readline — *shares* the session's `DurableRoot` (`Shell::join_session`), so a
+  `cancel_handle` cancel reaches it. A Ctrl-C struck during a hook is younger
+  than the hook's frame and unwinds it; one aimed at a command already in
+  flight is older than every frame the aside will mint, so the aside can
+  neither absorb it nor keep it from the run it was aimed at.
 
-The slots are the seam the
-[[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] ADR calls the
-"cancel-translation slots": the semantic collapse is onto the scope tree, never
+This is the seam the
+[[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] ADR calls
+"cancel translation": the semantic collapse is onto the scope tree, never
 into the signal handler.
 
 ## Where cancellation is observed: poll points
@@ -177,7 +194,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 |---|---|---|---|
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `sigint_relay` | `request_foreground_cancel(Interrupt)` + relay SIGINT to external pgids; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer, `process::clear()`; no signal |
-| **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker; the REPL loop observes the sticky root and exits |
+| **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Esc** | exarch TUI, active exchange | `cancel::raise_interrupt` | cancels the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
@@ -195,7 +212,8 @@ fix the interactive dispositions:
   the shell while a *mixed* pipeline (internal threads + external processes) runs,
   fanning SIGINT out to up to eight active external pgids via the `RELAY_PGIDS`
   slot array (`PipelineRelay` RAII). It *also* `request_foreground_cancel`s so an
-  in-process foreground computation unwinds. It is a no-op when idle.
+  in-process foreground computation unwinds; raised while idle, the cause is
+  older than every frame still to be born, so the next run never sees it.
 - **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as
   *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
@@ -218,9 +236,10 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   uncancelled), one sticky token per agent for its whole life; the attend loop
   threads clones through `deliberate`/`run_batch`/tools, so cancelling any share
   halts that agent's exchange (provider streaming, invoked tools). The trunk's
-  token flag is published into exarch's own `CURRENT` slot — the same
-  lock-free pattern as ral's — and a genuine exchange boundary
-  `Token::reset`s the flag, so a prior exchange's Esc never bleeds into the next.
+  token flag is published into exarch's own `CURRENT` slot — still the aliased
+  pointer ral has retired ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]) —
+  and a genuine exchange boundary `Token::reset`s the flag, so a prior
+  exchange's Esc never bleeds into the next.
 - **The registry cascade is two-layer.** `AgentRegistry::cancel` (behind
   `agent-cancel`, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
@@ -229,7 +248,8 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   already in flight at the evaluator's poll points — without it, a cancelled
   agent would grind to its tool's `timeout_secs` wall before noticing. The trunk
   carries no eval-root handle: its session outlives any cancel, and an Esc
-  cancels its *run* through the published foreground slot instead
+  cancels its *run* through the ambient foreground cause instead — its seat
+  boots the one `Shell::face_signals` session in the process
   ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
 - **`install`** chains ral's `term_handler`: the exarch handler `raise`s the token
   then forwards into ral's disposition, so the root-`Terminate` translation and
@@ -260,15 +280,19 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
   signal delivery onto the scope tree: `Terminate`, the scope-only `check`, the
   one wait loop.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] — the
-  root/foreground split, the `CancelCause` order, and the per-run cancel slots.
+  root/foreground split and the `CancelCause` order.
 - [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]] —
   why the user interrupt writes a flag, not a counter.
 - [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] — exarch's shared
   per-agent token and its exchange-boundary reset.
 - [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] — the original
   cooperative-poll insight.
-- [[decisions/260726_cancel-slot-leak|cancel-slot-leak]] — why the published flag
-  is leaked, and the pointer-free redesigns still under evaluation.
+- [[decisions/260726_cancel-is-a-join|cancel-is-a-join]] — why the handler
+  contributes an element instead of aliasing one, and what routing by minting
+  deletes.
+- [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]] — why the
+  interrupt is time-indexed, what the run door's nesting fixed, and the
+  authority apparatus that dissolved with the spend.
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] and
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.

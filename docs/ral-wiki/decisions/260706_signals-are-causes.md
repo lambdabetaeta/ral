@@ -13,6 +13,15 @@ foreground turn; SIGTERM/SIGHUP terminate the durable root with a new cause,
 no longer a second, parallel signal-delivery mechanism for a wait loop to
 forget to consult.
 
+> The *substrate* this rides on — the published `AtomicPtr` slots — is
+> superseded by [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]: a
+> handler now contributes a cause to two process-lifetime cells that facing
+> scopes fold. The translation thesis is untouched, the rejection of
+> session-lifetime root publication below is dissolved (nothing is published),
+> and the Residual's idle-SIGTERM case is closed — the root cell is never
+> spent, so an idle delivery latches and the REPL reads it at its next prompt
+> boundary.
+
 This closes issue #3 of the 2026-07-05 core audit: *signals can't preempt a
 blocked standalone external; SIGTERM never cancels*. The audit deferred the
 issue believing the fix needed a new signal→wait-loop bridge (a self-pipe /

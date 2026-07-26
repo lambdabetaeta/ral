@@ -26,7 +26,7 @@
 //! seed differs.
 
 use crate::io::{Io, Sink, Source};
-use crate::process::{CancelCause, CancelSlot, ForegroundScope};
+use crate::process::{CancelCause, ForegroundScope};
 use crate::syntax::parser::ParseError;
 use crate::transport::{Program, Run};
 use crate::typecheck::TypeError;
@@ -64,8 +64,8 @@ pub enum StaticDiagnostics {
 // (`Shell::register_hook` stores compiled hooks by name in the session-lived
 // hook table).  It returns one flat `RunReport`.  Hosts describe *policy*
 // (the protocol `Run`, `RunIo`, `SurfaceSink`, lifecycle hooks); core owns
-// *resources* (`Sink`, `Source`, `RunState`, guards, buffers, signal
-// slots).  Completion is the call returning — never a channel disconnecting
+// *resources* (`Sink`, `Source`, `RunState`, guards, buffers, cancel
+// scopes).  Completion is the call returning — never a channel disconnecting
 // — so a deferred worker holding a surface clone cannot keep a run from
 // ending.  This door is the only way into evaluation: the reduction
 // primitive behind it is crate-private, so a host cannot start an unframed
@@ -267,7 +267,7 @@ impl Shell {
                 // reaper, so an entry armed here survives the compile. The
                 // `Deadline` guard disarms when `wall` drops, so an early
                 // `Static` return leaves no pending reaper entry.
-                let foreground = self.durable_root().child();
+                let foreground = self.durable_root().foreground(&self.run.cancel);
                 let wall = arm_wall(req.run.wall, None, &foreground);
 
                 let (comp, single_command) = match compile_run(self, src) {
@@ -303,7 +303,7 @@ impl Shell {
                 // boundary: hook args are first-order by type (`FOValue`).
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
 
-                let foreground = self.durable_root().child();
+                let foreground = self.durable_root().foreground(&self.run.cancel);
                 let wall = arm_wall(req.run.wall, hook.policy.budget, &foreground);
 
                 // Fold the hook's registered `DefaultPolicy` into the run's
@@ -444,56 +444,28 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
     }
 }
 
-/// Saves the previous run frame on install and restores it on `Drop`,
-/// and owns the per-run foreground and durable-root signal-slot
-/// publications for the same extent. Restoring under `Drop` rather than an
+/// Saves the previous run frame on install and restores it on `Drop`.
+/// Restoring under `Drop` rather than an
 /// explicit epilogue keeps the persistent `Shell` clean even when the
 /// evaluation unwinds — a host that catches a worker panic and continues the
 /// session on the same `Shell` would otherwise inherit a stale cursor, an
 /// already-cancelled foreground scope, and (had the run captured IO) the
 /// prior run's buffers and a foreign surface sink.
 ///
-/// Only the signal-facing session publishes
-/// (`SessionState::publishes_signal_slots`): the slots' save/restore
-/// discipline is LIFO on one thread, which concurrent sessions — a host's
-/// forked sub-agents dispatching runs on their own threads — would
-/// violate; and a signal must target the primary session's run, never
-/// whichever session dispatched last.  A non-publishing session's runs
-/// are cancelled through its scope handles instead
-/// ([`Shell::cancel_handle`](crate::types::Shell::cancel_handle)).
-///
-/// The slot publications point at raw flags inside the installed frame's
-/// cancel scope, which [`publish_foreground`](crate::process::publish_foreground)
-/// makes immortal. The guards therefore bound only *when* a slot fires: a slot
-/// outliving the frame it names is stale, never dangling.
+/// The frame it swaps in is the one `dispatch` minted *under* the frame it
+/// displaces, so this LIFO discipline and the cancel tree describe the same
+/// dynamic extent, and installing carries no decision of its own.
 struct RunGuard<'s> {
-    _fg: Option<CancelSlot>,
-    _root: Option<CancelSlot>,
     shell: &'s mut Shell,
     saved: RunState,
 }
 
 impl<'s> RunGuard<'s> {
-    /// Swap `next` into `shell.run`, publish the installed frame's
-    /// foreground scope and the session's durable root into the
-    /// signal-reachable slots (signal-facing session only), and hold the
-    /// displaced frame for restoration on `Drop`.
-    #[allow(
-        clippy::used_underscore_binding,
-        reason = "RAII guard field; the leading underscore marks it as held for Drop, not read"
-    )]
+    /// Swap `next` into `shell.run` and hold the displaced frame for
+    /// restoration on `Drop`.
     fn install(shell: &'s mut Shell, next: RunState) -> Self {
         let saved = std::mem::replace(&mut shell.run, next);
-        let publish = shell.session.publishes_signal_slots;
-        let _fg = publish.then(|| crate::process::publish_foreground(shell.run.cancel.as_scope()));
-        let _root =
-            publish.then(|| crate::process::publish_durable_root(shell.session.root.as_scope()));
-        Self {
-            _fg,
-            _root,
-            shell,
-            saved,
-        }
+        Self { shell, saved }
     }
 
     fn shell_mut(&mut self) -> &mut Shell {
@@ -701,7 +673,7 @@ mod tests {
     /// with a zero transport status.
     #[test]
     fn clean_run_settles_with_zero_status() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("$[1 + 1]")) {
             RunReport::Ran { result, status, .. } => {
@@ -716,7 +688,7 @@ mod tests {
     /// diagnostic.
     #[test]
     fn parse_failure_is_static() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("let = ")) {
             RunReport::Static { diagnostics } => {
@@ -732,7 +704,7 @@ mod tests {
     /// A type error never reaches evaluation: it returns type diagnostics.
     #[test]
     fn type_failure_is_static() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("$[1 + true]")) {
             RunReport::Static { diagnostics } => {
@@ -749,7 +721,7 @@ mod tests {
     /// transport status.
     #[test]
     fn exit_escape_reports_code() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("exit 3")) {
             RunReport::Ran { result, status, .. } => {
@@ -766,7 +738,7 @@ mod tests {
     /// `RunIo::Capture` returns the run's stdout in `Ran::captured`.
     #[test]
     fn capture_returns_stdout_bytes() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("echo hi")) {
             RunReport::Ran { captured, .. } => {
@@ -788,7 +760,7 @@ mod tests {
     /// not the run's internally-minted child).
     #[test]
     fn frame_restores_state_on_return() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(
             shell.run.surface.is_none(),
@@ -824,6 +796,7 @@ mod tests {
         fn enquire(
             &self,
             req: crate::serial::FOValue,
+            _cancel: &crate::process::CancelScope,
         ) -> Result<crate::serial::FOValue, crate::types::Error> {
             Ok(req)
         }
@@ -834,7 +807,7 @@ mod tests {
     /// to its pre-run value (`None`) exactly as `surface` is.
     #[test]
     fn desk_is_restored_to_its_pre_run_value() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.run.desk.is_none(), "no desk before the run");
 
@@ -870,7 +843,7 @@ mod tests {
     /// empties it rather than merely swapping it out.
     #[test]
     fn nursery_is_restored_and_emptied_at_run_teardown() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.run.nursery.is_none(), "no nursery before the run");
 
@@ -905,7 +878,7 @@ mod tests {
     /// this run's own settling.
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
         // Spawn a worker under a millisecond-scale idle lease and never
@@ -967,7 +940,7 @@ mod tests {
     /// `post_exec` saw the computed transport status.
     #[test]
     fn lifecycle_hooks_fire_with_status() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         #[derive(Clone)]
         struct Spy {
             pre: Arc<Mutex<bool>>,
@@ -1000,14 +973,14 @@ mod tests {
         );
     }
 
-    /// `run` publishes the installed foreground scope into the
-    /// signal-reachable slot for the eval's extent: a lifecycle hook that
-    /// requests a foreground cancel (the role a signal handler plays) reaches
-    /// `shell.run.cancel`, and the trampoline's `process::check` unwinds
-    /// the eval into a `Break::Error` with transport status 130.
+    /// A run of a signal-facing session reads the interrupt watermark against
+    /// its own birth: a lifecycle hook that raises one (the role a signal
+    /// handler plays) is younger than `shell.run.cancel`, so the trampoline's
+    /// `process::check` unwinds the eval into a `Break::Error` with transport
+    /// status 130.
     #[test]
-    fn published_foreground_slot_carries_request_into_eval() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+    fn facing_session_carries_an_interrupt_into_eval() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         struct CancelInPreExec;
         impl RunLifecycle for CancelInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -1016,8 +989,7 @@ mod tests {
         }
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        // Publication under test: opt in (test sessions default out).
-        shell.session.publishes_signal_slots = true;
+        shell.face_signals();
         match shell.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let x = 42\nreturn $x")
@@ -1036,16 +1008,151 @@ mod tests {
         }
     }
 
-    /// A forked session ([`Shell::fork_session`]) is not the signal-facing
-    /// session, so its run doors leave the signal slots untouched: a
-    /// foreground-cancel request fired mid-run (the role a signal handler
-    /// plays) finds no published slot and the eval completes undisturbed.
-    /// Its host stops it through [`Shell::cancel_handle`] instead — the
-    /// companion assertion below cancels the handle and sees the same
-    /// unwind a published slot would have produced.
+    /// A nested run is a *child* of the run it nests in, so it observes what
+    /// that run observes. A hook that raises an interrupt and then dispatches
+    /// a nested run — the only re-entrant shape a lifecycle hook can build —
+    /// leaves both unwinding at 130: the nested frame is younger than the
+    /// interrupt and deaf to it on its own account, and reads it off the
+    /// outer frame it descends from.
     #[test]
-    fn forked_session_run_does_not_publish_signal_slots() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+    fn a_nested_run_observes_the_interrupt_through_the_run_it_nests_in() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        struct NestARun(Arc<Mutex<Option<i32>>>);
+        impl RunLifecycle for NestARun {
+            fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
+                match shell.run(capture_req("let y = 1\nreturn $y")) {
+                    RunReport::Ran { status, .. } => *self.0.lock().unwrap() = Some(status),
+                    RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+                }
+            }
+        }
+
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        let inner = Arc::new(Mutex::new(None));
+        match shell.run(RunRequest {
+            lifecycle: Box::new(NestARun(inner.clone())),
+            ..capture_req("let x = 42\nreturn $x")
+        }) {
+            RunReport::Ran { status, .. } => assert_eq!(
+                status, 130,
+                "the outer run must still observe the interrupt the nested run ran under"
+            ),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+        assert_eq!(
+            *inner.lock().unwrap(),
+            Some(130),
+            "and the nested run observes it too — sharing, not shadowing"
+        );
+    }
+
+    /// An aside — a separate `Shell` the host runs beside its session, as the
+    /// REPL runs plugin hooks ([`Shell::join_session`]) — can neither absorb
+    /// an interrupt aimed at the session's run nor keep it from it. It is not
+    /// a matter of authority: the aside's frames are minted under its own
+    /// boot frame, so an interrupt older than every one of them is unreadable
+    /// from the aside and stands undisturbed for the run it was aimed at.
+    #[test]
+    fn an_aside_cannot_absorb_an_interrupt_older_than_its_frames() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        struct RunAnAside(Shell, Arc<Mutex<Option<i32>>>);
+        impl RunLifecycle for RunAnAside {
+            fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
+                match self.0.run(capture_req("let y = 1\nreturn $y")) {
+                    RunReport::Ran { status, .. } => *self.1.lock().unwrap() = Some(status),
+                    RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+                }
+            }
+        }
+
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        let aside = shell.join_session();
+        let hook_status = Arc::new(Mutex::new(None));
+        match shell.run(RunRequest {
+            lifecycle: Box::new(RunAnAside(aside, hook_status.clone())),
+            ..capture_req("let x = 42\nreturn $x")
+        }) {
+            RunReport::Ran { status, .. } => assert_eq!(
+                status, 130,
+                "the interrupt must survive the aside's entry and unwind the run it was aimed at"
+            ),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+        assert_eq!(
+            *hook_status.lock().unwrap(),
+            Some(0),
+            "while the aside's own run, born after the interrupt, is deaf to it"
+        );
+    }
+
+    /// The other half: an interrupt raised *while* the aside runs does unwind
+    /// it, so arbitrary plugin code is interruptible for its whole life.
+    #[test]
+    fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        struct CancelInPreExec;
+        impl RunLifecycle for CancelInPreExec {
+            fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
+            }
+        }
+
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        let mut aside = shell.join_session();
+        match aside.run(RunRequest {
+            lifecycle: Box::new(CancelInPreExec),
+            ..capture_req("let y = 1\nreturn $y")
+        }) {
+            RunReport::Ran { status, .. } => assert_eq!(
+                status, 130,
+                "a Ctrl-C during a hook must unwind the hook it lands in"
+            ),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+    }
+
+    /// Cancelling a session through [`Shell::cancel_handle`] — how a host
+    /// stops a session it owns — reaches the aside running beside it, because
+    /// the aside shares that very root. Nothing else can: the handle names the
+    /// root and the aside is deaf to every cell the session does not hear.
+    #[test]
+    fn cancelling_a_session_by_handle_reaches_its_aside() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        let mut aside = shell.join_session();
+
+        shell
+            .cancel_handle()
+            .cancel(crate::process::CancelCause::Explicit);
+
+        match aside.run(capture_req("let y = 1\nreturn $y")) {
+            RunReport::Ran { result, status, .. } => {
+                assert_eq!(status, 130, "the aside's run unwinds with the session");
+                assert!(
+                    matches!(result, Err(Break::Error(_))),
+                    "the handle cancel must unwind the aside, got {result:?}"
+                );
+            }
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+    }
+
+    /// A forked session ([`Shell::fork_session`]) is not the signal-facing
+    /// session, so nothing on its runs' chains folds the ambient causes: an
+    /// interrupt raised mid-run (the role a signal handler plays) leaves the
+    /// eval undisturbed. Its host stops it through
+    /// [`Shell::cancel_handle`] instead — the companion assertion below
+    /// cancels the handle and sees the unwind the requested cause could not
+    /// produce.
+    #[test]
+    fn a_forked_session_is_deaf_to_the_requested_causes() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         struct CancelInPreExec;
         impl RunLifecycle for CancelInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -1054,9 +1161,9 @@ mod tests {
         }
 
         let mut trunk = Shell::new(crate::io::TerminalState::default());
-        // Mark the trunk signal-facing so the fork's non-publication below
-        // is `fork_session`'s doing, not the test default's.
-        trunk.session.publishes_signal_slots = true;
+        // Face the trunk, so the fork's deafness below is `fork_session`'s
+        // doing rather than the minting default's.
+        trunk.face_signals();
         let mut forked = trunk.fork_session();
         match forked.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
@@ -1076,8 +1183,8 @@ mod tests {
         }
 
         // The host-side path: cancelling the forked session's handle unwinds
-        // its next run at the evaluator's poll, exactly as a published slot
-        // would have for the signal-facing session.
+        // its next run at the evaluator's poll, exactly as the requested cause
+        // does for the signal-facing session.
         struct CancelHandleInPreExec(crate::process::DurableRoot);
         impl RunLifecycle for CancelHandleInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -1100,15 +1207,15 @@ mod tests {
         }
     }
 
-    /// `run` publishes the durable root into the signal-reachable
-    /// root slot for the run's extent: a lifecycle hook that requests a
-    /// root abort (the role a SIGQUIT handler plays) reaches the root, and
-    /// the foreground scope — a child of the root — observes the abort
-    /// through its parent chain. The trampoline's `process::check` unwinds
-    /// the eval into a `Break::Error` with transport status 130.
+    /// A signal-facing session's durable root folds the requested shutdown
+    /// cause: a lifecycle hook that requests a root abort (the role a SIGQUIT
+    /// handler plays) reaches the root, and the foreground scope — a child of
+    /// the root — observes the abort through its parent chain. The
+    /// trampoline's `process::check` unwinds the eval into a `Break::Error`
+    /// with transport status 130.
     #[test]
-    fn published_root_slot_carries_abort_into_eval() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+    fn facing_session_carries_a_root_abort_into_eval() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         struct AbortInPreExec;
         impl RunLifecycle for AbortInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -1117,12 +1224,15 @@ mod tests {
         }
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        // Publication under test: opt in (test sessions default out).
-        shell.session.publishes_signal_slots = true;
-        match shell.run(RunRequest {
+        shell.face_signals();
+        let report = shell.run(RunRequest {
             lifecycle: Box::new(AbortInPreExec),
             ..capture_req("let x = 42\nreturn $x")
-        }) {
+        });
+        // Hand the cell back before asserting: it is one-way in production,
+        // and every later session in this test binary would inherit the abort.
+        crate::process::cancel::clear_root_request();
+        match report {
             RunReport::Ran { result, status, .. } => {
                 assert_eq!(status, 130, "a root abort observed mid-eval reports 130");
                 assert!(
@@ -1140,7 +1250,7 @@ mod tests {
     /// pins the `timed_out` classification without sleeping on the reaper.
     #[test]
     fn deadline_cancel_reports_timed_out() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         struct DeadlineInPreExec;
         impl RunLifecycle for DeadlineInPreExec {
             fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
@@ -1149,8 +1259,7 @@ mod tests {
         }
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        // Publication under test: opt in (test sessions default out).
-        shell.session.publishes_signal_slots = true;
+        shell.face_signals();
         let req = capture_req("let x = 42\nreturn $x");
         match shell.run(RunRequest {
             run: Run {
@@ -1177,7 +1286,7 @@ mod tests {
     /// in it.
     #[test]
     fn inherit_leaves_session_streams_untouched() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
         shell.run.io.stdout = Sink::Buffer(marker.clone());
@@ -1239,7 +1348,7 @@ mod tests {
     /// binding intact, and the shell evaluating the next run cleanly.
     #[test]
     fn panicking_run_reports_failed_and_rolls_back() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
 
@@ -1298,7 +1407,7 @@ mod tests {
 
     #[test]
     fn lifecycle_panic_is_caught_at_the_door() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
         match shell.run(RunRequest {
@@ -1323,6 +1432,7 @@ mod tests {
         fn enquire(
             &self,
             _req: crate::serial::FOValue,
+            _cancel: &crate::process::CancelScope,
         ) -> Result<crate::serial::FOValue, crate::types::Error> {
             panic!("run-door test: desk handler panic");
         }
@@ -1337,7 +1447,7 @@ mod tests {
 
     #[test]
     fn desk_handler_panic_is_caught_at_the_door() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
         match shell.run(RunRequest {

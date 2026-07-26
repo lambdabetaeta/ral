@@ -92,6 +92,9 @@ impl Session {
             },
         );
         shell.set_exit_hints(crate::platform::load_exit_hints());
+        // The REPL owns this process's signals: Ctrl-C reaches its runs and
+        // Ctrl-\ / SIGTERM its durable root.
+        shell.face_signals();
         boot::setup_panic_hook();
 
         // Login shell: set umask and source system/user profiles.

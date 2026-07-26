@@ -3,8 +3,8 @@
 //! The concerns that interlock here:
 //!
 //!   * **Termination signals** (SIGINT/SIGTERM/SIGHUP) are translated
-//!     into a [`CancelCause`](crate::process::CancelCause) on the published
-//!     cancel slots — the same delivery every other cancellation uses — and
+//!     into a [`CancelCause`](crate::process::CancelCause) on the ambient
+//!     causes — the same delivery every other cancellation uses — and
 //!     tick the escalation ladder whose third delivery forces `_exit`.
 //!   * **Pipeline relays** keep the controlling tty with the shell while
 //!     mixed pipelines run, fanning Ctrl+C out to every external pgid.
@@ -58,9 +58,9 @@ extern "C" fn handler(sig: libc::c_int) {
         // Third signal: force exit. Use _exit to avoid atexit deadlocks.
         unsafe { libc::_exit(128 + sig) };
     }
-    // Translate the signal into a cause on the published cancel slots —
-    // async-signal-safe (a slot load plus a `fetch_max`).  SIGINT is an
-    // interrupt of the current foreground run; SIGTERM/SIGHUP are a
+    // Translate the signal into a cause on the ambient cells —
+    // async-signal-safe (atomic read-modify-writes on `static`s).  SIGINT is
+    // an interrupt of the runs already in flight; SIGTERM/SIGHUP are a
     // shutdown request and land on the durable root, reaching detached
     // workers too.  Every wait loop already polls its scope, so this is
     // what preempts a blocked external child.
@@ -91,11 +91,11 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
 // `RELAY_PGIDS` is a fixed slot array.  Each `PipelineRelay` claims one slot
 // with CAS; the handler iterates all slots and sends to any non-zero entry.
 // The handler is installed once at startup and never removed, so there is no
-// install/uninstall race.  Beyond the relay, the handler also cancels the
-// current run's foreground scope so an in-process foreground computation
-// unwinds on Ctrl-C; between runs that cancel is a no-op and the relay slots
-// are typically empty, so an idle Ctrl-C at the prompt is left to the line
-// editor.
+// install/uninstall race.  Beyond the relay, the handler also raises the
+// ambient interrupt so an in-process foreground computation unwinds on
+// Ctrl-C; between runs the relay slots are typically empty and every frame
+// still to be born is younger than the cause, so an idle Ctrl-C at the prompt
+// is left to the line editor.
 
 const MAX_RELAY: usize = 8;
 
@@ -116,10 +116,11 @@ fn relay_signal_to_groups(sig: libc::c_int) {
 }
 
 extern "C" fn sigint_relay(_: libc::c_int) {
-    // Cancel the current run's foreground scope so in-process foreground
-    // work unwinds at its next poll; a no-op between runs (idle Ctrl-C at
-    // the prompt is still handled by the line editor). Detached workers poll
-    // their own scopes, not the foreground, so they are spared.
+    // Raise the ambient interrupt so in-process foreground work unwinds at
+    // its next poll; a run that has already settled cannot be reached, and
+    // neither can one not yet born (idle Ctrl-C at the prompt is still
+    // handled by the line editor). Detached workers carry no birth instant,
+    // so they are spared.
     request_foreground_cancel(CancelCause::Interrupt);
     relay_signal_to_groups(libc::SIGINT);
 }
@@ -131,8 +132,8 @@ pub fn relay_handler() -> extern "C" fn(libc::c_int) {
 
 extern "C" fn sigquit_handler(_: libc::c_int) {
     // Ctrl-\ in cooked mode: reap the whole session. Cancel the durable
-    // root, reaching the foreground run and every detached worker. A no-op
-    // between runs (null slot), so an idle Ctrl-\ does not core-dump.
+    // root, reaching the foreground run and every detached worker — and
+    // latching if the session is idle, since the cause is one-way.
     request_root_cancel(CancelCause::RootAbort);
 }
 
@@ -862,9 +863,7 @@ fn active_relay_slots() -> usize {
 mod tests {
     use super::super::{clear, escalation_pending};
     use super::*;
-    use crate::process::cancel::{
-        CancelScope, SLOT_SERIAL, Serial, publish_durable_root, publish_foreground,
-    };
+    use crate::process::cancel::{DurableRoot, REQUEST_SERIAL, Serial, clear_root_request};
     use std::sync::{Arc, Barrier};
 
     // All relay tests share a process-wide lock because `RELAY_PGIDS` is a
@@ -1000,21 +999,23 @@ mod tests {
     #[test]
     fn handler_translates_sigint_into_foreground_interrupt() {
         let _relay = RELAY_TEST_LOCK.lock();
-        let _slots = SLOT_SERIAL.lock();
+        let _serial = REQUEST_SERIAL.lock();
         clear();
 
-        let foreground = CancelScope::root();
-        let root = CancelScope::root();
-        let _fg = publish_foreground(&foreground);
-        let _rt = publish_durable_root(&root);
+        let root = DurableRoot::signal_facing();
+        let foreground = root.foreground(&root.worker());
 
         handler(libc::SIGINT);
         assert_eq!(
             foreground.cause(),
             Some(CancelCause::Interrupt),
-            "SIGINT must interrupt the published foreground scope"
+            "SIGINT must interrupt a facing run's foreground scope"
         );
-        assert_eq!(root.cause(), None, "SIGINT must not reach the durable root");
+        assert_eq!(
+            root.as_scope().cause(),
+            None,
+            "SIGINT must not reach the durable root"
+        );
         assert!(
             escalation_pending(),
             "a delivered signal must tick the escalation ladder"
@@ -1026,25 +1027,24 @@ mod tests {
     /// them into a root [`Terminate`](crate::process::CancelCause::Terminate),
     /// reaching the foreground run *and* every detached worker parented
     /// under the durable root — the semantics a `timeout(1)`- or
-    /// systemd-style SIGTERM expects.  The foreground slot itself is not
-    /// written; the foreground observes the cause through its root
+    /// systemd-style SIGTERM expects.  The interrupt watermark itself is not
+    /// stamped; the foreground observes the cause through its root
     /// ancestry.
     #[test]
     fn handler_translates_sigterm_and_sighup_into_root_terminate() {
         let _relay = RELAY_TEST_LOCK.lock();
-        let _slots = SLOT_SERIAL.lock();
+        let _serial = REQUEST_SERIAL.lock();
         clear();
+        clear_root_request();
 
-        let root = CancelScope::root();
-        let foreground = root.child();
-        let _fg = publish_foreground(&foreground);
-        let _rt = publish_durable_root(&root);
+        let root = DurableRoot::signal_facing();
+        let foreground = root.foreground(&root.worker());
 
         handler(libc::SIGTERM);
         assert_eq!(
-            root.cause(),
+            root.as_scope().cause(),
             Some(CancelCause::Terminate),
-            "SIGTERM must terminate the published durable root"
+            "SIGTERM must terminate a facing session's durable root"
         );
         assert_eq!(
             foreground.cause(),
@@ -1054,11 +1054,12 @@ mod tests {
 
         handler(libc::SIGHUP);
         assert_eq!(
-            root.cause(),
+            root.as_scope().cause(),
             Some(CancelCause::Terminate),
             "SIGHUP is the same shutdown request as SIGTERM"
         );
         clear();
+        clear_root_request();
     }
 
     // ── Signal forwarding ──────────────────────────────────────────────────
@@ -1073,10 +1074,10 @@ mod tests {
         //
         // We use Command + pre_exec rather than fork() to avoid the hazards
         // of forking inside a multithreaded test binary.  `sigint_relay`
-        // also requests a foreground cancel through the global slot, so
-        // this test holds `SLOT_SERIAL` alongside the relay lock.
+        // also raises the ambient interrupt, so this test holds
+        // `REQUEST_SERIAL` alongside the relay lock.
         let _lock = RELAY_TEST_LOCK.lock();
-        let _slots = SLOT_SERIAL.lock();
+        let _serial = REQUEST_SERIAL.lock();
 
         use std::os::unix::process::CommandExt;
 

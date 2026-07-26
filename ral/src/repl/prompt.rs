@@ -166,6 +166,10 @@ pub(super) fn write_terminal_title(shell: &Shell) {
 ///
 /// The prompt hook is registered at session boot and may be
 /// overwritten by the rc `prompt:` key.
+///
+/// This runs on the session itself, as a run like any other: its frame is
+/// born after the settled command's Ctrl-C, so the prompt is drawn free of it
+/// without anything having to be handed back.
 pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> PromptText {
     let base = match shell.run(prompt_run("prompt")) {
         RunReport::Ran {

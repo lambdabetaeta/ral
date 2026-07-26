@@ -232,6 +232,11 @@ impl Seat {
 )]
 pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach: bool) -> Shell {
     let mut shell = crate::bootstrap::boot_shell();
+    // The trunk session owns this process's signals: an Esc or an async
+    // SIGINT interrupts its in-flight run, a SIGTERM its whole session. A
+    // sub-agent's session is a `fork_session` of it, and stays deaf — the
+    // registry stops one through its own cancel handle.
+    shell.face_signals();
     shell.seed_cwd(cwd);
     scratch.install_into(&mut shell);
     #[cfg(unix)]
@@ -282,13 +287,12 @@ fn identity_ceremony(
 // Wire-seat tests drive a *real* engine child (`std::env::current_exe()`
 // re-exec'd with `--engine`, exactly the pre_exec handoff
 // `WireTransport::new`/`exarch/tests/wire_liveness.rs` use), never an
-// in-process `engine_session` thread. `Shell::run` publishes the
-// process-global foreground/durable-root cancel slots on every run
-// (the single-session default); those slots are guarded by
-// `ral_core::process::cancel::SLOT_SERIAL` in core's own tests, but that
-// mutex is `pub(crate)` to core and unreachable here. A same-process
-// engine thread would race that slot against whatever sibling test in this
-// same lib binary is mid-run; a child process owns its slots alone.
+// in-process `engine_session` thread. `engine_session` faces its process's
+// signals, so its runs fold the process-lifetime ambient cancel causes;
+// core serialises its own tests against those cells with a lock that is
+// `pub(crate)` to core and unreachable here. A same-process engine thread
+// would race the cells against whatever sibling test in this same lib
+// binary is mid-run; a child process owns its cells alone.
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,

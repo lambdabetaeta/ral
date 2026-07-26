@@ -70,7 +70,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 pub fn install_handlers() {
     // SetConsoleCtrlHandler via the ctrlc crate.  The handler translates
     // the delivery into an [`Interrupt`](super::CancelCause::Interrupt) on
-    // the published foreground cancel slot — the delivery every poll point
+    // the ambient foreground cause — the delivery every poll point
     // (the evaluator's `check`, a blocked external's wait loop) observes —
     // returns TRUE so Windows does not terminate the process, and fans
     // Ctrl-Break / TerminateJobObject out depending on how many deliveries

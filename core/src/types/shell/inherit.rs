@@ -29,6 +29,9 @@
 //! - **REPL aside** (prompt, hook): [`Shell::child_from`] clones the
 //!   parent's [`Context`](super::Context) without touching its local
 //!   machinery; the child is an independent sibling with no flow-back.
+//!   [`Shell::join_session`] adds the one edge an aside keeps — the parent's
+//!   durable cancel root, shared — so the aside is inside the session for
+//!   cancellation while beginning no command of its own.
 //! - **Host session fork** (sub-agent): [`Shell::fork_session`] is the
 //!   session-scoped specialisation of `child_from` — it snapshots the whole
 //!   scope, context, and builtin table into a child session that performs its
@@ -250,19 +253,40 @@ impl Shell {
     /// continuation of the caller's call stack) and a freshly-defaulted
     /// [`SessionState`](super::SessionState), so it holds no terminal
     /// authority (`TerminalAccess::Denied`, no lease — it is not the
-    /// foreground session) and never publishes the process-global signal
-    /// slots (it is not the signal-facing session either — its host cancels
-    /// it through [`Shell::cancel_handle`]). There is no flow-back: the
-    /// child's `cd`, env, and new bindings die with it.
+    /// foreground session) and a freshly-minted durable root, deaf to the
+    /// ambient causes even when forked from a session that faces them (it is
+    /// not the signal-facing session either — its host cancels it through
+    /// [`Shell::cancel_handle`]). There is no flow-back: the child's `cd`,
+    /// env, and new bindings die with it.
     ///
     /// Routing a host fork through here keeps the "what flows into a child"
     /// decision in the flow matrix rather than at the call site, so a host
     /// cannot silently sever an inheritable datum — the builtin table among
     /// them — by hand-copying only the fields it happened to remember.
     pub fn fork_session(&self) -> Self {
-        let mut child = Self::child_from(&self.mobile.scope, self);
-        child.session.publishes_signal_slots = false;
-        child
+        Self::child_from(&self.mobile.scope, self)
+    }
+
+    /// Join this session as an *aside*: a second [`Shell`] the host runs
+    /// beside it rather than as one — the REPL's hook shell, which evaluates
+    /// arbitrary plugin code while the session sits at its prompt.
+    ///
+    /// The aside twin of [`Self::fork_session`], and its opposite in the one
+    /// place that matters: it *shares* this session's
+    /// [`DurableRoot`](crate::process::DurableRoot) instead of minting a fresh
+    /// one, so it is inside the session for cancellation exactly as
+    /// [`Self::inherit_from`] and [`Self::spawn_thread`] are — it hears the
+    /// shutdown request, a root abort, and a [`Self::cancel_handle`] cancel
+    /// through ancestry, and its runs' frames read the interrupt watermark as
+    /// this session's own do, each against its own birth. A hook interrupted
+    /// while it runs unwinds; one aimed at a command the session was already
+    /// running is older than every frame the aside will mint, so the aside
+    /// can neither absorb it nor keep it from the run it was aimed at.
+    pub fn join_session(&self) -> Self {
+        let mut aside = Self::child_from(&self.mobile.scope, self);
+        aside.session.root = self.session.root.clone();
+        aside.run.cancel = aside.session.root.worker();
+        aside
     }
 
     /// Spawn `f` on a fresh OS thread with a cloned child shell.  The
@@ -272,10 +296,12 @@ impl Shell {
     /// is cloned and installed on the new thread.  Per-fork IO setup
     /// lives inside `f`.  The one and only thread-spawn primitive.
     ///
-    /// The worker runs under a [`child`](crate::process::DurableRoot::child)
-    /// of the **durable root**, not the swappable foreground scope, so a
+    /// The worker runs under a [`worker`](crate::process::DurableRoot::worker)
+    /// scope of the **durable root**, not the swappable foreground scope, so a
     /// foreground cancel — a run timeout or a Ctrl-C on `run.cancel` —
-    /// does not reach it.  Only a
+    /// does not reach it: it folds the ambient shutdown cause through the
+    /// root, so a SIGTERM still reaches a detached worker, and never the
+    /// ambient interrupt.  Only a
     /// [`RootAbort`](crate::process::CancelCause::RootAbort) on the root,
     /// or a cancel on the worker's own returned scope (via `cancel` /
     /// `race`), stops it.  That returned child scope is stored on the
@@ -307,7 +333,7 @@ impl Shell {
         let guest_jail = self.session.guest_jail.clone();
         let workers = self.local.workers.clone();
         let detach = self.local.detach.clone();
-        let cancel = root.child();
+        let cancel = root.worker();
         let worker_cancel = cancel.as_scope().clone();
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);

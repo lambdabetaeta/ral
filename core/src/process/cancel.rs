@@ -6,18 +6,40 @@
 //! a run deadline — unwinds every thread that inherited the scope at its next
 //! poll point.
 //!
-//! The chain is walked, not flattened, so subscopes can carry their own flag
-//! (cancelling only their subtree) while still observing parent cancellation.
-//! No mutex, no allocation in the hot path — just an `AtomicU8::load` per
-//! ancestor.
+//! Cancellation is a *join-semilattice*: [`CancelCause`] is totally ordered,
+//! [`cancel`](CancelScope::cancel) is a `fetch_max`, and a scope's
+//! cancellation is the join of its own element with every ancestor's — walked,
+//! not flattened, so a subscope can carry its own flag while still observing
+//! its parents.  A context holding no scope — a signal handler, a TUI input
+//! thread — contributes an element to that join rather than reaching into the
+//! tree: two process-lifetime *ambient causes*, folded by exactly the scopes
+//! minted to face them.  Nothing is installed and nothing restored, so no
+//! mutex, no allocation, and a handful of atomic loads per ancestor.
+//!
+//! The two ambient causes are different kinds of proposition, and their
+//! shapes say so.  A shutdown request is **absolute**: once raised it holds
+//! for every observer forever, so it is a plain lattice element
+//! ([`REQUESTED_ROOT`]).  A user's interrupt is **temporal**: it is aimed at
+//! whatever was running when the key was struck, so it is a monotone
+//! watermark ([`STAMPED`]) read against a frame's *birth instant*.  A run born
+//! after an interrupt is deaf to it by construction — which is why a Ctrl-C
+//! for a settled command cannot unwind the next one, and why the prompt drawn
+//! after it renders clean.  Nothing is ever handed back, so nobody needs the
+//! authority to hand it back.
 //!
 //! [`CancelScope`] is the raw handle; [`DurableRoot`] and [`ForegroundScope`]
-//! name the one structural invariant the tree must keep — a run's foreground
-//! scope is always a descendant of the session's durable root. A context with
-//! no scope in hand (a signal handler, a TUI input thread) reaches the live
-//! scopes through the process-global [`CancelSlot`] publications.
+//! name the structural invariant the tree keeps — a run's foreground scope is
+//! always a descendant of the session's durable root, and, since the run door
+//! nests each entry under the frame it displaces, the tree is the runs'
+//! dynamic extent.  An *aside* — a second [`Shell`](crate::types::Shell)
+//! running plugin hooks beside the session — shares the session's
+//! [`DurableRoot`] rather than minting one, so it is inside the session for
+//! cancellation exactly as it is for everything else.
+//!
+//! The whole rule: **a scope observes every cause recorded on its chain, plus
+//! every ambient interrupt younger than a frame on it.**
 
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// Why a [`CancelScope`] was cancelled.
 ///
@@ -86,21 +108,90 @@ impl CancelCause {
     }
 }
 
-/// Internal node of the cancel-scope tree.  A scope is cancelled if its
-/// own flag is set OR any ancestor's flag is set.
+// ── The ambient causes ─────────────────────────────────────────────────────
+
+/// The process-wide shutdown request (SIGTERM / SIGHUP, Ctrl-\), raised by
+/// `fetch_max` — the exact store [`CancelScope::cancel`] performs,
+/// async-signal-safe by construction.  Absolute and one-way, so a signal
+/// delivered while the session sits idle latches and is read at the next
+/// boundary.
+static REQUESTED_ROOT: AtomicU8 = AtomicU8::new(0);
+
+/// The instant counter the interrupt watermark is indexed by: ticked once per
+/// raised interrupt, read once per foreground frame minted.  Only its own
+/// modification order is load-bearing — it is what orders a frame's birth
+/// against every interrupt — so the tick synchronises nothing else.
+static CLOCK: AtomicU64 = AtomicU64::new(0);
+
+/// The interrupt watermark: per [`CancelCause`], the instant it was last
+/// raised at, `0` for never.  A frame born at `b` observes cause `c` exactly
+/// when `STAMPED[c] > b`, so the causes aimed at runs that have settled
+/// retire themselves as the clock passes them.
+///
+/// One stamp per cause rather than one packed `(instant, cause)` word,
+/// because a frame reads a *suffix* of the escalation order and one word can
+/// keep only one coordinate faithfully: ordered instant-major, a young weak
+/// cause erases an old strong one; ordered cause-major, an old strong one
+/// hides a young weak one from every frame born between them.
+static STAMPED: [AtomicU64; CancelCause::RootAbort as usize] =
+    [const { AtomicU64::new(0) }; CancelCause::RootAbort as usize];
+
+/// Raise `cause` on the interrupt watermark, reaching the foreground of every
+/// run already in flight and of none born after this instant.
+///
+/// Async-signal-safe: two atomic read-modify-writes, no allocation, no lock.
+/// A detached worker's chain carries no birth instant at all, so by its shape
+/// it cannot absorb a user's interrupt of the foreground.
+pub fn request_foreground_cancel(cause: CancelCause) {
+    let now = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
+    STAMPED[cause as usize - 1].fetch_max(now, Ordering::Release);
+}
+
+/// Deliver `cause` to the signal-facing session's durable root, reaching its
+/// foreground run and every detached worker parented under it.
+pub fn request_root_cancel(cause: CancelCause) {
+    REQUESTED_ROOT.fetch_max(cause as u8, Ordering::Release);
+}
+
+/// Hand [`REQUESTED_ROOT`] back, which no host ever does — a shutdown request
+/// is one-way.  The ral-core test binary is one process hosting many
+/// sessions, so a test that raises it clears it again under
+/// [`REQUEST_SERIAL`] rather than terminating every session that follows.
+/// The watermark needs no such courtesy: it clears itself.
+#[cfg(test)]
+pub(crate) fn clear_root_request() {
+    REQUESTED_ROOT.store(0, Ordering::Release);
+}
+
+/// What a node folds from the ambient causes.  Fixed at mint: which of them
+/// reaches a scope is a property of how it was constructed, never of
+/// something installed later.
+#[derive(Debug, Clone, Copy)]
+enum Hears {
+    /// Nothing of its own — a deaf session's scopes, a detached worker, and
+    /// every nested scope, which hears its ancestors' by walking to them.
+    Nothing,
+    /// [`REQUESTED_ROOT`]: the signal-facing session's durable root.
+    Shutdown,
+    /// Every cause on [`STAMPED`] raised after this instant: a run's
+    /// foreground frame, born under a root that faces signals.
+    InterruptsSince(u64),
+}
+
+/// Internal node of the cancel-scope tree.
 #[derive(Debug)]
 struct ScopeNode {
     flag: AtomicU8,
+    hears: Hears,
     parent: Option<std::sync::Arc<Self>>,
 }
 
-/// A handle into the cancel-scope tree.  Cheap to clone (one `Arc` bump);
-/// cheap to check (chain of atomic loads).
+/// A handle into the cancel-scope tree.
 ///
-/// Construction:
-///   * [`CancelScope::root`] — a fresh top-level scope with no parent.
-///   * [`CancelScope::child`] — a new scope nested under `self`;
-///     cancelling `self` (or any of its ancestors) cancels the child too.
+/// Cheap to clone (one `Arc` bump), cheap to check (a chain of atomic loads).
+/// Built by [`root`](Self::root) — a fresh top-level scope — or by
+/// [`child`](Self::child), nested under `self` so that cancelling `self` or
+/// any ancestor cancels it.
 ///
 /// Cancellation is one-way and monotone in the [`CancelCause`]
 /// escalation order: once cancelled a scope stays cancelled, and the
@@ -109,26 +200,29 @@ struct ScopeNode {
 pub struct CancelScope(std::sync::Arc<ScopeNode>);
 
 impl CancelScope {
-    /// A fresh root scope.  Constructed only at session init (and the
-    /// `Default` impl below); spawned workers take a [`child`](Self::child)
-    /// of their parent's scope so cancellation reaches them.
-    pub(crate) fn root() -> Self {
+    /// The one constructor: a scope folding `hears`, nested under `parent`.
+    fn mint(hears: Hears, parent: Option<std::sync::Arc<ScopeNode>>) -> Self {
         Self(std::sync::Arc::new(ScopeNode {
             flag: AtomicU8::new(0),
-            parent: None,
+            hears,
+            parent,
         }))
     }
 
-    /// A new scope nested under `self`.  Cancelling any ancestor (or
-    /// `self`) cancels the returned child.  A run mints one as its
-    /// foreground scope and a detached worker mints one off the durable
-    /// root, so cancelling a worker (or the foreground) doesn't reach the
-    /// parent shell.
+    /// A fresh root scope, deaf to the ambient causes.  Constructed only at
+    /// session init (and the `Default` impl below); spawned workers take a
+    /// [`child`](Self::child) of their parent's scope so cancellation
+    /// reaches them.
+    pub(crate) fn root() -> Self {
+        Self::mint(Hears::Nothing, None)
+    }
+
+    /// A new scope nested under `self`.  Cancelling any ancestor (or `self`)
+    /// cancels the returned child, and it folds nothing of its own: what
+    /// `self` hears from the ambient causes, the child hears by walking to
+    /// the very nodes that fold them.
     pub fn child(&self) -> Self {
-        Self(std::sync::Arc::new(ScopeNode {
-            flag: AtomicU8::new(0),
-            parent: Some(self.0.clone()),
-        }))
+        Self::mint(Hears::Nothing, Some(self.0.clone()))
     }
 
     /// Record `cause` on this scope's flag, raising it to the maximum of
@@ -139,44 +233,47 @@ impl CancelScope {
         self.0.flag.fetch_max(cause as u8, Ordering::Release);
     }
 
-    /// Walk the parent chain, returning true if any node's flag is set.
+    /// The join of every flag along this scope's chain to the root with the
+    /// ambient causes those nodes fold — `0` when nothing is in force.
+    ///
+    /// The single reader of a flag and of the ambient causes.
+    /// [`is_cancelled`](Self::is_cancelled) and [`cause`](Self::cause) are
+    /// its only callers, so no observer can read a cancellation except as
+    /// the whole join.
+    fn fold(&self) -> u8 {
+        let mut node: &std::sync::Arc<ScopeNode> = &self.0;
+        let mut join = 0u8;
+        loop {
+            join = join.max(node.flag.load(Ordering::Acquire));
+            join = join.max(match node.hears {
+                Hears::Nothing => 0,
+                Hears::Shutdown => REQUESTED_ROOT.load(Ordering::Acquire),
+                // Walk the escalation order downwards: the strongest cause
+                // stamped after this frame was born is the join of every
+                // cause stamped after it.
+                Hears::InterruptsSince(birth) => (1..=CancelCause::RootAbort as u8)
+                    .rev()
+                    .find(|c| STAMPED[*c as usize - 1].load(Ordering::Acquire) > birth)
+                    .unwrap_or(0),
+            });
+            match &node.parent {
+                Some(p) => node = p,
+                None => return join,
+            }
+        }
+    }
+
+    /// True if anything in this scope's join is in force.
     pub fn is_cancelled(&self) -> bool {
-        let mut node: &std::sync::Arc<ScopeNode> = &self.0;
-        loop {
-            if node.flag.load(Ordering::Acquire) != 0 {
-                return true;
-            }
-            match &node.parent {
-                Some(p) => node = p,
-                None => return false,
-            }
-        }
+        self.fold() != 0
     }
 
-    /// The strongest [`CancelCause`] in force along this scope's chain to
-    /// the root, or `None` if nothing on the chain is cancelled.  Walks
-    /// every ancestor and takes the maximum flag seen, so an ancestor
-    /// [`RootAbort`](CancelCause::RootAbort) dominates a child
-    /// [`Interrupt`](CancelCause::Interrupt).
+    /// The strongest [`CancelCause`] in force on this scope, or `None` if
+    /// nothing is.  An ancestor [`RootAbort`](CancelCause::RootAbort)
+    /// dominates a child [`Interrupt`](CancelCause::Interrupt), and so does
+    /// a requested one.
     pub fn cause(&self) -> Option<CancelCause> {
-        let mut node: &std::sync::Arc<ScopeNode> = &self.0;
-        let mut max = 0u8;
-        loop {
-            max = max.max(node.flag.load(Ordering::Acquire));
-            match &node.parent {
-                Some(p) => node = p,
-                None => break,
-            }
-        }
-        CancelCause::from_u8(max)
-    }
-
-    /// A raw pointer to this scope's own flag, for publishing into a
-    /// signal-reachable slot. The flag lives in the scope's `Arc`, which
-    /// [`publish`] makes immortal before handing the pointer to the async
-    /// edge.
-    fn flag_ptr(&self) -> *const AtomicU8 {
-        &raw const self.0.flag
+        CancelCause::from_u8(self.fold())
     }
 }
 
@@ -184,146 +281,6 @@ impl Default for CancelScope {
     fn default() -> Self {
         Self::root()
     }
-}
-
-// ── Signal-reachable cancel slots ──────────────────────────────────────────
-//
-// A context with no `CancelScope` in hand — a signal handler, a TUI input
-// thread — cannot reach the foreground run's scope or the session's
-// durable root directly.  As exarch's `cancel.rs` does for its per-exchange
-// `Token`, we bridge the gap with process-global `AtomicPtr` slots holding
-// a pointer into each scope's flag, kept dereferenceable forever by the
-// leak [`publish`] performs.  A scope's flag is an
-// `AtomicU8` and `cancel` is a `fetch_max`, so the translation is itself
-// async-signal-safe: the signal/input path loads the slot and `fetch_max`es
-// the cause onto the flag, exactly the store `cancel` performs.
-
-/// Pointer to the current run's foreground-scope flag, published for the
-/// signal/frontend translation path. Null between runs; restored to its
-/// predecessor (not nulled) on guard drop, so nested runs stack correctly.
-static FOREGROUND_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
-
-/// Pointer to the session's durable-root-scope flag. Published per run by
-/// the run doors, alongside the foreground, for the run's extent.
-static DURABLE_ROOT_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
-
-/// RAII publication of a scope's flag into a process-global cancel slot,
-/// restoring the previous publication on drop.
-///
-/// Minted by [`publish_foreground`] / [`publish_durable_root`]; the prior
-/// publication is saved and restored on drop — a swap, not a clear — so a
-/// re-entrant run nests its scope above the outer run's and reveals it again
-/// when the inner guard drops. The guard bounds only *when* the slot fires,
-/// never how long the flag behind it lives: [`publish`] makes the pointee
-/// immortal, so a restored slot leaves nothing dangling.
-///
-/// The save/restore is blind, so it reads back the intended predecessor only
-/// for publications that nest LIFO on a single thread. At most one session per
-/// process publishes — the signal-facing one, marked by
-/// `SessionState::publishes_signal_slots` — so that holds, and a signal
-/// targets the primary session's run rather than whichever session dispatched
-/// last. A forked session's runs never publish; hosts cancel them through
-/// their own scope handles.
-pub struct CancelSlot {
-    slot: &'static AtomicPtr<AtomicU8>,
-    prev: *mut AtomicU8,
-}
-
-impl Drop for CancelSlot {
-    fn drop(&mut self) {
-        self.slot.store(self.prev, Ordering::Release);
-    }
-}
-
-/// Publish `scope`'s flag into `slot`, saving the prior pointer for the
-/// returned guard to restore on drop.
-///
-/// One strong share of the scope's `Arc` is leaked, making the published
-/// allocation immortal.  A process-directed signal lands on an arbitrary
-/// unblocked thread, so a handler may load the slot's pointer at one instant
-/// and dereference it at any later one — after a publisher restored the slot
-/// and the scope was dropped.  The pointee must therefore outlive the guard,
-/// not merely the publishing interval.  Leaking also retires that race's
-/// observed symptom: a freed flag byte re-read as a stale cause, surfacing as
-/// a spurious `cancelled` at status 130.  A dead run's leaked flag is polled
-/// by nobody.
-///
-/// The cost is one scope node — 32 bytes on a 64-bit host — per publishing
-/// run, for the life of the process; re-publishing an already-immortal scope
-/// (the durable root, every run) leaks a count, not an allocation.
-///
-/// It does *not* fix the dropped-signal case: two threads publishing
-/// concurrently can leave the blind save/restore aiming the slot at a
-/// finished run, so a cancellation is *missed* rather than delivered.  Never
-/// memory corruption, and unreachable while every publisher runs on one
-/// thread (`SessionState::publishes_signal_slots`).
-fn publish(slot: &'static AtomicPtr<AtomicU8>, scope: &CancelScope) -> CancelSlot {
-    std::mem::forget(scope.0.clone());
-    let prev = slot.swap(scope.flag_ptr().cast_mut(), Ordering::Release);
-    CancelSlot { slot, prev }
-}
-
-/// Deliver `cause` onto the scope currently published in `slot`.
-///
-/// Signal-safe: a lock-free slot load and an atomic `fetch_max`. A no-op when
-/// the slot is null.
-fn request(slot: &AtomicPtr<AtomicU8>, cause: CancelCause) {
-    let p = slot.load(Ordering::Acquire);
-    if !p.is_null() {
-        // SAFETY: a non-null slot points into an allocation `publish` leaked,
-        // so the pointee is live for the rest of the process.
-        unsafe {
-            (*p).fetch_max(cause as u8, Ordering::Release);
-        }
-    }
-}
-
-/// Publish `scope`'s flag as the foreground-cancel target for the returned
-/// guard's lifetime, saving and restoring the prior publication on drop.
-pub fn publish_foreground(scope: &CancelScope) -> CancelSlot {
-    publish(&FOREGROUND_SCOPE, scope)
-}
-
-/// Publish `scope`'s flag as the durable-root-cancel target for the returned
-/// guard's lifetime, saving and restoring the prior publication on drop.
-pub fn publish_durable_root(scope: &CancelScope) -> CancelSlot {
-    publish(&DURABLE_ROOT_SCOPE, scope)
-}
-
-/// Deliver `cause` to the current run's foreground scope; a no-op between
-/// runs.
-///
-/// The foreground scope is the only thing affected — detached workers
-/// poll their own scopes, not this one, so they are spared.
-pub fn request_foreground_cancel(cause: CancelCause) {
-    request(&FOREGROUND_SCOPE, cause);
-}
-
-/// Deliver `cause` to the session's durable root, reaching the foreground run
-/// and every detached worker (all parented under it); a no-op when no root is
-/// published.
-pub fn request_root_cancel(cause: CancelCause) {
-    request(&DURABLE_ROOT_SCOPE, cause);
-}
-
-/// Read [`FOREGROUND_SCOPE`] without a [`CancelScope`] in hand — the read-side
-/// dual of [`request_foreground_cancel`], for a context parked outside the
-/// evaluator's own `shell.run.cancel`.
-///
-/// The wire engine's enquiry desk, parked on a rendezvous, has no `&Shell` to
-/// poll [`check`](crate::process::check) with, but runs on the same thread that
-/// published this run's foreground scope, so the slot it reads is exactly that
-/// run's. `None` between runs (null slot) or when the published scope isn't
-/// cancelled.
-pub fn foreground_cancel_cause() -> Option<CancelCause> {
-    let p = FOREGROUND_SCOPE.load(Ordering::Acquire);
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: as in `request` — a non-null slot points into an allocation
-    // `publish` leaked, so the pointee is live for the rest of the process.
-    let flag = unsafe { (*p).load(Ordering::Acquire) };
-    CancelCause::from_u8(flag)
 }
 
 // ── Typed root / foreground relation ───────────────────────────────────────
@@ -334,7 +291,7 @@ pub fn foreground_cancel_cause() -> Option<CancelCause> {
 // by nesting another foreground), so an unrelated root can never be installed
 // as a run's foreground by accident.  Both wrap a private [`CancelScope`];
 // `as_scope` borrows it for the few places that still need the bare handle
-// (signal-slot publication, a worker's returned cancel token).
+// (a worker's returned cancel token, a parked host wait).
 
 /// The session's durable cancel root.
 ///
@@ -347,17 +304,46 @@ pub fn foreground_cancel_cause() -> Option<CancelCause> {
 pub struct DurableRoot(CancelScope);
 
 impl DurableRoot {
-    /// Mint a fresh session root.  One per [`Shell`](crate::types::Shell),
-    /// constructed at session init.
+    /// Mint a fresh session root, deaf to the ambient causes.  One per
+    /// [`Shell`](crate::types::Shell), constructed at session init; a host
+    /// that owns the process's signals re-mints it with
+    /// [`Shell::face_signals`](crate::types::Shell::face_signals).
     pub(crate) fn new() -> Self {
         Self(CancelScope::root())
     }
 
-    /// Mint a [`ForegroundScope`] descending from this root — a run's
-    /// foreground or a detached worker's scope.  The only entry into
-    /// foreground construction, so the descendant invariant holds by type.
-    pub fn child(&self) -> ForegroundScope {
-        ForegroundScope(self.0.child())
+    /// Mint the signal-facing session's root: it folds [`REQUESTED_ROOT`], so a
+    /// shutdown request reaches this session's foreground run and every
+    /// detached worker parented under it — and latches while it is idle.
+    pub(crate) fn signal_facing() -> Self {
+        Self(CancelScope::mint(Hears::Shutdown, None))
+    }
+
+    /// Mint the foreground frame of a run entering under `displaced` — the
+    /// frame the run door swaps out for this run's extent.
+    ///
+    /// Nested under that frame rather than beside it, so the tree *is* the
+    /// runs' dynamic extent: a nested run observes the interrupt its outer
+    /// run already carries, and an outer run's wall reaches into the nest.
+    /// Stamped with its birth instant under a root that faces signals — so it
+    /// observes exactly the interrupts raised after it began — and deaf under
+    /// a root that does not.
+    pub fn foreground(&self, displaced: &ForegroundScope) -> ForegroundScope {
+        let hears = match self.0.0.hears {
+            Hears::Shutdown => Hears::InterruptsSince(CLOCK.load(Ordering::Acquire)),
+            _ => Hears::Nothing,
+        };
+        ForegroundScope(CancelScope::mint(hears, Some(displaced.0.0.clone())))
+    }
+
+    /// Mint a scope under this root that is *not* a run's foreground — a
+    /// detached worker's scope, and the frame a session boots with.  It
+    /// still folds [`REQUESTED_ROOT`] through this root, so a SIGTERM reaches
+    /// a detached worker, while no node on its chain carries a birth instant,
+    /// so by the shape of that chain it cannot absorb a foreground
+    /// interrupt — whoever spawned it.
+    pub fn worker(&self) -> ForegroundScope {
+        ForegroundScope(CancelScope::mint(Hears::Nothing, Some(self.0.0.clone())))
     }
 
     /// Record `cause` on the root, reaching the foreground run and every
@@ -366,7 +352,8 @@ impl DurableRoot {
         self.0.cancel(cause);
     }
 
-    /// Borrow the underlying scope for signal-slot publication.
+    /// Borrow the underlying scope for a host that polls the session's
+    /// cancellation without a run in hand.
     pub fn as_scope(&self) -> &CancelScope {
         &self.0
     }
@@ -389,7 +376,8 @@ pub struct ForegroundScope(CancelScope);
 
 impl ForegroundScope {
     /// Nest a child foreground scope: a deadline window over a run, or the
-    /// shared scope a same-thread body inherits.  Still root-descended.
+    /// shared scope a same-thread body inherits.  Still root-descended, and
+    /// with the parent's reach.
     pub fn child(&self) -> Self {
         Self(self.0.child())
     }
@@ -410,18 +398,16 @@ impl ForegroundScope {
         self.0.cause()
     }
 
-    /// Borrow the underlying scope for publication, or to hand a bare
-    /// [`CancelScope`] to a worker handle / running pipeline that tracks
-    /// cancellation without minting children.
+    /// Borrow the underlying scope to hand a bare [`CancelScope`] to a
+    /// worker handle, a running pipeline, or a host parked outside the
+    /// evaluator's poll points.
     pub fn as_scope(&self) -> &CancelScope {
         &self.0
     }
 }
 
-/// A serialization-only test lock. The globals it guards are restored by
-/// RAII on unwind ([`CancelSlot`], `PipelineRelay`), so a panicked holder
-/// leaves nothing corrupt: poisoning is shrugged off rather than cascading
-/// one test's failure into every later taker's.
+/// A serialization-only test lock.  Poisoning is shrugged off rather than
+/// cascading one test's failure into every later taker's.
 #[cfg(test)]
 pub(crate) struct Serial(std::sync::Mutex<()>);
 
@@ -438,13 +424,11 @@ impl Serial {
     }
 }
 
-/// Serializes every publisher and asserter of the process-global cancel
-/// slots ([`FOREGROUND_SCOPE`], [`DURABLE_ROOT_SCOPE`]) across the ral-core
-/// test binary. Sessions minted in tests do not publish by default
-/// (`SessionState::publishes_signal_slots` is test-false); a test that opts
-/// back in, publishes directly, or requests through the slots holds this.
+/// Serializes every test in the ral-core binary that touches the ambient
+/// causes — by raising one, or by minting a scope that folds one: a frame
+/// born beside a concurrent raise may or may not fall on its older side.
 #[cfg(test)]
-pub(crate) static SLOT_SERIAL: Serial = Serial::new();
+pub(crate) static REQUEST_SERIAL: Serial = Serial::new();
 
 #[cfg(test)]
 mod tests {
@@ -517,110 +501,180 @@ mod tests {
         );
     }
 
-    /// A published foreground scope receives a requested cancel; after the
-    /// guard drops the slot reverts to null, so a later request is a no-op
-    /// and the scope keeps the cause it already recorded.
+    /// An interrupt reaches the frames already born and no frame born after
+    /// it: the watermark retires itself as the clock passes it, which is what
+    /// keeps a Ctrl-C for a settled command off the next one.
     #[test]
-    fn foreground_request_reaches_published_scope_then_reverts() {
-        let _g = SLOT_SERIAL.lock();
-        let scope = CancelScope::root();
-        {
-            let _slot = publish_foreground(&scope);
-            request_foreground_cancel(CancelCause::Interrupt);
-            assert_eq!(
-                scope.cause(),
-                Some(CancelCause::Interrupt),
-                "a foreground request must reach the published scope"
-            );
-        }
-        // The slot is null again; a request between runs touches nothing.
-        request_foreground_cancel(CancelCause::RootAbort);
-        assert_eq!(
-            scope.cause(),
-            Some(CancelCause::Interrupt),
-            "a post-drop request must not reach the formerly-published scope"
-        );
-    }
-
-    /// A request raises the recorded cause monotonically: a stronger cause
-    /// after a weaker one wins (`fetch_max`).
-    #[test]
-    fn foreground_request_escalates_monotonically() {
-        let _g = SLOT_SERIAL.lock();
-        let scope = CancelScope::root();
-        let _slot = publish_foreground(&scope);
+    fn an_interrupt_reaches_the_frames_older_than_it_and_no_other() {
+        let _g = REQUEST_SERIAL.lock();
+        let root = DurableRoot::signal_facing();
+        let boot = root.worker();
+        let older = root.foreground(&boot);
         request_foreground_cancel(CancelCause::Interrupt);
-        request_foreground_cancel(CancelCause::Deadline);
         assert_eq!(
-            scope.cause(),
-            Some(CancelCause::Deadline),
-            "a stronger later cause must win"
+            older.cause(),
+            Some(CancelCause::Interrupt),
+            "an interrupt must reach the run that was in flight when it was raised"
+        );
+        assert_eq!(
+            root.foreground(&boot).cause(),
+            None,
+            "and no frame born after it, with nothing handed back for it to miss"
         );
     }
 
-    /// Publishing nests: an inner publication shadows the outer, and the
-    /// inner guard's drop restores the outer pointer (a swap, not a clear),
-    /// so a request after the inner drop reaches the outer scope again.
+    /// The watermark is monotone in the escalation order: a frame born before
+    /// both a weak and a strong cause joins them, strongest first, whichever
+    /// order they were raised in.
     #[test]
-    fn foreground_publications_nest() {
-        let _g = SLOT_SERIAL.lock();
-        let outer = CancelScope::root();
-        let inner = CancelScope::root();
-        let _outer_slot = publish_foreground(&outer);
-        {
-            let _inner_slot = publish_foreground(&inner);
-            request_foreground_cancel(CancelCause::Interrupt);
-            assert_eq!(
-                inner.cause(),
-                Some(CancelCause::Interrupt),
-                "the inner publication must shadow the outer"
-            );
-            assert_eq!(
-                outer.cause(),
-                None,
-                "the outer scope is untouched while shadowed"
-            );
-        }
-        request_foreground_cancel(CancelCause::Explicit);
+    fn an_older_frame_joins_every_interrupt_raised_after_it() {
+        let _g = REQUEST_SERIAL.lock();
+        let root = DurableRoot::signal_facing();
+        let boot = root.worker();
+        let frame = root.foreground(&boot);
+        request_foreground_cancel(CancelCause::Deadline);
+        request_foreground_cancel(CancelCause::Interrupt);
+        assert_eq!(
+            frame.cause(),
+            Some(CancelCause::Deadline),
+            "the join is the strongest cause raised after the frame, not the latest"
+        );
+    }
+
+    /// Why the watermark is one stamp per cause and not one `(instant,
+    /// cause)` word: a frame born *between* an old strong cause and a young
+    /// weak one must observe the young one alone, while a frame born before
+    /// both observes the strong one.  No single word records both readings —
+    /// instant-major loses the first assertion, cause-major the second.
+    #[test]
+    fn each_cause_keeps_its_own_instant() {
+        let _g = REQUEST_SERIAL.lock();
+        let root = DurableRoot::signal_facing();
+        let boot = root.worker();
+        let before = root.foreground(&boot);
+        request_foreground_cancel(CancelCause::Deadline);
+        let between = root.foreground(&boot);
+        request_foreground_cancel(CancelCause::Interrupt);
+        assert_eq!(
+            before.cause(),
+            Some(CancelCause::Deadline),
+            "the older frame keeps the stronger cause a younger weak one must not erase"
+        );
+        assert_eq!(
+            between.cause(),
+            Some(CancelCause::Interrupt),
+            "the younger frame hears the weak cause the older strong one must not hide"
+        );
+    }
+
+    /// A frame's interrupt is shared with its nest, not shadowed by it: a run
+    /// entering under a frame already carrying an interrupt observes it
+    /// through that frame, so a Ctrl-C during a nested run unwinds the whole
+    /// nest, as a POSIX shell's would.
+    #[test]
+    fn a_nested_frame_observes_its_parents_interrupt() {
+        let _g = REQUEST_SERIAL.lock();
+        let root = DurableRoot::signal_facing();
+        let boot = root.worker();
+        let outer = root.foreground(&boot);
+        request_foreground_cancel(CancelCause::Interrupt);
+        let inner = root.foreground(&outer);
+        assert_eq!(
+            inner.cause(),
+            Some(CancelCause::Interrupt),
+            "the nested run observes the interrupt through the frame it nests in"
+        );
         assert_eq!(
             outer.cause(),
-            Some(CancelCause::Explicit),
-            "the inner drop must restore the outer pointer, not null the slot"
+            Some(CancelCause::Interrupt),
+            "and so does the run it nests in — sharing, not shadowing"
         );
     }
 
-    /// The root slot behaves like the foreground slot, and the two are
-    /// independent: a foreground request must not touch a published root.
+    /// An outer run's own cancellation — its wall elapsing — reaches the run
+    /// nested inside it, because the nest descends from it.  Cancellation is
+    /// the join with every ancestor, and after the run door's nesting the
+    /// ancestors are the runs actually enclosing it.
     #[test]
-    fn root_request_is_independent_of_foreground() {
-        let _g = SLOT_SERIAL.lock();
-        let foreground = CancelScope::root();
-        let root = CancelScope::root();
-        let _fg = publish_foreground(&foreground);
-        let _rt = publish_durable_root(&root);
+    fn an_outer_frames_deadline_reaches_the_nest() {
+        let _g = REQUEST_SERIAL.lock();
+        let root = DurableRoot::signal_facing();
+        let boot = root.worker();
+        let outer = root.foreground(&boot);
+        let inner = root.foreground(&outer);
+        outer.cancel(CancelCause::Deadline);
+        assert_eq!(
+            inner.cause(),
+            Some(CancelCause::Deadline),
+            "the enclosing run's deadline must unwind the run nested in it"
+        );
+    }
+
+    /// A detached worker is spared the interrupt and hears the shutdown
+    /// request: no node on a `worker` chain carries a birth instant, so the
+    /// watermark is unreadable from it, while the facing root above it
+    /// carries a root request down.  Detached is detached — the shape of the
+    /// chain says so, whoever spawned the worker.
+    #[test]
+    fn a_worker_is_spared_the_interrupt_and_hears_the_shutdown() {
+        let _g = REQUEST_SERIAL.lock();
+        let worker = DurableRoot::signal_facing().worker();
+        request_foreground_cancel(CancelCause::Interrupt);
+        assert_eq!(
+            worker.cause(),
+            None,
+            "a foreground interrupt must not reach a detached worker"
+        );
+        request_root_cancel(CancelCause::Terminate);
+        assert_eq!(
+            worker.cause(),
+            Some(CancelCause::Terminate),
+            "but a shutdown request reaches it through its root"
+        );
+        clear_root_request();
+    }
+
+    /// The two ambient causes are independent, and a session minted by
+    /// [`DurableRoot::new`] is deaf to both: an interrupt never touches the
+    /// root, a root request reaches the root *and* the foreground descending
+    /// from it, and neither reaches the deaf session.
+    #[test]
+    fn root_request_is_independent_of_the_watermark() {
+        let _g = REQUEST_SERIAL.lock();
+        let root = DurableRoot::signal_facing();
+        let boot = root.worker();
+        let facing = root.foreground(&boot);
+        let deaf_root = DurableRoot::new();
+        let deaf = deaf_root.foreground(&deaf_root.worker());
 
         request_foreground_cancel(CancelCause::Interrupt);
         assert_eq!(
-            foreground.cause(),
+            facing.cause(),
             Some(CancelCause::Interrupt),
-            "a foreground request reaches the foreground scope"
+            "an interrupt reaches a facing run's frame"
         );
         assert_eq!(
-            root.cause(),
+            root.as_scope().cause(),
             None,
-            "a foreground request must not touch the published root"
+            "an interrupt must not touch the durable root"
         );
 
         request_root_cancel(CancelCause::RootAbort);
         assert_eq!(
-            root.cause(),
+            root.as_scope().cause(),
             Some(CancelCause::RootAbort),
-            "a root request reaches the published root"
+            "a root request reaches the facing durable root"
         );
         assert_eq!(
-            foreground.cause(),
-            Some(CancelCause::Interrupt),
-            "a root request must not downgrade or alter the foreground scope"
+            facing.cause(),
+            Some(CancelCause::RootAbort),
+            "and the foreground observes it through its root ancestry"
         );
+        assert_eq!(
+            deaf.cause(),
+            None,
+            "a session that faces no signals is deaf to both ambient causes"
+        );
+        clear_root_request();
     }
 }

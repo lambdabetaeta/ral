@@ -780,6 +780,9 @@ pub(super) fn sync_plugins(
 /// takes it back afterwards.  This keeps the persistent fields
 /// (`hooks.state`, `hooks.history`) as the source of truth and lets us
 /// build a fresh context per handler from them.
+///
+/// It is an *aside* of the session: interruptible throughout, and unable to
+/// absorb an interrupt older than the hook it is about to run.
 pub(super) fn prepare_hook_env(shell: &Shell, runtime: &Arc<Mutex<PluginRuntime>>, keymap: Keymap) {
     let mut rt = lock(runtime);
 
@@ -792,7 +795,12 @@ pub(super) fn prepare_hook_env(shell: &Shell, runtime: &Arc<Mutex<PluginRuntime>
     rt.hooks.ghost = None;
     rt.hooks.highlights.clear();
 
-    let mut hook_env = Shell::child_from(&shell.snapshot(), shell);
+    // Arbitrary plugin code evaluates here, so a Ctrl-C struck during a hook
+    // must reach it: the hook shell joins the session, sharing its cancel
+    // root, and each hook run is stamped at its own birth — so a Ctrl-C aimed
+    // at a command already in flight is older than every frame the aside will
+    // mint, and stands undisturbed for the run it was aimed at.
+    let mut hook_env = shell.join_session();
     hook_env.set_interactive(true);
     rt.hooks.env = Some(hook_env);
 }

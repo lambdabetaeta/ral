@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 837cb5c
+generated_at_date: 2026-07-26
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs]
 ---
 
@@ -296,8 +296,10 @@ root (`Shell::cancel_handle`) for `terminate` and the run-scope cell for
 — and a `ral` eval already in flight
 unwinds at the evaluator's poll points instead of grinding to its
 `timeout_secs` wall. The trunk registers no eval-root — its session outlives
-any cancel; Esc reaches its exchange through the published foreground slot
-([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
+any cancel; Esc reaches its exchange through the ambient foreground cause,
+which only the trunk's session is minted facing
+([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]],
+[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
 [[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
 **per-tab exchange interrupt**, not a cascade: they stop only the *focused* agent's
 current exchange (`AgentRegistry::interrupt(id)`, or `cancel::raise_interrupt` on

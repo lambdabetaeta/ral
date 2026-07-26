@@ -209,12 +209,18 @@ pub type SurfaceSink = Arc<dyn EventSink>;
 pub trait EnquiryDesk: Send + Sync {
     /// Answer one enquiry synchronously.
     ///
+    /// `cancel` is the enquiring run's own scope: a desk that parks waiting
+    /// for its answer polls it, so the park unwinds on the same causes every
+    /// other poll point observes — an interrupt, a reaper deadline, a
+    /// cancelled handle.
+    ///
     /// # Errors
     /// Returns `Err` when the host cannot answer `req` — a malformed or
     /// unrecognised request, or a failure while producing the answer.
     fn enquire(
         &self,
         req: crate::serial::FOValue,
+        cancel: &crate::process::CancelScope,
     ) -> Result<crate::serial::FOValue, crate::types::Error>;
 }
 
@@ -442,18 +448,10 @@ pub struct SessionState {
     /// foreground [`RunState::cancel`], so a foreground cancel never reaches
     /// them.  Only a [`RootAbort`](crate::process::CancelCause::RootAbort) on
     /// the root, or a cancel on the worker's own scope, stops such a worker.
+    /// Minted deaf to the ambient causes; [`Shell::face_signals`] re-mints
+    /// it facing, for the one host that owns the process's signals.  Shared,
+    /// not re-minted, by an aside ([`Shell::join_session`]).
     pub(crate) root: DurableRoot,
-    /// Whether this session's run doors publish its scopes into the
-    /// process-global signal slots — the reach-in path for OS signals and a
-    /// front-end's cancel key.  The slots' save/restore-previous discipline
-    /// reads back its intended predecessor only for LIFO publication on a
-    /// single thread, and a signal must reach the primary session's run rather
-    /// than whichever session dispatched last, so at most one session per
-    /// process may publish: the signal-facing one.  `true` at
-    /// construction; a forked child session ([`Shell::fork_session`]) never
-    /// publishes — its host stops it through a cancel handle on
-    /// [`Self::root`] ([`Shell::cancel_handle`]), not through signals.
-    pub(crate) publishes_signal_slots: bool,
     /// Durable source registry, keyed by [`FileId`](crate::source::FileId).
     /// A run resets and seeds it at run start, module loads append to it,
     /// and hosts read it after the run returns to render runtime errors.
@@ -627,7 +625,7 @@ impl Shell {
         req: crate::serial::FOValue,
     ) -> Result<crate::serial::FOValue, crate::types::Error> {
         match self.run.desk.as_ref() {
-            Some(desk) => desk.enquire(req),
+            Some(desk) => desk.enquire(req, self.run.cancel.as_scope()),
             None => Err(self.err("this host answers no enquiries", 1)),
         }
     }

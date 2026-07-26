@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 837cb5c
+generated_at_date: 2026-07-26
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 

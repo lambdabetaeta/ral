@@ -752,9 +752,9 @@ impl ControlSender {
         }
         match ctrl {
             Control::Cancel(_id) => {
-                // Trip the signal-reachable foreground scope — the same
-                // static the SIGINT relay writes to.  This is the actual
-                // scope the run runs under, not a transport-side sibling.
+                // Raise the ambient interrupt — the same watermark the SIGINT
+                // relay stamps, read by this session's in-flight run rather
+                // than by a transport-side sibling scope.
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
             }
             Control::Suspend | Control::Resume | Control::Resize(_) => {
@@ -1204,7 +1204,7 @@ impl Transport for IdentityTransport {
     }
 
     fn detach(&self) {
-        // Cancel any in-flight run via the signal-reachable scope.
+        // Cancel any in-flight run via the ambient interrupt.
         crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
         self.engine.lock().terminal_lease = None;
     }
@@ -1689,7 +1689,11 @@ mod enquiry_tests {
     /// A stub desk that maps `Int{n}` to `Int{n+1}`, otherwise echoes.
     struct IncrementDesk;
     impl EnquiryDesk for IncrementDesk {
-        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+        fn enquire(
+            &self,
+            req: FOValue,
+            _cancel: &crate::process::CancelScope,
+        ) -> Result<FOValue, Error> {
             match req {
                 FOValue::Int { value } => Ok(FOValue::Int { value: value + 1 }),
                 other => Ok(other),
@@ -1751,7 +1755,11 @@ mod enquiry_tests {
     /// exact guard every real dispatch installs.
     struct ReentrantShellMutDesk(std::sync::Arc<IdentityTransport>);
     impl EnquiryDesk for ReentrantShellMutDesk {
-        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+        fn enquire(
+            &self,
+            req: FOValue,
+            _cancel: &crate::process::CancelScope,
+        ) -> Result<FOValue, Error> {
             let _guard = self.0.shell_mut();
             Ok(req)
         }
@@ -1774,7 +1782,11 @@ mod enquiry_tests {
     /// session lock its own stack already holds.
     struct ReentrantDispatchDesk(std::sync::Arc<IdentityTransport>);
     impl EnquiryDesk for ReentrantDispatchDesk {
-        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+        fn enquire(
+            &self,
+            req: FOValue,
+            _cancel: &crate::process::CancelScope,
+        ) -> Result<FOValue, Error> {
             self.0.dispatch(
                 DispatchId(0),
                 Run {
@@ -1895,7 +1907,7 @@ mod durability_tests {
     /// cleanly on the same transport.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
-        let _slot_guard = crate::process::cancel::SLOT_SERIAL.lock();
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
         let transport = IdentityTransport::new(shell);

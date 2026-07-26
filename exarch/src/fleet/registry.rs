@@ -1153,7 +1153,9 @@ mod tests {
         let child_root = DurableRoot::default();
         // Simulates what `IdentityTransport::observe_foreground` writes at
         // the start of the child's in-flight run.
-        let child_run_scope: RunScope = Arc::new(Mutex::new(Some(child_root.child())));
+        let child_run_scope: RunScope = Arc::new(Mutex::new(Some(
+            child_root.foreground(&child_root.worker()),
+        )));
         let grandchild_token = Token::new();
         let _ = reg.register(Registration {
             id: 1,
@@ -1226,7 +1228,8 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
-        let run_scope: RunScope = Arc::new(Mutex::new(Some(eval_root.child())));
+        let run_scope: RunScope =
+            Arc::new(Mutex::new(Some(eval_root.foreground(&eval_root.worker()))));
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
@@ -1251,7 +1254,7 @@ mod tests {
         // The next run mints a fresh scope from the same `eval_root` and the
         // transport re-captures it into the same cell, exactly as
         // `IdentityTransport::observe_foreground` does at every dispatch.
-        let next_run = eval_root.child();
+        let next_run = eval_root.foreground(&eval_root.worker());
         *run_scope.lock().unwrap() = Some(next_run.clone());
 
         assert!(

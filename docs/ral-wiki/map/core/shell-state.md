@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a1791c5
+generated_at_commit: 837cb5c
 generated_at_date: 2026-07-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -72,8 +72,12 @@ field name *is* the invariant** — joined by `Shell`
   `None` admits freely, and both flow into same-thread bodies and spawned
   workers alike), and the run's `TerminalAccess`.
 - **`SessionState`** — what survives every run's teardown: the durable cancel
-  `root` that detached workers parent under (with `publishes_signal_slots`,
-  true only for the one signal-facing session per process), the `sources`
+  `root` that detached workers parent under (minted deaf to the ambient
+  causes; `Shell::face_signals` re-mints it facing, for the host that owns the
+  process's signals, and `Shell::join_session` *shares* it, for a second
+  `Shell` the host runs beside that session,
+  [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]),
+  the `sources`
   registry rendered against after a run returns (reset and reseeded at each
   run start), the `exit_hints` table, the host-installed
   `builtins` with the session's `library_docs`, the session's
@@ -239,10 +243,12 @@ default for a store that is not the session's:
   pipeline stage (`child_of`, [[decisions/260610_child-eval-unification|child-eval]])
   leans on. Their asymmetry *is* the flow matrix: the source cursor (`run.loc`)
   and the `within`-attenuable bits do not flow back, but `context.cwd` does.
-- `child_from` — a REPL aside (the prompt/hook shell, one call site in the
+- `child_from` — a REPL aside (the hook shell, one call site in the
   [[map/repl|REPL plugin runtime]]): an independent sibling that clones the
   parent's `context`, source cursor, and builtin table without touching its IO /
-  audit / REPL scratch; no flow-back.
+  audit / REPL scratch; no flow-back. `join_session` is its aside
+  specialisation, sharing the parent's cancel root, so plugin code there is
+  interruptible while it runs and older interrupts stay out of its reach.
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
   specialisation of `child_from`. See [[map/exarch/agent|agent]].
 

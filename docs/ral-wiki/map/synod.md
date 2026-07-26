@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7ebf4fd
+generated_at_commit: 837cb5c
 generated_at_date: 2026-07-26
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
 ---

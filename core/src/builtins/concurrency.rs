@@ -1231,7 +1231,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel::<Settled<Value>>();
         let (_sink, stdout_buf) = new_buffer();
         let (_sink2, stderr_buf) = new_buffer();
-        let worker_scope = shell.session.root.child().as_scope().clone();
+        let worker_scope = shell.session.root.worker().as_scope().clone();
         let handle = HandleInner {
             result: Arc::new(Mutex::new(Some(rx))),
             cached: Arc::new(Mutex::new(None)),
@@ -1388,6 +1388,7 @@ mod tests {
         fn enquire(
             &self,
             req: crate::serial::FOValue,
+            _cancel: &crate::process::CancelScope,
         ) -> Result<crate::serial::FOValue, crate::types::Error> {
             Ok(req)
         }

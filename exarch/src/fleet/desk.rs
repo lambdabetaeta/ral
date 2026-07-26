@@ -989,7 +989,11 @@ impl SurfaceApplier {
 pub(crate) struct AbsentDesk;
 
 impl EnquiryDesk for AbsentDesk {
-    fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
+    fn enquire(
+        &self,
+        _req: FOValue,
+        _cancel: &ral_core::process::CancelScope,
+    ) -> Result<FOValue, Error> {
         Err(Error::new("this host answers no enquiries", 1))
     }
 }
@@ -1013,7 +1017,11 @@ pub(crate) struct DeskBinding {
 }
 
 impl EnquiryDesk for DeskBinding {
-    fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+    fn enquire(
+        &self,
+        req: FOValue,
+        _cancel: &ral_core::process::CancelScope,
+    ) -> Result<FOValue, Error> {
         while let Some((_, event)) = self.events.try_recv() {
             match event {
                 Event::Surface(val) => self.apply.live(val),
@@ -1295,10 +1303,13 @@ mod tests {
         };
 
         let answer = binding
-            .enquire(FOValue::Variant {
-                label: "probe".into(),
-                payload: None,
-            })
+            .enquire(
+                FOValue::Variant {
+                    label: "probe".into(),
+                    payload: None,
+                },
+                &ral_core::process::CancelScope::default(),
+            )
             .expect_err("the stub desk answers every class with the extension-law error");
         assert_eq!(answer.message, "unrecognised enquiry class `probe`");
 

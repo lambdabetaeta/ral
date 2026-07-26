@@ -719,8 +719,8 @@ mod tests {
 
     /// An inner `publish` nested inside an outer one restores the outer
     /// publication on drop, rather than leaving the slot null underneath
-    /// it — the same nesting discipline `ral_core`'s own `CancelSlot`
-    /// gives its scope publications.
+    /// it, so a nested exchange hands the signal path back to the exchange
+    /// that contains it.
     #[test]
     fn inner_publish_restores_the_outer_token_on_drop() {
         let _g = SERIAL.lock().unwrap();

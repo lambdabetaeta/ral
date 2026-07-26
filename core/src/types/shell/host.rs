@@ -42,7 +42,8 @@ impl Shell {
     }
 
     /// The session's durable cancel root.  A run door mints a run's
-    /// foreground scope from it (`self.durable_root().child()`); the typed
+    /// foreground scope from it, under the frame the run displaces
+    /// (`self.durable_root().foreground(&self.run.cancel)`); the typed
     /// relation keeps that scope rooted here.  Crate-private: frame
     /// assembly lives behind the run doors.
     pub(crate) fn durable_root(&self) -> &DurableRoot {
@@ -54,8 +55,8 @@ impl Shell {
     /// keeps one per session, so its own cancel cascade can reach the eval
     /// layer: cancelling the handle unwinds the session's in-flight run at
     /// the evaluator's poll points and stops its detached workers.  For a
-    /// forked session — which never publishes the process-global signal
-    /// slots — this handle is the *only* way to stop a running eval.
+    /// forked session — deaf to the ambient causes — this handle is the
+    /// *only* way to stop a running eval.
     pub fn cancel_handle(&self) -> DurableRoot {
         self.session.root.clone()
     }

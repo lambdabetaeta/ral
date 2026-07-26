@@ -4,6 +4,13 @@ status: active
 
 # Per-agent eval-layer cancel; only the trunk publishes the signal slots
 
+> The publication half is superseded by
+> [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]: a handler contributes
+> a cause to two process-lifetime cells that facing scopes fold, so "only the
+> trunk publishes" becomes "only the trunk's session is minted facing" — the
+> rule is carried by construction rather than by a flag. The eval-layer cascade
+> below is untouched.
+
 An Esc or `agent_cancel` set exarch `Token`s and nothing else. Two structural
 gaps made the cancel path slow and, under a running fleet, unsound:
 

@@ -149,6 +149,9 @@ pub(crate) fn run_batch(
     }
 
     let mut shell = ral_core::boot::boot_shell(terminal, &PRELUDE, &host_surface);
+    // The script owns this process's signals: SIGINT interrupts its run,
+    // SIGTERM/SIGHUP terminate the session.
+    shell.face_signals();
     shell.set_exit_hints(load_exit_hints());
     tick!("builtins");
     if let Some(n) = recursion_limit {

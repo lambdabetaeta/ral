@@ -12,8 +12,8 @@
 //!     [`ChildHandle`] for process-group placement at spawn time.
 //!   * **Cancellation** ([`cancel`]) — [`CancelScope`] and its typed
 //!     [`DurableRoot`] / [`ForegroundScope`] relation for cooperative
-//!     structured-concurrency cancellation, plus the signal-reachable slots
-//!     the handlers deliver onto.
+//!     structured-concurrency cancellation, plus the ambient cells the
+//!     handlers contribute a cause to.
 //!   * **Launch** ([`launch`]) — the owned [`Launch`] value the runtime
 //!     hands the subsystem to spawn one external command.
 //!   * **Jail** ([`jail`]) — the guest-only per-exec decision (fresh
@@ -43,8 +43,8 @@ pub use lease::TerminalLease;
 pub use reaper::{Deadline, arm_callback, arm_lifetime};
 
 pub use cancel::{
-    CancelCause, CancelScope, CancelSlot, DurableRoot, ForegroundScope, foreground_cancel_cause,
-    publish_durable_root, publish_foreground, request_foreground_cancel, request_root_cancel,
+    CancelCause, CancelScope, DurableRoot, ForegroundScope, request_foreground_cancel,
+    request_root_cancel,
 };
 
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};

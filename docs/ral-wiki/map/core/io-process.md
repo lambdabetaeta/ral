@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a1791c5
+generated_at_commit: 837cb5c
 generated_at_date: 2026-07-26
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
@@ -89,13 +89,17 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `cancel.rs` — the cause-bearing `CancelScope` tree (`DurableRoot` /
   `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
   polled cooperatively in hot loops
-  ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]), with the
-  process-global `CancelSlot` publications that let a signal handler or TUI
-  thread cancel a scope it cannot hold — `publish` leaking one strong share of
-  the published scope so the handler's dereference can never dangle
-  ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]]).
+  ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]). A scope's
+  cancellation is a *join*: one private `fold` over its chain's flags and the
+  ambient causes the nodes were minted folding (`Hears`), so a signal handler
+  or TUI thread contributes a cause without holding — or aliasing — a scope
+  ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]). The two ambient
+  causes have different shapes: `REQUESTED_ROOT` is an absolute `AtomicU8`,
+  while the interrupt is a per-cause watermark of instants (`CLOCK`,
+  `STAMPED`) a frame reads against its birth
+  ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 - `signal.rs` — *signals are causes*: the platform handlers translate each
-  delivered signal into a `CancelCause` on the published slots — SIGINT →
+  delivered signal into a `CancelCause` on the ambient causes — SIGINT →
   foreground `Interrupt`, SIGTERM/SIGHUP → root `Terminate` — so one
   cancel-aware wait loop serves user interrupts, timeouts, and termination
   alike ([[decisions/260706_signals-are-causes|signals-are-causes]]).

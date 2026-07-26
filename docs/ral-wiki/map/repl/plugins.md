@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 837cb5c
+generated_at_date: 2026-07-26
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -40,6 +40,15 @@ decides whether the handler runs in the caller's run or a fresh one:
   pipeline; `Denied` elsewhere), a `kind` label for the run's root context,
   and an optional budget arming the run's wall. Plugins run with the host
   authority (`Capabilities::root()`) the framed run already carries.
+
+Buffer-change hooks run on a **hook shell** of their own — `prepare_hook_env`
+builds one per readline from `Shell::join_session`, released by `HookEnvGuard` —
+so it *shares* the session's cancel root: arbitrary plugin code evaluates
+there, and a Ctrl-C struck while a hook runs reaches it, while one aimed at a
+command already in flight is older than every frame the aside mints and stands
+undisturbed for the run it was aimed at
+([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]). Keybinding and prompt
+hooks frame against the session itself.
 
 ## Source-mapped faults and the buffer-change breaker
 

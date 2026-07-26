@@ -1,8 +1,15 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260726_cancel-is-a-join
 ---
 
 # A published cancel flag is leaked, because a signal handler's load and its dereference are two instants
+
+> Superseded by [[decisions/260726_cancel-is-a-join|cancel-is-a-join]], which
+> takes the two-flag alternative argued below: there is no published pointer
+> left to keep alive, so the leak, the guards, and the save/restore go with
+> it. The race analysis and the measurements here are what that decision rests
+> on.
 
 **The signal-reachable cancel slots publish a *borrowed* pointer into a run
 frame's cancel flag, and `request` reads that slot in two steps — load, then

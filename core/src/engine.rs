@@ -89,10 +89,10 @@ impl crate::types::DeferredSink for ChannelDeferredSink {
     }
 }
 
-/// Cadence at which a parked enquiry re-checks the foreground cancel slot.
-/// `Control::Cancel` arrives on the reader thread and trips the published
-/// foreground scope, never this rendezvous — the park must poll, and this
-/// bounds how stale a cancel can go unnoticed.
+/// Cadence at which a parked enquiry re-checks its run's cancel scope.
+/// `Control::Cancel` arrives on the reader thread and trips that scope,
+/// never this rendezvous — the park must poll, and this bounds how stale a
+/// cancel can go unnoticed.
 const ENQUIRY_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(75);
 
 /// How long the reader parks in `poll_readable` before waking to re-check
@@ -121,7 +121,7 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// enquiry-channel ADR). `enquire` mints a fresh [`EnquiryId`], writes
 /// `Event::Enquiry` up the wire inside the in-flight dispatch, and parks on
 /// a rendezvous slot keyed by that id until the reader thread's
-/// `Frame::Answer` arm fills it — or the run's foreground cancel fires,
+/// `Frame::Answer` arm fills it — or the run's own cancel scope fires,
 /// polled at the condvar wait's timeout.
 struct WireDesk {
     writer: Arc<Mutex<WireChannel>>,
@@ -150,7 +150,11 @@ impl WireDesk {
 }
 
 impl EnquiryDesk for WireDesk {
-    fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+    fn enquire(
+        &self,
+        req: FOValue,
+        cancel: &crate::process::CancelScope,
+    ) -> Result<FOValue, Error> {
         let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
         let eid = EnquiryId(self.next_eid.fetch_add(1, Ordering::Relaxed));
         self.slots.lock().unwrap().insert(eid, None);
@@ -166,20 +170,19 @@ impl EnquiryDesk for WireDesk {
             return Err(Error::new("enquiry lost: the host connection is down", 1));
         }
 
-        // Park on the rendezvous. The enquiring thread is the worker running
-        // the run — the thread that published this run's foreground scope —
-        // so the global cancel slot polled here is exactly that scope, and a
-        // `Control::Cancel` (relayed by the reader thread) wakes the park at
-        // the next timeout tick. The cancellation message matches
-        // `process::check`'s cause vocabulary, so the enquiring builtin
-        // raises the same error every other cancelled poll point does.
+        // Park on the rendezvous, polling the enquiring run's own scope at
+        // each timeout tick: a `Control::Cancel` (relayed by the reader
+        // thread), a reaper deadline, or a cancelled session handle all wake
+        // it. The cancellation message matches `process::check`'s cause
+        // vocabulary, so the enquiring builtin raises the same error every
+        // other cancelled poll point does.
         let mut slots = self.slots.lock().unwrap();
         loop {
             if let Some(Some(_)) = slots.get(&eid) {
                 let answer = slots.remove(&eid).flatten().expect("slot just seen filled");
                 return answer.map_err(|e| Error::new(e.message, e.status));
             }
-            if let Some(cause) = crate::process::foreground_cancel_cause() {
+            if let Some(cause) = cancel.cause() {
                 slots.remove(&eid);
                 return Err(Error::new(cause.message(), cause.exit_code()));
             }
@@ -313,8 +316,10 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
             let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
             let _ = rc_path; // TODO: load rc_path — needs the host's RcCtx/plugin machinery, not a core-level concern yet
 
-            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
             let mut shell = (target.boot)();
+            // The engine process is this session's host: its runs answer the
+            // `Control::Cancel` arm below and the signals the process is sent.
+            shell.face_signals();
             // Only ral-daemon's closed engine environment sets RAL_GUEST,
             // so this is the whole "am I inside a guest?" signal. Gated on
             // the env var, never on `installer`'s tag, so every boot
@@ -593,20 +598,18 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
 // `--engine`, a flag only the host binaries handle, and a core unit-test
 // binary would just re-run the test harness.
 //
-// Every test that parks an enquiry holds `SLOT_SERIAL`: the park polls the
-// process-global foreground cancel slot, which other tests publish.
+// The park polls the scope handed to `enquire`, so each test states its own
+// and nothing here touches process-global state.
 #[cfg(test)]
 mod wire_desk_tests {
     use super::*;
-    use crate::process::cancel::SLOT_SERIAL;
-    use crate::process::{CancelCause, publish_foreground};
+    use crate::process::{CancelCause, CancelScope};
 
     /// The round-trip: `enquire` writes `Event::Enquiry` stamped with the
     /// in-flight dispatch, parks, and returns the answer `fill` delivers —
     /// the reader loop's `Answer` arm, driven by hand from the peer end.
     #[test]
     fn enquire_round_trips_through_the_rendezvous() {
-        let _g = SLOT_SERIAL.lock();
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(WireDesk {
             writer: Arc::new(Mutex::new(ours)),
@@ -627,7 +630,7 @@ mod wire_desk_tests {
             filler.fill(eid, Ok(FOValue::Int { value: 42 }));
         });
 
-        let answer = desk.enquire(FOValue::Int { value: 41 });
+        let answer = desk.enquire(FOValue::Int { value: 41 }, &CancelScope::default());
         front_end.join().expect("front-end thread");
         assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
         assert!(
@@ -640,7 +643,6 @@ mod wire_desk_tests {
     /// status the front-end refused with — the both-transports error law.
     #[test]
     fn refused_enquiry_raises_message_and_status() {
-        let _g = SLOT_SERIAL.lock();
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(WireDesk {
             writer: Arc::new(Mutex::new(ours)),
@@ -665,7 +667,9 @@ mod wire_desk_tests {
             );
         });
 
-        let err = desk.enquire(FOValue::Unit).expect_err("refused");
+        let err = desk
+            .enquire(FOValue::Unit, &CancelScope::default())
+            .expect_err("refused");
         front_end.join().expect("front-end thread");
         assert_eq!(err.message, "this host answers no enquiries");
         assert_eq!(err.status, crate::types::Status::Code(1));
@@ -676,7 +680,6 @@ mod wire_desk_tests {
     /// slot is removed, so the answer that never came has nowhere to land.
     #[test]
     fn cancel_wakes_a_parked_enquiry() {
-        let _g = SLOT_SERIAL.lock();
         let (ours, _peer) = WireChannel::pair().expect("socketpair");
         let desk = WireDesk {
             writer: Arc::new(Mutex::new(ours)),
@@ -686,13 +689,12 @@ mod wire_desk_tests {
             answered: Condvar::new(),
         };
 
-        // The run's foreground scope, published as the run doors publish
-        // it, cancelled as `Control::Cancel`'s reader arm cancels it.
-        let scope = crate::process::CancelScope::default();
-        let _slot = publish_foreground(&scope);
+        // The run's own scope, cancelled as `Control::Cancel`'s reader arm
+        // cancels it.
+        let scope = CancelScope::default();
         scope.cancel(CancelCause::Explicit);
 
-        let err = desk.enquire(FOValue::Unit).expect_err("cancelled");
+        let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
         assert_eq!(err.message, "cancelled");
         assert!(
             desk.slots.lock().unwrap().is_empty(),
@@ -782,14 +784,14 @@ mod tests {
 // includes a jittery VM); "cancelled promptly" is proven by using a run
 // (`sleep 30`) that could not settle inside the ceiling on its own.
 //
-// The engine's shell publishes the process-global foreground/durable-root
-// cancel slots for every run it runs (the single-session default), so any
-// test here that dispatches a run serialises on `SLOT_SERIAL` — the same
-// discipline `transport.rs`'s durability test follows.
+// `engine_session` faces this process's signals, so its runs fold the
+// ambient causes: a test here that dispatches serialises on `REQUEST_SERIAL`
+// against every sibling that raises or spends one — the same discipline
+// `transport.rs`'s durability test follows.
 #[cfg(test)]
 mod engine_session_tests {
     use super::*;
-    use crate::process::cancel::SLOT_SERIAL;
+    use crate::process::cancel::REQUEST_SERIAL;
     use crate::transport::{PROTOCOL_VERSION, TerminalEndpoint};
 
     /// The poll-until ceiling every await obeys.
@@ -797,18 +799,11 @@ mod engine_session_tests {
 
     fn boot() -> Shell {
         static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
-        let mut shell = crate::boot::boot_shell(
+        crate::boot::boot_shell(
             crate::io::TerminalState::default(),
             PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime),
             &crate::boot::HostSurface::default(),
-        );
-        // The engine session is its process's signal-facing session; the
-        // `Control::Cancel` arm reaches an in-flight run through the
-        // published foreground slot. Every dispatching test here holds
-        // `SLOT_SERIAL`, so opting back in (test sessions default out) is
-        // safe.
-        shell.session.publishes_signal_slots = true;
-        shell
+        )
     }
 
     static INSTALLERS: &[EngineInstaller] = &[EngineInstaller { tag: "test", boot }];
@@ -945,7 +940,7 @@ mod engine_session_tests {
     /// A dispatch round-trips through `Event::Report`, and detach exits 0.
     #[test]
     fn dispatch_round_trips_to_a_report() {
-        let _g = SLOT_SERIAL.lock();
+        let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
         assert_eq!(host.detach_and_join(), 0);
@@ -955,7 +950,7 @@ mod engine_session_tests {
     /// "engine busy": the single worker rendezvous, one arm for both riders.
     #[test]
     fn busy_refuses_a_second_dispatch_and_a_probe() {
-        let _g = SLOT_SERIAL.lock();
+        let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.dispatch(1, "sleep 15");
         assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
@@ -975,7 +970,7 @@ mod engine_session_tests {
     /// still exits 0.
     #[test]
     fn cancel_settles_an_in_flight_run_promptly() {
-        let _g = SLOT_SERIAL.lock();
+        let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.dispatch(1, "sleep 30");
         // Let the worker stamp its dispatch and install its foreground scope.
@@ -988,7 +983,7 @@ mod engine_session_tests {
     /// A deferred worker's boundary batch arrives stamped `DispatchId(0)`.
     #[test]
     fn deferred_batch_is_stamped_dispatch_zero() {
-        let _g = SLOT_SERIAL.lock();
+        let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.run(1, "let h = spawn { sleep 1 }");
         let frame = host.await_frame(|f| matches!(f, Frame::Event(_, Event::DeferredSurface(_))));

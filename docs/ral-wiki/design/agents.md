@@ -19,8 +19,9 @@ reader: `returns()`, parking's conversing predicate, the desk's `reply` refusal
 the same bit at `Agent::assemble` — so reply availability, parking, and the
 advertised vocabulary cannot disagree
 ([[decisions/260705_branch-minimal|branch-minimal]]). Position still does two jobs
-— it fixes the registry edge (`parent`) and the signal path (only the trunk
-publishes the process cancel slots,
+— it fixes the registry edge (`parent`) and the signal path (only the trunk's
+session is minted facing the ambient causes,
+[[decisions/260726_cancel-is-a-join|cancel-is-a-join]];
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
 not decide who returns.
 

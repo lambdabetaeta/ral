@@ -23,6 +23,11 @@ impl Shell {
     /// Installs [`crate::builtins::CORE_BUILTINS`] into this shell so
     /// the language's built-in surface is reachable from the first
     /// command.
+    ///
+    /// The session faces no signals: its cancel scopes fold neither ambient
+    /// cause, so a Ctrl-C or a SIGTERM passes it by. The host that owns the
+    /// process's signals declares itself with [`Self::face_signals`].  Its
+    /// boot frame is the root of the run tree every later frame nests under.
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
@@ -43,7 +48,7 @@ impl Shell {
                 deferred: None,
                 desk: None,
                 nursery: None,
-                cancel: root.child(),
+                cancel: root.worker(),
                 loc: LocationCursor::default(),
                 deferred_lease: None,
                 worker_cap: None,
@@ -54,12 +59,6 @@ impl Shell {
             },
             session: SessionState {
                 root,
-                // A minted session is the process's signal-facing session —
-                // except in the unit-test binary, where many sessions run
-                // concurrently and the slots' LIFO discipline would not
-                // hold. There, publication is opt-in: the tests that
-                // exercise the slots set this back under `SLOT_SERIAL`.
-                publishes_signal_slots: !cfg!(test),
                 sources: crate::source::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),
@@ -76,6 +75,24 @@ impl Shell {
         };
         shell.install_builtins(crate::builtins::CORE_BUILTINS);
         shell
+    }
+
+    /// Declare this session the process's signal-facing one: it re-mints its
+    /// durable root so the root folds the ambient shutdown cause and its run
+    /// doors stamp each foreground frame with a birth instant, against which
+    /// the frame reads the ambient interrupt watermark.
+    ///
+    /// Called once, at boot, by the host that owns the process's signals —
+    /// the interactive REPL, a batch script, a wire engine, an agent's trunk
+    /// session. A session forked from a facing one ([`Self::fork_session`])
+    /// starts deaf again: its host stops it through
+    /// [`Self::cancel_handle`], not through signals. Several facing sessions
+    /// in one process is well-defined — they read the same watermark, each
+    /// against its own frames' births — so nothing here has to be the only
+    /// caller.
+    pub fn face_signals(&mut self) {
+        self.session.root = crate::process::DurableRoot::signal_facing();
+        self.run.cancel = self.session.root.worker();
     }
 
     /// Adopt the host process env at startup.
