@@ -256,11 +256,9 @@ pub(crate) fn spawn_async(
                 // consuming edge instead: the attend loop's generation
                 // admission reads the birth `generation` stamped here.
                 let rejected = parent_mailbox.push(Post::AgentResult(AgentResult {
-                    id: agent_id,
                     name: worker_name,
                     outcome,
                     text,
-                    log_dir,
                     elapsed: started.elapsed(),
                     generation,
                 }));

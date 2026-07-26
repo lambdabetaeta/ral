@@ -1,7 +1,7 @@
 ---
-generated_at_commit: f7cf93a
+generated_at_commit: d11d980
 generated_at_date: 2026-07-25
-covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/bus/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -74,8 +74,8 @@ activity adds no concept. The event is a public `Value::Map`, reaching the same
 
 `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) is the shared surface
 decoder: an `io`-keyed map decodes into the typed `IoEvent`
-(`exarch/src/bus/card.rs`) and is bound to a card by `io_card`, emitted as
-**`Kind::Io { event, card }`** (`bus.rs`) so the bus event carries *both* the
+(`exarch/src/bus/card/io.rs`) and is bound to a card by `io_card`, emitted as
+**`Kind::Io { event, card }`** (`bus/event.rs`) so the bus event carries *both* the
 raw structural event and the rendered mark tree. The other surface shapes (pin,
 notice, card, done) have their own arms; a value matching none drops, the same
 graceful degradation as before.

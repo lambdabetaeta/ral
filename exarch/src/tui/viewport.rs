@@ -1592,7 +1592,7 @@ mod tests {
         );
     }
 
-    // ── viewport window caps and tombstones (7b) ───────────────────────────
+    // ── viewport window caps and tombstones ────────────────────────────────
 
     /// Each pushed block's log rendering, joined into one string — lets a
     /// test read back which marker survived without hard-coding the render

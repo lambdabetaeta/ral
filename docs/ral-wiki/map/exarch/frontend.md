@@ -1,15 +1,16 @@
 ---
-generated_at_commit: f7cf93a
+generated_at_commit: d11d980
 generated_at_date: 2026-07-25
-covers_paths: [exarch/src/bus.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
+covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
 
 The agent core and the user interface meet at **one outbound event stream and
-one inbound inbox**, defined by `bus.rs`:
+one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
 
-- workers stamp a `Kind` with an `AgentId` through an `Emitter`; a `Sink`
+- workers stamp a `Kind` (`bus/event.rs`) with an `AgentId` through an
+  `Emitter` (`bus/emitter.rs`); a `Sink` (`bus/sink.rs`)
   consumes them. A `Kind` is a token or reasoning run (a streamed `Thinking`
   delta, committed by a final `Reasoning` event), boundary, usage, tool or
   harness call/result,
@@ -20,20 +21,22 @@ one inbound inbox**, defined by `bus.rs`:
   `Pin`/`Unpin`, or a worker's `Done` — decoded onto the bus by
   [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` and drawn by one
   generic interpreter ([[map/exarch/cards|cards]]).
-- `Inbox` is the typed inbound twin — a per-session queue of `Post`s, each
-  carrying its source and drain boundary. User steering drains mid-exchange at a
+- `Inbox` (`bus/inbox.rs`) is the typed inbound twin — a per-session queue of
+  `Post`s (`bus/post.rs`), each carrying its source and drain boundary. User
+  steering drains mid-exchange at a
   tool boundary (`drain_steering`); a scheduled wakeup or a settled async agent
   drains at the exchange boundary as its own marked `Item` (`next_item`)
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
-- a `FleetBus` owns the event channel and the inbox; `pump` borrows it, runs
+- a `FleetBus` (`bus/emitter.rs`) owns the event channel and the inbox; `pump`
+  (`bus/sink.rs`) borrows it, runs
   the worker on a scoped thread, drains events into the sink, and reports a
   worker panic as a final `Kind::Error`. Completion is the per-exchange `done` flag,
-  latched by `drain_pass` so an exchange ends even while a background producer keeps
+  latched by `drain_pass` (`bus/sink.rs`) so an exchange ends even while a background producer keeps
   the channel non-empty — never the channel's state
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
-- the channel itself is bounded and coalescing, not a bare `mpsc` pair
+- the channel itself (`bus/channel.rs`) is bounded and coalescing, not a bare `mpsc` pair
   (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
   pushing `Token`/`Thinking` (concatenate) or `Phase` (replace) merges into the
   queue's tail entry when it is the same class and the same agent id; every
@@ -189,7 +192,7 @@ Two `Sink` implementations:
  under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,
  the one command admitted off the trunk, kills the focused branch and its
  subtree. The idle wait
- selects over input, inbox, and the session bus
+ selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
 - `/model` and `/login` share `picker::overlay_frame`: one centred double-line

@@ -60,7 +60,7 @@ certainly refuse) — the single source of truth, so the nudge layer, parking,
 reply availability, and the advertised vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
 `park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `Engaged` /
-`HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus.rs`) is the `should_park`
+`HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus/inbox.rs`) is the `should_park`
 verdict: a conversing node parks `Held`, immune to cancellation; a returning,
 parented agent the registry has recorded a human exchange with parks
 `Engaged`, the same wait except a terminate-class cause still ends it, since

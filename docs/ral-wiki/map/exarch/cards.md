@@ -1,7 +1,7 @@
 ---
-generated_at_commit: f7cf93a
+generated_at_commit: d11d980
 generated_at_date: 2026-07-25
-covers_paths: [exarch/src/bus/card.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/surface.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
+covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/surface.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -48,7 +48,7 @@ Composability is one rule at three scales: the plane stacks marks (`card`),
 
 ## Decode — `value_to_card`
 
-`value_to_card` (`bus/card.rs`) is the card decoder, reading marks off the runtime
+`value_to_card` (`bus/card/decode.rs`) is the card decoder, reading marks off the runtime
 `Value`; `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) tries the pin,
 io, and notice shapes first ([[map/exarch/io-surface|io-surface]]). The wire
 shape is `Variant{label:"card", payload: List<mark>}`; each mark is

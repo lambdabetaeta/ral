@@ -28,7 +28,7 @@ pub struct Fleet {
     /// is its contents; the fleet is alive while it is non-empty.
     pub agents: AgentRegistry,
     /// The one fan-out event bus the frontend drains.
-    pub bus: FleetBus,
+    pub(crate) bus: FleetBus,
     /// The shared transport borrowed by every provider in the fleet.
     pub engine: Arc<provider::Engine>,
 }

@@ -2377,7 +2377,6 @@ mod tests {
         parent_mailbox: Mailbox,
     ) -> std::thread::JoinHandle<()> {
         let id = child.id;
-        let log_dir = child.log_dir();
         let registry = child.agents.clone();
         let name = name.to_string();
         std::thread::spawn(move || {
@@ -2389,11 +2388,9 @@ mod tests {
                 .map(crate::agent::render_reply)
                 .unwrap_or_default();
             let _ = parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
-                id,
                 name,
                 outcome,
                 text,
-                log_dir,
                 elapsed: Duration::default(),
                 generation,
             }));
@@ -2541,7 +2538,6 @@ mod tests {
 
         match wait_for_settle(&parent.inbox()) {
             crate::bus::Item::Agent(result) => {
-                assert_eq!(result.id, id_a);
                 assert!(
                     matches!(result.outcome, crate::bus::AgentOutcome::Cancelled),
                     "a never-renewed lease reaps mid-exchange with Cancelled, got {:?}",

@@ -52,7 +52,7 @@ pub struct Headless<'a> {
     /// Where every other projected line lands — cards, progress, trace —
     /// `err` in [`converse_on`]'s contract.
     err: &'a mut (dyn Write + Send),
-    /// The run total, read once from the bus's [`UsageMeter`](crate::bus::UsageMeter)
+    /// The run total, read once from the bus's `UsageMeter`
     /// at the end of the run — the root plus every sub-agent, muted or live,
     /// since each tees its usage to the shared meter at the emit seam.  It is
     /// **not** a per-event sink accumulation: a `Kind::Usage` arriving here is

@@ -886,11 +886,9 @@ mod tests {
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
-                id: fresh_id(),
                 name: "late".into(),
                 outcome: AgentOutcome::Complete,
                 text: "settled across the clear".into(),
-                log_dir: dir,
                 elapsed: std::time::Duration::ZERO,
                 generation: stale,
             }))
@@ -916,11 +914,9 @@ mod tests {
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
-                id: fresh_id(),
                 name: "worker".into(),
                 outcome: AgentOutcome::Complete,
                 text: "found it".into(),
-                log_dir: dir,
                 elapsed: std::time::Duration::ZERO,
                 generation: session.agents.generation(),
             }))

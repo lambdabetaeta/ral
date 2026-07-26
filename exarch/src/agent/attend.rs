@@ -340,10 +340,22 @@ impl Agent {
     /// staleness is settled before an [`Item`] is even minted; by the time one
     /// reaches here it is already current.  Every other item source is
     /// generation-free and admitted unconditionally.
+    ///
+    /// A `Surface`'s stamped `id` is checked here too, as a debug assertion
+    /// rather than an admission rule: the deferred sink always stamps it
+    /// with, and posts it to, the very session that goes on to drain it, so
+    /// the id and `self.id` can never disagree without a routing bug — this
+    /// only catches a future one.
     pub(super) fn admits(&self, item: &Item) -> bool {
         match item {
             Item::Agent(r) => r.generation == self.agents.generation(),
-            Item::Surface { generation, .. } => *generation == self.agents.generation(),
+            Item::Surface { id, generation, .. } => {
+                debug_assert_eq!(
+                    *id, self.id,
+                    "a spawn's surface batch always drains in the session it was stamped with"
+                );
+                *generation == self.agents.generation()
+            }
             _ => true,
         }
     }
