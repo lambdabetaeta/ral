@@ -4,7 +4,7 @@
 # tested and reported as two broken fragments.  Here each link is a value;
 # a dangling one is exactly a link that resolves to neither file nor dir.
 
-let [root] = $args
+let [root] = $ARGS
 
 let links  = filter { |p| is-link $p } !{glob "$root/**/*"}
 let broken = filter { |p| $[not !{is-file $p} && not !{is-dir $p}] } $links

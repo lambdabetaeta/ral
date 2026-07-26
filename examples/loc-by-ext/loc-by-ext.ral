@@ -5,7 +5,7 @@
 # paths and the extension is taken from the basename alone, so nothing
 # is re-lexed and no directory leaks into a bucket.
 
-let [root] = $args
+let [root] = $ARGS
 
 let ext-of = { |p|
     let name = basename $p

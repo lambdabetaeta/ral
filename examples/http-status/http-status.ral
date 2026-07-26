@@ -7,5 +7,5 @@
 let results = par { |u|
     let code = curl -s -o /dev/null -w '%{http_code}' --max-time 15 $u | from-string
     return [url: $u, code: $code]
-} $args $nproc
+} $ARGS $NPROC
 for $results { |r| echo "$r[code]  $r[url]" }

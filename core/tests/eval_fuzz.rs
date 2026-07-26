@@ -1284,13 +1284,13 @@ fn script_args_are_not_polluted_by_runner_argv() {
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &std::sync::Arc::new(elaborate(
-            &parse("return $args").unwrap(),
+            &parse("return $ARGS").unwrap(),
             std::collections::HashSet::default(),
         )),
         &Mooring::adrift(),
         &mut shell,
     )
-    .expect("evaluate $args");
+    .expect("evaluate $ARGS");
     assert_eq!(
         result,
         Value::list(vec![
@@ -1307,13 +1307,13 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &std::sync::Arc::new(elaborate(
-            &parse("return $env[RAL_TEST_ENV]").unwrap(),
+            &parse("return $ENV[RAL_TEST_ENV]").unwrap(),
             std::collections::HashSet::default(),
         )),
         &Mooring::adrift(),
         &mut shell,
     )
-    .expect("evaluate $env");
+    .expect("evaluate $ENV");
     assert_eq!(result, Value::String("override".into()));
 }
 
@@ -1433,11 +1433,11 @@ fn arith_index_in_comparison() {
     );
 }
 
-// ── $nproc ──────────────────────────────────────────────────────────────
+// ── $NPROC ──────────────────────────────────────────────────────────────
 
 #[test]
 fn nproc_is_positive_int() {
-    let val = must_succeed("return $nproc");
+    let val = must_succeed("return $NPROC");
     match val {
         Value::Int(n) => assert!(n > 0, "nproc should be positive"),
         _ => panic!("nproc should be Int, got {val:?}"),

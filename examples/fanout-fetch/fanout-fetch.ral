@@ -5,7 +5,7 @@
 # result per input, so failures land in the manifest and "what broke?" is
 # one `filter`.
 
-let [list_file, out_dir] = $args
+let [list_file, out_dir] = $ARGS
 
 let urls = from-lines-list $list_file
 

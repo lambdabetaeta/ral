@@ -4,5 +4,5 @@
 # failed, not why. `retry n { }` re-runs on failure and, once attempts
 # run out, re-raises the last error verbatim (status, message, line).
 
-let [url] = $args
+let [url] = $ARGS
 retry 5 { curl -fsS --max-time 10 $url }

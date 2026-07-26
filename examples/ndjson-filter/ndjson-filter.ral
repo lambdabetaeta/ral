@@ -5,7 +5,7 @@
 # and the per-line loop forks grep for every record.  Here each line is
 # decoded once and the real field value is compared as data.
 
-let [path, field, want] = $args
+let [path, field, want] = $ARGS
 
 let kept = filter { |r|
     return $[!{has $r $field} && !{equal !{str $r[$field]} $want}]

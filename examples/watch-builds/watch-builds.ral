@@ -4,5 +4,5 @@
 # can't tell which build spoke — or which failed. `watch "label"` line-
 # frames each job's stdout, prefixing every whole line with its dir.
 
-let jobs = map { |d| return !{watch $d { make -C $d }} } $args
+let jobs = map { |d| return !{watch $d { make -C $d }} } $ARGS
 for $jobs { |h| await $h }

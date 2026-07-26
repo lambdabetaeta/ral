@@ -4,7 +4,7 @@
 # ranks differently on two machines.  Here words fold into a count map and
 # sort by a projection: deterministic, and free of any locale at all.
 
-let [path, n] = $args
+let [path, n] = $ARGS
 let counts = fold { |m w|
     return [...$m, $w: $[!{get $m $w 0} + 1]]
 } [:] !{map $lower !{words !{from-string < $path}}}

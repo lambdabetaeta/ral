@@ -4,7 +4,7 @@
 # Here the column is a named record field and the threshold test is a
 # genuine Float `>`.
 
-let [path, col, threshold] = $args
+let [path, col, threshold] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

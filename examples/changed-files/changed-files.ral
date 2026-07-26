@@ -4,7 +4,7 @@
 # entries.  A pipeline reads each name as one line, so a path with
 # spaces stays a single String — no re-lexing, no lost files.
 
-let [repo, base] = $args
+let [repo, base] = $ARGS
 
 let files = within [dir: $repo] {
     git diff --name-only "$base...HEAD" | from-lines | stream-to-list

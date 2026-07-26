@@ -4,7 +4,7 @@
 # order.  Here `group-by` keys on the named category and the keys come
 # out sorted.
 
-let [path, category, val] = $args
+let [path, category, val] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

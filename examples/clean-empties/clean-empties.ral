@@ -4,7 +4,7 @@
 # zero-byte file named "old log" is deleted as two nonexistent paths.
 # Here each empty file is a value, filtered by its `size` and removed whole.
 
-let [root] = $args
+let [root] = $ARGS
 
 let files   = filter { |p| is-file $p } !{glob "$root/**/*"}
 let empties = filter { |p| file-empty $p } $files

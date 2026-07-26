@@ -4,13 +4,13 @@
 # template is inert data: we find `${NAME}` placeholders and substitute only
 # known environment keys, executing nothing.
 
-let [path] = $args
+let [path] = $ARGS
 let tpl   = from-string < $path
 let phs   = re-find-matches '\$\{[A-Z_][A-Z0-9_]*\}' $tpl
 let names = nub !{map { |ph| return !{slice $ph 2 $[!{length $ph} - 3]} } $phs}
 
 let filled = fold { |acc name|
-    let val = try { return $env[$name] } { |_| return '' }
+    let val = try { return $ENV[$name] } { |_| return '' }
     let pat = intercalate '' ['\$\{', $name, '\}']
     return !{re-replace-all $pat $val $acc}
 } $tpl $names

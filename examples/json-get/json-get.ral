@@ -5,7 +5,7 @@
 # decoded value key by key, and a missing key fails loudly rather
 # than printing null.
 
-let [path, dotted] = $args
+let [path, dotted] = $ARGS
 let doc = from-json < $path
 let leaf = fold { |node key| return $node[$key] } $doc !{re-split '\.' $dotted}
 to-json $leaf

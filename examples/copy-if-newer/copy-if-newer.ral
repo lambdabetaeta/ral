@@ -5,7 +5,7 @@
 # the mtime test is explicit over typed records, and each branch says
 # what it did.
 
-let [src, dst] = $args
+let [src, dst] = $ARGS
 
 let newer = if !{is-file $dst} {
     let s = !{file-info $src}[mtime]

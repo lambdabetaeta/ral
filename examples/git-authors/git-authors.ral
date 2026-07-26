@@ -5,7 +5,7 @@
 # ourselves: a real list of [name, count] records, no tty-dependent
 # behaviour and nothing to re-parse from padded columns.
 
-let [repo] = $args
+let [repo] = $ARGS
 
 let names = within [dir: $repo] {
     git log --format=%an | from-lines | stream-to-list

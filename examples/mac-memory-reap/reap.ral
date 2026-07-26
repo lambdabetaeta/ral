@@ -5,7 +5,7 @@
 # is taken once, `attempt` swallows the empty match, and free memory is
 # sampled either side into the returned record.
 
-if !{is-empty $args} {
+if !{is-empty $ARGS} {
     echo 'usage: reap.ral APP...' 1>&2
     exit 2
 }
@@ -25,8 +25,8 @@ let weigh = { |pat|
 }
 
 let before = !$free
-let reaped = map $weigh $args
-for $args { |p| attempt { pkill -i $p } }
+let reaped = map $weigh $ARGS
+for $ARGS { |p| attempt { pkill -i $p } }
 let after  = !$free
 
 [

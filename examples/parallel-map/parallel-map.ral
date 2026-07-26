@@ -5,5 +5,5 @@
 # path *values* — no splitting — with a fixed worker count, returning one
 # result per file in input order.
 
-let done = par { |f| gzip -kf $f; return $f } $args 4
+let done = par { |f| gzip -kf $f; return $f } $ARGS 4
 echo "gzipped !{length $done} files"

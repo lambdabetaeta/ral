@@ -4,7 +4,7 @@
 # Here `int` converts the count and *fails loudly* on anything that is not
 # a number, so bad data stops the chart instead of quietly distorting it.
 
-let [path] = $args
+let [path] = $ARGS
 let rows = map { |l|
     let parts = words $l
     return [cat: $parts[0], n: !{int $parts[1]}]

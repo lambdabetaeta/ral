@@ -4,6 +4,6 @@
 # order and drags in locale collation.  Here membership is a set lookup,
 # so lines match unsorted and the first file's order is preserved.
 
-let [a, b] = $args
+let [a, b] = $ARGS
 let seen = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $b}
 for !{from-lines-list $a} { |l| if !{has $seen $l} { echo $l } }

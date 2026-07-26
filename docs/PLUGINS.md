@@ -404,16 +404,16 @@ as a file), and renders in a tmux pane/popup via fzf-tmux when
 return { |options|
     let key = get $options key "ctrl-t"
     let _handler = { |ctx|
-        let cmd = try { return $env[FZF_CTRL_T_COMMAND] } { |_| return "" }
-        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return $env[FZF_CTRL_T_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let cmd = try { return $ENV[FZF_CTRL_T_COMMAND] } { |_| return "" }
+        let user = try { return $ENV[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $ENV[FZF_CTRL_T_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $ENV[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $ENV[FZF_TMUX_HEIGHT] } { |_| return "" }
         let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
         let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=file,dir,follow,hidden --scheme=path\n$fopts\n$user $extra -m"
-        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let pane = try { return $ENV[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $ENV[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $ENV[FZF_TMUX_OPTS] } { |_| return "" }
         let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
             if !{is-empty $ftm_opts} {
                 return ["-d$height"]
@@ -463,16 +463,16 @@ zsh `:a`-style — no filesystem access, unlike `resolve-path`).
 return { |options|
     let key = get $options key "alt-c"
     let _handler = { |ctx|
-        let cmd = try { return $env[FZF_ALT_C_COMMAND] } { |_| return "" }
-        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return $env[FZF_ALT_C_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let cmd = try { return $ENV[FZF_ALT_C_COMMAND] } { |_| return "" }
+        let user = try { return $ENV[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $ENV[FZF_ALT_C_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $ENV[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $ENV[FZF_TMUX_HEIGHT] } { |_| return "" }
         let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
         let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=dir,follow,hidden --scheme=path\n$fopts\n$user $extra +m"
-        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let pane = try { return $ENV[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $ENV[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $ENV[FZF_TMUX_OPTS] } { |_| return "" }
         let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
             if !{is-empty $ftm_opts} {
                 return ["-d$height"]
@@ -528,15 +528,15 @@ return { |options|
     let _handler = { |ctx|
         let query = _ed-lbuffer
         let entries = _ed-history "" 0
-        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return $env[FZF_CTRL_R_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let user = try { return $ENV[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $ENV[FZF_CTRL_R_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $ENV[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $ENV[FZF_TMUX_HEIGHT] } { |_| return "" }
         let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
         let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore\n$fopts\n$user --scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi $extra"
-        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let pane = try { return $ENV[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $ENV[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $ENV[FZF_TMUX_OPTS] } { |_| return "" }
         let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
             if !{is-empty $ftm_opts} {
                 return ["-d$height"]
@@ -594,11 +594,11 @@ The manifest, the guard construction, and the dispatch handler:
 
 ```
 return { |options|
-    let env_trigger = try { return $env[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
+    let env_trigger = try { return $ENV[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
     let trigger = get $options trigger $env_trigger
 
     let _envor = { |name default|
-        try { return $env[$name] } { |_| return $default }
+        try { return $ENV[$name] } { |_| return $default }
     }
 
     # Guard: a word, a gap, then the current word ending in the trigger —

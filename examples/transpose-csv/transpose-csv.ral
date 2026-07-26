@@ -4,7 +4,7 @@
 # every time.  Here a CSV is a list of rows, and transposing is reading
 # column j across every row — a nested map that reads as what it does.
 
-let [path] = $args
+let [path] = $ARGS
 let rows = map { |l| re-split ',' $l } !{from-lines-list $path}
 
 for !{range 0 !{length $rows[0]}} { |j|

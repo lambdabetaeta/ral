@@ -5,6 +5,6 @@
 # call over the decoded records: it derives the header and
 # RFC-4180-quotes every field itself.
 
-let [path] = $args
+let [path] = $ARGS
 let rows = from-json < $path
 to-csv $rows

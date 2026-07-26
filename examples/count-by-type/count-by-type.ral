@@ -4,7 +4,7 @@
 # bogus extensions.  Here each file is one glob value and `group-by` buckets
 # it by an extension derived from the whole basename, dotless files in `(none)`.
 
-let [root] = $args
+let [root] = $ARGS
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 

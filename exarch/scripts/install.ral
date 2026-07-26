@@ -1,9 +1,9 @@
 #!/usr/bin/env ral
 
 # install.ral — build and install exarch from source.
-# May be run from anywhere; locates the repo root via $script.
+# May be run from anywhere; locates the repo root via $SCRIPT.
 
-let here      = dirname $script
+let here      = dirname $SCRIPT
 let repo_root = resolve-path "$here/../.."
 
 # if $[not !{is-file "$repo_root/exarch/Cargo.toml"}] {
@@ -12,7 +12,7 @@ let repo_root = resolve-path "$here/../.."
 
 cargo install --force --path "$repo_root/exarch" 
 
-let cargo_home = try { return $env[CARGO_HOME] } { |_| return "$env[HOME]/.cargo" }
+let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "$ENV[HOME]/.cargo" }
 let exarch_bin    = "$cargo_home/bin/exarch"
 let kernel     = uname -s
 

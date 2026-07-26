@@ -4,7 +4,7 @@
 # drop it and a spaced path hashes as two bogus files.  Here a path is a
 # value, `par` distributes values, and hashes come back in input order.
 
-let [root, ...rest] = $args
+let [root, ...rest] = $ARGS
 let jobs = if !{is-empty $rest} { return 8 } else { return !{int $rest[0]} }
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}

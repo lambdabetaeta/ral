@@ -1,9 +1,9 @@
 #!/usr/bin/env ral
 
 # build-install.ral — build and install ral from source.
-# May be run from anywhere; locates the repo root via $script.
+# May be run from anywhere; locates the repo root via $SCRIPT.
 
-let here      = dirname $script
+let here      = dirname $SCRIPT
 let repo_root = resolve-path "$here/.."
 
 if $[not !{is-file "$repo_root/ral/Cargo.toml"}] {
@@ -14,7 +14,7 @@ cargo +stable install --force --path ral
 cargo +stable install --force --path exarch
 cargo +stable install --force --path ral-sh
 
-let cargo_home = try { return $env[CARGO_HOME] } { |_| return "$env[HOME]/.cargo" }
+let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "$ENV[HOME]/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"
 let kernel     = uname -s
 

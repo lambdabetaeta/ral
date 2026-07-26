@@ -5,6 +5,6 @@
 # fails on the first object that is missing it — the mistake surfaces
 # instead of hiding.
 
-let [path, field] = $args
+let [path, field] = $ARGS
 let rows = from-json < $path
 for $rows { |row| echo !{str $row[$field]} }

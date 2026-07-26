@@ -4,7 +4,7 @@
 # files, or a file with nothing added, abort the script.  Here a count is
 # `length` of a filtered list; no exit status ever enters the reckoning.
 
-let [old, new] = $args
+let [old, new] = $ARGS
 let in-old = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $old}
 let in-new = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $new}
 

@@ -5,7 +5,7 @@
 # handed to `rm`.  Here entries are sorted by their mtime value and each
 # doomed path stays one atom through `rm`.
 
-let [folder, keep] = $args
+let [folder, keep] = $ARGS
 
 let backups = filter { |p| is-file $p } !{glob "$folder/*"}
 let newest-first = reverse !{sort-list-by { |p| return !{file-info $p}[mtime] } $backups}

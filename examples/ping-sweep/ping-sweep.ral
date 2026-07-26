@@ -6,7 +6,7 @@
 
 let results = par { |h|
     return [host: $h, up: !{succeeds { ping -c1 -W1 $h }}]
-} $args $nproc
+} $ARGS $NPROC
 for $results { |r|
     let mark = if $r[up] { return 'up  ' } else { return 'down' }
     echo "$mark  $r[host]"

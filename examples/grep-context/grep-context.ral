@@ -4,7 +4,7 @@
 # injection, fixable only with `-e "$pattern" --`.  Here the pattern only
 # ever reaches `re-match` as data; it can never become a flag.
 
-let [pat, n, path] = $args
+let [pat, n, path] = $ARGS
 let radius = int $n
 
 let indexed = enumerate !{from-lines-list $path}

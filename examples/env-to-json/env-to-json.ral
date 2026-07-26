@@ -1,10 +1,10 @@
 #!/usr/bin/env ral
 # Footgun: the bash hand-rolls the JSON with printf, so a value
 # holding a `"`, a backslash, or a newline produces malformed output.
-# Here $env is a typed map: a selected key that is missing fails
+# Here $ENV is a typed map: a selected key that is missing fails
 # loudly, and to-json escapes every value — quotes, newlines, and all.
 
 let selected = fold { |acc name|
-    return !{union $acc [$name: $env[$name]]}
-} [:] $args
+    return !{union $acc [$name: $ENV[$name]]}
+} [:] $ARGS
 to-json $selected

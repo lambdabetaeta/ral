@@ -5,6 +5,6 @@
 # from-json demands exactly one JSON value — trailing content is a hard
 # error — and to-json re-emits the canonical compact, key-sorted form.
 
-let [path] = $args
+let [path] = $ARGS
 let doc = from-json < $path
 to-json $doc

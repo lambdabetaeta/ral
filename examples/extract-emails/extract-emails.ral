@@ -4,7 +4,7 @@
 # makes `+` and `{2,}` literal, matching nothing.  Here matches come back
 # as a list — empty is empty, not a failure — and `nub` dedups in order.
 
-let [path] = $args
+let [path] = $ARGS
 let text = from-string < $path
 let re = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 

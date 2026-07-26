@@ -12,12 +12,12 @@
 # centred on a given 1-based line — composing them is one loop, no
 # parsing — and tags each line with the witness `edit` checks.
 
-if !{is-empty $args} {
+if !{is-empty $ARGS} {
     echo 'usage: grep-context.ral PATTERN [DIR]' 1>&2
     exit 2
 }
 
-let [pattern, ...rest] = $args
+let [pattern, ...rest] = $ARGS
 let where = if !{is-empty $rest} { return '.' } else { return $rest[0] }
 
 within [dir: $where] {

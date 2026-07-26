@@ -478,7 +478,7 @@ Head interpretation is syntactic:
    nullary block); any other value type in head position is an error.
    If the name is a builtin binding, the builtin runs. Otherwise,
    command lookup consults installed handler frames (alias or active
-   `within`) and finally `$env[PATH]`.
+   `within`) and finally `$ENV[PATH]`.
 2. **Path head.** A `SLASH_WORD` (`./x`, `../x`, `/x`) or a
    `TILDE_WORD` (`~`, `~/x`, `~user/x`) executes that exact path.
    Tilde expansion happens at the process boundary. Path heads never
@@ -550,7 +550,7 @@ when used in head position).
 A bare-head lookup walks local scope then the prelude; if the name
 is unbound there, dispatch consults builtin bindings before user
 handler frames (aliases and active `within` frames, innermost-first),
-then `$env[PATH]`.  `^name` skips the binding namespace and resolves
+then `$ENV[PATH]`.  `^name` skips the binding namespace and resolves
 to a user handler if one is active; otherwise it resolves to an
 external command.  An external dispatch reached this way is
 further filtered by `exec` whenever a `grant` is in force (§11.1).
@@ -558,7 +558,7 @@ The value namespace is consulted only through `$name` and through the
 implicit head step; bare non-head words and map-key positions never
 trigger either kind of lookup.
 
-**Platform.** On Windows the `$env[PATH]` walk is PATHEXT-aware: a
+**Platform.** On Windows the `$ENV[PATH]` walk is PATHEXT-aware: a
 candidate spelled without an extension is retried with each suffix
 named in `%PATHEXT%` (`.COM;.EXE;.BAT;.CMD` if the variable is unset)
 until one names an existing file, so a bare `git` resolves to
@@ -936,7 +936,7 @@ Patterns are purely structural: there are no literal patterns. A
 mismatch is a runtime error, catchable by `try`.
 
 ```
-let [first, ...rest] = $args
+let [first, ...rest] = $ARGS
 let [host: h, port: p = 8080] = $opts
 let [name: n, addr: [city: c]] = $p
 ```
@@ -955,14 +955,14 @@ and reject circular references and bound recursion depth.
 
 ## 9  Environment
 
-`$env` is a read-only map of environment variables and `$nproc` the
+`$ENV` is a read-only map of environment variables and `$NPROC` the
 CPU count as an `Int`.  Overrides are scoped through `within [env: …]`
 (§3.2); there is no `setenv`.  Three further pseudo-variables are
 computed at access time, chiefly for prompt bodies: `$CWD` is the
 logical working directory with a home-directory prefix abbreviated to
 `~`, `$STATUS` the last recorded exit status as an `Int`, and `$USER`
-the user name from the environment.  Like `$env`, `$args`, `$script`,
-and `$nproc`, they are resolved on read and never stored in scope.
+the user name from the environment.  Like `$ENV`, `$ARGS`, `$SCRIPT`,
+and `$NPROC`, they are resolved on read and never stored in scope.
 
 `~/.ralrc` is a ral script whose last expression is a configuration
 map with optional keys `env`, `prompt`, `bindings`, `aliases`,
@@ -1080,7 +1080,7 @@ When a `try` catches an error, debug builds echo a one-line summary
 to stderr (`ral: try caught error (line:col): message`); release
 builds stay silent.  This surfaces errors that would otherwise be
 swallowed silently by
-probes like `try { return $env[X] } { |_| return '' }` and by
+probes like `try { return $ENV[X] } { |_| return '' }` and by
 builtins such as `_ed-tui` (§18.1) that catch body failures
 internally and return them as a `[output, status]` record.
 
@@ -1754,7 +1754,7 @@ whose work the session stops owning.
 in-process transformation:
 
 ```
-par { |f| convert $f } !{glob '*.wav'} $nproc
+par { |f| convert $f } !{glob '*.wav'} $NPROC
 let results = map { |line| upper $line } $lines
 ```
 
@@ -2120,27 +2120,27 @@ image with no special case.
 
 ## 14  Scripts
 
-`$args` is the argument list — user-supplied arguments only, with no
-program name in `$args[0]`.  `$script` is the path of the file
+`$ARGS` is the argument list — user-supplied arguments only, with no
+program name in `$ARGS[0]`.  `$SCRIPT` is the path of the file
 currently executing, as handed to the interpreter.  Inside a loaded
-module or plugin `$script` refers to *that* file, matching the scope
+module or plugin `$SCRIPT` refers to *that* file, matching the scope
 used for module-relative path resolution (§8).  Under `ral -c`, in
-the REPL, and while the prelude is loading, `$script` is unbound —
+the REPL, and while the prelude is loading, `$SCRIPT` is unbound —
 reading it fails like any undefined variable.  The ambient
 pseudo-variables `$CWD`, `$STATUS`, and `$USER` (§9) resolve the same
 way in scripts: computed at access, never stored in scope.
 
 ```
 #!/usr/bin/env ral
-let [target, port] = $args
+let [target, port] = $ARGS
 echo "deploying to $target on $port"
 within [dir: $target] { git pull ? within [env: [PORT: $port]] { make deploy } }
 ```
 
-A common idiom is to self-locate relative to `$script`:
+A common idiom is to self-locate relative to `$SCRIPT`:
 
 ```
-let here = dirname !{resolve-path $script}
+let here = dirname !{resolve-path $SCRIPT}
 let repo_root = resolve-path "$here/.."
 ```
 
@@ -2784,7 +2784,7 @@ older parsers.
 
 - **SIGPIPE exception.** A non-final pipeline stage terminated by
   SIGPIPE is treated as success; the pipeline does not fail.
-- **`~` expansion.** Bare `~` and `~/…` expand to `$env[HOME]`.
+- **`~` expansion.** Bare `~` and `~/…` expand to `$ENV[HOME]`.
 - **`[` adjacency.** Postfix indexing (§1.1) requires no whitespace
   before `[`.
 - **`_` prefix visibility.** `use` (§8) excludes `_`-prefixed names
@@ -3065,13 +3065,13 @@ environment, falling back to platform defaults if not inherited:
 `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `LANG`, `SHLVL`
 (always incremented from the inherited value).
 
-`PWD` and `OLDPWD` are deliberately *not* kept in `$env`.  They live in
+`PWD` and `OLDPWD` are deliberately *not* kept in `$ENV`.  They live in
 shell-owned state alongside the logical cwd: `cd` updates the shell's
 record of "where we are" and "where we just were" without touching the
 process cwd, and child commands receive the right values through
 `Command::env("PWD", …)` / `Command::env("OLDPWD", …)` on each spawn.
 Within ral code, the current directory is always read via `cwd`; reading
-`$env[PWD]` returns nothing.
+`$ENV[PWD]` returns nothing.
 
 ### 21.6  Current working directory
 

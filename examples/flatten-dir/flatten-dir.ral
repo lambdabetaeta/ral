@@ -4,7 +4,7 @@
 # and data is lost with no warning.  Here a `fold` threads the set of
 # seen names, so a clash is copied under a numbered prefix instead.
 
-let [src, dst] = $args
+let [src, dst] = $ARGS
 mkdir -p $dst
 
 let files = filter { |p| is-file $p } !{glob "$src/**/*"}

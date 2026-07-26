@@ -12,11 +12,11 @@
 # Options:  trigger   completion trigger (default '**')
 
 return { |options|
-    let env_trigger = try { return $env[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
+    let env_trigger = try { return $ENV[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
     let trigger = get $options trigger $env_trigger
 
     let _envor = { |name default|
-        try { return $env[$name] } { |_| return $default }
+        try { return $ENV[$name] } { |_| return $default }
     }
 
     # Guard: a word, a gap, then the current word ending in the trigger —
@@ -42,8 +42,8 @@ return { |options|
         let n = length $p
         if !{re-match '^~/' $p} {
             let rest = slice $p 1 $[$n - 1]
-            return "$env[HOME]$rest"
-        } elsif !{equal $p '~'} { return $env[HOME] } else { return $p }
+            return "$ENV[HOME]$rest"
+        } elsif !{equal $p '~'} { return $ENV[HOME] } else { return $p }
     }
 
     let _initial-dir = { |base|
@@ -154,7 +154,7 @@ return { |options|
     }
 
     let _hosts = {
-        let home = $env[HOME]
+        let home = $ENV[HOME]
         let extra = try { return !{glob '~/.ssh/config.d/*'} } { |_| return [] }
         let cfgs = ["$home/.ssh/config", ...$extra, '/etc/ssh/ssh_config']
         let all = [...!{flat-map $_cfg-hosts $cfgs}, ...!{_known-hosts "$home/.ssh/known_hosts"}, ...!{_etc-hosts '/etc/hosts'}]

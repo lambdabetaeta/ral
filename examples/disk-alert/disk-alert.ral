@@ -5,7 +5,7 @@
 # a fixed early column and the mount tail is rejoined intact, so a spaced
 # path survives whole.
 
-let [pct] = $args
+let [pct] = $ARGS
 let threshold = int $pct
 
 let rows = df -P | from-lines | stream-drop 1 | stream-to-list

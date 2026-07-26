@@ -4,7 +4,7 @@
 # position.  Here `group-by` buckets on the named value directly, in one
 # pass, no pre-sort.
 
-let [path, col] = $args
+let [path, col] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

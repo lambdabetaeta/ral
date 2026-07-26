@@ -4,7 +4,7 @@
 # two entries and the wrong skeleton appears.  Here each manifest line
 # is one String, whitespace and all.
 
-let [root, manifest] = $args
+let [root, manifest] = $ARGS
 
 for !{from-lines-list $manifest} { |rel|
     let full = "$root/$rel"

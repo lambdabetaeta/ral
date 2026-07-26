@@ -4,7 +4,7 @@
 # file is renamed with a garbage ".name" suffix.  Here `ext` inspects
 # the split parts and yields '' when there is no extension.
 
-let [root, prefix] = $args
+let [root, prefix] = $ARGS
 
 let pad = { |n|
     let go = { |s| if $[!{length $s} >= 4] { return $s } else { return !{go "0$s"} } }

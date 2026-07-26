@@ -4,7 +4,7 @@
 # names a place, not a value.  Here the sort key is `float` of a named
 # field: addressed by name, immune to a column moving.
 
-let [path, col] = $args
+let [path, col] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

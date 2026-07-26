@@ -4,7 +4,7 @@
 # and one with jq syntax runs as code.  Here both are data: we index
 # each element by the field name and compare values as strings.
 
-let [path, field, want] = $args
+let [path, field, want] = $ARGS
 let rows = from-json < $path
 let kept = filter { |row| return !{equal !{str $row[$field]} $want} } $rows
 to-json $kept

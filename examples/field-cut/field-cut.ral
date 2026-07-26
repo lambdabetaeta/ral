@@ -4,7 +4,7 @@
 # Here columns are indexed explicitly, so `3 1` really means 3 then 1,
 # and a missing column fails loudly instead of vanishing into a blank.
 
-let [path, delim, ...cols] = $args
+let [path, delim, ...cols] = $ARGS
 let idxs = map { |c| return $[!{int $c} - 1] } $cols
 
 for !{from-lines-list $path} { |line|

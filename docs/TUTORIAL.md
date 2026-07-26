@@ -98,7 +98,7 @@ arguments, not one.  To concatenate, interpolate inside double quotes:
     cp $src "$dst/backup"
     curl "$host:$port/api"
 
-`~` and `~/bin` expand to `$env[HOME]`-relative paths, as single
+`~` and `~/bin` expand to `$ENV[HOME]`-relative paths, as single
 atoms.
 
 ## 4  Strings
@@ -294,7 +294,7 @@ format textually; spreading a nested list or map is an error.
 Patterns destructure, both on the left-hand side of `let` and as block
 parameters:
 
-    let [head, ...rest] = $args
+    let [head, ...rest] = $ARGS
     let [host: h, port: p] = $opts
     let [host: h, port: p = 8080] = $opts    # default if key missing
     let [name: n, addr: [city: c]] = $person # nested
@@ -582,10 +582,10 @@ construction, not by discipline.
 
     race [$a, $b]            # first to finish wins; the rest are cancelled
     cancel $h                # cancel a running block
-    par { |f| convert $f } !{glob '*.wav'} $nproc   # parallel map, n jobs
+    par { |f| convert $f } !{glob '*.wav'} $NPROC   # parallel map, n jobs
 
 `par` is `map` parallelised: it returns the list of *values* in input
-order, with at most `jobs` blocks in flight (`$nproc` is the CPU
+order, with at most `jobs` blocks in flight (`$NPROC` is the CPU
 count).  `watch "label" { … }` spawns a block whose output streams live
 to your terminal, each line prefixed `[label]`.  This is what one wants
 when running several builds at once without losing their interleaved
@@ -685,21 +685,21 @@ directories.
 ## 19  Scripts
 
     #!/usr/bin/env ral
-    let [target, port] = $args
+    let [target, port] = $ARGS
     echo "deploying to $target on $port"
     within [dir: $target] { git pull ? within [env: [PORT: $port]] { make deploy } }
 
-- `$args` — list of the script's arguments (no program name at
-  index 0).  Destructure it: `let [cmd, ...rest] = $args`.  Forward it
-  whole to another command by spreading: `cmd ...$args`.
-- `$script` — path of the file currently executing; inside a loaded
+- `$ARGS` — list of the script's arguments (no program name at
+  index 0).  Destructure it: `let [cmd, ...rest] = $ARGS`.  Forward it
+  whole to another command by spreading: `cmd ...$ARGS`.
+- `$SCRIPT` — path of the file currently executing; inside a loaded
   module it is that module's path.  Self-locate with the bundled
-  `dirname`: `let here = dirname $script`.
-- `$env` — read-only map of the environment (`$env[PATH]`,
-  `$env[HOME]`).  Reading a missing key fails; probe with
-  `try { return $env[MAYBE] } { |_| return '' }`.  Overrides go
+  `dirname`: `let here = dirname $SCRIPT`.
+- `$ENV` — read-only map of the environment (`$ENV[PATH]`,
+  `$ENV[HOME]`).  Reading a missing key fails; probe with
+  `try { return $ENV[MAYBE] } { |_| return '' }`.  Overrides go
   through `within [env: …]`, never mutation.
-- `$nproc` — CPU count as an `Int`.
+- `$NPROC` — CPU count as an `Int`.
 
 Invocation forms:
 
@@ -732,13 +732,13 @@ cleanup, and handles failures:
 
     #!/usr/bin/env ral
 
-    let [env-name, ...targets] = $args
+    let [env-name, ...targets] = $ARGS
     if !{is-empty $targets} {
         echo 'usage: deploy <env> <host>...'
         fail [status: 2, message: 'no targets given']
     }
 
-    let config = from-json < "config/$env-name.json"
+    let config = from-json < "config/$ENV-name.json"
     let [image: img, tag: tag = 'latest'] = $config
 
     for $targets { |host|
@@ -775,8 +775,8 @@ structural rules — no word splitting, no mutation.
 | `a \|\| b` (else, on failure) | `a ? b` |
 | `set -e` | always in effect — failure propagation is never off |
 | heredoc `<<EOF` | `cmd << #'…'#` — the raw string is the body; one leading newline is dropped |
-| `$@` / `$*` | `$args`; forward with the spread `...$args` |
-| `$0` / `BASH_SOURCE` | `$script` |
+| `$@` / `$*` | `$ARGS`; forward with the spread `...$ARGS` |
+| `$0` / `BASH_SOURCE` | `$SCRIPT` |
 | `export VAR=…` / env mutation | `within [env: [VAR: …]] { … }` |
 | `cd dir` (in scripts) | `within [dir: 'dir'] { … }` |
 | `trap … EXIT` | `guard { … } { … }` |
@@ -942,7 +942,7 @@ bundled coreutils (`cp`, `mv`, `rm`, `mkdir`, `ln`, …).  Queries:
 | `grant [exec:, fs:, net:, …] {…}` | scoped capability restriction |
 | `use` / `source` | load a module / evaluate into scope |
 | `cwd` | current directory |
-| `$env` / `$nproc` / `$args` / `$script` | ambient values |
+| `$ENV` / `$NPROC` / `$ARGS` / `$SCRIPT` | ambient values |
 
 ### JSON
 

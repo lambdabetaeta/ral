@@ -5,7 +5,7 @@
 # Here `glob` returns `[]` on no match, and the `is-empty` guard makes
 # "nothing to do" a clean exit.
 
-let [folder, from, to] = $args
+let [folder, from, to] = $ARGS
 
 let targets = glob "$folder/*.$from"
 

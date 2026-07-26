@@ -4,7 +4,7 @@
 # recounted whenever a column moves.  Here columns are named record
 # fields, selected in exactly the requested order.
 
-let [path, ...cols] = $args
+let [path, ...cols] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

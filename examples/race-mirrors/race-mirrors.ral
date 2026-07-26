@@ -4,7 +4,7 @@
 # until the script exits, and reaping their PIDs is manual and racy.
 # `race` returns the first handle to finish and cancels the rest for you.
 
-let [path, ...mirrors] = $args
+let [path, ...mirrors] = $ARGS
 let handles = map { |m| return !{spawn { curl -fsSL --max-time 20 "$m/$path" }} } $mirrors
 let r = race $handles
 echo $r[stdout]

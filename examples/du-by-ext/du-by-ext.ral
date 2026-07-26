@@ -4,7 +4,7 @@
 # is keyed by the actual extension value and aggregated with a fold —
 # nothing is stringly typed.
 
-let [root] = $args
+let [root] = $ARGS
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 

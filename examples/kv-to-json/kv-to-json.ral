@@ -4,7 +4,7 @@
 # way in.  Configuration is data; reading it should not run it.  Here it
 # stays data: lines are split, never evaluated.
 
-let [path] = $args
+let [path] = $ARGS
 
 let kv-of = { |line|
     let parts = re-split '=' $line

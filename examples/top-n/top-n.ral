@@ -3,7 +3,7 @@
 # column inserted upstream silently ranks on the wrong field.  Here the
 # ordering key is `float` of a named field and `take` bounds the result.
 
-let [path, col, n] = $args
+let [path, col, n] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

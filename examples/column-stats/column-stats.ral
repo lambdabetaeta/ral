@@ -4,7 +4,7 @@
 # by position throughout.  Here the field is named and `median` is a
 # prelude builtin.
 
-let [path, col] = $args
+let [path, col] = $ARGS
 
 let [hdr, ...rows] = !{from-lines-list $path}
 let header = re-split ',' $hdr

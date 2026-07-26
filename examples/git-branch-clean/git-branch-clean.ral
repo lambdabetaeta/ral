@@ -4,7 +4,7 @@
 # cwd — and it lists `main` itself, so a delete loop can wipe the wrong
 # refs.  `--format` gives bare names; we filter `main` out explicitly.
 
-let [repo] = $args
+let [repo] = $ARGS
 
 let merged = within [dir: $repo] {
     git branch --merged main '--format=%(refname:short)' | from-lines | stream-to-list

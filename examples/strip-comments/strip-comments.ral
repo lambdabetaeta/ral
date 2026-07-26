@@ -5,7 +5,7 @@
 # line survives only if its first non-blank char is not `#`, so indented
 # comments and blanks go while a `#` inside a value is never touched.
 
-let [path] = $args
+let [path] = $ARGS
 
 let kept = filter { |l| re-match '^\s*[^#\s]' $l } !{from-lines-list $path}
 

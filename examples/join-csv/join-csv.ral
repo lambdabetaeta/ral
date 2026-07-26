@@ -4,7 +4,7 @@
 # Here one table is indexed by the named key into a map, so the join is
 # a hash lookup — no pre-sort, no lost rows.
 
-let [lpath, rpath, key] = $args
+let [lpath, rpath, key] = $ARGS
 
 let parse = { |p|
     let [hdr, ...rows] = !{from-lines-list $p}

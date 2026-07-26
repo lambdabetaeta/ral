@@ -4,7 +4,7 @@
 # `$root/*/` and the script dies with a confusing error.  Here `glob`
 # returns an empty list and the loop simply does nothing.
 
-let [root, n] = $args
+let [root, n] = $ARGS
 
 let sized = map { |d|
     let total = sum !{map { |p|

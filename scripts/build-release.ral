@@ -73,24 +73,24 @@ let flags = ['--linux', '--macos', '--all', '--local',
 let known = [...$flags, '-h', '--help']
 
 # Help first, so `--help --whatever` still prints help instead of erroring.
-if $[!{has '-h' $args} || !{has '--help' $args}] {
+if $[!{has '-h' $ARGS} || !{has '--help' $ARGS}] {
     let usage = map { |f| return "[$f]" } $flags
     echo 'build-release.ral' ...$usage
     exit 0
 }
 
-for $args { |a|
+for $ARGS { |a|
     if $[not !{has $a $known}] { echo "!{styled $ansi-red "unknown argument: $a"}" 1>&2; fail [status: 2, message: "unknown argument: $a"] }
 }
 
-let dry_run      = has '--dry-run'      $args
-let skip_publish = has '--skip-publish' $args
-let want_local   = has '--local'        $args
-let want_linux   = has '--linux'        $args
-let want_macos   = has '--macos'        $args
-let want_all     = has '--all'          $args
-let want_clean_builds = $[!{has '--clean-builds' $args} || !{has '--clean' $args}]
-let want_clean_images = $[!{has '--clean-images' $args} || !{has '--clean' $args}]
+let dry_run      = has '--dry-run'      $ARGS
+let skip_publish = has '--skip-publish' $ARGS
+let want_local   = has '--local'        $ARGS
+let want_linux   = has '--linux'        $ARGS
+let want_macos   = has '--macos'        $ARGS
+let want_all     = has '--all'          $ARGS
+let want_clean_builds = $[!{has '--clean-builds' $ARGS} || !{has '--clean' $ARGS}]
+let want_clean_images = $[!{has '--clean-images' $ARGS} || !{has '--clean' $ARGS}]
 let want_clean        = $[$want_clean_builds || $want_clean_images]
 
 # Inclusion semantics: a target is built if it was named, or if --all was
@@ -101,7 +101,7 @@ let default_all = if $any_target { return $want_all } else { return true }
 let build_linux   = $[$want_linux   || $default_all]
 let build_macos   = $[$want_macos   || $default_all]
 
-let repo_root    = resolve-path "!{dirname $script}/.."
+let repo_root    = resolve-path "!{dirname $SCRIPT}/.."
 let artifact_dir = "$repo_root/target/release-artifacts"
 let cache_dir    = "$repo_root/target/release-cache"
 
@@ -297,5 +297,5 @@ let main = {
 # --dry-run: install a catch-all handler that prints every command instead
 # of executing it.  Otherwise just run the script.
 if $dry_run {
-    within [handler: { |name args| echo "!{styled $ansi-dim "+ $name"}" ...$args }] $main
+    within [handler: { |name args| echo "!{styled $ansi-dim "+ $name"}" ...$ARGS }] $main
 } else { !$main }

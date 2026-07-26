@@ -4,7 +4,7 @@
 # oddly-named directory is probed under the wrong path.  Here each directory
 # is a path value, empty exactly when `glob "$d/**/*"` yields no file beneath.
 
-let [root] = $args
+let [root] = $ARGS
 
 let dirs = filter { |p| is-dir $p } !{glob "$root/**/*"}
 

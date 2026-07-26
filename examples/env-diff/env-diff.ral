@@ -4,7 +4,7 @@
 # is silently mangled or missed.  Here each line is split once — the key
 # is the head, the value is the '='-rejoined tail — so `A=x=y` round-trips.
 
-let [old-file, new-file] = $args
+let [old-file, new-file] = $ARGS
 
 let parse = { |path|
     fold { |m line|

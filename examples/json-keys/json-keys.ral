@@ -5,6 +5,6 @@
 # so an array or scalar is a loud error, and it returns real String
 # keys, sorted, that echo emits raw.
 
-let [path] = $args
+let [path] = $ARGS
 let doc = from-json < $path
 for !{keys $doc} { |key| echo $key }

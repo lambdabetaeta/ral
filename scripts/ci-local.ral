@@ -24,7 +24,7 @@
 # Exits non-zero on the first failing step (default ral semantics —
 # external command failures propagate).
 
-let here      = dirname $script
+let here      = dirname $SCRIPT
 let repo_root = resolve-path "$here/.."
 
 # Print a CI-style banner, then run the thunk.  Matches the `==>`

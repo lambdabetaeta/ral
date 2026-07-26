@@ -80,7 +80,7 @@ within [handlers: [cat: { |args| echo 'handler-cat' }]] {
 
 # Combined keys
 
-within [env: [MY_VAR: scoped], handlers: [mycmd: { |args| echo "env=$env[MY_VAR]" }]] {
+within [env: [MY_VAR: scoped], handlers: [mycmd: { |args| echo "env=$ENV[MY_VAR]" }]] {
     mycmd
 }
 

@@ -10,7 +10,7 @@
 //! The compile-time constants ([`os_name`], [`arch`], [`family`]) are
 //! free and infallible.  The probes that ask the live system —
 //! [`git`], [`now`] — are best-effort: any failure yields `None` rather
-//! than erroring, so a caller stitching them into a prompt or an `$env`
+//! than erroring, so a caller stitching them into a prompt or an `$ENV`
 //! baseline stays well-formed on bare or exotic hosts.
 
 use std::process::Command;

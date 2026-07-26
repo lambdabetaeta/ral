@@ -5,7 +5,7 @@
 # strips every carriage return, and `>` is rename-on-close: a reader sees
 # the old file or the new, never a torn write.
 
-let [path] = $args
+let [path] = $ARGS
 
 let body = from-string < $path
 

@@ -5,7 +5,7 @@
 # (the rest is the filename, spaces and all) and computed in a `try`, so
 # one bad entry is one FAILED row and the report continues.
 
-let [manifest] = $args
+let [manifest] = $ARGS
 let base = dirname $manifest
 
 for !{from-lines-list $manifest} { |line|

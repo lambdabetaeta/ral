@@ -5,7 +5,7 @@
 # dotfiles, a match-free file is simply empty, and the line number is a
 # real Int — no exit-status surprise.
 
-let [root] = $args
+let [root] = $ARGS
 
 let files = filter { |p| return !{is-file $p} } !{glob "$root/**/*"}
 

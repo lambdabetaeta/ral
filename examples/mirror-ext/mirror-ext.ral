@@ -4,7 +4,7 @@
 # the destination and fails obscurely.  Here `glob` returns `[]` on no
 # match and every matched path stays one atom into `cp`.
 
-let [src, dst, ext] = $args
+let [src, dst, ext] = $ARGS
 mkdir -p $dst
 
 for !{glob "$src/**/*.$ext"} { |p|

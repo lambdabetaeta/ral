@@ -4,7 +4,7 @@
 # exhausted", and split reports nothing.  Here suffixes grow as needed
 # and each chunk announces its line count.
 
-let [src, n] = $args
+let [src, n] = $ARGS
 
 let pad = { |x|
     let go = { |s| if $[!{length $s} >= 4] { return $s } else { return !{go "0$s"} } }

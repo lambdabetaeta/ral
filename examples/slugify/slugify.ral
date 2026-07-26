@@ -4,6 +4,6 @@
 # locale.  Here `lower` and `re-replace-all` act on the String value
 # itself — no subprocess, no argv/flag confusion, no locale surprise.
 
-let [title] = $args
+let [title] = $ARGS
 let dashed = re-replace-all '[^a-z0-9]+' '-' !{lower $title}
 echo !{re-replace-all '^-+|-+$' '' $dashed}

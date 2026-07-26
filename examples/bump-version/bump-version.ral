@@ -5,7 +5,7 @@
 # staged and swapped atomically, so a reader sees the old string or the
 # new one, never a torn file.
 
-let [path] = $args
+let [path] = $ARGS
 
 let [major, minor, pat] = re-split '\.' !{from-line < $path}
 let next = "$major.$minor.$[!{int $pat} + 1]"

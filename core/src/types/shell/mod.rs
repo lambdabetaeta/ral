@@ -32,7 +32,7 @@
 //!   for forks, plus [`Shell::inherit_from`] / [`Shell::return_to`]).
 //!
 //! The small primitives that don't fit a concern — error
-//! construction, stdout writes, status writes, `$env` / `$args`
+//! construction, stdout writes, status writes, `$ENV` / `$ARGS`
 //! resolution, closure-capture snapshot — live directly on this
 //! module.
 
@@ -134,7 +134,7 @@ pub struct Context {
     pub hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
 
     // ── dynamic context, not attenuable ─────────────────────────────────
-    /// Invocation positional args (`$args`, `$1`, …) passed on the
+    /// Invocation positional args (`$ARGS`, `$1`, …) passed on the
     /// command line or by `source`.  Inherits with caller; not
     /// modified by `within` / `grant`.
     pub args: Vec<String>,
@@ -844,18 +844,19 @@ impl Shell {
             .register_at(file, Source::from_text(&name, text));
     }
 
-    /// Resolve the seven pseudo-variables (`$env`, `$args`, `$script`,
-    /// `$nproc`, `$CWD`, `$STATUS`, `$USER`).  These are computed on
+    /// Resolve the seven pseudo-variables (`$ENV`, `$ARGS`, `$SCRIPT`,
+    /// `$NPROC`, `$CWD`, `$STATUS`, `$USER`).  All-caps names are the
+    /// shell's; lowercase names are the user's.  These are computed on
     /// demand rather than stored in scope, so [`Self::lookup_value_name`]
     /// consults them after lexical scope and before the builtin table.
     /// Any other name returns `None`.
     pub fn pseudo_var(&self, name: &str) -> Option<Value> {
         match name {
-            "env" => {
+            "ENV" => {
                 // PWD / OLDPWD are shell-cwd-derived, not
                 // env-overrides: they live on `context.cwd` and
                 // change every `cd`.  Drop them at the source so
-                // `$env` reads as the rule.
+                // `$ENV` reads as the rule.
                 let mut merged: HashMap<String, String> = std::env::vars()
                     .filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"))
                     .collect();
@@ -872,7 +873,7 @@ impl Shell {
                     .collect();
                 Some(Value::map(pairs))
             }
-            "args" => Some(Value::list(
+            "ARGS" => Some(Value::list(
                 self.mobile
                     .context
                     .args
@@ -881,14 +882,14 @@ impl Shell {
                     .map(Value::String)
                     .collect(),
             )),
-            // $script: path of the currently-executing file, i.e. the name
+            // $SCRIPT: path of the currently-executing file, i.e. the name
             // of the source the call site's span belongs to.  Absent in the
             // REPL, under `-c`, and during prelude loading.
-            "script" => match self.script_name() {
+            "SCRIPT" => match self.script_name() {
                 None | Some("" | "-c" | "<prelude>") => None,
                 Some(s) => Some(Value::String(s.to_string())),
             },
-            "nproc" => Some(Value::Int(std::thread::available_parallelism().map_or(
+            "NPROC" => Some(Value::Int(std::thread::available_parallelism().map_or(
                 1,
                 |n| {
                     #[allow(

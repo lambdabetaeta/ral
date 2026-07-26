@@ -5,7 +5,7 @@
 # error.  Here matching is a Bool predicate; the count is `length` of a
 # filtered list, and 0 is just 0.
 
-let [pat, ...files] = $args
+let [pat, ...files] = $ARGS
 
 for $files { |f|
     let n = length !{filter { |l| re-match $pat $l } !{from-lines-list $f}}

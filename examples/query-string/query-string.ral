@@ -5,7 +5,7 @@
 # the key at the first '=' and rejoins the rest as the value, then '+' and
 # every %XX decode through the byte channel.
 
-let [query] = $args
+let [query] = $ARGS
 let hd = '0123456789ABCDEF'
 
 let hex-val = { |c|

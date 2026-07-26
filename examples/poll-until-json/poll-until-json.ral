@@ -4,7 +4,7 @@
 # "not ready" forever. `from-json` decodes to a typed value and reads the
 # field structurally, so the match can't be fooled by layout.
 
-let [url, field, target, tries] = $args
+let [url, field, target, tries] = $ARGS
 let probe = { |left|
     let doc = curl -fsS --max-time 10 $url | from-json
     if !{equal !{str $doc[$field]} $target} {

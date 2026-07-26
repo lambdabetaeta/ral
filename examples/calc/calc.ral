@@ -4,7 +4,7 @@
 # `x[$(reboot)]`.  Here operands go through `int` (a real failure on non-numbers)
 # and each operator is matched explicitly; nothing is re-lexed or eval'd.
 
-let [first, ...rest] = $args
+let [first, ...rest] = $ARGS
 let step = { |a op b|
     if    !{equal $op '+'} { return $[$a + $b] }
     elsif !{equal $op '-'} { return $[$a - $b] }

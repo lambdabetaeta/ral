@@ -6,11 +6,11 @@
 # Prerequisites: tree-sitter CLI, cc, nvim-treesitter configured for ral.
 # Run after any change to grammar.js or highlights.scm.
 
-let here        = dir $script
+let here        = dir $SCRIPT
 let repo_root   = resolve-path "$here/.."
 let ts_dir      = "$repo_root/editors/tree-sitter-ral"
-let parser_dir  = "$env[HOME]/.local/share/nvim/site/parser"
-let queries_dir = "$env[HOME]/.config/nvim/queries/ral"
+let parser_dir  = "$ENV[HOME]/.local/share/nvim/site/parser"
+let queries_dir = "$ENV[HOME]/.config/nvim/queries/ral"
 
 echo "==> generating parser"
 within [dir: $ts_dir] {

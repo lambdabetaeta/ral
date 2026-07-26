@@ -4,7 +4,7 @@
 # also has that key.  Deep merge means recursing where both sides
 # hold objects; we do exactly that, so nested defaults survive.
 
-let [left, right] = $args
+let [left, right] = $ARGS
 
 let deep = { |x y|
     fold { |acc key|

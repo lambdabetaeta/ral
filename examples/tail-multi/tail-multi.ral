@@ -4,13 +4,13 @@
 # manual pid array plus a trap to clean up.  Here `watch LABEL { … }`
 # line-frames each stream, so every line emerges whole and prefixed.
 
-if !{is-empty $args} {
+if !{is-empty $ARGS} {
     echo 'usage: tail-multi.ral FILE...' 1>&2
     exit 2
 }
 
 let handles = map { |f|
     return !{watch !{basename $f} { tail -f $f }}
-} $args
+} $ARGS
 
 for $handles { |h| await $h }

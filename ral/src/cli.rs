@@ -93,8 +93,8 @@ USAGE
     ral -i              force the interactive REPL
 
 SCRIPT ARGUMENTS
-    Arguments after <script> or <code> are available as $args. Script files \
-also bind $script to the script path; -c and the REPL leave $script unbound.
+    Arguments after <script> or <code> are available as $ARGS. Script files \
+also bind $SCRIPT to the script path; -c and the REPL leave $SCRIPT unbound.
 
 STARTUP FILES
     Interactive shells read ~/.ralrc or $XDG_CONFIG_HOME/ral/rc. Login shells \
@@ -143,7 +143,7 @@ pub(crate) struct Cli {
           action = clap::ArgAction::Append)]
     capabilities: Vec<std::path::PathBuf>,
 
-    /// Treat the next positional as ral code; remaining positionals become $args
+    /// Treat the next positional as ral code; remaining positionals become $ARGS
     #[arg(short = 'c')]
     code: bool,
 

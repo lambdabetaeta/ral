@@ -97,7 +97,7 @@ impl Shell {
     /// `OS_FAMILY` machine facts, and the multiplexer and terminal
     /// passthroughs) into `context.env_overrides`, filling in sensible
     /// defaults for anything unset.  These are read from ral
-    /// code as `$env[KEY]`; the environment is dynamic state, not a
+    /// code as `$ENV[KEY]`; the environment is dynamic state, not a
     /// lexical binding.  Called once at startup by every front end —
     /// interactive `ral`, `exarch`, batch scripts — so the language
     /// sees a consistent baseline regardless of who launched the
@@ -182,7 +182,7 @@ impl Shell {
             .to_string();
         self.mobile.context.set_env_var("SHLVL", shlvl);
 
-        // Machine facts (compile-time constants): exposed via `$env` so rc
+        // Machine facts (compile-time constants): exposed via `$ENV` so rc
         // can branch on the OS/arch without shelling out to `uname`.
         for (k, v) in [
             ("OS_NAME", crate::host::os_name()),

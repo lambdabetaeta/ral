@@ -5,7 +5,7 @@
 # Here the split is explicit, empties are filtered out, and `nub` keeps
 # the first occurrence of each directory.
 
-let parts = re-split ':' $env[PATH]
+let parts = re-split ':' $ENV[PATH]
 let clean = nub !{filter { |p| return $[not !{is-empty $p}] } $parts}
 
 echo !{intercalate ':' $clean}

@@ -1,8 +1,8 @@
 #!/usr/bin/env ral
 
-# Test: script arguments via $args
+# Test: script arguments via $ARGS
 
-let [name, ...rest] = $args
+let [name, ...rest] = $ARGS
 
 echo "hello, $name"
 

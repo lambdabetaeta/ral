@@ -5,6 +5,6 @@
 # commas, embedded newlines, and short rows are all handled — yielding
 # a record per row keyed by the header.
 
-let [path] = $args
+let [path] = $ARGS
 let rows = from-csv < $path
 to-json $rows

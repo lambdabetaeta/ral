@@ -4,7 +4,7 @@
 # treats the blank as 0 and prints a bogus 50-year age.  Here `mtime`
 # is a typed Int from `file-info`; a bad file fails loudly instead.
 
-let [root] = $args
+let [root] = $ARGS
 let now = int !{date +%s | from-line}
 
 for !{filter { |p| is-file $p } !{glob "$root/*"}} { |f|

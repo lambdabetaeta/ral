@@ -4,7 +4,7 @@
 # bounded recursion over `succeeds` caps the attempts and exits nonzero
 # on timeout, so the wait can never hang.
 
-let [host, port, tries] = $args
+let [host, port, tries] = $ARGS
 let probe = { |left|
     if !{succeeds { nc -z $host $port }} {
         echo "$host:$port is accepting connections"

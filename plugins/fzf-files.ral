@@ -12,16 +12,16 @@
 return { |options|
     let key = get $options key "ctrl-t"
     let _handler = { |ctx|
-        let cmd = try { return $env[FZF_CTRL_T_COMMAND] } { |_| return "" }
-        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return $env[FZF_CTRL_T_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = $env[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "" }
+        let cmd = try { return $ENV[FZF_CTRL_T_COMMAND] } { |_| return "" }
+        let user = try { return $ENV[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $ENV[FZF_CTRL_T_OPTS] } { |_| return "" }
+        let fopts = try { let optsf = $ENV[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
+        let height_env = try { return $ENV[FZF_TMUX_HEIGHT] } { |_| return "" }
         let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
         let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=file,dir,follow,hidden --scheme=path\n$fopts\n$user $extra -m"
-        let pane = try { return $env[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return $env[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return $env[FZF_TMUX_OPTS] } { |_| return "" }
+        let pane = try { return $ENV[TMUX_PANE] } { |_| return "" }
+        let ftm = try { return $ENV[FZF_TMUX] } { |_| return "" }
+        let ftm_opts = try { return $ENV[FZF_TMUX_OPTS] } { |_| return "" }
         let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
             if !{is-empty $ftm_opts} {
                 return ["-d$height"]

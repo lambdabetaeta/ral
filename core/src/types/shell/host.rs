@@ -535,7 +535,7 @@ impl Shell {
         self.mobile.control.recursion_limit = n;
     }
 
-    /// Install the invocation positional args (`$args`, `$1`, …) — the
+    /// Install the invocation positional args (`$ARGS`, `$1`, …) — the
     /// script arguments a CLI host passes after the program path.
     pub fn set_args(&mut self, args: Vec<String>) {
         self.mobile.context.args = args;

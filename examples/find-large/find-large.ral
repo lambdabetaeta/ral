@@ -5,7 +5,7 @@
 # Here each `file-info` record is a typed value; sorting and slicing operate
 # on records, not delimited text.
 
-let [root] = $args
+let [root] = $ARGS
 
 let stats = map { |p|
     return [path: $p, size: !{file-info $p}[size]]

@@ -4,7 +4,7 @@
 # `$col[...]` index arithmetic.  Here `from-csv` is a real RFC-4180 parse
 # into records, so a quoted comma stays put and columns are keys by name.
 
-let [path, group_col, value_col] = $args
+let [path, group_col, value_col] = $ARGS
 
 let rows = from-csv < $path
 

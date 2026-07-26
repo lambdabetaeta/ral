@@ -4,7 +4,7 @@
 # output whose nonzero status hides in a `pipefail` gap.  Here `>` is atomic,
 # `$path` never splits, and `guard` cleans up on every exit.
 
-let [path] = $args
+let [path] = $ARGS
 let enc = temp-file
 let dec = temp-file
 guard {

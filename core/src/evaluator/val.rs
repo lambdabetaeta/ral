@@ -41,7 +41,7 @@ pub(crate) fn interpolate_piece(v: &Value, shell: &Shell) -> Result<String, Erro
 /// Evaluates a value term of the CBPV IR.
 ///
 /// [`Val::Variable`] runs value-name lookup: env → pseudo-vars
-/// (`$env`, `$args`, `$script`, `$nproc`) → explicit builtin value
+/// (`$ENV`, `$ARGS`, `$SCRIPT`, `$NPROC`) → explicit builtin value
 /// form. A name that misses all three is reported as an undefined
 /// variable — value position has no handler or external command arm.
 pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
