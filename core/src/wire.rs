@@ -160,8 +160,7 @@ impl WireChannel {
                 None => -1,
                 Some(d) => {
                     let left = d.saturating_duration_since(std::time::Instant::now());
-                    libc::c_int::try_from(left.as_millis().min(i32::MAX as u128))
-                        .expect("clamped to i32::MAX")
+                    libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX)
                 }
             };
             let mut fds = libc::pollfd {
