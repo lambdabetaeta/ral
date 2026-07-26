@@ -228,6 +228,39 @@ mod tests {
         }
     }
 
+    /// The two bullets the model reads its own authority off, in the
+    /// spelling that has to reach the guest.
+    ///
+    /// No other test in this file can see them: [`prompt`] above builds on
+    /// [`Capabilities::root`], which is ambient, so `grant_summary`
+    /// collapses the whole section to one line and every fs bullet is
+    /// absent.  With the real grant, this renders the line a Windows host
+    /// once produced as `- fs read: \work, \tmp` — a grant that reads as
+    /// though the folder had been granted, over paths naming nothing in
+    /// the machine.
+    #[test]
+    fn the_grant_bullets_name_the_guests_paths_as_the_guest_spells_them() {
+        let dir = crate::test_fixture::workshop("prompt-grant-bullets");
+        let root = dir.join("Admissions");
+        std::fs::create_dir(&root).expect("granted folder");
+        let grant = crate::grant::Grant::open(&root).expect("fixture folder must open");
+        let p = assemble(
+            &grant.capabilities(),
+            Path::new(vm_manager::MachineSpec::GUEST_WORKSPACE),
+            &grant.name(),
+            Path::new("/nonexistent-config"),
+        )
+        .expect("no house rules to read");
+        for bullet in ["- fs read: /work, /tmp", "- fs write: /work, /tmp"] {
+            assert!(
+                p.contains(bullet),
+                "the grant must reach the model as {bullet:?}; the Host section reads:\n{}",
+                p.split("# Host").nth(1).unwrap_or(&p)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Host section carries guest truths: the guest scratch, the mount
     /// point as cwd — and none of this process's own host facts, whose
     /// leakage is exactly how a model ends up addressing paths that name
