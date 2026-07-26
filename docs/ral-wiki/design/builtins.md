@@ -60,7 +60,7 @@ The core entries group by what they compute:
   or failure as one settle variant rather than blocking or re-raising
   ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
 - **Session & terminal** — `cd` `cwd` `alias` / `unalias` `source` / `use`
-  `exit` / `quit` `ask` `echo` `clear` `reset` `surface` `help`, with the
+  `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
   underscore probes `_type` / `_ansi-ok`.
 
 `fail` sits outside these: it diverges rather than computing, and its role in
@@ -80,8 +80,9 @@ rule whose shape follows from how command-like the builtin is:
   in via `reducer_spec` ([[design/codecs|codecs]]).
 - **`Sig`** — a *command signature*: argv shape and result computation read
   directly, without falling through to command-name classification. This is for
-  builtins whose surface is not a curried value — *variadic* (`echo`, `help`),
-  *optional-argument* (the `from-X` codecs, which read stdin when given none),
+  builtins whose surface is not a curried value — *nullary* (`clear`, `reset`,
+  `help`), *optional-argument* (`cd`, and the `from-X` codecs, which read stdin
+  when given none),
   *divergent* (`fail`, result `Never`, carrying the nonzero-status diagnostic —
   [[design/failure|failure]]), or carrying a compile-time *probe* (`_type`). A
   `Sig` still exposes a first-class form when it declares a value scheme
@@ -100,8 +101,8 @@ So a reified primitive is an ordinary closure that composes like a user function
 and a later `within [handlers: …]` frame or `alias` still intercepts it, because
 dispatch happens by name at application time ([[design/name-resolution|resolution]]).
 Fixed arity ([[invariants/fixed-arity|fixed-arity]]) is what makes the
-η-expansion well-defined; variadic and command-only entries (`echo`, `help`) have
-no first-class form.
+η-expansion well-defined; a command-only entry, whose argv shape is variable
+(`cd`, the `from-X` codecs), has no first-class form.
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (builtins are the pure fragment — not every kernel call is an effect),
 [[design/name-resolution|name-resolution]], [[design/codecs|codecs]],
