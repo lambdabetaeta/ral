@@ -1,4 +1,4 @@
-//! The machine broker, as a program.
+//! The two ways the broker is started on Windows.
 //!
 //! Everything interesting is in [`vm_manager::broker`] — this file is only the
 //! two ways the same service can be started:
@@ -17,8 +17,6 @@
 //! invisible in the mode users run. Run it in a console to watch a machine, and
 //! as a service to serve one.
 
-#![cfg(windows)]
-
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::NO_ERROR;
@@ -33,7 +31,7 @@ use windows_sys::Win32::System::Services::{
 /// this name; the two must not drift.
 const SERVICE_NAME: &str = "SynodMachineBroker";
 
-fn main() {
+pub fn start() {
     if std::env::args().any(|arg| arg == "--console") {
         println!("synod machine broker: serving {}", vm_manager::broker::PIPE);
         println!("boot media: {:?}", vm_manager::broker::service::media());

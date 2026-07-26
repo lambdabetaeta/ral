@@ -31,6 +31,7 @@ use std::process::Command;
 /// console window exists.  Off Windows there is nothing to suppress — a
 /// child inherits its parent's terminal and no window is created for it —
 /// so this hands the command straight back.
+#[cfg_attr(not(windows), allow(unused_mut))]
 fn without_a_console_window(mut cmd: Command) -> Command {
     #[cfg(windows)]
     {
