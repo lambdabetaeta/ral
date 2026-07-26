@@ -29,7 +29,7 @@ pub(crate) fn invoke(
             let (mut arg_vals, redir_eval) = eval_call_parts(&e.args, &e.redirects, shell)?;
             // Append the value from the previous pipeline stage, if any.
             arg_vals.extend(upstream);
-            command_call::run_call(&e.head, &arg_vals, &redir_eval, mooring, shell)
+            command_call::run_call(&e.head, &arg_vals, &redir_eval, comp.span, mooring, shell)
         }
 
         CompKind::App {

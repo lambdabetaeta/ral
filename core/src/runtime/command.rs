@@ -308,12 +308,7 @@ pub(crate) fn run(
     match crate::process::CommandFailure::from_outcome(outcome, forgive_sigpipe) {
         None => Ok(Value::Unit),
         Some(failure) => {
-            let err = Error::from_command_failure(
-                &cmd_name,
-                failure,
-                shell.run.loc.source_loc(cmd_name.len()),
-                shell,
-            );
+            let err = Error::from_command_failure(&cmd_name, failure, shell);
             // When this child ran under an active OS sandbox, attach the
             // kernel-reported denial (if any) — exactly this child plus
             // its descendants attribute the deny lines.  The augment

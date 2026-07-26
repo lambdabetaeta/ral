@@ -184,7 +184,7 @@ builtin_registry! {
         call: |args, mooring, shell| collections::builtin_fold(args, mooring, shell), },
     Range { names: ["range"], arity: 2, ty: Sig(sig::RANGE),
         doc: "range <start> <end>  — generate a list of integers from start (inclusive) to end (exclusive).",
-        call: |args, mooring, shell| collections::builtin_range(args, mooring, shell), },
+        call: |args, mooring, _| collections::builtin_range(args, mooring), },
     Fail { names: ["fail"], arity: 1, ty: Sig(sig::FAIL),
         doc: "fail <status>  — exit with error status.",
         call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
@@ -600,8 +600,6 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
             .scope
             .set("false".into(), Value::Bool(false));
 
-        let saved_script = prelude_env.run.loc.script.clone();
-        prelude_env.run.loc.script = "<prelude>".into();
         if let Err(e) = crate::evaluate(prelude_comp, &Mooring::adrift(), &mut prelude_env) {
             let msg = match &e {
                 Break::Error(err) => err.to_string(),
@@ -613,7 +611,6 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
             };
             diagnostic::cmd_error("prelude", &msg);
         }
-        prelude_env.run.loc.script = saved_script;
         prelude_env.mobile.scope.top_scope().clone()
     });
 

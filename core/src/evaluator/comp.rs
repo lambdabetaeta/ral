@@ -31,9 +31,11 @@ use crate::runtime::pipeline;
 /// Each `CompKind` variant is reduced by its operational rule:
 /// `Return` produces a value, `Force` eliminates a thunk, `App` and
 /// `Exec` enter call dispatch, `Bind` sequences a computation with a
-/// continuation under a value binding, and so on. Source-position
-/// tracking is updated from the node's span before dispatch so
-/// errors carry location information.
+/// continuation under a value binding, and so on.
+///
+/// An error unwinding through this node picks up `comp.span` unless it
+/// already carries one, so a runtime error names the innermost node it
+/// broke on.
 ///
 /// `tail` is the tail position of this computation — whether it sits
 /// under a trivial continuation. It is *granted*, never ambient: an
@@ -52,23 +54,7 @@ pub(crate) fn eval_comp(
     shell: &mut Shell,
     tail: Tail,
 ) -> Raw<Value> {
-    // Update source position from the node's span.
-    if let Some(span) = comp.span {
-        if let Some(src) = shell.run.loc.source.as_ref() {
-            let (l, c) = src.byte_to_line_col(span.start as usize);
-            shell.run.loc.line = l;
-            shell.run.loc.col = c;
-        } else {
-            // No source text is attached, so there is no line/column to
-            // compute from the byte offset — use the established
-            // "unknown location" sentinel rather than passing the raw
-            // byte offset off as a line number.
-            shell.run.loc.line = 0;
-            shell.run.loc.col = 0;
-        }
-    }
-
-    match &comp.item {
+    let result = match &comp.item {
         CompKind::Return(val) => eval_return(val, shell),
 
         // CBPV: a bare `Lam` in computation position is the
@@ -156,6 +142,13 @@ pub(crate) fn eval_comp(
         },
 
         CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),
+    };
+
+    match (result, comp.span) {
+        (Err(Control::Break(Break::Error(e))), Some(span)) if e.span.is_none() => {
+            Err(e.at_span(span).into())
+        }
+        (result, _) => result,
     }
 }
 
@@ -379,7 +372,7 @@ fn eval_bind(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    crate::process::check(mooring, shell)?;
+    crate::process::check(mooring)?;
     super::pattern::check_pattern_shadow(pattern, shell)?;
     let val = eval_bind_rhs(m, rhs_output, mooring, shell)?;
     set_status_from_value(&val, shell);
@@ -431,7 +424,7 @@ fn eval_chain(parts: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Sh
     let mut last_err: Option<Error> = None;
     let last = parts.len().saturating_sub(1);
     for (i, part) in parts.iter().enumerate() {
-        crate::process::check(mooring, shell)?;
+        crate::process::check(mooring)?;
         let arm_tail = if i == last { tail } else { Tail::No };
         match with_scope(shell, |shell| eval_comp(part, mooring, shell, arm_tail)) {
             Ok(result) => return Ok(result),
@@ -490,7 +483,7 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shel
     let mut result = Value::Unit;
     let len = comps.len();
     for (i, c) in comps.iter().enumerate() {
-        crate::process::check(mooring, shell)?;
+        crate::process::check(mooring)?;
         let last = i == len - 1;
         let elem_tail = if last { tail } else { Tail::No };
         result = eval_comp(c, mooring, shell, elem_tail)?;

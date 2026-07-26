@@ -39,7 +39,7 @@ pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     iterate_audited("for", shell, |shell| {
         let mut last = Value::Unit;
         for item in &items {
-            if let Err(e) = crate::process::check(mooring, shell) {
+            if let Err(e) = crate::process::check(mooring) {
                 return (last, Some(e));
             }
             match apply(func, std::slice::from_ref(item), mooring, shell) {
@@ -59,7 +59,7 @@ pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     iterate_audited("map", shell, |shell| {
         let mut out = Vec::with_capacity(items.len());
         for item in &items {
-            if let Err(e) = crate::process::check(mooring, shell) {
+            if let Err(e) = crate::process::check(mooring) {
                 return (Value::list(out), Some(e));
             }
             match apply(func, std::slice::from_ref(item), mooring, shell) {
@@ -126,7 +126,7 @@ pub(super) fn builtin_filter(
     let items = as_list(&args[1], "filter")?;
     let mut results = Vec::new();
     for item in &items {
-        crate::process::check(mooring, shell)?;
+        crate::process::check(mooring)?;
         let result = apply(func, std::slice::from_ref(item), mooring, shell)?;
         let keep = match &result {
             Value::Bool(b) => *b,
@@ -188,7 +188,7 @@ pub(super) fn builtin_sort_by(
     let keyed: Vec<(Value, Value)> = items
         .into_iter()
         .map(|item| {
-            crate::process::check(mooring, shell)?;
+            crate::process::check(mooring)?;
             let key = apply(func, std::slice::from_ref(&item), mooring, shell)?;
             Ok((key, item))
         })
@@ -197,7 +197,7 @@ pub(super) fn builtin_sort_by(
 }
 
 /// `range <start> <end>` -- generate a list of integers from start (inclusive) to end (exclusive).
-pub(super) fn builtin_range(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value> {
     check_arity(args, 2, "range")?;
     let start = match &args[0] {
         Value::Int(n) => *n,
@@ -236,7 +236,7 @@ pub(super) fn builtin_range(args: &[Value], mooring: &Mooring, shell: &Shell) ->
         i += 1;
         since_poll += 1;
         if since_poll == INTERRUPT_POLL_CHUNK {
-            crate::process::check(mooring, shell)?;
+            crate::process::check(mooring)?;
             since_poll = 0;
         }
     }
@@ -250,7 +250,7 @@ pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let mut acc = args[1].clone();
     let items = as_list(&args[2], "fold")?;
     for item in &items {
-        crate::process::check(mooring, shell)?;
+        crate::process::check(mooring)?;
         acc = apply(func, &[acc, item.clone()], mooring, shell)?;
     }
     Ok(acc)
@@ -352,10 +352,9 @@ mod tests {
     /// longer than the chunk observes the cancel and aborts.
     #[test]
     fn long_range_polls_past_the_chunk() {
-        let shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         m.cancel.cancel(crate::process::CancelCause::Interrupt);
-        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &m, &shell)
+        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &m)
             .expect_err("a long range under a cancelled scope must abort");
         assert_eq!(status(err), 130);
     }
@@ -365,10 +364,9 @@ mod tests {
     /// guarantee that keeps the common case free.
     #[test]
     fn short_range_pays_no_poll() {
-        let shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         m.cancel.cancel(crate::process::CancelCause::Interrupt);
-        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &m, &shell)
+        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &m)
             .expect("a short range pays no poll and completes");
         assert_eq!(as_list(&v, "range").expect("list").len(), 10);
     }

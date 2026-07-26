@@ -9,9 +9,9 @@
 //! cycle and depth guards in `evaluate_source` are what keep re-evaluation
 //! terminating.
 //!
-//! `ScriptContextGuard` swaps the script context for the file's path
-//! (script name + source-text cache) and restores it on drop — the
-//! same primitive used by `_plugin 'load'`.
+//! Each load registers the file's text in the session's source registry
+//! under its path, so the module's own spans resolve to it — the same
+//! primitive used by `_plugin 'load'`.
 //!
 //! `evaluate_source` is also the single pipeline used by the
 //! capability-file loader (`crate::capability::load`) and the REPL plugin
@@ -24,69 +24,13 @@
 use std::path::Path;
 
 use crate::ir::Comp;
-use crate::source::{FileId, Source};
 use crate::types::{Break, Mooring, Settled, Shell, Value, sig};
 
 use super::util::arg0_str;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
-/// Save the script context (script name on both `script` and
-/// `call_site.script`, plus the `source`-text cache used for
-/// byte-span → (line, col) resolution),
-///
-/// swap to the loaded file's
-/// for the guard's lifetime, and restore on drop.
-///
-/// `?`-returns from
-/// the body roll the swap back automatically.  Shared between
-/// `source`, `use`, and the REPL plugin loader.
-///
-/// Restoring the `source` matters even though `script` swap alone
-/// would re-label diagnostics: while the loaded module evaluates,
-/// `comp.rs` resolves spans against `location.source`.  Leaving the
-/// parent's source in place there would convert the child's byte
-/// offsets against the wrong text, producing wrong line/col on any
-/// error raised inside the loaded module.
-pub struct ScriptContextGuard<'a> {
-    shell: &'a mut Shell,
-    saved_current_script: String,
-    saved_call_site_script: String,
-    saved_source: Option<Source>,
-    saved_current: FileId,
-}
-
-impl<'a> ScriptContextGuard<'a> {
-    pub fn enter(shell: &'a mut Shell, script: &str, text: &str) -> Self {
-        let saved_current_script = shell.run.loc.script.clone();
-        let saved_call_site_script = shell.run.loc.call_site.script.clone();
-        let saved_source = shell.run.loc.source.take();
-        let saved_current = shell.run.loc.current;
-        shell.install_script_context(script.to_string(), text);
-        Self {
-            shell,
-            saved_current_script,
-            saved_call_site_script,
-            saved_source,
-            saved_current,
-        }
-    }
-
-    pub fn shell_mut(&mut self) -> &mut Shell {
-        self.shell
-    }
-}
-
-impl Drop for ScriptContextGuard<'_> {
-    fn drop(&mut self) {
-        self.shell.run.loc.script = std::mem::take(&mut self.saved_current_script);
-        self.shell.run.loc.call_site.script = std::mem::take(&mut self.saved_call_site_script);
-        self.shell.run.loc.source = self.saved_source.take();
-        self.shell.run.loc.current = self.saved_current;
-    }
-}
-
-/// Run an already-checked `comp` under a `ScriptContextGuard` keyed on
+/// Run an already-checked `comp` with `source` registered under
 /// `virtual_path`, sharing the cycle-detection stack and recursion-depth
 /// guard with [`evaluate_source`].
 ///
@@ -131,21 +75,20 @@ pub fn evaluate_checked(
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
     }
-    let mut ctx = ScriptContextGuard::enter(shell, virtual_path, source);
-    ctx.shell_mut().mobile.context.modules.stack.push(key);
-    ctx.shell_mut().mobile.context.modules.depth += 1;
-    let result = crate::evaluate(comp, mooring, ctx.shell_mut());
-    ctx.shell_mut().mobile.context.modules.depth -= 1;
-    ctx.shell_mut().mobile.context.modules.stack.pop();
+    shell.install_script_context(key.clone(), source);
+    shell.mobile.context.modules.stack.push(key);
+    shell.mobile.context.modules.depth += 1;
+    let result = crate::evaluate(comp, mooring, shell);
+    shell.mobile.context.modules.depth -= 1;
+    shell.mobile.context.modules.stack.pop();
     result
 }
 
-/// Parse + elaborate + evaluate `source` under a `ScriptContextGuard`
-/// keyed on `virtual_path`.
+/// Parse + elaborate + evaluate `source`, registered under `virtual_path`.
 ///
 /// The path is virtual in the sense that the
 /// caller is responsible for any filesystem read; this function only
-/// uses it to label `shell.run.loc.script` (so error messages and
+/// uses it to name the registered source (so error messages and
 /// nested `source`/`use` resolutions point back to the right file) and
 /// to participate in the cycle-detection stack.
 ///
@@ -175,9 +118,9 @@ pub fn evaluate_source(
 /// file is reported and not run.  The schemes seed the check from the
 /// caller's scope, so a `source`d file sees the names already installed.
 ///
-/// Peeks the [`FileId`] the module's own registration
-/// ([`ScriptContextGuard::enter`], right after this returns) will mint, so
-/// the compiled program's spans carry the module's real file identity —
+/// Peeks the [`FileId`](crate::source::FileId) the module's own
+/// registration ([`evaluate_checked`], right after this returns) will
+/// mint, so the compiled program's spans carry its real file identity —
 /// nothing else registers a source into the session between the peek and
 /// that registration.
 ///
@@ -297,5 +240,5 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
 }
 
 fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
-    crate::path::resolve_relative_to_script(path, shell.run.loc.script.as_str())
+    crate::path::resolve_relative_to_script(path, shell.script_name().unwrap_or_default())
 }

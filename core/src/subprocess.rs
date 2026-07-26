@@ -16,7 +16,7 @@
 //!   ↳ WireContext { env_overrides, dir, grants, handlers, args, modules, cwd }
 //! ```
 //!
-//! Run-local state (IO sinks, surface sink, foreground scope, source cursor)
+//! Run-local state (IO sinks, surface sink, foreground scope, call site)
 //! and session state (durable root, source registry, exit hints, builtin
 //! table) are host-local — the child constructs its own.  In particular the
 //! builtin table is never wired: its entries hold host fn pointers, so the

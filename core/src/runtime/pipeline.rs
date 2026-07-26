@@ -60,7 +60,7 @@ pub(crate) fn run_pipeline(
     // but RELAY_PGIDS is empty, so the pipeline launches anyway and
     // collect blocks on a long-running consumer that never received
     // the signal.  Bail here instead.
-    crate::process::check(mooring, shell)?;
+    crate::process::check(mooring)?;
     let plan = resolve_pipeline(stages, wires, shell)?;
     if plan.kind == PipelineKind::PureValue {
         return run_value_fold(stages, tail, mooring, shell);

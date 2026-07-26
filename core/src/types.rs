@@ -78,8 +78,8 @@ pub use audit::{
     STDERR_CAP_BYTES, epoch_us,
 };
 
-// Run-local source cursor and its call-site snapshot.  See diagnostic.rs.
-pub use crate::diagnostic::{CallSite, LocationCursor};
+// The resolved source position audit nodes and capability checks carry.
+pub use crate::diagnostic::CallSite;
 
 // Shell state, Context.
 mod shell;

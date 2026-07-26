@@ -61,13 +61,14 @@ impl Shell {
         crate::capability::check_shell_chdir(&self.mobile.context)
     }
 
-    /// Snapshot the audit site, split out the disjoint context + audit
+    /// Resolve the audit site, split out the disjoint context + audit
     /// borrows (`mobile.context` and `local.audit` sit in different
     /// sub-trees of `Shell`), and hand them to `f`.  The site is
-    /// value-typed so it does not re-borrow `context.location` once the
-    /// context is live.  Every audit-emitting check funnels through here.
+    /// value-typed so it does not re-borrow the session's source registry
+    /// once the context is live.  Every audit-emitting check funnels
+    /// through here.
     fn audit_call<R>(&mut self, f: impl FnOnce(&Context, &mut Audit, CallSite) -> R) -> R {
-        let site = self.run.loc.audit_site();
+        let site = self.call_site();
         f(&self.mobile.context, &mut self.local.audit, site)
     }
 

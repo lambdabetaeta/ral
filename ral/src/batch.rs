@@ -157,7 +157,6 @@ pub(crate) fn run_batch(
     if let Some(n) = recursion_limit {
         shell.set_recursion_limit(n);
     }
-    shell.install_root_context(name.to_string(), source);
     shell.set_args(script_args);
 
     if let Err(code) = apply_session_capabilities(&mut shell, &capabilities) {

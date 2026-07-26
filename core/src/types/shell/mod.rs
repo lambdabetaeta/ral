@@ -6,7 +6,7 @@
 //! - [`Mobile`] — the persistable bundle (scope + control + context) that
 //!   crosses evaluation boundaries and thread spawns.
 //! - [`Disposition`] — the mutable residue of the frame a top-level run
-//!   installs (IO, source cursor, terminal authority) and restores on
+//!   installs (IO, call site, terminal authority) and restores on
 //!   teardown.  Its run-invariant other half, [`Mooring`], is deliberately
 //!   *not* a field here: it lives on the run's Rust stack frame and reaches
 //!   callees as `&Mooring`, disjoint from `&mut Shell`.
@@ -69,11 +69,10 @@ use super::env::EnvVars;
 use super::error::Error;
 use super::handler::HandlerStack;
 use super::value::Value;
-use crate::diagnostic::LocationCursor;
+use crate::diagnostic::CallSite;
 use crate::io::Io;
 use crate::process::{DurableRoot, ForegroundScope};
-use crate::source::FileId;
-use crate::source::{Source, SourceDb};
+use crate::source::{FileId, Source, SourceDb, Span};
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -92,7 +91,7 @@ pub const DEFAULT_RECURSION_LIMIT: usize = 1024;
 /// aside.
 ///
 /// Lives as the `context` field of [`Mobile`] and clones wholesale
-/// into a child; the source cursor and builtin table are deliberately *not*
+/// into a child; the call site and builtin table are deliberately *not*
 /// here (they are run- and session-state respectively), so a `Context` clone
 /// carries no render registry and no host dispatch.
 ///
@@ -527,10 +526,12 @@ impl Mooring {
 pub struct Disposition {
     /// Pipeline-stage IO: streams, value channel, terminal state, flags.
     pub(crate) io: Io,
-    /// Run-local source cursor: every non-registry source-position field.
-    /// Read when building a [`SourceLoc`](crate::diagnostic::SourceLoc);
-    /// resolved at render time against [`SessionState::sources`].
-    pub(crate) loc: LocationCursor,
+    /// Span of the node that dispatched the command now running — the
+    /// user-visible position audit nodes and capability checks name, held
+    /// across prelude wrappers so they name the user's call rather than the
+    /// wrapper's body.  `None` before the first dispatch of a run; resolved
+    /// through [`SessionState::sources`] by [`Shell::site_of`].
+    pub(crate) call_site: Option<Span>,
     /// This run's terminal-foreground authority. Gates whether a
     /// child/job foreground handoff can borrow the session's
     /// [`TerminalLease`](crate::process::TerminalLease); see
@@ -545,11 +546,11 @@ pub struct Disposition {
 
 impl Disposition {
     /// Same-thread child flow-in: clone the byte sinks, move the read-once
-    /// stdin out of the parent, and share the source cursor.  Mirror of
+    /// stdin out of the parent, and adopt its call site.  Mirror of
     /// [`Self::return_to`].
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.io.inherit_from(&mut parent.io);
-        self.loc = parent.loc.clone();
+        self.call_site = parent.call_site;
         // Terminal access flows in so a pipeline launched inside an `_ed-tui`
         // loan (or any same-thread body of a Leased run) sees the parent's
         // authority. It does not flow back in `return_to`: the parent retains
@@ -558,7 +559,7 @@ impl Disposition {
     }
 
     /// Same-thread child flow-out: return the read-once stdin to the parent
-    /// so sibling calls see the unconsumed pipe.  The cursor does not flow
+    /// so sibling calls see the unconsumed pipe.  The call site does not flow
     /// back — the asymmetry is the point.
     pub fn return_to(&mut self, parent: &mut Self) {
         self.io.return_to(&mut parent.io);
@@ -589,8 +590,8 @@ pub struct SessionState {
     /// Durable source registry, keyed by [`FileId`](crate::source::FileId).
     /// A run resets and seeds it at run start, module loads append to it,
     /// and hosts read it after the run returns to render runtime errors.
-    /// Durable across the teardown of [`Disposition::loc`], not across all
-    /// future runs.  Skipped by IPC/serde — it is render state, not mobile.
+    /// Durable across a run's teardown, not across all future runs.
+    /// Skipped by IPC/serde — it is render state, not mobile.
     pub(crate) sources: SourceDb,
     /// Exit-code hint table — loaded once at startup from the data directory.
     pub(crate) exit_hints: crate::exit_hints::ExitHints,
@@ -713,16 +714,51 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Construct an [`Error`] located at the current source position.
+    /// Construct an unspanned [`Error`]: the break path stamps the span of
+    /// the innermost node it unwinds through.  A caller already holding a
+    /// better span attaches it with [`Error::at_span`].
     pub fn err(&self, msg: impl Into<String>, status: i32) -> Error {
-        Error::new(msg, status).at_loc(self.run.loc.source_loc(0))
+        Error::new(msg, status)
     }
 
     /// Like [`Self::err`], with an additional hint.
     pub fn err_hint(&self, msg: impl Into<String>, hint: impl Into<String>, status: i32) -> Error {
-        Error::new(msg, status)
-            .at_loc(self.run.loc.source_loc(0))
-            .with_hint(hint)
+        Error::new(msg, status).with_hint(hint)
+    }
+
+    /// Resolve `span` to the value-typed [`CallSite`] audit nodes and
+    /// capability checks carry: the name of its source in this session's
+    /// registry plus the 1-indexed line and column of its start.
+    /// [`CallSite::default`] when there is no span, or its source is not
+    /// registered here.
+    pub(crate) fn site_of(&self, span: Option<Span>) -> CallSite {
+        let resolved = span.and_then(|s| self.session.sources.get(s.file).map(|src| (s, src)));
+        let Some((span, source)) = resolved else {
+            return CallSite::default();
+        };
+        let (line, col) = source.byte_to_line_col(span.start as usize);
+        CallSite {
+            script: source.name().to_string(),
+            line,
+            col,
+        }
+    }
+
+    /// This run's call site as a [`CallSite`] — [`Self::site_of`] applied to
+    /// `run.call_site`.  Taken by value so the caller may hold `&mut audit`
+    /// alongside it.
+    pub(crate) fn call_site(&self) -> CallSite {
+        self.site_of(self.run.call_site)
+    }
+
+    /// Display name of the currently-executing script — the name of the
+    /// source this run's call site belongs to.  `None` in the REPL, before
+    /// the first dispatch, and whenever that source is unregistered.
+    pub(crate) fn script_name(&self) -> Option<&str> {
+        self.session
+            .sources
+            .get(self.run.call_site?.file)
+            .map(Source::name)
     }
 
     /// Put one enquiry to `mooring`'s host desk and block for the answer.
@@ -778,22 +814,11 @@ impl Shell {
         crate::runtime::command::atomic_write(path, bytes, self)
     }
 
-    /// Install a script context: set the active script name on both the
-    /// cursor's `script` and `call_site.script`, register the source text in
-    /// the session registry, and make the registered source the active one
-    /// (`current` + the `source` cache used for byte-span → (line, col)
-    /// resolution).  All of these move together — diverging them produced
-    /// span-to-position drift inside loaded modules (the parent's `source`
-    /// was consulted for the child's spans).
-    ///
-    /// One-shot install: callers that need restore-on-exit semantics should
-    /// use [`crate::builtins::modules::ScriptContextGuard`] instead.
-    pub fn install_script_context(&mut self, name: String, text: &str) {
-        let source = Source::from_text(&name, text);
-        self.run.loc.current = self.session.sources.register(source.clone());
-        self.run.loc.script = name.clone();
-        self.run.loc.call_site.script = name;
-        self.run.loc.source = Some(source);
+    /// Install a script context: register `text` under display `name` in the
+    /// session registry, returning the [`FileId`] the compiled program's
+    /// spans must carry so they resolve to it.
+    pub fn install_script_context(&mut self, name: String, text: &str) -> FileId {
+        self.session.sources.register(Source::from_text(&name, text))
     }
 
     /// Install a top-level run's script context after clearing the session
@@ -803,23 +828,20 @@ impl Shell {
     /// [`install_script_context`](Self::install_script_context), which appends
     /// so a run's `source`d modules remain resolvable when its error renders
     /// at end of run.
-    pub fn install_root_context(&mut self, name: String, text: &str) {
+    pub fn install_root_context(&mut self, name: String, text: &str) -> FileId {
         self.session.sources.reset();
-        self.install_script_context(name, text);
+        self.install_script_context(name, text)
     }
 
-    /// Install a script context using an already-minted [`FileId`] and its
-    /// source text, without registering into the session registry — the
+    /// Install a script context under an already-minted [`FileId`] — the
     /// seam a re-exec'd pipeline-stage child uses to resolve its spans
     /// against the exact source and file identity its parent already
     /// registered, rather than minting a second, differently-numbered copy
     /// in its own (empty) session registry.
     pub(crate) fn install_remote_context(&mut self, name: String, file: FileId, text: &str) {
-        let source = Source::from_text(&name, text);
-        self.run.loc.current = file;
-        self.run.loc.script.clone_from(&name);
-        self.run.loc.call_site.script = name;
-        self.run.loc.source = Some(source);
+        self.session
+            .sources
+            .register_at(file, Source::from_text(&name, text));
     }
 
     /// Resolve the seven pseudo-variables (`$env`, `$args`, `$script`,
@@ -859,11 +881,12 @@ impl Shell {
                     .map(Value::String)
                     .collect(),
             )),
-            // $script: path of the currently-executing file.  Empty
-            // in the REPL, under `-c`, and during prelude loading.
-            "script" => match self.run.loc.script.as_str() {
-                "" | "-c" | "<prelude>" => None,
-                s => Some(Value::String(s.to_string())),
+            // $script: path of the currently-executing file, i.e. the name
+            // of the source the call site's span belongs to.  Absent in the
+            // REPL, under `-c`, and during prelude loading.
+            "script" => match self.script_name() {
+                None | Some("" | "-c" | "<prelude>") => None,
+                Some(s) => Some(Value::String(s.to_string())),
             },
             "nproc" => Some(Value::Int(std::thread::available_parallelism().map_or(
                 1,

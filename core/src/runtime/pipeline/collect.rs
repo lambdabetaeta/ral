@@ -42,8 +42,7 @@ fn observe_external_stage(
     let audit = synth_external_stage_audit(shell, &name, failure.as_ref(), effective);
 
     if let Some(failure) = failure {
-        let loc = shell.run.loc.source_loc(name.len());
-        let err = Error::from_command_failure(&name, failure, loc, shell);
+        let err = Error::from_command_failure(&name, failure, shell);
         let err = super::augment_stage_failure(err, shell, started);
         Ok(StageObservation::failure(err).with_audit(audit))
     } else {
@@ -62,7 +61,7 @@ fn synth_external_stage_audit(
     if !shell.local.audit.active() {
         return AuditFragment::empty();
     }
-    let site = shell.run.loc.audit_site();
+    let site = shell.call_site();
     let principal = shell.mobile.context.principal();
     let stderr = match failure {
         Some(f) => f.message(name).into_bytes(),

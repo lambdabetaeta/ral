@@ -1,7 +1,7 @@
 //! Plugin loading and unloading.
 //!
 //! Resolves a plugin file path under `~/.config/ral/plugins/` or
-//! `RAL_PATH`, evaluates the file under a `ScriptContextGuard`, applies
+//! `RAL_PATH`, evaluates the file under its own registered source, applies
 //! options, validates the result as a manifest, then — once every
 //! validation has passed — commits the plugin's hooks and alias bindings
 //! and records it in [`PluginRuntime`].  Commit is deferred past the

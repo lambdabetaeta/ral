@@ -9,7 +9,7 @@
 //! lists the seeded variables.
 
 use super::{Context, Disposition, LocalState, Mobile, SessionState, Shell};
-use crate::types::{ControlState, Env, GrantStack, LocationCursor};
+use crate::types::{ControlState, Env, GrantStack};
 use std::path::PathBuf;
 
 impl Shell {
@@ -44,7 +44,7 @@ impl Shell {
                     terminal,
                     ..Default::default()
                 },
-                loc: LocationCursor::default(),
+                call_site: None,
                 // A shell between runs holds no terminal authority; a host
                 // states it per run via `RunRequest::terminal`. `Denied` is the
                 // safe default so a frame with no stated policy never

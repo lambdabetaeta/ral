@@ -13,29 +13,26 @@
 //! streaming, if a future parcel wants it, reintroduces a frame loop and
 //! does not belong here.
 
-use crate::diagnostic::SourceLoc;
 use crate::evaluator::absorb_tail;
 use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
 use crate::serial::{InternCtx, ScopeArcs, ScopeTable, SerialEnvSnapshot, SerialValue, build_arcs};
-use crate::source::FileId;
+use crate::source::{FileId, SourceDb, Span};
 use crate::subprocess::{WireMobile, reexec_child_shell};
 use crate::types::{
-    Break, CapturePolicy, Env, Error, Escape, ExecNode, ExecNodeKind, LocationCursor, Mobile,
-    Mooring, Settled, Shell, Status, Tail, Value,
+    Break, CapturePolicy, Env, Error, Escape, ExecNode, ExecNodeKind, Mobile, Mooring, Settled,
+    Shell, Status, Tail, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// The parent's active script identity at the moment a pipeline stage's
 /// body crossed the wire: the [`FileId`] the parent's `SourceDb` already
-/// resolves it under, plus the name and text needed to rebuild the
-/// position cache locally.  Installed into the child's [`LocationCursor`]
-/// verbatim, never re-registered, so a `SourceLoc` the child raises
-/// carries the exact id the parent's registry resolves — and the child
-/// computes real line/col from real text instead of `comp.rs`'s no-source
-/// byte-offset fallback.  Carried on the eval-request envelope rather than
+/// resolves it under, plus that source's name and text.  Registered in the
+/// child under the parent's id ([`Shell::install_remote_context`]), never
+/// re-minted, so a [`Span`] the child raises resolves to the same source in
+/// both processes.  Carried on the eval-request envelope rather than
 /// [`WireMobile`], mirroring `audit_policy`: it names the parent's run
 /// state, not a property of the mobile snapshot itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,13 +43,15 @@ pub(crate) struct WireScriptContext {
 }
 
 impl WireScriptContext {
-    /// Capture `loc`'s script identity for the wire, or `None` when `loc`
-    /// has no script context installed yet (a bare, unstarted shell).
-    pub(crate) fn capture(loc: &LocationCursor) -> Option<Self> {
-        let source = loc.source.as_ref()?;
+    /// Capture the source `call_site` points into, or `None` when the
+    /// parent has no call site yet (a bare, unstarted shell) or its source
+    /// is unregistered.
+    pub(crate) fn capture(call_site: Option<Span>, sources: &SourceDb) -> Option<Self> {
+        let file = call_site?.file;
+        let source = sources.get(file)?;
         Some(Self {
-            file: loc.current,
-            name: loc.script.clone(),
+            file,
+            name: source.name().to_string(),
             text: source.as_str().to_string(),
         })
     }
@@ -107,12 +106,11 @@ pub(crate) enum WireOutcome {
         message: String,
         status: i32,
         hint: Option<String>,
-        /// Source position of the error, when one was attached.  The
-        /// location carries the source's [`FileId`], minted in the parent
-        /// before the body crossed the wire; the parent resolves it against
-        /// its own `SourceDb` at render, so the caret lands in the right
-        /// source after decode.
-        loc: Option<SourceLoc>,
+        /// Span of the node the error broke on, when the child's break path
+        /// stamped one.  Its [`FileId`] was minted in the parent before the
+        /// body crossed the wire, so the parent resolves it against its own
+        /// `SourceDb` at render and the caret lands in the right source.
+        span: Option<Span>,
     },
     Exit {
         code: i32,
@@ -246,16 +244,17 @@ pub(crate) fn transfer_error(err: &Error) -> Error {
 
 /// Reify a [`Mobile`] and a body into a wire-ready [`ChildEvalRequest`].
 /// Inverse of [`decode_response`].  `captured` carries the pipeline stage
-/// closure env; `loc` is the launching run's source cursor, captured as a
-/// [`WireScriptContext`] so the child resolves its spans against the same
-/// source.
+/// closure env; `call_site` is the launching run's call site, resolved
+/// against `sources` into a [`WireScriptContext`] so the child resolves its
+/// spans against the same source under the same [`FileId`].
 pub(crate) fn pack_request(
     body: Arc<Comp>,
     mobile: &Mobile,
     captured: Option<&Env>,
     audit_policy: Option<CapturePolicy>,
     wants_value: bool,
-    loc: &LocationCursor,
+    call_site: Option<Span>,
+    sources: &SourceDb,
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
     let captured = match captured {
@@ -270,7 +269,7 @@ pub(crate) fn pack_request(
         captured,
         audit_policy,
         wants_value,
-        script: WireScriptContext::capture(loc),
+        script: WireScriptContext::capture(call_site, sources),
     })
 }
 
@@ -397,7 +396,7 @@ fn break_to_outcome(b: Break) -> WireOutcome {
                 message: err.message,
                 status,
                 hint: err.hint,
-                loc: err.loc,
+                span: err.span,
             }
         }
         Break::Escape(Escape::Exit(code)) => WireOutcome::Exit { code },
@@ -541,13 +540,13 @@ pub(crate) fn decode_response(response: ChildEvalResponse) -> Settled<DecodedRes
             message,
             status,
             hint,
-            loc,
+            span,
         } => (
             None,
             Some(Break::Error(Error {
                 message,
                 status: Status::Code(status),
-                loc,
+                span,
                 hint,
             })),
         ),
@@ -583,7 +582,8 @@ mod tests {
             Some(&captured),
             shell.local.audit.active_policy(),
             wants_value,
-            &shell.run.loc,
+            shell.run.call_site,
+            &shell.session.sources,
         )
         .expect("pack")
     }
@@ -635,7 +635,7 @@ mod tests {
                 message: "helper failed".into(),
                 status: 1,
                 hint: None,
-                loc: None,
+                span: None,
             },
             last_status: 1,
             audit_nodes: vec![WireAuditNode {

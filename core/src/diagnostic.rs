@@ -8,9 +8,7 @@
 //! Color output is gated by [`ansi::use_color`].
 
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
-use crate::source::{
-    FileId, Source, SourceDb, Span as ByteSpan, byte_to_line_col, line_col_to_byte,
-};
+use crate::source::{SourceDb, Span, byte_to_line_col};
 use crate::syntax::lexer::{LexErrorKind, StringForm};
 use crate::syntax::parser::ParseError;
 use crate::text::byte_to_char;
@@ -23,103 +21,14 @@ pub use ansi::{set_terminal, use_color};
 
 // ── Source location ───────────────────────────────────────────────────────
 
-/// A source location for error reporting.
-///
-/// `source` is the non-optional identity of the source whose `line`/`col`
-/// index this carries — the [`FileId`] of the script or module that was
-/// active when the error was raised.  The runtime renderer resolves it
-/// against a [`SourceDb`] once at render, so a location that crosses a
-/// module boundary draws its caret into the right source's bytes.
-///
-/// Serializable so it can ride along with error outcomes across the
-/// sandbox and pipeline-helper IPC seams; the `FileId` resolves against the
-/// parent's `SourceDb` on decode.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SourceLoc {
-    pub source: FileId,
-    pub line: usize,
-    pub col: usize,
-    pub len: usize,
-}
-
-/// A source position: script name + (line, col).  Used both for "where we
-/// are now" and (via `Location::call_site`) "where we were called from".
+/// A resolved source position: script name + 1-indexed (line, col).  The
+/// audit and wire shape a [`Span`] resolves to via the session's
+/// [`SourceDb`]; hosts read it off audit nodes and capability checks.
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CallSite {
     pub script: String,
     pub line: usize,
     pub col: usize,
-}
-
-/// Run-local source cursor for diagnostics.
-///
-/// Holds where execution is,
-/// where it was called from (saved before entering prelude wrappers so
-/// `audit`/`try` name the user's line, not the prelude's), and the cached
-/// source text of the current script for structured spans.
-///
-/// The durable registry it resolves against — the
-/// [`SourceDb`] keyed by [`FileId`] — is session
-/// state, not part of this cursor: the cursor is installed by the current run
-/// and discarded on teardown, while the registry survives so a run's runtime
-/// error still renders after the run returns.
-#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
-pub struct LocationCursor {
-    pub script: String,
-    pub line: usize,
-    pub col: usize,
-    /// Cached source text plus a precomputed line-start index for fast
-    /// span → (line, col) lookup.  Not serde-transmissible (holds Arcs)
-    /// and the sandbox child doesn't need it for diagnostics.
-    #[serde(skip)]
-    pub source: Option<Source>,
-    /// Identity of the active source — the [`FileId`] registered in the
-    /// session registry for the text in `source`.  Stamped onto every
-    /// [`SourceLoc`] this cursor builds so the renderer resolves the right
-    /// source at render time.  [`FileId::DUMMY`] before any script context is
-    /// installed.
-    pub current: FileId,
-    pub call_site: CallSite,
-}
-
-impl LocationCursor {
-    /// Snapshot the user-visible call site (preserved across prelude
-    /// wrappers) as a [`CallSite`].  Used wherever capability checks
-    /// and command audit nodes need a value-typed source position —
-    /// passing the snapshot by value lets the caller hold `&mut
-    /// audit` alongside without a borrow conflict against the
-    /// cursor itself.
-    pub fn audit_site(&self) -> CallSite {
-        self.call_site.clone()
-    }
-
-    /// Record the current position (`script`, `line`, `col`) as the
-    /// user-visible call site.  Invoked at the start of dispatch so
-    /// audit nodes and error frames produced by the body name the
-    /// user's line rather than wherever the body's evaluation has
-    /// since drifted.
-    pub fn record_call_site_here(&mut self) {
-        self.call_site = CallSite {
-            script: self.script.clone(),
-            line: self.line,
-            col: self.col,
-        };
-    }
-
-    /// Build a [`SourceLoc`] anchored at the current position with the given
-    /// highlight length.  Used by error-construction sites that want to
-    /// point the diagnostic at the command/tool name on the current line.
-    /// The location carries `current` — the identity of the active source —
-    /// so the renderer resolves the right text even when the error crosses a
-    /// module boundary before it is rendered.
-    pub fn source_loc(&self, len: usize) -> SourceLoc {
-        SourceLoc {
-            source: self.current,
-            line: self.line,
-            col: self.col,
-            len,
-        }
-    }
 }
 
 // ── Format functions (ariadne) ────────────────────────────────────────────
@@ -265,7 +174,7 @@ pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) ->
 
 /// Byte→char clamp.  Spans arrive in bytes from the lexer; ariadne is
 /// configured for chars, so every span passes through here.
-fn byte_span_to_char_range(source: &str, span: ByteSpan) -> std::ops::Range<usize> {
+fn byte_span_to_char_range(source: &str, span: Span) -> std::ops::Range<usize> {
     let s = byte_to_char(source, span.start as usize);
     let e = byte_to_char(source, span.end.max(span.start + 1) as usize);
     caret_range(source, s, e.saturating_sub(s).max(1))
@@ -280,7 +189,7 @@ fn eof_char_range(source: &str) -> std::ops::Range<usize> {
 /// contains `$(…)` opened at 1:8".  Line/column is recovered from
 /// `source` at render time rather than carried on the error.
 fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
-    let pos = |span: ByteSpan| {
+    let pos = |span: Span| {
         let (line, col) = byte_to_line_col(source, span.start as usize);
         format!("{line}:{col}")
     };
@@ -427,34 +336,27 @@ pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) 
 
 /// Render a runtime error via ariadne.
 ///
-/// Resolves the location's source
-/// identity against `db` to recover the file name and text the `line`/`col`
-/// index, then draws the caret there; `len` is a byte length, converted to a
-/// character width for the underline.  Falls back to a messageless render when
-/// there is no location or `db` does not hold the named source — the latter is
-/// the live cross-source guard: a location whose source the renderer cannot
-/// resolve never draws a caret at an unrelated byte.
+/// Resolves `span`'s [`FileId`](crate::source::FileId) against `db` to
+/// recover the file name and text, then underlines the span's byte range
+/// there.  Falls back to a messageless render when there is no span or `db`
+/// does not hold its source — the live cross-source guard: a span the
+/// renderer cannot resolve never draws a caret at an unrelated byte.
 pub fn format_runtime_error_ariadne(
     db: &SourceDb,
-    loc: Option<&SourceLoc>,
+    span: Option<Span>,
     message: &str,
     hint: Option<&str>,
 ) -> String {
-    let Some((loc, source)) = loc.and_then(|loc| db.get(loc.source).map(|src| (loc, src))) else {
+    let Some((span, source)) = span.and_then(|sp| db.get(sp.file).map(|src| (sp, src))) else {
         return render_messageless(Some("R0001"), message, hint);
     };
-    let text = source.as_str();
-    let start_byte = line_col_to_byte(text, loc.line, loc.col);
-    let start = byte_to_char(text, start_byte);
-    let end = byte_to_char(text, start_byte + loc.len);
-    let range = caret_range(text, start, end.saturating_sub(start).max(1));
     render_ariadne(
         source.name(),
-        text,
+        source.as_str(),
         "R0001",
         message,
         LabelRange {
-            range,
+            range: byte_span_to_char_range(source.as_str(), span),
             label: "here".into(),
         },
         None,
@@ -474,7 +376,7 @@ pub fn format_runtime_error_auto(
     if single_command {
         format_runtime_error_compact(err)
     } else {
-        format_runtime_error_ariadne(db, err.loc.as_ref(), &err.message, err.hint.as_deref())
+        format_runtime_error_ariadne(db, err.span, &err.message, err.hint.as_deref())
     }
 }
 
@@ -582,10 +484,10 @@ macro_rules! dbg_trace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::Span;
+    use crate::source::{FileId, Source};
     use crate::typecheck::{TypeError, TypeErrorKind};
 
-    fn parse_error_with(message: &str, span: Option<ByteSpan>) -> ParseError {
+    fn parse_error_with(message: &str, span: Option<Span>) -> ParseError {
         ParseError {
             message: message.into(),
             span,
@@ -606,7 +508,7 @@ mod tests {
     #[test]
     fn parse_error_ariadne_points_at_source() {
         // `x = [a, b` — point at byte 8 (the trailing `b`).
-        let span = ByteSpan::new(crate::source::FileId::DUMMY, 8, 9);
+        let span = Span::new(crate::source::FileId::DUMMY, 8, 9);
         let err = parse_error_with("expected ',' or ']' in list", Some(span));
         let output = format_parse_error_ariadne("test.al", "x = [a, b", &err);
         assert!(output.contains("P0001"));
@@ -618,7 +520,7 @@ mod tests {
     fn lex_error_ariadne_renders_unterminated_string_with_open_anchor() {
         let err = parse_error_from(LexErrorKind::UnterminatedString {
             form: StringForm::DoubleQuoted,
-            opened: ByteSpan::new(crate::source::FileId::DUMMY, 0, 1),
+            opened: Span::new(crate::source::FileId::DUMMY, 0, 1),
             inner: None,
         });
         let output = format_parse_error_ariadne("test.al", "\"foo", &err);
@@ -632,11 +534,11 @@ mod tests {
         let inner = LexErrorKind::UnterminatedBalanced {
             open: '{',
             close: '}',
-            opened: ByteSpan::new(crate::source::FileId::DUMMY, 6, 7),
+            opened: Span::new(crate::source::FileId::DUMMY, 6, 7),
         };
         let err = parse_error_from(LexErrorKind::UnterminatedString {
             form: StringForm::DoubleQuoted,
-            opened: ByteSpan::new(crate::source::FileId::DUMMY, 0, 1),
+            opened: Span::new(crate::source::FileId::DUMMY, 0, 1),
             inner: Some(Box::new(inner)),
         });
         let output = format_parse_error_ariadne("test.al", "\"foo !{cmd", &err);
@@ -654,15 +556,13 @@ mod tests {
 
     #[test]
     fn runtime_error_ariadne_points_at_source() {
-        let (db, source) = db_with("test.al", "x = 5\ny = 10\necho $undefined\n");
-        let loc = SourceLoc {
-            source,
-            line: 3,
-            col: 6,
-            len: 10,
-        };
-        let output =
-            format_runtime_error_ariadne(&db, Some(&loc), "undefined variable: $undefined", None);
+        let (db, file) = db_with("test.al", "x = 5\ny = 10\necho $undefined\n");
+        let output = format_runtime_error_ariadne(
+            &db,
+            Some(Span::new(file, 18, 28)),
+            "undefined variable: $undefined",
+            None,
+        );
         assert!(output.contains("R0001"));
         assert!(output.contains("undefined variable: $undefined"));
         assert!(output.contains("test.al"));
@@ -670,39 +570,29 @@ mod tests {
 
     #[test]
     fn runtime_error_ariadne_renders_hint() {
-        let (db, source) = db_with("test.al", "[a, b] = 5");
-        let loc = SourceLoc {
-            source,
-            line: 1,
-            col: 1,
-            len: 3,
-        };
+        let (db, file) = db_with("test.al", "[a, b] = 5");
         let output = format_runtime_error_ariadne(
             &db,
-            Some(&loc),
+            Some(Span::new(file, 0, 6)),
             "list destructuring requires a list, got: 5",
             Some("the right-hand side must evaluate to a list"),
         );
         assert!(output.contains("the right-hand side must evaluate to a list"));
     }
 
-    /// `len` is a byte length: for a multi-byte token the caret width is the
+    /// A span is a byte range: for a multi-byte token the caret width is the
     /// token's character count, not its byte count, so the underline stops at
     /// the token boundary instead of running into the following text.
     #[test]
     fn runtime_error_caret_width_is_char_count_for_multibyte() {
-        let text = "café bar";
-        // The token `café` starts at column 1 and is 5 bytes but 4 chars.
-        let start_byte = line_col_to_byte(text, 1, 1);
-        assert_eq!(start_byte, 0);
-        let start = byte_to_char(text, start_byte);
-        let end = byte_to_char(text, start_byte + "café".len());
-        assert_eq!(end - start, 4, "caret must span 4 chars, not 5 bytes");
+        // The token `café` occupies bytes 0..5 but spans 4 characters.
+        let range = byte_span_to_char_range("café bar", Span::new(FileId::DUMMY, 0, 5));
+        assert_eq!(range, 0..4, "caret must span 4 chars, not 5 bytes");
     }
 
     #[test]
     fn type_error_ariadne_with_span() {
-        let sp = Span::new(crate::source::FileId::DUMMY, 21, 28);
+        let sp = Span::new(FileId::DUMMY, 21, 28);
         let err = TypeError {
             pos: Some(sp),
             kind: TypeErrorKind::TyMismatch {
@@ -738,69 +628,52 @@ mod tests {
         assert!(output.contains("T0002"));
     }
 
-    /// A runtime error whose location resolves in the db draws its caret
+    /// A runtime error whose span resolves in the db draws its caret
     /// into the named source's bytes.
     #[test]
     fn runtime_error_resolved_source_draws_caret() {
-        let (db, source) = db_with("main.ral", "echo x");
-        let loc = SourceLoc {
-            source,
-            line: 1,
-            col: 6,
-            len: 1,
-        };
-        let out = format_runtime_error_ariadne(&db, Some(&loc), "boom", None);
+        let (db, file) = db_with("main.ral", "echo x");
+        let out = format_runtime_error_ariadne(&db, Some(Span::new(file, 5, 6)), "boom", None);
         assert!(out.contains("R0001"));
         assert!(
             out.contains("here"),
-            "a resolved loc should draw a caret:\n{out}"
+            "a resolved span should draw a caret:\n{out}"
         );
         assert!(out.contains("main.ral"));
     }
 
-    /// A runtime error whose location names a source the registry does not
+    /// A runtime error whose span names a source the registry does not
     /// hold (e.g. the placeholder id) falls back to a messageless render —
     /// the live cross-source guard never draws a caret at an unrelated byte.
     #[test]
     fn runtime_error_in_unregistered_source_is_messageless() {
         let (db, _) = db_with("main.ral", "echo x");
-        let loc = SourceLoc {
-            source: crate::source::FileId::DUMMY,
-            line: 9,
-            col: 3,
-            len: 4,
-        };
-        let out = format_runtime_error_ariadne(&db, Some(&loc), "boom", None);
+        let span = Span::new(FileId::DUMMY, 2, 6);
+        let out = format_runtime_error_ariadne(&db, Some(span), "boom", None);
         assert!(out.contains("R0001"));
         assert!(out.contains("boom"));
         assert!(
             !out.contains("here"),
-            "an unresolved loc must not draw a caret in any source:\n{out}"
+            "an unresolved span must not draw a caret in any source:\n{out}"
         );
     }
 
     /// The cross-source fix in one renderer call: two sources registered in
-    /// one db; an error whose loc names the *module's* id draws into the
+    /// one db; an error whose span names the *module's* id draws into the
     /// module's bytes, not the top-level script's, even when the module's
-    /// (line, col) would land elsewhere in the top-level text.
+    /// byte range would land elsewhere in the top-level text.
     #[test]
     fn runtime_error_in_module_draws_into_module_source() {
         let mut db = SourceDb::default();
         let _top = db.register(Source::from_text("main.ral", "source 'mod.ral'\n"));
         let module = db.register(Source::from_text("mod.ral", "let a = 1\nfail 'kaboom'\n"));
-        // The module's line 2 is `fail 'kaboom'`; the top-level has no line 2.
-        let loc = SourceLoc {
-            source: module,
-            line: 2,
-            col: 1,
-            len: 4,
-        };
+        // Bytes 10..14 of the module are `fail`, past the top-level's end.
         // Strip ANSI before asserting: ariadne colors the underlined span
         // character-by-character when color is on (a tty), so the raw bytes
         // of `fail` are split by escapes.  The test is about the visible text.
         let out = ansi::strip(&format_runtime_error_ariadne(
             &db,
-            Some(&loc),
+            Some(Span::new(module, 10, 14)),
             "kaboom",
             None,
         ));

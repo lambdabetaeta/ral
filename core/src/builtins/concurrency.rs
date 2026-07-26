@@ -330,7 +330,7 @@ where
                 },
                 Err(e) => Value::Variant {
                     label: "err".into(),
-                    payload: Some(Box::new(break_record(e))),
+                    payload: Some(Box::new(break_record(e, child_env))),
                 },
             };
             guard.settle(&outcome);
@@ -808,7 +808,7 @@ fn wait_first_settled<'a>(
         if !saw_running {
             return Err(sig("no live handles to wait for"));
         }
-        crate::process::check(mooring, shell)?;
+        crate::process::check(mooring)?;
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
@@ -880,7 +880,7 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         shell.local.workers.remove(handle);
         let outcome = match completed.outcome {
             Ok(value) => variant("ok", Some(Box::new(value))),
-            Err(e) => variant("err", Some(Box::new(break_record(&e)))),
+            Err(e) => variant("err", Some(Box::new(break_record(&e, shell)))),
         };
         let settled = Value::map(vec![
             ("stdout".into(), Value::Bytes(completed.stdout)),
@@ -959,14 +959,22 @@ fn escape_exit_code(esc: &Escape) -> i32 {
 
 /// `poll`'s `` `err `` payload — the same `{cmd, status, message, line,
 /// col}` record `try` hands its handler thunk, built from the block's
-/// `Break` via the shared [`error_record`] constructor.  An `Escape`
-/// (a block that `exit`ed or stopped) carries no located message, so it
-/// reports the escape's exit code with a `<runtime>` source position.
-fn break_record(e: &Break) -> Value {
+/// `Break` via the shared [`error_record`] constructor.  The position is
+/// the error's span resolved against `shell`'s source registry, zero when
+/// it has none or its file is unregistered.  An `Escape` (a block that
+/// `exit`ed or stopped) carries no located message, so it reports the
+/// escape's exit code with a `<runtime>` source position.
+fn break_record(e: &Break, shell: &Shell) -> Value {
     match e {
         Break::Error(err) => {
-            let (line, col) = err.loc.as_ref().map_or((0, 0), |l| (l.line, l.col));
-            error_record("<runtime>", err.exit_code(), &err.message, line, col)
+            let site = shell.site_of(err.span);
+            error_record(
+                "<runtime>",
+                err.exit_code(),
+                &err.message,
+                site.line,
+                site.col,
+            )
         }
         Break::Escape(esc) => {
             let message = match esc {
@@ -1168,10 +1176,10 @@ mod tests {
             &Mooring::adrift(),
             Arc::new(()),
             snap,
-            move |mooring, child| {
+            move |mooring, _child| {
                 ready_tx.send(()).unwrap();
                 loop {
-                    if let Err(b) = crate::process::check(mooring, child) {
+                    if let Err(b) = crate::process::check(mooring) {
                         done_tx.send(status(b)).unwrap();
                         return;
                     }
@@ -1307,9 +1315,9 @@ mod tests {
     /// A worker body that stays `Running` until cancelled: it polls
     /// `process::check` so a lease reap genuinely unwinds the thread (with
     /// the cancel's 130), not merely flags a scope nobody reads.
-    fn check_loop(mooring: &Mooring, child: &mut Shell) -> Raw<Value> {
+    fn check_loop(mooring: &Mooring, _child: &mut Shell) -> Raw<Value> {
         loop {
-            crate::process::check(mooring, child)?;
+            crate::process::check(mooring)?;
             std::thread::yield_now();
         }
     }

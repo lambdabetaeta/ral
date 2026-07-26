@@ -222,7 +222,6 @@ fn sourced_module_runtime_error_points_into_module() {
     );
     let p = path.to_string_lossy().into_owned();
     let mut shell = fresh_shell();
-    shell.install_script_context("<top>".to_string(), &format!("source '{p}'"));
 
     let err = match top_level(&mut shell, &format!("source '{p}'")) {
         Err(Break::Error(e)) => e,
@@ -240,7 +239,7 @@ fn sourced_module_runtime_error_points_into_module() {
         "the caret must be drawn against the module's source:\n{rendered}"
     );
     assert!(
-        !rendered.contains("<top>"),
+        !rendered.contains("<test>"),
         "the top-level source must not appear:\n{rendered}"
     );
     // The caret must land on the module's failing line — line 3, where the

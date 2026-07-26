@@ -37,7 +37,7 @@ use crate::types::{AuditFragment, Break, Error, Mooring, Settled, Shell};
 /// resumes the helper to completion.
 pub(super) struct HelperStageHandle {
     pub(super) running: command::RunningChild,
-    pub(super) loc: crate::diagnostic::SourceLoc,
+    pub(super) span: Option<crate::source::Span>,
     report: FrameReader<ChildEvalResponse>,
 }
 
@@ -64,13 +64,9 @@ impl HelperStageHandle {
     ) -> Settled<StageObservation> {
         let Self {
             running,
-            loc,
+            span,
             report,
         } = self;
-        let loc = crate::diagnostic::SourceLoc {
-            len: running.name.len(),
-            ..loc
-        };
         let (helper_exit, failure) = match running.observe(!is_last) {
             Ok(pair) => pair,
             Err(br) => return Ok(StageObservation::from_break(br)),
@@ -84,7 +80,7 @@ impl HelperStageHandle {
         // Report-first contract: a ral semantic error always rides in
         // the report and the helper exits 0.  We unpack before
         // consulting the OS outcome so the user sees the ral-level
-        // diagnostic (with hint and source loc) rather than an
+        // diagnostic (with hint and span) rather than an
         // opaque process-failure shape.  Audit nodes — including
         // nested-external captures collected *before* the failure —
         // travel through the observation; the OS outcome only wins
@@ -106,13 +102,13 @@ impl HelperStageHandle {
                 return Ok(StageObservation::from_break(sig).with_audit(audit));
             }
             if helper_exit != 0 {
-                let err = Error::new(
+                let mut err = Error::new(
                     format!(
                         "pipeline helper exited with status {helper_exit} after reporting success"
                     ),
                     helper_exit,
-                )
-                .at_loc(loc);
+                );
+                err.span = span;
                 return Ok(StageObservation::failure(err).with_audit(audit));
             }
             let final_value = if is_last { value } else { None };
@@ -126,7 +122,8 @@ impl HelperStageHandle {
         // OS wait outcome.  A forgiven failure (SIGPIPE on a non-final
         // stage) is success with status 0.
         if let Some(failure) = failure {
-            let err = Error::from_command_failure("ral pipeline stage", failure, loc, shell);
+            let mut err = Error::from_command_failure("ral pipeline stage", failure, shell);
+            err.span = span;
             let err = super::augment_stage_failure(err, shell, started);
             return Ok(StageObservation::failure(err));
         }
@@ -160,7 +157,11 @@ pub(super) fn launch_helper_stage(
         mooring,
         shell,
         park_on_stop,
-        |e| Break::Error(Error::new(format!("pipeline helper: {e}"), 127).at_loc(spec.loc.clone())),
+        |e| {
+            let mut err = Error::new(format!("pipeline helper: {e}"), 127);
+            err.span = spec.span;
+            Break::Error(err)
+        },
     )?;
 
     let (report, deferred) = proto.settle(job);
@@ -168,7 +169,7 @@ pub(super) fn launch_helper_stage(
     Ok((
         HelperStageHandle {
             running,
-            loc: spec.loc.clone(),
+            span: spec.span,
             report,
         },
         deferred,

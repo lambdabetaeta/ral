@@ -137,10 +137,10 @@ pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOu
 pub(crate) fn builtin_test_clear_block_forever(
     _args: &[Value],
     mooring: &Mooring,
-    shell: &mut Shell,
+    _shell: &mut Shell,
 ) -> Settled<Value> {
     loop {
-        ral_core::process::check(mooring, shell)?;
+        ral_core::process::check(mooring)?;
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
@@ -165,11 +165,11 @@ pub(crate) static CLEAR_RELEASE: std::sync::atomic::AtomicBool =
 pub(crate) fn builtin_test_clear_block_until_released(
     _args: &[Value],
     mooring: &Mooring,
-    shell: &mut Shell,
+    _shell: &mut Shell,
 ) -> Settled<Value> {
     loop {
         if CLEAR_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
-            ral_core::process::check(mooring, shell)?;
+            ral_core::process::check(mooring)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }

@@ -9,13 +9,17 @@
 use super::flow::{Break, Escape};
 use super::value::Value;
 use crate::process::CommandFailure;
+use crate::source::Span;
 use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct Error {
     pub message: String,
     pub status: Status,
-    pub loc: Option<crate::diagnostic::SourceLoc>,
+    /// Byte range of the node the error broke on, resolved against a
+    /// [`SourceDb`](crate::source::SourceDb) at render time.  `None` until
+    /// the break path stamps the innermost enclosing node's span.
+    pub span: Option<Span>,
     pub hint: Option<String>,
 }
 
@@ -31,7 +35,7 @@ impl Error {
         Self {
             message: message.into(),
             status: Status::Code(status),
-            loc: None,
+            span: None,
             hint: None,
         }
     }
@@ -40,7 +44,6 @@ impl Error {
     pub fn from_command_failure(
         cmd: &str,
         failure: CommandFailure,
-        loc: crate::diagnostic::SourceLoc,
         shell: &crate::types::Shell,
     ) -> Self {
         let hint = failure.default_hint(cmd).or_else(|| match &failure {
@@ -50,13 +53,13 @@ impl Error {
         Self {
             message: failure.message(cmd),
             status: Status::Process(failure),
-            loc: Some(loc),
+            span: None,
             hint,
         }
     }
 
-    pub fn at_loc(mut self, loc: crate::diagnostic::SourceLoc) -> Self {
-        self.loc = Some(loc);
+    pub fn at_span(mut self, span: Span) -> Self {
+        self.span = Some(span);
         self
     }
 

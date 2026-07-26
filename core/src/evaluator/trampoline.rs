@@ -123,7 +123,7 @@ fn apply_inner(
                         None => eval_comp(&body, mooring, child, body_tail),
                     }
                 });
-                if let Some(done) = step(result, &mut callee, &mut args, mooring, shell) {
+                if let Some(done) = step(result, &mut callee, &mut args, mooring) {
                     return done;
                 }
             }
@@ -140,7 +140,7 @@ fn apply_inner(
                 let body = body.clone();
                 let result = super::eval_block(&body, captured, block_tail, mooring, shell)
                     .map_err(Control::from);
-                if let Some(done) = step(result, &mut callee, &mut args, mooring, shell) {
+                if let Some(done) = step(result, &mut callee, &mut args, mooring) {
                     return done;
                 }
             }
@@ -172,7 +172,6 @@ fn step(
     callee: &mut Value,
     args: &mut Vec<Value>,
     mooring: &Mooring,
-    shell: &Shell,
 ) -> Option<Settled<Value>> {
     match result {
         Ok(v) if args.is_empty() => Some(Ok(v)),
@@ -181,7 +180,7 @@ fn step(
             None
         }
         Err(Control::Tail(TailCall { callee: c, args: a })) => {
-            if let Err(b) = crate::process::check(mooring, shell) {
+            if let Err(b) = crate::process::check(mooring) {
                 return Some(Err(b));
             }
             *callee = c;

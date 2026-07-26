@@ -6,6 +6,7 @@
 //! the `^name` form skips env and builtins; path heads skip all three.
 
 use crate::ir::{CommandName, CommandWord};
+use crate::source::Span;
 use crate::types::{
     Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, Map, Mooring, Raw, Settled,
     Shell, Value,
@@ -137,9 +138,10 @@ fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
 /// Runtime entry: resolve `head` against the active grant, then run
 /// the chosen arm.
 ///
-/// Source-location bookkeeping is skipped for `_`-prefixed names —
-/// the host-registered `_ed-*` REPL surface — so audit readers see
-/// the user-visible caller rather than the editor builtin.
+/// `span` is the dispatching node's span, recorded as this run's call
+/// site.  Recording is skipped for `_`-prefixed names — the
+/// host-registered `_ed-*` REPL surface — so audit readers see the
+/// user-visible caller rather than the editor builtin.
 ///
 /// The [`Resolution::Env`] arm is defensive: the elaborator already
 /// routes env-bound names through CBPV [`CompKind::App`] via the
@@ -152,11 +154,12 @@ pub(crate) fn run_call(
     head: &CommandWord,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
-        shell.run.loc.record_call_site_here();
+        shell.run.call_site = span;
     }
 
     match classify_command(head, shell)? {

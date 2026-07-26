@@ -199,13 +199,10 @@ pub(crate) trait WithSpan {
 ///
 /// Binary search
 /// over the index resolves a `(byte_offset → line, col)` lookup in
-/// O(log lines), independent of file size; `eval_comp` recomputes `Location`
-/// from a span on every node it visits, so the per-lookup cost is on a hot
-/// path.
+/// O(log lines), independent of file size.
 ///
-/// Built once when the source is loaded; `Arc<[u32]>` makes Location
-/// clones (which happen every closure call) refcount-bumps rather
-/// than copies.
+/// Built once when the source is loaded; the `Arc`s make a clone a
+/// refcount bump rather than a copy of the text.
 #[derive(Clone, Debug)]
 pub struct Source {
     /// Display name of the source — a script path, `<stdin>`, or a loaded
@@ -285,30 +282,44 @@ impl Source {
 /// Registry of every source text the current run has loaded, keyed by
 /// [`FileId`].
 ///
-/// A [`SourceLoc`](crate::diagnostic::SourceLoc) carries the `FileId` of the
-/// source whose `line`/`col` index it holds, and the runtime renderer
-/// resolves that id here so a `source`d module's error draws its caret into
-/// the module's own bytes rather than the top-level script's.
+/// Every [`Span`] carries the `FileId` of the source its byte range indexes,
+/// and the runtime renderer resolves that id here so a `source`d module's
+/// error draws its caret into the module's own bytes rather than the
+/// top-level script's.
 ///
-/// `Arc`-shared so the per-closure `Location` clone is a refcount bump.
+/// Slots are `Option` so [`register_at`](Self::register_at) can place a
+/// source under an id another registry minted, leaving the ids below it
+/// unresolvable rather than aliased to unrelated text.
+///
 /// Within a run the top-level source and each module it loads each register
 /// once; [`reset`](Self::reset) at the next run boundary reclaims them.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
-    sources: Arc<Vec<Source>>,
+    sources: Arc<Vec<Option<Source>>>,
 }
 
 impl SourceDb {
     /// Register `source`, returning the [`FileId`] that resolves to it.
     pub fn register(&mut self, source: Source) -> FileId {
-        let sources = Arc::make_mut(&mut self.sources);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "FileId is u32; a run registers a handful of sources, far below 2^32"
-        )]
-        let id = FileId(sources.len() as u32);
-        sources.push(source);
+        let id = self.next_id();
+        Arc::make_mut(&mut self.sources).push(Some(source));
         id
+    }
+
+    /// Place `source` under `id` — an id minted by *another* registry, which
+    /// only a process that received both across the wire may do (the
+    /// pipeline-stage helper, resolving spans its parent compiled).  Slots
+    /// below `id` this registry never filled stay unresolvable.
+    pub(crate) fn register_at(&mut self, id: FileId, source: Source) {
+        if id == FileId::DUMMY {
+            return;
+        }
+        let sources = Arc::make_mut(&mut self.sources);
+        let idx = id.0 as usize;
+        if sources.len() <= idx {
+            sources.resize(idx + 1, None);
+        }
+        sources[idx] = Some(source);
     }
 
     /// Drop every registered source, returning the registry to empty so the
@@ -323,7 +334,10 @@ impl SourceDb {
     /// the placeholder [`FileId::DUMMY`] or names a source this registry
     /// does not hold.
     pub fn get(&self, id: FileId) -> Option<&Source> {
-        self.sources.get(id.0 as usize)
+        if id == FileId::DUMMY {
+            return None;
+        }
+        self.sources.get(id.0 as usize)?.as_ref()
     }
 
     /// Peek the [`FileId`] the next [`register`](Self::register) call will
@@ -356,20 +370,3 @@ pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// Locate the byte offset in `source` corresponding to 1-indexed
-/// (line, col).  `col` counts characters within the line, so the in-line
-/// advance steps over `col - 1` characters to land on a char boundary.
-pub(crate) fn line_col_to_byte(source: &str, line: usize, col: usize) -> usize {
-    let mut byte_offset = 0usize;
-    for (i, ln) in source.split_inclusive('\n').enumerate() {
-        if i + 1 == line {
-            let in_line = ln
-                .char_indices()
-                .nth(col.saturating_sub(1))
-                .map_or(ln.len(), |(b, _)| b);
-            return byte_offset + in_line;
-        }
-        byte_offset += ln.len();
-    }
-    byte_offset
-}

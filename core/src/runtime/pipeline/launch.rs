@@ -240,7 +240,8 @@ fn spawn_stage(
                 Some(&captured),
                 cx.shell.local.audit.active_policy(),
                 wants_value,
-                &cx.shell.run.loc,
+                cx.shell.run.call_site,
+                &cx.shell.session.sources,
             )?
         }
     };
@@ -451,7 +452,7 @@ fn spawn_all_stages(
     shell: &mut Shell,
 ) -> Settled<()> {
     for (ix, stage) in stages.iter().enumerate() {
-        crate::process::check(mooring, shell)?;
+        crate::process::check(mooring)?;
         build.step(stage, &plan.specs[ix], mooring, shell)?;
     }
     Ok(())

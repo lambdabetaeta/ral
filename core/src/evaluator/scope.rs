@@ -66,12 +66,9 @@ pub(crate) fn error_record(
     ])
 }
 
-pub(crate) fn classify(
-    body: &BodyResult,
-    children: &[ExecNode],
-    call_line: usize,
-    call_col: usize,
-) -> Outcome {
+/// The failed body's position comes from the error's own span; an
+/// unspanned error falls back to the run's call site.
+pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) -> Outcome {
     match body {
         BodyResult::Value(v) => Outcome {
             ok: true,
@@ -79,19 +76,20 @@ pub(crate) fn classify(
             value: v.clone(),
             message: String::new(),
             cmd: String::new(),
-            line: call_line,
-            col: call_col,
+            line: 0,
+            col: 0,
         },
         BodyResult::Error(e) => {
             let failing = children.iter().rev().find(|n| n.status != 0);
+            let site = e.span.map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
             Outcome {
                 ok: false,
                 status: e.exit_code(),
                 value: Value::Unit,
                 message: e.message.clone(),
                 cmd: failing.map_or_else(|| "<runtime>".into(), |n| n.cmd.clone()),
-                line: e.loc.as_ref().map_or(call_line, |l| l.line),
-                col: e.loc.as_ref().map_or(call_col, |l| l.col),
+                line: site.line,
+                col: site.col,
             }
         }
     }
@@ -267,15 +265,13 @@ pub(crate) fn eval_try(
     // error record.  Exit/Stopped propagate cleanly as `Err(Escape)`
     // through `?`, which lifts via `From<Escape> for Control`; the
     // parked-pipeline case never reaches `classify`.
-    let call_line = shell.run.loc.line;
-    let call_col = shell.run.loc.col;
     let body_val = eval_val(body, shell)?;
     let handler_val = eval_val(handler, shell)?;
     let record = audit::record_scope(shell, "try", CapturePolicy::Off, |s| {
         apply(body_val, vec![], mooring, s)
     })?;
 
-    let outcome = classify(&record.body, &record.node.children, call_line, call_col);
+    let outcome = classify(&record.body, &record.node.children, shell);
 
     let err_record = error_record(
         &outcome.cmd,

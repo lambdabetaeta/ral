@@ -370,7 +370,7 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 
     let mut results = Vec::new();
     for raw in cancellable(WalkBuilder::new(&root).git_global(false)) {
-        ral_core::process::check(mooring, shell)?;
+        ral_core::process::check(mooring)?;
         let entry = match raw {
             Ok(e) if e.file_type().is_some_and(|ft| ft.is_file()) => e,
             _ => continue,
@@ -761,7 +761,7 @@ fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let mut results = Vec::new();
 
     for result in walker {
-        ral_core::process::check(mooring, shell)?;
+        ral_core::process::check(mooring)?;
         match result {
             Ok(entry) => {
                 if entry.depth() == 0 {
@@ -1241,10 +1241,10 @@ mod tests {
     fn builtin_test_block_forever(
         _args: &[Value],
         mooring: &Mooring,
-        shell: &mut Shell,
+        _shell: &mut Shell,
     ) -> Settled<Value> {
         loop {
-            ral_core::process::check(mooring, shell)?;
+            ral_core::process::check(mooring)?;
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }

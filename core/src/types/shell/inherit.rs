@@ -53,8 +53,8 @@
 //! `session.guest_jail` are shared
 //! so dispatch, the `help`/`explain` index, the cancel root and anchor, and (on
 //! a guest) the jail's uid counter reach the child.  The
-//! asymmetry between the two manifests is the flow matrix — the source
-//! cursor (`run.loc`) and the `within`-attenuable bits do not flow back,
+//! asymmetry between the two manifests is the flow matrix — the call site
+//! (`run.call_site`) and the `within`-attenuable bits do not flow back,
 //! but `context.cwd` does.
 
 use super::{Mobile, Mooring, Shell, SurfaceSink};
@@ -220,7 +220,7 @@ impl Shell {
     /// REPL aside (prompt, hook shell): clone context state from
     /// `parent` without touching its IO / audit / REPL editor
     /// context.  The child is an independent sibling; no flow-back is
-    /// needed.  The source cursor (`run.loc`), the builtin table
+    /// needed.  The call site (`run.call_site`), the builtin table
     /// (`session.builtins`), and the library doc index
     /// (`session.library_docs`) are copied alongside the context clone so the
     /// aside resolves names, renders positions, and describes itself exactly
@@ -230,7 +230,10 @@ impl Shell {
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();
-        child.run.loc = parent.run.loc.clone();
+        child.run.call_site = parent.run.call_site;
+        // The registry rides along with the call site: an `Arc` bump, and
+        // without it the aside's spans name sources it does not hold.
+        child.session.sources = parent.session.sources.clone();
         child.session.builtins = parent.session.builtins.clone();
         child
             .session
@@ -374,7 +377,7 @@ impl Shell {
     }
 
     /// Flow mutations made by a child computation back to `parent`.
-    /// Per-substate return rules.  The source cursor (`run.loc`) and the
+    /// Per-substate return rules.  The call site (`run.call_site`) and the
     /// `within`-attenuable bits do not flow back; the asymmetry is
     /// the point.
     ///

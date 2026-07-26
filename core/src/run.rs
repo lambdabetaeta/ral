@@ -39,8 +39,8 @@ use crate::syntax::parser::ParseError;
 use crate::transport::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Disposition, Escape, LocationCursor, Mooring, Nursery,
-    Settled, Shell, SurfaceSink, TerminalPolicy, Value,
+    Break, Capabilities, DeferredSink, Desk, Disposition, Escape, Mooring, Nursery, Settled, Shell,
+    SurfaceSink, TerminalPolicy, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
@@ -546,7 +546,7 @@ pub(crate) fn build_run(
     }
     Disposition {
         io: run_io,
-        loc: LocationCursor::default(),
+        call_site: None,
         terminal_access,
     }
 }

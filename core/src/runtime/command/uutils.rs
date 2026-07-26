@@ -161,10 +161,10 @@ pub(crate) fn run_uutils_in_process(
         // branch below.
         drop(exit_code_guard);
         mooring.emit_io(&super::io_event::exec(tool, arg_strs, 1));
-        return Err(Break::Error(
-            Error::new(format!("bundled tool '{tool}' panicked"), 1)
-                .at_loc(shell.run.loc.source_loc(0)),
-        ));
+        return Err(Break::Error(Error::new(
+            format!("bundled tool '{tool}' panicked"),
+            1,
+        )));
     };
 
     // The exit-code cell has been read; release the lock before the
@@ -179,13 +179,10 @@ pub(crate) fn run_uutils_in_process(
     if exit_code == 0 {
         Ok(Value::Unit)
     } else {
-        Err(Break::Error(
-            Error::new(
-                format!("'{tool}' exited with status {exit_code}"),
-                exit_code,
-            )
-            .at_loc(shell.run.loc.source_loc(tool.len())),
-        ))
+        Err(Break::Error(Error::new(
+            format!("'{tool}' exited with status {exit_code}"),
+            exit_code,
+        )))
     }
 }
 

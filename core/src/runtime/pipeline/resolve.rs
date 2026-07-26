@@ -10,6 +10,7 @@ use super::super::command::CommandIdentity;
 use super::super::command_call;
 use crate::evaluator::call;
 use crate::ir::{Comp, CompKind};
+use crate::source::Span;
 use crate::types::{Settled, Shell, TerminalAccess, Value};
 use std::sync::Arc;
 
@@ -124,28 +125,9 @@ pub(super) enum StageLaunch {
 pub(super) struct StageSpec {
     pub(super) comp_type: crate::mode::PipeSpec,
     pub(super) launch: StageLaunch,
-    pub(super) loc: crate::diagnostic::SourceLoc,
-}
-
-/// Build the source location for a pipeline stage: the active source
-/// identity plus the span's byte offset converted into (line, col) via the
-/// current source text held on `shell`.  Carried on the stage so a stage
-/// error resolves against the right source at render time.
-fn stage_loc(stage: &Comp, shell: &Shell) -> crate::diagnostic::SourceLoc {
-    let (line, col) = match (stage.span, shell.run.loc.source.as_ref()) {
-        (Some(sp), Some(src)) => src.byte_to_line_col(sp.start as usize),
-        // No span, or no source text to convert the byte offset against:
-        // fall back to the "unknown location" sentinel (as in
-        // `evaluator::comp`) rather than passing a raw byte offset off as
-        // a line number.
-        _ => (0, 0),
-    };
-    crate::diagnostic::SourceLoc {
-        source: shell.run.loc.current,
-        line,
-        col,
-        len: 0,
-    }
+    /// The stage node's own span, carried so a parent-side error about
+    /// this stage points at the stage rather than the whole pipeline.
+    pub(super) span: Option<Span>,
 }
 
 /// Decide which launcher kind a pipeline stage needs.
@@ -276,12 +258,11 @@ fn analyze_stage(
     terminal: TerminalPlan,
     shell: &mut Shell,
 ) -> Settled<StageSpec> {
-    let loc = stage_loc(stage, shell);
     let launch = resolve_launch(i, n, stage, comp_type, terminal, shell)?;
     Ok(StageSpec {
         comp_type,
         launch,
-        loc,
+        span: stage.span,
     })
 }
 

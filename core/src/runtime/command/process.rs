@@ -122,7 +122,7 @@ pub(crate) fn spawn_error(name: &str, e: &std::io::Error) -> Break {
     Break::Error(Error {
         message: failure.message(name),
         status: crate::types::Status::Process(failure.clone()),
-        loc: None,
+        span: None,
         hint: failure.default_hint(name),
     })
 }
