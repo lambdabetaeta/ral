@@ -123,7 +123,7 @@ fn fold_lines_from_stdin() {
 #[test]
 fn mixed_pipeline_internal_byte_stage_buffers_output_cleanly() {
     let script = r#"
-let s = !{printf "a\nb\n" | map-lines { |x| return $x } | from-lines}
+let s = !{printf 'a\nb\n' | map-lines { |x| return $x } | from-lines}
 let lines = !{stream-to-list $s}
 echo !{length $lines}
 echo $lines[0]
