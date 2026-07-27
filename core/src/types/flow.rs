@@ -57,15 +57,13 @@ pub enum Break {
 /// A capability-policy decode/freeze failure: a message plus an optional
 /// hint, nothing else.
 ///
-/// The capability decoder ([`crate::capability::decode`]) and the sigil
-/// freeze pass beneath it ([`crate::path::sigil`]) are pure — the author
-/// of a `grant [...]` or capability file is the live user, so every
-/// malformed shape is just a "no" reported back, never a process exit.
-/// Giving that path its own error type (rather than `Break`) makes "this
-/// code cannot exit the process" a fact the type checker verifies instead
-/// of one a reader has to trust; `Break` is minted from a `PolicyError`
-/// only via the `From` impl below, at the boundary where the decoder's
-/// caller needs one.
+/// The capability decoder and the sigil freeze pass beneath it
+/// ([`crate::path::sigil`]) are pure: the author of a `grant [...]` or
+/// capability file is the live user, so a malformed shape is a "no"
+/// reported back, never a process exit.  Its own error type makes that a
+/// fact the type checker verifies rather than one a reader trusts —
+/// `Break` is minted from it only at the boundary where a caller needs
+/// one.
 #[derive(Debug, Clone)]
 pub struct PolicyError {
     pub message: String,

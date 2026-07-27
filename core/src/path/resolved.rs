@@ -272,6 +272,34 @@ impl NormalizedPrefix {
         self.namespace
     }
 
+    /// True iff `self` and `other` are the same directory as far as the
+    /// enforcement gate (`longest_dir_match`) is concerned, even if
+    /// they carry different `resolved` forms because they were frozen
+    /// against different disk state.  Not byte equality on `surface`:
+    /// the gate's own containment check, [`super::lex::path_within`],
+    /// matches modulo the host's path identity — macOS firmlink
+    /// aliases (`/tmp` ↔ `/private/tmp`) and, under Windows identity,
+    /// case, separator spelling, and a `\\?\`-verbatim prefix — so two
+    /// surfaces the gate treats as one directory can still differ
+    /// byte-for-byte.  "Same directory" is mutual containment under
+    /// that rule, gated on matching `namespace` since cross-namespace
+    /// surfaces are never the same directory regardless of spelling.
+    /// A set operation that means "does this clash with something the
+    /// gate would treat as the same dir" must use this, not the
+    /// derived `Eq`/`Ord`, which compares `resolved` too and compares
+    /// `surface` by bytes.
+    pub fn same_gate_dir(&self, other: &Self) -> bool {
+        self.namespace == other.namespace
+            && super::lex::path_within_str(&self.surface, &other.surface)
+            && super::lex::path_within_str(&other.surface, &self.surface)
+    }
+
+    /// What composition intersects on — `(namespace, resolved)`. See
+    /// [`super::prefix_set::meet_prefixes`].
+    pub fn overlap_key(&self) -> (Namespace, &str) {
+        (self.namespace, &self.resolved)
+    }
+
     /// Consume into the owned surface `String`, for the wire/render
     /// forms that flatten the prefix back to bytes.
     pub fn into_string(self) -> String {

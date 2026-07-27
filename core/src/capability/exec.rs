@@ -284,29 +284,40 @@ fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
 
 /// Find the deepest directory prefix that covers any absolute
 /// candidate and return whether it was an allow or a deny.  "Deepest"
-/// by character count of the key, which is monotone with prefix depth
-/// for canonical absolute paths.  Returns `None` if no directory
-/// matches, `Some(true)` for the deepest match being an allow,
-/// `Some(false)` for a deny.
+/// by [`path::lex::identity_depth`] — components of the alias-folded
+/// form, not characters of the raw surface, so a firmlink alias
+/// (`/tmp` vs `/private/tmp`) can't buy a shallower directory extra
+/// rank by virtue of a longer spelling.  Returns `None` if no
+/// directory matches, `Some(true)` for the deepest match being an
+/// allow, `Some(false)` for a deny.  An allow and a deny of *equal*
+/// depth can both reach here — `Meet`/`Join` only strip a clash where
+/// [`same_gate_dir`](crate::path::resolved::NormalizedPrefix::same_gate_dir)
+/// holds, and an allow one level short of a deny's directory, or in a
+/// different namespace, is no clash at all — so the two loops below
+/// break that tie in opposite directions on purpose: allow displaces
+/// `best` only on strictly greater depth, deny displaces it on
+/// greater-or-equal, so a same-depth deny always ends up the one left
+/// standing. A gate's ambiguity must resolve to deny.
 fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<bool> {
     let mut best: Option<(usize, bool)> = None;
-    let mut consider = |dir: &str, allow: bool| {
+    let mut consider = |dir: &str, allow: bool, wins_tie: bool| {
         let matches_any = names
             .iter()
             .any(|n| path::is_absolute(n) && path::path_within_str(n, dir));
         if !matches_any {
             return;
         }
-        let len = dir.len();
-        if best.is_none_or(|(best_len, _)| best_len < len) {
-            best = Some((len, allow));
+        let depth = path::lex::identity_depth(dir, cfg!(windows));
+        match best {
+            Some((best_depth, _)) if best_depth > depth || (best_depth == depth && !wins_tie) => {}
+            _ => best = Some((depth, allow)),
         }
     };
     for dir in &exec.allow_dirs {
-        consider(dir.as_str(), true);
+        consider(dir.as_str(), true, false);
     }
     for dir in &exec.deny_dirs {
-        consider(dir.as_str(), false);
+        consider(dir.as_str(), false, true);
     }
     best.map(|(_, allow)| allow)
 }
@@ -372,6 +383,67 @@ mod tests {
         assert_eq!(strip_windows_extension("my.tool"), "my.tool");
         assert_eq!(strip_windows_extension("git"), "git");
         assert_eq!(strip_windows_extension("git.EXE"), "git");
+    }
+
+    /// The tie-break half of the authority-leak fix: an allow and a
+    /// deny of equal depth both covering the candidate must resolve to
+    /// deny.  This is the shape `ExecMap::join` leaves behind when a
+    /// base veto's surface is re-granted with a divergent `resolved` —
+    /// `Meet`/`Join` no longer let that pair share a set slot, but this
+    /// pins the gate's own half of the fix directly, independent of
+    /// composition.
+    #[test]
+    fn longest_dir_match_ties_resolve_to_deny() {
+        let exec = ExecMap {
+            literals: BTreeMap::new(),
+            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/x")]),
+            deny_dirs: BTreeSet::from([path::NormalizedPrefix::for_test(
+                "/x",
+                "/y",
+                path::Namespace::Host,
+            )]),
+        };
+        assert_eq!(longest_dir_match(&exec, &["/x/bin"]), Some(false));
+    }
+
+    /// The alias-clash half of the sibling hole: a deny on `/tmp/bin`
+    /// and an allow on its firmlink alias `/private/tmp/bin` name the
+    /// same directory to the gate (`path_within` follows firmlinks),
+    /// but byte-compare distinct, longer surfaces outrank shorter ones
+    /// under the old character-count depth metric — so the allow used
+    /// to outrank the deny outright, no tie-break needed. Fixed by
+    /// `same_gate_dir` catching the clash at composition and
+    /// `identity_depth` ranking both at the same depth so the deny-wins
+    /// tie-break (above) closes it even if a clash reached the gate
+    /// directly, as here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn longest_dir_match_firmlink_alias_does_not_outrank_deny() {
+        let exec = ExecMap {
+            literals: BTreeMap::new(),
+            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/private/tmp/bin")]),
+            deny_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/tmp/bin")]),
+        };
+        assert_eq!(longest_dir_match(&exec, &["/tmp/bin/evil"]), Some(false));
+    }
+
+    /// The depth-metric half of the sibling hole, independent of the
+    /// first: `/tmp/a/b` is a real 3-component path, `/private/tmp` is
+    /// a firmlink alias of the 1-component `/tmp`, but the old
+    /// character-count metric ranked the 12-character alias above the
+    /// 8-character real descendant — fail-open regardless of which
+    /// side is allow or deny. `identity_depth` counts alias-folded
+    /// components, so `/tmp/a/b` (4, folded to
+    /// `/private/tmp/a/b`) outranks `/private/tmp` (2) as it should.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn longest_dir_match_depth_counts_components_not_characters() {
+        let exec = ExecMap {
+            literals: BTreeMap::new(),
+            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/private/tmp")]),
+            deny_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/tmp/a/b")]),
+        };
+        assert_eq!(longest_dir_match(&exec, &["/tmp/a/b/x"]), Some(false));
     }
 
     #[test]

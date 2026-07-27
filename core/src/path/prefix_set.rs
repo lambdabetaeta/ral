@@ -24,29 +24,30 @@ use super::resolved::NormalizedPrefix;
 use super::resolver::Resolver;
 use crate::types::Meet;
 
+/// The one containment judgment: does `a` cover `b`?
+///
+/// Same namespace, `b`'s resolved form within `a`'s: two prefixes in
+/// different namespaces never overlap, and a symlinked `b` cannot
+/// escape a shallower `a` because this reads the resolved form, never
+/// the surface spelling.  Pure — no disk, no `Resolver`.
+pub fn covers(a: &NormalizedPrefix, b: &NormalizedPrefix) -> bool {
+    a.namespace() == b.namespace() && path_within_str(b.resolved(), a.resolved())
+}
+
 /// Intersect two prefix lists, keeping every element covered by some
 /// element of the other list — i.e. the deeper prefix of each
 /// overlapping pair survives.
-///
-/// Overlap is judged on `(namespace,
-/// resolved)`: two prefixes in different namespaces never overlap, so
-/// a cross-namespace meet is the empty, fail-closed intersection, and a
-/// symlinked deeper prefix cannot escape a shallower ceiling because
-/// containment reads the resolved form, never the surface spelling.
 ///
 /// Pure — no disk, no `Resolver` — so [`PrefixSet::meet`] and every
 /// lattice meet in `types::capability` can share this one kernel.  The
 /// result is unsorted and may contain duplicates; callers dedup.
 pub fn meet_prefixes(a: &[NormalizedPrefix], b: &[NormalizedPrefix]) -> Vec<NormalizedPrefix> {
-    let covers = |x: &NormalizedPrefix, others: &[NormalizedPrefix]| {
-        others
-            .iter()
-            .any(|o| x.namespace() == o.namespace() && path_within_str(x.resolved(), o.resolved()))
-    };
+    let is_covered =
+        |x: &NormalizedPrefix, others: &[NormalizedPrefix]| others.iter().any(|o| covers(o, x));
     a.iter()
-        .filter(|x| covers(x, b))
+        .filter(|x| is_covered(x, b))
         .cloned()
-        .chain(b.iter().filter(|y| covers(y, a)).cloned())
+        .chain(b.iter().filter(|y| is_covered(y, a)).cloned())
         .collect()
 }
 

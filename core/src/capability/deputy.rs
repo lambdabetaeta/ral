@@ -4,40 +4,31 @@
 //! `design/grant.md`'s third concession names the shape in prose: a
 //! prefix that is both `exec`-admitted and `fs`-writable is an escape
 //! hatch — drop a binary there, the next call admits it.
-//! [`deputy_prefixes`] turns that into a theorem with a stated premise
-//! list instead of a caveat.
+//! [`deputy_prefixes`] turns that into a theorem, judged with
+//! [`covers`](crate::path::covers) — the same resolved-form predicate
+//! [`meet_prefixes`](crate::path::meet_prefixes) folds over — so
+//! overlap survives a symlinked write region and never fires across
+//! namespaces.
 //!
 //! **It reports; it does not deny.** Write-`cwd:` plus exec under
 //! `cwd:` is the compile-and-run workflow every agent profile needs
 //! (`cargo build && ./target/debug/app` *is* this shape), so a finding
-//! marks a property worth surfacing, not a policy to reject. Callers
-//! mint an audit node or a lint line from the result; neither attenuates
-//! nor fails a load.
+//! marks a property worth surfacing, not a policy to reject.
 //!
-//! **Judged on the folded frame, not a layer.** Two innocent layers
-//! compose into a guilty one: a base grants exec under `/usr/bin`, an
-//! overlay grants write under `/usr/bin`, and neither layer alone is a
-//! deputy — only their meet is. So this takes a single already-folded
-//! `Capabilities` — the shape a `GrantStack` reduces to under
-//! [`Capabilities::meet`] — rather than the stack itself, so a caller
-//! cannot pass an unfolded layer by mistake and read a per-layer answer
-//! as the composed one.
+//! **Judged on the folded frame, not a layer.** A base grants exec
+//! under `/usr/bin`, an overlay grants write under `/usr/bin`, and
+//! neither layer alone is a deputy — only their meet is. So this takes
+//! a single already-folded `Capabilities`, not the stack.
 //!
-//! **The residue is stated, not hidden.** Two premises:
-//!
-//! - *Static but invisible.* The predicate can only fire where **both**
-//!   dimensions are restricted. A frame with `fs: None` leaves every
-//!   exec-admitted prefix writable and undetectable — treating `None`
-//!   as "everything writable" would flag every exec-only grant, the
-//!   ambient root first. So `None` on either `exec` or `fs` yields no
-//!   finding, deliberately.
-//! - *Dynamic.* Overlap is judged on the prefix strings the policy
-//!   carries, lexically, at the moment the frame is folded. A symlink
-//!   created afterward inside an admitted write region, pointing into
-//!   an exec-admitted tree, stays open under the same stability
-//!   hypothesis as TOCTOU (`design/grant.md`'s second concession).
+//! **The residue is stated, not hidden.** The predicate can only fire
+//! where **both** dimensions are restricted: a frame with `fs: None`
+//! leaves every exec-admitted prefix writable and undetectable, so
+//! `None` on either `exec` or `fs` yields no finding, deliberately. A
+//! symlink created *after* the fold, pointing into an exec-admitted
+//! tree, stays open under the same stability hypothesis as TOCTOU
+//! (`design/grant.md`'s second concession).
 
-use crate::path::{NormalizedPrefix, path_within_str};
+use crate::path::{NormalizedPrefix, covers};
 use crate::types::Capabilities;
 
 /// The exec-admitted directory prefixes that are also writable under the
@@ -61,12 +52,9 @@ pub fn deputy_prefixes(caps: &Capabilities) -> Vec<NormalizedPrefix> {
         .filter_map(|dir| {
             fs.write_prefixes
                 .iter()
-                .find(|w| {
-                    path_within_str(dir.as_str(), w.as_str())
-                        || path_within_str(w.as_str(), dir.as_str())
-                })
+                .find(|w| covers(w, dir) || covers(dir, w))
                 .map(|w| {
-                    if path_within_str(dir.as_str(), w.as_str()) {
+                    if covers(w, dir) {
                         dir.clone()
                     } else {
                         w.clone()
@@ -82,7 +70,7 @@ pub fn deputy_prefixes(caps: &Capabilities) -> Vec<NormalizedPrefix> {
 #[cfg(test)]
 mod tests {
     use super::deputy_prefixes;
-    use crate::path::NormalizedPrefix;
+    use crate::path::{Namespace, NormalizedPrefix};
     use crate::types::{Capabilities, ExecMap, FsPolicy};
     use std::collections::BTreeSet;
 
@@ -98,6 +86,66 @@ mod tests {
             write_prefixes: vec![NormalizedPrefix::from_surface(prefix)],
             ..FsPolicy::default()
         }
+    }
+
+    #[test]
+    fn symlinked_write_region_is_reported_via_resolved_form() {
+        // /data lexically diverges from /usr/bin, but resolves inside it —
+        // the drop-a-binary escape the module doc names.
+        let caps = Capabilities {
+            exec: Some(ExecMap {
+                allow_dirs: BTreeSet::from([NormalizedPrefix::for_test(
+                    "/usr/bin",
+                    "/usr/bin",
+                    Namespace::Host,
+                )]),
+                ..ExecMap::default()
+            }),
+            fs: Some(FsPolicy {
+                write_prefixes: vec![NormalizedPrefix::for_test(
+                    "/data",
+                    "/usr/bin/sub",
+                    Namespace::Host,
+                )],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            deputy_prefixes(&caps),
+            vec![NormalizedPrefix::for_test(
+                "/data",
+                "/usr/bin/sub",
+                Namespace::Host
+            )]
+        );
+    }
+
+    #[test]
+    fn cross_namespace_overlap_is_not_reported() {
+        let caps = Capabilities {
+            exec: Some(ExecMap {
+                allow_dirs: BTreeSet::from([NormalizedPrefix::for_test(
+                    "/usr/bin",
+                    "/usr/bin",
+                    Namespace::Host,
+                )]),
+                ..ExecMap::default()
+            }),
+            fs: Some(FsPolicy {
+                write_prefixes: vec![NormalizedPrefix::for_test(
+                    "/usr/bin",
+                    "/usr/bin",
+                    Namespace::Guest,
+                )],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        };
+        assert!(
+            deputy_prefixes(&caps).is_empty(),
+            "a shared spelling across namespaces names different machines, not an overlap"
+        );
     }
 
     #[test]

@@ -300,6 +300,36 @@ pub fn path_within_str(path: &str, prefix: &str) -> bool {
     path_within(Path::new(path), Path::new(prefix))
 }
 
+/// Depth of `dir`, in path components, after folding it through the
+/// same identity [`path_within`] matches with: a macOS firmlink alias
+/// collapsed to its canonical (longer) spelling, then split under
+/// Windows path identity (case/separator/`\\?\`-fold) when `windows`
+/// is set, or by [`Path::components`] otherwise.
+///
+/// `capability::exec::longest_dir_match` ranks competing directory
+/// prefixes by depth, and a character count is only a depth proxy
+/// within one spelling of a path: `/tmp` and its firmlink alias
+/// `/private/tmp` name the same directory at different lengths, and
+/// `/tmp/a/b` (a real 3-level path) is shorter than `/private/tmp` (an
+/// alias of a 1-level path) despite nesting deeper. Ranking on
+/// characters ranks spelling, not depth, and lets a shallower alias or
+/// a longer alias-prefix outrank the directory it is actually
+/// shallower or deeper than. `windows` is a parameter, not a
+/// `cfg!(windows)` read, for the same testability reason as
+/// [`starts_with_identity`].
+pub(crate) fn identity_depth(dir: &str, windows: bool) -> usize {
+    let original = PathBuf::from(dir);
+    let canonical = match super::canon::firmlink_toggle(&original) {
+        Some(alt) if alt.as_os_str().len() > original.as_os_str().len() => alt,
+        _ => original,
+    };
+    if windows {
+        windows_identity_components(&canonical.to_string_lossy()).len()
+    } else {
+        canonical.components().count()
+    }
+}
+
 /// True if `script` names an actual compiled source — not the REPL,
 /// not `-c`, not a synthetic `<...>` source (`<stdin>`, `<prelude>`).
 ///
@@ -733,5 +763,17 @@ mod tests {
         // one, regardless of build target — same contract as
         // `capability::exec::names_match`'s `windows: false` arm.
         assert!(!starts_with_identity(r"C:\WORK", r"C:\work", false));
+    }
+
+    /// `identity_depth` folds Windows path identity — case, separator,
+    /// and a `\\?\`-verbatim prefix — before counting components, so
+    /// three spellings of the same 2-level directory report the same
+    /// depth. Exercised with `windows: true` directly, like
+    /// `starts_with_identity`'s own tests, so this runs on every host.
+    #[test]
+    fn identity_depth_windows_folds_case_separator_and_verbatim() {
+        assert_eq!(identity_depth(r"C:\work\sub", true), 3);
+        assert_eq!(identity_depth(r"c:/WORK/SUB", true), 3);
+        assert_eq!(identity_depth(r"\\?\C:\work\sub", true), 3);
     }
 }

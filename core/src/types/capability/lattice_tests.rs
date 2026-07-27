@@ -713,6 +713,177 @@ fn meet_fs_symlinked_prefix_cannot_escape_ceiling() {
     );
 }
 
+/// A single-prefix exec-dir *deny*, the counterpart to `exec_of` — the
+/// half of the universe the pre-fix law tests never folded in, which
+/// is exactly why they missed the authority leak this file's
+/// `capability.rs::Meet`/`Join for ExecMap` fix addresses.
+fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
+    ExecMap {
+        literals: BTreeMap::new(),
+        allow_dirs: BTreeSet::new(),
+        deny_dirs: BTreeSet::from([p.clone()]),
+    }
+}
+
+/// The authority-leak regression, composed both ways. An allow and a
+/// deny that share a surface but were frozen against different disk
+/// state — `for_test`'s divergent `resolved` pair, what `--extend-base`
+/// produces when a base profile's veto is re-granted later against a
+/// changed symlink — must not both survive into `allow_dirs`: the
+/// derived `Eq`/`Ord` on `NormalizedPrefix` sees them as distinct
+/// records (three fields, not the gate's two), so a naive `retain`
+/// keying on it lets both through and the gate then admits under the
+/// pre-fix tie-break. Checked under both `meet` and `join`, and through
+/// the same `admits_for_test` gate `runtime::command::identity` uses,
+/// not just by inspecting `allow_dirs` — the leak is only real if the
+/// gate itself is fooled.
+#[test]
+fn exec_meet_and_join_drop_allow_clashing_with_deny_on_divergent_resolved() {
+    use crate::capability::admits_for_test;
+    use crate::path::Namespace;
+
+    let allow = crate::path::NormalizedPrefix::for_test("/x", "/x", Namespace::Host);
+    let deny = crate::path::NormalizedPrefix::for_test("/x", "/y", Namespace::Host);
+    let allow_map = exec_of(&allow);
+    let deny_map = exec_deny_of(&deny);
+
+    for composed in [
+        allow_map.clone().meet(deny_map.clone()),
+        allow_map.join(deny_map),
+    ] {
+        assert!(
+            composed.allow_dirs.is_empty(),
+            "the deny must evict the clashing allow from allow_dirs, got {:?}",
+            composed.allow_dirs
+        );
+        let mut grants = GrantStack::root();
+        grants.push(Capabilities {
+            exec: Some(composed),
+            ..Capabilities::root()
+        });
+        let candidate = ["/x/bin"];
+        assert!(
+            !admits_for_test(&grants, &candidate, &candidate),
+            "a binary under the clashing surface must be denied"
+        );
+    }
+}
+
+/// Same clash, different disguise: the allow and the deny share no
+/// surface bytes at all — `/private/tmp/x` and `/tmp/x` — but name the
+/// same macOS firmlink-aliased directory, which is exactly what
+/// `same_gate_dir` (rather than a byte-equal `gate_key`) is for. Pins
+/// the composition half of the alias-clash fix; the gate half is
+/// `capability::exec::tests::longest_dir_match_firmlink_alias_does_not_outrank_deny`.
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_meet_and_join_drop_allow_clashing_with_deny_on_firmlink_alias() {
+    use crate::capability::admits_for_test;
+
+    let allow_map = exec_of(&crate::path::NormalizedPrefix::from_surface(
+        "/private/tmp/x",
+    ));
+    let deny_map = exec_deny_of(&crate::path::NormalizedPrefix::from_surface("/tmp/x"));
+
+    for composed in [
+        allow_map.clone().meet(deny_map.clone()),
+        allow_map.join(deny_map),
+    ] {
+        assert!(
+            composed.allow_dirs.is_empty(),
+            "the deny must evict the alias-clashing allow from allow_dirs, got {:?}",
+            composed.allow_dirs
+        );
+        let mut grants = GrantStack::root();
+        grants.push(Capabilities {
+            exec: Some(composed),
+            ..Capabilities::root()
+        });
+        let candidate = ["/tmp/x/bin"];
+        assert!(
+            !admits_for_test(&grants, &candidate, &candidate),
+            "a binary under the aliased surface must be denied"
+        );
+    }
+}
+
+/// The exec lattice laws, folded over a universe that mixes allow-only
+/// and deny-only maps for every prefix. The pre-fix tests
+/// (`meet_commutative_over_prefix_universe` and its siblings) only ever
+/// built allow-only `ExecMap`s via `exec_of`, so deny-overrides — the
+/// dimension the bug lived in — was never exercised by a law check at
+/// all.
+fn exec_universe() -> Vec<ExecMap> {
+    prefix_universe()
+        .iter()
+        .flat_map(|p| [exec_of(p), exec_deny_of(p)])
+        .collect()
+}
+
+#[test]
+fn exec_meet_commutative_with_denies() {
+    let u = exec_universe();
+    for a in &u {
+        for b in &u {
+            assert_eq!(a.clone().meet(b.clone()), b.clone().meet(a.clone()));
+        }
+    }
+}
+
+#[test]
+fn exec_meet_associative_with_denies() {
+    let u = exec_universe();
+    for a in &u {
+        for b in &u {
+            for c in &u {
+                assert_eq!(
+                    a.clone().meet(b.clone().meet(c.clone())),
+                    a.clone().meet(b.clone()).meet(c.clone())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exec_meet_idempotent_with_denies() {
+    for a in &exec_universe() {
+        assert_eq!(a.clone().meet(a.clone()), a.clone());
+    }
+}
+
+#[test]
+fn exec_join_commutative_with_denies() {
+    let u = exec_universe();
+    for a in &u {
+        for b in &u {
+            assert_eq!(a.clone().join(b.clone()), b.clone().join(a.clone()));
+        }
+    }
+}
+
+#[test]
+fn exec_join_associative_with_denies() {
+    let u = exec_universe();
+    for a in &u {
+        for b in &u {
+            for c in &u {
+                assert_eq!(
+                    a.clone().join(b.clone().join(c.clone())),
+                    a.clone().join(b.clone()).join(c.clone())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exec_join_idempotent_with_denies() {
+    for a in &exec_universe() {
+        assert_eq!(a.clone().join(a.clone()), a.clone());
+    }
+}
+
 #[test]
 fn join_commutative() {
     let a = witness_a();

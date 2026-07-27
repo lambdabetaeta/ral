@@ -682,11 +682,14 @@ impl Join for ShellPolicy {
 /// Meet two exec maps.  `allow_dirs` intersects via [`meet_prefixes`] —
 /// a prefix survives only where BOTH sides admit it, the deeper one
 /// winning, and a symlinked prefix cannot escape — `deny_dirs` unions
-/// (a `Deny` is sticky, so it propagates from either side), and a key
-/// landing in both after that is removed from `allow_dirs`: an
-/// exact-key clash between an allow and a deny resolves to the deny,
-/// meet's bottom.  The `literals` half mirrors this through
-/// [`meet_literal_exec`].
+/// (a `Deny` is sticky, so it propagates from either side), and any
+/// allow that is [`same_gate_dir`](NormalizedPrefix::same_gate_dir) as
+/// a deny — the directory the exec gate actually treats them as
+/// sharing, alias spellings included — is dropped from `allow_dirs`: a
+/// clash resolves to the deny, meet's bottom, even when the two sides
+/// froze the surface against different disk state and so disagree on
+/// `resolved`, or spelled the same directory two different ways.  The
+/// `literals` half mirrors this through [`meet_literal_exec`].
 impl Meet for ExecMap {
     fn meet(self, other: Self) -> Self {
         let self_allow: Vec<NormalizedPrefix> = self.allow_dirs.into_iter().collect();
@@ -696,7 +699,7 @@ impl Meet for ExecMap {
             .collect();
         let deny_dirs: BTreeSet<NormalizedPrefix> =
             self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
-        allow_dirs.retain(|p| !deny_dirs.contains(p));
+        allow_dirs.retain(|p| !deny_dirs.iter().any(|d| d.same_gate_dir(p)));
         Self {
             allow_dirs,
             deny_dirs,
@@ -708,10 +711,13 @@ impl Meet for ExecMap {
 /// Join two exec maps — the widening composition `--extend-base` runs.
 /// Both `allow_dirs` and `deny_dirs` union (either side widens; a dir
 /// `Deny` is a sticky veto kept from either side), so an extension
-/// silent on a base's denied tree cannot re-admit it.  A key landing in
-/// both is removed from `allow_dirs`, so deny-overrides exactly as
-/// under `meet`: a base veto on a directory survives even an overlay
-/// that re-grants it.  The `literals` half mirrors this through
+/// silent on a base's denied tree cannot re-admit it.  Any allow that
+/// is [`same_gate_dir`](NormalizedPrefix::same_gate_dir) as a deny —
+/// not merely byte-equal to it — is then dropped from `allow_dirs`, so
+/// deny-overrides exactly as under `meet`: a base veto on a directory
+/// survives even an overlay that re-grants it, whether the overlay
+/// froze a different disk state or just a different alias of the same
+/// directory. The `literals` half mirrors this through
 /// [`join_literal_exec`].
 impl Join for ExecMap {
     fn join(self, other: Self) -> Self {
@@ -722,7 +728,7 @@ impl Join for ExecMap {
             .collect();
         let deny_dirs: BTreeSet<NormalizedPrefix> =
             self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
-        allow_dirs.retain(|p| !deny_dirs.contains(p));
+        allow_dirs.retain(|p| !deny_dirs.iter().any(|d| d.same_gate_dir(p)));
         Self {
             allow_dirs,
             deny_dirs,
