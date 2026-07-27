@@ -1310,6 +1310,7 @@ mod tests {
             r#"let h = service "birth" { return 1 }; cancel $h"#,
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
+            "",
         ) {
             ral_core::CompileOutcome::Compiled(_) => {}
             ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),

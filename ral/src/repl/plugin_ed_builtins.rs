@@ -252,17 +252,17 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// non-Unit value it wins; otherwise the captured bytes are decoded
 /// (trailing newline stripped).
 ///
-/// The re-entrancy guard and the pipeline foreground signal are the run's
-/// explicit terminal loan.  `begin_terminal_loan` raises the run
-/// to `ExplicitLoan` — which the pipeline foreground rule honors, keeping
-/// `_ed-tui`'s body in the foreground process group despite the captured
-/// stdout pipe — and the matching `end_terminal_loan` restores it;
-/// `in_terminal_loan` is the re-entrancy guard.
+/// The pipeline foreground signal is a derived [`Mooring`]:
+/// [`Mooring::lend_terminal`] raises `terminal_access` to `ExplicitLoan`,
+/// which the pipeline foreground rule honors, keeping `_ed-tui`'s body in
+/// the foreground process group despite the captured stdout pipe.  The
+/// loaned mooring dies with the call — nothing to restore.
+/// [`Mooring::in_terminal_loan`] is the re-entrancy guard.
 pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "_ed-tui")?;
     require_interactive("_ed-tui", shell)?;
     shell.check_editor_tui()?;
-    if shell.in_terminal_loan() {
+    if mooring.in_terminal_loan() {
         return Ok(tui_result(
             Value::String("_ed-tui: already in TUI mode".into()),
             1,
@@ -277,11 +277,10 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
             ));
         }
     }
-    let loan = shell.begin_terminal_loan();
+    let loaned = mooring.lend_terminal();
     let (result, bytes) = ral_core::evaluator::with_capture(shell, |shell| {
-        ral_core::builtins::apply(&args[0], &[], mooring, shell)
+        ral_core::builtins::apply(&args[0], &[], &loaned, shell)
     });
-    shell.end_terminal_loan(loan);
     match result {
         Ok(v) => {
             let v = match v {

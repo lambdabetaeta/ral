@@ -27,7 +27,7 @@ const SINK_BUFFER_TRUNC_MARKER: &[u8] =
 
 /// Frontend-provided byte writer.
 ///
-/// The REPL installs one of these at `shell.run.io.stdout` so every write — from
+/// The REPL installs one of these at `shell.io.stdout` so every write — from
 /// foreground `echo`, from pumped external commands, or from backgrounded
 /// watched blocks — goes through rustyline's `ExternalPrinter`.  That keeps
 /// output atomic with respect to the line editor: bytes arrive above the
@@ -299,7 +299,7 @@ impl Sink {
 /// path) anywhere else that needs "see the bytes AND keep them visible."
 /// Standalone externals do *not* call this — their bytes are captured at
 /// dispatch level by `evaluator::with_audit_capture`, which tees
-/// `shell.run.io.stdout`/`stderr` themselves.
+/// `shell.io.stdout`/`stderr` themselves.
 pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
     let (buffer_sink, buf) = new_buffer();
     (Sink::Tee(Box::new(buffer_sink), Box::new(base)), buf)
@@ -307,7 +307,7 @@ pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
 
 /// Allocate a fresh [`ByteBuffer`] paired with a [`Sink::Buffer`] that
 /// writes into it.  Two-arity return because every caller wants the sink
-/// to wire onto `shell.run.io.{stdout,stderr}` *and* the buffer arc to drain
+/// to wire onto `shell.io.{stdout,stderr}` *and* the buffer arc to drain
 /// from later.  Sole owner of the `Arc::new(Mutex::new(Vec::new()))`
 /// idiom — every `ByteBuffer` allocation in the crate goes through here.
 pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {

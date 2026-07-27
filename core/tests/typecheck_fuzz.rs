@@ -26,7 +26,7 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     let Ok(ast) = parse(src) else {
         return Vec::new();
     };
-    let comp = elaborate(&ast, HashSet::default());
+    let comp = elaborate(&ast, HashSet::default(), "").expect("elaborate");
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(

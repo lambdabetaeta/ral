@@ -11,7 +11,7 @@ use super::super::command_call;
 use crate::evaluator::call;
 use crate::ir::{Comp, CompKind};
 use crate::source::Span;
-use crate::types::{Settled, Shell, TerminalAccess, Value};
+use crate::types::{Mooring, Settled, Shell, TerminalAccess, Value};
 use std::sync::Arc;
 
 // ── TerminalPlan ────────────────────────────────────────────────────────
@@ -276,7 +276,7 @@ pub(super) struct PipelinePlan {
     pub(super) last_output: crate::mode::PipeMode,
 }
 
-fn resolve_terminal_plan(shell: &Shell) -> TerminalPlan {
+fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     // The handoff authority is the session's terminal lease, lent only to a
     // run whose `TerminalAccess` permits it.  No reachable lease → never
     // foreground: a `Denied` run (an exarch tool run), a backgrounded or
@@ -284,7 +284,7 @@ fn resolve_terminal_plan(shell: &Shell) -> TerminalPlan {
     // no `tcsetpgrp` (the lease is never minted off Unix) all land here — the
     // old `startup_foreground` gate and the `cfg!(windows)` short-circuit both
     // collapse into this one question.
-    if shell.terminal_lease().is_none() {
+    if shell.terminal_lease(mooring).is_none() {
         return TerminalPlan::NoTerminal;
     }
     // With the lease held, foreground iff the final sink is terminal-bound, or
@@ -296,9 +296,9 @@ fn resolve_terminal_plan(shell: &Shell) -> TerminalPlan {
     // the foreground pgid or its first `tcsetattr` raises SIGTTOU; the host
     // suspended its own surface and raised the run to `ExplicitLoan` for
     // exactly this window.  Foregrounding is this single final-sink/loan rule.
-    let loan = matches!(shell.run.terminal_access, TerminalAccess::ExplicitLoan);
+    let loan = matches!(mooring.terminal_access, TerminalAccess::ExplicitLoan);
     let terminal_bound = matches!(
-        shell.run.io.stdout,
+        shell.io.stdout,
         crate::io::Sink::Terminal | crate::io::Sink::External(_)
     );
     if terminal_bound || loan {
@@ -350,13 +350,14 @@ fn specs_from_wires(
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
     wires: &[crate::mode::Wire],
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<PipelinePlan> {
     // The launch decision for each stage depends on whether the pipeline
     // owns the controlling terminal, so the terminal plan is frozen
     // before any stage is analyzed.  It reads only boot/capture state,
     // which stage argv evaluation does not mutate.
-    let terminal = resolve_terminal_plan(shell);
+    let terminal = resolve_terminal_plan(mooring, shell);
     let specs = specs_from_wires(stages, wires, terminal, shell)?;
 
     // `run_pipeline` is only ever called with ≥1 stage — single-stage
@@ -381,39 +382,45 @@ pub(super) fn resolve_pipeline(
 mod tests {
     use super::*;
 
-    /// A shell whose session owns a terminal lease and whose installed run
-    /// holds `Leased` access — the interactive REPL and a terminal-launched
+    /// A shell whose session owns a terminal lease, and a mooring holding
+    /// `Leased` access — the interactive REPL and a terminal-launched
     /// script.  Stdout defaults to `Sink::Terminal` (terminal-bound).
-    fn leased_shell() -> Shell {
+    fn leased_shell() -> (Shell, Mooring) {
         let mut shell = Shell::default();
-        shell.run.io.interactive = true;
-        shell.run.io.terminal.startup_stdin_tty = true;
-        shell.run.io.terminal.startup_stdout_tty = true;
-        // Hand the session a lease and the run the authority to borrow it.
+        shell.io.interactive = true;
+        shell.io.terminal.startup_stdin_tty = true;
+        shell.io.terminal.startup_stdout_tty = true;
+        // Hand the session a lease and the mooring the authority to borrow it.
         shell.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
-        shell.run.terminal_access = TerminalAccess::Leased;
-        shell
+        let mooring = Mooring {
+            terminal_access: TerminalAccess::Leased,
+            ..Mooring::adrift()
+        };
+        (shell, mooring)
     }
 
-    /// A Leased run with a terminal-bound sink foregrounds its pipeline.
+    /// A Leased mooring with a terminal-bound sink foregrounds its pipeline.
     #[test]
     #[cfg(unix)]
     fn leased_terminal_bound_pipeline_foregrounds() {
-        let shell = leased_shell();
+        let (shell, mooring) = leased_shell();
         assert_eq!(
-            resolve_terminal_plan(&shell),
+            resolve_terminal_plan(&mooring, &shell),
             TerminalPlan::ForegroundExternalGroup,
         );
     }
 
     /// A captured pipeline (`!{...}`) has a buffer sink, not a terminal one,
-    /// so it must not steal foreground — even in a Leased run.
+    /// so it must not steal foreground — even in a Leased mooring.
     #[test]
     fn leased_captured_pipeline_skips_foreground() {
-        let mut shell = leased_shell();
+        let (mut shell, mooring) = leased_shell();
         let (sink, _buf) = crate::io::new_buffer();
-        shell.run.io.stdout = sink;
-        assert_eq!(resolve_terminal_plan(&shell), TerminalPlan::NoTerminal);
+        shell.io.stdout = sink;
+        assert_eq!(
+            resolve_terminal_plan(&mooring, &shell),
+            TerminalPlan::NoTerminal
+        );
     }
 
     /// `_ed-tui` captures stdout to read the body's selection, but the body
@@ -423,54 +430,60 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn ed_tui_loan_foregrounds_captured_pipeline() {
-        let mut shell = leased_shell();
+        let (mut shell, mut mooring) = leased_shell();
         let (sink, _buf) = crate::io::new_buffer();
-        shell.run.io.stdout = sink;
-        shell.run.terminal_access = TerminalAccess::ExplicitLoan;
+        shell.io.stdout = sink;
+        mooring.terminal_access = TerminalAccess::ExplicitLoan;
         assert_eq!(
-            resolve_terminal_plan(&shell),
+            resolve_terminal_plan(&mooring, &shell),
             TerminalPlan::ForegroundExternalGroup,
         );
     }
 
-    /// A non-interactive script launched at a terminal holds a `Leased` run
-    /// exactly like the REPL, so its pipeline foregrounds — otherwise an
-    /// interactive child (`claude`, `fzf`) raises SIGTTOU on its first
+    /// A non-interactive script launched at a terminal holds a `Leased`
+    /// mooring exactly like the REPL, so its pipeline foregrounds — otherwise
+    /// an interactive child (`claude`, `fzf`) raises SIGTTOU on its first
     /// `tcsetattr` from a background pgroup.  Regression for the
     /// `run-claude.ral` SIGTTOU teardown.
     #[test]
     #[cfg(unix)]
     fn terminal_script_leased_pipeline_foregrounds() {
-        let mut shell = leased_shell();
-        shell.run.io.interactive = false;
+        let (mut shell, mooring) = leased_shell();
+        shell.io.interactive = false;
         assert_eq!(
-            resolve_terminal_plan(&shell),
+            resolve_terminal_plan(&mooring, &shell),
             TerminalPlan::ForegroundExternalGroup,
         );
     }
 
-    /// A `Denied` run never foregrounds, *even though the session owns a
+    /// A `Denied` mooring never foregrounds, *even though the session owns a
     /// lease* — the exarch tool-run case.  The lease borrow is unreachable
-    /// from a `Denied` run, so the SIGTTIN handoff is unrepresentable.
+    /// from a `Denied` mooring, so the SIGTTIN handoff is unrepresentable.
     #[test]
     #[cfg(unix)]
     fn denied_run_skips_foreground() {
-        let mut shell = leased_shell();
-        shell.run.terminal_access = TerminalAccess::Denied;
+        let (shell, mut mooring) = leased_shell();
+        mooring.terminal_access = TerminalAccess::Denied;
         assert!(
             shell.session.terminal_lease.is_some(),
             "session owns a lease"
         );
-        assert_eq!(resolve_terminal_plan(&shell), TerminalPlan::NoTerminal);
+        assert_eq!(
+            resolve_terminal_plan(&mooring, &shell),
+            TerminalPlan::NoTerminal
+        );
     }
 
     /// A launch that never owned the terminal foreground (backgrounded
     /// `ral … &`, a piped or tty-less eval) minted no lease, so even a
-    /// `Leased` run cannot borrow one and never foregrounds.
+    /// `Leased` mooring cannot borrow one and never foregrounds.
     #[test]
     fn no_lease_skips_foreground() {
-        let mut shell = leased_shell();
+        let (mut shell, mooring) = leased_shell();
         shell.session.terminal_lease = None;
-        assert_eq!(resolve_terminal_plan(&shell), TerminalPlan::NoTerminal);
+        assert_eq!(
+            resolve_terminal_plan(&mooring, &shell),
+            TerminalPlan::NoTerminal
+        );
     }
 }

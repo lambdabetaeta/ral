@@ -85,11 +85,12 @@ impl BakedPrelude {
     /// results in `OnceLock`s already filled (the blobs are unused).
     ///
     /// # Panics
-    /// Panics if the embedded `prelude.ral` fails to parse.
+    /// Panics if the embedded `prelude.ral` fails to parse or elaborate.
     pub fn bake_runtime() -> Self {
         let src = include_str!("prelude.ral");
         let ast = crate::parse(src).expect("prelude parse");
-        let comp = crate::elaborate(&ast, std::collections::HashSet::default());
+        let comp = crate::elaborate(&ast, std::collections::HashSet::default(), "")
+            .expect("prelude elaborate");
         let (annotated, schemes) = crate::bake_prelude(&comp);
         let this = Self::from_blobs(&[], &[]);
         let _ = this.comp.set(Arc::new(annotated));
@@ -213,7 +214,11 @@ pub fn bake_prelude_to_out_dir() {
         eprintln!("build: prelude parse error: {e}");
         std::process::exit(1);
     });
-    let comp = crate::elaborate(&ast, std::collections::HashSet::default());
+    let comp =
+        crate::elaborate(&ast, std::collections::HashSet::default(), "").unwrap_or_else(|e| {
+            eprintln!("build: prelude elaborate error: {e}");
+            std::process::exit(1);
+        });
 
     let (annotated, schemes) = crate::bake_prelude(&comp);
     let ir_bytes = postcard::to_allocvec(&annotated).expect("prelude IR serialization failed");

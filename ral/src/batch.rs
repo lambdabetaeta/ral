@@ -136,9 +136,20 @@ pub(crate) fn run_batch(
         return ExitCode::SUCCESS;
     }
 
+    let bare = match elaborate(&ast, std::collections::HashSet::default(), name) {
+        Ok(comp) => comp,
+        Err(e) => {
+            eprint!(
+                "{}",
+                diagnostic::format_parse_error_ariadne(name, source, &e)
+            );
+            return ExitCode::from(2);
+        }
+    };
+    tick!("elaborate");
+
     if check {
-        let comp = elaborate(&ast, std::collections::HashSet::default());
-        if let Err(errors) = run_check(&comp) {
+        if let Err(errors) = run_check(&bare) {
             eprint!(
                 "{}",
                 diagnostic::format_type_errors_ariadne(name, source, &errors)
@@ -173,9 +184,6 @@ pub(crate) fn run_batch(
     if audit {
         shell.enable_audit();
     }
-
-    let bare = elaborate(&ast, std::collections::HashSet::default());
-    tick!("elaborate");
 
     let comp = match run_check(&bare) {
         Ok(annotated) => Arc::new(annotated),

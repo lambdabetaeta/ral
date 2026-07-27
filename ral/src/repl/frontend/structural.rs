@@ -615,6 +615,7 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
         src,
         shell.session_schemes(),
         ral_core::source::FileId::DUMMY,
+        "",
     ) {
         CompileOutcome::Compiled(comp) => match pipeline_stage_rows(&comp, src) {
             Some(rows) => Spine::Stages(rows),
@@ -1522,6 +1523,7 @@ mod tests {
             "/bin/echo hi | /bin/cat",
             ral_core::typecheck::SessionSchemes::default(),
             ral_core::source::FileId::DUMMY,
+            "",
         );
         let CompileOutcome::Compiled(comp) = outcome else {
             panic!("pipeline should compile");
@@ -1543,6 +1545,7 @@ mod tests {
             "/bin/echo hi",
             ral_core::typecheck::SessionSchemes::default(),
             ral_core::source::FileId::DUMMY,
+            "",
         );
         let CompileOutcome::Compiled(comp) = outcome else {
             panic!("should compile");

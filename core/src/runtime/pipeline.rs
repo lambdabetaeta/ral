@@ -61,7 +61,7 @@ pub(crate) fn run_pipeline(
     // collect blocks on a long-running consumer that never received
     // the signal.  Bail here instead.
     crate::process::check(mooring)?;
-    let plan = resolve_pipeline(stages, wires, shell)?;
+    let plan = resolve_pipeline(stages, wires, mooring, shell)?;
     if plan.kind == PipelineKind::PureValue {
         return run_value_fold(stages, tail, mooring, shell);
     }

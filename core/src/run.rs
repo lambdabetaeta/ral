@@ -14,33 +14,35 @@
 //! The door and the types a host describes its policy with ([`RunIo`],
 //! [`RunStdin`], [`RequestedTerminalAccess`], [`RunRequest`]) live here, and
 //! behind them the spine they orchestrate: [`compile_run`] (parse/typecheck),
-//! [`build_run`] (materialise the [`Disposition`]), and [`run_framed`]
+//! [`build_run`] (materialise the run's `Io`), and [`run_framed`]
 //! (install, hook, evaluate, classify).
 //!
-//! A run's frame is split by mutability. What the run fixes once — its
-//! surface sink, deferred rail, desk, nursery, cancel scope, worker lease and
-//! cap — is a [`Mooring`], an owned local on [`Shell::run_built`]'s own stack
-//! frame that every callee borrows; an outer run's mooring is restored by the
-//! stack unwinding, and its [`Drop`] empties its nursery on that same
-//! unwinding. What genuinely changes within a run — the byte streams, the
-//! source cursor, the terminal authority — is a [`Disposition`] on the
-//! `Shell`, so installing a run is one swap: [`RunGuard`] moves the new
-//! residue into `shell.run` and restores the previous one on `Drop`, even
-//! when the evaluation unwinds (a host may catch a worker panic and continue
-//! the session on the same `Shell`). The IO regime
-//! is a sum of two cases: under `Inherit` the new frame's byte sinks are
-//! cloned from the ambient session streams; under `Capture` they are the
-//! fresh set the host reads back. The swap is total in both cases — only the
-//! seed differs.
+//! A run's frame is split by mutability — **borrow when you can, loan when
+//! you must**. What the run fixes once — its surface sink, deferred rail,
+//! desk, nursery, cancel scope, worker lease and cap, and its terminal
+//! authority — is a [`Mooring`], an owned local on [`Shell::run_built`]'s own
+//! stack frame that every callee borrows; an outer run's mooring is restored
+//! by the stack unwinding, and a [`NurseryGuard`] beside it empties its
+//! nursery on that same unwinding. What genuinely changes within a run — the
+//! byte streams, the source cursor, the dispatch call-site register — is
+//! taken on loan: installing a run is one swap, [`IoLoan`] moves the new `Io`
+//! into `shell.io` (and the two `Copy` registers, `session.root_file` and
+//! `local.audit.call_site`, alongside it) and restores the previous ones on
+//! `Drop`, even when the evaluation unwinds (a host may catch a worker panic
+//! and continue the session on the same `Shell`). The IO regime is a sum of
+//! two cases: under `Inherit` the new frame's byte sinks are cloned from the
+//! ambient session streams; under `Capture` they are the fresh set the host
+//! reads back. The swap is total in both cases — only the seed differs.
 
 use crate::io::{Io, Sink, Source};
 use crate::process::{CancelCause, ForegroundScope};
+use crate::source::{FileId, Span};
 use crate::syntax::parser::ParseError;
 use crate::transport::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Disposition, Escape, Mooring, Nursery, Settled, Shell,
-    SurfaceSink, TerminalPolicy, Value,
+    Break, Capabilities, DeferredSink, Desk, Escape, Mooring, Nursery, NurseryGuard, Settled,
+    Shell, SurfaceSink, TerminalPolicy, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
@@ -77,7 +79,7 @@ pub enum StaticDiagnostics {
 // (`Shell::register_hook` stores compiled hooks by name in the session-lived
 // hook table).  It returns one flat `RunReport`.  Hosts describe *policy*
 // (the protocol `Run`, `RunIo`, `SurfaceSink`, lifecycle hooks); core owns
-// *resources* (`Sink`, `Source`, `Mooring`, `Disposition`, guards, buffers, cancel
+// *resources* (`Sink`, `Source`, `Mooring`, `Io`, guards, buffers, cancel
 // scopes).  Completion is the call returning — never a channel disconnecting
 // — so a deferred worker holding a surface clone cannot keep a run from
 // ending.  This door is the only way into evaluation: the reduction
@@ -89,7 +91,7 @@ pub enum StaticDiagnostics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunIo {
     /// Run on the session's live streams: the run's byte sinks are cloned
-    /// from the ambient `shell.run`. The interactive REPL (whose stdout is
+    /// from the ambient `shell.io`. The interactive REPL (whose stdout is
     /// the external printer) and batch (the process streams).
     Inherit,
     /// Mint fresh stdout/stderr buffers core returns in
@@ -303,7 +305,7 @@ impl Shell {
                 let foreground = self.durable_root().foreground(under);
                 let wall = arm_wall(req.run.wall, None, &foreground);
 
-                let (comp, single_command) = match compile_run(self, src) {
+                let (comp, single_command) = match compile_run(self, src, &req.run.script_name) {
                     Ok(parts) => parts,
                     Err(diagnostics) => return RunReport::Static { diagnostics },
                 };
@@ -359,7 +361,7 @@ impl Shell {
 
     /// The framed scaffold behind the run door: materialise the IO regime
     /// from the run's conditions, build this run's [`Mooring`] on the
-    /// pre-minted `foreground` and install its [`Disposition`], evaluate
+    /// pre-minted `foreground` and install its `Io`, evaluate
     /// `body` under the capability ceiling and lifecycle hooks, then disarm
     /// the `wall` and fold the captured bytes and `timed_out` into the
     /// report. `body` is the run's resolved program — the source arm's
@@ -367,8 +369,10 @@ impl Shell {
     ///
     /// The mooring is an owned local on *this* Rust stack frame and is only
     /// ever lent onward, so an outer run's mooring is restored by the stack
-    /// unwinding rather than by a guard — and this one's [`Drop`] empties its
-    /// nursery on the panic path as surely as on the clean one.
+    /// unwinding rather than by a guard — and the [`NurseryGuard`] built
+    /// alongside it empties its nursery on the panic path as surely as on the
+    /// clean one, since both are owned locals inside `enter`'s
+    /// `catch_unwind`.
     fn run_built(
         &mut self,
         req: RunRequest<'_>,
@@ -409,7 +413,7 @@ impl Shell {
         };
 
         // Stdin source and terminal authority are independent of the output
-        // regime: `Capture` no longer implies `Source::Terminal`. A tool run
+        // regime: `Capture` does not imply `Source::Terminal`. A tool run
         // is `Denied` + `Empty`; a piped `ral -c` is `Denied` + `Inherit`.
         let stdin = match run.stdin {
             RunStdin::Inherit => Source::Terminal,
@@ -420,6 +424,7 @@ impl Shell {
             RequestedTerminalAccess::Denied => crate::types::TerminalAccess::Denied,
         };
 
+        let _nursery_guard = NurseryGuard(nursery.clone());
         let mooring = Mooring {
             surface,
             deferred,
@@ -428,8 +433,9 @@ impl Shell {
             cancel: foreground,
             deferred_lease: run.deferred_lease,
             worker_cap: run.worker_cap,
+            terminal_access,
         };
-        let next = build_run(self, capture, stdin, terminal_access);
+        let next = build_run(self, capture, stdin);
         let (result, status) = run_framed(
             &mooring,
             self,
@@ -480,29 +486,40 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
     }
 }
 
-/// Saves the previous run's [`Disposition`] on install and restores it on
-/// `Drop`.
-/// Restoring under `Drop` rather than an
-/// explicit epilogue keeps the persistent `Shell` clean even when the
-/// evaluation unwinds — a host that catches a worker panic and continues the
-/// session on the same `Shell` would otherwise inherit a stale cursor, a
-/// stale terminal authority, and (had the run captured IO) the prior run's
-/// buffers.
+/// Saves what a run takes on loan from the shell on install and restores it
+/// on `Drop`: the byte streams, plus two `Copy` registers this run's frame
+/// also owns for its life — `session.root_file` and `local.audit.call_site`.
+/// Restoring under `Drop` rather than an explicit epilogue keeps the
+/// persistent `Shell` clean even when the evaluation unwinds — a host that
+/// catches a worker panic and continues the session on the same `Shell`
+/// would otherwise inherit a stale cursor, a stale root file, a stale call
+/// site, and (had the run captured IO) the prior run's buffers.
 ///
 /// A swap and nothing more: what the previous run must *stop* being reachable
-/// through — its surface sink, its scope, its nursery — is its
-/// [`Mooring`], which was never on the shell and needs no restoring.
-struct RunGuard<'s> {
+/// through — its surface sink, its scope, its nursery, its terminal
+/// authority — is its [`Mooring`], which was never on the shell and needs no
+/// restoring.
+struct IoLoan<'s> {
     shell: &'s mut Shell,
-    saved: Disposition,
+    saved: Io,
+    saved_root: FileId,
+    saved_site: Option<Span>,
 }
 
-impl<'s> RunGuard<'s> {
-    /// Swap `next` into `shell.run` and hold the displaced residue for
-    /// restoration on `Drop`.
-    fn install(shell: &'s mut Shell, next: Disposition) -> Self {
-        let saved = std::mem::replace(&mut shell.run, next);
-        Self { shell, saved }
+impl<'s> IoLoan<'s> {
+    /// Swap `next` into `shell.io`, and `None`/`DUMMY` the call-site and
+    /// root-file registers, holding the displaced values for restoration on
+    /// `Drop`.
+    fn install(shell: &'s mut Shell, next: Io) -> Self {
+        let saved = std::mem::replace(&mut shell.io, next);
+        let saved_root = std::mem::replace(&mut shell.session.root_file, FileId::DUMMY);
+        let saved_site = shell.local.audit.call_site.take();
+        Self {
+            shell,
+            saved,
+            saved_root,
+            saved_site,
+        }
     }
 
     fn shell_mut(&mut self) -> &mut Shell {
@@ -510,33 +527,31 @@ impl<'s> RunGuard<'s> {
     }
 }
 
-impl Drop for RunGuard<'_> {
+impl Drop for IoLoan<'_> {
     fn drop(&mut self) {
-        // Swap the saved residue back in; the displaced one moves into `saved`
-        // and drops with the guard.
-        std::mem::swap(&mut self.shell.run, &mut self.saved);
+        // Swap the saved streams back in; the displaced ones move into
+        // `saved` and drop with the guard. The two `Copy` registers just
+        // overwrite.
+        std::mem::swap(&mut self.shell.io, &mut self.saved);
+        self.shell.session.root_file = self.saved_root;
+        self.shell.local.audit.call_site = self.saved_site;
     }
 }
 
-/// Build the [`Disposition`] a run installs, seeded from the ambient `shell`.
+/// Build the `Io` a run installs, seeded from the ambient `shell`.
 ///
 /// `capture` is `Some` only under [`RunIo::Capture`],
 /// where the run's byte *output* streams are redirected into host-read
 /// buffers; under `Inherit` it is `None` and the ambient streams flow through
-/// unchanged. `stdin` and `terminal_access` are supplied independently of the
-/// output regime (the host's [`RunStdin`] and
-/// [`RequestedTerminalAccess`]): stdin is
-/// always installed, so `Capture` no longer implies `Source::Terminal`.
-pub(crate) fn build_run(
-    shell: &Shell,
-    capture: Option<(Sink, Sink)>,
-    stdin: Source,
-    terminal_access: crate::types::TerminalAccess,
-) -> Disposition {
-    let mut run_io = shell.run.io.try_clone().unwrap_or_else(|_| Io {
-        terminal: shell.run.io.terminal,
-        interactive: shell.run.io.interactive,
-        launch_role: shell.run.io.launch_role,
+/// unchanged. `stdin` is supplied independently of the output regime (the
+/// host's [`RunStdin`]): it is always installed, so `Capture` does not
+/// imply `Source::Terminal`. Terminal authority is not part of this return
+/// value — it lives on the [`Mooring`] the caller builds separately.
+pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Source) -> Io {
+    let mut run_io = shell.io.try_clone().unwrap_or_else(|_| Io {
+        terminal: shell.io.terminal,
+        interactive: shell.io.interactive,
+        launch_role: shell.io.launch_role,
         ..Io::default()
     });
     run_io.stdin = stdin;
@@ -544,11 +559,7 @@ pub(crate) fn build_run(
         run_io.stdout = stdout;
         run_io.stderr = stderr;
     }
-    Disposition {
-        io: run_io,
-        call_site: None,
-        terminal_access,
-    }
+    run_io
 }
 
 /// Clear signal state, compile and typecheck `src` against the live session.
@@ -557,18 +568,18 @@ pub(crate) fn build_run(
 /// `single_command` flag is harvested here because the host needs it to render
 /// runtime errors after `comp` is consumed.
 ///
-/// Resets the session's source registry and peeks the [`FileId`] the next
-/// registration will mint *before* compiling, so the compiled program's
-/// spans carry this run's real file identity. [`Shell::install_root_context`]
-/// performs the actual reset-then-register once the run frame exists to
-/// install it into ([`run_framed`]); nothing between here and there touches
-/// the registry, so the id it mints always agrees with the one peeked here.
+/// Peeks the [`FileId`] the next registration will mint *before* compiling,
+/// so the compiled program's spans carry this run's real file identity.
+/// [`Shell::install_root_context`] performs the actual registration once the
+/// run frame exists to install it into ([`run_framed`]); nothing between here
+/// and there touches the registry — which only ever grows, never resets — so
+/// the id it mints always agrees with the one peeked here.
 pub(crate) fn compile_run(
-    shell: &mut Shell,
+    shell: &Shell,
     src: &str,
+    name: &str,
 ) -> Result<(Arc<crate::ir::Comp>, bool), StaticDiagnostics> {
     crate::process::clear();
-    shell.session.sources.reset();
     let file = shell.session.sources.next_id();
 
     #[cfg(debug_assertions)]
@@ -584,7 +595,7 @@ pub(crate) fn compile_run(
 
     #[cfg(debug_assertions)]
     let t_tc = std::time::Instant::now();
-    let outcome = compile_and_typecheck(src, schemes, file);
+    let outcome = compile_and_typecheck(src, schemes, file, name);
     crate::dbg_trace!(
         "shell",
         "compile_and_typecheck: {n_bindings} bindings, {} src bytes in {:?}",
@@ -607,10 +618,10 @@ pub(crate) fn compile_run(
 /// program: the source door evaluates a compiled [`Comp`](crate::ir::Comp)
 /// (`eval_top_level`); the value door applies an already-evaluated thunk in
 /// place (`builtins::apply`). Both settle to one [`Settled<Value>`], so the
-/// lifecycle/capability/status spine is shared verbatim. The `RunGuard`
-/// restores the prior residue on `Drop`, even on unwind. The caller
-/// ([`Shell::run_built`]) owns the mooring, IO materialisation, limit arming,
-/// and the `timed_out`/capture classification.
+/// lifecycle/capability/status spine is shared verbatim. The [`IoLoan`]
+/// restores the prior streams and registers on `Drop`, even on unwind. The
+/// caller ([`Shell::run_built`]) owns the mooring, IO materialisation, limit
+/// arming, and the `timed_out`/capture classification.
 #[allow(
     clippy::too_many_arguments,
     reason = "the run spine's whole frame in one place; a carrier struct would just relay the same fields"
@@ -618,16 +629,16 @@ pub(crate) fn compile_run(
 pub(crate) fn run_framed<'a>(
     mooring: &Mooring,
     shell: &mut Shell,
-    next: Disposition,
+    next: Io,
     script_name: &str,
     src: &str,
     capabilities: Capabilities,
     mut lifecycle: Box<dyn RunLifecycle + 'a>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
-    let mut guard = RunGuard::install(shell, next);
+    let mut guard = IoLoan::install(shell, next);
     let shell = guard.shell_mut();
-    shell.install_root_context(script_name.to_string(), src);
+    shell.install_root_context(script_name, src);
 
     lifecycle.pre_exec(mooring, shell, src);
 
@@ -642,7 +653,7 @@ pub(crate) fn run_framed<'a>(
     // the run's own stderr — while this run's frame (its surface sink and
     // capture streams) is still installed, so each rides this run's own
     // stream, ordered before its Report (`decisions/260706_enquiry-channel`
-    // §4.2). After `guard` drops below, `shell.run` reverts and there is no
+    // §4.2). After `guard` drops below, `shell.io` reverts and there is no
     // sink left to push through.
     shell.emit_ready_boundary_notices(mooring);
 
@@ -1262,7 +1273,7 @@ mod tests {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
-        shell.run.io.stdout = Sink::Buffer(marker.clone());
+        shell.io.stdout = Sink::Buffer(marker.clone());
 
         let req = capture_req("echo hi");
         let _ = shell.run(RunRequest {
@@ -1274,7 +1285,7 @@ mod tests {
         });
 
         assert!(
-            matches!(&shell.run.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
+            matches!(&shell.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
             "Inherit must restore the session's stdout sink after the run"
         );
         let written = marker.lock().unwrap().clone();

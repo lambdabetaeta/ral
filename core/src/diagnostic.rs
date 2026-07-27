@@ -692,23 +692,6 @@ mod tests {
         );
     }
 
-    /// A top-level run boundary resets the db before registering: a second
-    /// run's source reuses the first run's id rather than appending, so a
-    /// long session does not grow the registry without bound.
-    #[test]
-    fn reset_reclaims_ids_across_runs() {
-        let mut db = SourceDb::default();
-        let first = db.register(Source::from_text("<stdin>", "echo a"));
-        db.reset();
-        let second = db.register(Source::from_text("<stdin>", "echo b"));
-        assert_eq!(first, second, "the reset run must reuse the first id");
-        assert_eq!(
-            db.get(second).map(Source::as_str),
-            Some("echo b"),
-            "only the current run's source resolves after a reset"
-        );
-    }
-
     #[test]
     fn no_color_output_has_no_ansi() {
         // NO_COLOR path: messageless render produces no escape codes.

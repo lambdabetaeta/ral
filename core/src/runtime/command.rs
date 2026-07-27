@@ -115,11 +115,10 @@ pub(crate) fn run(
     let inherit_tty = inherit_tty(&plan, shell);
 
     // Wire stdout before stderr: on Windows, `wire_stderr`'s `2>&1`
-    // case reads `shell.run.io.stdout` to clone a writer; on Unix,
+    // case reads `shell.io.stdout` to clone a writer; on Unix,
     // the `pre_exec` dup2 needs a real stdout fd in place pre-fork.
     let stdout_plan = if plan.stdout_file.is_none() {
         let p = shell
-            .run
             .io
             .stdout
             .child_stdout(inherit_tty)
@@ -140,19 +139,19 @@ pub(crate) fn run(
         shell,
     )?;
 
-    // Stderr pump destination: clone `shell.run.io.stderr` (which
+    // Stderr pump destination: clone `shell.io.stderr` (which
     // may itself be a Tee under dispatch-level audit capture) when
     // stderr was piped; otherwise there is nothing for ral to drain
     // (file / 2>&1 / inherited fd 2). The clone happens pre-spawn so
     // that no fallible work remains between `spawn` and
     // `RunningChild::assemble` — the `?` here cannot leak a child.
     let stderr_pump = if stderr_piped {
-        Some(shell.run.io.stderr.try_clone().map_err(|e| pipe_err(&e))?)
+        Some(shell.io.stderr.try_clone().map_err(|e| pipe_err(&e))?)
     } else {
         None
     };
 
-    let fg = ForegroundDecision::for_standalone(shell, needs_pump);
+    let fg = ForegroundDecision::for_standalone(shell, needs_pump, mooring);
     let image_shown = match &rc.image {
         ExecImage::Host(p) => p.clone(),
         ExecImage::BundledTool { tool } => format!("ral --ral-bundled-tool {tool}"),
@@ -183,7 +182,7 @@ pub(crate) fn run(
     };
 
     let child_pid = child.id();
-    let _fg_guard = fg.acquire(child_pid, shell);
+    let _fg_guard = fg.acquire(child_pid, shell, mooring);
 
     // The `_fg_guard` above hands the terminal to the child through
     // an RAII `ForegroundGuard`: its `Drop` restores ral's pgid no
@@ -290,7 +289,7 @@ pub(crate) fn run(
 
     // Join the pump threads. When audit is active, bytes are
     // captured by the dispatch-level `with_audit_capture` Tee on
-    // `shell.run.io.stdout` / `shell.run.io.stderr`, so there is
+    // `shell.io.stdout` / `shell.io.stderr`, so there is
     // nothing for this site to drain.
     waited.drain();
     let code = outcome.to_user_exit_code();
@@ -304,7 +303,7 @@ pub(crate) fn run(
     // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
     // pipeline helper subprocess) forgives SIGPIPE — the reader ended the
     // pipe, not a real error.
-    let forgive_sigpipe = !shell.run.io.launch_role.is_top_level();
+    let forgive_sigpipe = !shell.io.launch_role.is_top_level();
     match crate::process::CommandFailure::from_outcome(outcome, forgive_sigpipe) {
         None => Ok(Value::Unit),
         Some(failure) => {
@@ -323,7 +322,7 @@ pub(crate) fn run(
 
 /// Announce the running command via the terminal title (OSC 0).
 fn announce_command_title(cmd: &str, shell: &Shell) {
-    if shell.run.io.interactive && shell.run.io.terminal.ui_title_ok() {
+    if shell.io.interactive && shell.io.terminal.ui_title_ok() {
         use std::io::Write;
         let _ = std::io::stdout().write_all(crate::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();
@@ -343,7 +342,7 @@ fn trace_io_wiring(
     fg: &ForegroundDecision,
     shell: &Shell,
 ) {
-    let sink = match &shell.run.io.stdout {
+    let sink = match &shell.io.stdout {
         crate::io::Sink::Terminal => "Terminal",
         crate::io::Sink::External(_) => "External",
         crate::io::Sink::Pipe(_) => "Pipe",
@@ -354,10 +353,10 @@ fn trace_io_wiring(
         "cmd={cmd_name} resolved={resolved} tty=[in:{} out:{} err:{}] \
          sink={sink} inherit={inherit_tty} pump={needs_pump} \
          interactive={} fg_job={}",
-        shell.run.io.terminal.startup_stdin_tty,
-        shell.run.io.terminal.startup_stdout_tty,
-        shell.run.io.terminal.startup_stderr_tty,
-        shell.run.io.interactive,
+        shell.io.terminal.startup_stdin_tty,
+        shell.io.terminal.startup_stdout_tty,
+        shell.io.terminal.startup_stderr_tty,
+        shell.io.interactive,
         fg.want_fg(),
     );
 }

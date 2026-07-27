@@ -101,6 +101,7 @@ impl Worksheet {
             input,
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
+            "",
         ) {
             ral_core::CompileOutcome::Compiled(comp) => bind_effects(&comp),
             _ => return,

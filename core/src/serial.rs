@@ -594,7 +594,7 @@ mod tests {
         // both interior to the lambda body — the shape the ADR names.
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
-        let comp = crate::elaborate(&ast, HashSet::default());
+        let comp = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
         let annotated =
             crate::typecheck(&comp, crate::SessionSchemes::default()).expect("typecheck");
         let mut body = None;

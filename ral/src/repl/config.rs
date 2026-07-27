@@ -352,10 +352,10 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
-        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(
-            &ast,
-            std::collections::HashSet::default(),
-        ));
+        let comp = std::sync::Arc::new(
+            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+                .expect("elaborate"),
+        );
         let config = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
         let mut mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
@@ -386,7 +386,8 @@ mod tests {
     /// Typecheck `src` against the baked prelude; return the errors.
     fn typecheck_src(src: &str) -> Vec<ral_core::TypeError> {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default());
+        let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+            .expect("elaborate");
         let schemes = ral_core::SessionSchemes::from_schemes(
             crate::PRELUDE.schemes(),
             ral_core::builtins::core_builtin_table(),
@@ -625,7 +626,8 @@ mod tests {
     /// seed a real prompt run uses — and return the errors.
     fn typecheck_against_session(shell: &Shell, src: &str) -> Vec<ral_core::TypeError> {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default());
+        let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+            .expect("elaborate");
         ral_core::typecheck(&comp, shell.session_schemes())
             .err()
             .unwrap_or_default()

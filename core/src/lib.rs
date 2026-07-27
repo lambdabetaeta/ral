@@ -104,9 +104,13 @@ pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 /// source" rather than re-spelling the ladder.
 ///
 /// # Errors
-/// Returns `Err` if `source` fails to parse; elaboration is infallible.
+/// Returns `Err` if `source` fails to parse, or if elaboration rejects it
+/// (currently: `$SCRIPT` referenced with no script identity to bake — see
+/// [`elaborator::elaborate`]).  A caller with no name of its own — this one
+/// — has no script identity, so `$SCRIPT` inside `source` is always that
+/// error.
 pub fn compile(source: &str) -> Result<Comp, ParseError> {
-    parse(source).map(|ast| elaborate(&ast, std::collections::HashSet::default()))
+    parse(source).and_then(|ast| elaborate(&ast, std::collections::HashSet::default(), ""))
 }
 
 /// Outcome of [`compile_and_typecheck`]: either a compiled program, a parse
@@ -167,19 +171,29 @@ impl CompileOutcome {
 /// so the program's spans carry the run's real file identity rather than
 /// the [`FileId::DUMMY`](source::FileId::DUMMY) placeholder [`parse`] falls
 /// back to.
+///
+/// `name` is that same source's display name — the one the elaborator
+/// bakes into every `$SCRIPT` reference in its body (self-location is
+/// lexical, resolved at elaboration time, not read dynamically at eval
+/// time). Pass the same string the caller registers `file` under.
 pub fn compile_and_typecheck(
     source: &str,
     schemes: SessionSchemes,
     file: source::FileId,
+    name: &str,
 ) -> CompileOutcome {
     let ast = match parse_with(source, file) {
         Ok(a) => a,
         Err(e) => return CompileOutcome::Parse(e),
     };
-    let comp = elaborate(
+    let comp = match elaborate(
         &ast,
         schemes.bindings.iter().map(|(n, _)| n.clone()).collect(),
-    );
+        name,
+    ) {
+        Ok(comp) => comp,
+        Err(e) => return CompileOutcome::Parse(e),
+    };
     match typecheck(&comp, schemes) {
         Ok(annotated) => CompileOutcome::Compiled(annotated),
         Err(errs) => CompileOutcome::Types(errs),

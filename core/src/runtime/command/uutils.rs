@@ -31,7 +31,7 @@ use {
 /// stdio is direct-to-fd and ral's logical state agrees with the process
 /// state.  A non-terminal stdin (`Source::Pipe` / `Source::File`, e.g. a
 /// piped-into bundled tool or a function body fed by `<`) is parked in
-/// `shell.run.io.stdin`, not on fd 0, so it forces child placement: the
+/// `shell.io.stdin`, not on fd 0, so it forces child placement: the
 /// child receives the real stdin handle through ordinary stdio plumbing
 /// rather than the parent rewiring its own fd 0.  Any capture buffer or
 /// audit Tee, or any `env_overrides` / `within [dir: …]` / `cd`-mutated
@@ -49,9 +49,9 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
         None => true,
         Some(p) => crate::path::process_cwd().is_some_and(|q| q == *p),
     };
-    matches!(shell.run.io.stdin, Source::Terminal)
-        && matches!(shell.run.io.stdout, Sink::Terminal | Sink::External(_))
-        && matches!(shell.run.io.stderr, Sink::Stderr)
+    matches!(shell.io.stdin, Source::Terminal)
+        && matches!(shell.io.stdout, Sink::Terminal | Sink::External(_))
+        && matches!(shell.io.stderr, Sink::Stderr)
         && shell.mobile.context.env_overrides().is_empty()
         && shell.mobile.context.dir.is_none()
         && cwd_matches_process
@@ -262,7 +262,7 @@ mod tests {
     fn pipe_stdin_forces_child_placement() {
         let mut shell = Shell::default();
         let (reader, _writer) = os_pipe::pipe().expect("pipe");
-        shell.run.io.stdin = crate::io::Source::Pipe(reader);
+        shell.io.stdin = crate::io::Source::Pipe(reader);
         assert!(
             !can_run_uutils_in_process(&shell),
             "a non-terminal stdin must force child placement, not inline \

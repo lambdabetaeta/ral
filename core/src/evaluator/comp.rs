@@ -134,11 +134,17 @@ pub(crate) fn eval_comp(
             // trampoline (`apply`), which absorbs any terminal tail
             // call inside the `with_*` frame, so the body's tail-ness
             // never escapes the bracket — these arms grant nothing.
-            ScopeOp::Within { opts, body } => scope::eval_within(opts, body, mooring, shell),
-            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, mooring, shell),
-            ScopeOp::Try { body, handler } => scope::eval_try(body, handler, mooring, shell),
-            ScopeOp::Guard { body, cleanup } => scope::eval_guard(body, cleanup, mooring, shell),
-            ScopeOp::Audit { body } => scope::eval_audit(body, mooring, shell),
+            ScopeOp::Within { opts, body } => {
+                scope::eval_within(opts, body, comp.span, mooring, shell)
+            }
+            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, comp.span, mooring, shell),
+            ScopeOp::Try { body, handler } => {
+                scope::eval_try(body, handler, comp.span, mooring, shell)
+            }
+            ScopeOp::Guard { body, cleanup } => {
+                scope::eval_guard(body, cleanup, comp.span, mooring, shell)
+            }
+            ScopeOp::Audit { body } => scope::eval_audit(body, comp.span, mooring, shell),
         },
 
         CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),
@@ -487,9 +493,8 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shel
         let last = i == len - 1;
         let elem_tail = if last { tail } else { Tail::No };
         result = eval_comp(c, mooring, shell, elem_tail)?;
-        if !last && let Some(outer) = &shell.run.io.capture_outer {
+        if !last && let Some(outer) = &shell.io.capture_outer {
             shell
-                .run
                 .io
                 .stdout
                 .flush_to(outer)

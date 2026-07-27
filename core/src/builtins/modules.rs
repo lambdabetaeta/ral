@@ -75,7 +75,7 @@ pub fn evaluate_checked(
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
     }
-    shell.install_script_context(key.clone(), source);
+    shell.install_script_context(&key, source);
     shell.mobile.context.modules.stack.push(key);
     shell.mobile.context.modules.depth += 1;
     let result = crate::evaluate(comp, mooring, shell);
@@ -107,7 +107,7 @@ pub fn evaluate_source(
     source: &str,
     virtual_path: &str,
 ) -> Settled<Value> {
-    let comp = check_source(source, shell)?;
+    let comp = check_source(source, virtual_path, shell)?;
     evaluate_checked(mooring, shell, &comp, source, virtual_path)
 }
 
@@ -122,7 +122,8 @@ pub fn evaluate_source(
 /// registration ([`evaluate_checked`], right after this returns) will
 /// mint, so the compiled program's spans carry its real file identity —
 /// nothing else registers a source into the session between the peek and
-/// that registration.
+/// that registration.  `virtual_path` doubles as the compile door's
+/// script name, so the module's own `$SCRIPT` references bake to it.
 ///
 /// Also the shared harvest seam for the binding-lease ledger
 /// (`decisions/260629_agent-binding-reaping`): every runtime-compiled load —
@@ -131,9 +132,13 @@ pub fn evaluate_source(
 /// covers all of them. The load is executing inside an already-committed
 /// run, so its references are real uses, unlike the run-boundary tick
 /// which this door does not touch.
-fn check_source(source: &str, shell: &mut Shell) -> Settled<std::sync::Arc<Comp>> {
+fn check_source(
+    source: &str,
+    virtual_path: &str,
+    shell: &mut Shell,
+) -> Settled<std::sync::Arc<Comp>> {
     let file = shell.session.sources.next_id();
-    let comp = crate::compile_and_typecheck(source, shell.session_schemes(), file)
+    let comp = crate::compile_and_typecheck(source, shell.session_schemes(), file, virtual_path)
         .into_comp_or_message()
         .map(std::sync::Arc::new)
         .map_err(sig)?;
@@ -239,6 +244,21 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     result.map_err(|e| tag_loader_error("use", e))
 }
 
+/// Resolve `path` against the directory of the innermost `source`/`use`
+/// currently loading — `context.modules.stack`'s top, pushed by every
+/// `source`/`use`/plugin/capability load through [`evaluate_checked`] —
+/// falling back to the run's own root source when no load is in flight
+/// (a bare top-level `source`/`use`).
 fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
-    crate::path::resolve_relative_to_script(path, shell.script_name().unwrap_or_default())
+    let script = shell.mobile.context.modules.stack.last().map_or_else(
+        || {
+            shell
+                .session
+                .sources
+                .get(shell.session.root_file)
+                .map_or("", crate::source::Source::name)
+        },
+        String::as_str,
+    );
+    crate::path::resolve_relative_to_script(path, script)
 }

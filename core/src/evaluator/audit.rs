@@ -20,6 +20,7 @@
 //! All functions are no-ops when `shell.local.audit.active()` is `false`, so
 //! the dispatcher path can call them unconditionally.
 
+use crate::source::Span;
 use crate::types::{
     AuditIo, AuditTime, BodyResult, Break, CallSite, CapturePolicy, Control, Escape, ExecNode, Map,
     Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
@@ -247,6 +248,11 @@ pub(crate) struct ScopeRecord {
 /// at the dispatcher level by `with_audit_capture` flow into the
 /// children, so this policy is what they observe.
 ///
+/// `span` is the scope node's own source position — its enclosing
+/// `Comp`'s span, resolved via [`Shell::site_of`] — rather than the
+/// dispatch register a command node reads: a scope node names where it
+/// sits, not whatever command preceded it.
+///
 /// The node's `last_status` comes from `shell.mobile.control.last_status`
 /// for a [`BodyResult::Value`] and from `e.exit_code()` for a
 /// [`BodyResult::Error`].
@@ -254,9 +260,17 @@ pub(crate) fn record_scope(
     shell: &mut Shell,
     cmd: &str,
     capture: CapturePolicy,
+    span: Option<Span>,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> Result<ScopeRecord, Escape> {
-    let start = start(shell);
+    let start = if shell.local.audit.active() {
+        AuditStart {
+            site: shell.site_of(span),
+            time: epoch_us(),
+        }
+    } else {
+        AuditStart::default()
+    };
     let principal = shell.mobile.context.principal();
     let (fragment, settled) =
         with_capture_policy(shell, capture, |shell| shell.audit_forced_child(body));
@@ -299,13 +313,14 @@ pub(crate) fn record_scope(
 pub(crate) fn with_scope(
     shell: &mut Shell,
     cmd: &str,
+    span: Option<Span>,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> Settled<Value> {
     if !shell.local.audit.active() {
         return body(shell);
     }
     let capture = shell.local.audit.capture_policy();
-    let record = record_scope(shell, cmd, capture, body).map_err(Break::Escape)?;
+    let record = record_scope(shell, cmd, capture, span, body).map_err(Break::Escape)?;
     shell.local.audit.push(record.node);
     match record.body {
         BodyResult::Value(v) => Ok(v),

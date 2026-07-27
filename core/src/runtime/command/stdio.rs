@@ -83,7 +83,7 @@ impl StdinRoute {
 /// `2>/dev/null 2>&1` doesn't).
 ///
 /// Stdin is *not* on the plan: `<file` is opened upstream and parked in
-/// `shell.run.io.stdin` by [`super::redirect::install_stdin_redirect`], so every
+/// `shell.io.stdin` by [`super::redirect::install_stdin_redirect`], so every
 /// dispatch arm (builtin, external, pipeline stage) reads input through the
 /// same `Source` channel.  See the module docstring on the cached-tty bug
 /// class.
@@ -109,13 +109,13 @@ pub(crate) enum StderrRoute {
 /// for foreground commands the prompt is not drawn, so a direct dup is
 /// safe and is the only way `ls` / `grep` / pagers see a TTY).  Under
 /// `audit` the dispatch-level capture installs a `Sink::Tee` on
-/// `shell.run.io.stdout`, so this falls through to the pump path
+/// `shell.io.stdout`, so this falls through to the pump path
 /// automatically — no separate `auditing` predicate needed.
 pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
     plan.stdout_file.is_none()
-        && shell.run.io.terminal.startup_stdout_tty
+        && shell.io.terminal.startup_stdout_tty
         && matches!(
-            shell.run.io.stdout,
+            shell.io.stdout,
             crate::io::Sink::Terminal | crate::io::Sink::External(_)
         )
 }
@@ -168,7 +168,7 @@ fn unmodeled_redirect(fd: u32, target: &str) -> Break {
 ///
 /// All non-terminal sources (pipeline pipe, `<file` redirect already opened
 /// by [`super::redirect::install_stdin_redirect`]) flow through
-/// `shell.run.io.stdin`; this routine just consumes whatever sits there.  The
+/// `shell.io.stdin`; this routine just consumes whatever sits there.  The
 /// fall-through inherit case is gated on a `TtyInputPermit`: inheriting fd
 /// 0 when the parent's fd 0 is the controlling tty is only safe when this
 /// child will hold the foreground itself (`for_standalone_external`) or
@@ -178,14 +178,14 @@ pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
     // An explicit empty source (an exarch tool run) wires to `/dev/null`,
     // never inheriting fd 0 — denial of byte input is its own effect, not a
     // consequence of foreground denial.
-    if matches!(shell.run.io.stdin, crate::io::Source::Empty) {
+    if matches!(shell.io.stdin, crate::io::Source::Empty) {
         return StdinRoute::Null;
     }
-    match shell.run.io.stdin.take_reader() {
+    match shell.io.stdin.take_reader() {
         Some(crate::io::SourceReader::Pipe(r)) => StdinRoute::Pipe(r),
         Some(crate::io::SourceReader::File(f)) => StdinRoute::File(f),
         None => {
-            let permit = if shell.run.io.terminal.startup_stdin_tty {
+            let permit = if shell.io.terminal.startup_stdin_tty {
                 TtyInputPermit::for_standalone_external()
             } else {
                 TtyInputPermit::for_non_tty_stdin()
@@ -242,11 +242,11 @@ pub(super) fn wire_stdout_file(
 }
 
 /// Set up the child's stderr according to the redirect plan and the
-/// caller's `shell.run.io.stderr` sink.  Four branches, in priority order:
+/// caller's `shell.io.stderr` sink.  Four branches, in priority order:
 ///
 ///   1. `2>&1` — stderr follows stdout (see platform note below).
 ///   2. `2>file` — open the file, hand fd 2 to it.
-///   3. Non-default `shell.run.io.stderr` (capture buffer, replay tee, watch
+///   3. Non-default `shell.io.stderr` (capture buffer, replay tee, watch
 ///      line-framer, etc.) — pipe fd 2 and signal the caller to pump.
 ///   4. Default `Sink::Stderr` — inherit fd 2 directly.
 ///
@@ -257,7 +257,7 @@ pub(super) fn wire_stdout_file(
 ///   * Windows: there is no `pre_exec`, so the dup must happen pre-spawn by
 ///     cloning the same handle that's about to be assigned as stdout.
 ///     `stdout_file_dup` carries that clone for the file-redirect case;
-///     for sink-driven stdout we re-clone the writer from `shell.run.io.stdout`,
+///     for sink-driven stdout we re-clone the writer from `shell.io.stdout`,
 ///     and for the inherit-tty case we duplicate the parent's `STDOUT_HANDLE`.
 ///
 /// Returns `true` when stderr is piped and a pump thread or reader must
@@ -284,7 +284,7 @@ pub(super) fn wire_stderr(
             {
                 let stdio = if let Some(dup) = stdout_file_dup {
                     dup
-                } else if inherit_tty || matches!(shell.run.io.stdout, crate::io::Sink::Terminal) {
+                } else if inherit_tty || matches!(shell.io.stdout, crate::io::Sink::Terminal) {
                     // The child inherits the helper's fd 1.  Duplicate fd 1 for
                     // stderr so `2>&1` routes diagnostics to whatever fd 1 points
                     // at — terminal, parent pipe, or a downstream pipeline stage
@@ -299,7 +299,7 @@ pub(super) fn wire_stderr(
                         .map_err(|e| pipe_err(&e))?;
                     crate::process::StdioSpec::from_owned_handle(owned)
                 } else {
-                    match &shell.run.io.stdout {
+                    match &shell.io.stdout {
                         crate::io::Sink::Pipe(w) => crate::process::StdioSpec::from_pipe_writer(
                             w.try_clone().map_err(|e| pipe_err(&e))?,
                         ),
@@ -336,7 +336,7 @@ pub(super) fn wire_stderr(
             ));
             Ok(false)
         }
-        None if !matches!(shell.run.io.stderr, crate::io::Sink::Stderr) => {
+        None if !matches!(shell.io.stderr, crate::io::Sink::Stderr) => {
             // Non-default stderr sink: dispatch-level audit Tee, §13.3 replay
             // buffer, watch line-framer, etc.  Pipe the child's stderr; the
             // caller pumps it into the sink.
@@ -362,7 +362,7 @@ mod tests {
     fn empty_stdin_wires_null_but_terminal_inherits() {
         let mut shell = Shell::default();
 
-        shell.run.io.stdin = Source::Empty;
+        shell.io.stdin = Source::Empty;
         assert!(
             matches!(wire_stdin(&mut shell), StdinRoute::Null),
             "Empty stdin must wire to /dev/null"
@@ -370,8 +370,8 @@ mod tests {
 
         // The ambient terminal/pipe source falls through to fd 0 (inherit),
         // independent of any foreground decision.
-        shell.run.io.stdin = Source::Terminal;
-        shell.run.io.terminal.startup_stdin_tty = false;
+        shell.io.stdin = Source::Terminal;
+        shell.io.terminal.startup_stdin_tty = false;
         assert!(
             matches!(wire_stdin(&mut shell), StdinRoute::Inherit(_)),
             "Terminal stdin still inherits fd 0"

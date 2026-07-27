@@ -12,7 +12,8 @@ use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typechec
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, std::collections::HashSet::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(
@@ -1154,7 +1155,8 @@ use ral_core::mode::{ByteMode, Wire};
 /// Compile `src` to an annotated comp, asserting it type-checks.
 fn annotated(src: &str) -> Comp {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, std::collections::HashSet::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(

@@ -81,17 +81,20 @@ pub use audit::{
 // The resolved source position audit nodes and capability checks carry.
 pub use crate::diagnostic::CallSite;
 
+// The run-invariant frame: Mooring and its satellites.
+mod mooring;
+pub use mooring::{
+    DeferredSink, Desk, EnquiryDesk, EventSink, Mooring, Nursery, NurseryId, SurfaceSink,
+};
+pub(crate) use mooring::{NurseryGuard, TerminalAccess};
+
 // Shell state, Context.
 mod shell;
+pub(crate) use shell::ThunkBody;
 pub use shell::hooks::{
     DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError, TerminalPolicy,
 };
-pub use shell::{
-    Context, DEFAULT_RECURSION_LIMIT, DeferredSink, Desk, Disposition, EnquiryDesk, EventSink,
-    LocalState, Mobile, Mooring, Nursery, NurseryId, SessionState, Shell, SurfaceSink,
-    TerminalLoan,
-};
-pub(crate) use shell::{TerminalAccess, ThunkBody};
+pub use shell::{Context, DEFAULT_RECURSION_LIMIT, LocalState, Mobile, SessionState, Shell};
 
 // Per-shell worker registry: id, lease class, entry, the frame lease, and
 // the reap-notice record.

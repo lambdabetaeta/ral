@@ -23,18 +23,6 @@ use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, 
 use std::io::Write;
 use std::sync::Arc;
 
-/// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
-/// surrendered to [`Shell::end_terminal_loan`].
-///
-/// Opaque to hosts: it carries the prior [`TerminalAccess`] to restore but
-/// exposes no way to read or forge one. Obtaining it raises an already-`Leased`
-/// run to [`TerminalAccess::ExplicitLoan`] (a `Denied` run is left untouched,
-/// so the loan can only raise authority, never mint it); surrendering it
-/// restores the prior access. This is the only path to an `ExplicitLoan` — a
-/// `RunRequest` cannot seed it — so the elevation is always a within-run loan
-/// held by the host that suspended its own terminal surface.
-pub struct TerminalLoan(TerminalAccess);
-
 impl Shell {
     /// The session's durable source registry.  Hosts read it after a run
     /// returns to render a runtime error against the right source text.
@@ -79,29 +67,29 @@ impl Shell {
     /// Cached terminal state probed at startup (isatty / ANSI / mode bits).
     /// `Copy`, so frontends read the bits they need without borrowing.
     pub fn terminal(&self) -> TerminalState {
-        self.run.io.terminal
+        self.io.terminal
     }
 
     /// Whether the shell is running as an interactive REPL.
     pub fn is_interactive(&self) -> bool {
-        self.run.io.interactive
+        self.io.interactive
     }
 
     /// Mark the shell interactive (or not).  The interactive REPL sets this
     /// at boot so external commands and prompts behave as a live session.
     pub fn set_interactive(&mut self, interactive: bool) {
-        self.run.io.interactive = interactive;
+        self.io.interactive = interactive;
     }
 
     /// Install the session stdout sink.  The interactive REPL installs its
     /// `ExternalPrinter` here so background output lands above the prompt.
     pub fn set_stdout(&mut self, stdout: Sink) {
-        self.run.io.stdout = stdout;
+        self.io.stdout = stdout;
     }
 
     /// The session stderr sink, for a host to write diagnostics into.
     pub fn stderr_mut(&mut self) -> &mut Sink {
-        &mut self.run.io.stderr
+        &mut self.io.stderr
     }
 
     /// Turn on top-level audit collection with byte capture (`ral --audit`).
@@ -303,7 +291,7 @@ impl Shell {
                  writing it to a file and binding the path instead of the captured bytes\n",
                 notice.name, notice.bytes,
             );
-            let _ = self.run.io.stderr.write_all(line.as_bytes());
+            let _ = self.io.stderr.write_all(line.as_bytes());
         }
         if mooring.surface.is_none() {
             return;
@@ -447,57 +435,21 @@ impl Shell {
         notices
     }
 
-    /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the
-    /// installed run's [`TerminalAccess`] permits it (`Leased` or
+    /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff
+    /// `mooring`'s [`TerminalAccess`] permits it (`Leased` or
     /// `ExplicitLoan`) *and* the session actually owns a lease. The single
     /// gate every post-startup foreground handoff funnels through — the
     /// pipeline launch, the standalone foreground command, and `fg`-resume —
     /// so a run that was not handed authority (an exarch tool run installs
     /// `Denied`) cannot construct the handoff: it has no `&TerminalLease` to
     /// pass [`ForegroundGuard::try_acquire`](crate::process::ForegroundGuard::try_acquire).
-    pub fn terminal_lease(&self) -> Option<&TerminalLease> {
-        match self.run.terminal_access {
+    pub fn terminal_lease(&self, mooring: &Mooring) -> Option<&TerminalLease> {
+        match mooring.terminal_access {
             TerminalAccess::Denied => None,
             TerminalAccess::Leased | TerminalAccess::ExplicitLoan => {
                 self.session.terminal_lease.as_ref()
             }
         }
-    }
-
-    /// Begin an explicit terminal loan on the installed run (the `_ed-tui`
-    /// case): a foreground handoff may now fire even though stdout is captured,
-    /// because the body draws on `/dev/tty` and must own the foreground pgid.
-    /// The host must have suspended its own terminal reader/renderer first. The
-    /// loan only *raises* an already-`Leased` run to [`TerminalAccess::ExplicitLoan`];
-    /// a `Denied` run is left untouched, so the loan can only raise an
-    /// authorised run, never mint authority. The returned [`TerminalLoan`]
-    /// restores the prior access when surrendered to [`Self::end_terminal_loan`].
-    pub fn begin_terminal_loan(&mut self) -> TerminalLoan {
-        let prev = self.run.terminal_access;
-        // The loan may only *raise* an already-authorised run; it never mints
-        // authority. A `Denied` run is left untouched, closing the
-        // `Denied → ExplicitLoan` door the manual token previously left open.
-        if matches!(prev, TerminalAccess::Leased) {
-            self.run.terminal_access = TerminalAccess::ExplicitLoan;
-        }
-        TerminalLoan(prev)
-    }
-
-    /// End an explicit terminal loan, restoring the access recorded when it
-    /// began. Pair with [`Self::begin_terminal_loan`].
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "TerminalLoan is a single-use RAII token; taking it by value surrenders it so a loan cannot be ended twice"
-    )]
-    pub fn end_terminal_loan(&mut self, loan: TerminalLoan) {
-        self.run.terminal_access = loan.0;
-    }
-
-    /// Whether the installed run is currently under an explicit terminal loan.
-    /// The re-entrancy guard for `_ed-tui`: a nested loan would be a logic
-    /// error, so the editor builtin refuses when this is already true.
-    pub fn in_terminal_loan(&self) -> bool {
-        matches!(self.run.terminal_access, TerminalAccess::ExplicitLoan)
     }
 
     /// Exit status of the last command (`$?`).  A host reads it to set its
@@ -604,72 +556,69 @@ mod tests {
             "session owns a lease"
         );
 
-        shell.run.terminal_access = TerminalAccess::Denied;
+        let denied = Mooring::adrift();
         assert!(
-            shell.terminal_lease().is_none(),
-            "a Denied run cannot borrow the session lease"
+            shell.terminal_lease(&denied).is_none(),
+            "a Denied mooring cannot borrow the session lease"
         );
 
-        shell.run.terminal_access = TerminalAccess::Leased;
+        let leased = Mooring {
+            terminal_access: TerminalAccess::Leased,
+            ..Mooring::adrift()
+        };
         assert!(
-            shell.terminal_lease().is_some(),
-            "a Leased run borrows the session lease"
+            shell.terminal_lease(&leased).is_some(),
+            "a Leased mooring borrows the session lease"
         );
 
         // Even with authority, no borrow when the session minted no lease
         // (a backgrounded / piped / tty-less launch).
         shell.session.terminal_lease = None;
         assert!(
-            shell.terminal_lease().is_none(),
+            shell.terminal_lease(&leased).is_none(),
             "no session lease → no borrow, regardless of access"
         );
     }
 
-    /// The loan token raises the run to `ExplicitLoan` and restores the prior
-    /// access on surrender — the within-run `_ed-tui` elevation.
+    /// [`Mooring::lend_terminal`] raises `Leased` to `ExplicitLoan` and
+    /// leaves the parent untouched — the within-run `_ed-tui` elevation.
     #[test]
-    fn terminal_loan_round_trips_access() {
-        let mut shell = Shell::default();
-        shell.run.terminal_access = TerminalAccess::Leased;
-        assert!(!shell.in_terminal_loan());
+    fn lend_terminal_raises_leased_to_explicit_loan() {
+        let leased = Mooring {
+            terminal_access: TerminalAccess::Leased,
+            ..Mooring::adrift()
+        };
+        assert!(!leased.in_terminal_loan());
 
-        let loan = shell.begin_terminal_loan();
+        let loaned = leased.lend_terminal();
         assert!(
-            shell.in_terminal_loan(),
-            "loan raises the run to ExplicitLoan"
+            loaned.in_terminal_loan(),
+            "the derived mooring is raised to ExplicitLoan"
         );
-
-        shell.end_terminal_loan(loan);
-        assert!(!shell.in_terminal_loan());
-        assert_eq!(
-            shell.run.terminal_access,
-            TerminalAccess::Leased,
-            "ending the loan restores the pre-loan access"
+        assert!(
+            !leased.in_terminal_loan(),
+            "the parent mooring is untouched by the derivation"
         );
     }
 
-    /// The loan only *raises* an authorised run; it never mints authority.
-    /// A `Denied` run calling `begin_terminal_loan` is left `Denied` — the
-    /// `Denied → ExplicitLoan` door is closed — so even with a session lease the
-    /// foreground borrow stays unreachable.
+    /// The loan only *raises* an authorised mooring; it never mints
+    /// authority. A `Denied` mooring lending its terminal is left `Denied` —
+    /// so even with a session lease the foreground borrow stays unreachable.
     #[test]
     #[cfg(unix)]
-    fn denied_run_loan_does_not_elevate() {
+    fn denied_mooring_lend_does_not_elevate() {
         let mut shell = Shell::default();
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        shell.run.terminal_access = TerminalAccess::Denied;
+        let denied = Mooring::adrift();
 
-        let loan = shell.begin_terminal_loan();
+        let loaned = denied.lend_terminal();
         assert!(
-            !shell.in_terminal_loan(),
-            "a Denied run is not raised to ExplicitLoan"
+            !loaned.in_terminal_loan(),
+            "a Denied mooring is not raised to ExplicitLoan"
         );
         assert!(
-            shell.terminal_lease().is_none(),
+            shell.terminal_lease(&loaned).is_none(),
             "no foreground borrow: the loan cannot mint authority from Denied"
         );
-
-        shell.end_terminal_loan(loan);
-        assert_eq!(shell.run.terminal_access, TerminalAccess::Denied);
     }
 }

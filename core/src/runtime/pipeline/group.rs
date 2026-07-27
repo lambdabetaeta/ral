@@ -30,7 +30,7 @@ use super::resolve::TerminalPlan;
 use crate::process::{Pgid, PgidPolicy};
 #[cfg(unix)]
 use crate::types::Break;
-use crate::types::{Settled, Shell};
+use crate::types::{Mooring, Settled, Shell};
 
 /// Encapsulates pipeline-group lifecycle on every platform.
 ///
@@ -134,14 +134,14 @@ impl PipelineGroup {
         Ok((child, jail))
     }
 
-    pub(super) fn claim_foreground(&mut self, shell: &Shell) {
+    pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
         // The terminal plan was already resolved against the lease, so a
         // `ForegroundExternalGroup` here implies the run holds one; the
         // borrow is the unforgeable proof `try_acquire` now demands.
         if self.terminal.owns_tty()
             && self.foreground.is_none()
             && let Some(group) = self.leader
-            && let Some(lease) = shell.terminal_lease()
+            && let Some(lease) = shell.terminal_lease(mooring)
         {
             self.foreground = crate::process::ForegroundGuard::try_acquire(group.as_raw(), lease);
         }

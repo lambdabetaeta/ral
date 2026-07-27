@@ -27,9 +27,9 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The parent's active script identity at the moment a pipeline stage's
-/// body crossed the wire: the [`FileId`] the parent's `SourceDb` already
-/// resolves it under, plus that source's name and text.  Registered in the
+/// The source a pipeline stage's body span points into: the [`FileId`] the
+/// parent's `SourceDb` already resolves it under, plus that source's name
+/// and text.  Registered in the
 /// child under the parent's id ([`Shell::install_remote_context`]), never
 /// re-minted, so a [`Span`] the child raises resolves to the same source in
 /// both processes.  Carried on the eval-request envelope rather than
@@ -43,11 +43,10 @@ pub(crate) struct WireScriptContext {
 }
 
 impl WireScriptContext {
-    /// Capture the source `call_site` points into, or `None` when the
-    /// parent has no call site yet (a bare, unstarted shell) or its source
-    /// is unregistered.
-    pub(crate) fn capture(call_site: Option<Span>, sources: &SourceDb) -> Option<Self> {
-        let file = call_site?.file;
+    /// Capture the source `span` points into, or `None` when the stage
+    /// body carries no span or its source is unregistered.
+    pub(crate) fn capture(span: Option<Span>, sources: &SourceDb) -> Option<Self> {
+        let file = span?.file;
         let source = sources.get(file)?;
         Some(Self {
             file,
@@ -82,9 +81,9 @@ pub(crate) struct ChildEvalRequest {
     /// success.  Pipeline: only the final value-typed stage
     /// (`FinalValue::Report`).
     pub wants_value: bool,
-    /// The parent's script identity, so the child resolves its spans
-    /// against the parent's real source instead of `comp.rs`'s no-source
-    /// fallback.  See [`WireScriptContext`].
+    /// The stage body's source, so the child resolves its spans against
+    /// the parent's real source instead of `comp.rs`'s no-source fallback.
+    /// See [`WireScriptContext`].
     pub script: Option<WireScriptContext>,
 }
 
@@ -244,16 +243,16 @@ pub(crate) fn transfer_error(err: &Error) -> Error {
 
 /// Reify a [`Mobile`] and a body into a wire-ready [`ChildEvalRequest`].
 /// Inverse of [`decode_response`].  `captured` carries the pipeline stage
-/// closure env; `call_site` is the launching run's call site, resolved
-/// against `sources` into a [`WireScriptContext`] so the child resolves its
-/// spans against the same source under the same [`FileId`].
+/// closure env; `span` is the stage body's own span, resolved against
+/// `sources` into a [`WireScriptContext`] so the child resolves its spans
+/// against the same source under the same [`FileId`].
 pub(crate) fn pack_request(
     body: Arc<Comp>,
     mobile: &Mobile,
     captured: Option<&Env>,
     audit_policy: Option<CapturePolicy>,
     wants_value: bool,
-    call_site: Option<Span>,
+    span: Option<Span>,
     sources: &SourceDb,
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
@@ -269,7 +268,7 @@ pub(crate) fn pack_request(
         captured,
         audit_policy,
         wants_value,
-        script: WireScriptContext::capture(call_site, sources),
+        script: WireScriptContext::capture(span, sources),
     })
 }
 
@@ -309,7 +308,7 @@ fn eval_request(
     let mut shell = reexec_child_shell(mobile, &arcs)?;
     shell.local.audit.install_active_policy(audit_policy);
     if let Some(ctx) = script {
-        shell.install_remote_context(ctx.name, ctx.file, &ctx.text);
+        shell.install_remote_context(&ctx.name, ctx.file, &ctx.text);
     }
     // The stage child has no surface sink to replay to, but the body may
     // still call `surface`; the no-op `()` sink discards those calls.
@@ -320,8 +319,8 @@ fn eval_request(
         shell.local.audit.active(),
     );
 
-    shell.run.io.terminal = TerminalState::probe();
-    shell.run.io.launch_role = crate::io::LaunchRole::PipelineStage;
+    shell.io.terminal = TerminalState::probe();
+    shell.io.launch_role = crate::io::LaunchRole::PipelineStage;
     let captured = captured
         .ok_or_else(|| {
             Break::Error(Error::new(
@@ -566,7 +565,7 @@ mod tests {
 
     fn compile_one(source: &str) -> Arc<Comp> {
         let ast = parse(source).expect("parse");
-        Arc::new(elaborate(&ast, std::collections::HashSet::default()))
+        Arc::new(elaborate(&ast, std::collections::HashSet::default(), "").expect("elaborate"))
     }
 
     fn eval_value(source: &str, shell: &mut Shell) -> Value {
@@ -576,13 +575,14 @@ mod tests {
     /// Pack a pipeline-stage request from a freshly captured snapshot.
     fn pack_stage(stage: Arc<Comp>, shell: &Shell, wants_value: bool) -> ChildEvalRequest {
         let captured = shell.snapshot();
+        let span = stage.span;
         pack_request(
             stage,
             &shell.mobile,
             Some(&captured),
             shell.local.audit.active_policy(),
             wants_value,
-            shell.run.call_site,
+            span,
             &shell.session.sources,
         )
         .expect("pack")

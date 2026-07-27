@@ -2,10 +2,10 @@
 //! command dispatch when bytes need to be observed.
 //!
 //! Both follow the same swap-restore-drain dance: replace a Sink on
-//! `shell.run.io`, run the closure, restore the saved Sink, drain the
+//! `shell.io`, run the closure, restore the saved Sink, drain the
 //! buffer.  They differ on visibility:
 //!
-//!   * [`with_capture`] *replaces* `shell.run.io.stdout` with
+//!   * [`with_capture`] *replaces* `shell.io.stdout` with
 //!     `Sink::Buffer`, diverting final byte output from the terminal so
 //!     it can be bound as a value.
 //!   * [`with_audit_capture`] *tees* through `Sink::Tee(Buffer, real)`,
@@ -15,7 +15,7 @@
 //! different policy.
 use crate::io::{Sink, new_buffer, take_buffer, tee_with_buffer};
 use crate::types::Shell;
-/// RAII guard for [`with_capture`]: swaps `shell.run.io.stdout` for an
+/// RAII guard for [`with_capture`]: swaps `shell.io.stdout` for an
 /// in-memory buffer sink and restores it on `Drop` — including on panic.
 struct CaptureScope<'a> {
     shell: &'a mut Shell,
@@ -29,11 +29,9 @@ struct CaptureScope<'a> {
 
 impl<'a> CaptureScope<'a> {
     fn enter(shell: &'a mut Shell, buffer_sink: Sink) -> Self {
-        let saved_stdout = std::mem::replace(&mut shell.run.io.stdout, buffer_sink);
-        let saved_capture_outer = std::mem::replace(
-            &mut shell.run.io.capture_outer,
-            saved_stdout.try_clone().ok(),
-        );
+        let saved_stdout = std::mem::replace(&mut shell.io.stdout, buffer_sink);
+        let saved_capture_outer =
+            std::mem::replace(&mut shell.io.capture_outer, saved_stdout.try_clone().ok());
         Self {
             shell,
             saved_stdout: Some(saved_stdout),
@@ -45,10 +43,10 @@ impl<'a> CaptureScope<'a> {
 impl Drop for CaptureScope<'_> {
     fn drop(&mut self) {
         if let Some(prev) = self.saved_capture_outer.take() {
-            self.shell.run.io.capture_outer = prev;
+            self.shell.io.capture_outer = prev;
         }
         if let Some(prev) = self.saved_stdout.take() {
-            self.shell.run.io.stdout = prev;
+            self.shell.io.stdout = prev;
         }
     }
 }
@@ -83,8 +81,8 @@ struct AuditCaptureScope<'a> {
 
 impl<'a> AuditCaptureScope<'a> {
     fn enter(shell: &'a mut Shell, out_sink: Sink, err_sink: Sink) -> Self {
-        let saved_stdout = std::mem::replace(&mut shell.run.io.stdout, out_sink);
-        let saved_stderr = std::mem::replace(&mut shell.run.io.stderr, err_sink);
+        let saved_stdout = std::mem::replace(&mut shell.io.stdout, out_sink);
+        let saved_stderr = std::mem::replace(&mut shell.io.stderr, err_sink);
         Self {
             shell,
             saved_stdout: Some(saved_stdout),
@@ -96,16 +94,16 @@ impl<'a> AuditCaptureScope<'a> {
 impl Drop for AuditCaptureScope<'_> {
     fn drop(&mut self) {
         if let Some(prev) = self.saved_stdout.take() {
-            self.shell.run.io.stdout = prev;
+            self.shell.io.stdout = prev;
         }
         if let Some(prev) = self.saved_stderr.take() {
-            self.shell.run.io.stderr = prev;
+            self.shell.io.stderr = prev;
         }
     }
 }
 
-/// Per-command byte capture for `audit { … }`: tee `shell.run.io.stdout` and
-/// `shell.run.io.stderr` through in-memory buffers while `f` runs, then restore.
+/// Per-command byte capture for `audit { … }`: tee `shell.io.stdout` and
+/// `shell.io.stderr` through in-memory buffers while `f` runs, then restore.
 ///
 /// Returns `Ok((result, stdout_bytes, stderr_bytes))`.  The output stays
 /// visible — Tee writes to both the buffer and the original sink — which is
@@ -130,7 +128,7 @@ impl Drop for AuditCaptureScope<'_> {
 /// stages don't pass through this path — they capture per-stage via
 /// [`crate::io::tee_with_buffer`] at stage launch, because their stdout
 /// is `Sink::Pipe(writer)` to the next stage and never touches
-/// `shell.run.io.stdout`.  Distinct from `Shell::audit_child` (a method
+/// `shell.io.stdout`.  Distinct from `Shell::audit_child` (a method
 /// on `Shell` that collects child `ExecNode`s into an
 /// [`AuditFragment`]).
 pub(crate) fn with_audit_capture<R, F>(
@@ -143,8 +141,8 @@ where
     if !shell.local.audit.captures_bytes() {
         return Ok((f(shell), Vec::new(), Vec::new()));
     }
-    let out_base = shell.run.io.stdout.try_clone()?;
-    let err_base = shell.run.io.stderr.try_clone()?;
+    let out_base = shell.io.stdout.try_clone()?;
+    let err_base = shell.io.stderr.try_clone()?;
     let (out_sink, out_buf) = tee_with_buffer(out_base);
     let (err_sink, err_buf) = tee_with_buffer(err_base);
     let scope = AuditCaptureScope::enter(shell, out_sink, err_sink);

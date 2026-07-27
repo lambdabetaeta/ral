@@ -7,8 +7,8 @@
 //!
 //! [`Source`] bundles a loaded text with a precomputed line-start index for
 //! O(log lines) `byte → (line, col)` recovery, and [`SourceDb`] is the
-//! per-run registry that resolves a [`FileId`] back to its [`Source`] at
-//! render time.
+//! append-only, per-session registry that resolves a [`FileId`] back to its
+//! [`Source`] at render time.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -291,8 +291,12 @@ impl Source {
 /// source under an id another registry minted, leaving the ids below it
 /// unresolvable rather than aliased to unrelated text.
 ///
-/// Within a run the top-level source and each module it loads each register
-/// once; [`reset`](Self::reset) at the next run boundary reclaims them.
+/// Append-only for the whole session: a run's top-level source and each
+/// module it loads register once, and nothing ever reclaims a slot — a
+/// nested run ([`Shell::run_nested`](crate::Shell::run_nested)) shares the
+/// registry with the run it nests in, so reclaiming mid-run would re-mint an
+/// outer run's still-live [`FileId`]s out from under it. The cost is
+/// monotonic growth, and a session's sources are small.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
     sources: Arc<Vec<Option<Source>>>,
@@ -320,14 +324,6 @@ impl SourceDb {
             sources.resize(idx + 1, None);
         }
         sources[idx] = Some(source);
-    }
-
-    /// Drop every registered source, returning the registry to empty so the
-    /// next [`register`](Self::register) hands out [`FileId`] with index `0` again.
-    /// Called at each top-level run boundary so a long interactive session
-    /// reclaims the prior run's sources instead of growing without bound.
-    pub fn reset(&mut self) {
-        Arc::make_mut(&mut self.sources).clear();
     }
 
     /// Resolve `id` to its registered [`Source`], or `None` when the id is

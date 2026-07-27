@@ -8,7 +8,8 @@
 //! consult shell state instead of resyscalling.  That function's doc
 //! lists the seeded variables.
 
-use super::{Context, Disposition, LocalState, Mobile, SessionState, Shell};
+use super::{Context, LocalState, Mobile, SessionState, Shell};
+use crate::source::FileId;
 use crate::types::{ControlState, Env, GrantStack};
 use std::path::PathBuf;
 
@@ -39,22 +40,15 @@ impl Shell {
                     ..Context::default()
                 },
             },
-            run: Disposition {
-                io: crate::io::Io {
-                    terminal,
-                    ..Default::default()
-                },
-                call_site: None,
-                // A shell between runs holds no terminal authority; a host
-                // states it per run via `RunRequest::terminal`. `Denied` is the
-                // safe default so a frame with no stated policy never
-                // foregrounds.
-                terminal_access: crate::types::TerminalAccess::Denied,
+            io: crate::io::Io {
+                terminal,
+                ..Default::default()
             },
             session: SessionState {
                 anchor: root.worker(),
                 root,
                 sources: crate::source::SourceDb::default(),
+                root_file: FileId::DUMMY,
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),
                 library_docs: std::collections::HashMap::new(),

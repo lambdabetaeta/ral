@@ -12,7 +12,7 @@
 //! pure-vs-mixed mode rather than on a single shell's runtime conditions.
 
 use crate::process::{ForegroundGuard, PgidPolicy};
-use crate::types::Shell;
+use crate::types::{Mooring, Shell};
 
 /// Whether a freshly-spawned standalone external should take the
 /// controlling terminal, and whether it should lead its own process
@@ -49,25 +49,24 @@ impl ForegroundDecision {
     /// its interactive children, or they raise SIGTTOU on their first
     /// `tcsetattr` from a background pgroup.  An internal pipeline stage runs
     /// with [`LaunchRole::PipelineStage`](crate::io::LaunchRole), so even when
-    /// its `shell.run.io` appears to satisfy the conditions it cannot take
+    /// its `shell.io` appears to satisfy the conditions it cannot take
     /// foreground; an exarch tool run installs `Denied`, so its lease borrow
     /// is unavailable and the handoff cannot be constructed at all.
-    pub(super) fn for_standalone(shell: &Shell, needs_pump: bool) -> Self {
-        let want_fg = shell.run.io.launch_role.is_top_level()
-            && shell.terminal_lease().is_some()
+    pub(super) fn for_standalone(shell: &Shell, needs_pump: bool, mooring: &Mooring) -> Self {
+        let want_fg = shell.io.launch_role.is_top_level()
+            && shell.terminal_lease(mooring).is_some()
             && !needs_pump
             && matches!(
-                shell.run.io.stdout,
+                shell.io.stdout,
                 crate::io::Sink::Terminal | crate::io::Sink::External(_)
             );
         Self {
             want_fg,
             // Lead an own group in the background — see the field doc.
-            own_group_when_background: shell.run.io.launch_role.is_top_level()
-                && !shell.run.io.interactive,
+            own_group_when_background: shell.io.launch_role.is_top_level() && !shell.io.interactive,
             // Park only a foreground child of an interactive REPL — see
             // the field doc.
-            park_on_stop: want_fg && shell.run.io.interactive,
+            park_on_stop: want_fg && shell.io.interactive,
         }
     }
 
@@ -135,13 +134,18 @@ impl ForegroundDecision {
     /// `Drop` restores ral's pgid no matter how the caller returns —
     /// making the restore RAII-managed is the only reliable way to plug
     /// every early-return path between spawn and `child.wait()`.
-    pub(super) fn acquire(&self, child_id: u32, shell: &Shell) -> Option<ForegroundGuard> {
+    pub(super) fn acquire(
+        &self,
+        child_id: u32,
+        shell: &Shell,
+        mooring: &Mooring,
+    ) -> Option<ForegroundGuard> {
         if !self.want_fg {
             return None;
         }
         // `want_fg` already required `terminal_lease().is_some()`, so the
         // borrow is present; it is the unforgeable proof `try_acquire` demands.
-        let lease = shell.terminal_lease()?;
+        let lease = shell.terminal_lease(mooring)?;
         #[cfg(unix)]
         {
             #[allow(

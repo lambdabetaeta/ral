@@ -159,7 +159,7 @@ pub(crate) fn run_call(
     shell: &mut Shell,
 ) -> Raw<Value> {
     if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
-        shell.run.call_site = span;
+        shell.local.audit.call_site = span;
     }
 
     match classify_command(head, shell)? {

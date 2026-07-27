@@ -42,7 +42,8 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
     let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
         Break::Error(Error::new(e.to_string(), 2))
     })?;
-    let comp = elaborate(&ast, std::collections::HashSet::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+        .map_err(|e| Break::Error(Error::new(e.to_string(), 2)))?;
     let comp = match typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(

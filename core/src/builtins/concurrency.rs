@@ -256,7 +256,6 @@ where
         ChildIoMode::Watch { label } => {
             let clone_parent = || {
                 shell
-                    .run
                     .io
                     .stdout
                     .try_clone()
@@ -289,9 +288,9 @@ where
         worker_surface.clone(),
         snap,
         move |mooring, child_env| {
-            child_env.run.io.capture_outer = None;
-            child_env.run.io.stdout = stdout;
-            child_env.run.io.stderr = stderr;
+            child_env.io.capture_outer = None;
+            child_env.io.stdout = stdout;
+            child_env.io.stderr = stderr;
             // A detached worker is a background computation with no terminal: its
             // stdout/stderr are buffers, and its stdin must not fall through to
             // fd 0.  `spawn_thread` builds the worker from a defaulted `Io`
@@ -299,7 +298,7 @@ where
             // `cargo test` exercising signal code, say — would inherit the real
             // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
             // it.  `Empty` wires fd 0 to `/dev/null`.
-            child_env.run.io.stdin = crate::io::Source::Empty;
+            child_env.io.stdin = crate::io::Source::Empty;
 
             // Arm the flush guard before the body runs: a panicking body unwinds
             // through it (a `` `panic `` batch, then the unwind continues to drop
@@ -318,8 +317,8 @@ where
             // tail call surfaces here rather than collapsing inside.
             let result = absorb_tail(work(mooring, child_env), mooring, child_env);
             if flush_pending {
-                let _ = child_env.run.io.stdout.flush_pending();
-                let _ = child_env.run.io.stderr.flush_pending();
+                let _ = child_env.io.stdout.flush_pending();
+                let _ = child_env.io.stderr.flush_pending();
             }
             // Flush the boundary's clone before sending the result, so its copy is
             // independent of `complete_handle`'s later `mem::take` of the buffer.

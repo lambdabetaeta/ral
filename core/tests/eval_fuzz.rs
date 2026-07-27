@@ -20,7 +20,8 @@ fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
     let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
         Break::Error(Error::new(e.to_string(), 2))
     })?;
-    let comp = elaborate(&ast, std::collections::HashSet::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+        .map_err(|e| Break::Error(Error::new(e.to_string(), 2)))?;
     // The evaluator reads its mode wires off the annotated comp, so it
     // must run the checked IR, not the bare elaboration whose wires are
     // still the elaborator's placeholder.
@@ -1283,10 +1284,14 @@ fn script_args_are_not_polluted_by_runner_argv() {
     shell.set_args(vec!["alpha".into(), "beta".into()]);
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
-        &std::sync::Arc::new(elaborate(
-            &parse("return $ARGS").unwrap(),
-            std::collections::HashSet::default(),
-        )),
+        &std::sync::Arc::new(
+            elaborate(
+                &parse("return $ARGS").unwrap(),
+                std::collections::HashSet::default(),
+                "",
+            )
+            .expect("elaborate"),
+        ),
         &Mooring::adrift(),
         &mut shell,
     )
@@ -1306,10 +1311,14 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     shell.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
-        &std::sync::Arc::new(elaborate(
-            &parse("return $ENV[RAL_TEST_ENV]").unwrap(),
-            std::collections::HashSet::default(),
-        )),
+        &std::sync::Arc::new(
+            elaborate(
+                &parse("return $ENV[RAL_TEST_ENV]").unwrap(),
+                std::collections::HashSet::default(),
+                "",
+            )
+            .expect("elaborate"),
+        ),
         &Mooring::adrift(),
         &mut shell,
     )
@@ -3144,10 +3153,10 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let comp = Arc::new(ral_core::elaborator::elaborate(
-            &ast,
-            std::collections::HashSet::default(),
-        ));
+        let comp = Arc::new(
+            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+                .expect("elaborate"),
+        );
         let mut saw = false;
         walk(&comp, &mut saw);
         assert!(

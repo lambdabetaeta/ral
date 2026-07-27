@@ -143,8 +143,8 @@ fn install_sink_redirects(
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Raw<SinkRedirects> {
-    let mut stdout = clone_redirect_sink(&shell.run.io.stdout, "redirect: duplicate stdout")?;
-    let mut stderr = clone_redirect_sink(&shell.run.io.stderr, "redirect: duplicate stderr")?;
+    let mut stdout = clone_redirect_sink(&shell.io.stdout, "redirect: duplicate stdout")?;
+    let mut stderr = clone_redirect_sink(&shell.io.stderr, "redirect: duplicate stderr")?;
     let mut stdout_changed = false;
     let mut stderr_changed = false;
     let mut unhandled = Vec::new();
@@ -196,8 +196,8 @@ fn install_sink_redirects(
         }
     }
 
-    let prev_stdout = stdout_changed.then(|| std::mem::replace(&mut shell.run.io.stdout, stdout));
-    let prev_stderr = stderr_changed.then(|| std::mem::replace(&mut shell.run.io.stderr, stderr));
+    let prev_stdout = stdout_changed.then(|| std::mem::replace(&mut shell.io.stdout, stdout));
+    let prev_stderr = stderr_changed.then(|| std::mem::replace(&mut shell.io.stderr, stderr));
 
     Ok(SinkRedirects {
         unhandled,
@@ -247,10 +247,10 @@ impl<'a> RedirectFrame<'a> {
             Err(e) => {
                 emit_writes_failed(mooring, write_intents);
                 if let Some(s) = sink_redirects.prev_stdout {
-                    shell.run.io.stdout = s;
+                    shell.io.stdout = s;
                 }
                 if let Some(s) = sink_redirects.prev_stderr {
-                    shell.run.io.stderr = s;
+                    shell.io.stderr = s;
                 }
                 stdin_guard.restore(shell);
                 return Err(e.into());
@@ -328,13 +328,13 @@ impl<'a> RedirectFrame<'a> {
         // flushes catch any unhandled fd-level redirect arm.
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
-        let _ = self.shell.run.io.stdout.flush();
-        let _ = self.shell.run.io.stderr.flush();
+        let _ = self.shell.io.stdout.flush();
+        let _ = self.shell.io.stderr.flush();
         if let Some(s) = self.prev_stdout.take() {
-            self.shell.run.io.stdout = s;
+            self.shell.io.stdout = s;
         }
         if let Some(s) = self.prev_stderr.take() {
-            self.shell.run.io.stderr = s;
+            self.shell.io.stderr = s;
         }
         let commits = self
             .fd_guard
@@ -360,7 +360,7 @@ impl Drop for RedirectFrame<'_> {
 
 /// Runs `body` with `redirects` applied: open the targets, route fd
 /// 1/2 through shell sinks, park `<file` input on
-/// `shell.run.io.stdin`, run, then always restore. Atomic-write
+/// `shell.io.stdin`, run, then always restore. Atomic-write
 /// commits fire on success and are dropped on failure, so the staging
 /// file is removed. When redirects are non-empty, stdout and stderr
 /// are flushed before restoring sinks/fds, so buffered bytes land at
@@ -374,8 +374,8 @@ impl Drop for RedirectFrame<'_> {
 ///
 /// `<file` redirects to fd 0 do *not* go through `dup2` — they are
 /// opened by `install_stdin_redirect` and parked on
-/// `shell.run.io.stdin`. This keeps the cached `startup_stdin_tty`
-/// honest: it is consulted only when `shell.run.io.stdin` is
+/// `shell.io.stdin`. This keeps the cached `startup_stdin_tty`
+/// honest: it is consulted only when `shell.io.stdin` is
 /// `Terminal`, which truly means "fall through to the inherited fd 0".
 pub(crate) fn with_redirects<F>(
     redirects: &[EvalRedirectV],

@@ -37,7 +37,7 @@
 
 use ral_core::Shell;
 use ral_core::process::Pgid;
-use ral_core::types::Resident;
+use ral_core::types::{Mooring, Resident};
 use std::collections::HashMap;
 
 #[cfg(unix)]
@@ -422,7 +422,7 @@ impl ForegroundWait {
 /// is nothing to hand the console to (it's shared across attached
 /// processes), and no SIGTSTP analogue — `stopped_by` is therefore
 /// always `None`; a stopped foreground job is unreachable on Windows.
-pub fn wait_foreground(pgid: Pgid, shell: &Shell) -> ForegroundWait {
+pub fn wait_foreground(pgid: Pgid, mooring: &Mooring, shell: &Shell) -> ForegroundWait {
     #[cfg(unix)]
     {
         // RAII handoff: tcsetpgrp + termios snapshot on acquire,
@@ -430,7 +430,7 @@ pub fn wait_foreground(pgid: Pgid, shell: &Shell) -> ForegroundWait {
         // lease (e.g. a non-interactive resume) — exactly when there
         // is no tty handoff to do, so we still SIGCONT and wait but
         // skip the tty dance.
-        let _fg_guard = shell.terminal_lease().and_then(|lease| {
+        let _fg_guard = shell.terminal_lease(mooring).and_then(|lease| {
             ral_core::process::ForegroundGuard::try_acquire(pgid.as_raw(), lease)
         });
         // SIGCONT after the tty handoff: the kernel-level race that
@@ -466,7 +466,7 @@ pub fn wait_foreground(pgid: Pgid, shell: &Shell) -> ForegroundWait {
     }
     #[cfg(windows)]
     {
-        let _ = shell;
+        let _ = (shell, mooring);
         let _ = ral_core::process::wait_leader_blocking(pgid);
         ForegroundWait { stopped_by: None }
     }

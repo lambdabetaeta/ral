@@ -33,7 +33,7 @@ pub(super) enum StageHandle {
 ///
 /// This mirrors `command::wire_stdin` for standalone externals: if the
 /// enclosing call has parked a `<file` redirect or a parent-shell pipe
-/// on `shell.run.io.stdin`, the boundary stage consumes it.  Without this,
+/// on `shell.io.stdin`, the boundary stage consumes it.  Without this,
 /// `f < file` on a function whose body is a pipeline would silently
 /// drop the redirect — the pipeline saw only `Parent` without ever
 /// reading the source.  Pipeline policy diverges from standalone exec
@@ -42,13 +42,13 @@ pub(super) enum StageHandle {
 fn route_parent_stdin(group: &PipelineGroup, shell: &mut Shell) -> command::StdinRoute {
     // An explicit empty source (an exarch tool run) wires the boundary stage
     // to `/dev/null` — no fd-0 fall-through, mirroring `command::wire_stdin`.
-    if matches!(shell.run.io.stdin, crate::io::Source::Empty) {
+    if matches!(shell.io.stdin, crate::io::Source::Empty) {
         return command::StdinRoute::Null;
     }
-    match shell.run.io.stdin.take_reader() {
+    match shell.io.stdin.take_reader() {
         Some(crate::io::SourceReader::Pipe(r)) => command::StdinRoute::Pipe(r),
         Some(crate::io::SourceReader::File(f)) => command::StdinRoute::File(f),
-        None if !shell.run.io.terminal.startup_stdin_tty => {
+        None if !shell.io.terminal.startup_stdin_tty => {
             command::StdinRoute::Inherit(command::TtyInputPermit::for_non_tty_stdin())
         }
         None if group.owns_tty() => {
@@ -94,9 +94,8 @@ pub(super) fn wire_stage_stdout(
             // or `ls`/`grep` sees a TTY — under the same predicate the
             // standalone path uses (`stdio::inherit_tty`): fd 1 was a tty at
             // startup and this group owns the terminal foreground.
-            let inherit = shell.run.io.terminal.startup_stdout_tty && group.owns_tty();
+            let inherit = shell.io.terminal.startup_stdout_tty && group.owns_tty();
             let plan = shell
-                .run
                 .io
                 .stdout
                 .child_stdout(inherit)
@@ -129,7 +128,6 @@ pub(super) fn wire_stage_stdio(
     cmd.stdin(route_stdin(stdin, group, shell).into_stdio());
     let stdout_pump = wire_stage_stdout(cmd, stdout, group, shell)?;
     let stderr_plan = shell
-        .run
         .io
         .stderr
         .child_stderr()
@@ -240,7 +238,7 @@ fn spawn_stage(
                 Some(&captured),
                 cx.shell.local.audit.active_policy(),
                 wants_value,
-                cx.shell.run.call_site,
+                stage.span,
                 &cx.shell.session.sources,
             )?
         }
@@ -379,13 +377,17 @@ impl PipelineBuild {
     /// gate frame.  Returns the running pipeline, with the
     /// `PipelineGroup` alongside so its anchor, foreground guard, and
     /// relay stay alive through collect.
-    fn finish(self, shell: &Shell) -> Result<(PipelineGroup, RunningPipeline), Break> {
+    fn finish(
+        self,
+        shell: &Shell,
+        mooring: &Mooring,
+    ) -> Result<(PipelineGroup, RunningPipeline), Break> {
         let Self { mut resources, .. } = self;
         // Hand the controlling tty to the pipeline pgid (interactive
         // only) *before* releasing the gate frames so the kernel's
         // foreground decision is settled when stages start running
         // user code.
-        resources.group.claim_foreground(shell);
+        resources.group.claim_foreground(shell, mooring);
         for deferred in std::mem::take(&mut resources.deferred_jobs) {
             deferred.release()?;
         }
@@ -474,7 +476,7 @@ pub(super) fn launch_pipeline(
     let routes = open_stage_routes(plan)?.into();
     let mut build = PipelineBuild::new(plan, routes, shell)?;
     match spawn_all_stages(&mut build, stages, plan, mooring, shell) {
-        Ok(()) => build.finish(shell),
+        Ok(()) => build.finish(shell, mooring),
         Err(e) => {
             build.abort();
             Err(e)

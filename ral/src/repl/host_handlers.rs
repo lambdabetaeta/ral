@@ -153,7 +153,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
         doc: "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
-        body: BuiltinBody::Captured(Arc::new(move |args, _mooring, shell| {
+        body: BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
             let (id, pgid) = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -164,7 +164,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             };
             match pgid {
                 Some(pgid) => {
-                    let wait = crate::jobs::wait_foreground(pgid, shell);
+                    let wait = crate::jobs::wait_foreground(pgid, mooring, shell);
                     let mut jt = jobs.lock().unwrap();
                     if wait.stopped() {
                         jt.stop(pgid);
@@ -427,10 +427,10 @@ mod tests {
         ));
 
         let ast = ral_core::syntax::parser::parse("{ |args| return 1 }").unwrap();
-        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(
-            &ast,
-            std::collections::HashSet::default(),
-        ));
+        let comp = std::sync::Arc::new(
+            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+                .expect("elaborate"),
+        );
         let thunk = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
 
         let err = shell

@@ -15,6 +15,7 @@
 
 use super::value::Value;
 use crate::diagnostic::CallSite;
+use crate::source::Span;
 use serde::{Deserialize, Serialize};
 
 /// Cap applied to per-node `stderr` when bytes are being captured
@@ -101,14 +102,26 @@ impl AuditFragment {
 /// Two orthogonal pieces of state: a `trail` that is `Some` when audit
 /// is active (a scope is collecting nodes), and a `capture` policy that
 /// the dispatcher-level Tee consults when wrapping per-command bytes.
-/// Callers must not reach inside; the methods on this type are the
-/// API.  The internal layout is private so adding new fields (or
-/// rewriting the trail representation) does not ripple through call
-/// sites.
+/// `trail` and `capture` are private; the methods on this type are the API,
+/// so adding a field (or rewriting the trail representation) does not
+/// ripple through call sites. `call_site` is the one exception: it is the
+/// dispatch register the dispatcher writes directly
+/// (`shell.local.audit.call_site = span`) and [`Shell::call_site`](super::shell::Shell::call_site)
+/// reads directly, so it is `pub(crate)` rather than method-gated.
 #[derive(Default, Debug)]
 pub struct Audit {
     trail: Option<AuditTrail>,
     capture: CapturePolicy,
+    /// Span of the node that dispatched the command now running — the
+    /// register every audit node and capability check resolves its site
+    /// from, held across `_`-prefixed dispatches so prelude wrappers name
+    /// the user's call rather than their own (SPEC §10.3).  `None` before
+    /// the first dispatch of a run.  Written by `run_call`'s guarded write
+    /// (`command_call.rs`); read by [`Shell::call_site`](super::shell::Shell::call_site).
+    /// Bracketed per run by `crate::run::IoLoan`, which saves and `None`s it
+    /// on install and restores it on drop, so a nested run cannot leave its
+    /// register in the outer run's.
+    pub(crate) call_site: Option<Span>,
 }
 
 impl Audit {
@@ -235,15 +248,21 @@ impl Audit {
     }
 
     /// STT-in for a same-thread thunk body — see
-    /// [`crate::types::Shell::inherit_from`].  Moves both the trail
-    /// and the capture policy into the child.
+    /// [`crate::types::Shell::inherit_from`].  Moves the trail and the
+    /// capture policy into the child, and copies the call-site register in
+    /// (the stage child's flow-in, and every other same-thread body's) —
+    /// never back on [`Self::return_to`]: the asymmetry is the point, so a
+    /// body's own dispatches don't leak their site into the caller's next
+    /// one.
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.trail = parent.trail.take();
         self.capture = parent.capture;
+        self.call_site = parent.call_site;
     }
 
     /// STT-out for a same-thread thunk body.  Returns the (possibly
-    /// extended) trail and policy back to the parent.
+    /// extended) trail and policy back to the parent.  The call site does
+    /// not flow back.
     pub fn return_to(&mut self, parent: &mut Self) {
         parent.trail = self.trail.take();
         parent.capture = self.capture;

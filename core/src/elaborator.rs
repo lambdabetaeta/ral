@@ -54,6 +54,7 @@ use crate::syntax::ast::{
     RedirectTarget, ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
+use crate::syntax::parser::ParseError;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -79,6 +80,18 @@ struct Elaborator {
     /// a narrower byte range than its caller wraps the body in `with_span`,
     /// so the prior span is restored when the body returns.
     current_span: Option<Span>,
+    /// This source's own display name, once it clears the shared
+    /// script-identity predicate ([`crate::path::lex::has_script_identity`])
+    /// — `None` for the REPL, `-c`, and synthetic `<...>` sources, which
+    /// have no self-location to bake.  Backs the `$SCRIPT` arm in
+    /// [`Self::variable_val`].
+    script: Option<String>,
+    /// Set the first time `$SCRIPT` is referenced with no script identity
+    /// in scope.  Checked once elaboration finishes ([`elaborate`]) —
+    /// elaboration otherwise has no failure path, so this is the one slot
+    /// that turns it fallible rather than threading `Result` through every
+    /// traversal.
+    error: Option<ParseError>,
 }
 
 /// Wrap a `CompKind` using the elaborator's current span.
@@ -97,14 +110,43 @@ impl WithSpan for Elaborator {
 impl Elaborator {
     /// Create an elaborator whose initial scope contains the prelude
     /// exports and the given `bindings` (e.g. names already defined in
-    /// a REPL session).
-    fn new_with_bindings(bindings: HashSet<String>) -> Self {
+    /// a REPL session).  `name` is the source's own display name, the
+    /// value `$SCRIPT` bakes to.
+    fn new_with_bindings(bindings: HashSet<String>, name: &str) -> Self {
         Self {
             counter: 0,
             prelude: prelude_scope(),
             lexical_scopes: vec![bindings],
             current_span: None,
+            script: crate::path::lex::has_script_identity(name).then(|| name.to_string()),
+            error: None,
         }
+    }
+
+    /// Elaborate a bare `$name` value reference.  All-caps names are the
+    /// shell's, unconditionally: `SCRIPT` bakes to this source's own name
+    /// as a string literal rather than a `Val::Variable` lookup —
+    /// self-location is lexical (bash's `BASH_SOURCE`, definition-site,
+    /// not `$0`'s caller-site), and a compile-time literal is lexicality
+    /// by construction. Referencing it where the compiling source has no
+    /// script identity (the REPL, `-c`, a preloaded `<...>` source) is a
+    /// static elaboration error.
+    fn variable_val(&mut self, name: &str) -> Val {
+        if name != "SCRIPT" {
+            return Val::Variable(name.to_string());
+        }
+        if let Some(s) = &self.script {
+            return Val::String(s.clone());
+        }
+        self.error.get_or_insert_with(|| ParseError {
+            message: "$SCRIPT: no script name here (the REPL, `-c`, and preloaded \
+                      sources have none)"
+                .into(),
+            span: self.current_span,
+            lex_kind: None,
+            incompleteness: None,
+        });
+        Val::Unit
     }
 
     /// Generate a fresh variable name (`_g1`, `_g2`, ...) for hoisted binds.
@@ -367,7 +409,10 @@ impl Elaborator {
                 comp!(self, CompKind::Return(Val::from_word(s)))
             }
             Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone()))),
-            Ast::Variable(s) => comp!(self, CompKind::Return(Val::Variable(s.clone()))),
+            Ast::Variable(s) => {
+                let v = self.variable_val(s);
+                comp!(self, CompKind::Return(v))
+            }
             Ast::Word(Word::Tilde(path)) => {
                 comp!(self, CompKind::Return(Val::TildePath(path.clone())))
             }
@@ -650,7 +695,7 @@ impl Elaborator {
                                 self.with_span(value.span, |this| this.to_val(&value.item, binds)),
                             ),
                             MapEntry::Deref { name, value } => ValMapEntry::Entry(
-                                Val::Variable(name.clone()),
+                                self.variable_val(name),
                                 self.with_span(value.span, |this| this.to_val(&value.item, binds)),
                             ),
                             MapEntry::Spread(a) => ValMapEntry::Spread(
@@ -958,20 +1003,26 @@ impl Elaborator {
             Expr::Integer(n) => comp!(self, CompKind::Return(Val::Int(*n))),
             Expr::Number(n) => comp!(self, CompKind::Return(Val::Float(*n))),
             Expr::Bool(b) => comp!(self, CompKind::Return(Val::Bool(*b))),
-            Expr::Variable(name) => comp!(self, CompKind::Return(Val::Variable(name.clone()))),
-            Expr::Index(name, keys) => comp!(
-                self,
-                CompKind::Index {
-                    target: Val::Variable(name.clone()),
-                    keys: keys
-                        .iter()
-                        .map(|k| Spanned::with_span(
-                            k.span,
-                            self.with_span(k.span, |this| this.to_val(&k.item, binds)),
-                        ))
-                        .collect(),
-                }
-            ),
+            Expr::Variable(name) => {
+                let v = self.variable_val(name);
+                comp!(self, CompKind::Return(v))
+            }
+            Expr::Index(name, keys) => {
+                let target = self.variable_val(name);
+                comp!(
+                    self,
+                    CompKind::Index {
+                        target,
+                        keys: keys
+                            .iter()
+                            .map(|k| Spanned::with_span(
+                                k.span,
+                                self.with_span(k.span, |this| this.to_val(&k.item, binds)),
+                            ))
+                            .collect(),
+                    }
+                )
+            }
             Expr::Force(inner) => self.with_span(inner.span, |this| {
                 comp!(this, CompKind::Force(this.to_val(&inner.item, binds)))
             }),
@@ -1147,20 +1198,29 @@ fn prelude_scope() -> Arc<HashSet<String>> {
 ///
 /// `bindings` is the set of names already bound in the calling
 /// environment (e.g. accumulated REPL definitions).  The prelude exports
-/// are always in scope.
+/// are always in scope.  `name` is the source's own display name — the
+/// value `$SCRIPT` bakes to (see [`Elaborator::variable_val`]).
 ///
 /// If the `RAL_DUMP_IR` environment variable is set, the resulting IR is
 /// printed to stderr before being returned.
+///
+/// # Errors
+/// Returns `Err` if `$SCRIPT` is referenced and `name` carries no script
+/// identity (see [`crate::path::lex::has_script_identity`]).
 #[allow(
     clippy::implicit_hasher,
     reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
 )]
-pub fn elaborate(ast: &[Stmt], bindings: HashSet<String>) -> Comp {
-    let comp = Elaborator::new_with_bindings(bindings).stmts(ast);
+pub fn elaborate(ast: &[Stmt], bindings: HashSet<String>, name: &str) -> Result<Comp, ParseError> {
+    let mut elaborator = Elaborator::new_with_bindings(bindings, name);
+    let comp = elaborator.stmts(ast);
+    if let Some(e) = elaborator.error {
+        return Err(e);
+    }
     if std::env::var("RAL_DUMP_IR").is_ok() {
         eprintln!("{comp:#?}");
     }
-    comp
+    Ok(comp)
 }
 
 #[cfg(test)]
@@ -1189,7 +1249,7 @@ mod tests {
     #[test]
     fn tilde_path_command_head_elaborates_to_exec() {
         let ast = parse("~/.local/bin/claude update").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let (name, args, _) = expect_exec_name(&comp);
         assert_eq!(
             name,
@@ -1207,7 +1267,7 @@ mod tests {
     #[test]
     fn tilde_path_command_head_without_args_elaborates_to_exec() {
         let ast = parse("~/.local/bin/claude").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let (name, args, _) = expect_exec_name(&comp);
         assert_eq!(
             name,
@@ -1222,7 +1282,7 @@ mod tests {
     #[test]
     fn literal_path_head_elaborates_to_direct_exec() {
         let ast = parse("./script").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let (name, args, _) = expect_exec_name(&comp);
         assert_eq!(name, &CommandName::Path("./script".into()));
         assert!(args.is_empty());
@@ -1231,7 +1291,7 @@ mod tests {
     #[test]
     fn external_name_head_elaborates_to_external_exec() {
         let ast = parse("^git status").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let (name, args, external_only) = expect_exec_name(&comp);
         assert_eq!(name, &CommandName::Bare("git".into()));
         assert_eq!(
@@ -1249,7 +1309,7 @@ mod tests {
         // redirects on the App able to bracket the body — see the
         // `with_redirects → install_stdin_redirect` path.
         let ast = parse("$map $upper ['a']").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let CompKind::App { head, args } = &comp.item else {
             panic!("expected app, got {:?}", comp.item);
         };
@@ -1277,7 +1337,7 @@ mod tests {
     #[test]
     fn command_use_before_non_thunk_let_is_exec() {
         let ast = parse("date\nlet date = 5").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let CompKind::Seq(parts) = &comp.item else {
             panic!("expected a Seq of two statements, got {:?}", comp.item);
         };
@@ -1294,7 +1354,7 @@ mod tests {
     #[test]
     fn command_use_before_acyclic_thunk_let_is_exec() {
         let ast = parse("f\nlet f = { return 1 }").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let CompKind::Seq(parts) = &comp.item else {
             panic!("expected a Seq, got {:?}", comp.item);
         };
@@ -1309,7 +1369,7 @@ mod tests {
     #[test]
     fn command_use_before_recursive_thunk_let_is_exec() {
         let ast = parse("g 3\nlet g = { |n| g $[$n - 1] }").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let CompKind::Seq(parts) = &comp.item else {
             panic!("expected a Seq, got {:?}", comp.item);
         };
@@ -1328,7 +1388,7 @@ mod tests {
     #[test]
     fn intra_group_recursion_resolves_to_binding() {
         let ast = parse("let f = { |n| f $n }\nf 5").expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let CompKind::Seq(parts) = &comp.item else {
             panic!("expected a Seq, got {:?}", comp.item);
         };
@@ -1357,11 +1417,35 @@ mod tests {
     #[test]
     fn chain_arm_hoist_stays_inside_the_arm() {
         let ast = parse(r#"return ok ? echo "fallback: !{hostname}""#).expect("parse");
-        let comp = elaborate(&ast, HashSet::new());
+        let comp = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         assert!(
             matches!(comp.item, CompKind::Chain(_)),
             "chain arm hoist leaked into the caller: expected a bare Chain, got {:?}",
             comp.item
         );
+    }
+
+    /// `$SCRIPT` bakes to the compiling source's own name as a string
+    /// literal, not a `Val::Variable` lookup — self-location is lexical,
+    /// resolved once at elaboration time.
+    #[test]
+    fn script_bakes_to_a_string_literal() {
+        let ast = parse("return $SCRIPT").expect("parse");
+        let comp = elaborate(&ast, HashSet::new(), "/repo/lib.ral").expect("elaborate");
+        assert_eq!(
+            comp.item,
+            CompKind::Return(Val::String("/repo/lib.ral".into()))
+        );
+    }
+
+    /// Referencing `$SCRIPT` where the compiling source has no script
+    /// identity — the REPL, `-c`, a preloaded `<...>` source — is a
+    /// static elaboration error.
+    #[test]
+    fn script_with_no_identity_is_an_elaboration_error() {
+        let ast = parse("return $SCRIPT").expect("parse");
+        assert!(elaborate(&ast, HashSet::new(), "").is_err());
+        assert!(elaborate(&ast, HashSet::new(), "-c").is_err());
+        assert!(elaborate(&ast, HashSet::new(), "<stdin>").is_err());
     }
 }

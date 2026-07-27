@@ -300,12 +300,22 @@ pub fn path_within_str(path: &str, prefix: &str) -> bool {
     path_within(Path::new(path), Path::new(prefix))
 }
 
+/// True if `script` names an actual compiled source — not the REPL,
+/// not `-c`, not a synthetic `<...>` source (`<stdin>`, `<prelude>`).
+///
+/// The one script-identity rule that [`resolve_relative_to_script`] and
+/// the elaborator's `$SCRIPT` bake both consult, instead of two drifting
+/// enumerations.
+pub fn has_script_identity(script: &str) -> bool {
+    !script.is_empty() && !script.starts_with('<') && script != "-c"
+}
+
 /// Resolve `path` relative to the directory containing `script`.
 ///
-/// If `path` is absolute it is returned unchanged.  If `script` is
-/// empty or starts with `<` (the synthetic-source convention used
-/// by the REPL, `eval`, etc.) the input is returned unchanged so
-/// the caller can fall back to cwd-relative resolution.
+/// If `path` is absolute it is returned unchanged.  If `script` has no
+/// [script identity](has_script_identity) — empty, `-c`, or a synthetic
+/// `<...>` source — the input is returned unchanged so the caller can
+/// fall back to cwd-relative resolution.
 ///
 /// The third anchor in the resolver lattice, after cwd-relative
 /// (most builtins) and HOME-relative (`~` expansion): a module
@@ -317,7 +327,7 @@ pub fn resolve_relative_to_script(path: &str, script: &str) -> PathBuf {
     if input.is_absolute() {
         return input;
     }
-    if script.is_empty() || script.starts_with('<') {
+    if !has_script_identity(script) {
         return input;
     }
     let base = Path::new(script).parent().unwrap_or_else(|| Path::new("."));
