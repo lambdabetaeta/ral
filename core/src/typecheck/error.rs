@@ -210,6 +210,11 @@ pub enum TypeErrorKind {
         got: usize,
         at_most: bool,
     },
+    /// A `from-*` decoder was passed an argument; it reads the byte
+    /// channel, so there is no argument slot to fill.
+    DecoderTakesNoArgument {
+        name: String,
+    },
     /// `fail [status: 0]` — a nonzero status is required so `fail` cannot
     /// masquerade as a clean exit.
     FailStatusZero,
@@ -262,6 +267,7 @@ impl TypeErrorKind {
             Self::FailStatusZero => "T0051",
             Self::MalformedAlias { .. } => "T0052",
             Self::MalformedUnalias { .. } => "T0053",
+            Self::DecoderTakesNoArgument { .. } => "T0054",
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",

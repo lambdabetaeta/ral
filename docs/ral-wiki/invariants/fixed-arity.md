@@ -11,13 +11,16 @@ primitive undefined ([[design/builtins|builtins]]).
 
 **A command entry is not applied, so the rule does not reach it.** An external
 command, an intercepted operation, and a command-only builtin take an *argv*,
-not a curried argument sequence, and have no first-class form to η-expand. `cd`
-and the `from-X` codecs take zero or one argument (`ArgSig::Optional`,
-`core/src/typecheck/builtins.rs`); an intercepted operation takes as many as the
-call site writes. The registry keeps the two apart structurally: an entry
-declares `arity: _` exactly when its signature has no fixed structural arity,
-and `$name` exists only where that signature declares a value form
-(`core/src/builtins.rs`).
+not a curried argument sequence, and have no first-class form to η-expand.
+Hence `cd` and the job-control verbs `fg` / `bg` / `disown` take zero or one
+argument (`ArgSig::Optional`, `core/src/typecheck/builtins.rs`); an intercepted
+operation takes as many as the call site writes; and `detach` alone takes a
+fully open argv (`ArgSig::Any`) — there is no `$detach` whose η-expansion an
+absent count could leave undefined
+([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+The registry keeps the two apart structurally: an entry declares `arity: _`
+exactly when its signature has no fixed structural arity, and `$name` exists
+only where that signature declares a value form (`core/src/builtins.rs`).
 
 **The discipline survives at that boundary by packing, not by banning.**
 `run_handler` (`core/src/runtime/command_call.rs`) hands a handler its arguments

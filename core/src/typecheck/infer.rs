@@ -869,7 +869,7 @@ impl Inferencer<'_> {
                     let scheme = factory(&mut self.ctx.unifier);
                     return self.apply_scheme(&scheme, args);
                 }
-                BuiltinTypeRule::Sig(sig) => return self.apply_builtin_sig(sig, args),
+                BuiltinTypeRule::Sig(sig) => return self.apply_builtin_sig(sig, name, args),
             }
         }
 

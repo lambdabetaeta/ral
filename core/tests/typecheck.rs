@@ -1125,7 +1125,6 @@ fn builtin_command_signatures_are_explicit() {
     ok("range 1 3");
     has_error(r#"range "a" 3"#, "couldn't match");
     ok("from-lines");
-    ok("from-lines \"a\\nb\\n\"");
     ok("_type 42");
     has_error("fail [status: 0]", "fail requires a nonzero status");
 }
@@ -1337,6 +1336,51 @@ fn nested_binds_carry_no_scheme_while_spine_does() {
     });
     assert_eq!(spine_named, Some(true), "spine bind carries a scheme");
     assert_eq!(nested_named, Some(false), "nested bind carries no scheme");
+}
+
+// ─── Nullary codec decoders ──────────────────────────────────────────────────
+//
+// Every `from-X` is `F[Bytes, ∅] A`: it consumes the byte channel and returns
+// a value, so it has no argument slot to fill.  An argument is a static error
+// (T0054), not a signal raised once the call is already running.
+
+/// One T0054 per decoder, with the encoder-pipe remedy as its hint.
+#[test]
+fn decoder_with_an_argument_is_a_type_error() {
+    for name in ["from-json", "from-string", "from-lines"] {
+        let errs = raw_errors(&format!("let x = hello\n{name} $x"));
+        let codes: Vec<_> = errs.iter().map(|e| e.kind.code()).collect();
+        assert_eq!(codes, ["T0054"], "expected one T0054 for `{name} $x`");
+        let hint = errs[0].hint().unwrap_or_default();
+        assert!(
+            hint.contains("to-string") && hint.contains("from-json"),
+            "hint should point at the encoder pipe, got: {hint:?}"
+        );
+    }
+}
+
+/// As a pipeline's last stage a decoder reads `Bytes` and emits nothing on
+/// the channel.
+#[test]
+fn nullary_decoder_keeps_its_byte_modes() {
+    let comp = annotated("echo hi | from-json");
+    let pipelines = all_pipeline_wires(&comp);
+    let (stage_count, wires) = &pipelines[0];
+    assert_eq!(*stage_count, 2, "two-stage pipeline");
+    assert_eq!(
+        wires[1],
+        Wire {
+            input: ByteMode::Bytes,
+            output: ByteMode::Empty
+        }
+    );
+}
+
+/// A decoder signature declares `value: None`, so `$from-json` has no
+/// first-class form.
+#[test]
+fn decoder_is_not_first_class() {
+    has_error("let f = $from-json; return $f", "builtin command");
 }
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────

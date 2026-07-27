@@ -71,7 +71,7 @@ const fn arity_agrees(declared: Option<usize>, structural: Option<usize>) -> boo
 ///
 /// Every entry binds six facets at once: the user-visible names, the
 /// computation-type hint consumed by the inference engine, a fixed arity
-/// (if the builtin is a first-class function and not variadic), the doc
+/// (if the builtin is a first-class function with a fixed argv), the doc
 /// string the `help` builtin prints, the type-checker rule, and a
 /// `call` block that produces the runtime result.  The macro emits a
 /// single [`BuiltinEntry`] per name into the [`CORE_BUILTINS`] static
@@ -85,9 +85,9 @@ const fn arity_agrees(declared: Option<usize>, structural: Option<usize>) -> boo
 /// (the static is const-evaluated, and a mismatch is a const-panic build
 /// error) — the two cannot drift apart.
 ///
-/// Entries with `arity: _` are not first-class functions (variadic or
-/// command-only); `$name` is available only if the type signature has an
-/// explicit value form.
+/// Entries with `arity: _` have no fixed argv (command-only, or `detach`'s
+/// open `ArgSig::Any`); `$name` is available only if the type signature has
+/// an explicit value form.
 ///
 /// The `call` block is a non-capturing closure `|args, mooring, shell| body`
 /// returning `Settled<Value>`; the macro wraps it into a per-entry
@@ -257,22 +257,22 @@ builtin_registry! {
     FoldLines { names: ["fold-lines"], arity: 2, ty: Scheme(None, scheme::fold_lines),
         doc: "fold-lines <fn> <init>  — fold over stdin lines.",
         call: |args, mooring, shell| collections::builtin_fold_lines(args, mooring, shell), },
-    FromBytes { names: ["from-bytes"], arity: _, ty: Sig(sig::FROM_BYTES),
+    FromBytes { names: ["from-bytes"], arity: 0, ty: Sig(sig::FROM_BYTES),
         doc: "from-bytes  — read raw bytes from the channel (stdin / `< file` / pipe) as Bytes.",
         call: |args, _mooring, shell| codecs::builtin_from_bytes(args, shell), },
-    FromString { names: ["from-string"], arity: _, ty: Sig(sig::FROM_STRING),
+    FromString { names: ["from-string"], arity: 0, ty: Sig(sig::FROM_STRING),
         doc: "from-string  — decode UTF-8 bytes from the channel to a String.",
         call: |args, _mooring, shell| codecs::builtin_from_string(args, shell), },
-    FromLine { names: ["from-line"], arity: _, ty: Sig(sig::FROM_STRING),
+    FromLine { names: ["from-line"], arity: 0, ty: Sig(sig::FROM_STRING),
         doc: "from-line  — decode UTF-8 bytes from the channel, stripping one trailing newline.",
         call: |args, _mooring, shell| codecs::builtin_from_line(args, shell), },
-    FromLines { names: ["from-lines"], arity: _, ty: Sig(sig::FROM_LINES),
+    FromLines { names: ["from-lines"], arity: 0, ty: Sig(sig::FROM_LINES),
         doc: "from-lines  — decode channel bytes to a Step stream of lines (lossy on invalid UTF-8).",
         call: |args, _mooring, shell| codecs::builtin_from_lines(args, shell), },
-    FromJson { names: ["from-json"], arity: _, ty: Sig(sig::FROM_JSON),
+    FromJson { names: ["from-json"], arity: 0, ty: Sig(sig::FROM_JSON),
         doc: "from-json  — decode JSON bytes from the channel to a value.",
         call: |args, _mooring, shell| codecs::builtin_from_json(args, shell), },
-    FromCsv { names: ["from-csv"], arity: _, ty: Sig(sig::FROM_JSON),
+    FromCsv { names: ["from-csv"], arity: 0, ty: Sig(sig::FROM_JSON),
         doc: "from-csv  — decode CSV bytes from the channel to a list of records keyed by the header row (every field a String).",
         call: |args, _mooring, shell| codecs::builtin_from_csv(args, shell), },
     ToBytes { names: ["to-bytes"], arity: 1, ty: Sig(sig::TO_BYTES),

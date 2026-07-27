@@ -34,7 +34,7 @@ pub enum BuiltinTypeRule {
     /// each call. `arity` caches the number of value arguments for
     /// `$name` synthesis — the registry entry's declared `arity:` field,
     /// cross-checked against the scheme's `Fun` nesting only by a
-    /// debug assertion; `None` for variadic / command-only entries.
+    /// debug assertion; `None` for entries without a fixed argv.
     Scheme(Option<usize>, fn(&mut Unifier) -> Scheme),
     /// Command-position signature.  `value` decides whether `$name`
     /// has a first-class form; `None` means command-only.
@@ -52,7 +52,7 @@ pub struct BuiltinSig {
 
 impl BuiltinSig {
     /// Fixed value-arg count implied by the argument signature;
-    /// `None` for variadic / optional / open argument policies.
+    /// `None` for optional / open argument policies.
     pub const fn fixed_arity(&self) -> Option<usize> {
         match self.args {
             ArgSig::Exact(t) | ArgSig::DataLast(t) => Some(t.len()),
@@ -120,6 +120,9 @@ pub enum BuiltinDiagnostic {
     None,
     FailStatusNonzero,
     TypeProbe,
+    /// A `from-*` decoder: an argument is not an arity slip but a
+    /// misunderstanding of where the bytes come from.
+    Decoder,
 }
 
 /// Project a [`ModeTemplate`] onto a concrete [`PipeMode`], minting a
@@ -315,6 +318,17 @@ pub mod sig {
         }
     }
 
+    /// A `from-*` decoder: nullary and command-only, because the bytes come
+    /// from the channel and there is no value form to η-expand.
+    const fn decoder(result: CompTemplate) -> BuiltinSig {
+        BuiltinSig {
+            args: ArgSig::Exact(NO_ARGS),
+            result,
+            value: None,
+            diagnostic: BuiltinDiagnostic::Decoder,
+        }
+    }
+
     pub const TERMINAL_CONTROL: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),
         ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
@@ -327,26 +341,22 @@ pub mod sig {
         Some(scheme::range),
     );
 
-    pub const FROM_BYTES: BuiltinSig = command(
-        ArgSig::Optional(ArgTemplate::Ty(TyTemplate::Bytes)),
-        ret(ModeTemplate::Bytes, ModeTemplate::None, TyTemplate::Bytes),
-        None,
-    );
-
-    pub const FROM_STRING: BuiltinSig = command(
-        ArgSig::Optional(ANY),
-        ret(ModeTemplate::Bytes, ModeTemplate::None, TyTemplate::String),
-        None,
-    );
-
-    pub const FROM_JSON: BuiltinSig = command(
-        ArgSig::Optional(ANY),
-        ret(ModeTemplate::Bytes, ModeTemplate::None, TyTemplate::Any),
-        None,
-    );
-
-    pub const FROM_LINES: BuiltinSig =
-        command(ArgSig::Optional(ANY), CompTemplate::LinesStep, None);
+    pub const FROM_BYTES: BuiltinSig = decoder(ret(
+        ModeTemplate::Bytes,
+        ModeTemplate::None,
+        TyTemplate::Bytes,
+    ));
+    pub const FROM_STRING: BuiltinSig = decoder(ret(
+        ModeTemplate::Bytes,
+        ModeTemplate::None,
+        TyTemplate::String,
+    ));
+    pub const FROM_JSON: BuiltinSig = decoder(ret(
+        ModeTemplate::Bytes,
+        ModeTemplate::None,
+        TyTemplate::Any,
+    ));
+    pub const FROM_LINES: BuiltinSig = decoder(CompTemplate::LinesStep);
 
     pub const TO_BYTES: BuiltinSig = command(
         ArgSig::DataLast(TO_BYTES_ARGS),
@@ -1095,8 +1105,8 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 ///
 /// Used to η-expand first-class
 /// builtin references (`$upper`) into curried lambda thunks.  `None` for
-/// builtins without an arity — typically variadic ones like `echo` or
-/// command-only dispatchers.
+/// builtins without a fixed argv — command-only entries, or the open-argv
+/// `detach`.
 ///
 /// Delegates to the entry's own `fixed_arity`, off `table`.  In debug
 /// builds, asserts that this matches the arity derived from the entry's
@@ -1266,7 +1276,12 @@ impl Inferencer<'_> {
         }
     }
 
-    pub(super) fn apply_builtin_sig(&mut self, sig: BuiltinSig, args: &crate::ir::Args) -> CompTy {
+    pub(super) fn apply_builtin_sig(
+        &mut self,
+        sig: BuiltinSig,
+        name: &str,
+        args: &crate::ir::Args,
+    ) -> CompTy {
         if sig.diagnostic == BuiltinDiagnostic::FailStatusNonzero
             && fail_status_is_zero_literal(args)
         {
@@ -1280,10 +1295,17 @@ impl Inferencer<'_> {
                     let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
                         && positional.len() + 1 == expected.len();
                     if positional.len() != expected.len() && !missing_data_last {
-                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
-                            expected: expected.len(),
-                            got: positional.len(),
-                            at_most: false,
+                        // A decoder's `expected` is empty, so reaching here
+                        // means an argument was written.
+                        self.ctx.diagnose(match sig.diagnostic {
+                            BuiltinDiagnostic::Decoder => {
+                                TypeErrorKind::DecoderTakesNoArgument { name: name.into() }
+                            }
+                            _ => TypeErrorKind::BuiltinArity {
+                                expected: expected.len(),
+                                got: positional.len(),
+                                at_most: false,
+                            },
                         });
                     }
                     for (arg, template) in positional.iter().zip(expected.iter()) {

@@ -32,8 +32,9 @@ codec" string ([[design/builtins|why each codec is its own builtin]]).
 ## The two directions
 
 `from-X` takes **no value argument** — it reads the byte channel, whether that
-channel is a `< file` redirect or the left stage of a pipeline. Passing a value
-is an error (`from-json: takes no arguments — it reads the byte channel`) whose
+channel is a `< file` redirect or the left stage of a pipeline. Each decoder is
+declared arity 0, so passing a value is a *type* error raised before the call
+runs (`` `from-json` takes no argument — it reads the byte channel ``) whose
 hint names the fix: to decode a value already in hand, pipe it through the
 matching `to-X` encoder, so the bytes re-enter the channel a decoder reads —
 `to-string $s | from-json` for JSON in a `String`, `to-bytes $b | from-string`

@@ -43,10 +43,11 @@ reinterpretation layer the identification leaves open.  We confine authority
 through *explicit sandboxing*, a capability wrapper whose braces are
 lexically apparent and whose restriction reaches dynamically into every
 callee.  We give the pipe *two execution models*, one for values and one for
-bytes, settled by the type of the connecting edge.  We make *handlers and
-aliases variadic while functions are not*, because the asymmetry is the
-exec/lambda boundary made visible.  And we keep *a spare surface*, two sigils
-and no hidden lexer modes, refusing to overload one form with two meanings.
+bytes, settled by the type of the connecting edge.  We hand *a handler its
+argv as one list while a function takes declared parameters*, because the
+asymmetry is the exec/lambda boundary made visible.  And we keep *a spare
+surface*, two sigils and no hidden lexer modes, refusing to overload one
+form with two meanings.
 Eight commitments in all, threaded in that order through the sections below.
 
 ## System calls are algebraic effects
@@ -149,13 +150,13 @@ The second model is the *byte pipeline*. As soon as one edge touches bytes — a
 
 The reader will object that this isolation has a price, and it does — we state it plainly. A ral stage running out-of-process is a *subshell with respect to mutation*: its `cd`, `env-set`, alias, module, registry, or REPL changes do not flow back to the parent; only the pipe contents and the final value cross the boundary. This is acceptable because it is exactly how every traditional shell treats process-pipeline stages, and because the alternative — smuggling mutations back across a process boundary — would forfeit the very isolation that makes the byte model honest. The platform mechanics that realise the shape — the process group and `tcsetpgrp` handoff, the exec trampoline that wins the foreground-claim race, the helper-frame protocol, and the Windows Job Object equivalents — are transport details, not part of the model.
 
-## Handlers and aliases are variadic, functions are not
+## A handler takes the argv as one list, a function takes parameters
 
-This section is about why a handler accepts an argument list of any length while a function does not, and why that asymmetry is forced rather than chosen. The short answer is that a handler is the in-process interpretation of `execve`, whose interface is `argv[]` — a vector of arbitrary length — so **a handler is variadic by necessity, not by taste**. You cannot mock `git` with a fixed-arity function, because `git status`, `git commit -m …`, and `git log --oneline -n 5` all reach the one handler installed for the name; the handler must take whatever the caller typed. A function is the other thing entirely: lambda application over a declared parameter list, as in `{ |x y| … }`, its arity fixed at definition and part of its type. The asymmetry is therefore the exec/lambda boundary — the identifications of *System calls are algebraic effects* and *Values and commands* — made visible at the point where you actually invoke things; the arity tells you which world you are in.
+This section is about why a handler is invoked with whatever the caller typed while a function is invoked against a declared parameter list, and why that asymmetry is forced rather than chosen. The short answer is that a handler is the in-process interpretation of `execve`, whose interface is `argv[]` — a vector of arbitrary length — so **a handler must accept what the caller typed, not what it declared**. You cannot mock `git` with a fixed-arity function, because `git status`, `git commit -m …`, and `git log --oneline -n 5` all reach the one handler installed for the name. The shape this takes in the type system is not variadic application but packing: the calling convention collects the whole argv into a single homogeneous list, so a parameterised arm is typed `Fun(List α, B)` and every supplied argument inhabits the element type `α`. Variable arity is thus a *surface* phenomenon — `g a b c` reaches its handler as one three-element list — while at the value level a handler's arity is exactly one. A function is the other thing entirely: lambda application over a declared parameter list, as in `{ |x y| … }`, its arity fixed at definition and part of its type. The asymmetry is therefore the exec/lambda boundary — the identifications of *System calls are algebraic effects* and *Values and commands* — made visible at the point where you actually invoke things; and because the argv arrives as a list *value*, fixed arity holds throughout ral with no exception carved out for commands, exactly as optionality is always a variant and never a hole in a type.
 
 Concretely, a per-name handler is a unary lambda `{ |args| … }` invoked with the command's argument list, and the catch-all `handler:` is a binary lambda `{ |name args| … }` invoked with the name and the arguments. The calling convention is fixed by the surface position — per-name versus catch-all — not inferred from the value's runtime shape, and arity is validated once at install time, so a bare block or a wrong-arity lambda is rejected rather than coerced. The reason it must be rejected, not inferred, is currying: a binary lambda applied to one argument does not fault but returns the inner closure, so a mis-shaped handler would silently hand the body a partial-application closure as the command's result — a category error surviving as a plausible value, exactly the bug class ral exists to make unconstructable.
 
-An alias is just a top-level handler — the same shape, the same variadic convention, and the same dispatch after the binding namespace has declined the name. It differs only in where and how long it is installed: in the interactive command namespace rather than scoped by `within`, and persisting across runs rather than popped at block exit. Hence scripts never see aliases at all, so script behaviour cannot turn on the user's interactive configuration — a property worth the narrowing on its own.
+An alias is just a top-level handler — the same shape, the same argv-as-one-list convention, and the same dispatch after the binding namespace has declined the name. It differs only in where and how long it is installed: in the interactive command namespace rather than scoped by `within`, and persisting across runs rather than popped at block exit. Hence scripts never see aliases at all, so script behaviour cannot turn on the user's interactive configuration — a property worth the narrowing on its own.
 
 ## A spare surface: not POSIX, two sigils
 

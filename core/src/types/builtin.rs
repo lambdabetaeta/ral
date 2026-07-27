@@ -71,7 +71,7 @@ pub struct BuiltinEntry {
 
 impl BuiltinEntry {
     /// Fixed value-arg count for `$name` η-expansion and typecheck.
-    /// `None` for variadic or command-only entries.
+    /// `None` for entries without a fixed argv.
     pub fn fixed_arity(&self) -> Option<usize> {
         match &self.type_rule {
             BuiltinTypeRule::Scheme(arity, _) => *arity,

@@ -37,7 +37,8 @@ fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
 /// Channel bytes for a `from-X` decoder.  Decoders are 0-arity: the bytes
 /// come from the channel (stdin / a `< file` redirect / a pipeline), never
 /// from an argument.  Passing one is a mistake — the encoder→decoder pipe is
-/// how a value already in hand reaches the channel.
+/// how a value already in hand reaches the channel.  The typechecker rejects
+/// it first; this guard covers untyped call paths.
 fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     if !args.is_empty() {
         return Err(sig_hint(

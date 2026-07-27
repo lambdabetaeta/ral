@@ -102,6 +102,9 @@ impl TypeErrorKind {
                 got,
                 at_most: true,
             } => format!("builtin expected at most {expected} argument(s), got {got}"),
+            Self::DecoderTakesNoArgument { name } => {
+                format!("`{name}` takes no argument — it reads the byte channel")
+            }
             Self::FailStatusZero => {
                 "`fail [status: 0]` is not allowed — fail requires a nonzero status".into()
             }
@@ -183,6 +186,7 @@ impl TypeErrorKind {
             | Self::CannotRedefineBuiltin { .. }
             | Self::HandlerShadowedByBinding { .. }
             | Self::BuiltinArity { .. }
+            | Self::DecoderTakesNoArgument { .. }
             | Self::FailStatusZero
             | Self::MalformedAlias { .. }
             | Self::MalformedUnalias { .. }
@@ -338,6 +342,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::BuiltinArity { at_most: true, .. } => {
             Some("remove the extra arguments or pass a single list value".to_string())
         }
+        TypeErrorKind::DecoderTakesNoArgument { .. } => Some(
+            "to decode a value in hand, pipe it through the matching encoder: \
+             `to-string $x | from-json`"
+                .to_string(),
+        ),
         TypeErrorKind::FailStatusZero => Some("use `return` for a clean exit".to_string()),
         TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
             Some(detail.to_string())
