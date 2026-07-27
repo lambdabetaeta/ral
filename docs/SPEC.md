@@ -1231,7 +1231,7 @@ editor, shell at whatever the caller had.  Six keys are accepted:
 
 ```
 grant [
-    exec: ['git': [], 'make': [], '/usr/bin/': 'allow'],
+    exec: ['git': 'allow', 'make': 'allow', '/usr/bin/': 'allow'],
     fs:   [read: ['/home/project'], write: ['/tmp/build']],
     net:  true,
     audit: true,
@@ -1245,7 +1245,11 @@ A unified map keyed by one of four shapes:
 - **bare command name** (`git`, `kubectl`) — match by name as the
   user typed it, after PATH lookup.
 - **absolute literal path** (`/usr/bin/git`) — match a specific
-  resolved binary.
+  resolved binary.  Since the trailing slash is the only thing telling
+  the two path shapes apart, a literal-path key that resolves to an
+  existing directory names a binary that cannot exist and is a load
+  error hinting the subpath spelling, rather than a grant that matches
+  nothing and denies at use time.
 - **absolute subpath** (`/usr/bin/`, trailing `/`) — match any
   binary whose resolved path lies inside the directory.  Path-prefix
   sigils (§11.2.1) may appear at the head of literal-path or subpath
@@ -1274,9 +1278,11 @@ A unified map keyed by one of four shapes:
 Each value is the policy.  Bare-name and literal-path keys carry the
 full lattice:
 
-- `'allow'` (or `[]`, equivalent — empty subcommand list) — allow with
-  any arguments;
-- `[s₁, …]` — allow only when `argv[0] ∈ {sᵢ}`;
+- `'allow'` — allow with any arguments;
+- `[s₁, …]` — allow only when `argv[0] ∈ {sᵢ}`.  The list must be
+  non-empty: `meet` on two subcommand sets is intersection and can
+  produce the empty set, which admits nothing, so `[]` would name ⊤ and
+  ⊥ at once and is rejected at policy load;
 - `'deny'` — sticky veto.
 
 Subpath keys carry only `'allow'` or `'deny'` — a subcommand list

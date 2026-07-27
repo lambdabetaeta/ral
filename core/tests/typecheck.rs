@@ -790,7 +790,7 @@ fn grant_exec_subpath_allow_typechecks() {
 fn grant_exec_mixed_policy_shapes_typecheck() {
     // The TUTORIAL §16 example: a subcommand list, an empty list, and an
     // inline string policy in one map.
-    ok(r"grant [exec: [git: ['status', 'log'], make: [], '/usr/bin/': 'allow']] { echo hi }");
+    ok(r"grant [exec: [git: ['status', 'log'], make: 'allow', '/usr/bin/': 'allow']] { echo hi }");
 }
 
 #[test]

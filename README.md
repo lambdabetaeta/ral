@@ -47,7 +47,7 @@ Authority is scoped, and it can only shrink:
 
 ```
 grant [
-    exec: [git: [], make: [], '/usr/bin/': 'allow'],
+    exec: [git: 'allow', make: 'allow', '/usr/bin/': 'allow'],
     fs:   [read: ['/home/project'], write: ['/tmp/build']],
     net:  false,
 ] {

@@ -234,6 +234,14 @@ pub(crate) fn decode_capability_map(
 /// names (`git`, `kubectl`) are names rather than paths and pass
 /// through unchanged.
 ///
+/// A path-shaped literal that resolves to an existing directory is an
+/// error: the surface distinguishes the two kinds by trailing slash, so
+/// `/usr/bin: 'allow'` would otherwise decode to a literal grant on a
+/// binary that cannot exist and fail closed at use time as a baffling
+/// "denied by active grant".  The freeze pass already consults the
+/// environment (`path:` reads `$PATH`, sigils resolve against `ctx`), so
+/// asking the filesystem here is in keeping.
+///
 /// Two sigils expand to more than one directory and so are special-
 /// cased here rather than in [`freeze_absolute`]: `path:` (one `dirs`
 /// entry per `$PATH` component) and `system:` (one `dirs` entry per
@@ -278,6 +286,12 @@ fn freeze_exec_map(
             }
         } else if looks_like_path_or_sigil(&key) {
             if let Some(frozen) = freeze_key(&key)? {
+                if crate::path::is_dir(&frozen) {
+                    return Err(format!(
+                        "{err_prefix}: '{key}' is a directory, so as a literal command key it \
+                         names a binary that cannot exist — did you mean '{key}/'?"
+                    ));
+                }
                 literals.insert(frozen, policy);
             }
             // else: foreign-rooted dead grant — dropped, see `freeze_absolute`.
@@ -369,7 +383,10 @@ fn system_dirs() -> Vec<String> {
 /// lands in [`ExecMap::literals`].  Three surface forms per literal:
 ///   * `'allow'`         — admit the command with any arguments.
 ///   * `'deny'`          — sticky veto, propagates upward through `meet`.
-///   * `[]` / `[s, …]`   — subcommand allowlist (empty = `'allow'`).
+///   * `[s, …]`          — subcommand allowlist.  Empty is an error, not a
+///     third spelling of `'allow'`: `meet` on two subcommand sets is
+///     intersection and can produce the empty set, which admits nothing,
+///     so an empty surface list would mean ⊤ and ⊥ at once.
 ///
 /// Lowercase strings are the ral surface convention; the internal serde
 /// tags on `ExecPolicy` (capitalised) are reserved for the IPC wire format.
@@ -406,7 +423,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
             },
             Value::Bool(_) => {
                 return Err(sig(format!(
-                    "{err_prefix}: use 'allow', 'deny', or [] (subcommand list) for '{cmd}', not true/false"
+                    "{err_prefix}: use 'allow', 'deny', or a subcommand list for '{cmd}', not true/false"
                 )));
             }
             Value::List(items) => {
@@ -415,10 +432,12 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                         .into_iter()
                         .collect();
                 if subs.is_empty() {
-                    ExecPolicy::Allow
-                } else {
-                    ExecPolicy::Subcommands(subs)
+                    return Err(sig(format!(
+                        "{err_prefix}: empty subcommand list for '{cmd}' — \
+                         use 'allow' to admit any arguments, or 'deny' to refuse the command"
+                    )));
                 }
+                ExecPolicy::Subcommands(subs)
             }
             Value::Lambda { .. } | Value::Block { .. } => {
                 return Err(sig(format!(
@@ -465,10 +484,10 @@ mod tests {
     }
 
     #[test]
-    fn decode_exec_grant_empty_list_means_allow() {
+    fn decode_exec_grant_rejects_empty_list() {
         let v = exec_map(&[("ls", Value::list(vec![]))]);
-        let m = decode_exec_grant(&v, "test").unwrap();
-        assert_eq!(m.literals.get("ls"), Some(&ExecPolicy::Allow));
+        let err = format!("{:?}", decode_exec_grant(&v, "test").unwrap_err());
+        assert!(err.contains("empty subcommand list"), "{err}");
     }
 
     #[test]
@@ -508,7 +527,7 @@ mod tests {
     }
 
     /// A `Bool` policy is rejected with a hint naming all three valid
-    /// forms (`'allow'`, `'deny'`, `[]`).
+    /// forms (`'allow'`, `'deny'`, a subcommand list).
     #[test]
     fn decode_exec_grant_bool_hint_lists_all_forms() {
         let v = exec_map(&[("git", Value::Bool(true))]);
@@ -518,7 +537,7 @@ mod tests {
             other @ crate::types::Break::Escape(_) => panic!("unexpected: {other:?}"),
         };
         assert!(
-            msg.contains("'allow'") && msg.contains("'deny'") && msg.contains("[]"),
+            msg.contains("'allow'") && msg.contains("'deny'") && msg.contains("subcommand list"),
             "{msg}"
         );
     }

@@ -45,8 +45,8 @@ pub use tilde::{
 pub use canon::match_variants_list;
 pub use git::{discover_git_dir, find_git_entry};
 pub use lex::{
-    basename, exists, is_absolute, parent_or_cwd, path_aliases, path_within, path_within_str,
-    proper_ancestors, resolve_path, resolve_relative_to_script, resolve_str,
+    basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases, path_within,
+    path_within_str, proper_ancestors, resolve_path, resolve_relative_to_script, resolve_str,
 };
 pub use prefix_set::PrefixSet;
 pub use resolved::{NormalizedPrefix, ResolvedPath};

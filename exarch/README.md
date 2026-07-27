@@ -94,7 +94,7 @@ like the argument of `grant [...]`:
 
 ```
 [
-  exec: [git: [], cargo: [], …],
+  exec: [git: 'allow', cargo: 'allow', …],
   fs:   [read:  ['<cwd>', '/tmp'],
          write: ['<cwd>', '/tmp']],
   net:  false,

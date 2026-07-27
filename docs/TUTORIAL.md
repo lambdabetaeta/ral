@@ -629,7 +629,7 @@ becomes deny-by-default within the grant; a dimension it omits keeps
 ambient authority:
 
     grant [
-        exec: [git: [], make: [], '/usr/bin/': 'allow'],
+        exec: [git: 'allow', make: 'allow', '/usr/bin/': 'allow'],
         fs:   [read: ['/home/project'], write: ['/tmp/build']],
         net:  false,
     ] {

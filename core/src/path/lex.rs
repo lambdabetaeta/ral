@@ -360,6 +360,19 @@ pub fn exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
+/// `Path::new(path).is_dir()` behind a named helper.
+///
+/// The companion of [`exists`] for call sites that must tell a
+/// directory from a file — exec grants distinguish their two kinds of
+/// path key by trailing slash, and check that spelling against what is
+/// really on disk.
+///
+/// Follows symlinks; `false` for a path that does not exist.
+#[allow(clippy::disallowed_methods)]
+pub fn is_dir(path: &str) -> bool {
+    Path::new(path).is_dir()
+}
+
 /// True iff `path` is an absolute path under the host's
 /// platform rules.  Wraps `Path::new(path).is_absolute()` so
 /// callers stop reaching for `Path::new` themselves just to ask

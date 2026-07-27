@@ -839,8 +839,9 @@ fn grant_fs_pipeline_stdout_flows() {
     if !sandbox_functional() {
         return;
     }
-    let o =
-        run("grant [exec: ['/bin/echo': []], fs: [read: ['/tmp']]] { /bin/echo sandboxed } | cat");
+    let o = run(
+        "grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { /bin/echo sandboxed } | cat",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "sandboxed");
 }
@@ -854,7 +855,7 @@ fn grant_fs_capture_returns_output() {
         return;
     }
     let o = run(
-        "let xv = grant [exec: ['/bin/echo': []], fs: [read: ['/tmp']]] { let s = !{/bin/echo captured | from-lines}; stream-to-list $s }; echo $xv[0]",
+        "let xv = grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { let s = !{/bin/echo captured | from-lines}; stream-to-list $s }; echo $xv[0]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "captured");
@@ -923,7 +924,7 @@ fn grant_exec_bare_name_denied_when_scoped_path_rebinds_command() {
     // semantically orthogonal to the exec/PATH-spoofing check this test
     // exercises.
     let script = format!(
-        "within [env: [PATH: '{0}']] {{ grant [exec: [git: []], fs: [read: ['{0}']]] {{ git }} }}",
+        "within [env: [PATH: '{0}']] {{ grant [exec: [git: 'allow'], fs: [read: ['{0}']]] {{ git }} }}",
         dir.path().to_string_lossy()
     );
     let o = run(&script);
@@ -946,7 +947,7 @@ fn grant_exec_explicit_path_allows_scoped_path_command() {
     // See sibling test: fs:read for the tempdir is required so the bwrap
     // sandbox can actually exec the spoofed git from /tmp/...
     let script = format!(
-        "within [env: [PATH: '{0}']] {{ grant [exec: ['{1}': []], fs: [read: ['{0}']]] {{ git }} }}",
+        "within [env: [PATH: '{0}']] {{ grant [exec: ['{1}': 'allow'], fs: [read: ['{0}']]] {{ git }} }}",
         dir.path().to_string_lossy(),
         fake_git.to_string_lossy()
     );

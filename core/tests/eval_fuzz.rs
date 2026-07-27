@@ -2438,7 +2438,8 @@ fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
 #[cfg(unix)]
 #[test]
 fn audit_exec_allowed_recorded() {
-    let tree = must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/true } }");
+    let tree =
+        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/true } }");
     let children = children_of(&tree);
     assert!(
         has_cap_check(&children, "exec", "allowed"),
@@ -2450,7 +2451,7 @@ fn audit_exec_allowed_recorded() {
 #[test]
 fn audit_exec_denied_recorded() {
     let tree =
-        must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/false } }");
+        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/false } }");
     let children = children_of(&tree);
     assert!(
         has_cap_check(&children, "exec", "denied"),
@@ -2460,7 +2461,7 @@ fn audit_exec_denied_recorded() {
 
 #[test]
 fn audit_no_flag_no_recording() {
-    let tree = must_succeed("audit { grant [exec: ['/bin/true': []]] { /bin/true } }");
+    let tree = must_succeed("audit { grant [exec: ['/bin/true': 'allow']] { /bin/true } }");
     let children = children_of(&tree);
     assert!(
         !has_cap_check(&children, "exec", "allowed"),
@@ -2474,7 +2475,7 @@ fn audit_nested_grant_outeraudit_propagates() {
     // SPEC §11.5: audit is logical OR — once enabled by an outer grant it
     // stays enabled for nested grants even if they omit audit: true.
     let tree = must_succeed(
-        "audit { grant [exec: ['/bin/true': []], audit: true] { grant [exec: ['/bin/true': []]] { /bin/true } } }",
+        "audit { grant [exec: ['/bin/true': 'allow'], audit: true] { grant [exec: ['/bin/true': 'allow']] { /bin/true } } }",
     );
     let children = children_of(&tree);
     assert!(
@@ -2599,7 +2600,8 @@ fn first_command_child(parent: &Value) -> Option<&Value> {
 #[cfg(unix)]
 #[test]
 fn audit_grant_owns_exec_capability_allowed_child() {
-    let tree = must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/true } }");
+    let tree =
+        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/true } }");
     let outer_children = children_of(&tree);
     let grant = outer_children
         .iter()
@@ -2620,7 +2622,7 @@ fn audit_grant_owns_exec_capability_denied_child() {
     // unambiguous "denied" event we issue a grant that does NOT include
     // the requested binary.
     let tree =
-        must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/false } }");
+        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/false } }");
     let outer_children = children_of(&tree);
     let grant = outer_children
         .iter()
@@ -2713,7 +2715,7 @@ fn audit_try_records_try_node_with_body_children() {
 #[test]
 fn audit_nested_grants_produce_nested_grant_nodes() {
     let tree = must_succeed(
-        "audit { grant [exec: ['/bin/true': []], audit: true] { grant [exec: ['/bin/true': []]] { /bin/true } } }",
+        "audit { grant [exec: ['/bin/true': 'allow'], audit: true] { grant [exec: ['/bin/true': 'allow']] { /bin/true } } }",
     );
     let outer_children = children_of(&tree);
     let outer_grant = outer_children

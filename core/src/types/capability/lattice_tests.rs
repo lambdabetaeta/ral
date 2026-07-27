@@ -696,6 +696,23 @@ fn decode_rewrites_sigils_to_concrete_paths() {
     assert_eq!(reads[1], "/etc");
 }
 
+/// The trailing slash is the only thing separating a directory grant
+/// from a literal one, so omitting it on a real directory would decode
+/// to a grant on a binary that cannot exist and fail closed at use time
+/// as a bare "denied by active grant".  Freeze catches it and points at
+/// the slash.
+// Unix-only, like its sigil-freezing siblings.
+#[cfg(unix)]
+#[test]
+fn decode_rejects_directory_as_literal_command() {
+    let v = map(vec![(
+        "exec",
+        map(vec![("/etc", Value::String("allow".into()))]),
+    )]);
+    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+    assert!(err.contains("/etc/"), "should hint the slash: {err}");
+}
+
 /// Defence in depth: a caller who sets `XDG_DATA_HOME=/etc` must not be
 /// able to widen a policy that names `xdg:data`.  Decode rejects the
 /// resolution at the boundary with a message naming the offending env
