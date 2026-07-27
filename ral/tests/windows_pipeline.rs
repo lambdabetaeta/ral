@@ -84,8 +84,8 @@ fn helper_to_helper_value_edge() {
     let out = run(
         "win_pipeline_value_edge",
         r"
-        let r = !{ [1, 2, 3] | { |xs| return !{length $xs} } }
-        echo $r
+        let res = !{ [1, 2, 3] | { |xs| return !{length $xs} } }
+        echo $res
         ",
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);

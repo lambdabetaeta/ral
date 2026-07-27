@@ -30,7 +30,7 @@ fn await_does_not_auto_replay() {
     let out = run_io(
         r"
         let h = spawn { echo from-child }
-        let r = await $h
+        let res = await $h
         echo marker-after
         ",
     );
@@ -54,9 +54,9 @@ fn record_value_and_stdout_both_accessible() {
     let out = run_io(
         r#"
         let h = spawn { echo middle; 7 }
-        let r = await $h
-        echo "value=$r[value]"
-        echo !{to-bytes $r[stdout] | from-string}
+        let res = await $h
+        echo "value=$res[value]"
+        echo !{to-bytes $res[stdout] | from-string}
         "#,
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
@@ -122,8 +122,8 @@ fn redirect_bypasses_record() {
     let script = format!(
         r"
         let h = spawn {{ /bin/echo written-to-file > {path} }}
-        let r = await $h
-        echo !{{to-bytes $r[stdout] | from-string}}
+        let res = await $h
+        echo !{{to-bytes $res[stdout] | from-string}}
         echo after
         ",
         path = logfile.to_str().unwrap(),
@@ -150,8 +150,8 @@ fn record_carries_block_stderr() {
     let out = run_io(
         r"
         let h = spawn { echo diag 1>&2 }
-        let r = await $h
-        echo !{to-bytes $r[stderr] | from-string}
+        let res = await $h
+        echo !{to-bytes $res[stderr] | from-string}
         ",
     );
     assert_eq!(out.status, 0, "err: {}", out.stderr);
@@ -173,8 +173,8 @@ fn stderr_to_stdout_inside_block() {
     let out = run_io(
         r#"
         let h = spawn { /bin/sh -c "echo both >&2" 2>&1 }
-        let r = await $h
-        echo !{to-bytes $r[stdout] | from-string}
+        let res = await $h
+        echo !{to-bytes $res[stdout] | from-string}
         "#,
     );
     assert_eq!(out.status, 0, "err: {}", out.stderr);

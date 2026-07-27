@@ -24,7 +24,7 @@ fn variant_nullary_displays_as_backtick_label() {
 fn tag_keyed_record_displays_with_backtick_keys() {
     let out = common::run(
         "tag_keyed_record",
-        "let r = [`dev: 8080, `prod: 443]\necho $r\n",
+        "let res = [`dev: 8080, `prod: 443]\necho $res\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "[`dev: 8080, `prod: 443]");
@@ -39,7 +39,7 @@ fn list_of_variants_round_trips() {
 
 #[test]
 fn mixed_alphabet_record_is_parse_error() {
-    let out = common::run("mixed_alphabet", "let r = [host: x, `dev: 8080]\n");
+    let out = common::run("mixed_alphabet", "let res = [host: x, `dev: 8080]\n");
     assert_ne!(out.status, 0, "expected failure, got success");
     let combined = format!("{}{}", out.stdout, out.stderr);
     assert!(
@@ -67,7 +67,7 @@ fn variant_payload_can_be_record() {
 fn case_dispatches_to_ok_arm() {
     let out = common::run(
         "case_ok",
-        "let r = `ok 5\nlet xv = case $r [`ok: { |x| return $x }, `err: { |_| return -1 }]\necho $xv\n",
+        "let res = `ok 5\nlet xv = case $res [`ok: { |x| return $x }, `err: { |_| return -1 }]\necho $xv\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "5");
@@ -77,7 +77,7 @@ fn case_dispatches_to_ok_arm() {
 fn case_dispatches_to_err_arm() {
     let out = common::run(
         "case_err",
-        "let r = `err nope\nlet xv = case $r [`ok: { |s| return $s }, `err: { |m| return $m }]\necho $xv\n",
+        "let res = `err nope\nlet xv = case $res [`ok: { |s| return $s }, `err: { |m| return $m }]\necho $xv\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "nope");
@@ -87,7 +87,7 @@ fn case_dispatches_to_err_arm() {
 fn case_handles_nullary_tag() {
     let out = common::run(
         "case_nullary",
-        "let r = `none\nlet xv = case $r [`none: { |_| return absent }, `some: { |_| return present }]\necho $xv\n",
+        "let res = `none\nlet xv = case $res [`none: { |_| return absent }, `some: { |_| return present }]\necho $xv\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "absent");

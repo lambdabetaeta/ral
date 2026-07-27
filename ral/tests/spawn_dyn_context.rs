@@ -14,8 +14,8 @@ fn spawn_inherits_within_handlers() {
         r#"
         within [handlers: [mycmd: { |args| echo "handled" }]] {
             let h = spawn { mycmd }
-            let r = await $h
-            echo !{to-bytes $r[stdout] | from-string}
+            let res = await $h
+            echo !{to-bytes $res[stdout] | from-string}
         }
     "#,
     );
@@ -35,8 +35,8 @@ fn spawn_inherits_within_env() {
         r"
         within [env: [MY_DYN_VAR: hello-from-dyn]] {
             let h = spawn { printenv MY_DYN_VAR }
-            let r = await $h
-            echo !{to-bytes $r[stdout] | from-string}
+            let res = await $h
+            echo !{to-bytes $res[stdout] | from-string}
         }
     ",
     );
@@ -57,8 +57,8 @@ fn spawn_inherits_within_dir() {
         let target = temp-dir
         within [dir: $target] {
             let h = spawn { cwd }
-            let r = await $h
-            if !{equal $r[value] $target} { echo 'dir inherited' } else { echo 'dir mismatch' }
+            let res = await $h
+            if !{equal $res[value] $target} { echo 'dir inherited' } else { echo 'dir mismatch' }
         }
         rm -rf $target
     ",
@@ -81,8 +81,8 @@ fn par_inherits_within_handlers() {
         "ral_spawn_dyn",
         r#"
         within [handlers: [mycmd: { |args| echo handled; return "handled" }]] {
-            let r = par { |x| mycmd $x } [a, b] 0
-            echo ...$r
+            let res = par { |x| mycmd $x } [a, b] 0
+            echo ...$res
         }
     "#,
     );
@@ -106,8 +106,8 @@ fn spawn_handler_does_not_leak_to_parent() {
                 localcmd
             }
         }
-        let r = await $h
-        echo !{to-bytes $r[stdout] | from-string}
+        let res = await $h
+        echo !{to-bytes $res[stdout] | from-string}
         try { localcmd } { |_| echo "parent: no handler" }
     "#,
     );

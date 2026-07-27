@@ -104,9 +104,9 @@ fn pending_poll_does_not_consume_bytes_from_await() {
         let h = spawn { echo first-chunk; sleep 0.5; echo second-chunk; return 7 }
         sleep 0.2
         let _ = poll $h
-        let r = await $h
-        echo "value=$r[value]"
-        echo !{to-bytes $r[stdout] | from-string}
+        let res = await $h
+        echo "value=$res[value]"
+        echo !{to-bytes $res[stdout] | from-string}
         "#,
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
@@ -309,8 +309,8 @@ fn await_still_reraises_failed_block() {
     let out = run_poll(
         r#"
         let h = spawn { fail [status: 5] }
-        let r = await $h
-        echo "unreachable=$r[value]"
+        let res = await $h
+        echo "unreachable=$res[value]"
         "#,
     );
     assert_eq!(

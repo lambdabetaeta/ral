@@ -154,7 +154,7 @@ fn block_as_stage_binds_upstream_to_param() {
 
 #[test]
 fn block_as_stage_returns_value_via_let() {
-    let o = run_pipe("let r = 5 | { |x| return $x }\necho $r");
+    let o = run_pipe("let res = 5 | { |x| return $x }\necho $res");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "5");
 }
@@ -163,8 +163,8 @@ fn block_as_stage_returns_value_via_let() {
 fn pure_value_pipeline_chains_compose_data_last() {
     // [1,2,3] | map { |x| x*2 } | map { |y| y+1 } → [3,5,7]
     let o = run_pipe(
-        r"let r = [1, 2, 3] | map { |x| return $[$x * 2] } | map { |y| return $[$y + 1] }
-echo !{length $r} $r[0] $r[1] $r[2]",
+        r"let res = [1, 2, 3] | map { |x| return $[$x * 2] } | map { |y| return $[$y + 1] }
+echo !{length $res} $res[0] $res[1] $res[2]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3 3 5 7");
@@ -185,7 +185,7 @@ echo $rhs",
 #[test]
 fn force_variable_as_stage_applies_to_upstream() {
     // `5 | $f` where f is a unary block: f gets applied to 5.
-    let o = run_pipe("let f = { |x| return $[$x + 10] }\nlet r = 5 | $f\necho $r");
+    let o = run_pipe("let f = { |x| return $[$x + 10] }\nlet res = 5 | $f\necho $res");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "15");
 }
@@ -421,8 +421,8 @@ fn required_value_edge_eof_is_structured_error() {
     // way the script must fail loudly rather than silently running
     // the consumer with a phantom upstream.
     let script = r#"
-let r = !{ { fail "producer failed" } | { |x| return $[$x + 1] } }
-echo $r
+let res = !{ { fail "producer failed" } | { |x| return $[$x + 1] } }
+echo $res
 "#;
     let o = run_with_timeout("ral_pipeline_value", &[], script, Duration::from_secs(5))
         .expect("required-value-edge test hung");
@@ -450,7 +450,7 @@ fn value_edge_send_failure_is_structured() {
     // a `Handle` and returns it, exercising the producer→consumer
     // value edge.
     let script = r"
-let r = !{
+let res = !{
   printf hi
   | from-string
   | { |_s| let h = !{spawn { return 1 }}; return $h }

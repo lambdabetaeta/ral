@@ -6,5 +6,5 @@
 
 let [path, ...mirrors] = $ARGS
 let handles = map { |m| return !{spawn { curl -fsSL --max-time 20 "$m/$path" }} } $mirrors
-let r = race $handles
-echo $r[stdout]
+let winner = race $handles
+echo $winner[stdout]

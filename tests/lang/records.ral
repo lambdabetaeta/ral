@@ -1,10 +1,10 @@
 # Test: §21.9 record types and row polymorphism
 
 # Heterogeneous map literal: each field has its own type
-let r = [host: prod1, port: 8080, debug: false]
-echo $r[host]
-echo $r[port]
-echo !{equal $r[debug] false}
+let rec = [host: prod1, port: 8080, debug: false]
+echo $rec[host]
+echo $rec[port]
+echo !{equal $rec[debug] false}
 
 # Nested records: inner fields retain their types
 let config = [db: [host: localhost, port: 5432], workers: 4]
@@ -38,7 +38,7 @@ echo $extended[x]
 echo $extended[z]
 
 # Record used as argument to row-polymorphic function
-let get_x = { |r| return $r[x] }
+let get_x = { |r| return $rec[x] }
 echo !{get_x [x: 99, y: 0]}
 echo !{get_x [label: a, x: 42]}
 

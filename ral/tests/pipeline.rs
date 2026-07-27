@@ -412,8 +412,8 @@ let handles = !{ map { |i|
     !{spawn { /bin/echo $v | cat }}
 } [1, 2, 3, 4, 5, 6, 7, 8] }
 !{ map { |h|
-    let r = await $h
-    echo !{to-bytes $r[stdout] | from-string}
+    let res = await $h
+    echo !{to-bytes $res[stdout] | from-string}
 } $handles }
 echo done
 ";
@@ -443,8 +443,8 @@ echo done
 fn spawned_pipeline_result_is_awaitable() {
     let script = r"
 let h = !{spawn { /bin/echo 42 | cat }}
-let r = await $h
-echo !{to-bytes $r[stdout] | from-string}
+let res = await $h
+echo !{to-bytes $res[stdout] | from-string}
 ";
     let o = run(script);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);

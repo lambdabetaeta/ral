@@ -6,15 +6,15 @@
 
 # Basic spawn/await: command-style block (returns Unit, prints to stdout).
 let h = spawn { echo from-child }
-let r = await $h
-echo !{to-bytes $r[stdout] | from-string}
+let res = await $h
+echo !{to-bytes $res[stdout] | from-string}
 # Expected: from-child
 
 # Value-returning block: bytes still land in stdout, value is the int.
 let h = spawn { echo middle ; 42 }
-let r = await $h
-echo "value=$r[value]"
-echo !{to-bytes $r[stdout] | from-string}
+let res = await $h
+echo "value=$res[value]"
+echo !{to-bytes $res[stdout] | from-string}
 # Expected: value=42 / middle
 
 # Multiple spawns
@@ -34,6 +34,6 @@ try { await $h; echo "child ok=true" } { |e|
 
 # Handles are values — store in a list, then await each.
 let handles = map { |x| spawn { $x } } [1, 2, 3]
-let values = map { |h| let r = await $h ; $r[value] } $handles
+let values = map { |h| let res = await $h ; $res[value] } $handles
 echo $values
 # Expected: [1, 2, 3]
