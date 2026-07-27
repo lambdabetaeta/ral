@@ -49,6 +49,18 @@ const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
 /// Per-attempt connect timeout handed to [`vet::open`].
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a finished connection may sit half-closed before it is reset.
+/// Not a tunnel lifetime — the worker is already gone and no byte can
+/// still arrive, so this only lets a normal close finish. Without it a
+/// guest holds a [`TUNNEL_CAP`] slot forever by never closing its half.
+const FIN_GRACE: Duration = Duration::from_secs(30);
+
+/// Whether a connection's slot can be released: the guest finished closing,
+/// or it did not within [`FIN_GRACE`].
+fn reap_now(socket_open: bool, worker_done: bool, since_fin: Option<Duration>) -> bool {
+    (!socket_open && worker_done) || since_fin.is_some_and(|d| d > FIN_GRACE)
+}
+
 const HANDSHAKE_TOO_LARGE: Refusal = Refusal {
     status: 431,
     reason: "CONNECT head exceeded 8 KiB",
@@ -100,12 +112,14 @@ impl Doorbell {
 }
 
 /// One live accepted connection. `origin` is set once the worker's dial
-/// succeeds, so [`Session::stop`] can wake a worker blocked on it.
+/// succeeds, so [`Session::stop`] can wake a worker blocked on it;
+/// `closing` is stamped when this end sends its FIN.
 struct Connection {
     handle: SocketHandle,
     core: CoreSide,
     origin: Arc<Mutex<Option<TcpStream>>>,
     worker: thread::JoinHandle<()>,
+    closing: Option<StdInstant>,
 }
 
 impl Connection {
@@ -358,6 +372,7 @@ impl<W: Wire> Core<W> {
                     core: core_side,
                     origin,
                     worker,
+                    closing: None,
                 });
         } else {
             self.sockets.get_mut::<tcp::Socket>(handle).abort();
@@ -373,7 +388,7 @@ impl<W: Wire> Core<W> {
         while i < connections.len() {
             let handle = connections[i].handle;
             let reap = {
-                let conn = &connections[i];
+                let conn = &mut connections[i];
                 let socket = self.sockets.get_mut::<tcp::Socket>(handle);
 
                 if socket.can_recv() {
@@ -394,12 +409,25 @@ impl<W: Wire> Core<W> {
                     }
                 }
 
-                if conn.core.worker_finished() && socket.may_send() {
-                    socket.close();
+                if conn.core.worker_finished() {
+                    if socket.may_send() {
+                        socket.close();
+                    }
+                    conn.closing.get_or_insert_with(StdInstant::now);
                 }
-                !socket.is_open() && conn.worker.is_finished()
+                reap_now(
+                    socket.is_open(),
+                    conn.worker.is_finished(),
+                    conn.closing.map(|t| t.elapsed()),
+                )
             };
             if reap {
+                let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+                if socket.is_open() {
+                    // The grace expired: reset, so smoltcp frees it rather
+                    // than waiting on a FIN the guest is withholding.
+                    socket.abort();
+                }
                 self.pending_removal.push(handle);
                 reaped.push(connections.remove(i));
             } else {
@@ -551,4 +579,30 @@ fn worker(
         up: Some(up.load(Ordering::Relaxed)),
         down: Some(down.load(Ordering::Relaxed)),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_is_reaped_once_the_guest_finishes_closing() {
+        assert!(reap_now(false, true, Some(Duration::ZERO)));
+    }
+
+    #[test]
+    fn a_live_connection_is_never_reaped() {
+        assert!(!reap_now(true, false, None));
+    }
+
+    #[test]
+    fn a_half_closed_connection_is_left_alone_inside_the_grace() {
+        assert!(!reap_now(true, true, Some(FIN_GRACE / 2)));
+    }
+
+    /// The guest cannot hold a tunnel slot by never closing its half.
+    #[test]
+    fn a_half_closed_connection_is_reaped_once_the_grace_expires() {
+        assert!(reap_now(true, true, Some(FIN_GRACE + Duration::from_secs(1))));
+    }
 }
