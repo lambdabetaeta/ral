@@ -358,7 +358,7 @@ fn spawn_without_projection_still_runs() {
     let mut shell = fresh_shell();
     let result = top_level(
         &mut shell,
-        "let h = !{spawn { return 41 }}\nlet r = await $h\nreturn $r[value]",
+        "let h = !{spawn { return 41 }}\nlet awaited = await $h\nreturn $awaited[value]",
     )
     .expect("spawn/await without projection");
     assert_eq!(result, Value::Int(41));
@@ -401,7 +401,7 @@ fn handle_is_usable_inside_local_grant_body() {
     let result = top_level_under(
         &mut shell,
         caps,
-        "let h = !{spawn { return 1 }}\nlet r = await $h\nreturn $r[value]",
+        "let h = !{spawn { return 1 }}\nlet awaited = await $h\nreturn $awaited[value]",
     );
     match result {
         Ok(v) => assert_eq!(
@@ -463,8 +463,8 @@ fn poll_then_await_returns_the_cached_record() {
          let _ = await $h\n\
          let sampled = poll $h\n\
          let polled = case $sampled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]\n\
-         let r = await $h\n\
-         return $[$polled + $r[value]]",
+         let awaited = await $h\n\
+         return $[$polled + $awaited[value]]",
     )
     .expect("poll then await");
     assert_eq!(result, Value::Int(14));
@@ -480,9 +480,9 @@ fn is_done_reports_false_then_true() {
     let running = top_level(
         &mut shell,
         "let h = !{spawn { sleep 30 }}\n\
-         let r = !{is-done $h}\n\
+         let finished = !{is-done $h}\n\
          cancel $h\n\
-         return $r",
+         return $finished",
     )
     .expect("is-done on a running handle");
     assert_eq!(running, Value::Bool(false));
