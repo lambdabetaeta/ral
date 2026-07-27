@@ -43,7 +43,7 @@ const TRUNK_NAME: &str = "main";
 /// [`Agent::fork`]/[`Agent::fork_with`], which stay the ordinary in-thread path.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, tool_enabled); not a candidate for a combined enum"
+    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
 )]
 pub(crate) struct Build {
     /// The system prompt *template*: still carrying
@@ -79,6 +79,10 @@ pub(crate) struct Build {
     /// Whether the constructed agent's provider requests advertise the
     /// `ral` tool at all — `false` only for a `--chat` trunk.
     pub(crate) tool_enabled: bool,
+    /// Whether the constructed agent may ride the provider's own hosted
+    /// web-search tool — bounded above by the IT policy verdict, never a
+    /// CLI flag or user config.
+    pub(crate) search: bool,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
     pub(crate) agents: AgentRegistry,
@@ -165,6 +169,7 @@ impl Agent {
             returns,
             allow_schedule,
             tool_enabled,
+            search,
             agents,
             disk_warn_bytes,
             egress,
@@ -189,6 +194,7 @@ impl Agent {
             nudges: nudge::Registry::new(),
             cancel: cancel::Token::new(),
             tool_enabled,
+            search,
             returns,
             allow_schedule,
             reply: None,
@@ -267,6 +273,10 @@ impl Agent {
             fuel,
             egress,
         } = cfg;
+        // Read before `egress` moves into `Build` below: the trunk's whole
+        // search story is this one verdict, IT's own, never a CLI flag or
+        // user config.
+        let search = egress.policy.search;
         // Index resolution reads only the compiled-in builtin table, which
         // an identity seat's own shell and a wire seat's boot recipe dress
         // identically (`bootstrap::exarch_shell`). An identity seat resolves
@@ -341,6 +351,7 @@ impl Agent {
             // and never returns, so it withholds `reply`; a headless trunk
             // is a returning agent.
             tool_enabled: !chat,
+            search,
             agents: AgentRegistry::new(),
             disk_warn_bytes,
             egress,
@@ -481,6 +492,10 @@ impl Agent {
             // descendants the same right to wake themselves.  `--chat` is
             // trunk-only, so every fork keeps the tool.
             tool_enabled: true,
+            // Never a fresh grant, exactly like `disk_warn_bytes`/`egress`
+            // below: a child's reach to the provider's own search is bounded
+            // by whatever its parent already carries, not re-derived.
+            search: self.search,
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
@@ -577,6 +592,8 @@ impl Agent {
             returns: true,
             allow_schedule: false,
             tool_enabled: true,
+            // Matches `Egress::for_test`'s own permissive policy below.
+            search: true,
             agents: AgentRegistry::new(),
             // Unconfigured by default: a test that wants to exercise the
             // disk-warn check sets `session.disk_warn_bytes` directly.
@@ -679,6 +696,22 @@ mod tests {
             assert_eq!(agent.fuel, expected);
         }
         assert_eq!(agent.fuel, 0, "the chain must bottom out at zero, not wrap");
+    }
+
+    /// A fork carries its parent's search reach verbatim, in both
+    /// directions — the ceiling the desk's own `s.search && spec.search`
+    /// clamp narrows a spawn against, asserted here because this module is
+    /// where a constructed child is actually in hand.
+    #[test]
+    fn fork_inherits_its_parents_search_reach() {
+        let dir = tmp("fork-search");
+        let mut parent = Agent::for_test(&dir, "system").unwrap();
+        assert!(parent.fork(parent.caps().clone()).unwrap().search);
+        parent.search = false;
+        assert!(
+            !parent.fork(parent.caps().clone()).unwrap().search,
+            "a searchless parent can hand out no search of its own"
+        );
     }
 
     /// The provider is per-agent: a `fork` seeds its own handle from the

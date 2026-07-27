@@ -305,6 +305,7 @@ impl Egress {
             allow: vec!["example.com".to_string(), "*.example.org".to_string()],
             max_response_bytes: 1_048_576,
             rate_per_minute: 1_000,
+            search: true,
         };
         let limiter = FetchLimiter::new(policy.rate_per_minute);
         let path = std::env::temp_dir().join(format!(

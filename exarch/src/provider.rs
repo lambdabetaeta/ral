@@ -138,12 +138,15 @@ impl Provider {
     /// against `cancel` so a mid-stream interrupt returns
     /// [`ProviderError::Cancelled`] rather than waiting on the next network
     /// chunk. `tool_enabled` gates whether tool definitions ride the request
-    /// at all.
+    /// at all; `search` gates whether the provider's own built-in web-search
+    /// tool joins them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
         tool_enabled: bool,
+        search: bool,
         on_text: &mut F,
         on_think: &mut G,
         cancel: &cancel::Token,
@@ -158,6 +161,7 @@ impl Provider {
                 system,
                 messages,
                 tool_enabled,
+                search,
                 on_text,
                 on_think,
                 cancel,

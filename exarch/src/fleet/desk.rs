@@ -39,6 +39,10 @@ use std::time::Duration;
 /// `agent-start`/`agent-list`/`agent-cancel`/`message` (Step 1),
 /// `schedule`/`schedule-list`/`unschedule` (Step 2), and `reply` (Step 3,
 /// reading `returns` and `reply`) read this capture between them.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent axis captured off the agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
+)]
 pub(crate) struct HostServices {
     /// The fleet's shared agent registry — `agents.clone()`.
     pub registry: AgentRegistry,
@@ -73,6 +77,11 @@ pub(crate) struct HostServices {
     /// Whether this agent holds the self-wakeup grant — the schedule
     /// family's handlers refuse without it.
     pub allow_schedule: bool,
+    /// Whether this agent may use the provider's built-in web search — the
+    /// ceiling `agent-start` clamps a spawn's own `search` request against,
+    /// exactly as `caps` bounds `grant`: a child may narrow this bit, never
+    /// widen it.
+    pub search: bool,
     /// The shared slot the `reply` handler stages a returning agent's
     /// return value into — a fresh cell [`Agent::run_shell`] mints for this
     /// one call and harvests back into [`Agent::reply`] once the desk
@@ -199,6 +208,16 @@ fn payload_tag(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
     }
 }
 
+fn payload_bool(v: FOValue, class: &str, field: &str) -> Result<bool, Error> {
+    match v {
+        FOValue::Bool { value } => Ok(value),
+        other => Err(Error::new(
+            format!("`{class}`: `{field}` must be a Bool, got {other:?}"),
+            1,
+        )),
+    }
+}
+
 /// Decode a `schedule` trigger variant into a live [`Trigger`], re-running
 /// the same parsers ([`CronSchedule::parse`]/[`parse_duration`]) the
 /// `schedule` builtin's own door already ran — the host-side half of the
@@ -270,6 +289,9 @@ struct Launch<'a> {
     /// it (the uniqueness pre-check inside [`ExarchDesk::launch`]).
     name: String,
     prompt: String,
+    /// The caller's own `search` request — clamped in [`ExarchDesk::launch`]
+    /// against the parent's own bit, never taken at face value.
+    search: bool,
 }
 
 impl ExarchDesk {
@@ -444,6 +466,8 @@ impl ExarchDesk {
             returns: true,
             allow_schedule: s.allow_schedule,
             tool_enabled: true,
+            // A child may narrow its parent's search reach, never widen it.
+            search: s.search && spec.search,
             agents: s.registry.clone(),
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
@@ -494,10 +518,10 @@ impl ExarchDesk {
     /// door (the `type` tag, the `grant` label the launch narrows against)
     /// and hand off to [`Self::launch`] for the spawn spine.
     fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let [session, kind, prompt, name, grant] = payload_list(
+        let [session, kind, prompt, name, grant, search] = payload_list(
             payload,
             "agent-start",
-            "[session, kind, prompt, name, grant]",
+            "[session, kind, prompt, name, grant, search]",
         )?;
         let session_id = payload_int(session, "agent-start", "session")?;
         let session_id = u64::try_from(session_id)
@@ -516,6 +540,7 @@ impl ExarchDesk {
         let prompt = payload_string(prompt, "agent-start", "prompt")?;
         let name = payload_string(name, "agent-start", "name")?;
         let grant = payload_tag(grant, "agent-start", "grant")?;
+        let search = payload_bool(search, "agent-start", "search")?;
 
         self.launch(Launch {
             session_id,
@@ -523,6 +548,7 @@ impl ExarchDesk {
             inherit_context: mnemon,
             name,
             prompt,
+            search,
         })
     }
 
@@ -1098,6 +1124,7 @@ mod tests {
             fuel: 3,
             returns: true,
             allow_schedule: false,
+            search: true,
             reply: ReplyCell::default(),
             schedules: ScheduleRegistry::new(),
             log: LogCell::new(fresh_log()),
@@ -1378,6 +1405,7 @@ mod tests {
                             label: "confined".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             })
@@ -1421,6 +1449,60 @@ mod tests {
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
+    }
+
+    /// A spawn asking `search: true` under a `search: false` parent is
+    /// narrowed, never refused — the same shape [`crate::policy::narrow`]
+    /// gives `grant`: a request above the parent's own ceiling silently
+    /// yields a child without the bit, rather than an error naming the
+    /// mismatch. What this test can see is the *never refused* half: the
+    /// clamped bit lands in a private `Agent` field, and `fleet::desk` is
+    /// no descendant of `agent`, so the narrowing itself is asserted where
+    /// the child agent is in hand instead
+    /// ([`crate::agent::build`]'s own fork test).
+    #[test]
+    fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
+        let (mut desk, _registry, parent_inbox) = spawnable_desk(3);
+        desk.services.search = false;
+        let provider = Arc::new(Provider::scripted(
+            "test-model",
+            ProviderKind::Openai,
+            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")])),
+        ));
+        desk.services.provider.swap(provider);
+
+        let root = root_shell();
+        let shell = forkable_child_shell(&root);
+        let session = desk.services.nursery.park(shell);
+
+        let answer = desk.handle(FOValue::Variant {
+            label: "agent-start".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::Int {
+                        value: i64::try_from(session.0).expect("small test id"),
+                    },
+                    FOValue::Variant {
+                        label: "amnemon".into(),
+                        payload: None,
+                    },
+                    FOValue::String { value: "go".into() },
+                    FOValue::String {
+                        value: "searcher".into(),
+                    },
+                    FOValue::Variant {
+                        label: "confined".into(),
+                        payload: None,
+                    },
+                    FOValue::Bool { value: true },
+                ],
+            })),
+        });
+        assert!(
+            answer.is_ok(),
+            "a spawn asking for more search reach than its parent holds is narrowed, not refused"
+        );
+        let _ = wait_for_settle(&parent_inbox);
     }
 
     /// Read the recorded `system_prompt_bytes` off a session's
@@ -1493,6 +1575,7 @@ mod tests {
                             label: "confined".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             })
@@ -1562,6 +1645,7 @@ mod tests {
                             label: "confined".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             })
@@ -1619,6 +1703,7 @@ mod tests {
                         label: "confined".into(),
                         payload: None,
                     },
+                    FOValue::Bool { value: true },
                 ],
             })),
         });
@@ -1648,6 +1733,7 @@ mod tests {
                             label: "confined".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             })
@@ -1710,6 +1796,7 @@ mod tests {
                             label: "confined".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             });
@@ -1766,6 +1853,7 @@ mod tests {
                             label: "confined".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             })
@@ -1806,6 +1894,7 @@ mod tests {
                             label: "bogus".into(),
                             payload: None,
                         },
+                        FOValue::Bool { value: true },
                     ],
                 })),
             })
@@ -1937,7 +2026,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         let _ = session.run_shell(
             "call-1".to_string(),
-            r#"surface `unpin [key: "test-marker"]; agent [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined]"#,
+            r#"surface `unpin [key: "test-marker"]; agent [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true]"#,
             5,
             &emit,
         );
@@ -2667,6 +2756,7 @@ mod tests {
                         allow: vec![addr.ip().to_string()],
                         max_response_bytes: 1_048_576,
                         rate_per_minute: 1_000,
+                        search: true,
                     }),
                     audit: AuditLog::for_test(&audit_path),
                     limiter: FetchLimiter::new(1_000),
@@ -2703,6 +2793,7 @@ mod tests {
                         allow: vec!["only-this-host.example".to_string()],
                         max_response_bytes: 1_048_576,
                         rate_per_minute: 1_000,
+                        search: true,
                     }),
                     audit: AuditLog::for_test(&audit_path),
                     limiter: FetchLimiter::new(1_000),
@@ -2747,6 +2838,7 @@ mod tests {
                         allow: vec![addr.ip().to_string()],
                         max_response_bytes: 100,
                         rate_per_minute: 1_000,
+                        search: true,
                     }),
                     audit: AuditLog::for_test(&audit_path),
                     limiter: FetchLimiter::new(1_000),
@@ -2786,6 +2878,7 @@ mod tests {
                         allow: vec![host.to_string()],
                         max_response_bytes: 1_048_576,
                         rate_per_minute: 1,
+                        search: true,
                     }),
                     audit: AuditLog::for_test(&tmp("fetch-url-rate-audit").join("audit.jsonl")),
                     limiter: FetchLimiter::new(1),
@@ -2830,6 +2923,7 @@ mod tests {
                         allow: vec![addr.ip().to_string()],
                         max_response_bytes: 1_048_576,
                         rate_per_minute: 1_000,
+                        search: true,
                     }),
                     audit: AuditLog::for_test(&audit_path),
                     limiter: FetchLimiter::new(1_000),

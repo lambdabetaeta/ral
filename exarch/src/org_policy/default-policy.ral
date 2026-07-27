@@ -7,8 +7,13 @@
 # `max-bytes` caps one response body; `rate-per-minute` caps how many
 # fetches this process (and everything it spawns) may make per minute.
 
+# `search` governs the provider's own built-in web search, run server-side —
+# the allowlist above cannot constrain it, since we never see the URLs it
+# visits, so it gets this separate verdict.
+
 return [
   allow: ['*.bristol.ac.uk'],
   max-bytes: 2097152,
   rate-per-minute: 10,
+  search: true,
 ]

@@ -3,6 +3,7 @@
 use genai::adapter::AdapterKind;
 use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, MessageOptions, ReasoningEffort, Tool,
+    ToolConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -187,17 +188,53 @@ pub(super) fn build_cached_request(
     ChatRequest::new(all)
 }
 
-pub(super) fn tool_defs(tool_enabled: bool) -> Vec<Tool> {
-    tool_enabled
+/// The tool array a request carries: the `ral` wire tool under
+/// `tool_enabled`, and the provider's own built-in web-search tool under
+/// `search`.
+///
+/// The built-in only rides the request on the three adapters genai actually
+/// maps `Tool::new_web_search()` for — `OpenAIResp` (`web_search`),
+/// `Anthropic` (`web_search_20250305`), `Gemini` (`googleSearch`). Every
+/// other adapter, including the plain `OpenAI` chat-completions one, gets
+/// nothing: that adapter has no built-in mapping and would instead serialise
+/// `ToolName::WebSearch` as an ordinary function tool literally named
+/// `WebSearch` with a null schema, which is junk on the wire, not a tool.
+///
+/// `OpenAIResp` alone also carries `ToolConfig::Custom(json!({"external_web_access": true}))`,
+/// which is codex's switch from its cached search index to live internet
+/// access. That config is OpenAI-specific and must not reach Anthropic:
+/// genai `x_merge`s a `Custom` config straight onto the tool object, and
+/// Anthropic's `web_search_20250305` instead expects `max_uses`/
+/// `allowed_domains`, so the field would be rejected there.
+/// `ToolConfig::WebSearch(WebSearchConfig)` is not an alternative for
+/// `OpenAIResp` either — the fork's OpenAI-Responses arm has a literal
+/// `// FIXME: Implement what is posible in filters` and drops it.
+pub(super) fn tool_defs(adapter: AdapterKind, tool_enabled: bool, search: bool) -> Vec<Tool> {
+    let mut tools: Vec<Tool> = tool_enabled
         .then(crate::shell_eval::tools::wire_tool)
         .into_iter()
-        .collect()
+        .collect();
+    if search
+        && matches!(
+            adapter,
+            AdapterKind::OpenAIResp | AdapterKind::Anthropic | AdapterKind::Gemini
+        )
+    {
+        let mut web_search = Tool::new_web_search();
+        if adapter == AdapterKind::OpenAIResp {
+            web_search = web_search.with_config(ToolConfig::Custom(serde_json::json!({
+                "external_web_access": true
+            })));
+        }
+        tools.push(web_search);
+    }
+    tools
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genai::chat::ChatRole;
+    use genai::chat::{ChatRole, ToolName};
 
     #[test]
     fn responses_adapter_routes_system_to_instructions() {
@@ -270,5 +307,43 @@ mod tests {
         let err = effort_by_label("extreme").unwrap_err();
         assert!(err.contains("extreme"), "got: {err}");
         assert!(err.contains("xhigh"), "got: {err}");
+    }
+
+    #[test]
+    fn openai_resp_search_carries_live_internet_access() {
+        let tools = tool_defs(AdapterKind::OpenAIResp, false, true);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, ToolName::WebSearch);
+        assert_eq!(
+            tools[0].config,
+            Some(ToolConfig::Custom(
+                serde_json::json!({"external_web_access": true})
+            ))
+        );
+    }
+
+    #[test]
+    fn anthropic_search_carries_the_bare_tool() {
+        let tools = tool_defs(AdapterKind::Anthropic, false, true);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, ToolName::WebSearch);
+        assert_eq!(tools[0].config, None);
+    }
+
+    #[test]
+    fn unsupported_adapter_gets_no_search_tool() {
+        let tools = tool_defs(AdapterKind::OpenAI, false, true);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn search_off_carries_no_tool_on_any_adapter() {
+        for adapter in [
+            AdapterKind::OpenAIResp,
+            AdapterKind::Anthropic,
+            AdapterKind::Gemini,
+        ] {
+            assert!(tool_defs(adapter, false, false).is_empty());
+        }
     }
 }

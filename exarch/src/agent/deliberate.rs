@@ -153,6 +153,7 @@ impl Agent {
                     &self.system,
                     messages,
                     self.tool_enabled,
+                    self.search,
                     &mut |t: &str| {
                         #[cfg(debug_assertions)]
                         if first_token.is_none() {

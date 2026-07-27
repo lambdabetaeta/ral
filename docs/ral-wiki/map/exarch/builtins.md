@@ -160,16 +160,19 @@ door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
 
-- **`agent [prompt: …, name: …, type: …, grant: …]`** →
+- **`agent [prompt: …, name: …, type: …, grant: …, search: …]`** →
   `F [name: Str, log-dir: Str]`. The one spawn verb, taking a single closed
   **record** argument. Launch-only and always asynchronous: the receipt is
   the answer, the reply comes later through the inbox. `name` is the child's
   identity — the tab-bar contract (`valid_name`), and unique among live
   agents or the call is refused; `type` is `` `amnemon `` (blank context) or
   `` `mnemon `` (imports the parent's model-visible context before the fresh
-  final prompt); `grant` is one of the six [[map/exarch/policy|base]] names.
-  Fuel bounds delegation depth, not fan-out — refused only once the caller's
-  own `fuel` reaches zero.
+  final prompt); `grant` is one of the six [[map/exarch/policy|base]] names;
+  `search` is a `Bool` admitting the provider's own hosted web search,
+  clamped at the desk to at most the caller's own bit, which the trunk takes
+  from the IT `fetch-url` policy's `search` verdict. Fuel bounds delegation
+  depth, not fan-out — refused only once the caller's own `fuel` reaches
+  zero.
 - **`agents`** → `F [[name: Str, elapsed-s: Int, log-dir: Str]]`.
   Silent; a recovery poll over live descendants.
 - **`message <name> <text>`** / **`agent-cancel <name>`** → `F Unit`.

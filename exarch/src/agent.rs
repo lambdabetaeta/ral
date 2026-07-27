@@ -69,7 +69,7 @@ use std::sync::{Arc, Mutex};
 
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, disk_warn_latched); not a candidate for a combined enum"
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search, disk_warn_latched); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
@@ -159,6 +159,12 @@ pub struct Agent {
     /// tool whatsoever; construction-fixed like `returns`/`allow_schedule`
     /// below.
     tool_enabled: bool,
+    /// Whether this agent may ride the provider's own hosted web-search
+    /// tool, construction-fixed like `tool_enabled` above. Bounded above by
+    /// the IT policy verdict ([`crate::fleet::egress::Egress`]'s own
+    /// `search`) — the trunk simply takes that verdict, and every fork
+    /// inherits its parent's bit verbatim.
+    search: bool,
     /// Whether this agent holds `reply`, fixed at construction from the same
     /// bit that shaped `tools` above, so the two cannot disagree.
     returns: bool,

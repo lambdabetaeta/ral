@@ -404,6 +404,7 @@ mod tests {
             fuel: 0,
             returns: true,
             allow_schedule: false,
+            search: false,
             reply: crate::agent::ReplyCell::default(),
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             log: crate::agent::LogCell::new(test_log()),

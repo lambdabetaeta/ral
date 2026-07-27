@@ -50,6 +50,7 @@ impl Engine {
         system: &str,
         messages: Vec<ChatMessage>,
         tool_enabled: bool,
+        search: bool,
         on_text: &mut F,
         on_think: &mut G,
         cancel: &cancel::Token,
@@ -57,7 +58,7 @@ impl Engine {
         self.refresh_if_stale(transport);
         let adapter = transport.adapter();
         let request_template = build_cached_request(adapter, system, messages);
-        let tools = tool_defs(tool_enabled);
+        let tools = tool_defs(adapter, tool_enabled, search);
         let options = complete_options(self.cache_key(), max_tokens_override, tuning, route);
 
         self.block_on(retry_with_backoff(

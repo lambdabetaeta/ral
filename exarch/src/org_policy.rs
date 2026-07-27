@@ -40,6 +40,12 @@ pub struct OrgPolicy {
     /// How many `fetch-url` calls this process's whole tree may make per
     /// minute.
     pub rate_per_minute: u32,
+    /// Whether this machine's agents may use the model provider's built-in,
+    /// server-side web search. A separate verdict from `allow` because that
+    /// allowlist cannot constrain a search the provider runs on our behalf —
+    /// we never see the URLs it visits, so there is nothing here to check
+    /// them against.
+    pub search: bool,
 }
 
 /// Load the policy: the file at [`POLICY_PATH`] if present, else the
@@ -79,22 +85,25 @@ fn int_field(value: Option<&Value>, field: &str, display: &str) -> Result<i64, S
 }
 
 /// Decode the policy's terminal value — a map
-/// `[allow: [...], max-bytes: ..., rate-per-minute: ...]` — into an
-/// [`OrgPolicy`]. Strict on shape and on keys: a malformed policy is a hard
-/// error naming the offending field.
+/// `[allow: [...], max-bytes: ..., rate-per-minute: ..., search: ...]` —
+/// into an [`OrgPolicy`]. Strict on shape and on keys: a malformed policy is
+/// a hard error naming the offending field.
 fn decode(value: Value, display: &str) -> Result<OrgPolicy, String> {
     let Value::Map(map) = value else {
         return Err(format!(
             "fetch-url policy {display}: expected a map \
-             [allow: [...], max-bytes: ..., rate-per-minute: ...], got {}",
+             [allow: [...], max-bytes: ..., rate-per-minute: ..., search: ...], got {}",
             value.type_name()
         ));
     };
     for key in map.keys() {
-        if !matches!(key.as_str(), "allow" | "max-bytes" | "rate-per-minute") {
+        if !matches!(
+            key.as_str(),
+            "allow" | "max-bytes" | "rate-per-minute" | "search"
+        ) {
             return Err(format!(
                 "fetch-url policy {display}: unknown key '{key}' — expected \
-                 allow, max-bytes, rate-per-minute"
+                 allow, max-bytes, rate-per-minute, search"
             ));
         }
     }
@@ -130,10 +139,21 @@ fn decode(value: Value, display: &str) -> Result<OrgPolicy, String> {
              in 32 bits, got {rate}"
         )
     })?;
+    let search = match map.get("search") {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(format!(
+                "fetch-url policy {display}: 'search' must be a Bool, got {}",
+                other.type_name()
+            ));
+        }
+        None => return Err(format!("fetch-url policy {display}: missing 'search'")),
+    };
     Ok(OrgPolicy {
         allow,
         max_response_bytes,
         rate_per_minute,
+        search,
     })
 }
 
@@ -255,5 +275,20 @@ mod tests {
             err.contains("'allow' entries must be strings"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn search_true_round_trips() {
+        let policy = parse("return [allow: ['a'], max-bytes: 1, rate-per-minute: 1, search: true]")
+            .expect("a well-formed policy with search: true must parse");
+        assert!(policy.search);
+    }
+
+    #[test]
+    fn search_false_round_trips() {
+        let policy =
+            parse("return [allow: ['a'], max-bytes: 1, rate-per-minute: 1, search: false]")
+                .expect("a well-formed policy with search: false must parse");
+        assert!(!policy.search);
     }
 }

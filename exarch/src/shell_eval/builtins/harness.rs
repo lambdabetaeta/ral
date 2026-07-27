@@ -191,20 +191,21 @@ fn spawn_receipt(answer: FOValue) -> Settled<Value> {
     Ok(Value::from(*payload))
 }
 
-/// `agent [prompt: …, name: …, type: …, grant: …]` — validate the door,
-/// fork this shell into the run's nursery, and enquire `` `agent-start ``
-/// with the adopted session's id — the builtin-body half of a spawn, the
-/// desk's own launch spine ([`crate::fleet::desk::ExarchDesk::launch`]) the
-/// other half. The argument arrives as a [`Value::Map`] — the closed record
-/// row [`scheme_agent`] mints guarantees the four fields statically — but
-/// the `else` arms below stay didactic anyway, matching [`builtin_schedule`]'s
-/// own style: a defensive door costs nothing and never has to trust the
-/// type checker alone.
+/// `agent [prompt: …, name: …, type: …, grant: …, search: …]` — validate the
+/// door, fork this shell into the run's nursery, and enquire
+/// `` `agent-start `` with the adopted session's id — the builtin-body half
+/// of a spawn, the desk's own launch spine
+/// ([`crate::fleet::desk::ExarchDesk::launch`]) the other half. The argument
+/// arrives as a [`Value::Map`] — the closed record row [`scheme_agent`]
+/// mints guarantees the five fields statically — but the `else` arms below
+/// stay didactic anyway, matching [`builtin_schedule`]'s own style: a
+/// defensive door costs nothing and never has to trust the type checker
+/// alone.
 fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent")?;
     let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
-            "agent: expected a [prompt: …, name: …, type: …, grant: …] record, got {}",
+            "agent: expected a [prompt: …, name: …, type: …, grant: …, search: …] record, got {}",
             args[0].type_name()
         )));
     };
@@ -228,6 +229,12 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             "agent: the spec record needs a `grant` field — one of the six permission bases",
         ));
     };
+    let Some(search) = spec.get("search") else {
+        return Err(sig(
+            "agent: the spec record needs a `search` field — whether the child may use the \
+             provider's built-in web search",
+        ));
+    };
 
     let name = name.to_string();
     if !valid_name(&name) {
@@ -238,6 +245,12 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     }
     let kind = agent_type_label(kind)?;
     let grant = permission_label(grant)?;
+    let Value::Bool(search) = search else {
+        return Err(sig(format!(
+            "agent: `search` must be a Bool — got {}",
+            search.type_name()
+        )));
+    };
     let prompt = prompt.to_string();
 
     let session = shell.fork_into_nursery(mooring)?;
@@ -262,6 +275,7 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
                         label: grant,
                         payload: None,
                     },
+                    FOValue::Bool { value: *search },
                 ],
             })),
         },
@@ -455,13 +469,17 @@ fn spawn_receipt_ty() -> Ty {
     closed_record(&[("name", Ty::String), ("log-dir", Ty::String)])
 }
 
-/// `agent :: ∀ρ1 ρ2. [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2] → F [name: Str, log-dir: Str]`
+/// `agent :: ∀ρ1 ρ2. [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool] → F [name: Str, log-dir: Str]`
 ///
 /// The record row is closed: a record literal with literal keys infers an
 /// exact row (`infer_map_val` builds on `Row::Empty`), so unifying it
 /// against this closed row makes a missing or misspelled field a static
 /// error naming that field — the same rationale [`scheme_schedule`] gives
-/// for its own closed record row.
+/// for its own closed record row. `search` joins `prompt`/`name`/`type`/`grant`
+/// as a fifth required field, exactly `grant`'s own character: a spawn
+/// states its child's powers rather than inheriting them silently, and
+/// whether the child may reach the provider's built-in web search is one
+/// more such power.
 ///
 /// The two variant rows *inside* the record — `type` and `grant` — stay
 /// open: a literal tag
@@ -473,7 +491,9 @@ fn spawn_receipt_ty() -> Ty {
 /// row-mismatch diagnostic instead of the legal labels enumerated. The open
 /// row defers the whole check to those runtime doors, which is where
 /// "closed rule, named labels" actually lives for these two arguments — the
-/// same door [`valid_name`] already is for the name contract.
+/// same door [`valid_name`] already is for the name contract. `search` has
+/// only two states, not an enumeration, so `Ty::Bool` is the right type for
+/// it outright — no runtime door of its own to defer to.
 fn scheme_agent(u: &mut Unifier) -> Scheme {
     let type_row = u.fresh_row_var();
     let grant_row = u.fresh_row_var();
@@ -487,6 +507,7 @@ fn scheme_agent(u: &mut Unifier) -> Scheme {
                 ("name", Ty::String),
                 ("type", Ty::Variant(Row::Var(type_row))),
                 ("grant", Ty::Variant(Row::Var(grant_row))),
+                ("search", Ty::Bool),
             ]),
             pure(spawn_receipt_ty()),
         )),
@@ -599,7 +620,7 @@ pub static HARNESS_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("agent"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent),
-        doc: "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
+        doc: "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
         body: BuiltinBody::Static(builtin_agent),
     },
     BuiltinEntry {
@@ -728,7 +749,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agent [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus]",
+            r"agent [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, search: true]",
             5,
             &emit,
         );
@@ -755,7 +776,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agent [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined]",
+            r"agent [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, search: true]",
             5,
             &emit,
         );
@@ -781,7 +802,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"agent [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined]"#,
+            r#"agent [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, search: true]"#,
             5,
             &emit,
         );
@@ -805,12 +826,12 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agent [prompt: #'hi'#, name: 't', type: `amnemon]",
+            r"agent [prompt: #'hi'#, name: 't', type: `amnemon, search: true]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("missing a field named 'grant'"),
+            result.content.contains("field named 'grant'"),
             "the diagnostic must name the missing field, got: {}",
             result.content
         );
@@ -822,7 +843,7 @@ mod tests {
 
     /// The full stack, end to end: a scripted provider issues a `ral` tool
     /// call whose script is
-    /// `` agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only] ``
+    /// `` agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false] ``
     /// — real source, parsed and type-checked, crossing the desk through a
     /// real nursery fork — and the receipt record is the run's value,
     /// while the child's own reply later settles into the parent's inbox.
@@ -852,7 +873,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only]",
+            r"agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false]",
             5,
             &emit,
         );
@@ -1192,7 +1213,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agent [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only]",
+            r"agent [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, search: false]",
             5,
             &emit,
         );

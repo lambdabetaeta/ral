@@ -155,6 +155,7 @@ impl Agent {
             fuel: self.fuel,
             returns: self.returns,
             allow_schedule: self.allow_schedule,
+            search: self.search,
             reply,
             schedules: self.schedules.clone(),
             log: self.log.clone(),
