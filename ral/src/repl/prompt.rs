@@ -269,19 +269,20 @@ mod tests {
         let source = "return { return \"$USER:$CWD:$STATUS\" }";
         let (mut shell, prompt) = evaluate_prompt_src(source);
         let result = eval_prompt(&prompt, &mut shell);
-        let parts: Vec<&str> = result.split(':').collect();
+        // Cut from the ends: a Windows `$CWD` carries a drive colon of
+        // its own, so the middle field is whatever is left between the
+        // first separator and the last.
+        let (user, rest) = result
+            .split_once(':')
+            .unwrap_or_else(|| panic!("expected user:cwd:status, got {result:?}"));
+        let (cwd, status) = rest
+            .rsplit_once(':')
+            .unwrap_or_else(|| panic!("expected user:cwd:status, got {result:?}"));
 
-        assert_eq!(parts.len(), 3, "expected user:cwd:status, got {result:?}");
-        assert!(
-            !parts[0].is_empty(),
-            "USER must be non-empty, got {result:?}"
-        );
-        assert!(
-            !parts[1].is_empty(),
-            "CWD must be non-empty, got {result:?}"
-        );
+        assert!(!user.is_empty(), "USER must be non-empty, got {result:?}");
+        assert!(!cwd.is_empty(), "CWD must be non-empty, got {result:?}");
         assert_eq!(
-            parts[2], "0",
+            status, "0",
             "STATUS must be 0 after successful eval, got {result:?}"
         );
     }
