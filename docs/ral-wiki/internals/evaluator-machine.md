@@ -1,13 +1,15 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-anchors: [eval_top_level, evaluate, with_thunk_body, Settled, trampoline, Mobile, RunState, SessionState]
+verified_at_commit: 16b2d1e
+verified_at_date: 2026-07-26
+anchors: [eval_top_level, evaluate, with_thunk_body, Settled, trampoline, Mobile, Mooring, Disposition, SessionState]
 ---
 
 # The evaluator as a trampolined CBPV machine
 
 The evaluator runs the typed [[internals/compilation-ladder|IR]] as a
-call-by-push-value abstract machine that threads one `Shell` of state. *The
+call-by-push-value abstract machine that threads two things: the run's
+immutable `&Mooring` and one mutable `Shell`. Every verb takes them in that
+order, the mooring immediately before the shell. *The
 machine is `core/src/evaluator/` alone* — `comp`, `expr`, `val`, `call`,
 `case`, `pattern`, `scope`, `trampoline`, `capture`, redirect frames, `audit`;
 the command / pipeline / transport plumbing it delegates to lives in
@@ -35,6 +37,15 @@ outside the module only through `Shell::run`'s hook arm (`Program::Hook`) or
 the in-frame builtin wrapper (`crate::builtins::apply`), so a host cannot
 start an unframed reduction.
 
+**The run's frame is split by mutability.** What the run fixed — its `surface`
+sink, the `deferred` rail with its worker lease and cap, the `desk`, the
+`nursery`, and the foreground `cancel` scope — is the `Mooring`, which lives on
+the run door's Rust stack frame and is only ever borrowed. Nothing saves or
+restores it, because nothing moved it: the stack does that work, and its `Drop`
+empties the nursery on the unwinding path too. `&Mooring` and `&mut Shell` are
+disjoint borrows, so a body can surface an event while holding the shell
+mutably.
+
 **The `Shell` is partitioned into four regions by lifetime — the field name
 *is* the invariant** ([[decisions/260617_turn-local-state|turn-local-state]];
 [[map/core/shell-state|shell-state]]):
@@ -44,10 +55,9 @@ start an unframed reduction.
   counters (`last_status`, `call_depth`, `recursion_limit`), and the dynamic
   `Context` (cwd, env overlays, grants, handlers, args, modules). The public
   embedding seam.
-- *RunState* — the dynamic frame a top-level run installs and restores on
-  teardown: the pipeline-stage `Io`, the `surface` sink, the foreground
-  `cancel` scope, the source-position cursor, the detached-worker lifetime
-  ceiling, and the run's `TerminalAccess`.
+- *Disposition* — the mutable residue of the run's frame, installed and
+  restored on teardown: the pipeline-stage `Io`, the source-position cursor,
+  and the run's `TerminalAccess`.
 - *SessionState* — what outlives every run's teardown: the durable cancel
   `root` detached workers parent under, the `sources` registry rendered against
   after a run returns, the `exit_hints` table, the host-installed `builtins`,
@@ -55,14 +65,16 @@ start an unframed reduction.
 - *LocalState* — host-local scratch with its own flow rules: the `Audit` tree
   and REPL scratch; the residue once run and session state are named.
 
-Hot loops poll the foreground `cancel` scope cooperatively
+Hot loops poll the mooring's `cancel` scope cooperatively, through
+`process::check(mooring, shell)`
 ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]).
 
 **A same-thread thunk body runs *in* the caller's session, not a copy.**
 Forcing a block or applying a lambda is one β-step over one threaded store: the
 runtime evaluates the body on the live `Shell` through `Shell::with_thunk_body`,
-sharing run, session, and local state by identity and swapping in only a
-`Mobile` rescoped to the closure's `captured` environment plus a fresh frame
+sharing run, session, and local state by identity — the mooring is the
+caller's own, lent onward — and swapping in only a `Mobile` rescoped to the
+closure's `captured` environment plus a fresh frame
 ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
 
 - The `ThunkBody` kind fixes the only two places block and lambda differ: a

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 837cb5c
+generated_at_commit: 16b2d1e
 generated_at_date: 2026-07-26
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
@@ -11,7 +11,12 @@ shell process. `builtins.rs` holds the `builtin_registry!` macro: each entry
 binds its facets at once — `names`, fixed `arity`, [[map/core/typecheck|type
 rule]] (`ty`), `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS`
 static (`&[BuiltinEntry]`), so the facets cannot drift apart, and the macro
-asserts a `Sig` rule's structural arity agrees with the written `arity`. The
+asserts a `Sig` rule's structural arity agrees with the written `arity`. A body
+is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
+Settled<Value>`, or a `Captured` closure of the same shape for a host frontend
+with state to carry — so the run's mooring arrives beside the shell
+([[map/core/shell-state|shell-state]]): it is how a body surfaces an event,
+enquires, or starts a nested run parented under the run that called it. The
 type-rule facet is a `BuiltinTypeRule` of two arms: `Sig` (a command signature)
 or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
 registers as an ordinary `Scheme` whose factory bakes the reducer boundary
@@ -85,7 +90,7 @@ Bodies are grouped by concern, one submodule each:
   policy, whose only bounds are the handle's own `cancel`, the host's
   `/clear`, and process exit.
   The spawn door also enforces the frame's admission cap
-  (`RunState::worker_cap`): a birth of any class *reserves* its seat at
+  (`Mooring::worker_cap`): a birth of any class *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
   running or reserved, with an error naming `await`/`cancel` as the
   remedies, the reservation held across thread spawn and released into the

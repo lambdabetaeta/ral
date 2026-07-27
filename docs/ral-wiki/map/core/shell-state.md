@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 837cb5c
+generated_at_commit: 16b2d1e
 generated_at_date: 2026-07-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -58,19 +58,13 @@ field name *is* the invariant** — joined by `Shell`
   thread spawns. `mobile` is the public embedding seam. The run door
   checkpoints and rolls back the `Mobile` around every run, so a
   panicking run reports as a failed run instead of corrupting the store.
-- **`RunState`** — the dynamic frame a top-level run installs and restores on
-  teardown: the pipeline-stage `Io`, the `surface` sink, the `deferred` sink
-  (a detached worker's completion delivery — `None` outside an agent host),
-  the `desk` answering the run's enquiries
-  ([[decisions/260706_enquiry-channel|enquiry-channel]]), the `nursery`
-  holding engine-side session forks a desk handler adopts (`None` outside a
-  host that installs one; like `desk`, never given to a deferred worker), the foreground
-  `cancel` scope, the source-position `loc` cursor, the deferred-worker
-  `WorkerLease` (`deferred_lease` — the idle bound and absolute backstop
-  travel as one value; `None` never reaps), the `worker_cap` admission bound
-  (`Some(cap)` refuses a spawn of any class while `cap` workers still run;
-  `None` admits freely, and both flow into same-thread bodies and spawned
-  workers alike), and the run's `TerminalAccess`.
+- **`Disposition`** — the mutable residue of the frame a run installs, and the
+  only part of that frame the `Shell` carries (as the field `run`): the
+  pipeline-stage `Io`, the source-position `loc` cursor, and the run's
+  `TerminalAccess`. All three change *within* a run — a redirect frame swaps
+  the sinks, a `source`d module moves the cursor, a loan token raises the
+  terminal authority — so all three must be saved and restored, which is all
+  `RunGuard` does.
 - **`SessionState`** — what survives every run's teardown: the durable cancel
   `root` that detached workers parent under (minted deaf to the ambient
   causes; `Shell::face_signals` re-mints it facing, for the host that owns the
@@ -154,13 +148,51 @@ scope's probe figure for a host's `/resources` fold
 ([[invariants/probe-convention|probe-convention]]): a count, never the
 values, and enumeration renews nothing.
 
+### The mooring
+
+What a run *fixes* is not on the `Shell` at all. The seven run-invariant
+members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
+detached worker's completion delivery — `None` outside an agent host), the
+`desk` answering the run's enquiries
+([[decisions/260706_enquiry-channel|enquiry-channel]]), the `nursery` holding
+engine-side session forks a desk handler adopts (`None` outside a host that
+installs one; like `desk`, never given to a deferred worker), the foreground
+`cancel` scope, the deferred-worker `WorkerLease` (`deferred_lease` — the idle
+bound and absolute backstop travel as one value; `None` never reaps), and the
+`worker_cap` admission bound (`Some(cap)` refuses a spawn of any class while
+`cap` workers still run; `None` admits freely). It is an owned local on the run
+door's own Rust stack frame, and reaches every callee as an explicit
+`&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
+signature.
+
+Immutability is what makes the frame free. A value that never moves needs no
+putting back: an outer run's mooring is restored by the stack unwinding, and
+`Mooring`'s `Drop` empties its nursery on that same unwinding. In effect terms
+the split separates a Reader (`&Mooring`, with `Shell::run_nested` as its
+`local` — a nested run's frame is a child of the mooring it is handed) from
+State (`Disposition` under a bracket).
+
+`&Mooring` and `&mut Shell` are disjoint borrows, so a builtin body can surface
+an event while holding the shell mutably. `Mooring` is not `Clone`: a second
+owner would empty the nursery while the first still ran. Outside core only
+`cancel`, `Mooring::surface`, and `Mooring::adrift` are reachable — `adrift()`
+being the mooring a host builds to call a builtin body outside any run (no
+surface, no rail, no desk, no nursery, and a scope under a root nothing else
+holds, so cancelling it is how such a caller drives the body's poll points).
+
+A worker *rebuilds* rather than sharing (`Mooring::for_worker`): it keeps the
+deferred rail, lease, and cap, takes its own buffering surface, and gets
+neither desk nor nursery — both barred to something that outlives its run's
+Report — under a `worker` scope of the durable root, so a SIGTERM reaches it
+and a Ctrl-C does not.
+
 ### Surface
 
-The `surface` sink (`RunState::surface`, `Option<SurfaceSink>` where
+The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
 `SurfaceSink = Arc<dyn EventSink>`) is the value-typed dual of the byte
 [[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
-borrowed `Value`; `Shell::surface` forwards onto the installed sink and is inert
-when none is present (a bare REPL). Run-scoped, not a persistent capability — a
+borrowed `Value`; the `Mooring::surface` method forwards onto the installed
+sink and is inert when none is present (a bare REPL). Run-scoped, not a persistent capability — a
 run door installs it, so a clone of it has no liveness role and can never decide
 a run is over. A *detached* worker does not receive the live sink: its events
 buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
@@ -179,7 +211,7 @@ lifetimes:
   startup from the `tcgetpgrp == getpgrp` witness — `Some` when ral owns the
   foreground, `None` otherwise. It is *lent*, never moved or cloned.
 - A run's authority to borrow it is the per-run `TerminalAccess` on
-  `RunState`: `Denied` (the safe default — an exarch tool run, the boot
+  `Disposition`: `Denied` (the safe default — an exarch tool run, the boot
   frame), `Leased` (an interactive run), or `ExplicitLoan` (a within-run
   elevation raised only by the host loan token). `Shell::terminal_lease` yields
   `&TerminalLease` only when access permits *and* the session owns a lease, so a
@@ -221,9 +253,10 @@ copying only the fields it happened to remember. There are two regimes.
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
 `Shell::with_thunk_body` runs the body *in* the caller's `Shell`. Only the
 `Mobile` is swapped, rescoped to the closure's captured `Env` plus a fresh frame;
-the `run`, `session`, and `local` state are shared *by identity*, so the body
-observes the caller's audit trail, byte sinks, builtin table, cancel root, and
-terminal lease without any of them being copied. There is no second store to
+the `run`, `session`, and `local` state are shared *by identity*, and the
+caller's `&Mooring` is simply passed along, so the body observes the caller's
+audit trail, byte sinks, builtin table, cancel scope, and terminal lease
+without any of them being copied. There is no second store to
 drift from the first ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
 The `ThunkBody` kind fixes the only two places a block and a lambda differ: a
 block enters with the caller's `$?` and folds only `last_status` back; a lambda
@@ -236,9 +269,11 @@ holds **no terminal authority** — `TerminalAccess::Denied`, no lease — the s
 default for a store that is not the session's:
 
 - `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker helper)
-  on a fresh OS thread that owns its own IO; nothing flows back. Runs under a
-  child of the durable root, not the foreground scope, so a run timeout or Esc
-  does not reach it.
+  on a fresh OS thread that owns its own IO; nothing flows back. Its mooring is
+  rebuilt by `Mooring::for_worker` on the calling thread (so the door can hand
+  the caller the worker's scope) and moved into the thread, which is why the
+  worker runs under a child of the durable root rather than the foreground
+  scope, and a run timeout or Esc does not reach it.
 - `inherit_from` / `return_to` — the per-substate manifests a cross-process
   pipeline stage (`child_of`, [[decisions/260610_child-eval-unification|child-eval]])
   leans on. Their asymmetry *is* the flow matrix: the source cursor (`run.loc`)
