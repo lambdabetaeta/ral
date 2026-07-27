@@ -33,7 +33,7 @@ pub(crate) enum LaunchTarget<'a> {
 /// A [`Kept`](Self::Kept) child is one this process waits on and can
 /// signal, so its confinement is built to die with us: bwrap gets
 /// `--die-with-parent`, and an envelope orphaned by a crash cannot outlive
-/// the session that authorised it.  A [`Surrendered`](Self::Surrendered)
+/// the session that authorised it.  A `Surrendered`
 /// one is a `detach` (SPEC §13.7), where that flag would kill the survivor
 /// moments after birth and hand back a receipt for nothing.  Dropping it
 /// there is not a hole: the confinement still applies for the survivor's
@@ -42,10 +42,12 @@ pub(crate) enum LaunchTarget<'a> {
 ///
 /// Read only by the Linux backend.  macOS enters Seatbelt in-process and
 /// `execve`s the target in place, so there is no envelope process to tie
-/// to a parent, and Windows has no `detach` at all.
+/// to a parent, and Windows has no `detach` at all — which is why
+/// surrender is a distinction only where the verb that makes it exists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ownership {
     Kept,
+    #[cfg(unix)]
     Surrendered,
 }
 
