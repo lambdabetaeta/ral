@@ -154,7 +154,9 @@ impl Shell {
     /// capabilities stack.  See
     /// [`capability::sandbox_projection`](crate::capability::sandbox_projection).
     pub fn sandbox_projection(&self) -> Option<SandboxProjection> {
-        crate::capability::sandbox_projection(&self.mobile.context)
+        let ctx = &self.mobile.context;
+        let path_env = ctx.env_overrides().get("PATH").map_or("", String::as_str);
+        crate::capability::sandbox_projection(&ctx.grants, &ctx.resolver(), path_env)
     }
 
     /// The guest process jail installed on this session, if any — `None`

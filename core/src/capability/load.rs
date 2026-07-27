@@ -44,7 +44,7 @@ pub fn load_capabilities_from_str(
     let value = crate::builtins::modules::evaluate_source(mooring, shell, source, virtual_path)
         .map_err(|e| wrap(virtual_path, e))?;
     let prefix = format!("capability file {virtual_path}");
-    crate::capability::decode_capability_map(&value, &prefix, ctx)
+    crate::capability::decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
 
 /// Read `path` from disk and forward to [`load_capabilities_from_str`].

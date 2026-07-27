@@ -303,7 +303,7 @@ mod tests {
 
         // Pre-fix shape: narrow set fed as both — the hole is open.
         assert!(
-            admits_for_test(&ctx, &allow_refs, &allow_refs),
+            admits_for_test(&ctx.grants, &allow_refs, &allow_refs),
             "narrow-only gate admits /bin/bash (the pre-fix bypass)",
         );
         assert!(
@@ -316,7 +316,7 @@ mod tests {
         );
         // Post-fix: broad deny set closes the hole.
         assert!(
-            !admits_for_test(&ctx, &deny_refs, &allow_refs),
+            !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
             "broad deny_names veto closes the /bin/bash bypass",
         );
     }
@@ -360,7 +360,7 @@ mod tests {
             "deny_names carries the basename (harmless: it is an allow, not a deny)",
         );
         assert!(
-            !admits_for_test(&ctx, &deny_refs, &allow_refs),
+            !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
             "bare rg: allow must not admit a Path-invoked /tmp/evil/rg",
         );
     }

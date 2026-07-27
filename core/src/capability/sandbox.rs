@@ -1,7 +1,7 @@
 //! The OS-renderable sandbox projection.
 //!
 //! [`sandbox_projection`] meet-folds the whole dynamic
-//! [`GrantStack`](crate::types::GrantStack) (`ctx.grants`) into the
+//! [`GrantStack`](crate::types::GrantStack) into the
 //! [`SandboxProjection`] the sandbox backends render — the fs, net, and
 //! exec dimensions intersected across every layer.  It returns `None`
 //! when no layer imposes a restriction the OS must enforce, so callers
@@ -10,10 +10,10 @@
 //! live in the sibling [`super::enforce`].
 
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
-use crate::path::{NormalizedPrefix, PrefixSet};
+use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{
-    Capabilities, Context, ExecDir, ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack,
-    Meet, SandboxProjection,
+    Capabilities, ExecDir, ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack, Meet,
+    SandboxProjection,
 };
 use std::collections::BTreeSet;
 
@@ -21,7 +21,16 @@ use std::collections::BTreeSet;
 /// OS-renderable projection.  Returns `None` when no layer imposes fs
 /// or net restrictions — nor, on macOS, an exec restriction Seatbelt
 /// enforces — so callers can cheaply skip OS sandbox setup.
-pub(crate) fn sandbox_projection(ctx: &Context) -> Option<SandboxProjection> {
+///
+/// Takes exactly what the fold consults: the grant stack, the `Resolver`
+/// bound to the caller's home/cwd (for prefix and deny-path resolution),
+/// and the `PATH` override under which literal exec keys resolve. No
+/// other part of `Context` feeds this projection.
+pub(crate) fn sandbox_projection(
+    grants: &GrantStack,
+    resolver: &Resolver,
+    path_env: &str,
+) -> Option<SandboxProjection> {
     let mut read_prefixes: Option<PrefixSet> = None;
     let mut write_prefixes: Option<PrefixSet> = None;
     let mut deny_paths: Vec<NormalizedPrefix> = Vec::new();
@@ -29,23 +38,22 @@ pub(crate) fn sandbox_projection(ctx: &Context) -> Option<SandboxProjection> {
     let mut saw_fs = false;
     let mut saw_net = false;
 
-    let resolver = ctx.resolver();
-    for fs in ctx.grants.fs() {
+    for fs in grants.fs() {
         saw_fs = true;
-        read_prefixes = read_prefixes.meet(Some(PrefixSet::resolve(&resolver, &fs.read_prefixes)));
+        read_prefixes = read_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.read_prefixes)));
         write_prefixes =
-            write_prefixes.meet(Some(PrefixSet::resolve(&resolver, &fs.write_prefixes)));
+            write_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.write_prefixes)));
         for p in &fs.deny_paths {
             deny_paths.push(p.clone());
             deny_paths.push(NormalizedPrefix::from_surface(resolver.check(p.as_str())));
         }
     }
-    for net in ctx.grants.net() {
+    for net in grants.net() {
         saw_net = true;
         net_allowed &= net;
     }
 
-    let exec = reduce_exec(ctx);
+    let exec = reduce_exec(grants, resolver, path_env);
     // Exec attenuation only triggers an OS-layer sandbox where the
     // backend can actually filter exec — Seatbelt on macOS does it via
     // the rendered `(allow file-read* process-exec …)` rule; bwrap on
@@ -87,15 +95,13 @@ pub(crate) fn sandbox_projection(ctx: &Context) -> Option<SandboxProjection> {
 /// confined to.  Mirrors the grant stack [`crate::types::Shell::new`]
 /// installs (root, then this frame), so a host can decide whether to
 /// stand up sandbox machinery without constructing a whole `Shell` to
-/// probe the projection.
+/// probe the projection.  A probe has no session home/cwd/PATH of its
+/// own, so it hands `sandbox_projection` the shell-less `Resolver` and
+/// an empty `PATH` — the caller only ever asks about `caps` in isolation.
 pub fn engages_sandbox(caps: &Capabilities) -> bool {
     let mut grants = GrantStack::root();
     grants.push(caps.clone());
-    let context = Context {
-        grants,
-        ..Context::default()
-    };
-    sandbox_projection(&context).is_some()
+    sandbox_projection(&grants, &Resolver::shell_less(), "").is_some()
 }
 
 /// Reduce the exec component of the stack into an [`ExecProjection`].
@@ -117,14 +123,13 @@ pub fn engages_sandbox(caps: &Capabilities) -> bool {
 ///     the decision defers to [`evaluate_exec`] over the resolved
 ///     identity (see [`admitted_literal_paths`]) rather than
 ///     intersecting names and dirs as separate maps.
-fn reduce_exec(ctx: &Context) -> ExecProjection {
-    let resolver = ctx.resolver();
+fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> ExecProjection {
     let mut subpath_allow: Option<PrefixSet> = None;
     let mut subpath_deny = PrefixSet::default();
     let mut literal_names: BTreeSet<String> = BTreeSet::new();
     let mut denied_names: BTreeSet<String> = BTreeSet::new();
     let mut saw = false;
-    for map in ctx.grants.exec() {
+    for map in grants.exec() {
         saw = true;
         let mut allow_dirs = Vec::new();
         let mut deny_dirs = Vec::new();
@@ -134,8 +139,8 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
                 ExecDir::Deny => deny_dirs.push(dir.clone()),
             }
         }
-        subpath_allow = subpath_allow.meet(Some(PrefixSet::resolve(&resolver, &allow_dirs)));
-        subpath_deny = subpath_deny.union(PrefixSet::resolve(&resolver, &deny_dirs));
+        subpath_allow = subpath_allow.meet(Some(PrefixSet::resolve(resolver, &allow_dirs)));
+        subpath_deny = subpath_deny.union(PrefixSet::resolve(resolver, &deny_dirs));
         for (name, policy) in &map.literals {
             literal_names.insert(name.clone());
             if matches!(policy, ExecPolicy::Deny) {
@@ -152,7 +157,6 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
             .map(NormalizedPrefix::into_string)
             .collect()
     };
-    let path_env = ctx.env_overrides().get("PATH").map_or("", String::as_str);
     let mut deny_paths = Vec::new();
     let mut deny_basenames = Vec::new();
     for name in &denied_names {
@@ -163,7 +167,7 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
         }
     }
     ExecProjection::Restricted {
-        allow_paths: admitted_literal_paths(ctx, &literal_names, path_env),
+        allow_paths: admitted_literal_paths(grants, &literal_names, path_env),
         allow_dirs: surface_strings(subpath_allow.unwrap_or_default()),
         deny_paths,
         deny_dirs: surface_strings(subpath_deny),
@@ -200,7 +204,11 @@ fn resolve_literal(name: &str, path_env: &str) -> Option<String> {
 /// `/usr/bin/git` literal exactly as it would at runtime.  An
 /// unresolvable admitted name fails closed, with a trace it can no longer
 /// be pinned.
-fn admitted_literal_paths(ctx: &Context, names: &BTreeSet<String>, path_env: &str) -> Vec<String> {
+fn admitted_literal_paths(
+    grants: &GrantStack,
+    names: &BTreeSet<String>,
+    path_env: &str,
+) -> Vec<String> {
     let mut allowed = BTreeSet::new();
     for name in names {
         let Some(resolved) = resolve_literal(name, path_env) else {
@@ -226,7 +234,7 @@ fn admitted_literal_paths(ctx: &Context, names: &BTreeSet<String>, path_env: &st
         .into_iter()
         .collect();
         if let ExecVerdict::Allowed(_) = evaluate_exec(
-            ctx,
+            grants,
             ExecNames {
                 deny: &deny,
                 allow: &allow,

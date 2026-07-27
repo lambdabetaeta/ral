@@ -250,7 +250,8 @@ pub(crate) fn eval_grant(
         home: &home,
         cwd: &cwd,
     };
-    let caps = crate::capability::decode_capability_map(&caps_val, "grant", &ctx)?;
+    let caps =
+        crate::capability::decode_capability_map(&caps_val, "grant", &ctx).map_err(Break::from)?;
     let body = eval_val(body, shell)?;
     audit::with_scope(shell, "grant", span, |shell| {
         shell.with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))

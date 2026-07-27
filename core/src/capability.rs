@@ -23,12 +23,14 @@
 //! on, in `crate::types::capability`.
 
 mod decode;
+mod deputy;
 mod enforce;
 mod exec;
 mod load;
 mod sandbox;
 
 pub(crate) use decode::decode_capability_map;
+pub use deputy::deputy_prefixes;
 pub(crate) use enforce::{
     FsOp, admits_head, check_editor_read, check_editor_tui, check_editor_write, check_exec_args,
     check_fs_op, check_shell_chdir,

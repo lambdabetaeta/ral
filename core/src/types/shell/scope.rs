@@ -25,7 +25,7 @@
 
 use super::Shell;
 use crate::types::{
-    AuditFragment, Binding, Capabilities, HandlerEntry, HandlerRole, Settled, Value,
+    AuditFragment, Binding, Capabilities, ExecNode, HandlerEntry, HandlerRole, Map, Settled, Value,
 };
 
 impl Shell {
@@ -41,6 +41,7 @@ impl Shell {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.mobile.context.grants.push(capabilities);
+        self.audit_deputy_prefixes();
         let r = f(self);
         self.mobile.context.grants.pop();
         r
@@ -55,6 +56,53 @@ impl Shell {
     /// when the frame's lifetime is lexical.
     pub fn push_session_capabilities(&mut self, capabilities: Capabilities) {
         self.mobile.context.grants.push(capabilities);
+        self.audit_deputy_prefixes();
+    }
+
+    /// Emit a `deputy` audit node when the stack just formed by the push
+    /// above — folded through `Capabilities::meet`, per
+    /// [`crate::capability::deputy_prefixes`]'s contract — admits a
+    /// prefix for both exec and write: the confused-deputy escape hatch
+    /// `design/grant.md`'s third concession names. Reports only; never
+    /// denies, never attenuates the grant that just landed. No-op when
+    /// audit is inactive or no layer opts in (SPEC §11.4–11.5).
+    fn audit_deputy_prefixes(&mut self) {
+        if !self
+            .mobile
+            .context
+            .should_audit_capabilities(&self.local.audit)
+        {
+            return;
+        }
+        let Some(folded) = self
+            .mobile
+            .context
+            .grants
+            .iter()
+            .cloned()
+            .reduce(Capabilities::meet)
+        else {
+            return;
+        };
+        let prefixes = crate::capability::deputy_prefixes(&folded);
+        if prefixes.is_empty() {
+            return;
+        }
+        let site = self.call_site();
+        let principal = self.mobile.context.principal();
+        let mut fields = Map::new();
+        fields.insert(
+            "prefixes".into(),
+            Value::list(
+                prefixes
+                    .iter()
+                    .map(|p| Value::String(p.as_str().to_string()))
+                    .collect(),
+            ),
+        );
+        self.local.audit.push(ExecNode::capability_check(
+            "deputy", "flagged", site, principal, fields,
+        ));
     }
 
     /// True when a non-root capabilities layer is active.

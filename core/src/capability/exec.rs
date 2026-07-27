@@ -8,7 +8,7 @@
 //! it).  Literal beats subpath; deeper subpath beats shallower.
 
 use crate::path;
-use crate::types::{Context, ExecDir, ExecMap, ExecPolicy, Meet};
+use crate::types::{ExecDir, ExecMap, ExecPolicy, GrantStack, Meet};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What an admitted command may run: any arguments, or only a fixed
@@ -91,10 +91,15 @@ pub(super) enum ExecVerdict {
 /// intersect.  If the stack declared exec policy but no layer admitted
 /// the command, deny; only a stack with no exec policy at all is
 /// unrestricted.
-pub(super) fn evaluate_exec(ctx: &Context, names: ExecNames) -> ExecVerdict {
+///
+/// Takes the grant stack alone: exec admission is a question about the
+/// policy, not the dynamic context it happens to be evaluated from — the
+/// only other inputs, `path::is_absolute` and `path_within_str`, are
+/// lexical. This makes the exec verdict pure outright.
+pub(super) fn evaluate_exec(grants: &GrantStack, names: ExecNames) -> ExecVerdict {
     let mut admit: Option<Admit> = None;
     let mut saw = false;
-    for exec in ctx.grants.exec() {
+    for exec in grants.exec() {
         saw = true;
         match layer_exec_verdict(exec, names) {
             LayerExec::Denied => return ExecVerdict::Denied,
@@ -166,9 +171,9 @@ fn literal_vetoes(literals: &BTreeMap<String, ExecPolicy>, deny_names: &[&str]) 
 /// a test feed the narrow set as both sets — reproducing the pre-fix
 /// gate, which had no broad veto identity — against the fixed gate.
 #[cfg(all(test, unix))]
-pub(crate) fn admits_for_test(ctx: &Context, deny: &[&str], allow: &[&str]) -> bool {
+pub(crate) fn admits_for_test(grants: &GrantStack, deny: &[&str], allow: &[&str]) -> bool {
     !matches!(
-        evaluate_exec(ctx, ExecNames { deny, allow }),
+        evaluate_exec(grants, ExecNames { deny, allow }),
         ExecVerdict::Denied
     )
 }

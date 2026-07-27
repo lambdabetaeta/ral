@@ -12,7 +12,7 @@
 
 use super::*;
 use crate::capability::decode_capability_map;
-use crate::types::{Break, Value};
+use crate::types::{PolicyError, Value};
 
 /// Build a `Value::Map` from `(key, value)` pairs — the shape both the
 /// `grant` builtin and the capability-file loader feed `decode_capability_map`.
@@ -41,12 +41,9 @@ fn np(s: &str) -> String {
     crate::path::NormalizedPrefix::from_surface(s).into_string()
 }
 
-/// Unwrap a decode `Break` into its error message.
-fn break_msg(b: Break) -> String {
-    match b {
-        Break::Error(e) => e.message,
-        other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
-    }
+/// Unwrap a decode `PolicyError` into its message.
+fn break_msg(e: PolicyError) -> String {
+    e.message
 }
 
 #[cfg(unix)]

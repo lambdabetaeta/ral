@@ -57,7 +57,7 @@ pub use error::{BodyResult, Error, Status, split};
 // Control-flow types: Escape, Break, Tail, TailCall, Control, Settled,
 // Raw. Tail/TailCall/Control/Raw are pub(crate) by design.
 mod flow;
-pub use flow::{Break, Escape, Settled};
+pub use flow::{Break, Escape, PolicyError, Settled};
 pub(crate) use flow::{Control, Raw, Tail, TailCall};
 
 // Error constructors and Value→Map coercions.

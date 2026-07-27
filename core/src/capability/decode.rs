@@ -24,10 +24,24 @@
 //! platform mismatch.
 
 use crate::types::{
-    Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, FsPolicy, List, Settled, ShellPolicy,
-    Value, as_map, as_map_ref, sig,
+    Break, Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, FsPolicy, List, PolicyError,
+    ShellPolicy, Value, as_map, as_map_ref,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// `as_map`/`as_map_ref` are shared with the rest of the evaluator and so
+/// return a `Break`, but within decode they only ever raise the generic
+/// "expects a Map" shape mismatch — never an `Escape` — so narrowing that
+/// `Break` into the decoder's own [`PolicyError`] currency is safe.
+fn shape(b: Break) -> PolicyError {
+    match b {
+        Break::Error(e) => match e.hint {
+            Some(hint) => PolicyError::new(e.message).with_hint(hint),
+            None => PolicyError::new(e.message),
+        },
+        Break::Escape(_) => unreachable!("as_map/as_map_ref never escape"),
+    }
+}
 
 // ── Dimension decoders ────────────────────────────────────────────────────
 
@@ -43,14 +57,14 @@ fn decode_fs(
     value: &Value,
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
-) -> Settled<FsPolicy> {
-    let entries = as_map_ref(value, err_prefix)?;
+) -> Result<FsPolicy, PolicyError> {
+    let entries = as_map_ref(value, err_prefix).map_err(shape)?;
     let mut fp = FsPolicy::default();
     for (sub, paths) in entries {
         let items = match paths {
             Value::List(items) => items,
             other => {
-                return Err(sig(format!(
+                return Err(PolicyError::new(format!(
                     "{err_prefix}: '{sub}' must be a list of paths, got {} (use [\"/path\"])",
                     other.type_name()
                 )));
@@ -63,7 +77,7 @@ fn decode_fs(
             "write" => fp.write_prefixes = frozen,
             "deny" => fp.deny_paths = frozen,
             _ => {
-                return Err(sig(format!(
+                return Err(PolicyError::new(format!(
                     "{err_prefix}: unknown key '{sub}' — expected one of read, write, deny"
                 )));
             }
@@ -75,12 +89,12 @@ fn decode_fs(
 /// Collect a `Value::List` into owned strings, rejecting any non-String
 /// element with a shape-specific hint.  Shared by the fs path lists and
 /// the exec subcommand lists, both of which are string-only.
-fn string_list(items: &List, what: &str, err_prefix: &str) -> Settled<Vec<String>> {
+fn string_list(items: &List, what: &str, err_prefix: &str) -> Result<Vec<String>, PolicyError> {
     items
         .iter()
         .map(|item| match item {
             Value::String(s) => Ok(s.clone()),
-            other => Err(sig(format!(
+            other => Err(PolicyError::new(format!(
                 "{err_prefix}: {what} must be strings — expected a string, got {}",
                 other.type_name()
             ))),
@@ -108,7 +122,7 @@ fn freeze_absolute(
     entry: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Result<Option<crate::path::NormalizedPrefix>, String> {
+) -> Result<Option<crate::path::NormalizedPrefix>, PolicyError> {
     let frozen = crate::path::sigil::freeze_one(entry, ctx)?;
     if frozen.is_absolute() {
         return Ok(Some(frozen));
@@ -116,10 +130,10 @@ fn freeze_absolute(
     if crate::path::lex::is_foreign_rooted(frozen.as_str(), cfg!(windows)) {
         return Ok(None);
     }
-    Err(format!(
+    Err(PolicyError::new(format!(
         "{err_prefix}: relative path '{entry}' is not allowed — \
          use an absolute path, or cwd:{entry} for \"relative to here\""
-    ))
+    )))
 }
 
 /// Freeze each raw fs entry, requiring the result absolute.  An entry
@@ -129,10 +143,10 @@ fn freeze_prefix_list(
     raw: Vec<String>,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Settled<Vec<crate::path::NormalizedPrefix>> {
+) -> Result<Vec<crate::path::NormalizedPrefix>, PolicyError> {
     let mut out = Vec::new();
     for entry in raw {
-        if let Some(frozen) = freeze_absolute(&entry, ctx, err_prefix).map_err(sig)? {
+        if let Some(frozen) = freeze_absolute(&entry, ctx, err_prefix)? {
             out.push(frozen);
         }
     }
@@ -143,10 +157,10 @@ fn freeze_prefix_list(
 /// an error naming the wrong type.  Shared by every boolean dimension
 /// (`net`, `editor.*`, `shell.chdir`, `audit`) so a known key with a
 /// non-Bool value fails loudly rather than silently denying.
-fn decode_bool(value: &Value, err_prefix: &str) -> Settled<bool> {
+fn decode_bool(value: &Value, err_prefix: &str) -> Result<bool, PolicyError> {
     match value {
         Value::Bool(b) => Ok(*b),
-        other => Err(sig(format!(
+        other => Err(PolicyError::new(format!(
             "{err_prefix}: expected a Bool, got {}",
             other.type_name()
         ))),
@@ -154,26 +168,26 @@ fn decode_bool(value: &Value, err_prefix: &str) -> Settled<bool> {
 }
 
 /// `editor: [read: bool, write: bool, tui: bool]`
-fn decode_editor(value: &Value, err_prefix: &str) -> Settled<EditorPolicy> {
+fn decode_editor(value: &Value, err_prefix: &str) -> Result<EditorPolicy, PolicyError> {
     let mut cap = EditorPolicy::default();
-    for (k, v) in as_map_ref(value, err_prefix)? {
+    for (k, v) in as_map_ref(value, err_prefix).map_err(shape)? {
         match k.as_str() {
             "read" => cap.read = decode_bool(v, err_prefix)?,
             "write" => cap.write = decode_bool(v, err_prefix)?,
             "tui" => cap.tui = decode_bool(v, err_prefix)?,
-            _ => return Err(sig(format!("{err_prefix}: unknown key '{k}'"))),
+            _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
         }
     }
     Ok(cap)
 }
 
 /// `shell: [chdir: bool]`
-fn decode_shell(value: &Value, err_prefix: &str) -> Settled<ShellPolicy> {
+fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyError> {
     let mut cap = ShellPolicy::default();
-    for (k, v) in as_map_ref(value, err_prefix)? {
+    for (k, v) in as_map_ref(value, err_prefix).map_err(shape)? {
         match k.as_str() {
             "chdir" => cap.chdir = decode_bool(v, err_prefix)?,
-            _ => return Err(sig(format!("{err_prefix}: unknown key '{k}'"))),
+            _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
         }
     }
     Ok(cap)
@@ -200,14 +214,16 @@ fn decode_shell(value: &Value, err_prefix: &str) -> Settled<ShellPolicy> {
 /// The freeze pass resolves `~` / `xdg:` / `cwd:` / `tempdir:` sigils and
 /// rejects an `xdg:` value that escapes `ctx.home` (defence in depth — an
 /// attacker-set `XDG_*_HOME=/etc` would otherwise silently widen the grant).
-/// Freeze errors surface as neutral [`Break::Error`]s; the caller prepends
-/// its own provenance.
+/// Freeze errors surface as a [`PolicyError`]; the caller prepends its own
+/// provenance and mints a [`Break`] from it, since the author of a grant or
+/// capability file is the live user and every malformed shape here is a
+/// message, never a process exit.
 pub(crate) fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
-) -> Settled<Capabilities> {
-    let entries = as_map_ref(value, err_prefix)?;
+) -> Result<Capabilities, PolicyError> {
+    let entries = as_map_ref(value, err_prefix).map_err(shape)?;
     let mut caps = Capabilities::default();
     for (k, v) in entries {
         match k.as_str() {
@@ -217,12 +233,11 @@ pub(crate) fn decode_capability_map(
             "audit" => caps.audit = decode_bool(v, &format!("{err_prefix} audit"))?,
             "editor" => caps.editor = Some(decode_editor(v, &format!("{err_prefix} editor"))?),
             "shell" => caps.shell = Some(decode_shell(v, &format!("{err_prefix} shell"))?),
-            _ => return Err(sig(format!("{err_prefix}: unknown key '{k}'"))),
+            _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
         }
     }
     if let Some(exec) = caps.exec.as_mut() {
-        *exec = freeze_exec_map(std::mem::take(exec), ctx, &format!("{err_prefix} exec"))
-            .map_err(sig)?;
+        *exec = freeze_exec_map(std::mem::take(exec), ctx, &format!("{err_prefix} exec"))?;
     }
     Ok(caps)
 }
@@ -252,21 +267,21 @@ fn freeze_exec_map(
     map: ExecMap,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Result<ExecMap, String> {
+) -> Result<ExecMap, PolicyError> {
     use crate::path::sigil::looks_like_path_or_sigil;
     // `None` means the key froze to a foreign-rooted dead grant (see
     // `freeze_absolute`) — the caller skips inserting it.
-    let freeze_key = |key: &str| -> Result<Option<String>, String> {
+    let freeze_key = |key: &str| -> Result<Option<String>, PolicyError> {
         Ok(freeze_absolute(key, ctx, err_prefix)?.map(crate::path::NormalizedPrefix::into_string))
     };
-    let dir_verdict = |sigil: &str, policy: ExecPolicy| -> Result<ExecDir, String> {
+    let dir_verdict = |sigil: &str, policy: ExecPolicy| -> Result<ExecDir, PolicyError> {
         match policy {
             ExecPolicy::Allow => Ok(ExecDir::Allow),
             ExecPolicy::Deny => Ok(ExecDir::Deny),
-            ExecPolicy::Subcommands(_) => Err(format!(
+            ExecPolicy::Subcommands(_) => Err(PolicyError::new(format!(
                 "{err_prefix}: '{sigil}' only takes 'allow' or 'deny', not a subcommand list \
                  (a subcommand list matches a command's first argument, so it needs a literal command)"
-            )),
+            ))),
         }
     };
 
@@ -287,10 +302,10 @@ fn freeze_exec_map(
         } else if looks_like_path_or_sigil(&key) {
             if let Some(frozen) = freeze_key(&key)? {
                 if crate::path::is_dir(&frozen) {
-                    return Err(format!(
+                    return Err(PolicyError::new(format!(
                         "{err_prefix}: '{key}' is a directory, so as a literal command key it \
                          names a binary that cannot exist — did you mean '{key}/'?"
-                    ));
+                    )));
                 }
                 literals.insert(frozen, policy);
             }
@@ -305,10 +320,10 @@ fn freeze_exec_map(
     // directory handling — `path:`/`system:` is the one spelling.
     for (key, dir) in map.dirs {
         if key == "path:" || key == "system:" {
-            return Err(format!(
+            return Err(PolicyError::new(format!(
                 "{err_prefix}: '{key}/' is not a directory grant — \
                  use '{key}' with no trailing slash"
-            ));
+            )));
         }
         if let Some(frozen) = freeze_key(&key)? {
             insert_dir_meet(&mut dirs, frozen, dir);
@@ -339,7 +354,7 @@ fn insert_dir_meet(dirs: &mut BTreeMap<String, ExecDir>, key: String, verdict: E
 
 /// Split `$PATH` on the platform separator, normalise each absolute
 /// entry, skip empties and relatives.
-fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
+fn path_dirs(err_prefix: &str) -> Result<Vec<String>, PolicyError> {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut dirs = Vec::new();
     for entry in std::env::split_paths(&path) {
@@ -350,10 +365,10 @@ fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
         dirs.push(normalized.into_string());
     }
     if dirs.is_empty() {
-        return Err(format!(
+        return Err(PolicyError::new(format!(
             "{err_prefix}: 'path:' expands to zero absolute directories — \
              PATH is empty, unset, or contains only relative entries"
-        ));
+        )));
     }
     Ok(dirs)
 }
@@ -392,8 +407,8 @@ fn system_dirs() -> Vec<String> {
 /// tags on `ExecPolicy` (capitalised) are reserved for the IPC wire format.
 /// `Bool` and `Thunk` are rejected with shape-specific hints so authors
 /// get better errors than "policy must be a list of subcommands".
-fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
-    let entries = as_map(value, err_prefix)?;
+fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<ExecMap, PolicyError> {
+    let entries = as_map(value, err_prefix).map_err(shape)?;
     let mut out = ExecMap::default();
     for (cmd, policy_val) in entries {
         if let Some(dir) = cmd.strip_suffix('/') {
@@ -401,7 +416,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                 Value::String(s) if s == "allow" => ExecDir::Allow,
                 Value::String(s) if s == "deny" => ExecDir::Deny,
                 _ => {
-                    return Err(sig(format!(
+                    return Err(PolicyError::new(format!(
                         "{err_prefix}: directory key '{cmd}' must be 'allow' or 'deny'; \
                          a subcommand list matches a command's first argument, \
                          so it requires a literal command key"
@@ -416,13 +431,13 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                 "allow" => ExecPolicy::Allow,
                 "deny" => ExecPolicy::Deny,
                 other => {
-                    return Err(sig(format!(
+                    return Err(PolicyError::new(format!(
                         "{err_prefix}: policy for '{cmd}' must be 'allow', 'deny', or a list of subcommands; got '{other}'"
                     )));
                 }
             },
             Value::Bool(_) => {
-                return Err(sig(format!(
+                return Err(PolicyError::new(format!(
                     "{err_prefix}: use 'allow', 'deny', or a subcommand list for '{cmd}', not true/false"
                 )));
             }
@@ -432,7 +447,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                         .into_iter()
                         .collect();
                 if subs.is_empty() {
-                    return Err(sig(format!(
+                    return Err(PolicyError::new(format!(
                         "{err_prefix}: empty subcommand list for '{cmd}' — \
                          use 'allow' to admit any arguments, or 'deny' to refuse the command"
                     )));
@@ -440,12 +455,12 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                 ExecPolicy::Subcommands(subs)
             }
             Value::Lambda { .. } | Value::Block { .. } => {
-                return Err(sig(format!(
+                return Err(PolicyError::new(format!(
                     "{err_prefix}: block form for '{cmd}' is not a valid exec policy; use within [handlers: [{cmd}: ...]] instead"
                 )));
             }
             other => {
-                return Err(sig(format!(
+                return Err(PolicyError::new(format!(
                     "{err_prefix}: policy for '{cmd}' must be 'allow', 'deny', or a list of subcommands; got {}",
                     other.type_name()
                 )));
@@ -517,11 +532,7 @@ mod tests {
     #[test]
     fn decode_exec_grant_rejects_capitalised_string() {
         let v = exec_map(&[("git", Value::String("Allow".into()))]);
-        let err = decode_exec_grant(&v, "test").unwrap_err();
-        let msg = match err {
-            crate::types::Break::Error(e) => e.message,
-            other @ crate::types::Break::Escape(_) => panic!("unexpected: {other:?}"),
-        };
+        let msg = decode_exec_grant(&v, "test").unwrap_err().message;
         assert!(msg.contains("'allow'"), "expected lowercase hint: {msg}");
         assert!(msg.contains("Allow"), "expected offending token: {msg}");
     }
@@ -531,11 +542,7 @@ mod tests {
     #[test]
     fn decode_exec_grant_bool_hint_lists_all_forms() {
         let v = exec_map(&[("git", Value::Bool(true))]);
-        let err = decode_exec_grant(&v, "test").unwrap_err();
-        let msg = match err {
-            crate::types::Break::Error(e) => e.message,
-            other @ crate::types::Break::Escape(_) => panic!("unexpected: {other:?}"),
-        };
+        let msg = decode_exec_grant(&v, "test").unwrap_err().message;
         assert!(
             msg.contains("'allow'") && msg.contains("'deny'") && msg.contains("subcommand list"),
             "{msg}"

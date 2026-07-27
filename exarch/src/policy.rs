@@ -19,7 +19,7 @@ mod base;
 mod load;
 
 use base::{resolve_base, root_fs_policy};
-use load::{absolute_in, load_capabilities_ral};
+use load::{absolute_in, lint_deputy_prefixes, load_capabilities_ral};
 use ral_core::io::TerminalState;
 use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list};
 use ral_core::types::{Capabilities, Shell};
@@ -93,6 +93,8 @@ pub fn for_invocation(
         deny_paths(&mut caps, &restricts, &ctx)?;
     }
 
+    lint_deputy_prefixes(&caps);
+
     Ok((caps, restricts))
 }
 
@@ -145,7 +147,8 @@ fn deny_paths(
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
         ctx,
-    )?;
+    )
+    .map_err(|e| e.message)?;
     let fs = caps.fs.get_or_insert_with(root_fs_policy);
     fs.deny_paths.extend(frozen);
     fs.deny_paths.sort();

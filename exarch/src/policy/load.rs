@@ -10,6 +10,7 @@ use ral_core::types::{Break, Capabilities, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
+use ral_core::path::NormalizedPrefix;
 
 /// Read a capabilities profile from `path` as a frozen [`Capabilities`].
 ///
@@ -46,6 +47,32 @@ pub(super) fn load_capabilities_ral(
         };
         format!("exarch: {flag} {}: {detail}", path.display())
     })
+}
+
+/// Warn — never fail — when the fully composed session ceiling admits a
+/// prefix for both exec and write: the confused-deputy escape hatch
+/// `design/grant.md`'s third concession names (drop a binary in the
+/// writable region, the next call admits it). Judged on `caps` as
+/// [`for_invocation`](super::for_invocation) hands it back after every
+/// `join`/`meet` has run, not on a single loaded file — two profiles can
+/// each be innocent and still compose into a deputy. A report only:
+/// `write: cwd:` plus exec under `cwd:` is the compile-and-run workflow
+/// every agent profile needs, so this never denies or attenuates the
+/// load it just finished.
+pub(super) fn lint_deputy_prefixes(caps: &Capabilities) {
+    let found = ral_core::capability::deputy_prefixes(caps);
+    if found.is_empty() {
+        return;
+    }
+    let list = found
+        .iter()
+        .map(NormalizedPrefix::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "exarch: capability profile admits exec and write on the same prefix ({list}) — \
+         a binary written there is admitted on the next call"
+    );
 }
 
 /// Resolve `p` relative to `cwd` if not already absolute.  Delegates

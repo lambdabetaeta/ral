@@ -38,6 +38,7 @@ use crate::path::basedir::{XdgKind, resolve_xdg};
 use crate::path::lex::fold_dots;
 use crate::path::resolved::NormalizedPrefix;
 use crate::path::tilde::{TildePath, expand_tilde_path};
+use crate::types::PolicyError;
 use std::path::{Path, PathBuf};
 
 /// True when `s` looks like an `xdg:` token, regardless of whether
@@ -156,7 +157,7 @@ pub struct FreezeCtx<'a> {
 pub fn freeze_path_list(
     paths: Vec<String>,
     ctx: &FreezeCtx<'_>,
-) -> Result<Vec<NormalizedPrefix>, String> {
+) -> Result<Vec<NormalizedPrefix>, PolicyError> {
     paths
         .into_iter()
         .map(|entry| freeze_one(&entry, ctx))
@@ -184,10 +185,11 @@ pub fn freeze_path_list(
 /// entry uses a home-relative sigil (`~`, `xdg:`), or if the entry is a
 /// `~user` naming another user's home, which cannot be resolved off Unix.
 #[allow(clippy::disallowed_methods)]
-pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, String> {
+pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, PolicyError> {
     if looks_like_xdg(entry) {
         require_home(ctx)?;
-        let (kind, sub) = parse_xdg_token(entry).ok_or_else(|| unknown_xdg_message(entry))?;
+        let (kind, sub) =
+            parse_xdg_token(entry).ok_or_else(|| PolicyError::new(unknown_xdg_message(entry)))?;
         return resolve_xdg_safe(kind, sub, ctx.home);
     }
     if let Some(sub) = parse_literal_sigil(entry, "cwd") {
@@ -203,7 +205,7 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
     if let Some(t) = TildePath::parse(entry) {
         require_home(ctx)?;
         let expanded = expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), ctx.home)
-            .ok_or_else(|| unresolvable_named_user_message(entry))?;
+            .ok_or_else(|| PolicyError::new(unresolvable_named_user_message(entry)))?;
         return Ok(NormalizedPrefix::freeze(Path::new(&expanded)));
     }
     Ok(NormalizedPrefix::freeze(Path::new(entry)))
@@ -223,14 +225,13 @@ fn unresolvable_named_user_message(entry: &str) -> String {
 /// The two home-relative sigils (`~`, `xdg:`) cannot resolve without a
 /// HOME; surface the configuration error rather than silently expanding
 /// against an empty root.
-fn require_home(ctx: &FreezeCtx<'_>) -> Result<(), String> {
+fn require_home(ctx: &FreezeCtx<'_>) -> Result<(), PolicyError> {
     if ctx.home.is_empty() {
-        return Err(
+        return Err(PolicyError::new(
             "HOME is unset, so `~/...` and `xdg:...` tokens in the policy \
              can't be resolved.  Set HOME in the environment, or replace the \
-             sigil-bearing entries in the policy with explicit absolute paths."
-                .into(),
-        );
+             sigil-bearing entries in the policy with explicit absolute paths.",
+        ));
     }
     Ok(())
 }
@@ -275,7 +276,7 @@ fn resolve_xdg_safe(
     kind: XdgKind,
     sub: Option<&str>,
     home: &str,
-) -> Result<NormalizedPrefix, String> {
+) -> Result<NormalizedPrefix, PolicyError> {
     let resolved = join_sub(resolve_xdg(kind, home), sub);
     let folded_home = fold_dots(Path::new(home));
     if resolved.as_path().starts_with(&folded_home) {
@@ -301,13 +302,13 @@ fn resolve_xdg_safe(
             name = kind.token_name(),
         )
     };
-    Err(format!(
+    Err(PolicyError::new(format!(
         "xdg:{name} resolves to '{path}', outside HOME — refusing to widen \
          the grant.  {clause}",
         name = kind.token_name(),
         path = resolved.as_str(),
         clause = env_clause,
-    ))
+    )))
 }
 
 fn unknown_xdg_message(entry: &str) -> String {
@@ -405,7 +406,7 @@ mod tests {
         FreezeCtx { home, cwd }
     }
 
-    fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, String> {
+    fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, PolicyError> {
         freeze_path_list(
             paths.iter().map(std::string::ToString::to_string).collect(),
             ctx,
@@ -465,7 +466,8 @@ mod tests {
             &["xdg:config/../../../../etc"],
             &ctx("/h", Path::new("/cwd")),
         )
-        .unwrap_err();
+        .unwrap_err()
+        .message;
         assert!(err.contains("outside HOME"), "{err}");
     }
 
@@ -535,7 +537,9 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn freeze_rejects_named_user_tilde_off_unix() {
-        let err = frozen(&["~bob/secrets"], &ctx("/h", Path::new("/cwd"))).unwrap_err();
+        let err = frozen(&["~bob/secrets"], &ctx("/h", Path::new("/cwd")))
+            .unwrap_err()
+            .message;
         assert!(err.contains("~bob/secrets"), "{err}");
     }
 

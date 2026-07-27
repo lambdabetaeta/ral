@@ -16,6 +16,10 @@
 //!   trampoline before reaching any boundary.
 //! - [`Control`] — evaluator-private union of [`Break`] and [`TailCall`];
 //!   the carrier for raw evaluator returns.
+//! - [`PolicyError`] — off to the side, not part of the `Break`/`Tail`
+//!   lattice: the error currency of the capability decoder and the path
+//!   sigil freeze pass, which cannot escape and so never touch `Break`
+//!   until a caller converts one at the boundary.
 //!
 //! Type aliases:
 //! - [`Settled<T>`] = `Result<T, Break>` — what callers outside the
@@ -48,6 +52,48 @@ pub enum Escape {
 pub enum Break {
     Error(Error),
     Escape(Escape),
+}
+
+/// A capability-policy decode/freeze failure: a message plus an optional
+/// hint, nothing else.
+///
+/// The capability decoder ([`crate::capability::decode`]) and the sigil
+/// freeze pass beneath it ([`crate::path::sigil`]) are pure — the author
+/// of a `grant [...]` or capability file is the live user, so every
+/// malformed shape is just a "no" reported back, never a process exit.
+/// Giving that path its own error type (rather than `Break`) makes "this
+/// code cannot exit the process" a fact the type checker verifies instead
+/// of one a reader has to trust; `Break` is minted from a `PolicyError`
+/// only via the `From` impl below, at the boundary where the decoder's
+/// caller needs one.
+#[derive(Debug, Clone)]
+pub struct PolicyError {
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+impl PolicyError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+impl From<PolicyError> for Break {
+    fn from(e: PolicyError) -> Self {
+        let err = Error::new(e.message, 1);
+        Self::Error(match e.hint {
+            Some(hint) => err.with_hint(hint),
+            None => err,
+        })
+    }
 }
 
 /// The tail-position property of an evaluation context: whether the
