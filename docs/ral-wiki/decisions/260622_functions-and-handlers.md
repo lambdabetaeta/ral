@@ -1,5 +1,5 @@
 ---
-status: partly implemented — §"Retiring alias" is NOT done (`alias`/`unalias` still the surface, `install_alias` still the API; ~150 occurrences, deferred to its own session). Done 2026-06-27: help→explain, echo→sugar, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0.
+status: 'partly implemented — §"Retiring alias" is NOT done (`alias`/`unalias` still the surface, `install_alias` still the API; ~150 occurrences, deferred to its own session). Done 2026-06-27: help→explain, echo→sugar, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0.'
 ---
 
 # Functions and handlers, and the end of "alias"
