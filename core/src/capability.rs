@@ -39,5 +39,5 @@ pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabil
 pub use sandbox::engages_sandbox;
 pub(crate) use sandbox::sandbox_projection;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) use exec::admits_for_test;

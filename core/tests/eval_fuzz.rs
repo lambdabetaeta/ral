@@ -6,8 +6,9 @@
 mod common;
 
 use ral_core::builtins;
+use ral_core::types::Mooring;
 #[cfg(unix)]
-use ral_core::types::{Capabilities, ExecMap, ExecPolicy, Mooring};
+use ral_core::types::{Capabilities, ExecMap, ExecPolicy};
 use ral_core::{
     Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
     typecheck,
