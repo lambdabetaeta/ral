@@ -9,18 +9,6 @@
 "else"  @keyword.control.conditional
 "case"  @keyword.control
 
-; ── Control flow (library functions treated as keywords) ─────────────────────
-
-(application
-  . (identifier) @keyword.control
-  (#match? @keyword.control
-    "^(for|while|try|spawn|await|race|par|watch|use|source|grant|within|withenv|withdir|map|filter|fold|reduce|each)$"))
-
-; Sandbox / scoping builtins read as keywords for the eye
-(application
-  . (identifier) @keyword.import
-  (#match? @keyword.import "^(use|source|load-plugin|unload-plugin)$"))
-
 ; ── Operators ────────────────────────────────────────────────────────────────
 
 "|"   @operator   ; pipe
@@ -29,11 +17,12 @@
 
 "="   @operator   ; let binding
 
-(redir_write)  @operator
-(redir_stream) @operator
-(redir_append) @operator
-(redir_read)   @operator
-(redir_fd)     @operator
+(redir_write)      @operator
+(redir_stream)     @operator
+(redir_append)     @operator
+(redir_read)       @operator
+(redir_fd)         @operator
+(redir_herestring) @operator
 
 "..."  @operator  ; spread
 
@@ -44,7 +33,7 @@
 (force_bang)  @operator
 
 ; Arithmetic operators
-(arith_binary _ @operator _)
+(arith_binary op: _ @operator)
 (arith_negate "-" @operator)
 "not" @keyword.operator
 
@@ -129,6 +118,25 @@
 ; The first identifier in an application is the head — a builtin or function.
 (application
   . (identifier) @function.call)
+
+; ── Control flow (control-operator keywords, plus library functions treated
+;    as keywords for the eye) ─────────────────────────────────────────────────
+;
+; Overrides @function.call above for these specific heads: try/guard/within/
+; grant/audit are real keywords (core::syntax::is_keyword) with no dedicated
+; grammar node — they parse as an ordinary `application` whose head happens
+; to be one of these names — and the rest are library functions styled as
+; keywords for the eye.
+
+(application
+  . (identifier) @keyword.control
+  (#match? @keyword.control
+    "^(try|guard|within|grant|audit|for|spawn|await|race|watch|service|detach|par|map|filter|fold|reduce|each)$"))
+
+; Sandbox / scoping builtins read as keywords for the eye
+(application
+  . (identifier) @keyword.import
+  (#match? @keyword.import "^(use|source)$"))
 
 ; ── Comments ─────────────────────────────────────────────────────────────────
 

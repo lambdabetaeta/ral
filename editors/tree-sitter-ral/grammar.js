@@ -2,7 +2,20 @@
 // @ts-check
 
 // Bare-word stems: anything that is not a delimiter, sigil, or whitespace.
-// Mirrors Lexer::is_bare_char in core/src/lexer.rs.
+// Mirrors Lexer::is_bare_char in core/src/syntax/lexer.rs, plus two positional
+// rules the character predicate alone can't express:
+//
+// - `,` is punctuation only while the real lexer is inside `[...]` (list/map
+//   literals); everywhere else — top level, inside `{...}`/`!{...}` blocks —
+//   it is bare (`ps -Aco rss,comm`, `echo a,b,c`).  Tree-sitter has no
+//   delimiter-stack, so bare words used directly inside a list/map literal
+//   (`_bracket`-suffixed below) exclude `,`; every other bare-word site
+//   includes it.
+// - `#` opens a comment (or a quoted string) only as the first character of
+//   a *new* token; mid-word it is ordinary (`curl host:8080/foo#anchor`).
+//   Excluding it from continuation positions would be wrong, but the one
+//   spot a `word` alternative can start on `#` (the leading symbol-start
+//   branch) must still exclude it so `comment` wins there instead.
 //
 // `:` is context-sensitive in the ral lexer: it splits the word only when
 // followed by space/tab/newline/`]`, so `host: val` becomes three tokens but
@@ -18,8 +31,32 @@
 // colon-joined stems.  The `word` rule's regex is constructed so that pure
 // IDENT shapes never match — every branch contains at least one non-IDENT
 // character, so the lexer can pick `identifier` unambiguously.
-const BARE_STEM         = /[^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\][^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\]*/;
-const BARE_STEM_NODIGIT = /[^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\0-9][^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\]*/;
+const CONT        = /[^ \t\n\r|{}\[\]$!~<>"'`():;&?\\]/;     // bare-word continuation: ',' and '#' both fine
+const CONT_NC     = /[^ \t\n\r|{}\[\]$!~<>"'`():;&?,\\]/;    // …inside a list/map literal: no ','
+// The char right after an identifier-shaped run that disqualifies it from
+// being a pure `identifier` (e.g. the '.' in "foo.bar"): must exclude
+// ident-continuation chars themselves, or "grant" would match by treating
+// its own last letter as the disqualifier. Not the token's overall first
+// character, so — unlike LEAD_SYM below — '#' is still fine here.
+const DISQ        = /[^a-zA-Z0-9_\- \t\n\r|{}\[\]$!~<>"'`():;&?\\]/;
+const DISQ_NC     = /[^a-zA-Z0-9_\- \t\n\r|{}\[\]$!~<>"'`():;&?,\\]/;
+const LEAD_SYM    = /[^a-zA-Z_0-9 \t\n\r|{}\[\]$!~<>"'`():;&?#\\]/;   // leading symbol char: no '#'
+const LEAD_SYM_NC = /[^a-zA-Z_0-9 \t\n\r|{}\[\]$!~<>"'`():;&?#,\\]/;  // …inside a list/map literal: no ',' either
+const BARE_STEM_NODIGIT = seq(/[^ \t\n\r|{}\[\]$!~<>"'`():;&?\\0-9]/, repeat(CONT));
+
+// The four shapes of `word` (see below), built over a continuation class,
+// a disqualifying-char class, and a leading-symbol class so the
+// comma-excluding bracket variant reuses the same structure instead of
+// repeating it.
+function wordAlternatives(cont, disq, lead) {
+  const stem = seq(cont, repeat(cont));
+  return [
+    seq(/[0-9]/, repeat(cont), repeat(seq(':', stem))),
+    seq(/[a-zA-Z_][a-zA-Z0-9_-]*/, disq, repeat(cont), repeat(seq(':', stem))),
+    seq(IDENT, ':', stem, repeat(seq(':', stem))),
+    seq(lead, repeat(cont), repeat(seq(':', stem))),
+  ];
+}
 
 // Identifier-style chars: letter/underscore, then alphanumerics, '-' or '_'.
 const IDENT = /[a-zA-Z_][a-zA-Z0-9_-]*/;
@@ -131,18 +168,26 @@ module.exports = grammar({
       field('table', $._value),
     ),
 
-    // Head and arguments are the same syntactic class.  Args additionally
-    // admit `...$x` spreads and redirects.
+    // Head and arguments are the same syntactic class, except that only the
+    // head may be a `^name` bypass (`head = '^' NAME | atom` — a bypass is
+    // never a general value: `parse_word` rejects a bare '^' anywhere else).
+    // Args additionally admit `...$x` spreads and redirects.
     application: $ => prec.left(seq(
-      $._value,
+      choice($.bypass, $._value),
       repeat(choice($._value, $.spread, $.redirect)),
     )),
 
     // ── Values ───────────────────────────────────────────────────────────────
 
-    _value: $ => choice(
+    // Forked only on the bare-word leaf: `_value` is the default (`,` bare),
+    // `_value_bracket` is for sites lexed directly inside an open `[...]`
+    // (list/map literal elements, map-entry values, pattern defaults) where
+    // the real lexer instead treats `,` as the element separator.
+    _value: $ => choice($.word, $._value_common),
+    _value_bracket: $ => choice($.word_bracket, $._value_common),
+
+    _value_common: $ => choice(
       $.identifier,
-      $.word,
       $.integer,
       $.float,
       $.boolean,
@@ -160,7 +205,6 @@ module.exports = grammar({
       $.force_brace,
       $.force_bang,
       $.tilde,
-      $.bypass,
       $.indexed,
     ),
 
@@ -213,7 +257,7 @@ module.exports = grammar({
       field('key', choice($.identifier, $.string_single, $.tag)),
       ':',
       optional($._pattern),
-      optional(seq('=', $._value)),
+      optional(seq('=', $._value_bracket)),
     ),
 
     // ── Redirects ────────────────────────────────────────────────────────────
@@ -228,14 +272,17 @@ module.exports = grammar({
       seq($.redir_stream, $._value),
       seq($.redir_write, $._value),
       seq($.redir_read, $._value),
+      // `<<` feeds a string value to stdin (a here-string, not a heredoc).
+      seq($.redir_herestring, $._value),
     ),
 
-    fd_target:    $ => token(/[0-9]+/),
-    redir_append: $ => token(seq(optional(/[0-9]+/), '>>')),
-    redir_stream: $ => token(seq(optional(/[0-9]+/), '>~')),
-    redir_write:  $ => token(seq(optional(/[0-9]+/), '>')),
-    redir_read:   $ => token(seq(optional(/[0-9]+/), '<')),
-    redir_fd:     $ => token(seq(optional(/[0-9]+/), '>&')),
+    fd_target:        $ => token(/[0-9]+/),
+    redir_append:     $ => token(seq(optional(/[0-9]+/), '>>')),
+    redir_stream:     $ => token(seq(optional(/[0-9]+/), '>~')),
+    redir_write:      $ => token(seq(optional(/[0-9]+/), '>')),
+    redir_read:       $ => token(seq(optional(/[0-9]+/), '<')),
+    redir_fd:         $ => token(seq(optional(/[0-9]+/), '>&')),
+    redir_herestring: $ => token(seq(optional(/[0-9]+/), '<<')),
 
     // ── Blocks ───────────────────────────────────────────────────────────────
 
@@ -274,7 +321,7 @@ module.exports = grammar({
       ']',
     ),
 
-    _list_item: $ => choice($._value, $.spread),
+    _list_item: $ => choice($._value_bracket, $.spread),
 
     // A map literal is either '[:] ' (empty) or '[entries...]' where each
     // entry is `key: value` or `...$expr` (spread).
@@ -297,7 +344,7 @@ module.exports = grammar({
     map_entry: $ => seq(
       field('key', choice($.identifier, $.string_single, $.tag, $.deref)),
       ':',
-      field('value', $._value),
+      field('value', $._value_bracket),
     ),
 
     // ── Tag literals ─────────────────────────────────────────────────────────
@@ -316,6 +363,8 @@ module.exports = grammar({
     tag_label: $ => token(seq('`', /[a-zA-Z_][a-zA-Z0-9_-]*/)),
 
     _tag_payload: $ => prec(-1, choice(
+      $.identifier,
+      $.word,
       $.integer,
       $.float,
       $.boolean,
@@ -332,6 +381,7 @@ module.exports = grammar({
       $.force_brace,
       $.force_bang,
       $.tilde,
+      $.indexed,
     )),
 
     // ── Arithmetic expressions ────────────────────────────────────────────────
@@ -359,11 +409,11 @@ module.exports = grammar({
     ),
 
     arith_binary: $ => choice(
-      prec.left(1, seq($._arith, '||', $._arith)),
-      prec.left(2, seq($._arith, '&&', $._arith)),
-      prec.left(3, seq($._arith, choice('==', '!=', '<', '>', '<=', '>='), $._arith)),
-      prec.left(4, seq($._arith, choice('+', '-'), $._arith)),
-      prec.left(5, seq($._arith, choice('*', '/', '%'), $._arith)),
+      prec.left(1, seq($._arith, field('op', '||'), $._arith)),
+      prec.left(2, seq($._arith, field('op', '&&'), $._arith)),
+      prec.left(3, seq($._arith, field('op', choice('==', '!=', '<', '>', '<=', '>=')), $._arith)),
+      prec.left(4, seq($._arith, field('op', choice('+', '-')), $._arith)),
+      prec.left(5, seq($._arith, field('op', choice('*', '/', '%')), $._arith)),
     ),
 
     arith_negate: $ => prec(6, seq('-', $._arith)),
@@ -442,12 +492,17 @@ module.exports = grammar({
 
     // ── Strings ──────────────────────────────────────────────────────────────
 
+    // The body tokens carry an explicit precedence above `comment`'s default
+    // (0): otherwise an embedded '#' — legal in either string body, and
+    // ordinary mid-word text per the real lexer — ties on match length
+    // against `comment`, which as an unconditional `extra` would run to end
+    // of line and swallow the string's own closing delimiter.
     string_single: $ => choice(
       seq(
         "'",
         repeat(choice(
           alias(token.immediate("''"), $.escape_single),
-          token.immediate(/[^']+/),
+          token.immediate(prec(1, /[^']+/)),
         )),
         token.immediate("'"),
       ),
@@ -487,7 +542,7 @@ module.exports = grammar({
         $.interp_deref_index,
         $.interp_deref,
         $.interp_force_plain,
-        token.immediate(/[^"\\$!]+/),
+        token.immediate(prec(1, /[^"\\$!]+/)),
       )),
       token.immediate('"'),
     ),
@@ -543,23 +598,13 @@ module.exports = grammar({
     //
     // Every branch of this `choice` is anchored on a disqualifying-non-IDENT
     // character so the lexer never picks `word` over `identifier` for a pure
-    // IDENT-shape.
-    word: $ => token(choice(
-      // starts with digit
-      seq(/[0-9][^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\]*/, repeat(seq(':', BARE_STEM))),
-      // first stem has a non-IDENT continuation char (slash, dot, equals, …)
-      seq(
-        /[a-zA-Z_][a-zA-Z0-9_-]*[^a-zA-Z0-9_\- \t\n\r|{}\[\]$!~<>"'`():;&,#?\\][^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\]*/,
-        repeat(seq(':', BARE_STEM)),
-      ),
-      // IDENT-shaped first stem with `:stem` continuations (host:5432)
-      seq(IDENT, ':', BARE_STEM, repeat(seq(':', BARE_STEM))),
-      // starts with a non-IDENT, non-digit char (e.g. '.', '/', '+', '-')
-      seq(
-        /[^a-zA-Z_0-9 \t\n\r|{}\[\]$!~<>"'`():;&,#?\\][^ \t\n\r|{}\[\]$!~<>"'`():;&,#?\\]*/,
-        repeat(seq(':', BARE_STEM)),
-      ),
-    )),
+    // IDENT-shape.  Parameterised on `cont`/`lead` so the one place `,` must
+    // stay punctuation — directly inside a list/map literal — gets its own
+    // variant (`word_bracket`, aliased back to `word` for tooling) without
+    // duplicating the four branches.
+    word: $ => token(choice(...wordAlternatives(CONT, DISQ, LEAD_SYM))),
+
+    word_bracket: $ => alias(token(choice(...wordAlternatives(CONT_NC, DISQ_NC, LEAD_SYM_NC))), $.word),
 
     identifier: $ => IDENT,
 
