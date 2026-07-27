@@ -35,3 +35,8 @@ site/wiki/
 CLAUDE.md
 
 .letta
+
+# cargo-fuzz builds a separate crate; its lock and target dir are generated,
+# and the fuzz target is a tool for a person to run, not part of the build.
+guest-net/fuzz/Cargo.lock
+guest-net/fuzz/target/

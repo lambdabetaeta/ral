@@ -4,8 +4,8 @@
 //! folder to work in, walled off from the rest of the computer.  This
 //! crate is that, and nothing more — [`detect`] finds the one backend this
 //! build can actually run, [`Hypervisor::boot`] turns a [`MachineSpec`]
-//! into a [`Machine`], and [`Machine::take_control`] hands over the wire
-//! the engine's runs run across.
+//! into a [`Machine`], and [`Machine::take_wires`] hands over the two wires
+//! the engine's runs and the guest's network run across.
 //!
 //! # What this crate does, stated plainly
 //!
@@ -226,6 +226,82 @@ pub trait Hypervisor {
     fn boot(&self, spec: &MachineSpec) -> Result<Box<dyn Machine>, Error>;
 }
 
+/// The `AF_VSOCK`/`AF_HYPERV` port the host listens on for the net wire.
+///
+/// One number, both backends: it is carried to the guest on the kernel
+/// command line as [`ral_daemon::boot::Net::port`], so the listener a
+/// backend binds and the port the guest dials agree by construction, not by
+/// two crates' constants happening to match.
+pub const NET_PORT: u32 = 1730;
+
+/// The guest's fixed address on the net wire's virtual link, and the subnet
+/// and gateway it is told alongside it.
+///
+/// The one fact both backends' `kernel_command_line` build a
+/// [`ral_daemon::boot::Net`] from, so it lives here once rather than as
+/// three private constants kept in agreement by hand. It is not a route to
+/// anywhere real: the far end is not a router but a user-mode TCP/IP stack
+/// in a host process (`guest-net`), answering as if it were the gateway so
+/// the guest's kernel hands it every packet leaving the subnet. The guest
+/// never learns any of this beyond the address, prefix, and gateway it is
+/// handed on the kernel command line under `ral.net`
+/// ([`ral_daemon::boot::command_line`]) — it boots believing it is on an
+/// ordinary `/24`.
+pub const GUEST_LINK: GuestLink = GuestLink {
+    address: std::net::Ipv4Addr::new(10, 0, 2, 15),
+    prefix: 24,
+    gateway: std::net::Ipv4Addr::new(10, 0, 2, 2),
+};
+
+/// [`ral_daemon::boot::Net`] minus the port.
+///
+/// The shape both backends build that struct from, since the port
+/// ([`NET_PORT`]) is a constant of this crate while the address is
+/// [`GUEST_LINK`], a value of this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestLink {
+    pub address: std::net::Ipv4Addr,
+    pub prefix: u8,
+    pub gateway: std::net::Ipv4Addr,
+}
+
+/// The host ends of a machine's two wires.
+///
+/// [`Wires::control`] is the control-plane stream the frame protocol of
+/// `dev/docs/VM/SYNOD.md` §3 runs over; [`Wires::net`] is the guest's peer
+/// for the net wire's user-mode TCP/IP stack.
+///
+/// One struct rather than two fields on [`Machine`] because a machine hands
+/// both over at once, from the same accepted-at-boot pair, and a caller that
+/// took only one would leave the other's ownership nowhere — every consumer
+/// wants both wires or neither.
+///
+/// The handle differs by platform because the socket does, and neither
+/// platform's owner type is the other's: on Unix a wire is an `AF_VSOCK`
+/// stream named by its file descriptor, on Windows an `AF_HYPERV` socket.
+/// Both are adopted into the same frame channel by
+/// [`ral_core::wire::WireStream`](../../core/src/wire.rs), whose docs explain
+/// why std's stream types can carry either.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct Wires {
+    /// The control plane — see the struct docs.
+    pub control: std::os::fd::OwnedFd,
+    /// The net wire — see the struct docs.
+    pub net: std::os::fd::OwnedFd,
+}
+
+/// See the Unix twin above for the whole contract, which this shares but for
+/// the handles' type.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct Wires {
+    /// The control plane — see the struct docs.
+    pub control: std::os::windows::io::OwnedSocket,
+    /// The net wire — see the struct docs.
+    pub net: std::os::windows::io::OwnedSocket,
+}
+
 /// A running machine holding one workspace, walled off in a virtual
 /// machine.
 pub trait Machine {
@@ -233,37 +309,18 @@ pub trait Machine {
     /// mounted the granted folder at.
     fn workspace_path(&self) -> &Path;
 
-    /// The host end of this machine's control-plane connection — the stream
-    /// the frame protocol of `dev/docs/VM/SYNOD.md` §3 runs over.
+    /// This machine's two wires — see [`Wires`] for what each carries.
     ///
-    /// A machine has exactly one, accepted when the guest's daemon dialed it
-    /// at boot; taking it transfers ownership away from the machine, so a
-    /// caller may ask for it no more than once.
-    ///
-    /// The handle differs by platform because the socket does, and neither
-    /// platform's owner type is the other's: on Unix a control plane is an
-    /// `AF_VSOCK` stream named by its file descriptor, on Windows an
-    /// `AF_HYPERV` socket.  Both are adopted into the same frame channel by
-    /// [`ral_core::wire::WireStream`](../../core/src/wire.rs), whose docs
-    /// explain why std's stream types can carry either; what does *not* vary is
-    /// that a machine has exactly one, and that taking it transfers ownership.
+    /// A machine has exactly one of each, accepted when the guest's daemon
+    /// dialed them at boot; taking them transfers ownership away from the
+    /// machine, so a caller may ask for them no more than once.
     ///
     /// # Panics
     /// Implementations panic if asked twice — a caller's error, not a
     /// machine's: the one caller in this crate's graph
-    /// (`synod::session::Conversation::begin`) takes it once, immediately
-    /// after boot.
-    #[cfg(unix)]
-    fn take_control(&mut self) -> std::os::fd::OwnedFd;
-
-    /// The host end of this machine's control-plane connection — see the Unix
-    /// twin above for the whole contract, which this shares but for the
-    /// handle's type.
-    ///
-    /// # Panics
-    /// Implementations panic if asked twice.
-    #[cfg(windows)]
-    fn take_control(&mut self) -> std::os::windows::io::OwnedSocket;
+    /// (`synod::session::control_seat`) takes them once, immediately after
+    /// boot.
+    fn take_wires(&mut self) -> Wires;
 
     /// Stop the machine and release what it holds.
     ///

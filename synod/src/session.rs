@@ -36,6 +36,7 @@ use exarch::provider::{
     models::{LiveSource, ModelCatalog, ModelSource, resolve_pinned_provider},
     oauth, pricing,
 };
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -387,6 +388,16 @@ pub struct Opening {
     pub large_folder_line: Option<String>,
 }
 
+/// The net wire's stream type, adopted from [`vm_manager::Wires::net`]: an
+/// `OwnedFd` wearing an `AF_VSOCK` connection on Unix, an `OwnedSocket`
+/// wearing an `AF_HYPERV` one on Windows — [`guest_net::device::Wire`] is
+/// implemented for both, the same pretence [`ral_core::wire::WireStream`]
+/// makes for the control plane.
+#[cfg(unix)]
+type NetWire = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type NetWire = std::net::TcpStream;
+
 /// One folder, held open over a booted machine and an agent, from the
 /// first message to the last.
 pub struct Conversation {
@@ -395,6 +406,9 @@ pub struct Conversation {
     agent: Agent,
     engine: Arc<Engine>,
     history: workspace::HistoryStore,
+    /// The guest's whole network, running on its own threads since before
+    /// the first exchange — see [`net_seat`].
+    net: guest_net::Session<NetWire>,
 }
 
 impl Conversation {
@@ -409,6 +423,15 @@ impl Conversation {
     /// the model does not take is masked to `None` regardless of what was
     /// asked for — the model would otherwise refuse the request outright.
     ///
+    /// `blocked` is told, at most once per distinct host for this whole
+    /// conversation, whenever `guest-net`'s proxy gate refuses something the
+    /// guest tried to reach — the dedup that keeps one `git clone` against
+    /// an off-list host from carding hundreds of times over. The caller
+    /// supplies it already bound to wherever a user-facing narration goes
+    /// (a Tauri emitter, headless stderr, …); this module has no opinion on
+    /// that, the same way [`Self::exchange`] takes a generic
+    /// [`exarch::bus::Sink`] rather than importing one.
+    ///
     /// # Errors
     /// Returns `Err` if this computer cannot start a virtual machine at all
     /// — the wrong platform, missing boot media, or an unsigned build — if
@@ -416,8 +439,14 @@ impl Conversation {
     /// named one has vanished), if the chosen effort names no rung on
     /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
     /// be made, if the system prompt cannot be assembled, if the agent
-    /// cannot be started, or if the before-checkpoint — the safety copy
-    /// every undo returns to — cannot be taken.
+    /// cannot be started, if the before-checkpoint — the safety copy every
+    /// undo returns to — cannot be taken, or if guest networking
+    /// cannot start: its session certificate authority could not be minted,
+    /// its prologue could not be written to the net wire, or its outbound
+    /// client could not be built against this computer's own trust store —
+    /// see [`guest_net::upstream::client`]. Guest networking does not start
+    /// degraded; a conversation with no network it can trust is refused
+    /// outright rather than opened quietly without one.
     ///
     /// # Panics
     /// Panics if the chosen provider is absent from `store` — an invariant
@@ -430,6 +459,7 @@ impl Conversation {
         folder: &Path,
         store: &Mutex<CredentialStore>,
         choice: Option<Choice>,
+        blocked: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
         // Handed as the *means* of readying the media rather than the media
@@ -444,9 +474,9 @@ impl Conversation {
         let hypervisor = vm_manager::detect(boot)?;
 
         let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
-        // The IT-set fetch-url policy, audit ledger, and rate budget — one
+        // The IT-set network policy, audit ledger, and rate budget — one
         // file regardless of which front-end is running, opened once here.
-        let egress = exarch::fleet::egress::Egress::open(SYNOD)?;
+        let egress = exarch::egress::Egress::open(SYNOD)?;
 
         let (id, model, effort, cred) = resolve_account(store, choice)?;
         let account = id.label().to_string();
@@ -500,8 +530,12 @@ impl Conversation {
             // The agent's engine dials in from inside the guest, so the
             // workspace is a guest path — never a directory this host process
             // could `chdir` into; the trunk drives it over the wire the
-            // machine hands back.
-            let root_seat = control_seat(&mut machine, workspace)?;
+            // machine hands back.  Taken once here, for both wires at once —
+            // `take_wires` panics on a second call, and `net_seat` wants its
+            // own half of the same pair.
+            let wires = machine.take_wires();
+            let root_seat = control_seat(wires.control, workspace)?;
+            let net = net_seat(wires.net, egress.clone(), blocked)?;
 
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
@@ -584,6 +618,7 @@ impl Conversation {
                     agent,
                     engine,
                     history,
+                    net,
                 },
                 opening,
             ))
@@ -624,14 +659,23 @@ impl Conversation {
     /// the machine off from the inside — the same inside-out shutdown
     /// `boot-run`'s own drop-then-stop performs, so the grace window
     /// `machine.shutdown` waits on below normally observes a stop already
-    /// under way rather than forcing one.
+    /// under way rather than forcing one. The net wire follows the control
+    /// wire down, never the other way — a session with its control plane
+    /// gone but its network still live has nothing left to police what that
+    /// network is used for.
     ///
     /// # Errors
     /// Returns `Err` if the machine does not stop cleanly — a failure
     /// this never swallows.
     pub fn end(self) -> Result<(), String> {
-        let Self { machine, agent, .. } = self;
+        let Self {
+            machine,
+            agent,
+            net,
+            ..
+        } = self;
         drop(agent);
+        net.stop();
         machine
             .shutdown()
             .map_err(|e| format!("the machine did not stop cleanly: {e}"))
@@ -692,14 +736,14 @@ fn resolve_account(
     Ok((id, model, effort, cred))
 }
 
-/// The seat the trunk drives the guest's engine from: the machine's own
-/// control plane, adopted as a wire, working at `cwd`.
+/// The seat the trunk drives the guest's engine from: `control`, the
+/// machine's own control plane, adopted as a wire, working at `cwd`.
 ///
 /// Split out of [`Conversation::begin`] because it is the one step that used
 /// to be platform-conditional, and a `#[cfg]` around a `return` inside that
 /// long body left every line after it dead. It is no longer conditional at
 /// all, and the shape of *why* is worth keeping in view: what
-/// [`vm_manager::Machine::take_control`] hands over differs by platform — an
+/// [`vm_manager::Machine::take_wires`] hands over differs by platform — an
 /// `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
 /// socket under Hyper-V — and yet no `#[cfg]` appears below, because
 /// [`ral_core::transport::WireTransport::adopt`] takes whatever converts into
@@ -707,22 +751,21 @@ fn resolve_account(
 /// owned handle does. The frame protocol never learns which hypervisor it is
 /// talking through.
 ///
+/// Takes the wire directly rather than the whole [`vm_manager::Wires`] pair
+/// — [`Conversation::begin`] calls [`vm_manager::Machine::take_wires`]
+/// itself now, once, so its other half can go to [`net_seat`] instead of
+/// being dropped unread.
+///
 /// # Errors
 /// Returns `Err` if the control plane cannot be adopted as a wire.
-///
-/// # Panics
-/// Panics if the machine's control plane was already taken — see
-/// [`vm_manager::Machine::take_control`]. `begin` is its only caller and
-/// takes it once.
 fn control_seat(
-    machine: &mut Box<dyn vm_manager::Machine>,
+    control: impl Into<ral_core::wire::WireStream>,
     cwd: std::path::PathBuf,
 ) -> Result<exarch::agent::RootSeat, String> {
-    let wire = machine.take_control();
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(
             ral_core::transport::WireTransport::adopt(
-                wire,
+                control,
                 ral_core::transport::Liveness::default(),
             )
             .map_err(|e| format!("could not take control of the machine: {e}"))?,
@@ -734,6 +777,51 @@ fn control_seat(
         // and in every change report.
         home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
     })
+}
+
+/// Write the net wire's prologue — this session's own certificate authority
+/// and the `resolv.conf` pointing the guest's DNS at
+/// [`vm_manager::GUEST_LINK`]'s gateway — then hand the wire to
+/// [`guest_net::run`], which owns it from here on.
+///
+/// Every refusal `guest-net`'s proxy gate makes for the life of the
+/// returned session narrates through `blocked`, deduplicated per name; the
+/// ledger behind `egress` gets every one regardless — see
+/// `guest_net::proxy::handler`.
+///
+/// # Errors
+/// Returns `Err` if this session's certificate authority cannot be minted,
+/// if the prologue cannot be written to the wire, or if `guest_net::run`
+/// itself cannot start — including its outbound client refusing to build
+/// against this computer's own trust store, in which case guest networking
+/// simply does not start.
+fn net_seat(
+    net: impl Into<NetWire>,
+    egress: exarch::egress::Egress,
+    blocked: impl Fn(&str, &str) + Send + Sync + 'static,
+) -> Result<guest_net::Session<NetWire>, String> {
+    let ca = Arc::new(
+        guest_net::ca::Ca::mint().map_err(|e| format!("could not start guest networking: {e}"))?,
+    );
+    let mut wire: NetWire = net.into();
+    let prologue = ral_daemon::packet::Prologue {
+        resolv_conf: format!("nameserver {}\n", vm_manager::GUEST_LINK.gateway).into_bytes(),
+        ca_pem: ca.pem().as_bytes().to_vec(),
+    };
+    wire.write_all(&prologue.encode())
+        .map_err(|e| format!("could not hand the guest its resolver and certificate: {e}"))?;
+
+    let handler = guest_net::proxy::handler(egress.clone(), ca, Arc::new(blocked))?;
+    guest_net::run(
+        wire,
+        guest_net::Config {
+            dns_rate_per_minute: egress.policy.rate_per_minute,
+            egress,
+            gateway: vm_manager::GUEST_LINK.gateway,
+            handler,
+        },
+    )
+    .map_err(|e| format!("could not start guest networking: {e}"))
 }
 
 /// The provider and model for a run whose [`Choice`] left both unnamed:

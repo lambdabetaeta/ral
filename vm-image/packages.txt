@@ -1,8 +1,10 @@
 # Synod guest rootfs — package set (SYNOD.md §7: "a complete office userland").
 #
-# The guest has no network (§6), so the image IS the package manager: whatever
-# is not listed here does not exist at runtime. One package per line; comments
-# and blank lines are stripped by build.sh. Groups mirror §7's rationale.
+# The guest reaches the network only through the host's allowlist (§6), and
+# nothing it installs survives the reboot — so this list is what an agent may
+# *rely* on, and everything else is a fetch it has to justify and redo. One
+# package per line; comments and blank lines are stripped by build.sh. Groups
+# mirror §7's rationale.
 #
 # Universe components are required (csvkit, ripgrep, tesseract language data,
 # the metric-compatible fonts, some python3-* bindings); build.sh enables
@@ -34,7 +36,20 @@ tesseract-ocr-ita
 tesseract-ocr-por
 tesseract-ocr-nld
 
-# --- Python 3 document stack, from apt only (no pip at build or run time) ---
+# --- Reaching the network at all ---
+# The host's proxy presents a certificate this session minted, and ral-daemon
+# writes that authority into `/etc/ssl/certs/ca-certificates.crt` at boot.  It
+# creates the file if the image has none, so this package is not what makes
+# TLS work — it is what makes the *directory layout* the one every tool
+# already expects, and it carries `update-ca-certificates` for anything that
+# rebuilds the bundle.  `curl` and `pip3` are the two verbs the model is told
+# it has (`synod/data/toolbox.md`), so they belong in the image rather than
+# being the first thing a task has to install in order to install anything.
+ca-certificates
+curl
+python3-pip
+
+# --- Python 3 document stack, from apt where apt has it ---
 # SPEC CORRECTION: §7 lists python-pptx, but there is NO python3-pptx package in
 # Ubuntu 24.04 (universe included). It is dropped here to keep the image apt-pure
 # and reproducible. pptx read/write is NOT lost — LibreOffice headless handles it
@@ -81,6 +96,6 @@ fonts-noto-cjk
 fonts-noto-color-emoji
 
 # --- Locales: full set, pre-generated ---
-# locales-all ships every locale already compiled, so no locale-gen step and
-# no post-install configuration is needed in an image with no network.
+# locales-all ships every locale already compiled, so the image needs no
+# locale-gen step and no post-install configuration at all.
 locales-all

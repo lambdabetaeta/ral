@@ -113,6 +113,18 @@ pub enum SynodEvent {
     Failure {
         message: String,
     },
+    /// `guest-net`'s proxy gate refused something the guest tried to reach —
+    /// emitted directly by the `blocked` closure `commands.rs` hands
+    /// `synod::session::Conversation::begin`, never by [`project`]. One per
+    /// distinct `domain` for the whole conversation: `guest-net` itself
+    /// deduplicates repeats before this closure is ever called, so every
+    /// event reaching the window is a name the user has not already been
+    /// shown a card for. The audit ledger behind `egress` still carries
+    /// every attempt, carded or not.
+    Blocked {
+        domain: String,
+        message: String,
+    },
 }
 
 /// Project one bus [`Kind`] into the event the window renders, or `None`

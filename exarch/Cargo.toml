@@ -25,7 +25,7 @@ ripgrep = ["ral-core/ripgrep"]
 ral-core   = { path = "../core", features = ["grep", "coreutils"] }
 blake3     = "1"
 genai      = { git = "https://github.com/lambdabetaeta/rust-genai", branch = "fix-anthropic-sonnet-5-thinking" }
-reqwest    = { version = "0.13", features = ["json", "form", "blocking"] }
+reqwest    = { version = "0.13", features = ["json", "form"] }
 rustls     = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
 webpki-roots = "1"
 tokio      = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }

@@ -1,4 +1,4 @@
-<!-- verified_at_commit: f7cf93a -->
+<!-- verified_at_commit: 2a3d8a5 -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -1439,8 +1439,12 @@ grant.  There is therefore **no in-process gate** for `net` — unlike
 action, a `net: false` is enforced *solely* by the OS sandbox (§11.8),
 all-or-nothing, with no endpoint-level policy.  On a platform without
 an OS sandbox backend a `net`-restricting grant therefore fails closed
-(§11.8) rather than running unconfined.  Inside a guest there is no
-network device at all, so `net` has nothing to govern (§11.8).
+(§11.8) rather than running unconfined.  Inside a guest the network is
+real — a `tun` device whose only peer is a host-side process enforcing an
+allowlist at the packet, DNS, and TLS layers — but `net` still has no
+in-process gate to fold there either: what the guest may reach is a
+host-side policy outside ral's own grant machinery, not a value this
+capability narrows (§11.8).
 
 ### 11.4  `audit`
 
@@ -1649,10 +1653,13 @@ namespaces bubblewrap requires, and every spawn already runs in the
 guest's spawn jail — a throwaway uid under `NO_NEW_PRIVS` in a
 transient cgroup, killed whole on cancel or settle.  The in-process
 `exec` and `fs` gates apply unchanged; OS-level confinement is the
-VM boundary plus the jail, deliberately without seccomp.  `net` has
-nothing to govern there — the guest has no network device, its only
-channel to the host being vsock — so a `net`-restricting grant
-neither wraps a spawn nor fails closed.
+VM boundary plus the jail, deliberately without seccomp.  `net` still has
+no in-process gate to fold here either — the guest's network is a `tun`
+device whose only peer is a host process policing an allowlist at the
+packet, DNS, and TLS layers, not this crate's grant machinery — so a
+`net`-restricting grant still neither wraps a spawn nor fails closed
+inside a guest: there is no OS sandbox backend there for it to fail
+closed *into*.
 
 ### 11.9  Capability profiles (`.ral` files)
 

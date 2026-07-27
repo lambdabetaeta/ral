@@ -104,7 +104,7 @@ pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
             chat: false,
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
-            egress: crate::fleet::egress::Egress::for_test(),
+            egress: crate::egress::Egress::for_test(),
         },
         RootSeat::Identity {
             scratch: Arc::new(scratch),

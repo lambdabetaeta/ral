@@ -44,8 +44,8 @@ use crate::vsock;
 /// `run_engine`, which adopts fd 3 unconditionally.
 pub const PROTOCOL_FD: RawFd = 3;
 
-/// The environment the engine is given — and, being given it after an
-/// `env_clear`, the *entire* environment it has.
+/// The environment every engine gets — and, being given it after an
+/// `env_clear`, the whole of what an un-networked boot has.
 ///
 /// Nothing here is inherited: the daemon's own environment is whatever the
 /// kernel handed PID 1, and passing it on would make the guest's behaviour
@@ -53,7 +53,7 @@ pub const PROTOCOL_FD: RawFd = 3;
 /// credentials to leak — provider traffic never enters the guest — but the
 /// closure is worth having anyway, because a closed environment is one
 /// fewer thing that can differ between two boots of the same image.
-pub const ENVIRONMENT: &[(&str, &str)] = &[
+const BASE: &[(&str, &str)] = &[
     ("HOME", "/root"),
     (
         "PATH",
@@ -70,6 +70,45 @@ pub const ENVIRONMENT: &[(&str, &str)] = &[
     // it can install the process jail (§5) onto the shell it boots.
     ("RAL_GUEST", "1"),
 ];
+
+/// The system CA bundle `net::delivery` writes the host's proxy CA into,
+/// once appended, still verifies the public web — named once here because
+/// every variable below points a different tool at the same file.
+const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+/// Added on top of [`BASE`] only when this boot has a network, so that every
+/// TLS-speaking tool in the guest trusts the proxy `net::delivery` wrote into
+/// [`CA_BUNDLE`] instead of failing closed against the public roots alone.
+///
+/// Conditional, not unconditional-and-harmless: on an un-networked exarch
+/// boot there is no [`CA_BUNDLE`] file to point at, and a `SSL_CERT_FILE`
+/// naming one that does not exist breaks TLS outright — worse than a tool
+/// that never heard of the variable at all.
+///
+/// The honest gap: `certifi`, the CA bundle a fresh Python venv installs for
+/// itself, and every JVM's own trust store both ignore all seven of these,
+/// because neither reads any of them. Nothing here can reach code that never
+/// consults its environment; that is a §7 rootfs question, not this list's.
+const TLS: &[(&str, &str)] = &[
+    ("SSL_CERT_FILE", CA_BUNDLE),
+    ("SSL_CERT_DIR", "/etc/ssl/certs"),
+    ("REQUESTS_CA_BUNDLE", CA_BUNDLE),
+    ("CURL_CA_BUNDLE", CA_BUNDLE),
+    ("GIT_SSL_CAINFO", CA_BUNDLE),
+    ("PIP_CERT", CA_BUNDLE),
+    ("NODE_EXTRA_CA_CERTS", CA_BUNDLE),
+];
+
+/// The engine's environment for this boot: [`BASE`] always, [`TLS`] only
+/// when `networked` — see [`TLS`]'s own docs for why the two must not be
+/// merged unconditionally.
+pub fn environment(networked: bool) -> Vec<(&'static str, &'static str)> {
+    let mut env = BASE.to_vec();
+    if networked {
+        env.extend_from_slice(TLS);
+    }
+    env
+}
 
 /// How long the daemon keeps trying to reach the host's control-plane
 /// listener before giving up.  The host sets its listener up before it boots
@@ -141,7 +180,7 @@ pub fn spawn(boot: &Boot, control: &OwnedFd) -> Result<Pid, String> {
     let mut cmd = Command::new(&boot.engine);
     cmd.arg("--engine");
     cmd.env_clear();
-    cmd.envs(ENVIRONMENT.iter().copied());
+    cmd.envs(environment(boot.net.is_some()));
     cmd.current_dir(WORK);
     // SAFETY: the closure runs between `fork` and `exec` and calls only
     // async-signal-safe syscalls — `setsid`, `dup2`, `close` — with no
@@ -206,6 +245,7 @@ mod tests {
             port: 1729,
             epoch: 0,
             engine: "/usr/libexec/ral/engine".into(),
+            net: None,
         }
     }
 
@@ -222,30 +262,36 @@ mod tests {
         );
     }
 
-    /// The environment is a set: one value per name, none of them empty.
+    /// The environment is a set: one value per name, none of them empty —
+    /// networked or not.
     #[test]
     fn the_environment_names_each_variable_once() {
-        let mut names: Vec<_> = ENVIRONMENT.iter().map(|(name, _)| *name).collect();
-        names.sort_unstable();
-        let given = names.len();
-        names.dedup();
-        assert_eq!(names.len(), given, "a variable is set twice");
-        assert!(
-            ENVIRONMENT.iter().all(|(_, value)| !value.is_empty()),
-            "an empty value is not a setting"
-        );
+        for networked in [false, true] {
+            let env = environment(networked);
+            let mut names: Vec<_> = env.iter().map(|(name, _)| *name).collect();
+            names.sort_unstable();
+            let given = names.len();
+            names.dedup();
+            assert_eq!(names.len(), given, "a variable is set twice ({networked})");
+            assert!(
+                env.iter().all(|(_, value)| !value.is_empty()),
+                "an empty value is not a setting ({networked})"
+            );
+        }
     }
 
     /// `RAL_GUEST` is the entire signal `core::engine::run_engine` reads to
     /// know it is booting inside a guest, so it must always be set and
-    /// non-empty.
+    /// non-empty, whether or not this boot has a network.
     #[test]
     fn ral_guest_is_set_and_non_empty() {
-        let value = ENVIRONMENT
-            .iter()
-            .find_map(|(name, value)| (*name == "RAL_GUEST").then_some(*value))
-            .expect("the engine is given RAL_GUEST");
-        assert!(!value.is_empty());
+        for networked in [false, true] {
+            let value = environment(networked)
+                .into_iter()
+                .find_map(|(name, value)| (name == "RAL_GUEST").then_some(value))
+                .expect("the engine is given RAL_GUEST");
+            assert!(!value.is_empty());
+        }
     }
 
     /// Every directory the engine will search for a command is absolute:
@@ -253,14 +299,42 @@ mod tests {
     /// sensibly mean.
     #[test]
     fn every_path_entry_is_absolute() {
-        let path = ENVIRONMENT
-            .iter()
-            .find_map(|(name, value)| (*name == "PATH").then_some(*value))
+        let path = environment(false)
+            .into_iter()
+            .find_map(|(name, value)| (name == "PATH").then_some(value))
             .expect("the engine is given a PATH");
         assert!(
             path.split(':').all(|dir| dir.starts_with('/')),
             "PATH carries a relative entry: {path}"
         );
+    }
+
+    /// The TLS variables exist only for a networked boot: pointing them at a
+    /// CA bundle that was never written would break TLS outright rather than
+    /// leave it merely unconfigured.
+    #[test]
+    fn tls_variables_are_conditional_on_networked() {
+        assert!(
+            environment(false)
+                .iter()
+                .all(|(name, _)| *name != "SSL_CERT_FILE"),
+            "an un-networked boot has no CA bundle to point SSL_CERT_FILE at"
+        );
+        let networked = environment(true);
+        for name in [
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+            "PIP_CERT",
+            "NODE_EXTRA_CA_CERTS",
+        ] {
+            assert!(
+                networked.iter().any(|(n, _)| *n == name),
+                "a networked boot is missing {name}"
+            );
+        }
     }
 
     /// A clean exit is the session ending, not a failure, and the log says

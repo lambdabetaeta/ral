@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
-covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs]
+generated_at_commit: 2a3d8a5
+generated_at_date: 2026-07-27
+covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
@@ -30,11 +30,28 @@ caps are fixed `agent/digest.rs` constants, not per-agent state.
 The **trunk** is the parent-less node (`parent = None`), built by
 `Agent::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
 prompt, caps, `fuel` (exarch's launch sites pass `SPAWN_FUEL`; synod passes
-`0`), and the IT-set `fetch-url` `Egress` — opened once at launch and
-inherited verbatim by every fork — while `RootSeat` picks the seat kind
+`0`), and the IT-set `Egress` (`exarch/src/egress.rs`) — opened once at
+launch and inherited verbatim by every fork — while `RootSeat` picks the seat
+kind
 (`Identity` boots its own shell from `scratch`; `Wire` adopts a built
 transport whose engine lives elsewhere, and refuses sub-agent forks at the
-desk). An `interactive` node
+desk).
+
+`Egress` bundles the three things a fleet's outbound network shares across
+every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the IT-owned
+allowlist read from `/etc/exarch/net-policy.ral` or the embedded default —
+`read`/`write` host rules, `max-bytes`, `rate-per-minute`, `search`), a
+`RateLimiter`, and an `AuditLog` (both `exarch/src/egress.rs`). None of it is
+a model-facing verb any more — there is no `fetch-url` builtin
+([[map/exarch/builtins|builtins]]). The same `Egress` a trunk opens at launch
+is what `guest-net::Config::egress` takes: the policy, limiter, and ledger a
+synod session's guest network is gated by are the fleet's own, not a second
+copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
+has no guest to police, still keeps `Egress` for one thing: the `search` bit
+that clamps the harness `agent [... search: …]` field
+([[map/exarch/builtins|builtins]]).
+
+An `interactive` node
 built to converse — the interactive trunk, and every `/branch` tab
 ([[decisions/260705_branch-minimal|branch-minimal]]) — withholds `reply` and
 parks for its human, but both behaviours fall out of construction and position,

@@ -203,7 +203,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     ("exarch/src/cli.rs", "io-door:silent:seed-file"),
     ("exarch/src/config.rs", "io-door:silent:config-load"),
-    ("exarch/src/fleet/egress.rs", "io-door:silent:fetch-audit"),
+    ("exarch/src/egress.rs", "io-door:silent:net-audit"),
     ("exarch/src/agent/event.rs", "io-door:silent:events-file"),
     ("exarch/src/agent/event.rs", "io-door:silent:session-dir"),
     (

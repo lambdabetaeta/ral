@@ -186,18 +186,25 @@ case "$ARCH" in
     CHECK_SYMS=(CONFIG_VIRTIO CONFIG_VIRTIO_RING CONFIG_VIRTIO_MMIO CONFIG_VIRTIO_PCI
                 CONFIG_VIRTIO_BLK CONFIG_VIRTIO_CONSOLE CONFIG_VIRTIO_FS CONFIG_VSOCKETS
                 CONFIG_VIRTIO_VSOCKETS CONFIG_HYPERV_VSOCKETS CONFIG_OVERLAY_FS
-                CONFIG_EXT4_FS CONFIG_DEVTMPFS CONFIG_DEVTMPFS_MOUNT)
+                CONFIG_EXT4_FS CONFIG_DEVTMPFS CONFIG_DEVTMPFS_MOUNT CONFIG_TUN)
     # The vsock family's real names (confirmed against this kernel's own
     # modules.dep, not guessed from its Kconfig symbol): the virtio transport
     # is `vmw_vsock_virtio_transport`, not `virtio_vsock`, and it pulls the
     # core `vsock` module in automatically via its own modules.dep line.
+    #
+    # CONFIG_TUN backs no virtio device, unlike everything else in this list:
+    # neither hypervisor backend configures a network adapter (§6). The
+    # guest's only network device is a tun whose peer is a user-mode TCP/IP
+    # stack in a host process, reached over the vsock net wire — so where
+    # CONFIG_HYPERV_VSOCKETS above is declined for having no hardware behind
+    # it, CONFIG_TUN is shipped for having no hardware behind it either.
     declare -A MODNAME=(
       [CONFIG_VIRTIO]=virtio [CONFIG_VIRTIO_RING]=virtio_ring
       [CONFIG_VIRTIO_MMIO]=virtio_mmio [CONFIG_VIRTIO_PCI]=virtio_pci
       [CONFIG_VIRTIO_BLK]=virtio_blk [CONFIG_VIRTIO_CONSOLE]=virtio_console
       [CONFIG_VSOCKETS]=vsock [CONFIG_VIRTIO_VSOCKETS]=vmw_vsock_virtio_transport
       [CONFIG_VIRTIO_FS]=virtiofs [CONFIG_OVERLAY_FS]=overlay
-      [CONFIG_EXT4_FS]=ext4
+      [CONFIG_EXT4_FS]=ext4 [CONFIG_TUN]=tun
     )
     BIN_FORMAT="ARM aarch64"
     ;;
@@ -209,9 +216,11 @@ case "$ARCH" in
     # client.
     #
     # There is deliberately NO `hv_netvsc`, though Ubuntu builds it: the guest
-    # has no network device at all (§6), so its driver would be code loaded
-    # for hardware that is not there. CONFIG_HYPERV_NET is recorded to say
-    # that plainly.
+    # has no paravirtualized NIC on the VMBus (§6), so its driver would be code
+    # loaded for hardware that is not there. CONFIG_HYPERV_NET is recorded to
+    # say that plainly. The guest's only network device is CONFIG_TUN below —
+    # a tun whose peer is a user-mode TCP/IP stack in a host process, reached
+    # over the vsock net wire, not the bus hv_netvsc answers to.
     #
     # The control plane is the same AF_VSOCK the guest already speaks (§3);
     # only the transport under it changes, from virtio's to Hyper-V's
@@ -258,7 +267,7 @@ case "$ARCH" in
                 CONFIG_HYPERV_VSOCKETS CONFIG_VIRTIO_VSOCKETS CONFIG_9P_FS
                 CONFIG_NET_9P CONFIG_NET_9P_FD CONFIG_SCSI CONFIG_BLK_DEV_SD
                 CONFIG_OVERLAY_FS CONFIG_EXT4_FS CONFIG_DEVTMPFS
-                CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_8250)
+                CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_8250 CONFIG_TUN)
     # Real module basenames, as Ubuntu's own linux-modules package ships them
     # (`hv_storvsc`, not `storvsc_drv`; `hv_sock`, not `hyperv_transport`;
     # `9p`, not `9pfs`). `9p` pulls the netfs core in through its own
@@ -269,7 +278,7 @@ case "$ARCH" in
       [CONFIG_VSOCKETS]=vsock [CONFIG_HYPERV_VSOCKETS]=hv_sock
       [CONFIG_9P_FS]=9p [CONFIG_NET_9P]=9pnet [CONFIG_NET_9P_FD]=9pnet_fd
       [CONFIG_SCSI]=scsi_mod [CONFIG_BLK_DEV_SD]=sd_mod
-      [CONFIG_OVERLAY_FS]=overlay [CONFIG_EXT4_FS]=ext4
+      [CONFIG_OVERLAY_FS]=overlay [CONFIG_EXT4_FS]=ext4 [CONFIG_TUN]=tun
     )
     BIN_FORMAT="x86-64"
     ;;

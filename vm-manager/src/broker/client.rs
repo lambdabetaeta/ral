@@ -77,25 +77,34 @@ impl Hypervisor for Brokered {
         .map_err(|cause| unavailable(&format!("synod could not ask for a machine: {cause}")))?;
 
         match frame::read(&mut pipe) {
-            Ok(Some(Reply::Booted { workspace, socket })) => {
-                let control = adopt_socket(&socket).map_err(|cause| {
+            Ok(Some(Reply::Booted {
+                workspace,
+                control,
+                net,
+            })) => {
+                let control = adopt_socket(&control).map_err(|cause| {
                     unavailable(&format!(
                         "the machine started, but its control plane could not be taken over: \
                          {cause}"
                     ))
                 })?;
-                // Only now may the broker let go of its own handle on that
-                // socket — see [`Request::Adopted`] for why both the earlier and
-                // the later moment are wrong.
+                let net = adopt_socket(&net).map_err(|cause| {
+                    unavailable(&format!(
+                        "the machine started, but its net wire could not be taken over: {cause}"
+                    ))
+                })?;
+                // Only now may the broker let go of its own handles on those
+                // sockets — see [`Request::Adopted`] for why both the earlier
+                // and the later moment are wrong.
                 frame::write(&mut pipe, &Request::Adopted).map_err(|cause| {
                     unavailable(&format!(
-                        "synod took over the machine's control plane but could not say so: {cause}"
+                        "synod took over the machine's wires but could not say so: {cause}"
                     ))
                 })?;
                 Ok(Box::new(BrokeredGuest {
                     pipe: Some(pipe),
                     workspace,
-                    control: Some(control),
+                    wires: Some(crate::Wires { control, net }),
                 }))
             }
             Ok(Some(Reply::Refused(why))) => Err(unavailable(&why)),
@@ -119,7 +128,7 @@ pub struct BrokeredGuest {
     /// tells the service to tear the machine down.
     pipe: Option<std::fs::File>,
     workspace: PathBuf,
-    control: Option<OwnedSocket>,
+    wires: Option<crate::Wires>,
 }
 
 impl Machine for BrokeredGuest {
@@ -128,25 +137,25 @@ impl Machine for BrokeredGuest {
     }
 
     /// # Panics
-    /// Panics if asked a second time: a machine has exactly one control plane.
-    fn take_control(&mut self) -> OwnedSocket {
-        self.control
+    /// Panics if asked a second time: a machine has exactly one of each wire.
+    fn take_wires(&mut self) -> crate::Wires {
+        self.wires
             .take()
-            .expect("a machine's control plane is taken at most once")
+            .expect("a machine's two wires are taken at most once")
     }
 
     /// Ask the service to stop the machine, and wait for its answer.
     ///
-    /// The wire is closed first, for the same reason the direct backend closes
-    /// it first: the guest's engine sees EOF, and `ral-daemon` powers the
-    /// machine off from inside. The service's own grace window then observes a
-    /// machine already stopping.
+    /// Both wires are closed first, for the same reason the direct backend
+    /// closes them first: the guest's engine sees EOF on the control plane,
+    /// and `ral-daemon` powers the machine off from inside. The service's own
+    /// grace window then observes a machine already stopping.
     ///
     /// # Errors
     /// Returns [`Error::Unavailable`] if the service reports that the machine
     /// did not stop cleanly, or if it could not be asked at all.
     fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
-        self.control = None;
+        self.wires = None;
         let Some(mut pipe) = self.pipe.take() else {
             return Ok(());
         };
@@ -171,7 +180,7 @@ impl Drop for BrokeredGuest {
     /// service is reading this pipe, and its end of it going quiet is the
     /// signal.
     fn drop(&mut self) {
-        self.control = None;
+        self.wires = None;
         self.pipe = None;
     }
 }

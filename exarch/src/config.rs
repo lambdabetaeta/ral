@@ -115,11 +115,11 @@ pub fn load() -> Result<Vec<CustomProvider>, String> {
 /// (permission denied, say) — a present-but-unreadable file is never
 /// silently treated as absent.
 ///
-/// Shared by [`crate::org_policy::load`], which reads the IT-owned
-/// fetch-url policy the same way.
+/// Shared by [`crate::net_policy::load`], which reads the IT-owned
+/// network policy the same way.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the IT-owned fetch-url policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
+    reason = "[io-door:silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the IT-owned network policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
 )]
 pub(crate) fn read_optional_file(
     path: &std::path::Path,
@@ -137,7 +137,7 @@ pub(crate) fn read_optional_file(
 /// reach no effect. Errors are surfaced with `label` and the file path for
 /// provenance.
 ///
-/// Shared by [`crate::org_policy::load`], which evaluates the fetch-url
+/// Shared by [`crate::net_policy::load`], which evaluates the network
 /// policy through the identical no-authority mechanism.
 pub(crate) fn evaluate_no_authority(
     shell: &mut Shell,

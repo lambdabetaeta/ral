@@ -3,7 +3,7 @@
 //! Where `vm-manager`'s `boot-smoke` example ends at "the engine is alive on
 //! the guest's socket", this one drives the §3 protocol over that same wire: it
 //! boots the three artifacts through whichever backend this platform has,
-//! adopts the control plane `take_control` hands back into a [`WireTransport`],
+//! adopts the control plane `take_wires` hands back into a [`WireTransport`],
 //! attaches a session at the guest's `/work`, and dispatches one real run —
 //! reading the granted folder from inside the VM — to a settled [`Report`]. The
 //! captured output comes back across the wire, proving the whole path end to
@@ -26,6 +26,8 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
+use std::io::Write as _;
+
 use ral_core::io::TerminalState;
 use ral_core::transport::{
     EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport,
@@ -33,7 +35,13 @@ use ral_core::transport::{
 };
 use ral_core::types::Capabilities;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use ral_daemon::packet::Prologue;
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
+
+#[cfg(unix)]
+type NetStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type NetStream = std::net::TcpStream;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -74,8 +82,25 @@ fn main() {
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
 
     let workspace = machine.workspace_path().to_path_buf();
-    let control = machine.take_control();
-    let transport = WireTransport::adopt(control, Liveness::default())
+    // Both wires arrive at boot, and the guest waits on the net wire's
+    // prologue before it will start an engine at all — so a host that takes
+    // that wire and says nothing wedges the boot rather than merely going
+    // without a network. This example wants no network, only an engine, so it
+    // sends the shortest honest prologue there is (no resolver, no proxy to
+    // trust) and then holds the wire open: the pump ends the session the
+    // moment it reports EOF.
+    let wires = machine.take_wires();
+    let mut net = NetStream::from(wires.net);
+    net.write_all(
+        &Prologue {
+            resolv_conf: Vec::new(),
+            ca_pem: Vec::new(),
+        }
+        .encode(),
+    )
+    .expect("write the net wire's prologue");
+
+    let transport = WireTransport::adopt(wires.control, Liveness::default())
         .expect("adopt the guest's control plane");
 
     transport.attach(

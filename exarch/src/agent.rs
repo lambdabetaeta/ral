@@ -161,7 +161,7 @@ pub struct Agent {
     tool_enabled: bool,
     /// Whether this agent may ride the provider's own hosted web-search
     /// tool, construction-fixed like `tool_enabled` above. Bounded above by
-    /// the IT policy verdict ([`crate::fleet::egress::Egress`]'s own
+    /// the IT network policy's verdict ([`crate::egress::Egress`]'s own
     /// `search`) — the trunk simply takes that verdict, and every fork
     /// inherits its parent's bit verbatim.
     search: bool,
@@ -240,10 +240,10 @@ pub struct Agent {
     /// crossing, cleared once a later check finds the total back under, so
     /// the warning fires once per excursion, never once per boundary.
     disk_warn_latched: bool,
-    /// The IT-set `fetch-url` policy, audit ledger, and rate budget —
-    /// shared verbatim by every fork, exactly like [`Self::disk_warn_bytes`]:
-    /// a host setting, not a per-agent choice.
-    egress: crate::fleet::egress::Egress,
+    /// The IT-set network policy, audit ledger, and rate budget — shared
+    /// verbatim by every fork, exactly like [`Self::disk_warn_bytes`]: a
+    /// host setting, not a per-agent choice.
+    egress: crate::egress::Egress,
 }
 
 /// The depth budget exarch's own trunks start with, passed as

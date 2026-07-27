@@ -225,9 +225,11 @@ fn serve_client(pipe: OwnedHandle) {
     // it is closed once, on return.
     let mut stream = unsafe { std::fs::File::from_raw_handle(pipe.into_raw_handle()) };
     let mut machine: Option<Box<dyn Machine>> = None;
-    // The broker's own handle on the control plane, held only until the client
-    // says it has made its own ([`Request::Adopted`]).
-    let mut control: Option<std::os::windows::io::OwnedSocket> = None;
+    // The broker's own handles on the two wires, held only until the client
+    // says it has made its own ([`Request::Adopted`]).  One `Option` around
+    // both, not two around each, so letting go is the one statement below
+    // rather than something to remember to do twice.
+    let mut wires: Option<crate::Wires> = None;
 
     loop {
         // The client has gone; the machine goes with it.
@@ -245,10 +247,11 @@ fn serve_client(pipe: OwnedHandle) {
                 match boot_for(handle, &folder, read_only) {
                     Ok(booted) => {
                         machine = Some(booted.machine);
-                        control = Some(booted.control);
+                        wires = Some(booted.wires);
                         Reply::Booted {
                             workspace: booted.workspace,
-                            socket: booted.description,
+                            control: booted.control_description,
+                            net: booted.net_description,
                         }
                     }
                     Err(why) => Reply::Refused(why),
@@ -256,16 +259,16 @@ fn serve_client(pipe: OwnedHandle) {
             }
             .versioned(version),
             Request::Adopted => {
-                // The client has its own socket now, so the broker's must go:
-                // while it lived, the guest could not see the end-of-file a
-                // closing client is supposed to cause.
-                drop(control.take());
+                // The client has its own sockets now, so the broker's must
+                // go: while they lived, the guest could not see the
+                // end-of-file a closing client is supposed to cause.
+                drop(wires.take());
                 continue;
             }
             Request::Stop => {
-                // The broker's own handle goes first if the client never adopted
-                // one, so the guest sees its wire close either way.
-                drop(control.take());
+                // The broker's own handles go first if the client never
+                // adopted them, so the guest sees both wires close either way.
+                drop(wires.take());
                 let outcome = match machine.take() {
                     Some(machine) => machine.shutdown().map_err(|e| e.to_string()),
                     None => Ok(()),
@@ -300,17 +303,18 @@ impl Versioned for Reply {
 }
 
 /// One booted machine, as the serving thread has to hold it: the machine
-/// itself, where its workspace is, the socket the broker still owns, and the
-/// description of that socket made for the client.
+/// itself, where its workspace is, the two wires the broker still owns, and
+/// the description of each made for the client.
 struct Booted {
     machine: Box<dyn Machine>,
     workspace: PathBuf,
-    control: std::os::windows::io::OwnedSocket,
-    description: Vec<u8>,
+    wires: crate::Wires,
+    control_description: Vec<u8>,
+    net_description: Vec<u8>,
 }
 
-/// Boot one machine for the client on `pipe`, and describe its control plane
-/// for that client's process.
+/// Boot one machine for the client on `pipe`, and describe its two wires for
+/// that client's process.
 ///
 /// Every check the broker makes is here, in order: the folder must be one the
 /// *caller* can read; the media is this installation's; the spec is constructed,
@@ -330,13 +334,15 @@ fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, Stri
     let workspace = machine.workspace_path().to_path_buf();
 
     let client = client_process(pipe)?;
-    let control = machine.take_control();
-    let description = describe_socket(control.as_socket(), client)?;
+    let wires = machine.take_wires();
+    let control_description = describe_socket(wires.control.as_socket(), client)?;
+    let net_description = describe_socket(wires.net.as_socket(), client)?;
     Ok(Booted {
         machine,
         workspace,
-        control,
-        description,
+        wires,
+        control_description,
+        net_description,
     })
 }
 

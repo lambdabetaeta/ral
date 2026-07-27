@@ -1,0 +1,25 @@
+[package]
+name = "guest-net-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+guest-net = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+bench = false
+
+# Detached from the parent workspace deliberately: a `cargo-fuzz` project
+# needs nightly and libfuzzer-sys, neither of which the rest of this repo
+# should be made to carry just because one crate has an untrusted-input
+# parser worth fuzzing.
+[workspace]

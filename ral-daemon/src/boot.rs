@@ -37,15 +37,19 @@
 //! it is a sum type rather than a pair of loosely-related fields because
 //! exactly one of the two arrangements is ever the case.
 //!
-//! ## Two vsock ports, which are not the same port
+//! ## Three vsock ports, which are not the same port
 //!
 //! [`Boot::port`] is the *control plane*: where the daemon dials the host to
 //! get the engine's protocol socket (`dev/docs/VM/SYNOD.md` §3).  The port
 //! inside [`Export::Plan9`] is the *workspace transport*: where the host's
-//! 9p server answers.  They are written by the same host, both are host-side
-//! `AF_VSOCK` ports, and confusing them yields a boot in which the engine
-//! talks 9p at the session manager — so they are named apart everywhere,
-//! `ral.port` and `ral.plan9`.
+//! 9p server answers.  The port inside [`Boot::net`] is the *net wire*:
+//! where the host's user-mode TCP/IP stack answers.  They are written by the
+//! same host, all three are host-side `AF_VSOCK` ports, and confusing any
+//! two of them yields a boot in which one plane speaks another's protocol at
+//! it — so they are named apart everywhere, `ral.port`, `ral.plan9`, and
+//! `ral.net`.
+
+use std::net::Ipv4Addr;
 
 /// The prefix every setting meant for this daemon carries.
 pub const PREFIX: &str = "ral.";
@@ -91,6 +95,27 @@ pub enum Export {
     },
 }
 
+/// The guest's virtual network, present only on a boot that has one.
+///
+/// Absent on an un-networked exarch boot: `crate::net` has nothing to plan
+/// against, and `engine::environment` must not point TLS at a proxy that
+/// will never answer.  One struct rather than four loose settings, because
+/// the four are one indivisible fact — a port with no address is nothing to
+/// dial, an address with no gateway is nothing to leave the subnet through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Net {
+    /// The host-side `AF_VSOCK` port the net wire dials — the third port,
+    /// after [`Boot::port`] and [`Export::Plan9`]'s.
+    pub port: u32,
+    /// The guest's own address on the virtual link.
+    pub address: Ipv4Addr,
+    /// The subnet's prefix length, 0 through 32.
+    pub prefix: u8,
+    /// The default route's next hop.  [`parse_net`] has already refused a
+    /// value outside `address/prefix`, so nothing downstream re-checks it.
+    pub gateway: Ipv4Addr,
+}
+
 /// Everything the host told this guest at boot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Boot {
@@ -107,6 +132,8 @@ pub struct Boot {
     /// Absolute path to the ral/exarch multicall binary to run under
     /// `--engine`.
     pub engine: String,
+    /// The guest's virtual network, when this boot has one at all.
+    pub net: Option<Net>,
 }
 
 impl Boot {
@@ -118,8 +145,8 @@ impl Boot {
     /// by a ral VM backend), when a required setting is missing, when a
     /// value does not parse, or when an unknown `ral.` key appears.
     pub fn read(cmdline: &str) -> Result<Self, String> {
-        let (mut workspace, mut plan9, mut port, mut epoch, mut engine) =
-            (None, None, None, None, None);
+        let (mut workspace, mut plan9, mut port, mut epoch, mut engine, mut net) =
+            (None, None, None, None, None, None);
         let mut addressed_to_us = false;
 
         for word in cmdline.split_ascii_whitespace() {
@@ -139,11 +166,13 @@ impl Boot {
                 "port" => port = Some(parse_vsock_port("port", value)?),
                 "epoch" => epoch = Some(parse_epoch(value)?),
                 "engine" => engine = Some(validate_engine(value)?),
+                "net" => net = Some(parse_net(value)?),
                 _ => {
                     return Err(format!(
                         "the kernel command line carries `{PREFIX}{key}=…`, which this daemon \
                          does not understand. The settings it knows are {PREFIX}workspace, \
-                         {PREFIX}plan9, {PREFIX}port, {PREFIX}epoch, and {PREFIX}engine."
+                         {PREFIX}plan9, {PREFIX}port, {PREFIX}epoch, {PREFIX}engine, and \
+                         {PREFIX}net."
                     ));
                 }
             }
@@ -192,8 +221,42 @@ impl Boot {
                 )
             })?,
             engine: engine.unwrap_or_else(|| DEFAULT_ENGINE.to_string()),
+            net,
         })
     }
+}
+
+/// Render a [`Boot`] back onto a kernel command line, in the key spellings
+/// [`Boot::read`] accepts.
+///
+/// This is the single writer of the guest command line: both hypervisor
+/// backends build the `Boot` describing what they are about to configure and
+/// call this rather than formatting their own line, so the two ends of the
+/// boot contract cannot drift apart at compile time.
+pub fn command_line(boot: &Boot, console: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut line = format!("console={console}");
+    match &boot.workspace {
+        Export::Virtiofs { tag } => {
+            let _ = write!(line, " {PREFIX}workspace={tag}");
+        }
+        Export::Plan9 { name, port } => {
+            let _ = write!(line, " {PREFIX}workspace={name} {PREFIX}plan9={port}");
+        }
+    }
+    let _ = write!(line, " {PREFIX}port={} {PREFIX}epoch={}", boot.port, boot.epoch);
+    if boot.engine != DEFAULT_ENGINE {
+        let _ = write!(line, " {PREFIX}engine={}", boot.engine);
+    }
+    if let Some(net) = &boot.net {
+        let _ = write!(
+            line,
+            " {PREFIX}net={},{}/{},{}",
+            net.port, net.address, net.prefix, net.gateway
+        );
+    }
+    line
 }
 
 /// Accept the workspace's name: a non-empty, path-free word the host and
@@ -247,6 +310,54 @@ fn parse_vsock_port(key: &str, value: &str) -> Result<u32, String> {
     }
 }
 
+/// Accept the net wire: `<port>,<address>/<prefix>,<gateway>`, one
+/// indivisible fact rather than three keys that could disagree.  The
+/// gateway is checked against the subnet *here*, where the mistake was
+/// made, rather than left for `SIOCADDRT` to answer with `ENETUNREACH` once
+/// the guest is already trying to route through it.
+fn parse_net(value: &str) -> Result<Net, String> {
+    let bad = || {
+        format!(
+            "`{PREFIX}net={value}` is not `<port>,<address>/<prefix>,<gateway>` — the host's \
+             vsock port for the net wire, the guest's address in CIDR notation, and the \
+             gateway, joined by commas, e.g. `1730,10.0.2.15/24,10.0.2.2`."
+        )
+    };
+    let mut parts = value.splitn(3, ',');
+    let (Some(port), Some(cidr), Some(gateway)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(bad());
+    };
+    let port = parse_vsock_port("net", port)?;
+    let (address, prefix) = cidr.split_once('/').ok_or_else(bad)?;
+    let address: Ipv4Addr = address
+        .parse()
+        .map_err(|err| format!("`{PREFIX}net={value}` names `{address}` as the guest's address: {err}."))?;
+    let prefix: u8 = prefix.parse().ok().filter(|&p| p <= 32).ok_or_else(|| {
+        format!(
+            "`{PREFIX}net={value}` names `{prefix}` as the prefix length; it must be a whole \
+             number from 0 to 32."
+        )
+    })?;
+    let gateway: Ipv4Addr = gateway.parse().map_err(|err| {
+        format!("`{PREFIX}net={value}` names `{gateway}` as the gateway: {err}.")
+    })?;
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    if u32::from(gateway) & mask != u32::from(address) & mask {
+        return Err(format!(
+            "`{PREFIX}net={value}` names a gateway, {gateway}, that is not inside \
+             {address}/{prefix} — the guest could never route to it. Fix the prefix or the \
+             gateway."
+        ));
+    }
+    Ok(Net {
+        port,
+        address,
+        prefix,
+        gateway,
+    })
+}
+
 /// Accept a wall clock: seconds since the Unix epoch, at or after it.
 fn parse_epoch(value: &str) -> Result<i64, String> {
     match value.parse::<i64>() {
@@ -294,6 +405,7 @@ mod tests {
                 port: 1729,
                 epoch: 1_771_200_000,
                 engine: DEFAULT_ENGINE.into(),
+                net: None,
             }
         );
     }
@@ -384,7 +496,7 @@ mod tests {
         let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.netowrk=on")
             .expect_err("a misspelled setting must be refused");
         assert!(err.contains("does not understand"), "{err}");
-        for known in ["ral.workspace", "ral.plan9", "ral.port", "ral.epoch"] {
+        for known in ["ral.workspace", "ral.plan9", "ral.port", "ral.epoch", "ral.net"] {
             assert!(
                 err.contains(known),
                 "the refusal lists every known key, and not {known}: {err}"
@@ -464,5 +576,88 @@ mod tests {
         let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.engine=engine")
             .expect_err("a relative engine path must be refused");
         assert!(err.contains("absolute path"), "{err}");
+    }
+
+    /// The net wire is one composite key, and a well-formed one parses into
+    /// all four fields at once.
+    #[test]
+    fn a_net_key_reads_into_its_four_fields() {
+        let boot = Boot::read(
+            "ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.2.2",
+        )
+        .expect("a well-formed net key must parse");
+        assert_eq!(
+            boot.net,
+            Some(Net {
+                port: 1730,
+                address: Ipv4Addr::new(10, 0, 2, 15),
+                prefix: 24,
+                gateway: Ipv4Addr::new(10, 0, 2, 2),
+            })
+        );
+    }
+
+    /// A gateway outside the guest's own subnet is refused at boot, not
+    /// left for `SIOCADDRT` to answer with `ENETUNREACH`.
+    #[test]
+    fn a_gateway_outside_the_subnet_is_refused() {
+        let err = Boot::read(
+            "ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2",
+        )
+        .expect_err("a gateway outside the subnet must be refused");
+        assert!(err.contains("not inside"), "{err}");
+    }
+
+    /// A net key missing one of its three comma-separated parts, or naming
+    /// an unparsable address, prefix, or gateway, is refused rather than
+    /// silently defaulted.
+    #[test]
+    fn a_malformed_net_key_is_refused() {
+        for value in [
+            "ral.net=1730,10.0.2.15/24",
+            "ral.net=1730,not-an-address/24,10.0.2.2",
+            "ral.net=1730,10.0.2.15/99,10.0.2.2",
+            "ral.net=1730,10.0.2.15/24,not-a-gateway",
+            "ral.net=0,10.0.2.15/24,10.0.2.2",
+        ] {
+            let err = Boot::read(&format!("ral.workspace=w ral.port=1 ral.epoch=0 {value}"))
+                .expect_err(value);
+            assert!(!err.is_empty(), "{value}");
+        }
+    }
+
+    /// [`command_line`] is the inverse of [`Boot::read`]: whatever a `Boot`
+    /// says, reading its own rendering back must reproduce it exactly —
+    /// across both workspace shapes, a custom engine, and a net wire.
+    #[test]
+    fn command_line_round_trips_through_read() {
+        for boot in [
+            Boot {
+                workspace: Export::Virtiofs { tag: "work".into() },
+                port: 1729,
+                epoch: 1_771_200_000,
+                engine: DEFAULT_ENGINE.into(),
+                net: None,
+            },
+            Boot {
+                workspace: Export::Plan9 {
+                    name: "work".into(),
+                    port: 50001,
+                },
+                port: 1729,
+                epoch: 1_771_200_000,
+                engine: "/opt/ral/engine".into(),
+                net: Some(Net {
+                    port: 1730,
+                    address: Ipv4Addr::new(10, 0, 2, 15),
+                    prefix: 24,
+                    gateway: Ipv4Addr::new(10, 0, 2, 2),
+                }),
+            },
+        ] {
+            let rendered = command_line(&boot, "hvc0");
+            let read_back = Boot::read(&rendered).expect("a rendered command line must parse");
+            assert_eq!(read_back, boot, "{rendered}");
+        }
     }
 }

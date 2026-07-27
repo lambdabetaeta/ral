@@ -35,6 +35,18 @@ use std::time::Duration;
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(3);
 
 /// rustls config validating against the bundled Mozilla webpki roots.
+///
+/// This choice is **deliberately the inverse of `guest_net::upstream::client`**,
+/// which validates against *this computer's own* trust store instead. The
+/// two must never be swapped. This client speaks for exarch itself — to
+/// model providers exarch's own operator chose — on a process that may run
+/// on a container image with no OS trust store to consult, so a bundled set
+/// it always carries with it is the only trust source that is guaranteed to
+/// be there. `guest_net::upstream::client` speaks for a *guest*, on the
+/// strength of *this machine's* judgement about what is safe to
+/// `pip install` or `apt install` — the guest has no store of its own to
+/// consult, so the one store that can stand behind that judgement is this
+/// computer's.
 pub(crate) fn config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots

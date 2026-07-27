@@ -406,6 +406,7 @@ mod tests {
             port: 1729,
             epoch: 0,
             engine: crate::boot::DEFAULT_ENGINE.into(),
+            net: None,
         }
     }
 

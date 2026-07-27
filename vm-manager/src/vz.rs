@@ -50,9 +50,9 @@
 //!   under `WORKSPACE_TAG`, built from a `VZSingleDirectoryShare` over a
 //!   `VZSharedDirectory` carrying the spec's `read_only` flag, so read-only
 //!   is the mount's law and not a matter of policy;
-//! - a `VZVirtioSocketDevice` for the control plane, and **no network device
-//!   at all**: the guest's only way off the machine is the socket
-//!   (`dev/docs/VM/SYNOD.md` §6);
+//! - a `VZVirtioSocketDevice` multiplexing both wires — `CONTROL_PORT` and
+//!   `NET_PORT` — and **no network device at all**: the guest's only way off
+//!   the machine is that one socket, port-routed (`dev/docs/VM/SYNOD.md` §6);
 //! - a `VZVirtioConsoleDeviceSerialPortConfiguration` writing the guest's
 //!   console to the host's standard output, which is where the daemon's log
 //!   lines surface (`dev/docs/VM/SYNOD.md` §1);
@@ -82,14 +82,17 @@
 //!
 //! Boot is not declared done when `start` returns — a kernel can panic on the
 //! way up and never reach userspace.  The worker installs a
-//! `VZVirtioSocketListener` on `CONTROL_PORT` before starting, and waits for
-//! the guest's daemon to dial the host on it (`ral-daemon`'s `control_plane`).
-//! A connection is proof the guest booted far enough to run its init; only
-//! then does [`Vz::boot`] return.  That same accepted connection is not spent
-//! on the readiness signal and discarded — it *is* the stream the control-plane
-//! frame protocol (`dev/docs/VM/SYNOD.md` §3) runs over, so its host end is
-//! duplicated out of the framework's connection object and carried back to the
-//! caller on the [`Guest`], to outlive the object VZ may close.
+//! `VZVirtioSocketListener` on `CONTROL_PORT` *and* one on `NET_PORT` before
+//! starting, and waits for the guest's daemon to dial the host on both
+//! (`ral-daemon`'s `control_plane` and its net-wire counterpart).  Two
+//! connections are proof the guest booted far enough to run its init and open
+//! its net wire; only then does [`Vz::boot`] return.  Neither accepted
+//! connection is spent on the readiness signal and discarded — each *is* a
+//! stream a later stage speaks over (the control-plane frame protocol of
+//! `dev/docs/VM/SYNOD.md` §3, and the net wire of §6), so each host end is
+//! duplicated out of the framework's connection object and carried back to
+//! the caller on the [`Guest`]'s [`Wires`](crate::Wires), to outlive the
+//! object VZ may close.
 //!
 //! # Entitlement and signing — what fails without them, and how
 //!
@@ -277,7 +280,7 @@ impl Hypervisor for Vz {
         };
         let mount_path = plan.guest_path.clone();
 
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<OwnedFd, Error>>(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<crate::Wires, Error>>(1);
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let thread = thread::Builder::new()
             .name("ral-vz-machine".to_string())
@@ -288,9 +291,9 @@ impl Hypervisor for Vz {
             })?;
 
         match ready_rx.recv() {
-            Ok(Ok(control_socket)) => Ok(Box::new(Guest {
+            Ok(Ok(wires)) => Ok(Box::new(Guest {
                 mount_path,
-                control_socket: Some(control_socket),
+                wires: Some(wires),
                 control: Some(Control {
                     cmd_tx,
                     thread: Some(thread),
@@ -390,7 +393,9 @@ fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfigura
         sharing.setShare(Some(&share));
         config.setDirectorySharingDevices(&NSArray::from_slice(&[&**sharing]));
 
-        // The control plane — and nothing else off the machine.
+        // The one socket device, port-routed for both wires — see `run`'s
+        // two `setSocketListener_forPort` calls — and nothing else off the
+        // machine.
         let socket = VZVirtioSocketDeviceConfiguration::new();
         config.setSocketDevices(&NSArray::from_slice(&[&**socket]));
         // Network devices are left empty on purpose: the guest has no way out
@@ -469,12 +474,27 @@ fn block_device(
     }
 }
 
-/// The kernel command line: the console, and the four session settings the
-/// daemon reads out of `/proc/cmdline` (`ral-daemon`'s `boot::Boot`).
+/// The kernel command line: the console, and the session settings the daemon
+/// reads out of `/proc/cmdline`.  Rendered by `ral_daemon::boot::command_line`
+/// rather than formatted here, so this backend and the daemon's own parser
+/// cannot drift apart at compile time.
 fn kernel_command_line(plan: &Plan) -> String {
-    format!(
-        "console=hvc0 ral.workspace={WORKSPACE_TAG} ral.port={CONTROL_PORT} ral.epoch={}",
-        plan.epoch
+    ral_daemon::boot::command_line(
+        &ral_daemon::boot::Boot {
+            workspace: ral_daemon::boot::Export::Virtiofs {
+                tag: WORKSPACE_TAG.to_string(),
+            },
+            port: CONTROL_PORT,
+            epoch: i64::try_from(plan.epoch).unwrap_or(i64::MAX),
+            engine: ral_daemon::boot::DEFAULT_ENGINE.to_string(),
+            net: Some(ral_daemon::boot::Net {
+                port: crate::NET_PORT,
+                address: crate::GUEST_LINK.address,
+                prefix: crate::GUEST_LINK.prefix,
+                gateway: crate::GUEST_LINK.gateway,
+            }),
+        },
+        "hvc0",
     )
 }
 
@@ -567,11 +587,12 @@ fn create_session_image(dir: &Path) -> Result<PathBuf, Error> {
 enum Ready {
     /// `start` finished — successfully, or with macOS's error text.
     Started(Result<(), String>),
-    /// The guest dialed the control plane: it booted far enough to run init.
-    /// The payload is the host end of that connection, duplicated out of the
-    /// framework's object to outlive it — the stream the frame protocol runs
-    /// over (`dev/docs/VM/SYNOD.md` §3).
-    Connected(OwnedFd),
+    /// The guest dialed one of the two ports: it booted far enough to run
+    /// init and open at least one of its wires.  The `u32` is the port that
+    /// was dialed ([`CONTROL_PORT`] or [`crate::NET_PORT`]) and the [`OwnedFd`] is
+    /// the host end of that connection, duplicated out of the framework's
+    /// object to outlive it.
+    Connected(u32, OwnedFd),
 }
 
 /// A message from a [`Guest`] to the thread that owns its machine.
@@ -585,7 +606,7 @@ enum Command {
 /// This is the code that needs the entitlement, and so the code this checkout
 /// cannot run: it compiles, and its shape is the contract, but no line of it
 /// past [`build_configuration`] has been exercised on an unentitled test box.
-fn run(plan: &Plan, ready: &SyncSender<Result<OwnedFd, Error>>, commands: &Receiver<Command>) {
+fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &Receiver<Command>) {
     let config = match build_configuration(plan).and_then(|config| {
         validate(&config)?;
         Ok(config)
@@ -608,17 +629,27 @@ fn run(plan: &Plan, ready: &SyncSender<Result<OwnedFd, Error>>, commands: &Recei
         VZVirtualMachine::initWithConfiguration_queue(VZVirtualMachine::alloc(), &config, &queue)
     };
 
-    // The listener whose delegate wakes us when the guest connects.  It is
-    // kept alive for the machine's whole life: the device holds only a weak
-    // reference to it.
+    // Two listeners, one per wire, whose delegates wake us when the guest
+    // dials each — not a problem needing two designs, the same one-shot
+    // readiness answered twice.  Both are kept alive for the machine's whole
+    // life: the device holds only weak references to them.
     let (events_tx, events_rx) = mpsc::channel::<Ready>();
-    let delegate = SocketReadiness::new(events_tx.clone());
-    let listener = new_listener(&delegate);
+    let control_delegate = SocketReadiness::new(CONTROL_PORT, events_tx.clone());
+    let control_listener = new_listener(&control_delegate);
+    let net_delegate = SocketReadiness::new(crate::NET_PORT, events_tx.clone());
+    let net_listener = new_listener(&net_delegate);
 
-    let outcome = boot_machine(&queue, &machine, &listener, &events_tx, &events_rx);
+    let outcome = boot_machine(
+        &queue,
+        &machine,
+        &control_listener,
+        &net_listener,
+        &events_tx,
+        &events_rx,
+    );
     match outcome {
-        Ok(control_socket) => {
-            let _ = ready.send(Ok(control_socket));
+        Ok(wires) => {
+            let _ = ready.send(Ok(wires));
             wait_for_stop(&queue, &machine, commands);
         }
         Err(why) => {
@@ -627,31 +658,37 @@ fn run(plan: &Plan, ready: &SyncSender<Result<OwnedFd, Error>>, commands: &Recei
         }
     }
 
-    // Keep the delegate and listener alive until the machine is done with
+    // Keep the delegates and listeners alive until the machine is done with
     // them, then let the session disk go.
-    drop(listener);
-    drop(delegate);
+    drop(control_listener);
+    drop(control_delegate);
+    drop(net_listener);
+    drop(net_delegate);
     let _ = remove_session_image(&plan.session);
 }
 
-/// Install the readiness listener, start the machine, and wait for the guest.
+/// Install both readiness listeners, start the machine, and wait for the
+/// guest to dial both wires.
 ///
-/// On success this yields the host end of the guest's control-plane
-/// connection — the stream the frame protocol (`dev/docs/VM/SYNOD.md` §3) runs
-/// over — for the caller to keep.
+/// On success this yields the host ends of the guest's control-plane and net
+/// connections — the streams `dev/docs/VM/SYNOD.md` §3 and §6 describe — for
+/// the caller to keep.
 ///
 /// # Errors
-/// Returns macOS's start error, or a sentence, if the machine does not start
-/// or the guest does not connect within [`BOOT_TIMEOUT`].
+/// Returns macOS's start error, or a sentence naming whichever wire never
+/// arrived, if the machine does not start or the guest does not dial both
+/// within [`BOOT_TIMEOUT`].
 fn boot_machine(
     queue: &DispatchQueue,
     machine: &VZVirtualMachine,
-    listener: &VZVirtioSocketListener,
+    control_listener: &VZVirtioSocketListener,
+    net_listener: &VZVirtioSocketListener,
     events_tx: &Sender<Ready>,
     events_rx: &Receiver<Ready>,
-) -> Result<OwnedFd, String> {
+) -> Result<crate::Wires, String> {
     let machine_ptr = core::ptr::from_ref(machine);
-    let listener_ptr = core::ptr::from_ref(listener);
+    let control_listener_ptr = core::ptr::from_ref(control_listener);
+    let net_listener_ptr = core::ptr::from_ref(net_listener);
     let start_tx = events_tx.clone();
     // The completion handler is copied and held by the framework; it captures
     // only the `Send`, `'static` sender.
@@ -667,33 +704,56 @@ fn boot_machine(
 
     on_queue(queue, move || {
         // SAFETY: runs on the machine's own queue.  We fetch the runtime
-        // socket device, attach the readiness listener to the control port,
-        // and start the machine — every call on the queue it demands, with
-        // the machine and listener borrowed only for this synchronous block.
+        // socket device, attach both readiness listeners to their ports, and
+        // start the machine — every call on the queue it demands, with the
+        // machine and listeners borrowed only for this synchronous block.
+        // One `VZVirtioSocketDeviceConfiguration` already multiplexes both
+        // ports, so this is two listener registrations on the one device,
+        // not a second device.
         unsafe {
             let machine = &*machine_ptr;
-            let listener = &*listener_ptr;
+            let control_listener = &*control_listener_ptr;
+            let net_listener = &*net_listener_ptr;
             let devices = machine.socketDevices();
             if let Some(device) = devices.firstObject()
                 && let Ok(socket) = device.downcast::<VZVirtioSocketDevice>()
             {
-                socket.setSocketListener_forPort(listener, CONTROL_PORT);
+                socket.setSocketListener_forPort(control_listener, CONTROL_PORT);
+                socket.setSocketListener_forPort(net_listener, crate::NET_PORT);
             }
             machine.startWithCompletionHandler(&completion);
         }
     });
 
     let deadline = Instant::now() + BOOT_TIMEOUT;
+    let mut control = None;
+    let mut net = None;
     loop {
+        if let (Some(_), Some(_)) = (&control, &net) {
+            return Ok(crate::Wires {
+                control: control.expect("checked above"),
+                net: net.expect("checked above"),
+            });
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         match events_rx.recv_timeout(left) {
-            Ok(Ready::Connected(control_socket)) => return Ok(control_socket),
+            Ok(Ready::Connected(CONTROL_PORT, socket)) => control = Some(socket),
+            Ok(Ready::Connected(crate::NET_PORT, socket)) => net = Some(socket),
+            Ok(Ready::Connected(port, _)) => {
+                return Err(format!("the guest dialed an unexpected port, {port}"));
+            }
             Ok(Ready::Started(Ok(()))) => {}
             Ok(Ready::Started(Err(why))) => return Err(why),
             Err(RecvTimeoutError::Timeout) => {
+                let missing = match (&control, &net) {
+                    (None, None) => "either wire",
+                    (None, Some(_)) => "the control plane",
+                    (Some(_), None) => "the net wire",
+                    (Some(_), Some(_)) => unreachable!("checked at the top of the loop"),
+                };
                 return Err(format!(
-                    "the guest did not dial the control plane within {}s of starting: the kernel \
-                     may have panicked before its init could run",
+                    "the guest did not dial {missing} within {}s of starting: the kernel may \
+                     have panicked before its init could run",
                     BOOT_TIMEOUT.as_secs()
                 ));
             }
@@ -827,11 +887,13 @@ fn remove_session_image(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
 }
 
-/// The delegate object that turns the guest's first control-plane connection
-/// into a [`Ready::Connected`] carrying the host end of that connection.  Its
-/// instance variable is the sender the worker thread waits on; it is spent at
-/// most once, for the one control connection a machine has.
+/// The delegate object that turns the guest's first connection on one wire
+/// into a [`Ready::Connected`] carrying the port and the host end of that
+/// connection.  One instance per wire — the control plane gets one, the net
+/// wire another — each spent at most once, for the one connection its port
+/// ever accepts.
 struct SocketReadinessIvars {
+    port: u32,
     announce: Mutex<Option<Sender<Ready>>>,
 }
 
@@ -873,7 +935,7 @@ define_class!(
                 && let Ok(mut slot) = self.ivars().announce.lock()
                 && let Some(announce) = slot.take()
             {
-                let _ = announce.send(Ready::Connected(control_socket));
+                let _ = announce.send(Ready::Connected(self.ivars().port, control_socket));
                 true
             } else {
                 // Refuse.  Each way here is benign: a failed dup leaves the
@@ -891,10 +953,11 @@ define_class!(
 );
 
 impl SocketReadiness {
-    /// A delegate that will send `Ready::Connected` down `announce` the first
-    /// time the guest connects.
-    fn new(announce: Sender<Ready>) -> Retained<Self> {
+    /// A delegate for `port` that will send `Ready::Connected` down
+    /// `announce` the first time the guest connects to it.
+    fn new(port: u32, announce: Sender<Ready>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(SocketReadinessIvars {
+            port,
             announce: Mutex::new(Some(announce)),
         });
         // SAFETY: `super(this), init` is `NSObject`'s designated initializer
@@ -912,17 +975,16 @@ pub struct Guest {
     /// The path *inside* the guest at which virtiofs mounted the shared
     /// folder — what [`Machine::workspace_path`] hands back.
     mount_path: PathBuf,
-    /// The host end of the control-plane connection accepted at boot — the
-    /// stream the frame protocol (`dev/docs/VM/SYNOD.md` §3) runs over.
-    /// Taken out by [`Machine::take_control`], which may be called at most
-    /// once.
-    control_socket: Option<OwnedFd>,
+    /// The two wires accepted at boot.  Taken out by
+    /// [`Machine::take_wires`], which may be called at most once.
+    wires: Option<crate::Wires>,
     control: Option<Control>,
 }
 
 /// The live end of a machine's thread: the channel to it, and the thread
 /// itself, kept so a stop can be both asked for and waited on.  Not to be
-/// confused with [`Guest::control_socket`], the control-plane wire.
+/// confused with [`Wires::control`](crate::Wires::control), the
+/// control-plane wire held in [`Guest::wires`].
 struct Control {
     cmd_tx: Sender<Command>,
     thread: Option<JoinHandle<()>>,
@@ -934,12 +996,12 @@ impl Guest {
     /// Idempotent through the `Option`: [`Machine::shutdown`] takes the
     /// control out, so the `Drop` that follows finds nothing left to do.
     fn stop(&mut self) -> Result<(), Error> {
-        // Close the host end of the wire first, if it was never taken: the
-        // guest's engine exits on EOF and the daemon powers the machine off
-        // from inside — the same inside-out shutdown the end of a session
-        // performs — so the grace window below normally observes a stop
-        // rather than forcing one.
-        self.control_socket = None;
+        // Close the host ends of both wires first, if they were never taken:
+        // the guest's engine exits on EOF and the daemon powers the machine
+        // off from inside — the same inside-out shutdown the end of a
+        // session performs — so the grace window below normally observes a
+        // stop rather than forcing one.
+        self.wires = None;
         let Some(mut control) = self.control.take() else {
             return Ok(());
         };
@@ -969,16 +1031,14 @@ impl Machine for Guest {
         &self.mount_path
     }
 
-    /// The host end of the control-plane connection the guest dialed at boot,
-    /// handed over once.
+    /// The two wires the guest dialed at boot, handed over once.
     ///
     /// # Panics
-    /// Panics if asked a second time: a machine has exactly one such wire.
-    #[cfg(unix)]
-    fn take_control(&mut self) -> OwnedFd {
-        self.control_socket
+    /// Panics if asked a second time: a machine has exactly one of each.
+    fn take_wires(&mut self) -> crate::Wires {
+        self.wires
             .take()
-            .expect("a machine's control plane is taken at most once")
+            .expect("a machine's wires are taken at most once")
     }
 
     /// Ask the guest daemon to shut down, wait for the machine to reach the
@@ -1063,9 +1123,16 @@ mod tests {
     }
 
     /// The configuration carries exactly the machine the design asks for: two
-    /// disks, one share, one socket, and — the load-bearing absence — no
-    /// network device at all.  This reads the objects back before validation,
-    /// so it needs no entitlement.
+    /// disks, one share, one socket device carrying both the control plane
+    /// and the net wire, and — the load-bearing absence — no network device
+    /// at all.  This reads the objects back before validation, so it needs no
+    /// entitlement.
+    ///
+    /// `socketDevices().count() == 1` is asserted deliberately, alongside the
+    /// `networkDevices` absence: a `VZVirtioSocketDeviceConfiguration`
+    /// already multiplexes ports, so a second socket device would be a
+    /// regression the next reader might mistake for how a second wire is
+    /// meant to be added.
     #[test]
     fn the_configuration_is_the_machine_the_design_describes() {
         let fixture = fixture();
@@ -1075,7 +1142,11 @@ mod tests {
         unsafe {
             assert_eq!(config.storageDevices().count(), 2, "rootfs and session");
             assert_eq!(config.directorySharingDevices().count(), 1, "the share");
-            assert_eq!(config.socketDevices().count(), 1, "the control plane");
+            assert_eq!(
+                config.socketDevices().count(),
+                1,
+                "one socket device carries both the control plane and the net wire"
+            );
             assert_eq!(config.serialPorts().count(), 1, "the console");
             assert_eq!(
                 config.networkDevices().count(),
@@ -1112,8 +1183,9 @@ mod tests {
         assert!(matches!(error, Error::Unavailable { .. }), "{error}");
     }
 
-    /// The command line carries the console and the three session settings the
-    /// daemon reads, spelled the way `ral-daemon`'s parser expects.
+    /// The command line carries the console and the session settings the
+    /// daemon reads, spelled the way `ral-daemon`'s `boot::Boot::read` expects
+    /// — including the net wire's composite key.
     #[test]
     fn the_command_line_addresses_the_daemon() {
         let fixture = fixture();
@@ -1122,37 +1194,49 @@ mod tests {
         assert!(line.contains("ral.workspace=workspace"), "{line}");
         assert!(line.contains("ral.port=1729"), "{line}");
         assert!(line.contains("ral.epoch=1771200000"), "{line}");
+        assert!(
+            line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"),
+            "{line}"
+        );
     }
 
-    /// A machine has exactly one control-plane connection: [`take_control`]
-    /// hands its host end over once.  Built here from a socketpair rather
-    /// than a boot, since the wire is all the law concerns.
+    /// A machine has exactly one of each wire: [`take_wires`] hands both host
+    /// ends over once, together.  Built here from socketpairs rather than a
+    /// boot, since the wires are all the law concerns.
     ///
-    /// [`take_control`]: Machine::take_control
+    /// [`take_wires`]: Machine::take_wires
     #[test]
-    fn the_control_plane_is_handed_over_once() {
-        let (host_end, _guest_end) = std::os::unix::net::UnixStream::pair().unwrap();
+    fn the_wires_are_handed_over_once() {
+        let (control, _guest_control) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (net, _guest_net) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut guest = Guest {
             mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
-            control_socket: Some(OwnedFd::from(host_end)),
+            wires: Some(crate::Wires {
+                control: OwnedFd::from(control),
+                net: OwnedFd::from(net),
+            }),
             control: None,
         };
-        let _fd = guest.take_control();
+        let _wires = guest.take_wires();
     }
 
     /// A second ask finds nothing left to hand over: it is a caller's own
-    /// error, so the machine panics rather than answer with a used-up wire.
+    /// error, so the machine panics rather than answer with used-up wires.
     #[test]
     #[should_panic(expected = "at most once")]
-    fn a_second_ask_for_the_control_plane_panics() {
-        let (host_end, _guest_end) = std::os::unix::net::UnixStream::pair().unwrap();
+    fn a_second_ask_for_the_wires_panics() {
+        let (control, _guest_control) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (net, _guest_net) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut guest = Guest {
             mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
-            control_socket: Some(OwnedFd::from(host_end)),
+            wires: Some(crate::Wires {
+                control: OwnedFd::from(control),
+                net: OwnedFd::from(net),
+            }),
             control: None,
         };
-        let _ = guest.take_control();
-        let _ = guest.take_control();
+        let _ = guest.take_wires();
+        let _ = guest.take_wires();
     }
 
     /// The backend names itself, for the greeting a user sees.

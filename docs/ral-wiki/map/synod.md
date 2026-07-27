@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
+generated_at_commit: 2a3d8a5
+generated_at_date: 2026-07-27
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
 ---
 
@@ -54,9 +54,9 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 - `session.rs` — `Conversation`, one folder held open from first message to
   last. `begin` opens the grant, boots the machine, and seats exarch's agent
   on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over
-  `Machine::take_control`, attached at the guest's `/work`). `control_seat`
-  carries no platform condition at all: `take_control` hands back each
-  platform's own owned handle and `ral_core::transport::WireTransport::adopt`
+  `Machine::take_wires`, attached at the guest's `/work`). `control_seat`
+  carries no platform condition at all: `take_wires` hands back each
+  platform's own owned handles and `ral_core::transport::WireTransport::adopt`
   takes either, so the seam is one function
   ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
   `exchange` drives one message through `exarch::headless::converse_sink`,
@@ -144,10 +144,10 @@ of a spec, called by every backend so a bad spec is refused in the same words
 everywhere. `BootArtifact::resolve` is its twin for the media, and makes every
 file absolute: the paths are opened by *another process* — `vmcompute` runs in
 `C:\Windows\System32` — so a relative path that resolved for the caller names
-nothing by the time the machine is built. `Machine::take_control` is the one
-signature that varies — an `OwnedFd` on Unix, an `OwnedSocket` on Windows —
-because each platform owns its own accepted socket, and both are adopted by
-the host seam unchanged.
+nothing by the time the machine is built. `Machine::take_wires` is the one
+signature that varies — `Wires` holds an `OwnedFd` per wire on Unix and an
+`OwnedSocket` per wire on Windows — because each platform owns its own
+accepted sockets, and both are adopted by the host seam unchanged.
 
 **The crate boots only real machines.** `detect(Option<BootArtifact>)` answers
 `Vz`, `Brokered`, or `Hyperv`, or refuses with a sentence for a
@@ -168,10 +168,13 @@ backends.
   of the granted folder with `read_only` as the mount's law, a vsock device
   and no network device, console to the host log — drives the `!Send`
   machine from a dedicated thread against a private serial dispatch queue,
-  and declares boot only when the guest's daemon dials the control port.
-  That accepted connection is the host end of the §3 control plane:
-  `Machine::take_control` hands it out exactly once (a second ask panics as
-  a caller's bug), and a second guest dial is refused. Booting requires the
+  and declares boot only when the guest's daemon has dialled both the
+  control port and the net port. One socket device multiplexes them: a
+  second network *device* is exactly the fix that must never be made, and a
+  test asserts `socketDevices().count() == 1` to say so.
+  Those accepted connections are the host ends of the §3 control plane and
+  the §6 net wire: `Machine::take_wires` hands both out exactly once (a
+  second ask panics as a caller's bug), and a second guest dial is refused. Booting requires the
   `com.apple.security.virtualization` entitlement — `vz::entitled()` is a
   process check, not a platform check.
 
@@ -224,7 +227,9 @@ blocking I/O.
   `pppppppp-facb-11e6-bd58-64006a7986d3`, which is why a guest that knows
   nothing of Windows can still be dialled. `socket_sddl` names SYSTEM,
   built-in Administrators, and *this user's own SID* — never a wildcard, since
-  this socket is the one door in an otherwise networkless machine — and
+  this socket is one of two doors into a machine with no network *adapter* of
+  its own (the guest's actual network rides the second `HvSocket` port,
+  `NET_PORT`, into a host process — [[design/egress|egress]]) — and
   `fresh_machine_id` draws on `ProcessPrng` because the machine's identifier
   *is* half the socket's address.
 - `vhd.rs` — a `VirtualDisk` attachment must be a VHD, so the raw ext4 images
@@ -366,9 +371,11 @@ runs — end to end on macOS, and everything above the machine on both: the §3
 wire carries real runs (`synod/examples/boot-run.rs` witnesses
 boot → shared folder → engine → settled report), the §5 spawn jail stands
 inside the guest (a fresh uid and a cgroup between the engine and what it
-runs), and §6's `fetch-url` answers the web through `exarch::fleet::egress`
-under IT's policy, threaded once through `RootConfig` so both seats answer
-alike.
+runs), and §6 gives the guest a network of its own — a `tun` whose only peer
+is `guest-net`, a user-mode TCP/IP stack in a host process — rather than the
+single `fetch-url` verb an earlier draft made the whole egress surface
+([[design/egress|egress]],
+[[decisions/260727_the-guest-gets-a-network-not-a-verb|the-guest-gets-a-network-not-a-verb]]).
 [[decisions/260715_vm-workspaces-cross-by-copy|vm-workspaces-cross-by-copy]]
 records where synod's work-in-place workspace deliberately departs from
 exarch's cross-by-copy position.

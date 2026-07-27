@@ -9,9 +9,12 @@
 //!
 //! The answer is deliberately small.  `SYNOD.md` §8 lists eight security
 //! layers; the grant is layer 2, *topology as policy* — credentials,
-//! `$HOME`, the user's other folders and the network are out of reach by
-//! absence, not by a rule that could be argued with.  This module is the
-//! typed statement of that absence.
+//! `$HOME`, and the user's other folders are out of reach by absence, not
+//! by a rule that could be argued with.  The network is the one axis
+//! topology cannot settle alone: §6 gives the guest a wire, and what it may
+//! say on it is a host-side allowlist, checked one layer out from this
+//! module (`design/two-enforcers`).  This module is the typed statement of
+//! the rest.
 //!
 //! ## Namespace
 //!
@@ -41,8 +44,9 @@ use std::path::{Path, PathBuf};
 /// the honest grant is "whatever lives under these roots".
 ///
 /// Synod's toolbox is the opposite shape.  §7 makes the image the
-/// package manager — the guest has no network, so the rootfs is fixed,
-/// finite, and known before the user ever opens the app.  A directory
+/// package manager — anything installed mid-session is forgotten at the
+/// next reboot, so what the agent may *rely* on is exactly the rootfs:
+/// fixed, finite, and known before the user ever opens the app.  A directory
 /// grant on `/usr/bin` would therefore hand the agent every package the
 /// *next* image build happens to add, silently widening the grant each
 /// time the rootfs is repackaged, and it would quietly re-admit exactly
@@ -95,8 +99,14 @@ const TOOLBOX: &[&str] = &[
     "csvstack",
     "csvstat",
     // The language the document libraries live in (pandas, openpyxl,
-    // python-docx, python-pptx, pypdf, Pillow — all preinstalled).
+    // python-docx, python-pptx, pypdf, Pillow — all preinstalled), and its
+    // package installer: a model-spawned `apt` fails outright on §5's
+    // fresh-UID jail, so `pip3 install --user` is the one install path the
+    // network's allowlist actually admits. `curl` rides beside it for
+    // whatever `pip3` cannot reach directly.
     "python3",
+    "pip3",
+    "curl",
     // Reading and reshaping text.
     "cat",
     "head",
@@ -301,10 +311,17 @@ impl Grant {
     ///   configuration so `git` and `cargo` behave, an office session has
     ///   no configuration to find; every byte it needs is in the folder it
     ///   was handed.
-    /// - **net** — off, flatly.  §6 gives the guest no network device at
-    ///   all, so this is the policy agreeing with the topology rather
-    ///   than substituting for it.  The web arrives, when it arrives, as
-    ///   the host's `fetch-url` verb; not in v1.
+    /// - **net** — on.  §6 gives the guest a `tun` whose only peer is a
+    ///   user-mode TCP/IP stack in the host, which terminates every
+    ///   connection and checks it against an allowlist before a byte
+    ///   crosses.  ral's `net` is a flat boolean with no endpoint
+    ///   vocabulary of its own, so the real narrowing is stated one layer
+    ///   out, in that host policy — `design/two-enforcers` applied
+    ///   outward, not reproduced here.  `Some(false)` would strip the
+    ///   network from every command this grant spawns
+    ///   (`core/src/sandbox/linux.rs`'s `bwrap --unshare-net`), silently
+    ///   deleting the capability §6 built — this is a correctness bit,
+    ///   not prose.
     /// - **exec** — the toolbox of §7 and nothing else.  See [`TOOLBOX`]
     ///   for why it is a list of names rather than of directories.
     /// - **editor / shell** — the ral editor is off in every mode: this
@@ -344,7 +361,7 @@ impl Grant {
                 write_prefixes: prefixes(),
                 deny_paths: Vec::new(),
             }),
-            net: Some(false),
+            net: Some(true),
             exec: Some(ExecMap {
                 literals: TOOLBOX
                     .iter()
@@ -566,12 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn the_guest_has_no_network() {
+    fn the_guest_reaches_the_network_through_the_hosts_allowlist() {
         let (dir, grant) = granted("grant-net");
         assert_eq!(
             grant.capabilities().net,
-            Some(false),
-            "SYNOD.md §6: the guest has no network at all"
+            Some(true),
+            "SYNOD.md §6: the guest has a wire; `core/src/sandbox/linux.rs` turns \
+             Some(false) into `bwrap --unshare-net`, which would strip it back off"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

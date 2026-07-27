@@ -90,10 +90,10 @@ pub(crate) struct Build {
     /// at the trunk's construction and inherited verbatim by every fork — a
     /// host setting, not a per-agent choice.
     pub(crate) disk_warn_bytes: Option<u64>,
-    /// The IT-set `fetch-url` policy, audit ledger, and rate budget,
-    /// threaded from [`RootConfig::egress`] and inherited verbatim by every
-    /// fork — a host setting, not a per-agent choice.
-    pub(crate) egress: crate::fleet::egress::Egress,
+    /// The IT-set network policy, audit ledger, and rate budget, threaded
+    /// from [`RootConfig::egress`] and inherited verbatim by every fork —
+    /// a host setting, not a per-agent choice.
+    pub(crate) egress: crate::egress::Egress,
 }
 
 /// The trunk's launch configuration.
@@ -119,11 +119,10 @@ pub struct RootConfig {
     /// Exarch's own launch sites pass [`SPAWN_FUEL`]; synod passes `0` — an
     /// office job is asked and answered, never a fleet.
     pub fuel: u32,
-    /// The IT-set `fetch-url` policy, audit ledger, and rate budget —
-    /// opened once at launch ([`crate::fleet::egress::Egress::open`]) and
-    /// threaded into every fork verbatim, a host setting like
-    /// `disk_warn_bytes` above.
-    pub egress: crate::fleet::egress::Egress,
+    /// The IT-set network policy, audit ledger, and rate budget — opened
+    /// once at launch ([`crate::egress::Egress::open`]) and threaded into
+    /// every fork verbatim, a host setting like `disk_warn_bytes` above.
+    pub egress: crate::egress::Egress,
 }
 
 /// Where the trunk's engine lives — the one construction-time choice
@@ -598,7 +597,7 @@ impl Agent {
             // Unconfigured by default: a test that wants to exercise the
             // disk-warn check sets `session.disk_warn_bytes` directly.
             disk_warn_bytes: None,
-            egress: crate::fleet::egress::Egress::for_test(),
+            egress: crate::egress::Egress::for_test(),
         })?;
         agent.register_self();
         Ok(agent)
@@ -814,7 +813,7 @@ mod tests {
                 chat: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
-                egress: crate::fleet::egress::Egress::for_test(),
+                egress: crate::egress::Egress::for_test(),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -957,7 +956,7 @@ mod tests {
                 chat: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
-                egress: crate::fleet::egress::Egress::for_test(),
+                egress: crate::egress::Egress::for_test(),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),

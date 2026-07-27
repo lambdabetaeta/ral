@@ -87,7 +87,11 @@ pub const PIPE: &str = r"\\.\pipe\synod-machine-broker";
 /// other from `Program Files` — so a mismatch has to be refused loudly rather
 /// than discovered as a strange field later. The same law
 /// `dev/docs/VM/SYNOD.md` §3 puts on the engine's own `Attach`.
-pub const VERSION: u32 = 1;
+///
+/// 2, since [`Reply::Booted`] grew a second socket description: an installed
+/// service still speaking 1 would answer a boot with one wire, and a client
+/// that adopted only that one would have no net wire to hand the engine.
+pub const VERSION: u32 = 2;
 
 /// What synod asks the broker for.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,19 +109,21 @@ pub enum Request {
         /// Whether the agent may only read it.
         read_only: bool,
     },
-    /// The client has made its own socket from the description it was given, so
-    /// the broker may close the one it still holds.
+    /// The client has made its own sockets from the descriptions it was
+    /// given, so the broker may close the two it still holds.
     ///
-    /// This step exists because of an ordering trap with two jaws. Closing the
-    /// broker's handle *before* the client has adopted the description would
-    /// race the duplication and could leave the client with a socket whose
-    /// connection is already gone. Never closing it would be worse and quieter:
-    /// two handles hold the connection open, so the guest would not see the
-    /// end-of-file that a closing client is supposed to cause, and the
-    /// inside-out power-off every teardown depends on would simply never start —
-    /// a machine that shuts down only when forced, for a reason no log would
-    /// show. So the client says when it is safe, and only then does the broker
-    /// let go.
+    /// This step exists because of an ordering trap with two jaws, and it now
+    /// closes on two handles rather than one. Closing the broker's own
+    /// before the client has adopted its descriptions would race the
+    /// duplication and could leave the client with a socket whose connection
+    /// is already gone. Never closing them would be worse and quieter: two
+    /// handles apiece hold each connection open, so the guest would not see
+    /// the end-of-file that a closing client is supposed to cause on either
+    /// wire, and the inside-out power-off every teardown depends on would
+    /// simply never start — a machine that shuts down only when forced, for
+    /// a reason no log would show. So the client says when it is safe, and
+    /// only then does the broker let go — of both, in one statement, for the
+    /// same reason [`crate::hcs::Guest`]'s own wires are dropped together.
     Adopted,
     /// Stop the machine this connection owns, and report whether it stopped
     /// cleanly. Dropping the connection stops it too; this exists so a caller
@@ -128,7 +134,7 @@ pub enum Request {
 /// What the broker answers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Reply {
-    /// The machine is up and its guest has dialled the control plane.
+    /// The machine is up and its guest has dialled both wires.
     Booted {
         /// Where the granted folder appears inside the guest — the path the
         /// agent works at, never a host path.
@@ -137,7 +143,11 @@ pub enum Reply {
         /// `WSADuplicateSocketW`; [`client::adopt_socket`] turns it back into a
         /// socket. Opaque bytes on the wire, and meaningless in any other
         /// process.
-        socket: Vec<u8>,
+        control: Vec<u8>,
+        /// The net-wire socket, described the same way as `control` and for
+        /// the same process — the two are peers, not a pair to be told apart
+        /// by which arrives first.
+        net: Vec<u8>,
     },
     /// The machine stopped; `Err` carries the sentence explaining what was not
     /// clean about it.

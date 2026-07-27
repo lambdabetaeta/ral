@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
-covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/egress.rs, exarch/src/org_policy.rs, exarch/data/agent.ral]
+generated_at_commit: 2a3d8a5
+generated_at_date: 2026-07-27
+covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
@@ -30,8 +30,7 @@ prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 
 `EXARCH_BUILTINS` is the largest set on `builtins::host_surface()` — the one
 `HostSurface` value declaring exarch's builtins beyond core's, alongside the
-harness verbs, the `fetch-url` egress set, and core's host-selected
-`SERVICE_BUILTIN`. Core's `boot_shell`
+harness verbs and core's host-selected `SERVICE_BUILTIN`. Core's `boot_shell`
 takes the surface and installs it at construction (a half-dressed production
 shell is unrepresentable), and the wire engine boots the same dressing
 through its `EngineInstaller` *boot recipe*
@@ -170,7 +169,8 @@ error with no room for a didactic message.
   final prompt); `grant` is one of the six [[map/exarch/policy|base]] names;
   `search` is a `Bool` admitting the provider's own hosted web search,
   clamped at the desk to at most the caller's own bit, which the trunk takes
-  from the IT `fetch-url` policy's `search` verdict. Fuel bounds delegation
+  from the IT network policy's `search` verdict
+  ([[map/exarch/agent|agent]]). Fuel bounds delegation
   depth, not fan-out — refused only once the caller's own `fuel` reaches
   zero.
 - **`agents`** → `F [[name: Str, elapsed-s: Int, log-dir: Str]]`.
@@ -210,21 +210,6 @@ additionally derives a child tab);
 listings stay silent, since their value *is* the returned record.
 [[map/exarch/tools|tools]] is what remains a tool.
 
-## The web door — `fetch-url`
-
-`fetch-url <url>` → `F Bytes` (`shell_eval/builtins/egress.rs`,
-`EGRESS_BUILTINS`): the model's one action onto the outbound network, a
-sibling of the harness family kept separate — no launch spine, no grant to
-hold, one `shell.enquire(`` `fetch-url `` `…)` crossing per call. The desk's
-`fetch_url` arm answers under the IT-set `Egress` policy (`fleet/egress.rs`,
-opened once at launch — `org_policy`'s baked `default-policy.ral` or the
-operator's own — and inherited verbatim by every fork,
-[[map/exarch/agent|agent]]): approved domains only, redirects refused, a
-per-response size cap, a rate budget, and every fetch — allowed or refused —
-on the audit record. A refusal names the site and points at the IT policy;
-the success is `Bytes` the script decodes itself (`to-string`,
-`from-json`, …).
-
 ## Where to look
 
 - `exarch/src/shell_eval/builtins.rs` (+ `builtins/fff_index.rs`) — the Rust
@@ -239,3 +224,6 @@ the success is `Bytes` the script decodes itself (`to-string`,
   ([[map/exarch|exarch]] hub).
 - The model-facing tool that carries every one of these calls is
   [[map/exarch/tools|`ral`]].
+- There is no model-facing network builtin: a guest reaches the network
+  itself, policed host-side — [[design/egress|egress]],
+  [[map/exarch/agent|agent]], [[map/synod|synod]].

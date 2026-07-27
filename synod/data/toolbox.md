@@ -1,4 +1,4 @@
-Everything named below is already installed, and nothing else can be — there is no network. Solve the problem with these.
+Everything named below is already installed. `pip3 install --user` can add more from the package list, but nothing installed survives past this conversation — solve the problem with these first.
 
 ## Spreadsheets
 

@@ -5,9 +5,12 @@
      with Virtualization.framework (the vz backend in vm-manager).  It works
      under an ad-hoc signature, so local development never needs an Apple
      Developer account; a Developer ID signature carries it identically when
-     the app ships.  Deliberately absent: com.apple.vm.networking — the
-     guest has no network device by design (SYNOD.md §6), and that
-     entitlement would need Apple's case-by-case approval anyway. -->
+     the app ships.  Deliberately absent: com.apple.vm.networking.  The guest
+     does reach the network, but never through a network device the
+     hypervisor configures (SYNOD.md §6) — its only interface is a tun whose
+     one peer is guest-net, a user-mode stack in this process, reached over
+     vsock.  So the entitlement Apple grants case by case is one we never
+     have to ask for, which is a consequence of the design worth stating. -->
 <dict>
     <key>com.apple.security.virtualization</key>
     <true/>

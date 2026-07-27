@@ -3,10 +3,11 @@
 //!
 //! Everything this module does is a syscall in a fixed order.  The decisions
 //! it performs live in [`crate::boot`], [`crate::mounts`], [`crate::engine`],
-//! and [`crate::reap`], where they are data and can be tested; here they are
-//! only carried out.
+//! [`crate::net`], [`crate::pump`], and [`crate::reap`], where they are data
+//! and can be tested; here they are only carried out.
 
 use std::convert::Infallible;
+use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -14,11 +15,9 @@ use rustix::process::{Pid, Signal, getpid, kill_process_group};
 use rustix::system::{RebootCommand, reboot};
 use rustix::time::{ClockId, Timespec, clock_settime};
 
-use crate::boot::{Boot, Export};
-use crate::engine;
-use crate::mounts;
+use crate::boot::{Boot, Export, Net};
 use crate::reap::{self, Waking};
-use crate::sysctl;
+use crate::{engine, mounts, net, packet, pump, sysctl, vsock};
 
 /// How long the engine is given to finish after being asked to stop, before
 /// it is killed.  Long enough for a run to abandon its work and flush the
@@ -49,6 +48,16 @@ extern "C" fn requested_stop(_: libc::c_int) {
 /// the boot was misconfigured, a filesystem would not mount, the host was
 /// not listening, or the engine could not be started.
 pub fn serve() -> Result<Infallible, String> {
+    // The one exception to the refusal below: the pump (`crate::pump`) is
+    // `ral-daemon --pump`, re-executed as a plain child of this same init
+    // rather than as pid 1, so it must never reach the is-init check at all.
+    // Every other argv — including none — still meets the hard refusal, the
+    // same law `boot::Boot::read` applies to an unknown `ral.` key: a
+    // spelling this daemon does not recognise is refused, not ignored.
+    if std::env::args().nth(1).as_deref() == Some("--pump") {
+        return pump::run();
+    }
+
     if !getpid().is_init() {
         return Err(format!(
             "ral-daemon is the init process of a ral guest, not a command. It is what runs as \
@@ -108,10 +117,22 @@ pub fn serve() -> Result<Infallible, String> {
 
     listen_for_the_end();
     if STOPPING.load(Ordering::Acquire) {
-        return halt(None, "the host asked to stop before the engine had started");
+        return halt(None, None, "the host asked to stop before the engine had started");
     }
 
+    // The control plane is dialled first — this is what fixes the Windows
+    // broker's serial accept order and preserves today's readiness
+    // semantics — but not handed to the engine yet: the engine is the last
+    // thing this function starts, so that the network (if any) and the CA
+    // it delivers are already in place before any process exists that could
+    // read them.
     let control = engine::control_plane(boot.port)?;
+
+    let pump = match &boot.net {
+        Some(net_config) => Some(bring_up_network(net_config)?),
+        None => None,
+    };
+
     let engine = engine::spawn(&boot, &control)?;
     // The child holds its own copy on fd 3 now; the parent's would only keep
     // the connection alive past the engine's death.
@@ -122,26 +143,69 @@ pub fn serve() -> Result<Infallible, String> {
         boot.port
     );
 
-    halt(Some(engine), &attend(engine)?)
+    halt(Some(engine), pump, &attend(engine, pump)?)
+}
+
+/// Dial the host's net wire, deliver its prologue, bring the `tun` up, and
+/// start the pump — everything step 10 of the crate's boot narrative
+/// promises, in the order it promises it.
+///
+/// # Errors
+/// Returns a sentence naming whichever of those steps failed: the wire
+/// could not be reached, the prologue could not be read, a blob could not
+/// be written, the interface could not be planned or created, or the pump
+/// could not be started.
+fn bring_up_network(net_config: &Net) -> Result<Pid, String> {
+    let socket = vsock::dial_host(net_config.port).map_err(|err| {
+        format!(
+            "could not reach the host's net wire on vsock port {}: {err}. The host must be \
+             listening there before the guest boots, exactly as it must for the control plane.",
+            net_config.port
+        )
+    })?;
+    let mut wire = std::fs::File::from(socket);
+    let prologue = packet::Prologue::parse(&mut wire)
+        .map_err(|err| format!("could not read the net wire's prologue: {err}"))?;
+    for blob in net::delivery(&prologue) {
+        blob.apply()?;
+    }
+    let tun = net::plan(net_config)?.apply()?;
+    eprintln!(
+        "ral-daemon: the network is up on vsock port {} as {}",
+        net_config.port, net_config.address
+    );
+    let net_fd = OwnedFd::from(wire);
+    let pump = pump::spawn(&tun, &net_fd)?;
+    // As with the control plane above: the pump holds its own copies of
+    // both descriptors now, and this process keeping either open would only
+    // keep the tun and the net wire alive past the pump's own death.
+    drop((tun, net_fd));
+    eprintln!("ral-daemon: net pump running as pid {}", pump.as_raw_nonzero());
+    Ok(pump)
 }
 
 /// Wait until there is a reason to stop, reaping everything that dies in the
 /// meantime, and return that reason.
 ///
-/// This is the whole of the daemon's running life.  Three things can end
-/// it: the engine dies, a signal says the host wants the machine off, or —
-/// which should not happen while the engine lives — the guest runs out of
+/// This is the whole of the daemon's running life.  Four things can end it:
+/// the engine dies, the pump dies (when this boot has one — see
+/// `pump::epitaph` for why that ends the session exactly as the engine's
+/// death does), a signal says the host wants the machine off, or — which
+/// should not happen while the engine lives — the guest runs out of
 /// processes entirely.
 ///
 /// # Errors
 /// Returns a sentence when the wait itself fails for a reason that is
 /// neither an interruption nor an empty process table.
-fn attend(engine: Pid) -> Result<String, String> {
+fn attend(engine: Pid, pump: Option<Pid>) -> Result<String, String> {
     loop {
         let waking = reap::wait_any()
             .map_err(|err| format!("waiting for the guest's processes failed: {err}"))?;
         match waking {
             Waking::Reaped { pid, death } if pid == engine => return Ok(engine::epitaph(death)),
+            Waking::Reaped { pid, death } if Some(pid) == pump => {
+                return Ok(pump::epitaph(death));
+            }
             // An orphan, reparented here when its own parent died. Burying
             // it is the job; saying so keeps the host's log honest about
             // what the guest was doing.
@@ -169,30 +233,47 @@ fn attend(engine: Pid) -> Result<String, String> {
 ///
 /// The engine's whole session — it leads one, so `kill(-pid, …)` reaches
 /// every command it ever spawned — is asked to finish, given [`GRACE`] to do
-/// it, and then killed.  Then the filesystems are flushed and the power goes
-/// off.
+/// it, and then killed; only then is the pump killed outright, with no
+/// grace at all. That order is deliberate, not incidental: an engine that is
+/// finishing a job may still be draining a response over the network, so
+/// killing the pump first would turn a graceful five seconds into five
+/// seconds of hung sockets for no benefit — the pump has no work of its own
+/// to finish, only the engine's. Then the filesystems are flushed and the
+/// power goes off.
 ///
 /// # Errors
 /// Returns a sentence if the kernel refuses to power the machine off, which
 /// leaves the daemon with nothing further it can do.
-fn halt(engine: Option<Pid>, why: &str) -> Result<Infallible, String> {
+fn halt(engine: Option<Pid>, pump: Option<Pid>, why: &str) -> Result<Infallible, String> {
     eprintln!("ral-daemon: {why}");
     if let Some(engine) = engine {
         let _ = kill_process_group(engine, Signal::TERM);
-        let deadline = Instant::now() + GRACE;
-        while Instant::now() < deadline {
-            match reap::poll_any() {
-                Ok(Waking::Reaped { pid, .. }) if pid == engine => break,
-                Ok(Waking::Reaped { .. } | Waking::Idle | Waking::Interrupted) => {
-                    std::thread::sleep(PULSE);
+        // Only an engine still running is worth waiting for.  The commonest
+        // way to arrive here is [`attend`] having just reaped it, and a pid
+        // already reaped is never reported a second time — so without this
+        // probe the loop below could only ever expire, spending the whole
+        // grace on a process that ended before it started.  The group is
+        // swept either way: a process group outlives its leader for as long
+        // as the commands the engine spawned are still in it.
+        if rustix::process::test_kill_process(engine).is_ok() {
+            let deadline = Instant::now() + GRACE;
+            while Instant::now() < deadline {
+                match reap::poll_any() {
+                    Ok(Waking::Reaped { pid, .. }) if pid == engine => break,
+                    Ok(Waking::Reaped { .. } | Waking::Idle | Waking::Interrupted) => {
+                        std::thread::sleep(PULSE);
+                    }
+                    // Nobody left to wait for, or a wait that failed: either
+                    // way there is nothing more to learn here, and the
+                    // SIGKILL below is unconditional anyway.
+                    Ok(Waking::Childless) | Err(_) => break,
                 }
-                // Nobody left to wait for, or a wait that failed: either way
-                // there is nothing more to learn here, and the SIGKILL below
-                // is unconditional anyway.
-                Ok(Waking::Childless) | Err(_) => break,
             }
         }
         let _ = kill_process_group(engine, Signal::KILL);
+    }
+    if let Some(pump) = pump {
+        let _ = rustix::process::kill_process(pump, Signal::KILL);
     }
     // Everything the guest wrote to the workspace should reach the host
     // before the export carrying it — a virtiofs share or a 9p connection —

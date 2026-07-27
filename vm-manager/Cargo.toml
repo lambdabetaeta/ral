@@ -14,6 +14,12 @@ path = "src/lib.rs"
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# `boot::command_line` is the single writer of the kernel command line, shared
+# with the guest's own reader so the two ends of the boot contract cannot drift
+# apart at compile time; `boot::Net`/`NET_PORT` are this crate's own re-export
+# of the guest's link, in `lib.rs`. Unconditional because both backends need
+# it and `boot` itself is not platform-gated.
+ral-daemon = { path = "../ral-daemon" }
 
 # The macOS backend ([`vz`]) speaks to Virtualization.framework through the
 # `objc2` family — the only maintained Rust binding to the framework (the

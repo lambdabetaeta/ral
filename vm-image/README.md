@@ -16,17 +16,21 @@ rootfs.img   (RO, pinned)   <--   build.sh BUILDS THIS ONE
 boot.img     (ships w/ app)      kernel + ral-daemon + ral engine (build-boot.sh)
 ```
 
-## Why the image is the package manager
+## Why the image is what an agent may rely on
 
-The guest has **no network device at all** (§6): office work is folder-local
-and the model API is called from the host, so the guest is given only a virtual
-socket. That single fact is the whole reason this directory exists. "No egress
-means no installs at runtime, which makes the rootfs load-bearing: whatever
-isn't in the image doesn't exist" (§7). So the image is deliberately rich — a
-full document stack, a wide font set, full locales — and just as deliberately
-lean where it counts: **no compilers, headers, or build systems**, because
-"they exist only to install more software, and there is nothing to install
-from."
+The guest reaches the network only through the host's allowlist (§6), and no
+hypervisor here configures a network adapter: its only interface is a `tun`
+whose single peer is `guest-net`, a user-mode TCP/IP stack in a host process
+that answers DNS itself, terminates TCP, and intercepts 80 and 443 so a grant
+is a *verb on a host* rather than a hostname. So installs at runtime are
+possible — and they are also **forgotten at the next boot**, because the root
+overlay is per-session (§7). That is what makes the rootfs load-bearing: not
+that nothing can be installed, but that nothing installed *lasts*, so whatever
+an agent may rely on is exactly what is in the image. Hence an image that is
+deliberately rich — a full document stack, a wide font set, full locales — and
+just as deliberately lean where it counts: **no compilers, headers, or build
+systems**. Those earn their weight only for software that outlives the session,
+and here nothing does.
 
 No ral binaries live here either; the daemon and engine ship in `boot.img`,
 versioned with the app so the `Attach` handshake can enforce the pairing (§7).
@@ -180,10 +184,11 @@ the mirror from `ARCH` rather than let a caller pair them wrongly.)
    full headless docx/xlsx/pptx read, write, and `--convert-to`.
 2. **No `python3-pptx` in Ubuntu 24.04 *or* 26.04.** python-pptx is genuinely
    not packaged for either release (universe included; no alternative name;
-   re-checked on resolute). It is **dropped** to keep
-   the image apt-pure and reproducible — the design leans on "the image is the
-   package manager", and a build-time `pip` would undercut that. **pptx is not
-   lost**: LibreOffice headless reads and writes pptx via `--convert-to`; only
+   re-checked on resolute). It is **dropped** to keep the image apt-pure and
+   reproducible: a build-time `pip` would make the rootfs depend on a resolver
+   run rather than on a package set, and it is the *reproducibility* of the
+   image that argument protects, not the guest's inability to fetch. **pptx is
+   not lost**: LibreOffice headless reads and writes pptx via `--convert-to`; only
    the Python *binding* is absent. If a native binding is later required, the
    clean fallback is to `apt install` its dependencies (`python3-lxml`,
    `python3-pil`, `python3-xlsxwriter`) and then `pip install --no-deps
@@ -412,9 +417,10 @@ The amd64 column earns its differences one at a time:
   has enumerated; `hv_storvsc` is the SCSI HBA both disks arrive behind,
   `hv_utils` the KVP/shutdown/timesync services the host expects a well-behaved
   guest to answer, `hv_balloon` its dynamic-memory client.
-- **There is deliberately no `hv_netvsc`.** Ubuntu builds it, and this guest has
-  **no network device at all** (§6) — so shipping its driver would load code for
-  hardware that is not there. `CONFIG_HYPERV_NET` is still *recorded* in
+- **There is deliberately no `hv_netvsc`.** Ubuntu builds it, and no hypervisor
+  here gives the guest a paravirtualised NIC (§6) — its network arrives over
+  `tun`, not the VMBus — so shipping its driver would load code for hardware
+  that is not there. `CONFIG_HYPERV_NET` is still *recorded* in
   `kernel-config-check.txt`, so the artifact shows a decision rather than an
   omission.
 - **The transports are mirror images.** `CONFIG_HYPERV_VSOCKETS` is recorded and

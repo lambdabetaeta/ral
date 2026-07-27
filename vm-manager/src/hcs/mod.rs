@@ -11,7 +11,11 @@
 //! | the granted folder | virtiofs share | 9p share the host serves ([`spec`]) |
 //! | one socket out | `VZVirtioSocketDevice` | `AF_HYPERV` socket ([`hvsock`]) |
 //! | a console | virtio console → stdout | COM port on a named pipe ([`console`]) |
-//! | no network | no device configured | no device configured |
+//! | one net wire | second `VZVirtioSocketDevice` port | second `HvSocket` service ([`spec`]) |
+//!
+//! Neither backend configures a network adapter: the net wire is a second
+//! socket, not a NIC, and the guest's TCP/IP stack lives entirely on the
+//! host side of it (`dev/docs/VM/SYNOD.md` §6).
 //!
 //! The guest cannot tell the difference, and that is the point: the same
 //! `ral-daemon` and the same engine boot under both, because every difference
@@ -39,7 +43,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec};
+use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec, Wires};
 
 mod api;
 mod console;
@@ -236,6 +240,7 @@ fn assemble(
 
     let socket_sddl = hvsock::socket_sddl().map_err(|why| unavailable(&why))?;
     let control_service = hvsock::format_guid(&hvsock::service_guid(CONTROL_PORT));
+    let net_service = hvsock::format_guid(&hvsock::service_guid(crate::NET_PORT));
     let document = spec::document(&spec::Plan {
         kernel: &artifact.kernel,
         initramfs: &artifact.initramfs,
@@ -246,10 +251,12 @@ fn assemble(
         vcpus: clamp_cpus(spec.vcpus),
         memory_mib: spec.memory_mib,
         control_port: CONTROL_PORT,
+        net_port: crate::NET_PORT,
         epoch: unix_seconds(),
         console_pipe: console.as_ref().map_or("", console::Console::pipe),
         socket_sddl: &socket_sddl,
         control_service: &control_service,
+        net_service: &net_service,
     });
     let document = serde_json::to_string(&document).map_err(|e| {
         unavailable(&format!(
@@ -285,7 +292,7 @@ fn assemble(
         id,
         system,
         mount_path: spec.workspace.guest_path.clone(),
-        control: None,
+        wires: None,
         console,
         session: session.to_path_buf(),
         granted: Vec::new(),
@@ -313,32 +320,55 @@ fn assemble(
         guest.granted.push(file.to_path_buf());
     }
 
-    let listener = hvsock::Listener::bind(&machine_id, CONTROL_PORT).map_err(|cause| {
+    // Both listeners are bound before the machine starts, for the reason
+    // [`hvsock::Listener::bind`] documents: the guest's daemon dials with a
+    // few seconds' patience, and a listener bound afterwards would be racing
+    // a boot.
+    let control_listener = hvsock::Listener::bind(&machine_id, CONTROL_PORT).map_err(|cause| {
         unavailable(&format!(
             "the machine's control plane could not be opened: {cause}"
+        ))
+    })?;
+    let net_listener = hvsock::Listener::bind(&machine_id, crate::NET_PORT).map_err(|cause| {
+        unavailable(&format!(
+            "the machine's net wire could not be opened: {cause}"
         ))
     })?;
 
     api.start(guest.system)
         .map_err(|error| unavailable(&error.to_string()))?;
 
-    // A started machine is not a booted guest: a kernel can panic on the
-    // way up and never reach userspace.  The dial is the proof, and the
-    // connection it arrives on *is* the session's wire — not a handshake to
-    // be spent and dropped (`dev/docs/VM/SYNOD.md` §3).
-    let control = listener.accept_within(BOOT_TIMEOUT).map_err(|cause| {
-        unavailable(&format!(
-            "the guest did not dial the control plane within {}s of starting: {cause}. The \
+    // A started machine is not a booted guest: a kernel can panic on the way
+    // up and never reach userspace.  The two dials are the proof, taken in
+    // the daemon's own order — control, then the net wire — and both are
+    // charged against one deadline rather than two, so a guest that dials
+    // the first promptly and never dials the second does not double the
+    // patience a hung boot gets.
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let control = control_listener
+        .accept_within(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|cause| {
+            unavailable(&format!(
+                "the guest did not dial the control plane within {}s of starting: {cause}. The \
                  guest's own console output above says why, if it got far enough to say anything",
-            BOOT_TIMEOUT.as_secs()
-        ))
-    })?;
-    guest.control = Some(control);
+                BOOT_TIMEOUT.as_secs()
+            ))
+        })?;
+    let net = net_listener
+        .accept_within(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|cause| {
+            unavailable(&format!(
+                "the guest did not dial the net wire within {}s of starting: {cause}. The \
+                 guest's own console output above says why, if it got far enough to say anything",
+                BOOT_TIMEOUT.as_secs()
+            ))
+        })?;
+    guest.wires = Some(Wires { control, net });
     Ok(Box::new(guest))
 }
 
 /// A booted guest, and the four things that have to be released when it stops:
-/// its control plane, its machine, its console pump, and its session disk.
+/// its two wires, its machine, its console pump, and its session disk.
 pub struct Guest {
     api: &'static api::Api,
     /// The machine's identifier — its `VmId`, and what `hcsdiag list` shows.
@@ -346,9 +376,16 @@ pub struct Guest {
     system: api::HcsSystem,
     /// The path *inside* the guest where the granted folder is mounted.
     mount_path: PathBuf,
-    /// The host end of the control-plane connection accepted at boot, taken out
-    /// once by [`Machine::take_control`].
-    control: Option<std::os::windows::io::OwnedSocket>,
+    /// The host ends of the control-plane and net-wire connections accepted
+    /// at boot, taken out together by [`Machine::take_wires`].
+    ///
+    /// One `Option` around the pair, not two around each field: [`stop`]
+    /// drops both wires in the one statement that clears this, which is what
+    /// makes "drop both, or the pump never sees EOF on the one that
+    /// lingered" true by construction rather than by remembering it.
+    ///
+    /// [`stop`]: Guest::stop
+    wires: Option<Wires>,
     console: Option<console::Console>,
     session: PathBuf,
     /// The files this machine was given access to, to be taken away again when
@@ -372,12 +409,14 @@ impl Guest {
     /// Returns [`Error::Unavailable`] if the guest did not stop within
     /// [`STOP_GRACE`] and the machine had to be stopped for it.
     fn stop(&mut self) -> Result<(), Error> {
-        // Closing the host end of the wire first is what makes this a *clean*
-        // shutdown rather than a kill: the guest's engine sees EOF, the daemon
-        // powers the machine off from inside, and the grace window below
-        // observes a machine already stopping.  The same inside-out shutdown
-        // the macOS backend performs.
-        self.control = None;
+        // Closing the host ends of both wires first is what makes this a
+        // *clean* shutdown rather than a kill: the guest's engine sees EOF on
+        // the control plane, the daemon powers the machine off from inside,
+        // and the grace window below observes a machine already stopping.
+        // Dropping the one `Option` drops both sockets — see the field's own
+        // doc for why that is not something a caller has to remember.  The
+        // same inside-out shutdown the macOS backend performs.
+        self.wires = None;
         if self.system.is_null() {
             return Ok(());
         }
@@ -447,20 +486,20 @@ impl Machine for Guest {
         &self.mount_path
     }
 
-    /// The host end of the control-plane connection the guest dialled at boot,
-    /// handed over once.
+    /// The host ends of the control plane and the net wire the guest dialled
+    /// at boot, handed over together, once.
     ///
-    /// An `AF_HYPERV` socket, where the macOS backend's is an `AF_VSOCK`
-    /// descriptor; both are adopted by `ral-core`'s wire the same way, and
+    /// Both are `AF_HYPERV` sockets, where the macOS backend's are `AF_VSOCK`
+    /// descriptors; both are adopted by `ral-core`'s wire the same way, and
     /// [`ral_core::wire::WireStream`](../../core/src/wire.rs) is where that is
     /// explained.
     ///
     /// # Panics
-    /// Panics if asked a second time: a machine has exactly one such wire.
-    fn take_control(&mut self) -> std::os::windows::io::OwnedSocket {
-        self.control
+    /// Panics if asked a second time: a machine has exactly one of each wire.
+    fn take_wires(&mut self) -> Wires {
+        self.wires
             .take()
-            .expect("a machine's control plane is taken at most once")
+            .expect("a machine's two wires are taken at most once")
     }
 
     /// Close the wire, let the guest power itself off, and release the machine.

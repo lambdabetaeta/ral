@@ -54,7 +54,8 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    model's.  So this section must never suggest a change is pending
 ///    review or reversible: a model that believes in a gate is a model
 ///    that overwrites originals cheerfully.
-/// 6. **No network** (`data/no-network.md`) — absent, not denied.
+/// 6. **Network** (`data/network.md`) — a fixed package-site allowlist, not
+///    the web.
 /// 7. **Host** — [`host_section`], synod's own: guest truths only.
 ///    Exarch's section reports this process's cwd, user, `$HOME` and git
 ///    state — host facts that are all false inside the machine the agent
@@ -96,10 +97,7 @@ pub fn assemble(
             workspace.display()
         ),
     ));
-    sections.push((
-        Some("No network"),
-        include_str!("../data/no-network.md").into(),
-    ));
+    sections.push((Some("Network"), include_str!("../data/network.md").into()));
     sections.push((Some("Host"), host_section(caps, workspace)));
     let rules = config_dir.join(HOUSE_RULES);
     match std::fs::read_to_string(&rules) {
@@ -150,7 +148,7 @@ mod tests {
         "# Editing",
         "# Toolbox",
         "# The folder",
-        "# No network",
+        "# Network",
         "# Host",
         "# Talking to the user",
     ];
@@ -284,12 +282,12 @@ mod tests {
 
     /// The office sections are present in substance, not just by heading.
     #[test]
-    fn assemble_carries_the_toolbox_and_the_absent_network() {
+    fn assemble_carries_the_toolbox_and_the_package_only_network() {
         let p = prompt();
         assert!(p.contains("openpyxl"));
         assert!(p.contains("ocrmypdf"));
         assert!(p.contains("soffice --headless"));
-        assert!(p.contains("no network connection"));
+        assert!(p.contains("It is not the web"));
     }
 
     /// House rules are picked up from the config directory when present, and

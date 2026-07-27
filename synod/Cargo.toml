@@ -32,3 +32,17 @@ blake3     = "1"
 sha2       = "0.10"
 zstd       = "0.13"
 tokio      = { version = "1", features = ["rt"] }
+
+# The guest's whole network: `session::begin` writes the net wire's
+# prologue and hands it to `guest_net::run` beside the control wire
+# `vm-manager` already returns.  synod already links `exarch`, so this adds
+# nothing to the binary that `guest-net` did not already carry.  Both
+# platforms: `guest_net::device::Wire` is implemented for `UnixStream` on
+# Unix and `TcpStream` on Windows, the same pretence
+# `ral_core::wire::WireStream` makes for the control plane.
+guest-net  = { path = "../guest-net" }
+# The prologue codec `session::net_seat` writes onto the net wire before
+# handing it to `guest_net::run` — `ral_daemon::packet` is deliberately
+# ungated so any host process can link it; this is the one other than
+# `guest-net` itself.
+ral-daemon = { path = "../ral-daemon" }

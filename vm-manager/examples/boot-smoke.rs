@@ -20,7 +20,15 @@
 //!
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
 
+use std::io::Write as _;
+
+use ral_daemon::packet::Prologue;
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
+
+#[cfg(unix)]
+type NetStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type NetStream = std::net::TcpStream;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,18 +47,42 @@ fn main() {
     };
 
     println!("booting via {}...", hypervisor.name());
-    let machine = match hypervisor.boot(&MachineSpec::for_folder(folder)) {
+    let mut machine = match hypervisor.boot(&MachineSpec::for_folder(folder)) {
         Ok(machine) => machine,
         Err(err) => {
             eprintln!("boot failed: {err}");
             std::process::exit(1);
         }
     };
+    // The guest waits on the net wire's prologue before it will start an
+    // engine at all, so a host that takes the wires and says nothing wedges
+    // the boot rather than merely going without a network.  This example
+    // wants no network, only a machine to watch, so it sends the shortest
+    // honest prologue there is — no resolver, no proxy to trust — and holds
+    // the wire open, because the pump ends the session on EOF.
+    let wires = machine.take_wires();
+    let mut net = NetStream::from(wires.net);
+    if let Err(err) = net.write_all(
+        &Prologue {
+            resolv_conf: Vec::new(),
+            ca_pem: Vec::new(),
+        }
+        .encode(),
+    ) {
+        eprintln!("could not write the net wire's prologue: {err}");
+        std::process::exit(1);
+    }
+
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
     println!("ral-daemon's own console lines print above as the guest runs.");
     println!("press enter to shut the machine down");
     let _ = std::io::stdin().read_line(&mut String::new());
 
+    // Closing the wire first is what makes this the inside-out shutdown the
+    // end of a real session performs: the pump sees EOF, the daemon powers
+    // the machine off from within, and the wait below observes a stop rather
+    // than forcing one.
+    drop(net);
     match machine.shutdown() {
         Ok(()) => println!("stopped cleanly"),
         Err(err) => {

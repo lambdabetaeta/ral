@@ -25,9 +25,13 @@
 //!   port; the guest dials that port and mounts it at `/work`.  This is the
 //!   mechanism WSL uses for `/mnt/c` and Microsoft's own Linux containers use
 //!   for every host path, so it is neither exotic nor synod's invention.
-//! - **`Devices.HvSocket`** — the control plane, and the only way out of the
-//!   machine.  There is **no network adapter at all** (§6): not a disabled one,
-//!   not a filtered one — absent, so there is nothing to misconfigure.
+//! - **`Devices.HvSocket`** — the control plane and the net wire, the guest's
+//!   only two ways out of the machine.  There is **no network adapter at
+//!   all** (§6): not a disabled one, not a filtered one — absent, so there is
+//!   nothing to misconfigure.  The net wire is a second `HvSocketService`
+//!   entry in the same table, dialled by the guest exactly as the control
+//!   plane is, and carries only IPv4 frames to the host's own user-mode
+//!   TCP/IP stack — no NIC, no ARP, no broadcast domain.
 //! - **`Devices.ComPorts`** — the guest console on a named pipe, which
 //!   [`super::console`] reads onto synod's own output.  This is where a kernel
 //!   panic or a daemon's refusal becomes visible; without it a failed boot is
@@ -38,6 +42,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use ral_daemon::boot;
 use serde::Serialize;
 
 /// The schema version this document is written against.
@@ -94,6 +99,8 @@ pub(super) struct Plan<'a> {
     pub(super) memory_mib: u32,
     /// The host's `AF_HYPERV` control-plane port, as the guest's vsock port.
     pub(super) control_port: u32,
+    /// The host's `AF_HYPERV` net-wire port, as the guest's vsock port.
+    pub(super) net_port: u32,
     /// The host's wall clock at boot, for the guest to adopt.
     pub(super) epoch: u64,
     /// The named pipe the guest's console is wired to.
@@ -102,26 +109,42 @@ pub(super) struct Plan<'a> {
     pub(super) socket_sddl: &'a str,
     /// The service GUID the control port maps to, spelled as HCS wants it.
     pub(super) control_service: &'a str,
+    /// The service GUID the net port maps to, spelled as HCS wants it.
+    pub(super) net_service: &'a str,
 }
 
 /// The kernel command line: the console, and the session settings
-/// `ral-daemon`'s [`Boot`](../../ral-daemon/src/boot.rs) parser reads out of
-/// `/proc/cmdline`.
+/// [`ral_daemon::boot::Boot`] reads back out of `/proc/cmdline`.
 ///
-/// Two of these differ from the macOS backend's line, and both differences are
-/// the hypervisor's rather than a choice: the console is an emulated COM port
-/// (`ttyS0`) instead of a virtio console (`hvc0`), and the workspace arrives as
-/// a 9p share on a port (`ral.plan9`) instead of a virtiofs tag alone.  The
-/// two ports named here are *different sockets for different jobs* —
-/// `ral.port` is the control plane the engine speaks the frame protocol over,
-/// `ral.plan9` is the transport the workspace filesystem rides — and the guest
-/// would mount its control plane if they were ever swapped, so they are
-/// written from named fields, never positionally.
-pub(super) fn kernel_command_line(plan: &Plan<'_>) -> String {
-    format!(
-        "console=ttyS0 ral.workspace={WORKSPACE_SHARE} ral.plan9={PLAN9_PORT} ral.port={} \
-         ral.epoch={}",
-        plan.control_port, plan.epoch
+/// Built and rendered by `ral-daemon`'s own [`boot::command_line`] rather than
+/// formatted here, so the two ends of the boot contract cannot drift apart at
+/// compile time — the stale-`boot.img` case stays possible, and stays a loud
+/// one-line refusal, but a *spelling* mismatch between writer and reader is no
+/// longer possible at all.
+///
+/// The console is an emulated COM port (`ttyS0`), where the macOS backend's is
+/// a virtio console (`hvc0`) — the one difference [`boot::command_line`]
+/// leaves to its caller, because it is the hypervisor's fact, not the boot
+/// contract's.  Everything else — the workspace as a named 9p share, the two
+/// control-plane and net-wire ports, the epoch — is the shared shape.
+fn kernel_command_line(plan: &Plan<'_>) -> String {
+    boot::command_line(
+        &boot::Boot {
+            workspace: boot::Export::Plan9 {
+                name: WORKSPACE_SHARE.to_string(),
+                port: PLAN9_PORT,
+            },
+            port: plan.control_port,
+            epoch: i64::try_from(plan.epoch).unwrap_or(i64::MAX),
+            engine: boot::DEFAULT_ENGINE.to_string(),
+            net: Some(boot::Net {
+                port: plan.net_port,
+                address: crate::GUEST_LINK.address,
+                prefix: crate::GUEST_LINK.prefix,
+                gateway: crate::GUEST_LINK.gateway,
+            }),
+        },
+        "ttyS0",
     )
 }
 
@@ -194,13 +217,22 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
                     hv_socket_config: HvSocketConfig {
                         default_bind_security_descriptor: plan.socket_sddl.to_string(),
                         default_connect_security_descriptor: plan.socket_sddl.to_string(),
-                        service_table: BTreeMap::from([(
-                            plan.control_service.to_string(),
-                            HvSocketService {
-                                bind_security_descriptor: plan.socket_sddl.to_string(),
-                                connect_security_descriptor: plan.socket_sddl.to_string(),
-                            },
-                        )]),
+                        service_table: BTreeMap::from([
+                            (
+                                plan.control_service.to_string(),
+                                HvSocketService {
+                                    bind_security_descriptor: plan.socket_sddl.to_string(),
+                                    connect_security_descriptor: plan.socket_sddl.to_string(),
+                                },
+                            ),
+                            (
+                                plan.net_service.to_string(),
+                                HvSocketService {
+                                    bind_security_descriptor: plan.socket_sddl.to_string(),
+                                    connect_security_descriptor: plan.socket_sddl.to_string(),
+                                },
+                            ),
+                        ]),
                     },
                 },
                 com_ports: BTreeMap::from([(
@@ -378,10 +410,12 @@ mod tests {
             vcpus: 4,
             memory_mib: 4096,
             control_port: 1729,
+            net_port: 1730,
             epoch: 1_771_200_000,
             console_pipe: r"\\.\pipe\synod-console-1",
             socket_sddl: "D:P(A;;FA;;;SY)",
             control_service: "000006c1-facb-11e6-bd58-64006a7986d3",
+            net_service: "000006c2-facb-11e6-bd58-64006a7986d3",
         }
     }
 
@@ -390,10 +424,12 @@ mod tests {
     }
 
     /// The document carries exactly the machine the design describes: two
-    /// disks in the guest's own order, one share, one socket service, one
-    /// console — and, the load-bearing absence, no network adapter at all
-    /// (`dev/docs/VM/SYNOD.md` §6).  This is the Windows twin of the macOS
-    /// backend's `the_configuration_is_the_machine_the_design_describes`.
+    /// disks in the guest's own order, one share, two socket services — the
+    /// control plane and the net wire — one console, and, the load-bearing
+    /// absence, no network adapter at all (`dev/docs/VM/SYNOD.md` §6): the
+    /// net wire is a second `HvSocket` service, not a NIC.  This is the
+    /// Windows twin of the macOS backend's
+    /// `the_configuration_is_the_machine_the_design_describes`.
     #[test]
     fn the_document_is_the_machine_the_design_describes() {
         let doc = json();
@@ -412,11 +448,12 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .len(),
-            1
+            2,
+            "the control plane and the net wire, and nothing else"
         );
         assert!(
             devices.get("NetworkAdapters").is_none(),
-            "the guest has no way out but the socket"
+            "the guest has no way out but the two sockets"
         );
     }
 
@@ -459,9 +496,10 @@ mod tests {
     }
 
     /// The command line addresses the daemon in the spelling its parser
-    /// expects, and keeps the two vsock ports distinct — the control plane and
-    /// the workspace transport are different sockets, and swapping them would
-    /// have the guest mount its own control connection.
+    /// expects, and keeps the three vsock ports distinct — the control plane,
+    /// the workspace transport and the net wire are three different sockets,
+    /// and `service_guid` folds each into its own GUID, so a collision here
+    /// would silently alias two of the machine's services onto one.
     #[test]
     fn the_command_line_addresses_the_daemon() {
         let line = kernel_command_line(&plan());
@@ -470,7 +508,14 @@ mod tests {
         assert!(line.contains("ral.plan9=564"), "{line}");
         assert!(line.contains("ral.port=1729"), "{line}");
         assert!(line.contains("ral.epoch=1771200000"), "{line}");
-        assert_ne!(PLAN9_PORT, 1729, "the two ports must not collide");
+        assert!(line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"), "{line}");
+        assert_ne!(PLAN9_PORT, super::super::CONTROL_PORT, "plan9/control collide");
+        assert_ne!(PLAN9_PORT, crate::NET_PORT, "plan9/net collide");
+        assert_ne!(
+            super::super::CONTROL_PORT,
+            crate::NET_PORT,
+            "control/net collide"
+        );
     }
 
     /// Losing the handle stops the machine: a crashed synod leaves no guest

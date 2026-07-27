@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 2a3d8a5
+generated_at_date: 2026-07-27
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -141,8 +141,7 @@ are batched rather than live under the sandbox.
 `shell_eval/builtins.rs` registers exarch's resident host atoms — `view-text`, the
 `grep-files` search, the hash-addressed `edit-hash`/`edit-replace`, whose
 file I/O happens in Rust, below the redirect frame
-([[map/exarch/io-surface|io-surface]]), and the `fetch-url` egress builtin,
-which crosses the desk seam as one enquiry — and sources the small embedded
+([[map/exarch/io-surface|io-surface]]) — and sources the small embedded
 `data/agent.ral` helper library (`view-text-around`, the tasks kit) into the
 shell at boot ([[map/exarch/builtins|builtins]]). The one `host_surface()`
 value declaring these sets rides core's `boot_shell` at construction and is
