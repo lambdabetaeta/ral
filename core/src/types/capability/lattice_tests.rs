@@ -38,7 +38,14 @@ fn strs(items: &[&str]) -> Value {
 /// through the same kernel so the Unix-shaped literals stay meaningful
 /// on both Unix and Windows.
 fn np(s: &str) -> String {
-    crate::path::NormalizedPrefix::from_surface(s).into_string()
+    nprefix(s).into_string()
+}
+
+/// Mint a [`NormalizedPrefix`](crate::path::NormalizedPrefix) witness —
+/// used throughout this file's fixtures, which build `FsPolicy`/`ExecMap`
+/// values directly rather than through `decode_capability_map`.
+fn nprefix(s: &str) -> crate::path::NormalizedPrefix {
+    crate::path::NormalizedPrefix::from_surface(s)
 }
 
 /// Unwrap a decode `PolicyError` into its message.
@@ -81,12 +88,13 @@ fn witness_a() -> Capabilities {
                     ExecPolicy::Subcommands(BTreeSet::from(["log".into(), "status".into()])),
                 ),
             ]),
-            dirs: BTreeMap::from([(np("/usr/bin"), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         fs: Some(FsPolicy {
-            read_prefixes: vec!["/tmp".into()],
-            write_prefixes: vec!["/tmp".into()],
-            deny_paths: vec!["/tmp/secret".into()],
+            read_prefixes: vec![nprefix("/tmp")],
+            write_prefixes: vec![nprefix("/tmp")],
+            deny_paths: vec![nprefix("/tmp/secret")],
         }),
         net: Some(true),
         audit: false,
@@ -109,15 +117,13 @@ fn witness_b() -> Capabilities {
                 ),
                 ("ls".into(), ExecPolicy::Allow),
             ]),
-            dirs: BTreeMap::from([
-                (np("/usr/bin"), ExecDir::Allow),
-                (np("/usr/local/bin"), ExecDir::Allow),
-            ]),
+            allow_dirs: BTreeSet::from([nprefix("/usr/bin"), nprefix("/usr/local/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         fs: Some(FsPolicy {
-            read_prefixes: vec!["/tmp/work".into()],
-            write_prefixes: vec!["/tmp/work".into()],
-            deny_paths: vec!["/tmp/work/.exarch.toml".into()],
+            read_prefixes: vec![nprefix("/tmp/work")],
+            write_prefixes: vec![nprefix("/tmp/work")],
+            deny_paths: vec![nprefix("/tmp/work/.exarch.toml")],
         }),
         net: Some(false),
         audit: false,
@@ -134,10 +140,11 @@ fn witness_c() -> Capabilities {
     Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("cargo".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         fs: Some(FsPolicy {
-            read_prefixes: vec!["/tmp".into()],
+            read_prefixes: vec![nprefix("/tmp")],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -206,7 +213,7 @@ fn meet_bottom_zeroes_authority() {
     let a = witness_a();
     let m = a.meet(Capabilities::deny_all());
     let exec = m.exec.expect("exec retained");
-    assert!(exec.literals.is_empty() && exec.dirs.is_empty());
+    assert!(exec.literals.is_empty() && exec.allow_dirs.is_empty() && exec.deny_dirs.is_empty());
     let fs = m.fs.expect("fs retained");
     assert!(fs.read_prefixes.is_empty());
     assert!(fs.write_prefixes.is_empty());
@@ -230,8 +237,8 @@ fn meet_exec_intersects_and_meets_policies() {
     }
     assert!(!exec.literals.contains_key("git"));
     assert!(!exec.literals.contains_key("ls"));
-    assert!(exec.dirs.contains_key(np("/usr/bin").as_str()));
-    assert!(!exec.dirs.contains_key(np("/usr/local/bin").as_str()));
+    assert!(exec.allow_dirs.contains(&nprefix("/usr/bin")));
+    assert!(!exec.allow_dirs.contains(&nprefix("/usr/local/bin")));
 }
 
 /// `Deny` is sticky downward: a base ceiling that vetos `bash`
@@ -247,14 +254,16 @@ fn meet_exec_preserves_one_sided_deny() {
                 ("ls".into(), ExecPolicy::Allow),
                 ("bash".into(), ExecPolicy::Deny),
             ]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
     let restrict = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("ls".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
@@ -273,14 +282,16 @@ fn join_exec_regrant_does_not_lift_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
     let extend = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("bash".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
@@ -301,14 +312,16 @@ fn join_exec_keeps_one_sided_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
     let extend = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
@@ -325,23 +338,22 @@ fn meet_exec_dirs_preserve_one_sided_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([
-                ("/usr/bin".into(), ExecDir::Allow),
-                ("/opt/danger".into(), ExecDir::Deny),
-            ]),
+            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            deny_dirs: BTreeSet::from([nprefix("/opt/danger")]),
         }),
         ..Default::default()
     };
     let restrict = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
-    let dirs = base.meet(restrict).exec.unwrap().dirs;
-    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Allow));
-    assert_eq!(dirs.get(np("/opt/danger").as_str()), Some(&ExecDir::Deny));
+    let exec = base.meet(restrict).exec.unwrap();
+    assert!(exec.allow_dirs.contains(&nprefix("/usr/bin")));
+    assert!(exec.deny_dirs.contains(&nprefix("/opt/danger")));
 }
 
 /// Security-inversion regression: an exact-key clash between an allow
@@ -352,19 +364,22 @@ fn meet_exec_dirs_deny_beats_allow() {
     let allow = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
     let deny = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Deny)]),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::from([nprefix("/usr/bin")]),
         }),
         ..Default::default()
     };
-    let dirs = allow.meet(deny).exec.unwrap().dirs;
-    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Deny));
+    let exec = allow.meet(deny).exec.unwrap();
+    assert!(exec.deny_dirs.contains(&nprefix("/usr/bin")));
+    assert!(!exec.allow_dirs.contains(&nprefix("/usr/bin")));
 }
 
 /// Deny-overrides on dirs too: an extend-base that re-grants the exact
@@ -375,19 +390,22 @@ fn join_exec_dirs_regrant_does_not_lift_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/x".into(), ExecDir::Deny)]),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::from([nprefix("/x")]),
         }),
         ..Default::default()
     };
     let extend = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/x".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([nprefix("/x")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
-    let dirs = base.join(extend).exec.unwrap().dirs;
-    assert_eq!(dirs.get(np("/x").as_str()), Some(&ExecDir::Deny));
+    let exec = base.join(extend).exec.unwrap();
+    assert!(exec.deny_dirs.contains(&nprefix("/x")));
+    assert!(!exec.allow_dirs.contains(&nprefix("/x")));
 }
 
 /// Dir veto is sticky under join too: a base that denies a directory
@@ -397,20 +415,22 @@ fn join_exec_dirs_keep_one_sided_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/opt/danger".into(), ExecDir::Deny)]),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::from([nprefix("/opt/danger")]),
         }),
         ..Default::default()
     };
     let extend = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
-    let dirs = base.join(extend).exec.unwrap().dirs;
-    assert_eq!(dirs.get(np("/opt/danger").as_str()), Some(&ExecDir::Deny));
-    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Allow));
+    let exec = base.join(extend).exec.unwrap();
+    assert!(exec.deny_dirs.contains(&nprefix("/opt/danger")));
+    assert!(exec.allow_dirs.contains(&nprefix("/usr/bin")));
 }
 
 /// Meet keeps an allow-region intersection AND a covering deny carved
@@ -421,23 +441,22 @@ fn meet_exec_dirs_intersect_allow_keeps_covering_deny() {
     let broad = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([nprefix("/usr")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
     };
     let carved = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([
-                ("/usr".into(), ExecDir::Allow),
-                ("/usr/bin".into(), ExecDir::Deny),
-            ]),
+            allow_dirs: BTreeSet::from([nprefix("/usr")]),
+            deny_dirs: BTreeSet::from([nprefix("/usr/bin")]),
         }),
         ..Default::default()
     };
-    let dirs = broad.meet(carved).exec.unwrap().dirs;
-    assert_eq!(dirs.get(np("/usr").as_str()), Some(&ExecDir::Allow));
-    assert_eq!(dirs.get(np("/usr/bin").as_str()), Some(&ExecDir::Deny));
+    let exec = broad.meet(carved).exec.unwrap();
+    assert!(exec.allow_dirs.contains(&nprefix("/usr")));
+    assert!(exec.deny_dirs.contains(&nprefix("/usr/bin")));
 }
 
 /// IPC roundtrip: a `Capabilities` survives a JSON trip through the
@@ -686,8 +705,12 @@ fn decode_rewrites_sigils_to_concrete_paths() {
     // Dir keys are stored slash-free; sigil expansion rewrites them to
     // concrete absolute prefixes.
     let exec = caps.exec.unwrap();
-    assert!(exec.dirs.contains_key("/h/.local/bin"));
-    assert!(exec.dirs.contains_key("/usr/bin"));
+    assert!(
+        exec.allow_dirs
+            .iter()
+            .any(|p| p.as_str() == "/h/.local/bin")
+    );
+    assert!(exec.allow_dirs.iter().any(|p| p.as_str() == "/usr/bin"));
     let reads = caps.fs.unwrap().read_prefixes;
     assert_eq!(reads[0], "/h/notes");
     assert_eq!(reads[1], "/etc");

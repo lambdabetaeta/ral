@@ -191,7 +191,7 @@ mod tests {
     use super::*;
     use crate::types::Shell;
     #[cfg(unix)]
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn render_expands_tilde_against_env_home() {
@@ -281,13 +281,15 @@ mod tests {
     #[test]
     fn deny_names_close_path_bash_bypass_of_bare_deny() {
         use crate::capability::admits_for_test;
-        use crate::types::{Capabilities, Context, ExecDir, ExecMap, ExecPolicy, GrantStack};
+        use crate::path::NormalizedPrefix;
+        use crate::types::{Capabilities, Context, ExecMap, ExecPolicy, GrantStack};
 
         let mut grants = GrantStack::root();
         grants.push(Capabilities {
             exec: Some(ExecMap {
                 literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-                dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+                allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/bin")]),
+                deny_dirs: BTreeSet::new(),
             }),
             ..Capabilities::root()
         });
@@ -337,7 +339,8 @@ mod tests {
         grants.push(Capabilities {
             exec: Some(ExecMap {
                 literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
-                dirs: BTreeMap::new(),
+                allow_dirs: BTreeSet::new(),
+                deny_dirs: BTreeSet::new(),
             }),
             ..Capabilities::root()
         });

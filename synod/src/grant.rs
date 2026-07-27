@@ -31,11 +31,11 @@
 
 use ral_core::path::NormalizedPrefix;
 use ral_core::types::{Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, ShellPolicy};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The office toolbox of `SYNOD.md` §7, as an allowlist of *literal
-/// command names* — `ExecMap::dirs` stays empty.
+/// command names* — `ExecMap::allow_dirs`/`deny_dirs` stay empty.
 ///
 /// [`ExecMap`] admits either bare-name literals or directory prefixes,
 /// and exarch's profiles lean hard on the directory half because a
@@ -367,7 +367,8 @@ impl Grant {
                     .iter()
                     .map(|name| ((*name).to_string(), ExecPolicy::Allow))
                     .collect::<BTreeMap<_, _>>(),
-                dirs: BTreeMap::new(),
+                allow_dirs: BTreeSet::new(),
+                deny_dirs: BTreeSet::new(),
             }),
             editor: Some(EditorPolicy::default()),
             shell: Some(ShellPolicy { chdir: true }),

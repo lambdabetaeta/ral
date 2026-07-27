@@ -18,8 +18,8 @@ pub use shell::repl::ReplScratch;
 // SandboxProjection/BindSpec/CheckSpec, Capabilities + meet.
 mod capability;
 pub use capability::{
-    Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, ExecProjection, FsPolicy,
-    FsProjection, GrantStack, Join, Meet, SandboxBindSpec, SandboxProjection, ShellPolicy,
+    Capabilities, EditorPolicy, ExecMap, ExecPolicy, ExecProjection, FsPolicy, FsProjection,
+    GrantStack, Join, Meet, SandboxBindSpec, SandboxProjection, ShellPolicy,
 };
 
 // Runtime values: Value and lambda rendering.

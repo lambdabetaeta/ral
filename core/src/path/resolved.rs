@@ -2,28 +2,46 @@
 //!
 //! [`ResolvedPath`] is the access-side stage-2 output: a path that is
 //! absolute, `.`/`..`-collapsed, and anchored against the *logical*
-//! cwd.  [`NormalizedPrefix`] is the grant-side counterpart: a frozen
-//! prefix string in the same normal form, minted at policy freeze.
+//! cwd.  [`NormalizedPrefix`] is the grant-side counterpart: a record
+//! minted at policy freeze that carries *both* the `surface` form (as
+//! authored, `.`/`..`-folded) and the `resolved` form (symlinks
+//! followed) alongside the `namespace` the two forms agree in.
 //!
-//! Both have private fields.  A [`ResolvedPath`] is minted only
-//! through [`super::Resolver::resolve`]; the grant-side freeze door
-//! is the lexer ([`super::sigil`]).  [`NormalizedPrefix`] also admits
-//! [`NormalizedPrefix::from_surface`] (and the `From<&str>` /
-//! `From<String>` sugar), which re-fold an already-normal surface form
-//! for the prefix-set projection and the OS-sandbox renderer.  Every
-//! door — `Resolver::resolve`, `freeze`, `from_surface` — runs the one
-//! `.`/`..`-folding kernel ([`super::lex::fold_dots`]), so an
-//! access-side path and a grant-side prefix compare like-for-like
-//! under [`super::path_within`].
+//! Carrying `resolved` on the value, rather than re-deriving it from
+//! disk at every comparison, is what lets composition
+//! ([`Capabilities::meet`](crate::types::Capabilities::meet), the
+//! `ExecMap`/`FsPolicy` lattices) be a total pure function of two
+//! policies: minting consults the disk once, at freeze; composing two
+//! already-minted prefixes never does.  Enforcement — the gate at the
+//! point of use — still re-resolves against the live filesystem, and
+//! that is correct: composition is a statement about the policy,
+//! enforcement is a statement about the world.
+//!
+//! Both types have private fields.  A [`ResolvedPath`] is minted only
+//! through [`super::Resolver::resolve`]; the grant-side freeze door is
+//! the lexer ([`super::sigil`]).  [`NormalizedPrefix`] also admits
+//! [`NormalizedPrefix::from_surface`], which re-folds an already-normal
+//! surface form for the prefix-set projection and the OS-sandbox
+//! renderer.  Every door — `Resolver::resolve`, `freeze`,
+//! `from_surface` — runs the one `.`/`..`-folding kernel
+//! ([`super::lex::fold_dots`]), so an access-side path and a grant-side
+//! prefix compare like-for-like under [`super::path_within`].  There is
+//! no `From<&str>`/`From<String>` sugar: a `From` impl cannot consult
+//! the oracle a `resolved` field needs, so it would be a door for
+//! fabricating one.
 //!
 //! One door answers to a different operating system:
 //! [`NormalizedPrefix::from_guest`], for a prefix this process mints but
 //! never matches, because the gate that matches it runs inside a Linux
 //! guest.  It runs the same law in the guest's namespace
-//! ([`super::lex::fold_dots_posix`]).  The like-for-like promise above is
-//! unchanged and is exactly why the second door has to exist: the pairing
-//! is per-namespace, and a Windows host folding `/work` with its own
-//! kernel would hand the guest a prefix matching nothing.
+//! ([`super::lex::fold_dots_posix`]), and — because there is no
+//! `realpath(3)` on this host for a path inside another machine —
+//! `resolved` is just `surface` again, tagged `Namespace::Guest`.  That
+//! tag is what makes composition namespace-correct: overlap is judged
+//! on `(namespace, resolved)`, so a host-namespace prefix and a
+//! guest-namespace prefix never overlap, and a cross-namespace meet is
+//! the empty, fail-closed intersection rather than a host kernel
+//! silently folding `/work` to `\work` and matching nothing.
 //!
 //! Canonicalisation against `realpath(3)` is anchored on this normal
 //! form: [`ResolvedPath::canonicalise_strict`] /
@@ -108,41 +126,78 @@ impl ResolvedPath {
     }
 }
 
-/// A frozen grant prefix in the same normal form a [`ResolvedPath`]
-/// carries: absolute and `.`/`..`-collapsed.
+/// Which operating system's namespace a [`NormalizedPrefix`]'s
+/// `resolved` form was resolved in.
 ///
-/// Held as a `String`
-/// because grant prefixes freeze against a different cwd/home than the
-/// access, but minted by the same `fold_dots` kernel so they match
-/// like-for-like.  Private field; the grant-side door is the freeze
-/// lexer, save for a prefix bound for another OS's namespace — see
-/// [`NormalizedPrefix::from_guest`].
+/// Composition keys overlap on `(namespace, resolved)`
+/// ([`super::meet_prefixes`]), so a prefix minted for one namespace
+/// never overlaps one minted for another — the meet is fail-closed
+/// across namespaces rather than silently comparing spellings that
+/// were never meant to agree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Namespace {
+    /// Resolved by and matched against this process's own filesystem.
+    Host,
+    /// Resolved by and matched against a Linux guest's filesystem —
+    /// see [`NormalizedPrefix::from_guest`].
+    Guest,
+}
+
+/// A frozen grant prefix, carrying both the form the author wrote and
+/// the form the gate matches against.
 ///
-/// `Serialize`/`Deserialize` are transparent — the wire form is the
-/// bare inner `String`.  Decoding bypasses the freeze constructor
-/// because the IPC boundary (`WireContext` across the re-exec'd child)
-/// is trusted: the parent has already frozen every prefix.
+/// `surface` is absolute and `.`/`..`-collapsed, in the same normal
+/// form a [`ResolvedPath`] carries.  `resolved` is `surface` with
+/// symlinks followed, in `namespace`.  Carrying both — rather than
+/// re-deriving `resolved` from disk on every comparison — is what lets
+/// the lattice meets be pure: minting is the one place this type
+/// touches the filesystem.
+///
+/// Private fields; the grant-side door is the freeze lexer
+/// ([`super::sigil`]), save for a prefix bound for another OS's
+/// namespace — see [`NormalizedPrefix::from_guest`].  Field order is
+/// load-bearing: the derived `Ord` sorts by `surface` first, so a
+/// `BTreeSet` dedups two spellings of one directory by the string the
+/// author wrote, not by where it resolves — collapsing on `resolved`
+/// instead would fold two distinct-looking grants into one and change
+/// the rendered OS rule list.
+///
+/// `Serialize`/`Deserialize` are the ordinary derived (struct) form —
+/// not transparent — since the wire boundary (`WireContext` across the
+/// re-exec'd child) is a trusted, same-build hop and the whole record,
+/// not just `surface`, must survive it.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NormalizedPrefix(String);
+pub struct NormalizedPrefix {
+    surface: String,
+    resolved: String,
+    namespace: Namespace,
+}
 
 impl NormalizedPrefix {
-    /// Fold `path` and wrap it.  The constructor enforces the
-    /// `.`/`..`-collapsed invariant the gate would otherwise apply at
-    /// match time, performed once at the door so authorised-form and
-    /// matched-form are one normal form.  Crate-internal: the grant-side
-    /// door is the freeze lexer in [`super::sigil`].
+    /// Fold `path`, follow its symlinks, and wrap both forms.  The
+    /// constructor enforces the `.`/`..`-collapsed invariant the gate
+    /// would otherwise apply at match time and does the one disk
+    /// consultation this type ever needs, performed once at the door so
+    /// authorised-form and matched-form are one normal form.
+    /// Crate-internal: the grant-side door is the freeze lexer in
+    /// [`super::sigil`].
     pub(super) fn freeze(path: &Path) -> Self {
         let folded = super::lex::fold_dots(path);
-        Self(folded.to_string_lossy().into_owned())
+        let resolved = super::canon::canonicalise_lenient(&folded);
+        Self {
+            surface: folded.to_string_lossy().into_owned(),
+            resolved: resolved.to_string_lossy().into_owned(),
+            namespace: Namespace::Host,
+        }
     }
 
     /// Mint a prefix from an already-resolved surface form — the output
     /// of [`PrefixSet::surface`](super::PrefixSet::surface) and the bytes
-    /// the OS-sandbox renderer emits.  Runs the same `fold_dots` kernel
-    /// (idempotent on a surface form, which is already normal), so the
-    /// projection's prefixes pass through the identical normaliser the
-    /// access-side [`ResolvedPath`] and the grant-side freeze do.
+    /// the OS-sandbox renderer emits.  Runs the same fold-then-resolve
+    /// kernel (idempotent on a surface form, which is already normal),
+    /// so the projection's prefixes pass through the identical
+    /// normaliser the access-side [`ResolvedPath`] and the grant-side
+    /// freeze do.
     pub fn from_surface(path: impl AsRef<Path>) -> Self {
         Self::freeze(path.as_ref())
     }
@@ -166,39 +221,61 @@ impl NormalizedPrefix {
     /// an `AsRef<Path>` and this takes a `&str`.  There is no host whose
     /// paths this normalises correctly except by coincidence.
     ///
+    /// This namespace has no `realpath(3)` of its own to consult from
+    /// this host, so `resolved` is just `surface` again: the door does
+    /// no disk I/O because there is no oracle for it to consult, which
+    /// is exactly why `namespace` exists — so composition can tell a
+    /// guest-namespace prefix apart from a host one instead of silently
+    /// comparing spellings that were never meant to agree.
+    ///
     /// One constraint travels with a prefix minted here: it must not be
-    /// *reduced* on the host.  `FsPolicy::meet` re-mints its result
-    /// through `from_surface` (via [`PrefixSet::surface`](super::PrefixSet::surface)),
-    /// which would fold `/work` straight back to `\work` on Windows.
-    /// Synod never reaches that path — its trunk runs with `fuel: 0`, so
-    /// no sub-agent ever narrows its grant — and a nested `grant` block
-    /// inside the machine is reduced *there*, by the guest's own kernel,
-    /// which is the right one.  A guest-namespace policy that ever does
-    /// need narrowing needs the meet to learn which namespace it is in.
+    /// *reduced* on the host.  Synod never narrows a guest grant — its
+    /// trunk runs with `fuel: 0`, so no sub-agent composition ever runs
+    /// against it — and a nested `grant` block inside the machine is
+    /// reduced *there*, by the guest's own kernel, which is the right
+    /// one.  A guest-namespace policy that ever does need host-side
+    /// narrowing is exactly what the `namespace` tag protects: the meet
+    /// keys overlap on `(namespace, resolved)`, so it can never fold a
+    /// guest prefix through the host's separator by mistake.
     #[must_use]
     pub fn from_guest(path: &str) -> Self {
         debug_assert!(
             path.starts_with('/'),
             "a guest prefix must be absolute in the guest's namespace, got {path}"
         );
-        Self(super::lex::fold_dots_posix(path))
+        let folded = super::lex::fold_dots_posix(path);
+        Self {
+            surface: folded.clone(),
+            resolved: folded,
+            namespace: Namespace::Guest,
+        }
     }
 
     /// The prefix as a borrow, for containment matching.
     #[allow(clippy::disallowed_methods)]
     pub fn as_path(&self) -> &Path {
-        Path::new(&self.0)
+        Path::new(&self.surface)
     }
 
-    /// The prefix string, for the OS sandbox renderer and overlap keys.
+    /// The surface form, for the OS sandbox renderer and overlap keys.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.surface
     }
 
-    /// Consume into the owned `String`, for the wire/render forms that
-    /// flatten the prefix back to bytes.
+    /// The resolved (symlink-followed) form, for composition overlap.
+    pub fn resolved(&self) -> &str {
+        &self.resolved
+    }
+
+    /// Which namespace `resolved` was resolved in.
+    pub fn namespace(&self) -> Namespace {
+        self.namespace
+    }
+
+    /// Consume into the owned surface `String`, for the wire/render
+    /// forms that flatten the prefix back to bytes.
     pub fn into_string(self) -> String {
-        self.0
+        self.surface
     }
 
     /// True iff this prefix is absolute.  The freeze pass asserts this
@@ -206,45 +283,45 @@ impl NormalizedPrefix {
     pub fn is_absolute(&self) -> bool {
         self.as_path().is_absolute()
     }
+
+    /// Test-only mint with an explicit, possibly divergent
+    /// `surface`/`resolved` pair — the shape a real symlink would
+    /// produce, without touching a disk to produce it.  Every
+    /// production door derives `resolved` from `surface` itself; this
+    /// is the one place that invariant is deliberately broken, and it
+    /// exists only under `#[cfg(test)]` so it can never become a fifth
+    /// production door for fabricating a resolved form.
+    #[cfg(test)]
+    pub(crate) fn for_test(surface: &str, resolved: &str, namespace: Namespace) -> Self {
+        Self {
+            surface: surface.to_string(),
+            resolved: resolved.to_string(),
+            namespace,
+        }
+    }
 }
 
 impl AsRef<str> for NormalizedPrefix {
     fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Sugar for [`NormalizedPrefix::from_surface`] — the OS-projection and
-/// wire/render sites that already hold a normal-form surface string.
-/// The grant-side door stays the freeze lexer; this never reaches a
-/// `decode_*` path.
-impl From<&str> for NormalizedPrefix {
-    fn from(s: &str) -> Self {
-        Self::from_surface(s)
-    }
-}
-
-impl From<String> for NormalizedPrefix {
-    fn from(s: String) -> Self {
-        Self::from_surface(s)
+        &self.surface
     }
 }
 
 impl PartialEq<str> for NormalizedPrefix {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.surface == other
     }
 }
 
 impl PartialEq<&str> for NormalizedPrefix {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        self.surface == *other
     }
 }
 
 impl PartialEq<String> for NormalizedPrefix {
     fn eq(&self, other: &String) -> bool {
-        &self.0 == other
+        &self.surface == other
     }
 }
 

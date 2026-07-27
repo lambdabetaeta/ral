@@ -679,8 +679,10 @@ mod tests {
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsPolicy {
                 read_prefixes: Vec::new(),
-                write_prefixes: vec!["/tmp/work".into()],
-                deny_paths: vec!["/tmp/work/.exarch.toml".into()],
+                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp/work")],
+                deny_paths: vec![crate::path::NormalizedPrefix::from_surface(
+                    "/tmp/work/.exarch.toml",
+                )],
             }),
             net: true,
             exec: ExecProjection::default(),

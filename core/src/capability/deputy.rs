@@ -38,7 +38,7 @@
 //!   hypothesis as TOCTOU (`design/grant.md`'s second concession).
 
 use crate::path::{NormalizedPrefix, path_within_str};
-use crate::types::{Capabilities, ExecDir};
+use crate::types::Capabilities;
 
 /// The exec-admitted directory prefixes that are also writable under the
 /// folded `caps` — the confused-deputy escape hatch.
@@ -56,16 +56,18 @@ pub fn deputy_prefixes(caps: &Capabilities) -> Vec<NormalizedPrefix> {
         return Vec::new();
     };
     let mut found: Vec<NormalizedPrefix> = exec
-        .dirs
+        .allow_dirs
         .iter()
-        .filter(|(_, verdict)| **verdict == ExecDir::Allow)
-        .filter_map(|(dir, _)| {
+        .filter_map(|dir| {
             fs.write_prefixes
                 .iter()
-                .find(|w| path_within_str(dir, w.as_str()) || path_within_str(w.as_str(), dir))
+                .find(|w| {
+                    path_within_str(dir.as_str(), w.as_str())
+                        || path_within_str(w.as_str(), dir.as_str())
+                })
                 .map(|w| {
-                    if path_within_str(dir, w.as_str()) {
-                        NormalizedPrefix::from_surface(dir)
+                    if path_within_str(dir.as_str(), w.as_str()) {
+                        dir.clone()
                     } else {
                         w.clone()
                     }
@@ -81,19 +83,19 @@ pub fn deputy_prefixes(caps: &Capabilities) -> Vec<NormalizedPrefix> {
 mod tests {
     use super::deputy_prefixes;
     use crate::path::NormalizedPrefix;
-    use crate::types::{Capabilities, ExecDir, ExecMap, FsPolicy};
-    use std::collections::BTreeMap;
+    use crate::types::{Capabilities, ExecMap, FsPolicy};
+    use std::collections::BTreeSet;
 
     fn exec_dir(dir: &str) -> ExecMap {
         ExecMap {
-            dirs: BTreeMap::from([(dir.to_string(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(dir)]),
             ..ExecMap::default()
         }
     }
 
     fn fs_write(prefix: &str) -> FsPolicy {
         FsPolicy {
-            write_prefixes: vec![prefix.into()],
+            write_prefixes: vec![NormalizedPrefix::from_surface(prefix)],
             ..FsPolicy::default()
         }
     }

@@ -130,7 +130,7 @@ mod tests {
     use ral_core::path::sigil::expand_path_prefix;
     #[cfg(unix)]
     use ral_core::types::ExecPolicy;
-    use ral_core::types::{Capabilities, ExecDir, Shell};
+    use ral_core::types::{Capabilities, Shell};
     use std::path::Path;
 
     /// Load and freeze a bake-in against `ctx`.  Freezing happens inside
@@ -222,7 +222,11 @@ mod tests {
         );
         let exec = caps.exec.as_ref().expect("minimal declares exec");
         assert!(
-            !exec.dirs.contains_key("/opt/homebrew"),
+            !exec
+                .allow_dirs
+                .iter()
+                .any(|p| p.as_str() == "/opt/homebrew")
+                && !exec.deny_dirs.iter().any(|p| p.as_str() == "/opt/homebrew"),
             "the foreign-rooted '/opt/homebrew/' override must not survive freeze on Windows"
         );
     }
@@ -309,7 +313,7 @@ mod tests {
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
         let xdg_bin = expand_path_prefix("xdg:bin", &home);
         assert!(
-            exec.dirs.contains_key(&xdg_bin),
+            exec.allow_dirs.iter().any(|p| p.as_str() == xdg_bin),
             "reasonable should list the resolved xdg:bin ({xdg_bin}) in exec dirs"
         );
     }
@@ -338,11 +342,13 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             assert!(
-                exec.dirs.contains_key(&cwd_resolved),
+                exec.allow_dirs.iter().any(|p| p.as_str() == cwd_resolved),
                 "{name} exec missing resolved cwd"
             );
             assert!(
-                exec.dirs.contains_key(&tempdir_resolved),
+                exec.allow_dirs
+                    .iter()
+                    .any(|p| p.as_str() == tempdir_resolved),
                 "{name} exec missing resolved tempdir"
             );
             let fs = caps
@@ -418,7 +424,7 @@ mod tests {
         assert!(
             caps.exec
                 .as_ref()
-                .is_some_and(|m| m.dirs.contains_key("/opt/homebrew")),
+                .is_some_and(|m| m.allow_dirs.iter().any(|p| p.as_str() == "/opt/homebrew")),
             "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
         );
 
@@ -704,15 +710,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             for root in &roots {
                 let normalized = ral_core::path::NormalizedPrefix::from_surface(root).into_string();
-                let expected = if name == "minimal" && root == "/opt/homebrew" {
-                    ExecDir::Deny
+                let denied = name == "minimal" && root == "/opt/homebrew";
+                let (expected, in_set) = if denied {
+                    (
+                        "Deny",
+                        exec.deny_dirs.iter().any(|p| p.as_str() == normalized),
+                    )
                 } else {
-                    ExecDir::Allow
+                    (
+                        "Allow",
+                        exec.allow_dirs.iter().any(|p| p.as_str() == normalized),
+                    )
                 };
-                assert_eq!(
-                    exec.dirs.get(&normalized),
-                    Some(&expected),
-                    "{name} should carry a {expected:?} verdict for the live system tool root {normalized}"
+                assert!(
+                    in_set,
+                    "{name} should carry a {expected} verdict for the live system tool root {normalized}"
                 );
             }
         }

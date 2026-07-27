@@ -8,7 +8,7 @@
 //! it).  Literal beats subpath; deeper subpath beats shallower.
 
 use crate::path;
-use crate::types::{ExecDir, ExecMap, ExecPolicy, GrantStack, Meet};
+use crate::types::{ExecMap, ExecPolicy, GrantStack, Meet};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What an admitted command may run: any arguments, or only a fixed
@@ -152,8 +152,8 @@ pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec 
         };
     }
     match longest_dir_match(exec, names.allow) {
-        Some(ExecDir::Allow) => LayerExec::Allowed(Admit::Any),
-        Some(ExecDir::Deny) | None => LayerExec::Denied,
+        Some(true) => LayerExec::Allowed(Admit::Any),
+        Some(false) | None => LayerExec::Denied,
     }
 }
 
@@ -283,25 +283,32 @@ fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
 }
 
 /// Find the deepest directory prefix that covers any absolute
-/// candidate and return its verdict.  "Deepest" by character count of
-/// the key, which is monotone with prefix depth for canonical absolute
-/// paths.  Returns `None` if no directory matches.
-fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<ExecDir> {
-    let mut best: Option<(usize, ExecDir)> = None;
-    for (dir, verdict) in &exec.dirs {
+/// candidate and return whether it was an allow or a deny.  "Deepest"
+/// by character count of the key, which is monotone with prefix depth
+/// for canonical absolute paths.  Returns `None` if no directory
+/// matches, `Some(true)` for the deepest match being an allow,
+/// `Some(false)` for a deny.
+fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<bool> {
+    let mut best: Option<(usize, bool)> = None;
+    let mut consider = |dir: &str, allow: bool| {
         let matches_any = names
             .iter()
             .any(|n| path::is_absolute(n) && path::path_within_str(n, dir));
         if !matches_any {
-            continue;
+            return;
         }
         let len = dir.len();
-        match &best {
-            Some((best_len, _)) if *best_len >= len => {}
-            _ => best = Some((len, verdict.clone())),
+        if best.is_none_or(|(best_len, _)| best_len < len) {
+            best = Some((len, allow));
         }
+    };
+    for dir in &exec.allow_dirs {
+        consider(dir.as_str(), true);
     }
-    best.map(|(_, p)| p)
+    for dir in &exec.deny_dirs {
+        consider(dir.as_str(), false);
+    }
+    best.map(|(_, allow)| allow)
 }
 
 #[cfg(test)]

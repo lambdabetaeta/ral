@@ -722,7 +722,8 @@ fn grant_exec_subcommand_allows_listed_subcommand() {
                 "/bin/sh".into(),
                 ExecPolicy::Subcommands(BTreeSet::from(["-c".into()])),
             )]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -1218,7 +1219,8 @@ fn grant_exec_attenuation_subcommand_intersection_permits_common() {
                 "/bin/sh".into(),
                 ExecPolicy::Subcommands(BTreeSet::from(["-c".into(), "-s".into()])),
             )]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -1228,7 +1230,8 @@ fn grant_exec_attenuation_subcommand_intersection_permits_common() {
                 "/bin/sh".into(),
                 ExecPolicy::Subcommands(BTreeSet::from(["-c".into()])),
             )]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };

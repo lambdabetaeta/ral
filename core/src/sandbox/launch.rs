@@ -297,9 +297,9 @@ mod tests {
     fn restrictive() -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: vec!["/tmp".into()],
-                write_prefixes: vec!["/tmp".into()],
-                deny_paths: vec!["/etc".into()],
+                read_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp")],
+                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp")],
+                deny_paths: vec![crate::path::NormalizedPrefix::from_surface("/etc")],
             }),
             net: true,
             exec: crate::types::ExecProjection::default(),
@@ -379,8 +379,8 @@ mod tests {
     fn write_confined_to(write_dir: &str) -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: vec![write_dir.into()],
-                write_prefixes: vec![write_dir.into()],
+                read_prefixes: vec![crate::path::NormalizedPrefix::from_surface(write_dir)],
+                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface(write_dir)],
                 deny_paths: vec![],
             }),
             net: true,

@@ -461,7 +461,7 @@ mod tests {
     fn strip_policy_arg_extracts_json_and_preserves_other_args() {
         let (policy, args) = strip_policy_arg(&[
             "--sandbox-projection".into(),
-            r#"{"fs":{"kind":"restricted","policy":{"read_prefixes":["/tmp"],"write_prefixes":[]}},"net":true}"#.into(),
+            r#"{"fs":{"kind":"restricted","policy":{"read_prefixes":[{"surface":"/tmp","resolved":"/tmp","namespace":"Host"}],"write_prefixes":[]}},"net":true}"#.into(),
             "-c".into(),
             "echo hi".into(),
         ])
@@ -470,13 +470,19 @@ mod tests {
             policy,
             Some(SandboxProjection {
                 fs: crate::types::FsProjection::Restricted(crate::types::FsPolicy {
-                    // The wire boundary is trusted and transparent: it
-                    // deserializes the prefix verbatim without re-folding
-                    // (`.into()` would fold `/tmp` to `\tmp` on Windows and
-                    // diverge from the JSON above), so build the expected
-                    // prefix through the same non-folding deserialize path.
+                    // The wire boundary is trusted: it deserializes the
+                    // record's three fields verbatim without re-folding
+                    // (`NormalizedPrefix::from_surface` would fold `/tmp` to
+                    // `\tmp` on Windows and diverge from the JSON above), so
+                    // build the expected prefix through the same
+                    // non-folding deserialize path — a same-namespace,
+                    // no-symlink prefix, matching what the JSON literal
+                    // above actually carries.
                     read_prefixes: vec![
-                        serde_json::from_str::<crate::path::NormalizedPrefix>(r#""/tmp""#).unwrap(),
+                        serde_json::from_str::<crate::path::NormalizedPrefix>(
+                            r#"{"surface":"/tmp","resolved":"/tmp","namespace":"Host"}"#,
+                        )
+                        .unwrap(),
                     ],
                     write_prefixes: Vec::new(),
                     deny_paths: Vec::new(),

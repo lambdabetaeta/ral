@@ -12,7 +12,7 @@
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{
-    Capabilities, ExecDir, ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack, Meet,
+    Capabilities, ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack, Meet,
     SandboxProjection,
 };
 use std::collections::BTreeSet;
@@ -131,14 +131,8 @@ fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> Exec
     let mut saw = false;
     for map in grants.exec() {
         saw = true;
-        let mut allow_dirs = Vec::new();
-        let mut deny_dirs = Vec::new();
-        for (dir, verdict) in &map.dirs {
-            match verdict {
-                ExecDir::Allow => allow_dirs.push(dir.clone()),
-                ExecDir::Deny => deny_dirs.push(dir.clone()),
-            }
-        }
+        let allow_dirs: Vec<&NormalizedPrefix> = map.allow_dirs.iter().collect();
+        let deny_dirs: Vec<&NormalizedPrefix> = map.deny_dirs.iter().collect();
         subpath_allow = subpath_allow.meet(Some(PrefixSet::resolve(resolver, &allow_dirs)));
         subpath_deny = subpath_deny.union(PrefixSet::resolve(resolver, &deny_dirs));
         for (name, policy) in &map.literals {

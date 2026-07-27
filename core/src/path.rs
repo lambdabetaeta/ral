@@ -48,8 +48,8 @@ pub use lex::{
     basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases, path_within,
     path_within_str, proper_ancestors, resolve_path, resolve_relative_to_script, resolve_str,
 };
-pub use prefix_set::PrefixSet;
-pub use resolved::{NormalizedPrefix, ResolvedPath};
+pub use prefix_set::{PrefixSet, meet_prefixes};
+pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use which::{commands_on_path, file_exists_on_path, locate, resolve_in_path};
 

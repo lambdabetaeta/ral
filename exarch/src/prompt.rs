@@ -10,7 +10,7 @@ pub mod host;
 use crate::cli::EditScheme;
 use crate::shell_eval::skill;
 use ral_core::Shell;
-use ral_core::types::{Capabilities, ExecDir};
+use ral_core::types::Capabilities;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -407,10 +407,9 @@ fn exec_line(caps: &Capabilities) -> String {
 /// not here.  Empty when no directory admits.
 fn exec_dirs_line(caps: &Capabilities) -> String {
     caps.exec.as_ref().map_or_else(String::new, |m| {
-        m.dirs
+        m.allow_dirs
             .iter()
-            .filter(|&(_, v)| matches!(v, ExecDir::Allow))
-            .map(|(dir, _)| format!("{dir}/"))
+            .map(|dir| format!("{}/", dir.as_str()))
             .collect::<Vec<_>>()
             .join(", ")
     })
@@ -426,11 +425,7 @@ fn exec_denies(caps: &Capabilities) -> Vec<String> {
             .iter()
             .filter(|&(_, pol)| pol.is_denied())
             .map(|(name, _)| name.clone());
-        let dirs = m
-            .dirs
-            .iter()
-            .filter(|&(_, v)| matches!(v, ExecDir::Deny))
-            .map(|(dir, _)| format!("{dir}/"));
+        let dirs = m.deny_dirs.iter().map(|dir| format!("{}/", dir.as_str()));
         literals.chain(dirs).collect()
     })
 }

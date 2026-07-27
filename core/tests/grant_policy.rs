@@ -7,9 +7,10 @@
 //! No internals are reached into — the policies and their meet/join
 //! semantics are the contract.
 
+use ral_core::path::NormalizedPrefix;
 #[cfg(unix)]
 use ral_core::types::ExecProjection;
-use ral_core::types::{Capabilities, ExecDir, ExecMap, ExecPolicy, FsPolicy, Shell};
+use ral_core::types::{Capabilities, ExecMap, ExecPolicy, FsPolicy, Shell};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::path::Path;
@@ -36,7 +37,8 @@ fn subpath_key_admits_path_under_prefix() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -54,7 +56,8 @@ fn subpath_key_denies_outside_prefix() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -76,7 +79,8 @@ fn literal_subcommands_beats_subpath_admit() {
                 "cargo".into(),
                 ExecPolicy::Subcommands(BTreeSet::from(["build".into()])),
             )]),
-            dirs: BTreeMap::from([("/opt/homebrew/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/opt/homebrew/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -105,10 +109,8 @@ fn subpath_deny_carves_hole_in_subpath_allow() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([
-                ("/usr/bin".into(), ExecDir::Allow),
-                ("/usr/bin/sensitive".into(), ExecDir::Deny),
-            ]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+            deny_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin/sensitive")]),
         }),
         ..Capabilities::root()
     };
@@ -139,14 +141,16 @@ fn nested_exec_layer_denies_outside_its_map() {
     let outer = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
     let inner = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("git".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -167,7 +171,8 @@ fn exec_path_override_requires_resolved_path_authority() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("git".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -184,7 +189,8 @@ fn exec_path_override_allows_explicit_resolved_path() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("/tmp/fake-bin/git".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -201,7 +207,7 @@ fn sandbox_projection_intersects_path_components() {
     let mut shell = Shell::default();
     let outer = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec!["/tmp/ral-prefix-a".into()],
+            read_prefixes: vec![NormalizedPrefix::from_surface("/tmp/ral-prefix-a")],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -209,7 +215,7 @@ fn sandbox_projection_intersects_path_components() {
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec!["/tmp/ral-prefix-ab".into()],
+            read_prefixes: vec![NormalizedPrefix::from_surface("/tmp/ral-prefix-ab")],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -234,7 +240,9 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let mut shell = Shell::default();
     let outer = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![link.to_string_lossy().into_owned().into()],
+            read_prefixes: vec![NormalizedPrefix::from_surface(
+                link.to_string_lossy().into_owned(),
+            )],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -242,7 +250,9 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![inner_dir.to_string_lossy().into_owned().into()],
+            read_prefixes: vec![NormalizedPrefix::from_surface(
+                inner_dir.to_string_lossy().into_owned(),
+            )],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -277,7 +287,8 @@ fn broad_deny_set_vetoes_path_invoked_denied_basename() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-            dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -304,7 +315,8 @@ fn broad_deny_set_does_not_admit_planted_path_invoked_basename() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -331,7 +343,8 @@ fn literal_deny_on_resolved_absolute_still_vetoes() {
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("/usr/bin/git".into(), ExecPolicy::Deny)]),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -359,7 +372,8 @@ fn bare_admit_and_subcommand_gating_unregressed() {
     let allow = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("git".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -382,7 +396,8 @@ fn bare_admit_and_subcommand_gating_unregressed() {
                 "git".into(),
                 ExecPolicy::Subcommands(BTreeSet::from(["status".into()])),
             )]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         ..Capabilities::root()
     };
@@ -419,7 +434,7 @@ fn bare_admit_and_subcommand_gating_unregressed() {
 #[cfg(unix)]
 fn projection_fs() -> FsPolicy {
     FsPolicy {
-        read_prefixes: vec!["/".into()],
+        read_prefixes: vec![NormalizedPrefix::from_surface("/")],
         write_prefixes: Vec::new(),
         deny_paths: Vec::new(),
     }
@@ -467,7 +482,8 @@ fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
     let outer = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+            deny_dirs: BTreeSet::new(),
         }),
         fs: Some(projection_fs()),
         ..Capabilities::root()
@@ -475,7 +491,8 @@ fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
     let inner = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("/usr/bin/git".into(), ExecPolicy::Allow)]),
-            dirs: BTreeMap::new(),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
         }),
         fs: Some(projection_fs()),
         ..Capabilities::root()
@@ -520,7 +537,8 @@ fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
 fn sandbox_projection_never_out_permits_live_gate() {
     let allow_dir = |d: &str| ExecMap {
         literals: BTreeMap::new(),
-        dirs: BTreeMap::from([(d.into(), ExecDir::Allow)]),
+        allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(d)]),
+        deny_dirs: BTreeSet::new(),
     };
     let cases: Vec<(ExecMap, ExecMap, Vec<&str>)> = vec![
         // Literal admitted by inner, covered only by outer's allow-dir.
@@ -528,7 +546,8 @@ fn sandbox_projection_never_out_permits_live_gate() {
             allow_dir("/usr/bin"),
             ExecMap {
                 literals: BTreeMap::from([("/usr/bin/git".into(), ExecPolicy::Allow)]),
-                dirs: BTreeMap::new(),
+                allow_dirs: BTreeSet::new(),
+                deny_dirs: BTreeSet::new(),
             },
             vec!["/usr/bin/git", "/usr/bin/ls", "/tmp/evil"],
         ),
@@ -537,7 +556,8 @@ fn sandbox_projection_never_out_permits_live_gate() {
             allow_dir("/usr/bin"),
             ExecMap {
                 literals: BTreeMap::from([("/usr/bin/sudo".into(), ExecPolicy::Deny)]),
-                dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+                allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
+                deny_dirs: BTreeSet::new(),
             },
             vec!["/usr/bin/ls", "/usr/bin/sudo"],
         ),
@@ -546,7 +566,8 @@ fn sandbox_projection_never_out_permits_live_gate() {
             allow_dir("/bin"),
             ExecMap {
                 literals: BTreeMap::from([("/bin/bash".into(), ExecPolicy::Deny)]),
-                dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+                allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/bin")]),
+                deny_dirs: BTreeSet::new(),
             },
             vec!["/bin/ls", "/bin/bash"],
         ),
@@ -557,7 +578,8 @@ fn sandbox_projection_never_out_permits_live_gate() {
             allow_dir("/bin"),
             ExecMap {
                 literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-                dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+                allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/bin")]),
+                deny_dirs: BTreeSet::new(),
             },
             vec!["/bin/ls", "/bin/bash", "/bin/nested/bash"],
         ),

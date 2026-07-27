@@ -678,8 +678,8 @@ mod tests {
     fn projecting_caps() -> Capabilities {
         Capabilities {
             fs: Some(ral_core::types::FsPolicy {
-                read_prefixes: vec!["/".into()],
-                write_prefixes: vec!["/".into()],
+                read_prefixes: vec![ral_core::path::NormalizedPrefix::from_surface("/")],
+                write_prefixes: vec![ral_core::path::NormalizedPrefix::from_surface("/")],
                 deny_paths: Vec::new(),
             }),
             ..Capabilities::root()

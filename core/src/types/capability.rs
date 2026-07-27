@@ -9,8 +9,8 @@
 //! ## Fields
 //!
 //! - [`ExecMap`]: exec authority partitioned into `literals` (keyed by
-//!   command name or absolute path, carrying [`ExecPolicy`]) and `dirs`
-//!   (absolute directory prefixes, carrying [`ExecDir`]).
+//!   command name or absolute path, carrying [`ExecPolicy`]) and the
+//!   `allow_dirs`/`deny_dirs` pair of directory-prefix sets.
 //! - [`FsPolicy`]: read/write prefixes and explicit `deny_paths` for
 //!   single files.
 //! - [`EditorPolicy`] / [`ShellPolicy`]: bit flags gating REPL-side builtins.
@@ -25,7 +25,7 @@
 //! boundary.  Produced by `capability::sandbox_projection`, which folds
 //! the whole stack; consumed only by sandbox backends.
 
-use crate::path::{NormalizedPrefix, PrefixSet};
+use crate::path::{NormalizedPrefix, meet_prefixes};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -115,7 +115,7 @@ impl Join for bool {
 ///
 /// Borne by [`ExecMap::literals`], whose keys are bare command names
 /// (`git`) or absolute literal paths (`/usr/bin/git`).  Directory
-/// prefixes live in [`ExecMap::dirs`] under the two-valued [`ExecDir`].
+/// prefixes live in [`ExecMap::allow_dirs`]/[`ExecMap::deny_dirs`].
 /// Literal keys beat dir prefixes, and the deepest dir prefix wins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecPolicy {
@@ -131,28 +131,27 @@ pub enum ExecPolicy {
     Deny,
 }
 
-/// A directory prefix's exec verdict — two-valued: a directory admits
-/// or denies binaries resolving inside it but cannot name subcommands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExecDir {
-    Allow,
-    Deny,
-}
-
 /// Exec authority, partitioned by key kind at the type level.
 ///
 /// `literals` keys are bare command names and absolute literal paths,
-/// carrying the full three-valued [`ExecPolicy`].  `dirs` keys are
-/// absolute directory prefixes (stored without a trailing slash),
-/// carrying the two-valued [`ExecDir`].  Literal keys beat dir
-/// prefixes when both cover a candidate, and the deepest dir prefix
-/// wins among the dirs.
+/// carrying the full three-valued [`ExecPolicy`].  Directory prefixes
+/// are two-valued — a directory admits or denies binaries resolving
+/// inside it but cannot name subcommands — and stored as the
+/// partition itself: `allow_dirs` and `deny_dirs` are disjoint sets of
+/// [`NormalizedPrefix`].  Storing the partition (rather than one map
+/// keyed by verdict) is what lets [`Meet`]/[`Join`] combine each side
+/// directly — intersect the allows, union the denies — instead of
+/// splitting a unified map by verdict and re-minting every key on
+/// every composition.  Literal keys beat dir prefixes when both cover
+/// a candidate, and the deepest dir prefix wins among the dirs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecMap {
     #[serde(default)]
     pub literals: BTreeMap<String, ExecPolicy>,
     #[serde(default)]
-    pub dirs: BTreeMap<String, ExecDir>,
+    pub allow_dirs: BTreeSet<NormalizedPrefix>,
+    #[serde(default)]
+    pub deny_dirs: BTreeSet<NormalizedPrefix>,
 }
 
 /// Filesystem access policy within a `grant` block.
@@ -511,12 +510,13 @@ impl Capabilities {
     /// fs prefixes), AND (net, editor, shell), and union
     /// (`fs.deny_paths` — more denies = less authority).
     /// `audit` is not part of the lattice: it propagates upward
-    /// (logical OR).  The fs/exec-dir prefix intersections build a
-    /// [`PrefixSet`] and judge overlap on the symlink-resolved form
-    /// (via [`PrefixSet::from_frozen`]) — the same fidelity the
-    /// point-of-use gate and the sandbox projection use — so a symlinked
-    /// deeper prefix cannot survive the meet as authority reaching
-    /// outside a shallower ceiling.
+    /// (logical OR).  The fs/exec-dir prefix intersections read the
+    /// `resolved` form each [`NormalizedPrefix`] already carries (via
+    /// [`meet_prefixes`]) — the same fidelity the point-of-use gate and
+    /// the sandbox projection use — so a symlinked deeper prefix cannot
+    /// survive the meet as authority reaching outside a shallower
+    /// ceiling.  No disk consultation happens here: it happened once, at
+    /// whichever freeze door minted each prefix.
     pub fn meet(self, other: Self) -> Self {
         // Per-field meets via the lattice trait (Option<T>: Meet does
         // the None-as-identity lift; ExecMap, bool, FsPolicy,
@@ -615,13 +615,15 @@ impl Join for ExecPolicy {
 
 impl Meet for FsPolicy {
     fn meet(self, other: Self) -> Self {
+        let sorted_meet = |a: &[NormalizedPrefix], b: &[NormalizedPrefix]| {
+            let mut out = meet_prefixes(a, b);
+            out.sort();
+            out.dedup();
+            out
+        };
         Self {
-            read_prefixes: PrefixSet::from_frozen(&self.read_prefixes)
-                .meet(PrefixSet::from_frozen(&other.read_prefixes))
-                .surface(),
-            write_prefixes: PrefixSet::from_frozen(&self.write_prefixes)
-                .meet(PrefixSet::from_frozen(&other.write_prefixes))
-                .surface(),
+            read_prefixes: sorted_meet(&self.read_prefixes, &other.read_prefixes),
+            write_prefixes: sorted_meet(&self.write_prefixes, &other.write_prefixes),
             deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
         }
     }
@@ -677,93 +679,56 @@ impl Join for ShellPolicy {
     }
 }
 
-/// Meet two exec maps.  Both halves split each verdict by sign and
-/// recombine per the [`ExecDir`] lattice.  In `dirs`: allow-regions
-/// intersect through a [`PrefixSet`] on the resolved form (a prefix
-/// survives only where BOTH sides admit it, the deeper one winning, and
-/// a symlinked prefix cannot escape), deny-regions union (a `Deny` is
-/// sticky, so it
-/// propagates from either side), and on an exact-key clash the deny
-/// lands last so meet's bottom — `Deny` — wins.  The `literals` half
-/// mirrors this through [`meet_literal_exec`].
+/// Meet two exec maps.  `allow_dirs` intersects via [`meet_prefixes`] —
+/// a prefix survives only where BOTH sides admit it, the deeper one
+/// winning, and a symlinked prefix cannot escape — `deny_dirs` unions
+/// (a `Deny` is sticky, so it propagates from either side), and a key
+/// landing in both after that is removed from `allow_dirs`: an
+/// exact-key clash between an allow and a deny resolves to the deny,
+/// meet's bottom.  The `literals` half mirrors this through
+/// [`meet_literal_exec`].
 impl Meet for ExecMap {
     fn meet(self, other: Self) -> Self {
+        let self_allow: Vec<NormalizedPrefix> = self.allow_dirs.into_iter().collect();
+        let other_allow: Vec<NormalizedPrefix> = other.allow_dirs.into_iter().collect();
+        let mut allow_dirs: BTreeSet<NormalizedPrefix> = meet_prefixes(&self_allow, &other_allow)
+            .into_iter()
+            .collect();
+        let deny_dirs: BTreeSet<NormalizedPrefix> =
+            self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
+        allow_dirs.retain(|p| !deny_dirs.contains(p));
         Self {
-            dirs: combine_exec_dirs(&self.dirs, &other.dirs, |a_allow, b_allow| {
-                PrefixSet::from_frozen(&a_allow)
-                    .meet(PrefixSet::from_frozen(&b_allow))
-                    .surface()
-            }),
+            allow_dirs,
+            deny_dirs,
             literals: meet_literal_exec(&self.literals, &other.literals),
         }
     }
 }
 
 /// Join two exec maps — the widening composition `--extend-base` runs.
-/// In `dirs`: allow-regions union (either side widens) and deny-regions
-/// union too (a dir `Deny` is a sticky veto, kept from either side), so
-/// an extension silent on a base's denied tree cannot re-admit it.  On
-/// an exact-key clash the deny lands last, so deny-overrides: a base
-/// veto on a directory survives even an overlay that re-grants it,
-/// exactly as under `meet`.  The `literals` half mirrors this through
+/// Both `allow_dirs` and `deny_dirs` union (either side widens; a dir
+/// `Deny` is a sticky veto kept from either side), so an extension
+/// silent on a base's denied tree cannot re-admit it.  A key landing in
+/// both is removed from `allow_dirs`, so deny-overrides exactly as
+/// under `meet`: a base veto on a directory survives even an overlay
+/// that re-grants it.  The `literals` half mirrors this through
 /// [`join_literal_exec`].
 impl Join for ExecMap {
     fn join(self, other: Self) -> Self {
+        let mut allow_dirs: BTreeSet<NormalizedPrefix> = self
+            .allow_dirs
+            .into_iter()
+            .chain(other.allow_dirs)
+            .collect();
+        let deny_dirs: BTreeSet<NormalizedPrefix> =
+            self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
+        allow_dirs.retain(|p| !deny_dirs.contains(p));
         Self {
-            dirs: combine_exec_dirs(&self.dirs, &other.dirs, union_prefixes),
+            allow_dirs,
+            deny_dirs,
             literals: join_literal_exec(&self.literals, &other.literals),
         }
     }
-}
-
-/// Shared `dirs`-half of [`ExecMap::meet`]/[`ExecMap::join`]: partition both
-/// sides into allow/deny prefixes, combine the allow side with
-/// `combine_allow` (intersect under meet, union under join), and always
-/// union the deny side — a `Deny` is sticky under both lattice operations.
-/// `literals` is combined separately by [`meet_literal_exec`]/
-/// [`join_literal_exec`], which are not near-identical enough to share.
-fn combine_exec_dirs(
-    a: &BTreeMap<String, ExecDir>,
-    b: &BTreeMap<String, ExecDir>,
-    combine_allow: impl FnOnce(Vec<NormalizedPrefix>, Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix>,
-) -> BTreeMap<String, ExecDir> {
-    let (a_allow, a_deny) = partition_exec_dirs(a);
-    let (b_allow, b_deny) = partition_exec_dirs(b);
-    let mut dirs = BTreeMap::new();
-    for path in combine_allow(a_allow, b_allow)
-        .into_iter()
-        .map(NormalizedPrefix::into_string)
-    {
-        dirs.insert(path, ExecDir::Allow);
-    }
-    for path in union_prefixes(a_deny, b_deny)
-        .into_iter()
-        .map(NormalizedPrefix::into_string)
-    {
-        dirs.insert(path, ExecDir::Deny);
-    }
-    dirs
-}
-
-/// Split a dir map's keys by verdict into the allow-key list and the
-/// deny-key list, so the two signs can be combined under their own
-/// lattice operation (allows intersect under meet, denies union; dual
-/// under join).  Keys are minted as [`NormalizedPrefix`]es — the frozen
-/// form both [`PrefixSet::from_frozen`] (allow intersection) and
-/// [`union_prefixes`] (deny union) consume — and flattened back to the
-/// dir map's string keys at insertion.
-fn partition_exec_dirs(
-    dirs: &BTreeMap<String, ExecDir>,
-) -> (Vec<NormalizedPrefix>, Vec<NormalizedPrefix>) {
-    let mut allow = Vec::new();
-    let mut deny = Vec::new();
-    for (path, verdict) in dirs {
-        match verdict {
-            ExecDir::Allow => allow.push(NormalizedPrefix::from_surface(path)),
-            ExecDir::Deny => deny.push(NormalizedPrefix::from_surface(path)),
-        }
-    }
-    (allow, deny)
 }
 
 /// Per-name meet over the `literals` half of an exec map.  Allow-sided
