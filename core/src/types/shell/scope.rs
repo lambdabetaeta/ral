@@ -236,16 +236,6 @@ impl Shell {
         self.mobile.scope.binding_schemes()
     }
 
-    /// The type scheme bound to `name`, if it is a lexical binding that
-    /// carries one.  Flattens "unbound" and "bound but scheme-less" to
-    /// `None`: a name appears with a scheme only when [`Self::bind_value`]
-    /// (or the prelude harvest) inferred one — pattern components and
-    /// [`Self::set_var`] data bindings carry none.  The single-name
-    /// companion of [`Self::binding_schemes`].
-    pub fn binding_scheme(&self, name: &str) -> Option<&crate::typecheck::Scheme> {
-        self.mobile.scope.get_binding(name)?.scheme.as_ref()
-    }
-
     /// The names of every installed handler entry — `within` arms and
     /// aliases alike — for tab completion.  The handler-stack counterpart
     /// of [`Self::builtin_names`](Self::builtin_names).

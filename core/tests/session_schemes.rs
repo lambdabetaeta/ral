@@ -24,6 +24,15 @@ fn shell() -> Shell {
     s
 }
 
+/// The scheme `name` carries on the live scope, `None` when it is unbound
+/// or bound without one.
+fn scheme_of(sh: &Shell, name: &str) -> Option<ral_core::typecheck::Scheme> {
+    sh.binding_schemes()
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .and_then(|(_, scheme)| scheme)
+}
+
 /// One REPL run through the public `run` door, which checks `src`
 /// against the live session before evaluating it.  Panics on parse / type
 /// failure — callers that expect a clean run pick source that compiles;
@@ -229,13 +238,13 @@ fn pattern_binds_carry_no_scheme() {
             .collect::<Vec<_>>()
     );
     assert!(
-        sh.binding_scheme("a").is_none(),
+        scheme_of(&sh, "a").is_none(),
         "a pattern-bound name must carry no scheme"
     );
     // A plain `let` binding does carry a scheme.
     run(&mut sh, "let n = 3").unwrap();
     assert!(
-        sh.binding_scheme("n").is_some(),
+        scheme_of(&sh, "n").is_some(),
         "a plain let binding must carry a scheme"
     );
 }
@@ -315,11 +324,11 @@ fn live_binding_scheme_matches_baked_entry() {
         .map(|(n, s)| (n.as_str(), fmt_scheme(s)))
         .collect();
     for name in ["lines", "reverse"] {
-        let live = sh.binding_scheme(name).unwrap_or_else(|| {
+        let live = scheme_of(&sh, name).unwrap_or_else(|| {
             panic!("prelude binding {name:?} must be bound on the live scope and carry a scheme")
         });
         assert_eq!(
-            fmt_scheme(live),
+            fmt_scheme(&live),
             baked[name],
             "live scope scheme for {name:?} must match the baked entry"
         );

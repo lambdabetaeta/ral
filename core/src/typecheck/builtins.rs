@@ -257,11 +257,12 @@ macro_rules! curry {
     ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
 }
 
-/// Like [`curry!`] but the final position already carries a [`CompTy`]
-/// (from [`fm`]), so we omit the `pure` wrapper.
+/// Like [`curry!`] but the result already carries a [`CompTy`] (from
+/// [`fm`]), so we omit the `pure` wrapper.  Pipe modes take one parameter.
 macro_rules! curry_pipe {
-    ($p:expr => $ret:expr) => { fun($p, $ret) };
-    ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry_pipe!($($rest),+ => $ret)) };
+    ($p:expr => $ret:expr) => {
+        fun($p, $ret)
+    };
 }
 
 /// Reusable command signatures for builtins whose surface is not a
@@ -1100,19 +1101,15 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     Some(fmt_scheme(&scheme))
 }
 
-/// Number of value arguments the builtin's scheme declares (count of nested
-/// `Fun` layers under the outer `Thunk`).
+/// The entry's own [`crate::types::BuiltinEntry::fixed_arity`], off `table`,
+/// guarded in debug builds by [`check_arity_consistency`].
 ///
-/// Used to η-expand first-class
-/// builtin references (`$upper`) into curried lambda thunks.  `None` for
-/// builtins without a fixed argv — command-only entries, or the open-argv
-/// `detach`.
-///
-/// Delegates to the entry's own `fixed_arity`, off `table`.  In debug
-/// builds, asserts that this matches the arity derived from the entry's
-/// first-class scheme, when present — the arity and the scheme factory are
-/// co-defined in the same `builtin_registry!` entry, so the assert catches
-/// a typo where the two drift apart.
+/// The guard is the point: `builtin_registry!` const-asserts declared
+/// `arity:` against a `Sig`'s structural arity at build time, but it cannot
+/// see through a `Scheme` entry's factory, which needs a `Unifier` to
+/// instantiate.  Calling this for every name — as `registry_and_scheme_arity_agree`
+/// does — closes that gap.  Production η-expansion of `$name` reads
+/// `fixed_arity` directly.
 pub fn builtin_arity(table: &BuiltinTable, name: &str) -> Option<usize> {
     let arity = table.get(name).and_then(|e| e.fixed_arity());
     debug_assert!(

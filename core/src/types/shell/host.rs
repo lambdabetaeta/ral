@@ -458,9 +458,14 @@ impl Shell {
         self.mobile.control.last_status
     }
 
-    /// Set the last-command exit status (`$?`) to an explicit code.  The
-    /// integer-valued sibling of
-    /// [`set_status_from_bool`](Shell::set_status_from_bool).
+    /// Set the last-command exit status (`$?`) to an explicit code.
+    ///
+    /// Core itself writes the field directly, and a host only ever *reads*
+    /// `$?` — it is the run's own result, not something an embedder supplies.
+    /// This is the seam for a caller outside the crate that must plant a
+    /// status anyway: the tests prime a sentinel through it to prove what
+    /// evaluation resets, which a `#[cfg(test)]` item could not do from an
+    /// integration test.
     pub fn set_last_status(&mut self, status: i32) {
         self.mobile.control.last_status = status;
     }
