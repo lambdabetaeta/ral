@@ -760,8 +760,17 @@ fn exec_meet_and_join_drop_allow_clashing_with_deny_on_divergent_resolved() {
     use crate::capability::admits_for_test;
     use crate::path::Namespace;
 
-    let allow = crate::path::NormalizedPrefix::for_test("/x", "/x", Namespace::Host);
-    let deny = crate::path::NormalizedPrefix::for_test("/x", "/y", Namespace::Host);
+    // Spelled for the host: the gate weighs only candidates the
+    // platform calls absolute, and a rooted path with no drive is not
+    // absolute to Windows — so a POSIX fixture would leave the gate
+    // half of this test asserting nothing there.
+    let (surface, divergent, candidate) = if cfg!(windows) {
+        (r"C:\x", r"C:\y", r"C:\x\bin")
+    } else {
+        ("/x", "/y", "/x/bin")
+    };
+    let allow = crate::path::NormalizedPrefix::for_test(surface, surface, Namespace::Host);
+    let deny = crate::path::NormalizedPrefix::for_test(surface, divergent, Namespace::Host);
     let allow_map = exec_of(&allow);
     let deny_map = exec_deny_of(&deny);
 
@@ -779,7 +788,7 @@ fn exec_meet_and_join_drop_allow_clashing_with_deny_on_divergent_resolved() {
             exec: Some(composed),
             ..Capabilities::root()
         });
-        let candidate = ["/x/bin"];
+        let candidate = [candidate];
         assert!(
             !admits_for_test(&grants, &candidate, &candidate),
             "a binary under the clashing surface must be denied"

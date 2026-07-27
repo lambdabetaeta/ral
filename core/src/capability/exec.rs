@@ -392,18 +392,26 @@ mod tests {
     /// `Meet`/`Join` no longer let that pair share a set slot, but this
     /// pins the gate's own half of the fix directly, independent of
     /// composition.
+    /// The fixture is spelled for the host, because the gate weighs
+    /// only candidates [`path::is_absolute`] admits and a rooted path
+    /// with no drive is not absolute to Windows.
     #[test]
     fn longest_dir_match_ties_resolve_to_deny() {
+        let (dir, divergent, candidate) = if cfg!(windows) {
+            (r"C:\x", r"C:\y", r"C:\x\bin")
+        } else {
+            ("/x", "/y", "/x/bin")
+        };
         let exec = ExecMap {
             literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/x")]),
+            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface(dir)]),
             deny_dirs: BTreeSet::from([path::NormalizedPrefix::for_test(
-                "/x",
-                "/y",
+                dir,
+                divergent,
                 path::Namespace::Host,
             )]),
         };
-        assert_eq!(longest_dir_match(&exec, &["/x/bin"]), Some(false));
+        assert_eq!(longest_dir_match(&exec, &[candidate]), Some(false));
     }
 
     /// The alias-clash half of the sibling hole: a deny on `/tmp/bin`
