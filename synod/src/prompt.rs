@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn assemble_reuses_exarchs_language_and_editing_documents() {
         let p = prompt();
-        assert!(p.contains("`ral` is call-by-push-value"));
+        assert!(p.contains("call-by-push-value with recursion"));
         assert!(p.contains("edit-replace PATH FROM TO"));
         assert!(
             !p.contains("edit-hash PATH EDITS"),

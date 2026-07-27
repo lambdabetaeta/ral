@@ -54,6 +54,7 @@
 
 mod common;
 
+use ral_core::path::NormalizedPrefix;
 use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Capabilities, FsPolicy, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
@@ -96,8 +97,8 @@ fn denied_path(tag: &str) -> (std::path::PathBuf, String) {
 fn restrict_to(dir: &str) -> Capabilities {
     Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![dir.into()],
-            write_prefixes: vec![dir.into()],
+            read_prefixes: vec![NormalizedPrefix::from_surface(dir)],
+            write_prefixes: vec![NormalizedPrefix::from_surface(dir)],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::root()
