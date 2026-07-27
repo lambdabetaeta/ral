@@ -96,6 +96,18 @@ impl From<PolicyError> for Break {
     }
 }
 
+/// `as_map`/`as_map_ref`/`as_list` raise a bare `Error` — a shape
+/// mismatch, never a process exit — so the decoder can absorb one
+/// directly into its own currency.
+impl From<Error> for PolicyError {
+    fn from(e: Error) -> Self {
+        match e.hint {
+            Some(hint) => Self::new(e.message).with_hint(hint),
+            None => Self::new(e.message),
+        }
+    }
+}
+
 /// The tail-position property of an evaluation context: whether the
 /// redex sits under a trivial continuation.
 ///

@@ -25,8 +25,8 @@
 
 use crate::path::NormalizedPrefix;
 use crate::types::{
-    Break, Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, List, PolicyError,
-    ShellPolicy, Value, as_map, as_map_ref,
+    Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, List, PolicyError, ShellPolicy,
+    Value, as_map, as_map_ref,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,20 +39,6 @@ use std::collections::{BTreeMap, BTreeSet};
 struct RawExecMap {
     literals: BTreeMap<String, ExecPolicy>,
     dirs: BTreeMap<String, bool>,
-}
-
-/// `as_map`/`as_map_ref` are shared with the rest of the evaluator and so
-/// return a `Break`, but within decode they only ever raise the generic
-/// "expects a Map" shape mismatch — never an `Escape` — so narrowing that
-/// `Break` into the decoder's own [`PolicyError`] currency is safe.
-fn shape(b: Break) -> PolicyError {
-    match b {
-        Break::Error(e) => match e.hint {
-            Some(hint) => PolicyError::new(e.message).with_hint(hint),
-            None => PolicyError::new(e.message),
-        },
-        Break::Escape(_) => unreachable!("as_map/as_map_ref never escape"),
-    }
 }
 
 // ── Dimension decoders ────────────────────────────────────────────────────
@@ -70,7 +56,7 @@ fn decode_fs(
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Result<FsPolicy, PolicyError> {
-    let entries = as_map_ref(value, err_prefix).map_err(shape)?;
+    let entries = as_map_ref(value, err_prefix).map_err(PolicyError::from)?;
     let mut fp = FsPolicy::default();
     for (sub, paths) in entries {
         let items = match paths {
@@ -182,7 +168,7 @@ fn decode_bool(value: &Value, err_prefix: &str) -> Result<bool, PolicyError> {
 /// `editor: [read: bool, write: bool, tui: bool]`
 fn decode_editor(value: &Value, err_prefix: &str) -> Result<EditorPolicy, PolicyError> {
     let mut cap = EditorPolicy::default();
-    for (k, v) in as_map_ref(value, err_prefix).map_err(shape)? {
+    for (k, v) in as_map_ref(value, err_prefix).map_err(PolicyError::from)? {
         match k.as_str() {
             "read" => cap.read = decode_bool(v, err_prefix)?,
             "write" => cap.write = decode_bool(v, err_prefix)?,
@@ -196,7 +182,7 @@ fn decode_editor(value: &Value, err_prefix: &str) -> Result<EditorPolicy, Policy
 /// `shell: [chdir: bool]`
 fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyError> {
     let mut cap = ShellPolicy::default();
-    for (k, v) in as_map_ref(value, err_prefix).map_err(shape)? {
+    for (k, v) in as_map_ref(value, err_prefix).map_err(PolicyError::from)? {
         match k.as_str() {
             "chdir" => cap.chdir = decode_bool(v, err_prefix)?,
             _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
@@ -227,7 +213,7 @@ fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyEr
 /// rejects an `xdg:` value that escapes `ctx.home` (defence in depth — an
 /// attacker-set `XDG_*_HOME=/etc` would otherwise silently widen the grant).
 /// Freeze errors surface as a [`PolicyError`]; the caller prepends its own
-/// provenance and mints a [`Break`] from it, since the author of a grant or
+/// provenance and mints a `Break` from it, since the author of a grant or
 /// capability file is the live user and every malformed shape here is a
 /// message, never a process exit.
 pub(crate) fn decode_capability_map(
@@ -235,7 +221,7 @@ pub(crate) fn decode_capability_map(
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Result<Capabilities, PolicyError> {
-    let entries = as_map_ref(value, err_prefix).map_err(shape)?;
+    let entries = as_map_ref(value, err_prefix).map_err(PolicyError::from)?;
     let mut caps = Capabilities::default();
     for (k, v) in entries {
         match k.as_str() {
@@ -431,7 +417,7 @@ fn system_dirs() -> Vec<NormalizedPrefix> {
 /// `Bool` and `Thunk` are rejected with shape-specific hints so authors
 /// get better errors than "policy must be a list of subcommands".
 fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, PolicyError> {
-    let entries = as_map(value, err_prefix).map_err(shape)?;
+    let entries = as_map(value, err_prefix).map_err(PolicyError::from)?;
     let mut out = RawExecMap::default();
     for (cmd, policy_val) in entries {
         if let Some(dir) = cmd.strip_suffix('/') {
