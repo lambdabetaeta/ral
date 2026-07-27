@@ -202,7 +202,7 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
     let d = within [dir: #'/app'#] { detach #'gRPC KV store on port 5328'# python server.py }
 
-`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling that process can only happen using its own logs. Killing this process can only be done with OS primitives, e.g. `kill`.
+`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling that process can only happen using its own logs. Killing this process can only be done with OS primitives, e.g. `kill`. If you detach inside a `grant`, that grant's limits stay on the process for as long as it runs, and nothing later can lift them; a grant may also refuse the call outright with `detach: false`.
 
 ## Within
 

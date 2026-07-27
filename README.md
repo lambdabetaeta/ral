@@ -205,7 +205,7 @@ confined under an AppContainer (LowBox token) keyed to its own fs projection
 — the fs allow-list is enforced by ACEs stamped for that projection's SID on
 the granted prefixes, so a narrowed grant is narrowed at the kernel, and
 `net: false` is enforced by withholding the network capability SIDs, so a
-denied command cannot open a socket at all (SPEC §11.8). This confinement is
+denied command cannot open a socket at all (SPEC §11.9). This confinement is
 exercised on CI, not merely asserted.
 
 Documented degradations, not bugs:

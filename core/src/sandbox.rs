@@ -74,15 +74,12 @@ pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub use linux::make_command_with_policy;
-
 // Per-command OS sandbox launcher: `build_command` routes an external /
 // bundled child through here when the process is not already confined and
 // a projection is active.  `serve_sandbox_exec` is the macOS post-Seatbelt
 // `execve` hook for the host re-exec tail.
 pub use launch::serve_sandbox_exec;
-pub(crate) use launch::{LaunchTarget, sandboxed_command};
+pub(crate) use launch::{LaunchTarget, Ownership, sandboxed_command};
 
 // Kernel-denial diagnostics: the command runners call these on a failure
 // that ran under an active OS sandbox to attach an actionable hint
@@ -154,7 +151,13 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(target_os = "linux")]
     {
-        let cmd = linux::make_command_with_policy("/bin/true", &[], policy, None);
+        let cmd = linux::make_command_with_policy(
+            "/bin/true",
+            &[],
+            policy,
+            None,
+            launch::Ownership::Kept,
+        );
         let mut line = String::from("bwrap");
         for arg in cmd.get_args() {
             line.push(' ');

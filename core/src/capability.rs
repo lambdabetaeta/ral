@@ -36,7 +36,6 @@ pub(crate) use enforce::{
     check_fs_op, check_shell_chdir,
 };
 pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabilities_from_str};
-pub use sandbox::engages_sandbox;
 pub(crate) use sandbox::sandbox_projection;
 
 #[cfg(test)]

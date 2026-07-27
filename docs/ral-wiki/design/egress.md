@@ -85,7 +85,7 @@ proxy does not proxy.
 ral's own `net` capability is a flat boolean
 ([[design/two-enforcers|two-enforcers]] — `net` has no in-process gate, only
 an OS-sandbox one, and inside a guest not even that: `docs/SPEC.md` §11.3,
-§11.8). It cannot express "reachable, but only this host"; nothing in the
+§11.9). It cannot express "reachable, but only this host"; nothing in the
 grant vocabulary names an endpoint. The real narrowing this page describes
 happens one layer outside the grant entirely, in the host policy `NetPolicy`
 enforces: `synod::grant`'s `net: Some(true)` is a correctness bit that keeps

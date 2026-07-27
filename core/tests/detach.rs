@@ -8,13 +8,18 @@
 //! [`a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it`]:
 //! a host that is a whole process, gone, and a survivor still working.
 //!
-//! Four properties the ADR argues about are deliberately *not* tested here,
-//! and none of them is faked: behaviour under bwrap's `--die-with-parent`
-//! (a `detach` under confinement is refused, so there is nothing to
-//! observe); macOS reparenting, which `/proc` cannot answer; the teardown
-//! footrace, which by construction has no determinate outcome, so a test
-//! asserting either side would be exactly the flake the ADR warns of; and
-//! pid recycling, which no test can provoke on demand.
+//! Confinement is tested from two sides.  Whether a frame *permits* the
+//! verb is ordinary capability behaviour, checked here through the same
+//! public door as everything else.  What the survivor is confined *to* is
+//! not: it is one flag in a bwrap argv, so it is checked where that argv is
+//! built (`core/src/sandbox/linux.rs`) rather than by birthing a process
+//! and interrogating a namespace this test cannot enter.
+//!
+//! Three properties the ADR argues about are deliberately *not* tested
+//! here, and none of them is faked: macOS reparenting, which `/proc` cannot
+//! answer; the teardown footrace, which by construction has no determinate
+//! outcome, so a test asserting either side would be exactly the flake the
+//! ADR warns of; and pid recycling, which no test can provoke on demand.
 
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)]
@@ -83,6 +88,38 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
             panic!("{call} must return a receipt record, got {result:?}")
         }
         RunReport::Static { .. } => panic!("{call} must compile"),
+    }
+}
+
+/// `birth`'s negative: run `source` and return the message it was refused
+/// with, insisting the run reached evaluation so a refusal is never
+/// confused with a compile failure.
+fn refusal(shell: &mut Shell, source: &str) -> String {
+    let report = shell.run(RunRequest {
+        run: Run {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Capture,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: RunStdin::Inherit,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        nursery: None,
+        lifecycle: Box::new(()),
+    });
+    match report {
+        RunReport::Ran {
+            result: Err(ral_core::types::Break::Error(e)),
+            ..
+        } => e.to_string(),
+        RunReport::Ran { result, .. } => panic!("{source} must be refused, got {result:?}"),
+        RunReport::Static { .. } => panic!("{source} must compile"),
     }
 }
 
@@ -293,6 +330,55 @@ fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
         ),
         other => panic!("the `workers probe must answer a list, got {other:?}"),
     }
+}
+
+/// A frame that withholds the verb refuses the call and births nothing —
+/// and, because the refusal comes before admission, spends no birth either.
+/// The budget is monotone, so a refusal that quietly counted would be
+/// unrecoverable.
+#[test]
+fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut shell = armed();
+    // One birth in the whole session, so the surviving process itself is the
+    // evidence: had the refusal counted, this budget would be gone and the
+    // birth below would be refused for exhaustion instead.
+    shell.arm_detach(1);
+    let message = refusal(
+        &mut shell,
+        "grant [detach: false] { detach #'a long sleep'# /bin/sleep 300 }",
+    );
+    assert!(
+        message.contains("withholds"),
+        "the refusal must say the grant withheld the verb, got {message:?}"
+    );
+
+    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
+    let survivor = Survivor::of(&receipt);
+    assert!(
+        survivor.alive(),
+        "the one birth the session had must still be spendable after a refusal"
+    );
+}
+
+/// Silence permits: a grant that attenuates some *other* dimension says
+/// nothing about survivors, so the verb is spendable inside it — the whole
+/// point of the axis being a meet rather than an opt-in.  The survivor is
+/// born under that frame's projection and keeps it for life.
+#[test]
+fn a_grant_that_attenuates_something_else_still_permits_a_birth() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut shell = armed();
+    let receipt = birth(
+        &mut shell,
+        "grant [fs: [read: ['/bin'], write: []]] \
+         { detach #'a long sleep'# /bin/sleep 300 }",
+    );
+    let survivor = Survivor::of(&receipt);
+    assert!(
+        survivor.alive(),
+        "a grant silent on detach must birth a living survivor"
+    );
 }
 
 /// The survivor's three streams are `/dev/null`, never the host's own.  The

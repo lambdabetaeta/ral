@@ -419,7 +419,7 @@ fn launch_external_stage_direct(
     debug_assert!(route.value_in.is_none() && route.value_out.is_none());
 
     let rc = command::vet(&ext.id, &ext.args, shell)?;
-    let mut cmd = command::build_command(&rc, shell)?;
+    let mut cmd = command::build_command(&rc, crate::sandbox::Ownership::Kept, shell)?;
 
     // Redirect-file branches are unreachable in `wire_stage_stdout` here —
     // the caller gates on `ext.redirects.is_empty()`.

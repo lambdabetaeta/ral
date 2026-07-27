@@ -54,7 +54,7 @@ manifest is a load-time error, so a plugin cannot mistake a listed
 capability set for enforcement. Confinement is `grant`, applied at
 the call site, not a manifest declaration.
 
-`grant`'s `editor` field gates the `_ed-*` builtins (SPEC §11.5):
+`grant`'s `editor` field gates the `_ed-*` builtins (SPEC §11.6):
 
 | Field | Enables |
 |---|---|
@@ -63,7 +63,7 @@ the call site, not a manifest declaration.
 | `tui`   | `_ed-tui` |
 
 `grant`'s `shell` field gates shell builtins that modify persistent
-process state (SPEC §11.6):
+process state (SPEC §11.7):
 
 | Field | Enables |
 |---|---|

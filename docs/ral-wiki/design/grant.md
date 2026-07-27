@@ -26,13 +26,18 @@ This is a deliberate mental-model fact, recorded so omission is never mistaken
 for an implicit cross-axis deny — see
 [[decisions/260601_reduced-authority-witness|reduced-authority-witness]] §B7.
 
-**Capability checks gate four dimensions:**
+**Capability checks gate five dimensions:**
 
 - **exec** over a three-valued lattice (Allow / Subcommands / Deny) — more
   expressive than orthodox object-capability, since a base profile can veto a
   name a restrict file never mentions;
 - **fs** by read/write path prefix with denies;
 - **net** as allow/deny;
+- **detach** as allow/deny — the one dimension that gates a *verb* rather than
+  an action on a resource, and the one that reaches no OS profile: it decides
+  whether a process the session stops owning may be born at all, never what
+  that process may then do
+  ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]);
 - **audit** as a record of check events.
 
 Filesystem checks are alias-aware and resolve symlinks, so a directory scoped by
@@ -45,6 +50,12 @@ process by `check_fs_op` before the syscall; each external or bundled child the
 body spawns is confined under the effective projection — per-command Seatbelt
 on macOS and bwrap on Linux, the projection's own AppContainer on Windows
 ([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
+A survivor `detach` births inside the body is confined the same way and then
+keeps that confinement for life: the projection is frozen at birth, since no
+later frame can name the process to widen it. Only the envelope's tie to this
+process's death is dropped, which is what makes it a survivor rather than a
+receipt for something already killed.
+
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
 frozen `Capabilities`, so configuration is the grant value written as source,

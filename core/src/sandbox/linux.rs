@@ -31,15 +31,26 @@ use std::process::{Command, Stdio};
 /// re-exec and profile-dump call sites pass `None` (the re-exec'd ral
 /// inherits the launcher cwd and threads logical cwd into its own
 /// children).
+///
+/// `ownership` decides `--die-with-parent` alone.  See [`Ownership`] for
+/// why a surrendered launch must not carry it: the flag is
+/// `PR_SET_PDEATHSIG(SIGKILL)` over the whole envelope, which for a
+/// double-forked survivor either kills it moments after birth or never
+/// fires at all, depending on which of bwrap's `prctl` and the
+/// intermediate's `_exit` the scheduler runs first.  Neither outcome is a
+/// lifetime anyone asked for.  Everything else about the envelope — mount
+/// namespace, net namespace, seccomp filter — is unchanged, so the
+/// survivor is confined exactly as a kept child would have been.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. The exec card is fused onto this image at command::run, which emits the exec event with the resolved argv and exit status when the spawn/wait completes."
 )]
-pub fn make_command_with_policy(
+pub(crate) fn make_command_with_policy(
     name: &str,
     args: &[String],
     policy: &SandboxProjection,
     chdir: Option<&str>,
+    ownership: super::launch::Ownership,
 ) -> Command {
     let mut c = Command::new("bwrap");
     let bind_spec = policy.bind_spec();
@@ -61,7 +72,10 @@ pub fn make_command_with_policy(
     rw_binds.sort();
     rw_binds.dedup();
 
-    c.args(["--die-with-parent", "--new-session"]);
+    c.arg("--new-session");
+    if ownership == super::launch::Ownership::Kept {
+        c.arg("--die-with-parent");
+    }
     if !policy.net {
         c.arg("--unshare-net");
     }
@@ -83,9 +97,10 @@ pub fn make_command_with_policy(
             }
         }
         FsProjection::Unrestricted => {
-            // No fs attenuation in the stack: pass fs through.  bwrap
-            // is only here for the seccomp/--die-with-parent envelope;
-            // the grant body should see the host filesystem unchanged.
+            // No fs attenuation in the stack: pass fs through.  bwrap is
+            // only here for the seccomp envelope, and the parent-death tie
+            // where one applies; the grant body should see the host
+            // filesystem unchanged.
             // `--dev-bind / /` mount-binds the whole tree including
             // device nodes (`--bind` would skip them).
             c.args(["--dev-bind", "/", "/"]);
@@ -270,7 +285,15 @@ pub(super) fn respawn_under_bwrap(
     args: &[String],
     policy: &SandboxProjection,
 ) -> Result<u8, String> {
-    let mut cmd = make_command_with_policy(exe.to_string_lossy().as_ref(), args, policy, None);
+    // Kept: this respawn is a child we wait on, so its envelope should not
+    // outlive us even if we die abruptly.
+    let mut cmd = make_command_with_policy(
+        exe.to_string_lossy().as_ref(),
+        args,
+        policy,
+        None,
+        super::launch::Ownership::Kept,
+    );
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -359,7 +382,13 @@ mod tests {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        let cmd = make_command_with_policy("/bin/true", &[], &policy, None);
+        let cmd = make_command_with_policy(
+            "/bin/true",
+            &[],
+            &policy,
+            None,
+            super::launch::Ownership::Kept,
+        );
         let args: Vec<String> = cmd
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -396,7 +425,13 @@ mod tests {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        let cmd = make_command_with_policy("/bin/true", &[], &policy, None);
+        let cmd = make_command_with_policy(
+            "/bin/true",
+            &[],
+            &policy,
+            None,
+            super::launch::Ownership::Kept,
+        );
         let args: Vec<String> = cmd
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -407,6 +442,48 @@ mod tests {
         assert!(
             deny_pos.is_some(),
             "absent deny path must still be overlaid with --tmpfs: {args:?}"
+        );
+    }
+
+    /// Ownership decides `--die-with-parent` and nothing else.  A kept
+    /// child's envelope is tied to our death; a surrendered one's must not
+    /// be, or the survivor is killed moments after birth — while every
+    /// other confinement flag stays identical, so what the survivor may
+    /// touch is exactly what a kept child could have.
+    #[test]
+    fn only_the_parent_death_tie_distinguishes_a_surrendered_launch() {
+        let policy = SandboxProjection {
+            fs: FsProjection::Restricted(FsPolicy {
+                read_prefixes: vec!["/usr".to_string().into()],
+                write_prefixes: Vec::new(),
+                deny_paths: Vec::new(),
+            }),
+            net: false,
+            exec: crate::types::ExecProjection::default(),
+        };
+        let argv = |ownership| {
+            make_command_with_policy("/bin/true", &[], &policy, None, ownership)
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let kept = argv(super::launch::Ownership::Kept);
+        let surrendered = argv(super::launch::Ownership::Surrendered);
+
+        assert!(
+            kept.contains(&"--die-with-parent".to_string()),
+            "a child we keep must not outlive us: {kept:?}"
+        );
+        assert!(
+            !surrendered.contains(&"--die-with-parent".to_string()),
+            "a survivor must not be killed by our death: {surrendered:?}"
+        );
+        assert_eq!(
+            kept.iter()
+                .filter(|a| *a != "--die-with-parent")
+                .collect::<Vec<_>>(),
+            surrendered.iter().collect::<Vec<_>>(),
+            "the two launches must otherwise be confined identically"
         );
     }
 }

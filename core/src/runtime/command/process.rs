@@ -19,9 +19,19 @@ use super::vet::{ExecImage, SpawnPlan};
 /// can fail); the resulting child inherits cwd/env/PWD through
 /// `apply_env` exactly like a host external.
 ///
-/// Invoked by [`super::run`] and by the pipeline stage builder
-/// (`launch_external_stage_direct`); it is never spawned here.
-pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::process::Launch> {
+/// `ownership` says whether the caller keeps the child it is about to
+/// spawn.  Only the Linux sandbox reads it, and only to decide whether the
+/// bwrap envelope is tied to this process's death — see
+/// [`Ownership`](crate::sandbox::Ownership).
+///
+/// Invoked by [`super::run`], by [`super::detach`], and by the pipeline
+/// stage builder (`launch_external_stage_direct`); it is never spawned
+/// here.
+pub(crate) fn build_command(
+    plan: &SpawnPlan,
+    ownership: crate::sandbox::Ownership,
+    shell: &Shell,
+) -> Settled<crate::process::Launch> {
     // A guest jail IS the guest's sandbox: bwrap needs unprivileged user
     // namespaces, which the guest's boot-time sysctl turns off, so a
     // jailed shell never wraps a spawn in bwrap on top — `check_exec_args`
@@ -44,7 +54,7 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::p
             ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
             ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
         };
-        crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?
+        crate::sandbox::sandboxed_command(&projection, target, &plan.args, ownership, shell)?
     } else {
         match &plan.image {
             ExecImage::Host(path) => {

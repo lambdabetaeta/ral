@@ -246,15 +246,19 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| format!("log dir: {e}"))?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
-    // Whether the verb has meaning here at all: the seat installs the name
-    // only where it does, so under a sandbox `detach` is an unknown command
-    // rather than a builtin that resolves and refuses.
+    // Whether the verb has meaning here at all — a question about the host,
+    // not about its capabilities. An interactive trunk converses and parks
+    // for a human who may well want a server left running, so it offers the
+    // name wherever the double fork exists; the headless runner, which
+    // terminates once its seeded work is idle, does not.
     //
-    // The gate is the sandbox *property*, never a base's name: `--extend-base`
-    // and `--restrict` compose capabilities, and on macOS an exec attenuation
-    // alone raises Seatbelt. An engaged sandbox kills its whole envelope with
-    // its parent, so a survivor born inside one is a promise the OS breaks.
-    let detach = cfg!(unix) && !ral_core::capability::engages_sandbox(&caps);
+    // Whether any particular call may spend it is a separate question, asked
+    // of the live grant stack at the call (`detach:` on the capability
+    // lattice). A sandboxed session therefore keeps the verb: a survivor
+    // born under a projection carries that confinement for its whole life,
+    // which is a stricter promise than an unsandboxed base makes, not a
+    // weaker one.
+    let detach = cfg!(unix);
     // Chat mode registers no tools, so there is nothing for a system prompt to
     // describe: it is skipped entirely in favour of the minimal placeholder.
     let system = if c.chat {

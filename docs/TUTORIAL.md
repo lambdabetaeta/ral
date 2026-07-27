@@ -645,6 +645,9 @@ ambient authority:
   enforced for builtins, redirects, and the bundled coreutils alike
   (and for external programs via the OS sandbox where available).
 - `net:` — boolean; enforced through the OS sandbox.
+- `detach:` — boolean; `false` withholds `detach` (§13.7 of the spec)
+  for the block, so nothing born inside it may outlive the session.
+  Omitting it permits, like every other dimension.
 
 A nested grant can only *reduce* authority, never expand it.  A
 *capability profile* — a `.ral` file whose last expression is a map of
@@ -939,7 +942,7 @@ bundled coreutils (`cp`, `mv`, `rm`, `mkdir`, `ln`, …).  Queries:
 | Form | Purpose |
 |---|---|
 | `within [dir:, env:, handlers:, handler:] {…}` | scoped overrides |
-| `grant [exec:, fs:, net:, …] {…}` | scoped capability restriction |
+| `grant [exec:, fs:, net:, detach:, …] {…}` | scoped capability restriction |
 | `use` / `source` | load a module / evaluate into scope |
 | `cwd` | current directory |
 | `$ENV` / `$NPROC` / `$ARGS` / `$SCRIPT` | ambient values |

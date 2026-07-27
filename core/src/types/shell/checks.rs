@@ -159,6 +159,13 @@ impl Shell {
         crate::capability::sandbox_projection(&ctx.grants, &ctx.resolver(), path_env)
     }
 
+    /// Whether the live capability stack permits birthing a process this
+    /// session stops owning.  Read at the `detach` call rather than at
+    /// boot, so a `grant` frame's answer is the one that binds.
+    pub fn permits_detach(&self) -> bool {
+        self.mobile.context.grants.permits_detach()
+    }
+
     /// The guest process jail installed on this session, if any — `None`
     /// everywhere but a real Linux guest.  Thin forwarder, same shape as
     /// [`Self::sandbox_projection`].

@@ -27,6 +27,28 @@ pub(crate) enum LaunchTarget<'a> {
     BundledTool { tool: &'a str },
 }
 
+/// Whether the session keeps owning what it launches — the one thing the
+/// *envelope's* lifetime turns on.
+///
+/// A [`Kept`](Self::Kept) child is one this process waits on and can
+/// signal, so its confinement is built to die with us: bwrap gets
+/// `--die-with-parent`, and an envelope orphaned by a crash cannot outlive
+/// the session that authorised it.  A [`Surrendered`](Self::Surrendered)
+/// one is a `detach` (SPEC §13.7), where that flag would kill the survivor
+/// moments after birth and hand back a receipt for nothing.  Dropping it
+/// there is not a hole: the confinement still applies for the survivor's
+/// whole life, frozen as the frame that birthed it left it, and no later
+/// frame can widen what a process nothing can name is allowed to do.
+///
+/// Read only by the Linux backend.  macOS enters Seatbelt in-process and
+/// `execve`s the target in place, so there is no envelope process to tie
+/// to a parent, and Windows has no `detach` at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    Kept,
+    Surrendered,
+}
+
 /// Build a [`Launch`](crate::process::Launch) that runs `target` + `args`
 /// under the OS sandbox for `projection`.  The caller has already confirmed
 /// [`super::projection_enforceable`].  Env/cwd and resource limits are
@@ -38,23 +60,25 @@ pub(crate) enum LaunchTarget<'a> {
 /// `SECURITY_CAPABILITIES` the parent's spawn applies (no re-exec).
 ///
 /// `shell` is taken only for the target's logical cwd, which Linux folds
-/// into the bwrap argv as `--chdir`.
+/// into the bwrap argv as `--chdir`; `ownership` likewise reaches only the
+/// Linux backend, which alone builds an envelope process to tie to us.
 #[cfg_attr(
     not(target_os = "linux"),
     allow(
         unused_variables,
-        reason = "shell.cwd() is only consumed for the bwrap --chdir"
+        reason = "shell.cwd() and ownership are consumed by the bwrap argv alone"
     )
 )]
 pub(crate) fn sandboxed_command(
     projection: &crate::types::SandboxProjection,
     target: LaunchTarget,
     args: &[String],
+    ownership: Ownership,
     shell: &Shell,
 ) -> Settled<crate::process::Launch> {
     #[cfg(target_os = "linux")]
     {
-        linux_sandboxed_command(projection, target, args, shell)
+        linux_sandboxed_command(projection, target, args, ownership, shell)
             .map(crate::process::Launch::from_command)
     }
     #[cfg(target_os = "macos")]
@@ -151,6 +175,7 @@ fn linux_sandboxed_command(
     projection: &crate::types::SandboxProjection,
     target: LaunchTarget,
     args: &[String],
+    ownership: Ownership,
     shell: &Shell,
 ) -> Settled<Command> {
     let cwd = shell.cwd().to_string_lossy().into_owned();
@@ -160,6 +185,7 @@ fn linux_sandboxed_command(
             args,
             projection,
             Some(cwd.as_str()),
+            ownership,
         )),
         LaunchTarget::BundledTool { tool } => {
             let self_path = super::reexec::self_arg0().map_err(|e| {
@@ -177,6 +203,7 @@ fn linux_sandboxed_command(
                 &tool_args,
                 projection,
                 Some(cwd.as_str()),
+                ownership,
             ))
         }
     }

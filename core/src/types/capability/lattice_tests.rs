@@ -92,6 +92,7 @@ fn witness_a() -> Capabilities {
             deny_paths: vec![nprefix("/tmp/secret")],
         }),
         net: Some(true),
+        detach: Some(true),
         audit: false,
         editor: Some(EditorPolicy {
             read: true,
@@ -121,6 +122,7 @@ fn witness_b() -> Capabilities {
             deny_paths: vec![nprefix("/tmp/work/.exarch.toml")],
         }),
         net: Some(false),
+        detach: Some(false),
         audit: false,
         editor: Some(EditorPolicy {
             read: true,
@@ -144,6 +146,7 @@ fn witness_c() -> Capabilities {
             deny_paths: Vec::new(),
         }),
         net: None,
+        detach: None,
         audit: false,
         editor: None,
         shell: None,
@@ -213,9 +216,38 @@ fn meet_bottom_zeroes_authority() {
     assert!(fs.read_prefixes.is_empty());
     assert!(fs.write_prefixes.is_empty());
     assert_eq!(m.net, Some(false));
+    assert_eq!(m.detach, Some(false));
     let ed = m.editor.expect("editor retained");
     assert!(!ed.read && !ed.write && !ed.tui);
     assert!(!m.shell.expect("shell retained").chdir);
+}
+
+/// Silence permits, and one `detach: false` anywhere in the stack denies
+/// no matter what sits above it — the axis composes by meet like every
+/// other, so an ordinary `grant fs: […]` says nothing about survivors.
+#[test]
+fn detach_is_permitted_until_some_layer_withholds_it() {
+    let deny = |d: Option<bool>| Capabilities {
+        detach: d,
+        ..Default::default()
+    };
+    let mut stack = GrantStack::root();
+    assert!(stack.permits_detach(), "ambient authority permits");
+    stack.push(Capabilities {
+        fs: Some(FsPolicy::default()),
+        ..Default::default()
+    });
+    assert!(
+        stack.permits_detach(),
+        "a frame that attenuates only fs leaves the verb alone"
+    );
+    stack.push(deny(Some(false)));
+    assert!(!stack.permits_detach(), "an explicit withholding denies");
+    stack.push(deny(Some(true)));
+    assert!(
+        !stack.permits_detach(),
+        "and no inner frame can grant back what an outer one withheld"
+    );
 }
 
 #[test]
@@ -1124,24 +1156,6 @@ fn decode_accepts_cwd_relative_fs_path() {
     let v = map(vec![("fs", map(vec![("read", strs(&["cwd:proj"]))]))]);
     decode_capability_map(&v, "test", &test_ctx("/h"))
         .expect("cwd: sigil freezes to an absolute path");
-}
-
-/// Root authority imposes no fs or net restriction, so it must never
-/// engage the OS sandbox — the projection is empty.
-#[test]
-fn root_does_not_engage_sandbox() {
-    assert!(!crate::capability::engages_sandbox(&Capabilities::root()));
-}
-
-/// A net-deny frame is a real restriction an external process must be
-/// confined to, so it engages the sandbox.
-#[test]
-fn net_deny_engages_sandbox() {
-    let caps = Capabilities {
-        net: Some(false),
-        ..Default::default()
-    };
-    assert!(crate::capability::engages_sandbox(&caps));
 }
 
 /// A bool-typed `editor` sub-key must hold a genuine `Bool`.  A non-Bool

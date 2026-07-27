@@ -1535,12 +1535,12 @@ mod tests {
     }
 
     /// Registration hygiene, `service`'s story inverted: `detach` must
-    /// *not* ride the host surface.  [`host_surface`] is a bare fn pointer
-    /// with no capability argument, so a name it carried would resolve
-    /// under every base — including the sandboxed ones, where the envelope
-    /// dies with its parent and a survivor is a promise the OS breaks.  The
-    /// verb is installed per boot instead, by the one act that also arms its
-    /// policy ([`crate::agent::seat::boot_root_shell`]).
+    /// *not* ride the host surface.  [`host_surface`] is a bare fn pointer,
+    /// so a name it carried would arrive already armed on every shell that
+    /// dresses through it — including the child shells that never asked for
+    /// a budget.  The verb is installed per boot instead, by the one act
+    /// that also arms its policy
+    /// ([`crate::agent::seat::boot_root_shell`]).
     #[test]
     fn detach_is_absent_from_the_host_surface() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1578,30 +1578,16 @@ mod tests {
         );
     }
 
-    /// The gate is the sandbox *property*, never a base's name, and its
-    /// refusal is absence rather than veto: a capability set that engages
-    /// the OS sandbox is denied the verb (the gate in [`crate::run`]), and a
-    /// boot denied it leaves `detach` an ordinary unknown command — never a
-    /// builtin that resolves and refuses.
+    /// A boot denied the verb leaves `detach` an ordinary unknown command
+    /// — never a builtin that resolves and refuses.  The host's answer is
+    /// about the host (the headless runner has no use for survivors); what
+    /// a *sandbox* does to a call is a grant's business, asked of the live
+    /// stack at the call, so it cannot be read off a boot.
     #[cfg(unix)]
     #[test]
-    fn a_sandbox_engaging_capability_set_leaves_detach_an_unknown_name() {
-        assert!(
-            ral_core::capability::engages_sandbox(&ral_core::types::Capabilities {
-                net: Some(false),
-                ..Default::default()
-            }),
-            "precondition: a net-deny frame is a restriction an external process must be \
-             confined to, so it engages the sandbox and is denied detach"
-        );
-        assert!(
-            !ral_core::capability::engages_sandbox(&ral_core::types::Capabilities::root()),
-            "precondition: unrestricted authority engages no sandbox, and is the only shape \
-             the verb is granted to"
-        );
-
+    fn a_boot_denied_detach_leaves_it_an_unknown_name() {
         let scratch =
-            crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, "detach-sandboxed")
+            crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, "detach-denied")
                 .expect("scratch dir");
         let shell = crate::agent::seat::boot_root_shell(
             &scratch,
@@ -1610,8 +1596,8 @@ mod tests {
         );
         assert!(
             shell.lookup_builtin("detach").is_none(),
-            "under a sandbox the name must be absent, so calling it reads as an unknown \
-             command rather than a permission denial"
+            "a boot denied the verb must leave the name absent, so calling it reads as an \
+             unknown command rather than a permission denial"
         );
         assert!(shell.detach_policy().is_none(), "and no policy is armed");
     }

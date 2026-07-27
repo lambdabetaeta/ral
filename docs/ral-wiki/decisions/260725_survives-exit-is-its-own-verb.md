@@ -410,16 +410,22 @@ accurate string minutes earlier.
   refusal.** "`--base dangerous` only" names a profile where a property is
   meant: `--extend-base` and `--restrict` compose capabilities freely, and on
   macOS an exec attenuation alone raises Seatbelt, so what decides is whether
-  the session's capabilities engage the OS sandbox
-  (`core/src/capability/sandbox.rs:91`) — never the name of the base they came
-  from. Absence and refusal remain different axes, and this lands on the first:
-  the seat installs the builtin only where the gate says yes
+  the session's capabilities engage the OS sandbox — never the name of the base
+  they came from. Absence and refusal remain different axes, and this lands on
+  the first: the seat installs the builtin only where the gate says yes
   (`exarch/src/agent/seat.rs`), so under a sandbox, off unix, or on a ral host,
   naming `detach` is an ordinary unknown-command diagnostic rather than a
   builtin that resolves and refuses — the
   [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] discipline again.
   Naming the verb and arming its budget are deliberately one act, so the name
   and the budget cannot drift apart.
+
+  *Superseded in part by
+  [[decisions/260727_detach-under-a-grant|detach-under-a-grant]]:* the
+  capability half of this gate is gone, and a sandbox now decides what a
+  survivor is confined to rather than whether it may exist. Absence survives as
+  the host's and the platform's answer; a frame's answer is a refusal, spelled
+  `detach: false`.
 
 - **The seat question is void; what is bounded is the act.** A `service` occupies
   a seat under `LIVE_WORKER_CAP` because the session can see it vacated. A
@@ -490,14 +496,14 @@ accurate string minutes earlier.
 
 ## Open questions
 
-- **Interaction with the sandbox.** Under a granted base,
-  `core/src/sandbox/linux.rs:64` applies bwrap's `--die-with-parent`, which
-  kills the whole envelope on exarch's death regardless of double-forking.
-  `detach` under a sandbox is therefore either impossible or requires escaping
-  the envelope — which is a capability question, not a lifetime one, and
-  probably wants a [[design/grant|grant]] authority of its own. **Until this is
-  settled, the verb is not installed at all where `engages_sandbox(&caps)`
-  holds.** This deserves its own ADR.
+- ~~**Interaction with the sandbox.**~~ **Settled** by
+  [[decisions/260727_detach-under-a-grant|detach-under-a-grant]]. The
+  `--die-with-parent` obstacle was a flag this repo passes, not a property of
+  confinement, and against a double fork it was indeterminate rather than
+  merely fatal. Dropping it for a surrendered launch leaves every other
+  restriction intact, so a survivor is now confined for life by the frame that
+  bore it — and the authority became the `detach:` dimension on the capability
+  lattice, as this page guessed it would. The `engages_sandbox` gate is gone.
 
 - **Confirming the race empirically.** One run settles which side wins and how
   reliably: `RAL_DBG=wait` emits `cancel-fired name=… cause=Explicit` from

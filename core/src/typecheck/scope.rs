@@ -233,10 +233,12 @@ fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     }
 }
 
-/// Schema for the `grant [exec:, fs:, net:, editor:, env:, audit:]` map.
+/// Schema for the `grant [exec:, fs:, net:, detach:, editor:, env:,
+/// audit:]` map.
 ///
-/// `net`/`audit` are booleans and `editor`/`shell` are `String → Bool` maps,
-/// so each carries a homogeneous type the checker can pin.  `exec`/`fs`
+/// `net`/`detach`/`audit` are booleans and `editor`/`shell` are
+/// `String → Bool` maps, so each carries a homogeneous type the checker
+/// can pin.  `exec`/`fs`
 /// cannot: their per-key policy value is a `String` (`'allow'`/`'deny'`), a
 /// subcommand list, or — for `fs` — a `read`/`write`/`deny` map, and these
 /// shapes mix freely within one policy map (TUTORIAL §16, SPEC §11.1).  No
@@ -247,7 +249,7 @@ fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
 fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
     let bool_map = || Ty::Map(Box::new(Ty::Bool));
     match key {
-        "net" | "audit" => Some(Ty::Bool),
+        "net" | "detach" | "audit" => Some(Ty::Bool),
         "editor" | "shell" => Some(bool_map()),
         _ => None,
     }

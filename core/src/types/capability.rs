@@ -15,6 +15,11 @@
 //!   single files.
 //! - [`EditorPolicy`] / [`ShellPolicy`]: bit flags gating REPL-side builtins.
 //! - `net`: tristate (None=inherit, Some(false)=deny, Some(true)=allow).
+//! - `detach`: the same tristate over the authority to birth a process the
+//!   session stops owning (SPEC §13.7).  It gates a verb rather than
+//!   projecting into the OS profile, so it is folded at the call by
+//!   [`GrantStack::permits_detach`] and appears in no
+//!   [`SandboxProjection`].
 //! - `audit`: orthogonal flag — propagated upward by `meet` (logical OR),
 //!   not part of the lattice.
 //!
@@ -370,6 +375,12 @@ pub struct Capabilities {
     pub fs: Option<FsPolicy>,
     #[serde(default)]
     pub net: Option<bool>,
+    /// Authority to birth a process this session stops owning (SPEC
+    /// §13.7).  `None` inherits, `Some(false)` withholds the verb for the
+    /// frame's extent.  Silence therefore permits, as on every other axis:
+    /// a `grant` that attenuates fs says nothing about survivors.
+    #[serde(default)]
+    pub detach: Option<bool>,
     #[serde(default)]
     pub audit: bool,
     #[serde(default)]
@@ -453,6 +464,19 @@ impl GrantStack {
     pub fn net(&self) -> impl Iterator<Item = bool> {
         self.0.iter().filter_map(|c| c.net)
     }
+
+    /// Whether the stack permits birthing a process the session stops
+    /// owning.  A meet over the layers, so one `detach: false` anywhere
+    /// withholds the verb no matter what sits above it — and silence, the
+    /// unattenuated `None`, permits.
+    ///
+    /// Folded here rather than into [`SandboxProjection`] because nothing
+    /// about it reaches the OS profile: what the survivor inherits is the
+    /// projection of the frame it was born in, and this only decides
+    /// whether it is born at all.
+    pub fn permits_detach(&self) -> bool {
+        self.0.iter().all(|c| c.detach != Some(false))
+    }
 }
 
 impl<'a> IntoIterator for &'a GrantStack {
@@ -473,6 +497,7 @@ impl Capabilities {
             exec: Some(ExecMap::default()),
             fs: Some(FsPolicy::default()),
             net: Some(false),
+            detach: Some(false),
             editor: Some(EditorPolicy::default()),
             shell: Some(ShellPolicy::default()),
             audit: false,
@@ -485,6 +510,7 @@ impl Capabilities {
         self.exec.is_some()
             || self.fs.is_some()
             || self.net.is_some()
+            || self.detach.is_some()
             || self.editor.is_some()
             || self.shell.is_some()
     }
@@ -505,7 +531,7 @@ impl Capabilities {
     ///
     /// Each `Option<_>` field treats `None` as ⊤, so
     /// `meet(None, x) = x`.  Inner fields intersect (exec maps,
-    /// fs prefixes), AND (net, editor, shell), and union
+    /// fs prefixes), AND (net, detach, editor, shell), and union
     /// (`fs.deny_paths` — more denies = less authority).
     /// `audit` is not part of the lattice: it propagates upward
     /// (logical OR).  The fs/exec-dir prefix intersections run through
@@ -519,6 +545,7 @@ impl Capabilities {
             exec: self.exec.meet(other.exec),
             fs: self.fs.meet(other.fs),
             net: self.net.meet(other.net),
+            detach: self.detach.meet(other.detach),
             editor: self.editor.meet(other.editor),
             shell: self.shell.meet(other.shell),
             audit: self.audit || other.audit,
@@ -530,7 +557,7 @@ impl Capabilities {
     /// Commutative, associative, idempotent.
     ///
     /// `None` on a field acts as the join identity.  Positive authority
-    /// widens — exec allows and fs prefixes union, net/editor/shell OR
+    /// widens — exec allows and fs prefixes union, net/detach/editor/shell OR
     /// — while every veto is preserved: `fs.deny_paths` and exec `Deny`s
     /// survive (deny-overrides, the same conflict rule as `meet`), so an
     /// extension can add authority where the base was silent but can
@@ -543,6 +570,7 @@ impl Capabilities {
             exec: self.exec.join(other.exec),
             fs: self.fs.join(other.fs),
             net: self.net.join(other.net),
+            detach: self.detach.join(other.detach),
             editor: self.editor.join(other.editor),
             shell: self.shell.join(other.shell),
             audit: self.audit || other.audit,

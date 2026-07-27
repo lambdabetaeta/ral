@@ -322,6 +322,16 @@ impl Launch {
     /// An inherited stream dies with us and takes the survivor's writes
     /// with it.
     ///
+    /// Unlike [`Self::spawn`], this hands back no [`JailCgroup`]: under a
+    /// guest jail the survivor stays in the transient `exec-N` cgroup it
+    /// was placed in, with that cgroup's limits still enforced, and nobody
+    /// is left to `kill` or `remove` it.  That is the only coherent answer
+    /// — a caller that cannot name the process cannot know when the cgroup
+    /// is empty — and the cost is one inert directory per surviving birth,
+    /// until the guest next boots.
+    ///
+    /// [`JailCgroup`]: crate::process::jail::JailCgroup
+    ///
     /// # Errors
     /// Returns `Err` if either fork or the `execve` fails, or if the
     /// grandchild's pid does not come back.

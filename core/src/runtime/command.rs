@@ -106,7 +106,7 @@ pub(crate) fn run(
             .map_err(crate::types::Control::from);
     }
 
-    let mut command = build_command(&rc, shell)?;
+    let mut command = build_command(&rc, crate::sandbox::Ownership::Kept, shell)?;
 
     let plan = classify_redirects(redirects)?;
     command.stdin(wire_stdin(shell).into_stdio());

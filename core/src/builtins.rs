@@ -489,6 +489,11 @@ pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 /// the policy are one host act, so absence is an unknown-name diagnostic and
 /// never a veto (`decisions/260617_watch-repl-builtin`).
 ///
+/// That absence answers only whether the *host* has the verb.  Whether a
+/// given call may spend it is a capability question, asked of the live
+/// grant stack ([`crate::types::GrantStack::permits_detach`]) and answered
+/// as a refusal — the ordinary shape for a frame-scoped denial.
+///
 /// The other three verbs vary policy over one type; this one changes the
 /// type. It is a variadic effect, not a function — there is no first-class
 /// `$detach` — and it returns a plain record rather than a
@@ -502,7 +507,7 @@ pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("detach"),
     type_rule: BuiltinTypeRule::Sig(sig::DETACH),
-    doc: "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    doc: "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
     body: BuiltinBody::Static(concurrency::builtin_detach),
 }];
 

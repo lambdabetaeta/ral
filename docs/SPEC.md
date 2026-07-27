@@ -387,7 +387,7 @@ rather than captured lexically: working directory, environment, and
 capability restriction (`grant`). They scope to a block, are
 inherited by callees defined elsewhere, and compose by nesting —
 `within` overrides outward, `grant` attenuates by intersection
-(§11.5). The set is fixed. `audit` is an observability wrapper, not
+(§11.8). The set is fixed. `audit` is an observability wrapper, not
 an execution context.
 
 A scoped frame holds for the **whole dynamic extent** of its body,
@@ -1226,8 +1226,8 @@ authority for `B` using the dynamic-context mechanism of §3.1.
 a compile-time error.  Each capability dimension `C` mentions is
 deny-by-default within the grant; dimensions `C` *omits* keep ambient
 authority — `grant [exec: …] body` tightens exec but leaves fs, net,
-editor, shell at whatever the caller had.  Six keys are accepted:
-`exec`, `fs`, `net`, `audit`, `editor`, `shell`.
+editor, shell at whatever the caller had.  Seven keys are accepted:
+`exec`, `fs`, `net`, `detach`, `audit`, `editor`, `shell`.
 
 ```
 grant [
@@ -1436,17 +1436,35 @@ Boolean.  ral has no in-process network primitives, so `net` governs
 only the network access of external programs spawned inside the
 grant.  There is therefore **no in-process gate** for `net` — unlike
 `exec`, `fs`, `editor`, and `shell`, which ral checks before the gated
-action, a `net: false` is enforced *solely* by the OS sandbox (§11.8),
+action, a `net: false` is enforced *solely* by the OS sandbox (§11.9),
 all-or-nothing, with no endpoint-level policy.  On a platform without
 an OS sandbox backend a `net`-restricting grant therefore fails closed
-(§11.8) rather than running unconfined.  Inside a guest the network is
+(§11.9) rather than running unconfined.  Inside a guest the network is
 real — a `tun` device whose only peer is a host-side process — but `net`
 still has no in-process gate to fold there either: what the guest may reach
 is a host-side policy outside ral's own grant machinery, an explicit
 CONNECT-only proxy admitting an exact list of public DNS names on port 443
-and nothing else, not a value this capability narrows (§11.8).
+and nothing else, not a value this capability narrows (§11.9).
 
-### 11.4  `audit`
+### 11.4  `detach`
+
+Boolean, and the only dimension that gates a *verb* rather than an
+action on a resource.  `detach: false` withholds `detach` (§13.7) for
+the frame's extent: the call is refused before it is admitted against
+the session's birth budget, so a refusal costs nothing that cannot be
+recovered.  Silence permits, exactly as on every other dimension — a
+`grant` that attenuates fs says nothing about survivors.
+
+Unlike absence of the builtin, which is a host's answer and reads as an
+unknown command (§13.7), this is a refusal: a frame-scoped denial, the
+same shape `exec` and `fs` denials take.
+
+Nothing about `detach` reaches the OS profile.  What a survivor is
+confined *to* is the projection of the frame that birthed it, folded
+from `fs`/`net`/`exec` in the ordinary way; this key only decides
+whether it is born.
+
+### 11.5  `audit`
 
 `audit: true` requests inclusion of capability-check events in any
 execution tree that is already being collected; it does not itself
@@ -1455,7 +1473,7 @@ grants.  When such a tree is active, each `exec` or `fs` check emits
 a `capability-check` node (§10.3) just before the gated action — or
 alone if the action is denied — while `net` checks emit no nodes.
 
-### 11.5  `editor`
+### 11.6  `editor`
 
 Gates access to the line editor API (the `_ed-*` family, §18.1).
 Three booleans:
@@ -1477,7 +1495,7 @@ authority (§18.1) — so the `editor` capability is whatever the
 enclosing scope grants; wrap a plugin call in `grant { editor: … }
 { … }` to restrict it explicitly.
 
-### 11.6  `shell`
+### 11.7  `shell`
 
 Gates shell builtins that modify persistent process state beyond the
 current command's lifetime.  Currently one boolean:
@@ -1495,7 +1513,7 @@ Omitting `shell` (or setting `shell: [chdir: false]`) denies `cd`.
 interactive, script, and agent contexts; bare `cd` with no argument
 means `cd ~`.
 
-### 11.7  Attenuation
+### 11.8  Attenuation
 
 Nested grants can only reduce authority.  Per dimension:
 
@@ -1546,7 +1564,7 @@ unwind past the capability layer.  The same holds for the dynamic
 frames installed by `within` (cwd, env, handlers) and the cleanup
 thunk registered by `guard` — see §3.1.
 
-### 11.8  Platform support
+### 11.9  Platform support
 
 In-process `exec` and `fs` checks apply on every platform; `net` has
 no in-process gate (§11.3) and is enforced by the OS sandbox alone.
@@ -1661,7 +1679,7 @@ else, not this crate's grant machinery — so a `net`-restricting grant still
 neither wraps a spawn nor fails closed inside a guest: there is no OS
 sandbox backend there for it to fail closed *into*.
 
-### 11.9  Capability profiles (`.ral` files)
+### 11.10  Capability profiles (`.ral` files)
 
 A capability profile is an ordinary ral script whose terminal expression
 is a map shaped exactly like the argument of `grant [...] { body }`.
@@ -1690,7 +1708,7 @@ permanent session frame above `Capabilities::root()`.  Repeated
 `--capabilities` invocations append.  `meet` is commutative, so order
 doesn't change correctness — but each successive file narrows
 authority, never widens, and `audit: true` in any file makes the
-session audit (logical OR per §11.7).
+session audit (logical OR per §11.5).
 
 **Loading at runtime.** `source 'my-profile.ral'` returns the
 terminal-expression map, suitable for direct use:
@@ -2035,12 +2053,15 @@ that is a handle errors with `cannot return a handle from sandboxed
 evaluation`, since the worker it names does not exist in that child.
 `await` the handle before its value leaves the process.
 
-`detach` (§13.7) has no place in this picture.  An engaged sandbox
-kills its whole envelope with the process it wraps, however a child
-inside was born, so a detached process under confinement would be a
-receipt for a promise the OS breaks.  The verb is therefore not
-installed at all where the session's capabilities engage the sandbox
-— absent, not vetoed (§13.7).
+`detach` (§13.7) takes the same rule one step further.  A survivor is
+launched under the inherited `SandboxProjection` exactly as any other
+external child is, and then keeps it: the projection is frozen at
+birth, since no later frame can name the process to widen it.  What
+differs is only the envelope's lifetime.  A confinement built to die
+with this process would kill the survivor with it, so a surrendered
+launch drops that tie alone — every restriction the frame imposed
+still applies for the survivor's whole life.  Whether the frame
+permits the birth at all is the `detach` dimension (§11.4).
 
 ### 13.7  Handing work away: `detach`
 
@@ -2097,16 +2118,28 @@ writes.  This is the price of the cut, and it is the one thing a
 caller must understand before using the verb.
 
 `detach` is **absent rather than vetoed** wherever it has no meaning,
-and absence is decided once, when the session is built.  It has three
-grounds: the host (the agent host installs it, the interactive and
-batch `ral` hosts do not), the platform (it is born by a POSIX double
-fork, so it does not exist on Windows), and the session's
-capabilities (nothing is installed where they engage the OS sandbox,
-§13.6).  Where any of these holds, naming `detach` is an ordinary
-unknown-command error (§16) rather than a builtin that resolves and
-then refuses — the same discipline `watch` follows (§13.5).  A host
-installs the name and arms its budget in one act, so the two cannot
-be configured apart.
+and absence is decided once, when the session is built.  It has two
+grounds: the host (the interactive agent host installs it; the
+headless runner and the `ral` hosts do not) and the platform (it is
+born by a POSIX double fork, so it does not exist on Windows).  Where
+either holds, naming `detach` is an ordinary unknown-command error
+(§16) rather than a builtin that resolves and then refuses — the same
+discipline `watch` follows (§13.5).  A host installs the name and arms
+its budget in one act, so the two cannot be configured apart.
+
+Whether a *call* may spend the verb is a separate question, asked of
+the live capability stack rather than of the host, and answered as an
+ordinary refusal: a frame that says `detach: false` (§11.4) withholds
+it for that frame's extent.  Absence is a host's answer and reads as
+an unknown command; refusal is a frame's answer and reads as a denial.
+The refusal precedes admission against the budget, so it costs no
+birth.
+
+A survivor is confined by the frame that bore it.  It is launched
+under that frame's projection like any other external child and keeps
+it for life (§13.6), which no later frame can widen — so a `grant`
+narrow enough to be worth writing is narrow around the survivor too,
+for as long as it runs.
 
 A birth is bounded by a **budget**, not by a seat.  The live-worker
 cap (§13.4) bounds occupancy, and a process the session cannot
@@ -2327,7 +2360,7 @@ the daemon turns unprivileged user namespaces off
 `unshare(CLONE_NEWUSER)` would be "root" enough in its own namespace
 to attach a ptrace to a sibling, defeating the cross-uid isolation
 the jail exists for.  That same facility is what bubblewrap
-requires, so where the jail stands, bwrap does not (§11.8): the VM
+requires, so where the jail stands, bwrap does not (§11.9): the VM
 plus the jail is the guest's sandbox, deliberately without seccomp —
 cross-uid ptrace is already impossible, and a syscall policy would
 be maintained complexity buying nothing the uid and the cgroup do
@@ -2693,7 +2726,7 @@ but stable enough to round-trip ordinary text arguments.
 handlers.  Every op is its own builtin (no string-op dispatch); each
 is inert in non-interactive contexts (a call from a non-REPL script
 raises).  All but `_ed-hyperlink` — a string-shaping operation, not
-an editor mutation — are gated by the `editor` capability (§11.5).
+an editor mutation — are gated by the `editor` capability (§11.6).
 
 | Builtin | Gate | Description |
 |---|---|---|

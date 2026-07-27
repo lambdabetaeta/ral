@@ -12,6 +12,16 @@
 //! a session configures its own logging, and files invented here would be
 //! litter nobody reads (`decisions/260725_survives-exit-is-its-own-verb`).
 //!
+//! A survivor born inside a `grant` keeps that grant's confinement for
+//! life.  The projection is rendered into the launch exactly as it is for
+//! a child we keep — only the parent-death tie is dropped
+//! ([`Ownership::Surrendered`](crate::sandbox::Ownership)) — so what the
+//! process may read, write and reach is frozen as the birthing frame left
+//! it.  Nothing can widen it afterwards, since no later frame, and no
+//! later session, can name the process at all.  The frame's authority over
+//! the verb is a separate question, asked below and answered by
+//! `detach:` on the capability stack.
+//!
 //! All three of the survivor's standard descriptors are therefore
 //! `/dev/null`.  What rules out *inheriting* them is the pipe, not the bytes:
 //! this process's end closes when it exits, and the survivor's next write
@@ -37,6 +47,12 @@ use super::vet::vet;
 /// ([`crate::runtime::command_call`]), so the handler runs and its value is
 /// the value of the `detach`.  Nothing is born on that route, and so nothing
 /// is spent from the budget.
+///
+/// Three judgments follow resolution, in this order: the frame's authority
+/// over the verb ([`Shell::permits_detach`]), the grant's verdict on the
+/// command itself ([`vet`]), and the session's remaining births.  The
+/// verb's own authority comes first because a frame that withheld it is
+/// not owed an opinion on which program was named.
 pub(crate) fn detach(
     desc: &str,
     head: &Value,
@@ -65,6 +81,13 @@ pub(crate) fn detach(
             return crate::runtime::command_call::run_handler(&entry, depth, argv, mooring, shell);
         }
     }
+    if !shell.permits_detach() {
+        return Err(sig(
+            "detach: an active grant withholds it, so nothing here may outlive this session. \
+             Would `spawn` or `service` do, since both end when the session does?"
+                .to_string(),
+        ));
+    }
     // Nothing is bypassed: existence (127/126), argv shape, and the grant's
     // verdict on the whole call are the same three judgments an ordinary
     // external passes, so a bundled uutils tool falls out as its own image
@@ -90,7 +113,7 @@ pub(crate) fn detach(
         )));
     }
 
-    let mut launch = build_command(&plan, shell)?;
+    let mut launch = build_command(&plan, crate::sandbox::Ownership::Surrendered, shell)?;
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::null());
     launch.stderr(StdioSpec::null());

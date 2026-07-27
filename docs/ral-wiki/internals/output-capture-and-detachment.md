@@ -188,9 +188,17 @@ of the child's pgid.
   still alive is to probe what it serves.
 - The verb is **absent, not vetoed**, wherever it has no meaning. A host arms a
   `DetachPolicy` — a birth budget — in the same act that installs the builtin,
-  and does so only off Windows and where the session's capabilities do not
-  `engages_sandbox`: a bwrap envelope dies with its parent however its
-  inhabitants were born.
+  and does so only off Windows, where the double fork exists. That is now the
+  whole of the absence question: whether a given *call* may spend the verb is
+  asked of the live grant stack (`GrantStack::permits_detach`) and answered as
+  a refusal, `detach: false`
+  ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
+- A survivor born under a projection **keeps it for life**. `build_command`
+  renders the frame's confinement into the launch exactly as for a child the
+  session keeps; only `Ownership::Surrendered` drops bwrap's
+  `--die-with-parent`, which against a double fork would kill the survivor
+  moments after birth or never fire at all. Nothing later can widen what it may
+  touch, because nothing later can name it.
 - A detached row could not implement `Resident` (`core/src/types/resident.rs`)
   even if one wanted the ledger's uniformity, because that trait demands
   `cancel()` and every answer is wrong — a no-op lies about the edge, a `kill`

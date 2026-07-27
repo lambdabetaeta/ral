@@ -12,8 +12,7 @@
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{
-    Capabilities, ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack, Meet,
-    SandboxProjection,
+    ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack, Meet, SandboxProjection,
 };
 use std::collections::BTreeSet;
 
@@ -87,21 +86,6 @@ pub(crate) fn sandbox_projection(
         net: net_allowed,
         exec,
     })
-}
-
-/// True when `caps` engage the OS sandbox over the ambient root.
-///
-/// I.e. they impose fs or net restrictions an external process must be
-/// confined to.  Mirrors the grant stack [`crate::types::Shell::new`]
-/// installs (root, then this frame), so a host can decide whether to
-/// stand up sandbox machinery without constructing a whole `Shell` to
-/// probe the projection.  A probe has no session home/cwd/PATH of its
-/// own, so it hands `sandbox_projection` the shell-less `Resolver` and
-/// an empty `PATH` — the caller only ever asks about `caps` in isolation.
-pub fn engages_sandbox(caps: &Capabilities) -> bool {
-    let mut grants = GrantStack::root();
-    grants.push(caps.clone());
-    sandbox_projection(&grants, &Resolver::shell_less(), "").is_some()
 }
 
 /// Reduce the exec component of the stack into an [`ExecProjection`].

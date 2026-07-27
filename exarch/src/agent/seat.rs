@@ -215,8 +215,9 @@ impl Seat {
 /// Forks instead snapshot their parent through [`Shell::fork_session`],
 /// inheriting the seeding.
 ///
-/// `detach` says whether the host decided the verb has meaning at all (no OS
-/// sandbox engages, and the platform can double-fork). Naming the verb and
+/// `detach` says whether the host decided the verb has meaning at all — a
+/// question about the host and its platform, not about its capabilities,
+/// which a `grant` answers separately at each call. Naming the verb and
 /// arming its budget is deliberately one act: a shell that has the name
 /// always has the budget, and the two cannot drift. Where `detach` is false
 /// the name is simply absent, and calling it is an ordinary unknown-command

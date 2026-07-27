@@ -372,6 +372,10 @@ impl Grant {
             }),
             editor: Some(EditorPolicy::default()),
             shell: Some(ShellPolicy { chdir: true }),
+            // Unattenuated: the guest VM already bounds every survivor a
+            // detach could birth, so withholding the verb here would deny
+            // an escape the machine boundary has already closed.
+            detach: None,
             audit: true,
         }
     }

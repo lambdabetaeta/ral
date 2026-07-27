@@ -2,8 +2,8 @@
 //!
 //! **The surface is `grant [...]` and its equivalent `--capabilities
 //! <file>` ceiling** — a map keyed by capability dimension (`exec`,
-//! `fs`, `net`, `editor`, `shell`, `audit`).  A dimension the map does
-//! not name stays `None` and inherits the surrounding frame, so an
+//! `fs`, `net`, `detach`, `editor`, `shell`, `audit`).  A dimension the
+//! map does not name stays `None` and inherits the surrounding frame, so an
 //! attenuation touches only the dimensions it lists.  The author is the
 //! live user, so every malformed shape is a strict error carrying a
 //! shape-specific hint.
@@ -153,8 +153,8 @@ fn freeze_prefix_list(
 
 /// A capability bool field: strictly `true` or `false`, any other shape
 /// an error naming the wrong type.  Shared by every boolean dimension
-/// (`net`, `editor.*`, `shell.chdir`, `audit`) so a known key with a
-/// non-Bool value fails loudly rather than silently denying.
+/// (`net`, `detach`, `editor.*`, `shell.chdir`, `audit`) so a known key
+/// with a non-Bool value fails loudly rather than silently denying.
 fn decode_bool(value: &Value, err_prefix: &str) -> Result<bool, PolicyError> {
     match value {
         Value::Bool(b) => Ok(*b),
@@ -231,6 +231,7 @@ pub(crate) fn decode_capability_map(
             }
             "fs" => caps.fs = Some(decode_fs(v, &format!("{err_prefix} fs"), ctx)?),
             "net" => caps.net = Some(decode_bool(v, &format!("{err_prefix} net"))?),
+            "detach" => caps.detach = Some(decode_bool(v, &format!("{err_prefix} detach"))?),
             "audit" => caps.audit = decode_bool(v, &format!("{err_prefix} audit"))?,
             "editor" => caps.editor = Some(decode_editor(v, &format!("{err_prefix} editor"))?),
             "shell" => caps.shell = Some(decode_shell(v, &format!("{err_prefix} shell"))?),
