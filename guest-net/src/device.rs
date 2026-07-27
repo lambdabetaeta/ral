@@ -1,29 +1,17 @@
 //! The `smoltcp` [`Device`] over the net wire — the vsock-backed stream
 //! `ral-daemon --pump`'s guest side speaks `ral_daemon::packet`'s framing on.
 //!
-//! Three threads meet here, and this module owns exactly two of them:
+//! A **reader** thread blocks on [`ral_daemon::packet::read_frame`] and
+//! hands frames to `stack`'s core thread over a bounded channel; a full
+//! channel **drops** the frame — the right guest→host backpressure for raw
+//! IP, since the guest's own TCP sees the loss and backs off. The core
+//! thread's every `transmit` is a blocking
+//! [`ral_daemon::packet::write_frame`], so a wedged net link stalls the
+//! poll loop itself: end-to-end backpressure with no unbounded queue.
 //!
-//! - A **reader** thread that blocks on [`ral_daemon::packet::read_frame`] and, on
-//!   success, tries to hand the frame to `stack`'s core thread over a
-//!   bounded channel. A full channel means the core thread is behind, and
-//!   the frame is **dropped**, never queued without bound — that is the
-//!   correct guest→host backpressure for raw IP: the guest's own TCP stack
-//!   sees the loss and backs off, exactly as it would over a lossy link.
-//! - The **core** thread (owned by `stack`, not this module) that calls
-//!   [`Device::receive`]/[`Device::transmit`] from inside `Interface::poll`.
-//!   Every `transmit` is a **blocking** [`ral_daemon::packet::write_frame`] call made
-//!   directly on that thread: a wedged net link stalls `poll_egress`, which
-//!   stalls every socket's ability to drain its own send buffer, which is
-//!   end-to-end backpressure with no unbounded queue anywhere in between —
-//!   the same shape `vm-manager/src/hcs/console.rs` uses for its own
-//!   blocking pump.
-//!
-//! `stop()` on the returned [`Stop`] handle unsticks a reader parked in a
-//! blocking read the same way `vm-manager`'s `Console::wake` does: it
-//! does not touch the read half directly (a thread cannot safely interrupt
-//! another thread's blocking syscall by fiddling with the fd it owns), it
-//! shuts the wire down from a cloned handle, which turns the parked read
-//! into an immediate error.
+//! `stop()` on the returned [`Stop`] unsticks a parked reader the way
+//! `vm-manager`'s `Console::wake` does: shut the wire down from a cloned
+//! handle, turning the blocked read into an immediate error.
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,23 +23,17 @@ use smoltcp::time::Instant;
 
 use crate::pipe::Wake;
 
-/// How many frames the reader thread may queue for the core thread before
-/// it starts dropping. Sized well past a normal poll interval's worth of
-/// traffic; a channel that is *usually* full means the core thread itself
-/// is stuck, not that this number is wrong.
+/// How many frames the reader may queue before dropping. Sized well past a
+/// poll interval's traffic; a usually-full channel means the core thread is
+/// stuck, not that this number is wrong.
 const INBOX_CAP: usize = 256;
 
-/// The net wire's transport, abstracted over the two hypervisor backends'
-/// very different socket types.
-///
-/// A `VZVirtioSocket` fd on macOS, an `hvsocket` handle on Windows —
-/// whatever the caller hands in only needs to look like a duplex byte
-/// stream that can be cloned into independent read/write handles and shut
-/// down from any of them.
+/// The net wire's transport: a duplex byte stream that can be cloned into
+/// independent handles and shut down from any of them — a `VZVirtioSocket`
+/// fd on macOS, an `hvsocket` handle on Windows.
 pub trait Wire: Read + Write + Send + 'static {
-    /// An independent handle onto the same underlying connection: reads and
-    /// writes through it observe the same stream as `self`, and
-    /// [`Wire::shutdown`] on either unblocks a read parked on the other.
+    /// An independent handle onto the same connection; [`Wire::shutdown`]
+    /// on either unblocks a read parked on the other.
     ///
     /// # Errors
     /// Whatever the platform's own duplication call reports.
@@ -59,8 +41,8 @@ pub trait Wire: Read + Write + Send + 'static {
     where
         Self: Sized;
 
-    /// Unblock any read or write parked on this connection, from any
-    /// cloned handle, including one on another thread. Idempotent.
+    /// Unblock any read or write parked on this connection, from any cloned
+    /// handle. Idempotent.
     fn shutdown(&self);
 }
 
@@ -96,45 +78,54 @@ impl Wire for std::net::TcpStream {
 pub struct TunDevice<W: Wire> {
     inbox: mpsc::Receiver<Vec<u8>>,
     write: W,
-    /// Set once a blocking write fails — a dead net wire, not a recoverable
-    /// condition. `stack`'s core loop checks this each iteration and ends
-    /// the session rather than spin against a socket that will never
-    /// accept another byte.
+    /// Set once a write fails or the reader exits — a dead net wire.
+    /// `stack`'s core loop checks this each iteration and ends the session.
     failed: Arc<AtomicBool>,
 }
 
 impl<W: Wire> TunDevice<W> {
-    /// Whether the last `transmit` on this device failed. Sticky: once the
-    /// wire is dead, it stays dead.
+    /// Whether the wire has died. Sticky.
     #[must_use]
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
     }
 }
 
-/// Unblocks the reader thread from outside it. See the module doc.
-pub struct Stop<W: Wire>(W);
+/// Unblocks the reader thread from outside it, and later waits for it to
+/// actually end. See the module doc.
+pub struct Stop<W: Wire> {
+    wire: W,
+    reader: thread::JoinHandle<()>,
+}
 
 impl<W: Wire> Stop<W> {
     pub fn stop(&self) {
-        self.0.shutdown();
+        self.wire.shutdown();
+    }
+
+    /// Wait for the reader thread to end — prompt once [`Self::stop`] has
+    /// been called or the wire has failed on its own.
+    ///
+    /// # Panics
+    /// If the reader thread itself panicked.
+    pub fn join(self) {
+        self.reader
+            .join()
+            .expect("guest-net reader thread panicked");
     }
 }
 
 /// Start the reader thread and build the device the core thread polls.
-/// `wake`, if given, is called once per frame the reader hands off, so a
-/// core thread parked between `smoltcp` events wakes promptly.
+/// `wake`, if given, is called once per frame the reader hands off.
 ///
 /// # Errors
-/// Whatever `wire.try_clone()` reports — the same duplication call the
-/// reader thread, the writer half, and the returned [`Stop`] handle each
-/// need their own independent handle from.
+/// Whatever `wire.try_clone()` or starting the reader thread reports.
 pub fn spawn<W: Wire>(wire: W, wake: Option<Wake>) -> io::Result<(TunDevice<W>, Stop<W>)> {
     let write_half = wire.try_clone()?;
     let stop_handle = wire.try_clone()?;
     let read_half = wire; // the caller's own handle becomes the reader's
     let (tx, rx) = mpsc::sync_channel(INBOX_CAP);
-    thread::Builder::new()
+    let reader = thread::Builder::new()
         .name("guest-net-reader".to_string())
         .spawn(move || reader_loop(read_half, tx, wake))
         .map_err(|e| io::Error::other(format!("could not start the guest-net reader: {e}")))?;
@@ -144,14 +135,16 @@ pub fn spawn<W: Wire>(wire: W, wake: Option<Wake>) -> io::Result<(TunDevice<W>, 
             write: write_half,
             failed: Arc::new(AtomicBool::new(false)),
         },
-        Stop(stop_handle),
+        Stop {
+            wire: stop_handle,
+            reader,
+        },
     ))
 }
 
 fn reader_loop<W: Wire>(mut r: W, tx: mpsc::SyncSender<Vec<u8>>, wake: Option<Wake>) {
-    // A broken peer and a deliberate `Stop::stop()` look identical from
-    // here — both end `read_frame` with an error, and either way the wire
-    // is done.
+    // A broken peer and a deliberate `Stop::stop()` look identical here:
+    // both end `read_frame` with an error, and either way the wire is done.
     while let Ok(frame) = ral_daemon::packet::read_frame(&mut r) {
         // Drop on a full inbox rather than block: the guest's own TCP is
         // what must back off, never this thread.
@@ -160,12 +153,8 @@ fn reader_loop<W: Wire>(mut r: W, tx: mpsc::SyncSender<Vec<u8>>, wake: Option<Wa
             w();
         }
     }
-    // The core thread may have nothing left to *transmit* for a long
-    // while (or ever again), so a failed write is not a reliable signal
-    // that the session is over. Dropping `tx` here is what makes
-    // `receive`'s next `try_recv` see `Disconnected` instead of `Empty`,
-    // and ringing the doorbell one last time is what makes the core
-    // thread notice promptly instead of waiting out its own timeout.
+    // Dropping `tx` makes `receive`'s next `try_recv` see `Disconnected`;
+    // the final ring makes the core thread notice promptly.
     drop(tx);
     if let Some(wake) = wake {
         wake();
@@ -186,10 +175,8 @@ impl<W: Wire> Device for TunDevice<W> {
         let frame = match self.inbox.try_recv() {
             Ok(frame) => frame,
             Err(mpsc::TryRecvError::Empty) => return None,
-            // The reader thread has exited — a dead wire, exactly as much a
-            // reason to end the session as a failed transmit, and one a
-            // connection with nothing pending to *send* would otherwise
-            // never notice.
+            // The reader has exited — a dead wire, which a connection with
+            // nothing pending to *send* would otherwise never notice.
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.failed.store(true, Ordering::Relaxed);
                 return None;

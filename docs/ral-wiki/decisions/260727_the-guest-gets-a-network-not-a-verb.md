@@ -1,8 +1,20 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260727_one-connect-door-not-four-gates
 ---
 
 # The guest gets a network, not a verb
+
+> Superseded by
+> [[decisions/260727_one-connect-door-not-four-gates|one-connect-door-not-four-gates]],
+> which keeps this page's core claim — the guest reaches the network itself
+> rather than a bespoke per-protocol verb — but replaces the architecture
+> named below as what makes that safe. DNS answered locally, TCP accepted
+> only for a minted address, and an intercepting proxy on 80/443 are gone;
+> one explicit CONNECT-only proxy at an exact-hostname allowlist, pinned to a
+> single host-side resolution, replaces all three. Read the new page for what
+> is enforced now; this page's four-gate account of *why* the network is safe
+> to expose no longer holds.
 
 **A userland as rich as `synod`'s §7 is half wasted if nothing in it can
 reach anything, so the guest gets a real interface — a `tun` whose only peer

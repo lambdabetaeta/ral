@@ -39,12 +39,10 @@
 //! 9. **Dial the host's control plane**, but do not hand it to the engine
 //!    yet — the engine is the *last* thing this daemon starts.
 //! 10. **Bring the network up, when this boot has one** (`boot::Boot::net`):
-//!     dial the host's net wire, read its [`packet::Prologue`], write the
-//!     resolver config and CA it carries (`net::delivery`), create and
-//!     address the `tun` (`net::plan`, `net::Interface::apply`), and start
-//!     the pump (`pump::spawn`) that will shovel packets across it. All of
-//!     it before the engine exists, because the CA has to be on disk before
-//!     anything that could read it is running.
+//!     dial the host's net wire — packet framing begins on it immediately,
+//!     with no prologue ahead of it — create and address the `tun`
+//!     (`net::plan`, `net::Interface::apply`), and start the pump
+//!     (`pump::spawn`) that will shovel packets across it.
 //! 11. **Start the engine**, now that its network — if this boot has one —
 //!     is already live, and hand it the control-plane connection from step 9
 //!     as fd 3.

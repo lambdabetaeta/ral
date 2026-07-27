@@ -191,7 +191,9 @@ fn net_to_tun(mut net: File, mut tun: File) -> Result<Infallible, String> {
 /// `crate::engine`'s own module docs already refuse to accept for the
 /// engine, and there is no principled reason to accept it here.
 pub fn epitaph(death: Death) -> String {
-    format!("the network pump {death}; the session cannot be resumed in place, powering the machine off")
+    format!(
+        "the network pump {death}; the session cannot be resumed in place, powering the machine off"
+    )
 }
 
 #[cfg(test)]

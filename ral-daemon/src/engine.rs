@@ -29,6 +29,7 @@
 //! quietly wrong.
 
 use std::io;
+use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -71,41 +72,35 @@ const BASE: &[(&str, &str)] = &[
     ("RAL_GUEST", "1"),
 ];
 
-/// The system CA bundle `net::delivery` writes the host's proxy CA into,
-/// once appended, still verifies the public web — named once here because
-/// every variable below points a different tool at the same file.
-const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+/// The gateway's port for the CONNECT-only proxy — `guest-net`'s one
+/// listening endpoint.
+const PROXY_PORT: u16 = 3128;
 
-/// Added on top of [`BASE`] only when this boot has a network, so that every
-/// TLS-speaking tool in the guest trusts the proxy `net::delivery` wrote into
-/// [`CA_BUNDLE`] instead of failing closed against the public roots alone.
-///
-/// Conditional, not unconditional-and-harmless: on an un-networked exarch
-/// boot there is no [`CA_BUNDLE`] file to point at, and a `SSL_CERT_FILE`
-/// naming one that does not exist breaks TLS outright — worse than a tool
-/// that never heard of the variable at all.
-///
-/// The honest gap: `certifi`, the CA bundle a fresh Python venv installs for
-/// itself, and every JVM's own trust store both ignore all seven of these,
-/// because neither reads any of them. Nothing here can reach code that never
-/// consults its environment; that is a §7 rootfs question, not this list's.
-const TLS: &[(&str, &str)] = &[
-    ("SSL_CERT_FILE", CA_BUNDLE),
-    ("SSL_CERT_DIR", "/etc/ssl/certs"),
-    ("REQUESTS_CA_BUNDLE", CA_BUNDLE),
-    ("CURL_CA_BUNDLE", CA_BUNDLE),
-    ("GIT_SSL_CAINFO", CA_BUNDLE),
-    ("PIP_CERT", CA_BUNDLE),
-    ("NODE_EXTRA_CA_CERTS", CA_BUNDLE),
-];
+/// Hosts a networked boot's own server should never be routed through the
+/// proxy to reach.
+const NO_PROXY: &str = "localhost,127.0.0.1,::1";
 
-/// The engine's environment for this boot: [`BASE`] always, [`TLS`] only
-/// when `networked` — see [`TLS`]'s own docs for why the two must not be
-/// merged unconditionally.
-pub fn environment(networked: bool) -> Vec<(&'static str, &'static str)> {
-    let mut env = BASE.to_vec();
-    if networked {
-        env.extend_from_slice(TLS);
+/// The engine's environment for this boot: [`BASE`] always, plus — only when
+/// `gateway` is `Some`, i.e. this boot has a network — both conventional
+/// spellings of `HTTPS_PROXY` and [`NO_PROXY`].
+///
+/// `HTTP_PROXY`/`http_proxy` are deliberately not set: only HTTPS goes
+/// through this door, so a plain `http://` URL dies as a connection reset
+/// rather than a proxy error — answering it well would mean parsing
+/// absolute-form requests, a second parse surface this door does not have.
+pub fn environment(gateway: Option<Ipv4Addr>) -> Vec<(&'static str, String)> {
+    let mut env: Vec<(&'static str, String)> = BASE
+        .iter()
+        .map(|(name, value)| (*name, (*value).to_string()))
+        .collect();
+    if let Some(gateway) = gateway {
+        let proxy = format!("http://{gateway}:{PROXY_PORT}");
+        for name in ["HTTPS_PROXY", "https_proxy"] {
+            env.push((name, proxy.clone()));
+        }
+        for name in ["NO_PROXY", "no_proxy"] {
+            env.push((name, NO_PROXY.to_string()));
+        }
     }
     env
 }
@@ -180,7 +175,7 @@ pub fn spawn(boot: &Boot, control: &OwnedFd) -> Result<Pid, String> {
     let mut cmd = Command::new(&boot.engine);
     cmd.arg("--engine");
     cmd.env_clear();
-    cmd.envs(environment(boot.net.is_some()));
+    cmd.envs(environment(boot.net.as_ref().map(|net| net.gateway)));
     cmd.current_dir(WORK);
     // SAFETY: the closure runs between `fork` and `exec` and calls only
     // async-signal-safe syscalls — `setsid`, `dup2`, `close` — with no
@@ -262,20 +257,22 @@ mod tests {
         );
     }
 
+    const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+
     /// The environment is a set: one value per name, none of them empty —
     /// networked or not.
     #[test]
     fn the_environment_names_each_variable_once() {
-        for networked in [false, true] {
-            let env = environment(networked);
+        for gateway in [None, Some(GATEWAY)] {
+            let env = environment(gateway);
             let mut names: Vec<_> = env.iter().map(|(name, _)| *name).collect();
             names.sort_unstable();
             let given = names.len();
             names.dedup();
-            assert_eq!(names.len(), given, "a variable is set twice ({networked})");
+            assert_eq!(names.len(), given, "a variable is set twice ({gateway:?})");
             assert!(
                 env.iter().all(|(_, value)| !value.is_empty()),
-                "an empty value is not a setting ({networked})"
+                "an empty value is not a setting ({gateway:?})"
             );
         }
     }
@@ -285,8 +282,8 @@ mod tests {
     /// non-empty, whether or not this boot has a network.
     #[test]
     fn ral_guest_is_set_and_non_empty() {
-        for networked in [false, true] {
-            let value = environment(networked)
+        for gateway in [None, Some(GATEWAY)] {
+            let value = environment(gateway)
                 .into_iter()
                 .find_map(|(name, value)| (name == "RAL_GUEST").then_some(value))
                 .expect("the engine is given RAL_GUEST");
@@ -299,7 +296,7 @@ mod tests {
     /// sensibly mean.
     #[test]
     fn every_path_entry_is_absolute() {
-        let path = environment(false)
+        let path = environment(None)
             .into_iter()
             .find_map(|(name, value)| (name == "PATH").then_some(value))
             .expect("the engine is given a PATH");
@@ -309,32 +306,39 @@ mod tests {
         );
     }
 
-    /// The TLS variables exist only for a networked boot: pointing them at a
-    /// CA bundle that was never written would break TLS outright rather than
-    /// leave it merely unconfigured.
+    /// An un-networked boot carries none of the proxy variables; a networked
+    /// one carries all four, `HTTPS_PROXY` pointing at the gateway's
+    /// CONNECT door.
     #[test]
-    fn tls_variables_are_conditional_on_networked() {
+    fn proxy_variables_are_conditional_on_networked() {
+        let names = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"];
+        let unnetworked = environment(None);
         assert!(
-            environment(false)
+            names
                 .iter()
-                .all(|(name, _)| *name != "SSL_CERT_FILE"),
-            "an un-networked boot has no CA bundle to point SSL_CERT_FILE at"
+                .all(|name| unnetworked.iter().all(|(n, _)| n != name)),
+            "an un-networked boot has no proxy to point at"
         );
-        let networked = environment(true);
-        for name in [
-            "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-            "REQUESTS_CA_BUNDLE",
-            "CURL_CA_BUNDLE",
-            "GIT_SSL_CAINFO",
-            "PIP_CERT",
-            "NODE_EXTRA_CA_CERTS",
-        ] {
+
+        let networked = environment(Some(GATEWAY));
+        for name in names {
             assert!(
                 networked.iter().any(|(n, _)| *n == name),
                 "a networked boot is missing {name}"
             );
         }
+        assert!(
+            networked
+                .iter()
+                .any(|(n, v)| *n == "HTTPS_PROXY" && v == "http://10.0.2.2:3128"),
+            "HTTPS_PROXY does not name the gateway's proxy door"
+        );
+        assert!(
+            networked
+                .iter()
+                .all(|(n, _)| *n != "HTTP_PROXY" && *n != "http_proxy"),
+            "HTTP_PROXY is deliberately never set"
+        );
     }
 
     /// A clean exit is the session ending, not a failure, and the log says

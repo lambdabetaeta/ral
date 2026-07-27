@@ -361,29 +361,16 @@ fn converse(
         "start_conversation refuses before spawning this thread when the credential scrub failed",
     );
 
-    let blocked = {
-        let emitter = emitter.clone();
-        move |domain: &str, message: &str| {
+    let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
+        Ok(begun) => begun,
+        Err(e) => {
             emitter.emit(
                 "synod-event",
-                super::sink::SynodEvent::Blocked {
-                    domain: domain.to_string(),
-                    message: message.to_string(),
-                },
+                super::sink::SynodEvent::Failure { message: e },
             );
+            return ConversationEnded { stopped: false };
         }
     };
-    let (mut conversation, opening) =
-        match Conversation::begin(Path::new(folder), store, choice, blocked) {
-            Ok(begun) => begun,
-            Err(e) => {
-                emitter.emit(
-                    "synod-event",
-                    super::sink::SynodEvent::Failure { message: e },
-                );
-                return ConversationEnded { stopped: false };
-            }
-        };
 
     emitter.emit("synod-opening", opening);
 

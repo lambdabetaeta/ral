@@ -73,7 +73,7 @@ gray_matter = { version = "0.3", default-features = false, features = ["yaml"] }
 # which do not compile on Windows.
 [target.'cfg(unix)'.dependencies]
 ral-core = { path = "../core", features = ["grep", "coreutils", "coreutils-unix-only"] }
-rustix = { workspace = true, features = ["process", "stdio"] }
+rustix = { workspace = true, features = ["process", "stdio", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

@@ -20,9 +20,6 @@
 //!
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
 
-use std::io::Write as _;
-
-use ral_daemon::packet::Prologue;
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
 #[cfg(unix)]
@@ -54,24 +51,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // The guest waits on the net wire's prologue before it will start an
-    // engine at all, so a host that takes the wires and says nothing wedges
-    // the boot rather than merely going without a network.  This example
-    // wants no network, only a machine to watch, so it sends the shortest
-    // honest prologue there is — no resolver, no proxy to trust — and holds
-    // the wire open, because the pump ends the session on EOF.
+    // Held open until the wire is dropped below, because the pump ends the
+    // session on EOF — nothing needs to be sent on it first.
     let wires = machine.take_wires();
-    let mut net = NetStream::from(wires.net);
-    if let Err(err) = net.write_all(
-        &Prologue {
-            resolv_conf: Vec::new(),
-            ca_pem: Vec::new(),
-        }
-        .encode(),
-    ) {
-        eprintln!("could not write the net wire's prologue: {err}");
-        std::process::exit(1);
-    }
+    let net = NetStream::from(wires.net);
 
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
     println!("ral-daemon's own console lines print above as the guest runs.");

@@ -17,7 +17,7 @@ use rustix::time::{ClockId, Timespec, clock_settime};
 
 use crate::boot::{Boot, Export, Net};
 use crate::reap::{self, Waking};
-use crate::{engine, mounts, net, packet, pump, sysctl, vsock};
+use crate::{engine, mounts, net, pump, sysctl, vsock};
 
 /// How long the engine is given to finish after being asked to stop, before
 /// it is killed.  Long enough for a run to abandon its work and flush the
@@ -117,15 +117,18 @@ pub fn serve() -> Result<Infallible, String> {
 
     listen_for_the_end();
     if STOPPING.load(Ordering::Acquire) {
-        return halt(None, None, "the host asked to stop before the engine had started");
+        return halt(
+            None,
+            None,
+            "the host asked to stop before the engine had started",
+        );
     }
 
     // The control plane is dialled first — this is what fixes the Windows
     // broker's serial accept order and preserves today's readiness
     // semantics — but not handed to the engine yet: the engine is the last
-    // thing this function starts, so that the network (if any) and the CA
-    // it delivers are already in place before any process exists that could
-    // read them.
+    // thing this function starts, so that the network (if any) is already
+    // up before any process exists that could reach it.
     let control = engine::control_plane(boot.port)?;
 
     let pump = match &boot.net {
@@ -146,15 +149,21 @@ pub fn serve() -> Result<Infallible, String> {
     halt(Some(engine), pump, &attend(engine, pump)?)
 }
 
-/// Dial the host's net wire, deliver its prologue, bring the `tun` up, and
-/// start the pump — everything step 10 of the crate's boot narrative
+/// Dial the host's net wire, clear the resolver config, bring the `tun` up,
+/// and start the pump — everything step 10 of the crate's boot narrative
 /// promises, in the order it promises it.
+///
+/// `/etc/resolv.conf` is emptied rather than left as the image shipped it:
+/// a stray `getaddrinfo` in the guest should fail at once, not hang through
+/// resolver retries against whatever the base image happened to carry. The
+/// image's own CA bundle is untouched — no session certificate is minted or
+/// installed.
 ///
 /// # Errors
 /// Returns a sentence naming whichever of those steps failed: the wire
-/// could not be reached, the prologue could not be read, a blob could not
-/// be written, the interface could not be planned or created, or the pump
-/// could not be started.
+/// could not be reached, `/etc/resolv.conf` could not be cleared, the
+/// interface could not be planned or created, or the pump could not be
+/// started.
 fn bring_up_network(net_config: &Net) -> Result<Pid, String> {
     let socket = vsock::dial_host(net_config.port).map_err(|err| {
         format!(
@@ -163,12 +172,9 @@ fn bring_up_network(net_config: &Net) -> Result<Pid, String> {
             net_config.port
         )
     })?;
-    let mut wire = std::fs::File::from(socket);
-    let prologue = packet::Prologue::parse(&mut wire)
-        .map_err(|err| format!("could not read the net wire's prologue: {err}"))?;
-    for blob in net::delivery(&prologue) {
-        blob.apply()?;
-    }
+    let wire = std::fs::File::from(socket);
+    std::fs::write("/etc/resolv.conf", b"")
+        .map_err(|err| format!("could not clear /etc/resolv.conf: {err}"))?;
     let tun = net::plan(net_config)?.apply()?;
     eprintln!(
         "ral-daemon: the network is up on vsock port {} as {}",
@@ -180,7 +186,10 @@ fn bring_up_network(net_config: &Net) -> Result<Pid, String> {
     // both descriptors now, and this process keeping either open would only
     // keep the tun and the net wire alive past the pump's own death.
     drop((tun, net_fd));
-    eprintln!("ral-daemon: net pump running as pid {}", pump.as_raw_nonzero());
+    eprintln!(
+        "ral-daemon: net pump running as pid {}",
+        pump.as_raw_nonzero()
+    );
     Ok(pump)
 }
 

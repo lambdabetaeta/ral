@@ -8,30 +8,21 @@ license = "MIT OR Apache-2.0"
 workspace = true
 
 [dependencies]
-# The policy, the rate budget and the ledger are exarch's, not a second copy:
-# what a fleet's IT department wrote in `net-policy.ral` is what the gate
-# enforces, and every decision it takes lands in the same audit file.
+# The policy and the audit ledger are exarch's, not a second copy: what a
+# fleet's IT department wrote in `net-policy.ral` is what the gate enforces,
+# and every decision it takes lands in the same audit file.
 exarch = { path = "../exarch", default-features = false }
-# The frame codec is the guest's own file, linked here rather than reimplemented,
-# so the two ends of the net wire cannot drift into two codecs that agree today.
+# The frame codec is the guest's own file, linked here rather than
+# reimplemented, so the two ends of the net wire cannot drift apart.
 ral-daemon = { path = "../ral-daemon" }
 
 # A sans-io TCP/IP stack: this process *is* the guest's peer, so it has to
-# speak IP itself.  `medium-ip` because a tun carries bare IP with no ethernet
-# header, and there is no DHCP client or IPv6 to configure — the guest's
-# address came down the kernel command line.
+# speak IP itself. `medium-ip` because a tun carries bare IP with no ethernet
+# header; no `socket-udp`, since this crate answers no UDP traffic at all.
 smoltcp = { version = "0.13", default-features = false, features = [
-    "std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp",
+    "std", "medium-ip", "proto-ipv4", "socket-tcp",
 ] }
-# The intercepting proxy's server side, pinned to the same crypto provider
-# exarch already links so one process holds one aws-lc-rs.
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
-# Upstream trust is the *host operating system's* store, deliberately the
-# inverse of `exarch::provider::tls::config` — see `upstream`.  Note what is
-# absent: `webpki-roots` is in no line of this manifest, which is the cheapest
-# possible enforcement of that rule.
-rustls-platform-verifier = "0.7"
-# The CA whose leaves the guest is taught to trust, minted per session.
-rcgen = "0.14"
-reqwest = { version = "0.13", features = ["blocking"] }
+# The CONNECT head's HTTP/1 parse.
 httparse = "1"
+# `Authority` parsing for the CONNECT target — deliberately not a full URL.
+http = "1"

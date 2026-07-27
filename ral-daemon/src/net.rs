@@ -12,10 +12,6 @@
 //! run it, and `crate::packet` already sets the precedent of an ungated
 //! module in a mostly-gated crate for exactly this reason.
 //!
-//! The same split governs the files the prologue carries: [`delivery`] turns
-//! a [`crate::packet::Prologue`] into a list of [`Blob`]s, purely; each
-//! [`Blob::apply`] is the thin edge that writes one.
-//!
 //! **ioctls only, no netlink**: the pinned `libc` carries `ifreq`,
 //! `rtentry`, the `SIOC*` requests, `TUNSETIFF`, `IFF_TUN`, `IFF_NO_PI` and
 //! `RTF_*` for both `musl` targets this daemon ships on, so reaching for
@@ -92,74 +88,6 @@ pub fn plan(net: &boot::Net) -> Result<Interface, String> {
     })
 }
 
-/// Where a [`Blob`]'s contents go once written: over the top of whatever was
-/// there, or onto the end of it.
-///
-/// A sum rather than a bare bool because [`Blob::apply`] is the only place
-/// that ever reads what `mode` means, and a name it can match on says why
-/// each blob in [`delivery`] carries the one it does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// Truncate the file to exactly `contents`.
-    Replace,
-    /// Add `contents` to whatever the file already holds.
-    Append,
-}
-
-/// One file the guest writes because the host's prologue said to, decided
-/// before any of them touches a disk.
-///
-/// [`delivery`] is pure precisely because it stops here: whether
-/// `/etc/ssl/certs/ca-certificates.crt` already holds anything is a fact
-/// about the guest's filesystem, not the prologue, so appending to it is
-/// [`Blob::apply`]'s job, not this struct's.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Blob {
-    pub path: &'static str,
-    pub contents: Vec<u8>,
-    pub mode: Mode,
-}
-
-/// Turn the host's prologue into the files the guest must write before
-/// anything downstream — TLS, DNS — can trust or resolve through it.
-///
-/// `resolv.conf` is replaced outright: it is the guest's whole resolver
-/// configuration, and there is nothing already on disk worth keeping
-/// alongside it. The CA PEM, when the host sent one, goes to two places for
-/// two different readers: appended to the system bundle at
-/// `/etc/ssl/certs/ca-certificates.crt` so every public root already there
-/// still verifies whatever passes through the proxy untouched, and written
-/// whole to `/usr/local/share/ca-certificates/synod-proxy.crt` — the
-/// well-known holding pen `update-ca-certificates` would refresh the bundle
-/// from, named separately so the proxy's own certificate can be told apart
-/// from the public roots it was appended beside. An empty `ca_pem` means the
-/// host has no proxy to be trusted for, not a mistake — [`Prologue::parse`]
-/// already allows it, and this function answers with one blob instead of
-/// three rather than three blobs that would each write nothing.
-///
-/// [`Prologue::parse`]: crate::packet::Prologue::parse
-#[must_use]
-pub fn delivery(prologue: &crate::packet::Prologue) -> Vec<Blob> {
-    let mut blobs = vec![Blob {
-        path: "/etc/resolv.conf",
-        contents: prologue.resolv_conf.clone(),
-        mode: Mode::Replace,
-    }];
-    if !prologue.ca_pem.is_empty() {
-        blobs.push(Blob {
-            path: "/etc/ssl/certs/ca-certificates.crt",
-            contents: prologue.ca_pem.clone(),
-            mode: Mode::Append,
-        });
-        blobs.push(Blob {
-            path: "/usr/local/share/ca-certificates/synod-proxy.crt",
-            contents: prologue.ca_pem.clone(),
-            mode: Mode::Replace,
-        });
-    }
-    blobs
-}
-
 #[cfg(target_os = "linux")]
 mod apply {
     use std::ffi::CString;
@@ -167,44 +95,7 @@ mod apply {
     use std::net::Ipv4Addr;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-    use super::{Blob, Interface, Mode};
-
-    impl Blob {
-        /// Write `contents` to `path`, truncating or appending as `mode`
-        /// says, creating the file — and the directory holding it — if they
-        /// are not there.
-        ///
-        /// The directory has to be created rather than assumed: a rootfs
-        /// carrying no `ca-certificates` package has neither
-        /// `/etc/ssl/certs` nor `/usr/local/share/ca-certificates`, and a
-        /// guest that cannot be handed this session's certificate authority
-        /// cannot speak to the proxy at all — so refusing the boot over a
-        /// missing directory would turn a one-`mkdir` problem into no
-        /// session.  Appending to a bundle that does not exist yet is
-        /// likewise correct rather than a fallback: everything the guest
-        /// reaches is intercepted, so our own authority is the only one it
-        /// needs, and a bundle holding just that is a complete one.
-        ///
-        /// # Errors
-        /// A sentence naming `path` and the reason the open or the write
-        /// failed.
-        pub fn apply(&self) -> Result<(), String> {
-            use std::io::Write as _;
-            if let Some(parent) = std::path::Path::new(self.path).parent() {
-                std::fs::create_dir_all(parent).map_err(|err| {
-                    format!("could not make the directory for {}: {err}", self.path)
-                })?;
-            }
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(self.mode == Mode::Replace)
-                .append(self.mode == Mode::Append)
-                .open(self.path)
-                .and_then(|mut file| file.write_all(&self.contents))
-                .map_err(|err| format!("could not write {}: {err}", self.path))
-        }
-    }
+    use super::Interface;
 
     /// Convert a `SIOC*`/`TUNSETIFF` request constant to `libc::Ioctl`.
     ///
@@ -361,8 +252,8 @@ mod apply {
             ioctl(sock.as_raw_fd(), code(libc::SIOCSIFNETMASK), &mut req)
                 .map_err(|err| format!("could not set {}'s netmask: {err}", self.name))?;
 
-            req.ifr_ifru.ifru_mtu = libc::c_int::try_from(crate::packet::MTU)
-                .expect("MTU is 1500, which fits a c_int");
+            req.ifr_ifru.ifru_mtu =
+                libc::c_int::try_from(crate::packet::MTU).expect("MTU is 1500, which fits a c_int");
             ioctl(sock.as_raw_fd(), code(libc::SIOCSIFMTU), &mut req)
                 .map_err(|err| format!("could not set {}'s MTU: {err}", self.name))?;
 
@@ -456,51 +347,5 @@ mod tests {
     fn a_prefix_over_32_is_refused() {
         let err = plan(&net("10.0.2.15", 33, "10.0.2.2")).unwrap_err();
         assert!(err.contains('/'), "{err}");
-    }
-
-    /// One row per shape a prologue can take: whether a CA PEM is present
-    /// decides the whole list, since `resolv.conf` is unconditional.
-    #[test]
-    fn delivery_writes_resolv_conf_and_the_ca_only_when_one_arrived() {
-        let resolv_conf = b"nameserver 10.0.2.2\n".to_vec();
-
-        let without_ca = crate::packet::Prologue {
-            resolv_conf: resolv_conf.clone(),
-            ca_pem: Vec::new(),
-        };
-        assert_eq!(
-            delivery(&without_ca),
-            vec![Blob {
-                path: "/etc/resolv.conf",
-                contents: resolv_conf.clone(),
-                mode: Mode::Replace,
-            }]
-        );
-
-        let ca_pem = b"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n".to_vec();
-        let with_ca = crate::packet::Prologue {
-            resolv_conf: resolv_conf.clone(),
-            ca_pem: ca_pem.clone(),
-        };
-        assert_eq!(
-            delivery(&with_ca),
-            vec![
-                Blob {
-                    path: "/etc/resolv.conf",
-                    contents: resolv_conf,
-                    mode: Mode::Replace,
-                },
-                Blob {
-                    path: "/etc/ssl/certs/ca-certificates.crt",
-                    contents: ca_pem.clone(),
-                    mode: Mode::Append,
-                },
-                Blob {
-                    path: "/usr/local/share/ca-certificates/synod-proxy.crt",
-                    contents: ca_pem,
-                    mode: Mode::Replace,
-                },
-            ]
-        );
     }
 }

@@ -1,38 +1,25 @@
-# What a fresh install reaches with nobody having configured anything.  Most
+# What a fresh install reaches with nobody having configured anything. Most
 # installs are unmanaged and stay on this list, so it has to be useful on day
 # one; a managed fleet widens or narrows it by installing its own
 # `/etc/exarch/net-policy.ral`, never by editing this one.
 #
-# `read` entries are either an exact hostname or a `*.suffix` wildcard, and
-# each grants GET+HEAD only.  `write` is the whole exfiltration story: every
-# host on `read` is somewhere to fetch from and nowhere to put anything, so
-# a shipped default that ships with an empty `write` cannot be used to send
-# a byte anywhere, whatever else it can read.  A managed fleet that trusts a
-# host with uploads names it there, and names exactly the methods it means.
+# `hosts` is a destination allowlist: the exact public DNS names a guest's
+# CONNECT tunnel may reach on port 443, and nothing else. It does not judge
+# what an admitted host is sent once the tunnel is open — an allowed host
+# can receive whatever the guest's TLS connection carries.
 #
-# `max-bytes` caps one response body; `rate-per-minute` caps how many
-# requests this process (and everything it spawns) may make per minute.
-# Both are sized for a guest that runs real installs rather than occasional
-# lookups: a cap that suits a single enquiry fails a routine package fetch
-# on day one.
-
 # `search` governs the provider's own built-in web search, run server-side —
 # the allowlist above cannot constrain it, since we never see the URLs it
 # visits, so it gets this separate verdict.
-
-# The `read` list is Claude Cowork's, copied wholesale: the same problem,
-# solved by people who had to survive contact with real machines.  That it
-# reads like a developer's list is the point — an agent does office work by
-# scripting it, so PyPI and the archive are how it reaches capability the
-# image does not already hold, whatever the person in front of it does for
-# a living.  One host is added rather than adopted wholesale:
-# `ports.ubuntu.com` is arm64 Ubuntu's real package mirror — `archive.
-# ubuntu.com` alone silently starves an arm64 guest of the packages `apt`
-# depends on, so leaving it off would make the default quietly useless on
-# the architecture most of our guests run.
+#
+# The list is Claude Cowork's, copied wholesale: an agent does office work
+# by scripting it, so PyPI and the archives are how it reaches capability
+# the image does not already hold. One addition: `ports.ubuntu.com`, arm64
+# Ubuntu's real package mirror — without it the default silently starves an
+# arm64 guest of the packages `apt` depends on.
 
 return [
-  read: [
+  hosts: [
     'registry.npmjs.org', 'npmjs.com', 'www.npmjs.com', 'npmjs.org',
     'www.npmjs.org', 'yarnpkg.com', 'registry.yarnpkg.com',
     'pypi.org', 'files.pythonhosted.org', 'pythonhosted.org',
@@ -41,8 +28,5 @@ return [
     'crates.io', 'index.crates.io', 'static.crates.io',
     'playwright.download.prss.microsoft.com', 'cdn.playwright.dev',
   ],
-  write: [],
-  max-bytes: 268435456,
-  rate-per-minute: 240,
   search: true,
 ]

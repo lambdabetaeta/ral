@@ -49,9 +49,13 @@ BASE_IMAGE="${BASE_IMAGE:-docker.io/library/ubuntu:24.04}"
 # bit-for-bit reproducibility, point MIRROR at a snapshot.ubuntu.com timestamp
 # instead — an explicit MIRROR always wins over the derived one — and
 # packages-manifest.txt records the exact versions that were pulled either way.
+# mmdebstrap bakes this URL straight into the rootfs's own
+# /etc/apt/sources.list, so it is https: the guest's only door out is a
+# CONNECT-only proxy on port 443, and a later `apt-get update` inside a
+# running guest can only reach an https mirror through it.
 case "$ARCH" in
-  arm64) ARCH_MIRROR="http://ports.ubuntu.com/ubuntu-ports" ;;
-  amd64) ARCH_MIRROR="http://archive.ubuntu.com/ubuntu" ;;
+  arm64) ARCH_MIRROR="https://ports.ubuntu.com/ubuntu-ports" ;;
+  amd64) ARCH_MIRROR="https://archive.ubuntu.com/ubuntu" ;;
   *) echo "ARCH=$ARCH is neither of synod's two guests (SYNOD.md §2)." >&2
      echo "Did you mean ARCH=arm64 (macOS, Virtualization.framework) or" >&2
      echo "ARCH=amd64 (Windows, Hyper-V)? Debian architecture names, not" >&2
@@ -101,7 +105,10 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo ">> [container] installing build tooling"
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends mmdebstrap e2fsprogs zstd >/dev/null
+# `ca-certificates` because MIRROR is https now: the base image ships without a
+# CA bundle, so mmdebstrap's fetch would fail to verify the mirror.
+apt-get install -y -qq --no-install-recommends \
+  mmdebstrap e2fsprogs zstd ca-certificates >/dev/null
 
 # --- The container must BE the image's architecture --------------------------
 # mmdebstrap alone would happily assemble a foreign-architecture tree, but this

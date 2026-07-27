@@ -1,61 +1,68 @@
-//! Stage 9's proof: a second `smoltcp` stack playing the guest, talking to
-//! `guest_net::run`'s host stack over a `UnixStream` pair — the same frame
-//! codec and [`device::Wire`] abstraction both ends of the real link use.
-//! `GuestSide` drives its own `Interface`/`SocketSet` by hand, exactly the
-//! shape a real guest kernel's TCP/IP stack would exercise, which is what
-//! lets these tests prove the raw-IP refusal, the DNS answers, and the
-//! port gate before a line of TLS or `proxy.rs` exists anywhere in this
-//! crate — the [`Config::handler`] here is a stub that only records that a
-//! connection was ever handed to it.
+//! A second `smoltcp` stack playing the guest, talking to `guest_net::run`'s
+//! host stack over a `UnixStream` pair — the same frame codec and
+//! [`device::Wire`] abstraction both ends of the real link use. `GuestSide`
+//! drives its own `Interface`/`SocketSet` by hand, exactly the shape a real
+//! guest kernel's TCP/IP stack would exercise.
+//!
+//! Every test supplies its own [`TestDialer`], the crate's one injectable
+//! resolve-and-dial seam, so nothing here ever opens a socket to a real
+//! host: an "allowed" CONNECT is vetted exactly as production code vets it
+//! (`resolve` answers a public-looking address, `vet::open`'s own
+//! `is_public` filter runs for real), but `dial` is free to ignore that
+//! address and connect to a local fixture instead.
 //!
 //! Unix-only: the harness needs a `UnixStream` pair to stand in for the net
-//! wire, and [`device::Wire`]'s Windows twin is exercised only by the type
-//! check, not by a socket pair std has no equivalent constructor for.
+//! wire.
 #![cfg(unix)]
 
-use std::net::Ipv4Addr;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::{tcp, udp};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
-use exarch::egress::{AuditLog, Egress, RateLimiter};
-use exarch::net_policy::{NetPolicy, Rule};
+use exarch::egress::Egress;
+use exarch::net_policy::Host;
 
-use guest_net::{Config, device};
+use guest_net::{Config, vet};
 
-/// The interface's own address — also where the guest's `resolv.conf`
-/// would point its nameserver, per [`Config::gateway`]'s doc.
-const GATEWAY: Ipv4Addr = Ipv4Addr::new(100, 64, 0, 1);
-
-/// The guest's own address on the link, chosen well outside the
-/// `100.64.0.0/10` range `Names` mints from so it can never collide with a
-/// minted answer.
-const GUEST_ADDR: Ipv4Addr = Ipv4Addr::new(100, 100, 0, 2);
-
+/// The interface's own address — `vm_manager::GUEST_LINK.gateway` in the
+/// real deployment, where the guest's `HTTPS_PROXY` also points.
+const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+/// The guest's own address on the link — `vm_manager::GUEST_LINK.address`.
+const GUEST_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
+const PORT: u16 = 3128;
 const SOCKET_BUF: usize = 8 * 1024;
+/// Matches `stack::TUNNEL_CAP`. Not importable (private, deliberately —
+/// see that module's doc), so restated here as the number this test's
+/// capacity case must exercise.
+const TUNNEL_CAP: usize = 32;
 
 /// A minimal guest: a `smoltcp` interface driven by hand over one end of a
 /// `UnixStream` pair, the other end handed to [`guest_net::run`].
 struct GuestSide {
-    device: device::TunDevice<UnixStream>,
+    device: guest_net::device::TunDevice<UnixStream>,
     iface: Interface,
     sockets: SocketSet<'static>,
 }
 
 impl GuestSide {
     fn new(guest_end: UnixStream) -> Self {
-        let (mut device, _stop) = device::spawn(guest_end, None).expect("reader starts");
+        let (mut device, _stop) = guest_net::device::spawn(guest_end, None).expect("reader starts");
         let mut config = IfaceConfig::new(HardwareAddress::Ip);
         config.random_seed = 1;
         let mut iface = Interface::new(config, &mut device, Instant::now());
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(IpAddress::Ipv4(GUEST_ADDR), 10)).unwrap();
+            addrs
+                .push(IpCidr::new(IpAddress::Ipv4(GUEST_ADDR), 24))
+                .unwrap();
         });
         Self {
             device,
@@ -65,13 +72,14 @@ impl GuestSide {
     }
 
     fn poll(&mut self) {
-        self.iface.poll(Instant::now(), &mut self.device, &mut self.sockets);
+        self.iface
+            .poll(Instant::now(), &mut self.device, &mut self.sockets);
     }
 
     /// Poll until `done` is satisfied or `timeout` elapses. Generous
     /// margins throughout this file: this host's own scheduling jitter is
-    /// high, and every wait here is for one or two round trips over a
-    /// loopback socket pair, not a real network.
+    /// high, and every wait here is only a handful of round trips over a
+    /// loopback socket pair.
     fn poll_until(&mut self, timeout: Duration, mut done: impl FnMut(&mut Self) -> bool) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -82,7 +90,7 @@ impl GuestSide {
             if std::time::Instant::now() > deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -104,227 +112,531 @@ impl GuestSide {
         self.sockets.get::<tcp::Socket>(handle).state()
     }
 
-    fn udp_query(&mut self, dst: Ipv4Addr, local_port: u16, query: &[u8]) -> SocketHandle {
-        let socket = udp::Socket::new(
-            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 2048]),
-            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 2048]),
-        );
-        let handle = self.sockets.add(socket);
-        let socket = self.sockets.get_mut::<udp::Socket>(handle);
-        socket.bind(local_port).expect("a fresh ephemeral port binds");
-        socket
-            .send_slice(query, (IpAddress::Ipv4(dst), 53))
-            .expect("room for one query");
-        handle
+    fn tcp_send(&mut self, handle: SocketHandle, data: &[u8]) {
+        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+        let n = socket
+            .send_slice(data)
+            .expect("a fresh socket has room for this test's payload");
+        assert_eq!(n, data.len(), "test payload must fit in one send");
     }
 
-    fn udp_can_recv(&self, handle: SocketHandle) -> bool {
-        self.sockets.get::<udp::Socket>(handle).can_recv()
+    fn tcp_can_recv(&self, handle: SocketHandle) -> bool {
+        self.sockets.get::<tcp::Socket>(handle).can_recv()
     }
 
-    fn udp_response(&mut self, handle: SocketHandle) -> Vec<u8> {
-        let socket = self.sockets.get_mut::<udp::Socket>(handle);
-        let mut buf = [0u8; 2048];
-        let (n, _meta) = socket.recv_slice(&mut buf).expect("caller checked can_recv first");
+    fn tcp_recv(&mut self, handle: SocketHandle) -> Vec<u8> {
+        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+        let mut buf = [0u8; 4096];
+        let n = socket.recv_slice(&mut buf).unwrap_or(0);
         buf[..n].to_vec()
     }
-}
 
-fn wire_name(name: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    for label in name.split('.') {
-        out.push(u8::try_from(label.len()).unwrap());
-        out.extend_from_slice(label.as_bytes());
+    fn tcp_close(&mut self, handle: SocketHandle) {
+        self.sockets.get_mut::<tcp::Socket>(handle).close();
     }
-    out.push(0);
-    out
+
+    /// The host closed its half: a FIN arrived. This, not [`Self::tcp_done`],
+    /// is what a refusal produces — the guest is still free to send.
+    fn tcp_peer_closed(&self, handle: SocketHandle) -> bool {
+        matches!(
+            self.tcp_state(handle),
+            tcp::State::CloseWait
+                | tcp::State::LastAck
+                | tcp::State::Closing
+                | tcp::State::Closed
+                | tcp::State::TimeWait
+        )
+    }
+
+    /// Both halves are done. `TimeWait` counts: a guest that closes first
+    /// sits there for 2MSL, which no test can afford to wait out.
+    fn tcp_done(&self, handle: SocketHandle) -> bool {
+        matches!(
+            self.tcp_state(handle),
+            tcp::State::Closed | tcp::State::TimeWait
+        )
+    }
 }
 
-/// Build a minimal, RD-set, no-EDNS DNS query for `name`/`qtype`.
-fn dns_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&id.to_be_bytes());
-    msg.extend_from_slice(&0x0100u16.to_be_bytes()); // RD
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend(wire_name(name));
-    msg.extend_from_slice(&qtype.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes()); // IN
-    msg
+/// The one injected [`vet::Dialer`]. `resolve` always answers a
+/// public-looking address so `vet::open`'s own classifier runs honestly;
+/// `dial` ignores that address and connects to `fixture` — a loopback
+/// listener this test owns — after sleeping `dial_delay`, and panics
+/// instead of resolving if `panic_on_resolve` is set.
+struct TestDialer {
+    fixture: SocketAddr,
+    dial_delay: Duration,
+    panic_on_resolve: bool,
+    resolve_calls: AtomicUsize,
+    dial_calls: AtomicUsize,
 }
 
-fn dns_rcode(resp: &[u8]) -> u16 {
-    u16::from_be_bytes([resp[2], resp[3]]) & 0xF
+impl vet::Dialer for TestDialer {
+    fn resolve(&self, _host: &Host) -> std::io::Result<Vec<SocketAddr>> {
+        self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.panic_on_resolve,
+            "injected worker panic for the panic-reporting test"
+        );
+        Ok(vec!["93.184.216.34:443".parse().unwrap()])
+    }
+
+    fn dial(&self, _addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+        self.dial_calls.fetch_add(1, Ordering::SeqCst);
+        if !self.dial_delay.is_zero() {
+            thread::sleep(self.dial_delay);
+        }
+        TcpStream::connect_timeout(&self.fixture, timeout)
+    }
 }
 
-fn dns_ancount(resp: &[u8]) -> u16 {
-    u16::from_be_bytes([resp[6], resp[7]])
+fn no_fixture_dialer() -> Arc<TestDialer> {
+    Arc::new(TestDialer {
+        fixture: "127.0.0.1:1".parse().unwrap(),
+        dial_delay: Duration::ZERO,
+        panic_on_resolve: false,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    })
 }
 
-/// The minted `A` record's address, for a response built from a query for
-/// `name` at type `A` — the question length is recomputed to find where
-/// the answer section starts, since it is not fixed size.
-fn dns_answer_addr(resp: &[u8], name: &str) -> Ipv4Addr {
-    let qlen = wire_name(name).len() + 4;
-    let rr = 12 + qlen;
-    let rdata = rr + 12; // NAME(2) TYPE(2) CLASS(2) TTL(4) RDLENGTH(2)
-    Ipv4Addr::new(resp[rdata], resp[rdata + 1], resp[rdata + 2], resp[rdata + 3])
-}
-
-/// A [`Config`] with a policy admitting only `a.example`, a throwaway audit
-/// ledger, and a handler that just counts how many connections it saw —
-/// enough to prove the accept gate's verdict without any TLS or HTTP code.
-fn test_config() -> (Config, Arc<AtomicUsize>) {
-    let accepted = Arc::new(AtomicUsize::new(0));
-    let counter = accepted.clone();
-    let policy = NetPolicy {
-        allow: vec![Rule {
-            host: "a.example".to_string(),
-            methods: vec!["GET".to_string()],
-        }],
-        max_response_bytes: 1_048_576,
-        rate_per_minute: 10_000,
-        search: false,
-    };
-    let path = std::env::temp_dir().join(format!(
-        "guest-net-loopback-{}-{}.jsonl",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let config = Config {
-        egress: Egress {
-            policy: Arc::new(policy),
-            audit: AuditLog::for_test(&path),
-            limiter: RateLimiter::new(10_000),
-        },
-        gateway: GATEWAY,
-        dns_rate_per_minute: 10_000,
-        handler: Arc::new(move |accepted| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            drop(accepted);
-        }),
-    };
-    (config, accepted)
-}
-
-fn harness() -> (GuestSide, Arc<AtomicUsize>, guest_net::Session<UnixStream>) {
-    let (host_end, guest_end) = UnixStream::pair().expect("a socket pair");
-    let (config, accepted) = test_config();
-    let session = guest_net::run(host_end, config).expect("the host stack starts");
-    (GuestSide::new(guest_end), accepted, session)
-}
-
-/// The whole point of the crate, proved with nothing downstream of the
-/// accept gate built yet: a `100.64.0.0/10` address DNS never minted has
-/// no name, so a guest dialling it directly gets a `RST`, never a worker.
-#[test]
-fn raw_ip_to_an_address_dns_never_minted_is_refused() {
-    let (mut guest, accepted, session) = harness();
-    let never_minted = Ipv4Addr::new(100, 64, 33, 44);
-    let handle = guest.tcp_connect(never_minted, 80, 40000);
-    let closed = guest.poll_until(Duration::from_secs(5), |g| {
-        matches!(g.tcp_state(handle), tcp::State::Closed | tcp::State::TimeWait)
+/// A loopback listener that echoes whatever it reads back until EOF.
+fn spawn_echo_fixture() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if stream.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
     });
-    assert!(closed, "an unminted address must be refused, not left hanging");
-    assert_eq!(accepted.load(Ordering::SeqCst), 0, "no worker was ever handed this connection");
-    session.stop();
-    session.join();
+    addr
 }
 
-/// The other half of the same proof: a name the policy actually admits
-/// mints a real address, and dialling *that* address on 80 is accepted —
-/// the gate distinguishes the two, it does not just refuse everything.
-#[test]
-fn an_address_minted_for_an_allowed_name_is_accepted_on_80() {
-    let (mut guest, accepted, session) = harness();
-    let dns = guest.udp_query(GATEWAY, 40001, &dns_query(1, "a.example", 1));
-    let arrived = guest.poll_until(Duration::from_secs(5), |g| g.udp_can_recv(dns));
-    assert!(arrived, "the DNS answer must arrive");
-    let resp = guest.udp_response(dns);
-    assert_eq!(dns_rcode(&resp), 0);
-    let minted = dns_answer_addr(&resp, "a.example");
+/// A loopback listener that writes continuously and never reads, to fill
+/// the tunnel's worker→guest ring on purpose.
+fn spawn_flood_fixture() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let chunk = vec![0u8; 8192];
+            while stream.write_all(&chunk).is_ok() {}
+        }
+    });
+    addr
+}
 
-    let handle = guest.tcp_connect(minted, 80, 40002);
-    let established = guest.poll_until(Duration::from_secs(5), |g| {
+fn connect_request(host: &str) -> Vec<u8> {
+    format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\nUser-Agent: test\r\n\r\n")
+        .into_bytes()
+}
+
+fn harness(dialer: Arc<dyn vet::Dialer>) -> (GuestSide, guest_net::Session<UnixStream>) {
+    let (host_end, guest_end) = UnixStream::pair().expect("a socket pair");
+    let session = guest_net::run(
+        host_end,
+        Config {
+            egress: Egress::for_test(),
+            gateway: GATEWAY,
+            dialer,
+        },
+    )
+    .expect("the host stack starts");
+    (GuestSide::new(guest_end), session)
+}
+
+/// Runs `session.join()` on its own thread and waits at most `timeout` for
+/// it — a hung join must fail this test loudly rather than hang the whole
+/// suite.
+fn join_within(
+    session: guest_net::Session<UnixStream>,
+    timeout: Duration,
+) -> Option<Result<(), String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(session.join());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
+/// The host stack holds one address, the gateway, and does not use
+/// `set_any_ip`. A SYN for anything else is not addressed to it at all, so
+/// it is dropped rather than reset: the connection goes nowhere.
+#[test]
+fn direct_traffic_to_an_arbitrary_address_never_reaches_a_worker() {
+    let dialer = no_fixture_dialer();
+    let (mut guest, session) = harness(dialer.clone());
+    let handle = guest.tcp_connect(Ipv4Addr::new(93, 184, 216, 34), 443, 40000);
+    let established = guest.poll_until(Duration::from_secs(2), |g| {
         g.tcp_state(handle) == tcp::State::Established
     });
-    assert!(established, "a minted, on-list address must be accepted on 80");
-    let saw_worker = guest.poll_until(Duration::from_secs(2), |_| accepted.load(Ordering::SeqCst) >= 1);
-    assert!(saw_worker, "the accept gate must hand the connection to a worker");
+    assert!(!established, "a direct address must never establish");
+    assert_eq!(dialer.resolve_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(dialer.dial_calls.load(Ordering::SeqCst), 0);
     session.stop();
-    session.join();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
 }
 
-/// Every port but 80 and 443 has no listener at all, so `smoltcp`'s own
-/// stack answers with a `RST` — gate four, and no code of this crate's own
-/// runs to produce it.
 #[test]
-fn a_port_other_than_80_or_443_is_reset() {
-    let (mut guest, _accepted, session) = harness();
-    let handle = guest.tcp_connect(GATEWAY, 2222, 40003);
+fn a_port_other_than_3128_has_no_listener() {
+    let (mut guest, session) = harness(no_fixture_dialer());
+    let handle = guest.tcp_connect(GATEWAY, 9999, 40001);
     let closed = guest.poll_until(Duration::from_secs(5), |g| {
-        matches!(g.tcp_state(handle), tcp::State::Closed | tcp::State::TimeWait)
+        matches!(
+            g.tcp_state(handle),
+            tcp::State::Closed | tcp::State::TimeWait
+        )
     });
     assert!(closed, "a port with no listener must reset, not hang");
     session.stop();
-    session.join();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
 }
 
 #[test]
-fn an_off_list_name_gets_nxdomain() {
-    let (mut guest, _accepted, session) = harness();
-    let dns = guest.udp_query(GATEWAY, 40004, &dns_query(7, "off-list.example", 1));
-    let arrived = guest.poll_until(Duration::from_secs(5), |g| g.udp_can_recv(dns));
-    assert!(arrived, "a response arrives even for an off-list name");
-    let resp = guest.udp_response(dns);
-    assert_eq!(dns_rcode(&resp), 3, "NXDOMAIN");
+fn a_denied_connect_never_dials() {
+    let dialer = no_fixture_dialer();
+    let (mut guest, session) = harness(dialer.clone());
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40002);
+    let established = guest.poll_until(Duration::from_secs(5), |g| {
+        g.tcp_state(handle) == tcp::State::Established
+    });
+    assert!(established, "the proxy port must accept the handshake");
+    guest.tcp_send(handle, &connect_request("off-list.example"));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
+    assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 403"));
+    let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_peer_closed(handle));
+    assert!(closed, "a denied host must close the connection");
+    assert_eq!(
+        dialer.resolve_calls.load(Ordering::SeqCst),
+        0,
+        "a denied host must never be resolved"
+    );
+    assert_eq!(
+        dialer.dial_calls.load(Ordering::SeqCst),
+        0,
+        "a denied host must never dial"
+    );
     session.stop();
-    session.join();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
 }
 
-/// `AAAA` on an on-list name must be `NOERROR` with zero answers, never
-/// `NXDOMAIN` — see `dns.rs`'s own doc for why that distinction matters.
+/// The authority-confusion string that bypassed the old intercepting
+/// proxy: `decode` must refuse it before policy or DNS is consulted.
 #[test]
-fn an_on_list_aaaa_query_is_noerror_with_zero_answers() {
-    let (mut guest, _accepted, session) = harness();
-    let dns = guest.udp_query(GATEWAY, 40005, &dns_query(8, "a.example", 28));
-    let arrived = guest.poll_until(Duration::from_secs(5), |g| g.udp_can_recv(dns));
-    assert!(arrived, "a response arrives for an AAAA query too");
-    let resp = guest.udp_response(dns);
-    assert_eq!(dns_rcode(&resp), 0, "NOERROR");
-    assert_eq!(dns_ancount(&resp), 0);
+fn the_authority_confusion_regression_is_refused_before_any_dial() {
+    let dialer = no_fixture_dialer();
+    let (mut guest, session) = harness(dialer.clone());
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40003);
+    let established = guest.poll_until(Duration::from_secs(5), |g| {
+        g.tcp_state(handle) == tcp::State::Established
+    });
+    assert!(established);
+    guest.tcp_send(
+        handle,
+        b"CONNECT archive.ubuntu.com@169.254.169.254:443 HTTP/1.1\r\nHost: archive.ubuntu.com@169.254.169.254:443\r\n\r\n",
+    );
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
+    assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 403"));
+    let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_peer_closed(handle));
+    assert!(closed, "the userinfo-confusion target must be refused");
+    assert_eq!(dialer.resolve_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(dialer.dial_calls.load(Ordering::SeqCst), 0);
     session.stop();
-    session.join();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
 }
 
-/// `stop()` unsticks the reader even mid-session — the same mechanism the
-/// `device` module's own tests exercise in isolation, proved here once more
-/// through the full stack.
+/// An allowed CONNECT reaches the fixture through the injected dialer, and
+/// bytes copy both ways; closing the guest's side then closes the whole
+/// tunnel.
 #[test]
-fn stop_ends_a_session_with_nothing_in_flight() {
-    let (guest, _accepted, session) = harness();
+fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
+    let fixture = spawn_echo_fixture();
+    let dialer = Arc::new(TestDialer {
+        fixture,
+        dial_delay: Duration::ZERO,
+        panic_on_resolve: false,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    });
+    let (mut guest, session) = harness(dialer.clone());
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40004);
+    let established = guest.poll_until(Duration::from_secs(5), |g| {
+        g.tcp_state(handle) == tcp::State::Established
+    });
+    assert!(established);
+    guest.tcp_send(handle, &connect_request("a.example"));
+
+    let got_response = guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle));
+    assert!(got_response, "an allowed CONNECT must get a response");
+    let resp = guest.tcp_recv(handle);
+    assert!(resp.starts_with(b"HTTP/1.1 200"), "got {resp:?}");
+    assert_eq!(dialer.dial_calls.load(Ordering::SeqCst), 1);
+
+    guest.tcp_send(handle, b"ping");
+    let echoed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle));
+    assert!(
+        echoed,
+        "the fixture's echo must come back through the tunnel"
+    );
+    assert_eq!(guest.tcp_recv(handle), b"ping");
+
+    guest.tcp_close(handle);
+    let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_done(handle));
+    assert!(closed, "closing the guest side must close the whole tunnel");
     session.stop();
-    session.join();
-    drop(guest);
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
 }
 
-/// Kept out of the corpus replay in `dns.rs`, but a light sanity check that
-/// the seed files this crate ships for `cargo-fuzz` are themselves
-/// well-formed enough to be useful seeds, not just non-panicking noise.
+/// The fixed live-tunnel cap refuses the next connection at accept, before
+/// any worker exists, and frees a slot the moment one tunnel ends.
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "a test-only check that the crate's own checked-in fuzz corpus is present, not turn-time model I/O"
-)]
-fn the_shipped_dns_corpus_seeds_exist() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/dns");
-    let entries: Vec<_> = std::fs::read_dir(&dir)
-        .expect("the corpus directory ships with the crate")
-        .collect();
-    assert!(!entries.is_empty(), "the fuzz corpus must not be empty");
+fn capacity_rejects_the_next_connection_and_frees_after_one_tunnel_ends() {
+    let fixture = spawn_echo_fixture();
+    let dialer = Arc::new(TestDialer {
+        fixture,
+        dial_delay: Duration::ZERO,
+        panic_on_resolve: false,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    });
+    let (mut guest, session) = harness(dialer);
+
+    let mut handles = Vec::new();
+    for i in 0..TUNNEL_CAP {
+        let local_port = 41000 + u16::try_from(i).unwrap();
+        let handle = guest.tcp_connect(GATEWAY, PORT, local_port);
+        assert!(
+            guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+                == tcp::State::Established),
+            "connection {i} must be accepted"
+        );
+        guest.tcp_send(handle, &connect_request("a.example"));
+        assert!(
+            guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)),
+            "connection {i} must get a response"
+        );
+        assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 200"));
+        handles.push(handle);
+    }
+
+    let over_cap = guest.tcp_connect(GATEWAY, PORT, 42000);
+    let refused = guest.poll_until(Duration::from_secs(5), |g| {
+        matches!(
+            g.tcp_state(over_cap),
+            tcp::State::Closed | tcp::State::TimeWait
+        )
+    });
+    assert!(
+        refused,
+        "a connection past the cap must be refused at accept, before any worker runs"
+    );
+
+    guest.tcp_close(handles[0]);
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_done(handles[0])));
+
+    let freed = guest.tcp_connect(GATEWAY, PORT, 42001);
+    let accepted = guest.poll_until(Duration::from_secs(5), |g| {
+        g.tcp_state(freed) == tcp::State::Established
+    });
+    assert!(accepted, "ending one tunnel must free a slot for the next");
+    guest.tcp_send(freed, &connect_request("a.example"));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(freed)));
+    assert!(guest.tcp_recv(freed).starts_with(b"HTTP/1.1 200"));
+
+    session.stop();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn stop_during_an_incomplete_connect_ends_the_session_promptly() {
+    let (mut guest, session) = harness(no_fixture_dialer());
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40005);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(handle, b"CONNECT a.example:443 HTTP/1.1\r\n"); // no terminating blank line
+    guest.poll();
+    session.stop();
+    let result = join_within(session, Duration::from_secs(5));
+    assert!(
+        result.is_some(),
+        "join must return promptly, not wait out the handshake deadline"
+    );
+    assert!(result.unwrap().is_ok());
+}
+
+#[test]
+fn stop_while_a_worker_is_dialling_ends_the_session_once_the_dial_returns() {
+    let fixture = spawn_echo_fixture();
+    let dialer = Arc::new(TestDialer {
+        fixture,
+        dial_delay: Duration::from_millis(300),
+        panic_on_resolve: false,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    });
+    let (mut guest, session) = harness(dialer);
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40006);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(handle, &connect_request("a.example"));
+    guest.poll();
+    thread::sleep(Duration::from_millis(50)); // let the worker get into the dial
+    session.stop();
+    let result = join_within(session, Duration::from_secs(5));
+    assert!(
+        result.is_some(),
+        "a bounded dial must not hold join up indefinitely"
+    );
+    assert!(result.unwrap().is_ok());
+}
+
+#[test]
+fn stop_during_an_idle_established_tunnel_ends_the_session_promptly() {
+    let fixture = spawn_echo_fixture();
+    let dialer = Arc::new(TestDialer {
+        fixture,
+        dial_delay: Duration::ZERO,
+        panic_on_resolve: false,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    });
+    let (mut guest, session) = harness(dialer);
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40007);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(handle, &connect_request("a.example"));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
+    assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 200"));
+
+    session.stop();
+    let result = join_within(session, Duration::from_secs(5));
+    assert!(
+        result.is_some(),
+        "an idle tunnel must not hold join up — the worker is blocked reading the pipe"
+    );
+    assert!(result.unwrap().is_ok());
+}
+
+/// The worker→guest ring is filled on purpose by a fixture that floods
+/// and a guest that never drains, so the worker's write genuinely blocks;
+/// `stop` must still wake it.
+#[test]
+fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly() {
+    let fixture = spawn_flood_fixture();
+    let dialer = Arc::new(TestDialer {
+        fixture,
+        dial_delay: Duration::ZERO,
+        panic_on_resolve: false,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    });
+    let (mut guest, session) = harness(dialer);
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40008);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(handle, &connect_request("a.example"));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
+    assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 200"));
+
+    // Never drain again: let the flood fill the ring and the socket
+    // window from here on, without any further polling from this side.
+    thread::sleep(Duration::from_millis(500));
+
+    session.stop();
+    let result = join_within(session, Duration::from_secs(5));
+    assert!(
+        result.is_some(),
+        "a worker blocked writing to a full ring must wake on stop, not hang join"
+    );
+    assert!(result.unwrap().is_ok());
+}
+
+#[test]
+fn a_worker_panic_becomes_a_named_session_failure() {
+    let dialer = Arc::new(TestDialer {
+        fixture: "127.0.0.1:1".parse().unwrap(),
+        dial_delay: Duration::ZERO,
+        panic_on_resolve: true,
+        resolve_calls: AtomicUsize::new(0),
+        dial_calls: AtomicUsize::new(0),
+    });
+    let (mut guest, session) = harness(dialer);
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40009);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(handle, &connect_request("a.example"));
+    let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_peer_closed(handle));
+    assert!(closed, "a panicked worker must still tear its socket down");
+
+    session.stop();
+    let result = join_within(session, Duration::from_secs(5)).expect("join must return");
+    let err =
+        result.expect_err("a worker panic must surface as a named failure, not a detached panic");
+    assert!(err.contains("panicked"), "got {err:?}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn repeated_start_stop_leaves_thread_count_stable() {
+    fn thread_count() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("Threads:")
+                        .map(|n| n.trim().parse().unwrap())
+                })
+            })
+            .unwrap_or(0)
+    }
+
+    let before = thread_count();
+    for _ in 0..5 {
+        let (guest, session) = harness(no_fixture_dialer());
+        drop(guest);
+        session.stop();
+        join_within(session, Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+    }
+    let after = thread_count();
+    assert!(
+        after <= before + 2,
+        "threads leaked across repeated start/stop: before={before} after={after}"
+    );
 }

@@ -1,81 +1,120 @@
-//! The IT-owned network policy: a root-owned script naming which hosts this
-//! machine's exarch/synod sessions may reach, which HTTP methods each host
-//! admits, and the size/rate ceilings on doing so.
+//! The IT-owned network policy: a root-owned script naming which public
+//! DNS names a CONNECT tunnel may reach, on port 443, and nothing else.
 //!
-//! Read from a fixed system path (`/etc/exarch/net-policy.ral` — no XDG
-//! home, no per-user override), evaluated through the shared
-//! [`ral_core::builtins::modules::evaluate_source`] path under a
-//! [`ral_core::types::Capabilities::deny_all`] grant, exactly as [`crate::config::load`]
-//! reads the user's own unusual-provider config — the same vetted shape,
-//! applied to a policy that is IT's rather than the user's. Absent, it
-//! falls back to a small built-in default (mirrors
-//! `crate::policy::base`'s embedded capability scripts).
+//! A destination allowlist, not an information-flow policy: an admitted
+//! host receives whatever the guest sends once the tunnel is open.
 //!
-//! One file for every front-end on this machine: exarch and synod alike
-//! ([`crate::fleet::desk::ExarchDesk`]) answer host enquiries off the same
-//! allowlist, so it is not keyed by which one is running.
+//! Read from a fixed system path (no XDG home, no per-user override),
+//! evaluated under a [`ral_core::types::Capabilities::deny_all`] grant like
+//! [`crate::config::load`]; absent, a small built-in default. One file for
+//! every front-end on this machine — exarch and synod answer off the same
+//! allowlist.
 
 use ral_core::Shell;
 use ral_core::types::Value;
 
-/// The one fixed path every front-end reads — no XDG lookup, no
-/// per-invocation override: this is IT's ruleset, not the user's.
+/// The one fixed path every front-end reads: IT's ruleset, not the user's.
 const POLICY_PATH: &str = "/etc/exarch/net-policy.ral";
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
 
-/// This module's error-message prefix, passed to `crate::config`'s shared
-/// `read_optional_file`/`evaluate_no_authority` helpers.
+/// This module's error-message prefix for `crate::config`'s shared helpers.
 const LABEL: &str = "network policy";
 
-/// The HTTP methods a policy may name, uppercase only — hostnames are
-/// case-insensitive, HTTP methods are not, so a lowercase spelling is
-/// refused rather than silently folded.
-const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+/// One exact, lowercase ASCII DNS name — the only shape this policy admits.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Host(String);
 
-/// One allowlist entry: a host (exact hostname or `*.suffix` wildcard — see
-/// [`host_matches`]) and the HTTP methods it admits.
-#[derive(Debug, Clone)]
-pub struct Rule {
-    pub host: String,
-    pub methods: Vec<String>,
+impl Host {
+    /// The only constructor: lowercases `raw` and rejects anything that
+    /// isn't one plain DNS name — no wildcard, no IP literal, no trailing
+    /// dot, no empty label, no underscore, no non-ASCII byte, no label
+    /// outside `[a-z0-9-]` or starting/ending with `-`, no label over 63
+    /// bytes, no name over 253 bytes.
+    ///
+    /// # Errors
+    /// Returns `Err` naming what was wrong with `raw`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        if raw.is_empty() {
+            return Err("a host name must not be empty".to_string());
+        }
+        if !raw.is_ascii() {
+            return Err(format!("'{raw}' is not ASCII"));
+        }
+        if raw.starts_with('[') || raw.parse::<std::net::IpAddr>().is_ok() {
+            return Err(format!("'{raw}' is an IP literal, not a host name"));
+        }
+        if raw.contains([':', '/', '@']) || raw.contains(char::is_whitespace) {
+            return Err(format!(
+                "'{raw}' contains a character that has no place in a bare host name"
+            ));
+        }
+        if raw.bytes().any(|b| b.is_ascii_control()) {
+            return Err(format!("'{raw}' contains a control byte"));
+        }
+        if raw.contains('*') {
+            return Err(format!("'{raw}' is a wildcard, which this policy refuses"));
+        }
+        if raw.ends_with('.') {
+            return Err(format!(
+                "'{raw}' has a trailing dot, which this policy refuses"
+            ));
+        }
+        let lower = raw.to_ascii_lowercase();
+        if lower.len() > 253 {
+            return Err(format!("'{raw}' is over 253 bytes long"));
+        }
+        for label in lower.split('.') {
+            if label.is_empty() {
+                return Err(format!("'{raw}' has an empty label"));
+            }
+            if label.len() > 63 {
+                return Err(format!("'{raw}' has a label over 63 bytes long"));
+            }
+            if label.starts_with('-') || label.ends_with('-') {
+                return Err(format!("'{raw}' has a label starting or ending with '-'"));
+            }
+            if label.contains('_') {
+                return Err(format!("'{raw}' has a label with an underscore"));
+            }
+            if !label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
+                return Err(format!(
+                    "'{raw}' has a label with a character outside [a-z0-9-]"
+                ));
+            }
+        }
+        Ok(Self(lower))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// What this machine's sessions are allowed to reach, and how much of it.
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What this machine's sessions may open a CONNECT tunnel to.
 #[derive(Debug)]
 pub struct NetPolicy {
-    pub allow: Vec<Rule>,
-    /// The largest response body one request may read.
-    pub max_response_bytes: u64,
-    /// How many requests this process's whole tree may make per minute.
-    pub rate_per_minute: u32,
+    pub hosts: std::collections::HashSet<Host>,
     /// Whether this machine's agents may use the model provider's built-in,
-    /// server-side web search. A separate verdict from `allow` because that
-    /// allowlist cannot constrain a search the provider runs on our behalf —
-    /// we never see the URLs it visits, so there is nothing here to check
-    /// them against.
+    /// server-side web search — a separate verdict from `hosts`, since that
+    /// allowlist cannot constrain a search the provider runs on our behalf.
     pub search: bool,
 }
 
 impl NetPolicy {
-    /// Whether `host` is admitted by any rule, method-blind.
-    ///
-    /// This is the DNS/accept gate: a name resolves, or a connection is
-    /// accepted, before any method line exists to consult, so this
-    /// predicate and [`Self::allows`] cannot be collapsed into one without
-    /// leaving that earlier gate with nothing to check.
     #[must_use]
-    pub fn host_allowed(&self, host: &str) -> bool {
-        self.allow.iter().any(|r| host_matches(host, &r.host))
-    }
-
-    /// Whether `host` admits `method` — the proxy gate, checked once a
-    /// request line is in the clear.
-    #[must_use]
-    pub fn allows(&self, method: &str, host: &str) -> bool {
-        self.allow
-            .iter()
-            .any(|r| host_matches(host, &r.host) && r.methods.iter().any(|m| m == method))
+    pub fn admits(&self, host: &Host) -> bool {
+        self.hosts.contains(host)
     }
 }
 
@@ -103,187 +142,70 @@ pub fn load() -> Result<NetPolicy, String> {
     )
 }
 
-/// Require a present `Int`-valued field, naming the field on a miss.
-fn int_field(value: Option<&Value>, field: &str, display: &str) -> Result<i64, String> {
-    match value {
-        Some(Value::Int(n)) => Ok(*n),
-        Some(other) => Err(format!(
-            "network policy {display}: '{field}' must be an Int, got {}",
-            other.type_name()
-        )),
-        None => Err(format!("network policy {display}: missing '{field}'")),
-    }
-}
-
-/// Decode one `write` row — `[host: Str, methods: [Str]]` — into a [`Rule`],
-/// naming the offending row on any shape mismatch.
-fn decode_write_row(row: &Value, display: &str) -> Result<Rule, String> {
-    let Value::Map(row) = row else {
-        return Err(format!(
-            "network policy {display}: 'write' rows must be maps \
-             [host: Str, methods: [Str]], got {}",
-            row.type_name()
-        ));
-    };
-    for key in row.keys() {
-        if !matches!(key.as_str(), "host" | "methods") {
-            return Err(format!(
-                "network policy {display}: unknown key '{key}' in a 'write' row — expected \
-                 host, methods"
-            ));
-        }
-    }
-    let host = match row.get("host") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => {
-            return Err(format!(
-                "network policy {display}: a 'write' row's 'host' must be a Str, got {}",
-                other.type_name()
-            ));
-        }
-        None => {
-            return Err(format!(
-                "network policy {display}: a 'write' row is missing 'host'"
-            ));
-        }
-    };
-    let raw_methods = match row.get("methods") {
-        Some(Value::List(items)) => items,
-        Some(other) => {
-            return Err(format!(
-                "network policy {display}: '{host}' in 'write' has a 'methods' field that must \
-                 be a list of strings, got {}",
-                other.type_name()
-            ));
-        }
-        None => {
-            return Err(format!(
-                "network policy {display}: '{host}' in 'write' is missing 'methods'"
-            ));
-        }
-    };
-    if raw_methods.is_empty() {
-        return Err(format!(
-            "network policy {display}: '{host}' in 'write' has an empty 'methods' list — name \
-             at least one method, or drop the row"
-        ));
-    }
-    let methods = raw_methods
-        .iter()
-        .map(|m| {
-            let Value::String(m) = m else {
-                return Err(format!(
-                    "network policy {display}: '{host}' in 'write' names a method that must be \
-                     a Str, got {}",
-                    m.type_name()
-                ));
-            };
-            if METHODS.contains(&m.as_str()) {
-                Ok(m.clone())
-            } else if METHODS.contains(&m.to_ascii_uppercase().as_str()) {
-                Err(format!(
-                    "network policy {display}: '{host}' names method '{m}' in lowercase — HTTP \
-                     methods are case-sensitive and must be written uppercase, unlike hostnames"
-                ))
-            } else {
-                Err(format!(
-                    "network policy {display}: '{host}' names unknown method '{m}' — expected \
-                     one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
-                ))
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Rule { host, methods })
-}
-
-/// Decode the policy's terminal value — a map
-/// `[read: [...], write: [...], max-bytes: ..., rate-per-minute: ..., search: ...]`
-/// — into a [`NetPolicy`]. Strict on shape and on keys: a malformed policy
-/// is a hard error naming the offending field.
+/// Decode the policy's terminal value — a map `[hosts: [...], search: ...]`
+/// — into a [`NetPolicy`]. Strict on shape and on keys: a malformed policy,
+/// or one still written against the retired `read`/`write`/`max-bytes`/
+/// `rate-per-minute` shape, is a hard error naming the offending field.
 fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
     let Value::Map(map) = value else {
         return Err(format!(
-            "network policy {display}: expected a map \
-             [read: [...], write: [...], max-bytes: ..., rate-per-minute: ..., search: ...], \
-             got {}",
+            "network policy {display}: expected a map [hosts: [...], search: ...], got {}",
             value.type_name()
         ));
     };
     for key in map.keys() {
-        if !matches!(
-            key.as_str(),
-            "read" | "write" | "max-bytes" | "rate-per-minute" | "search"
-        ) {
-            return Err(format!(
-                "network policy {display}: unknown key '{key}' — expected \
-                 read, write, max-bytes, rate-per-minute, search"
-            ));
-        }
-    }
-    let read = match map.get("read") {
-        Some(Value::List(items)) => items,
-        Some(other) => {
-            return Err(format!(
-                "network policy {display}: 'read' must be a list of strings, got {}",
-                other.type_name()
-            ));
-        }
-        None => return Err(format!("network policy {display}: missing 'read'")),
-    };
-    let write = match map.get("write") {
-        Some(Value::List(items)) => items,
-        Some(other) => {
-            return Err(format!(
-                "network policy {display}: 'write' must be a list of \
-                 [host: Str, methods: [Str]] rows, got {}",
-                other.type_name()
-            ));
-        }
-        None => return Err(format!("network policy {display}: missing 'write'")),
-    };
-    let mut allow = Vec::with_capacity(read.len() + write.len());
-    let mut seen = std::collections::HashSet::new();
-    for v in read {
-        let host = match v {
-            Value::String(s) => s.clone(),
-            other => {
+        match key.as_str() {
+            "hosts" | "search" => {}
+            "read" | "write" => {
                 return Err(format!(
-                    "network policy {display}: 'read' entries must be strings, got {}",
-                    other.type_name()
+                    "network policy {display}: '{key}' is retired — name every admitted host \
+                     in 'hosts'; this gate no longer judges HTTP methods"
                 ));
             }
+            "max-bytes" => {
+                return Err(format!(
+                    "network policy {display}: 'max-bytes' is retired — this gate no longer \
+                     bounds response size"
+                ));
+            }
+            "rate-per-minute" => {
+                return Err(format!(
+                    "network policy {display}: 'rate-per-minute' is retired — this gate no \
+                     longer meters requests"
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "network policy {display}: unknown key '{key}' — expected hosts, search"
+                ));
+            }
+        }
+    }
+    let raw_hosts = match map.get("hosts") {
+        Some(Value::List(items)) => items,
+        Some(other) => {
+            return Err(format!(
+                "network policy {display}: 'hosts' must be a list of strings, got {}",
+                other.type_name()
+            ));
+        }
+        None => return Err(format!("network policy {display}: missing 'hosts'")),
+    };
+    let mut hosts = std::collections::HashSet::with_capacity(raw_hosts.len());
+    for v in raw_hosts {
+        let Value::String(raw) = v else {
+            return Err(format!(
+                "network policy {display}: 'hosts' entries must be strings, got {}",
+                v.type_name()
+            ));
         };
-        if !seen.insert(host.to_ascii_lowercase()) {
+        let host = Host::parse(raw).map_err(|e| format!("network policy {display}: {e}"))?;
+        if !hosts.insert(host) {
             return Err(format!(
-                "network policy {display}: '{host}' is named twice across 'read' and 'write'"
+                "network policy {display}: '{raw}' is named twice in 'hosts' after lowercasing"
             ));
         }
-        allow.push(Rule {
-            host,
-            methods: vec!["GET".to_string(), "HEAD".to_string()],
-        });
     }
-    for row in write {
-        let rule = decode_write_row(row, display)?;
-        if !seen.insert(rule.host.to_ascii_lowercase()) {
-            return Err(format!(
-                "network policy {display}: '{}' is named twice across 'read' and 'write'",
-                rule.host
-            ));
-        }
-        allow.push(rule);
-    }
-    let max_bytes = int_field(map.get("max-bytes"), "max-bytes", display)?;
-    let max_response_bytes = u64::try_from(max_bytes).map_err(|_| {
-        format!("network policy {display}: 'max-bytes' must be a non-negative Int, got {max_bytes}")
-    })?;
-    let rate = int_field(map.get("rate-per-minute"), "rate-per-minute", display)?;
-    let rate_per_minute = u32::try_from(rate).map_err(|_| {
-        format!(
-            "network policy {display}: 'rate-per-minute' must be a non-negative Int that fits \
-             in 32 bits, got {rate}"
-        )
-    })?;
     let search = match map.get("search") {
         Some(Value::Bool(b)) => *b,
         Some(other) => {
@@ -294,46 +216,15 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
         }
         None => return Err(format!("network policy {display}: missing 'search'")),
     };
-    Ok(NetPolicy {
-        allow,
-        max_response_bytes,
-        rate_per_minute,
-        search,
-    })
+    Ok(NetPolicy { hosts, search })
 }
 
-/// Whether `host` matches allowlist `pattern` — an exact hostname, or a
-/// `*.suffix` wildcard matching `host` itself or any of its subdomains.
-/// Nothing richer (no regex): the allowlist stays enumerable and
-/// reviewable, the same rationale `synod::grant`'s exec map is kept a flat
-/// enumeration rather than a pattern language. Case-insensitive, since
-/// hostnames are.
-fn host_matches(host: &str, pattern: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    let pattern = pattern.to_ascii_lowercase();
-    match pattern.strip_prefix("*.") {
-        Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
-        None => host == pattern,
-    }
-}
-
-/// The refusal a `host` that admits no rule at all gets — the DNS/accept
-/// gate's message.
+/// The refusal a `host` outside the allowlist gets.
 #[must_use]
 pub fn refusal(host: &str) -> String {
     format!(
         "'{host}' is not on the list of sites your IT department has approved for this \
          assistant to reach — ask your IT department to add it if you need this site"
-    )
-}
-
-/// The refusal a `host` that is on the list, but not for `method`, gets —
-/// the proxy gate's message.
-#[must_use]
-pub fn method_refusal(method: &str, host: &str) -> String {
-    format!(
-        "'{host}' is on the list your IT department has approved, but not for {method} — ask \
-         your IT department to widen it if this assistant needs to send that there"
     )
 }
 
@@ -353,213 +244,146 @@ mod tests {
         )
     }
 
-    /// A minimal well-formed policy, `read` set to `hosts` and `write` empty
-    /// — the shape most of the migrated tests only need one axis of.
-    fn read_only(hosts: &[&str]) -> String {
+    fn hosts_policy(hosts: &[&str]) -> String {
         let hosts = hosts
             .iter()
             .map(|h| format!("'{h}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "return [read: [{hosts}], write: [], max-bytes: 1, rate-per-minute: 1, search: false]"
-        )
+        format!("return [hosts: [{hosts}], search: true]")
     }
 
     #[test]
-    fn a_read_entry_matches_an_exact_hostname() {
-        let policy = parse(&read_only(&["example.com"])).expect("well-formed policy");
-        assert!(policy.host_allowed("example.com"));
-        assert!(!policy.host_allowed("evil.example.com"));
-        assert!(!policy.host_allowed("other.com"));
+    fn an_exact_host_admits_itself_and_nothing_else() {
+        let policy = parse(&hosts_policy(&["example.com"])).expect("well-formed policy");
+        assert!(policy.admits(&Host::parse("example.com").unwrap()));
+        assert!(!policy.admits(&Host::parse("evil.example.com").unwrap()));
     }
 
     #[test]
-    fn a_read_entry_matches_a_wildcard_suffix() {
-        let policy = parse(&read_only(&["*.bristol.ac.uk"])).expect("well-formed policy");
-        assert!(policy.host_allowed("bristol.ac.uk"));
-        assert!(policy.host_allowed("cs.bristol.ac.uk"));
-        assert!(!policy.host_allowed("bristol.ac.uk.evil.com"));
-        assert!(!policy.host_allowed("otherbristol.ac.uk"));
+    fn admits_is_false_for_an_unlisted_host() {
+        let policy = parse(&hosts_policy(&["example.com"])).expect("well-formed policy");
+        assert!(!policy.admits(&Host::parse("other.com").unwrap()));
     }
 
     #[test]
-    fn an_empty_read_list_admits_nothing() {
-        let policy = parse(&read_only(&[])).expect("well-formed policy");
-        assert!(!policy.host_allowed("example.com"));
-    }
-
-    #[test]
-    fn a_read_entry_is_case_insensitive() {
-        let policy = parse(&read_only(&["*.Bristol.AC.UK"])).expect("well-formed policy");
-        assert!(policy.host_allowed("CS.BRISTOL.AC.UK"));
-    }
-
-    #[test]
-    fn the_embedded_default_policy_parses() {
-        let policy = parse(DEFAULT_POLICY_RAL).expect("the built-in default must parse");
-        assert!(
-            policy.host_allowed("archive.ubuntu.com"),
-            "an unmanaged install must be useful on day one"
+    fn case_normalization_makes_pypi_org_and_pypi_org_uppercase_the_same_host() {
+        let policy = parse(&hosts_policy(&["PyPI.ORG"])).expect("well-formed policy");
+        assert!(policy.admits(&Host::parse("pypi.org").unwrap()));
+        assert_eq!(
+            Host::parse("PyPI.ORG").unwrap(),
+            Host::parse("pypi.org").unwrap()
         );
-        assert!(policy.max_response_bytes > 0);
-        assert!(policy.rate_per_minute > 0);
     }
 
-    /// `load()` itself, exercised end to end: with no real
-    /// `/etc/exarch/net-policy.ral` on the test machine, it falls back to
-    /// the same embedded default the test above parses directly.
     #[test]
-    fn load_falls_back_to_the_embedded_default_when_no_file_is_installed() {
+    fn a_duplicate_after_lowercasing_is_a_hard_error() {
+        let err = parse(&hosts_policy(&["pypi.org", "PyPI.org"])).unwrap_err();
+        assert!(err.contains("named twice"), "got: {err}");
+    }
+
+    #[test]
+    fn a_wildcard_is_refused() {
+        let err = Host::parse("*.example.com").unwrap_err();
+        assert!(err.contains("wildcard"), "got: {err}");
+    }
+
+    #[test]
+    fn an_ipv4_literal_is_refused() {
+        let err = Host::parse("192.0.2.1").unwrap_err();
+        assert!(err.contains("IP literal"), "got: {err}");
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_literal_is_refused() {
+        let err = Host::parse("[::1]").unwrap_err();
+        assert!(err.contains("IP literal"), "got: {err}");
+    }
+
+    #[test]
+    fn a_trailing_dot_is_refused() {
+        let err = Host::parse("example.com.").unwrap_err();
+        assert!(err.contains("trailing dot"), "got: {err}");
+    }
+
+    #[test]
+    fn an_underscore_is_refused() {
+        let err = Host::parse("_dmarc.example.com").unwrap_err();
+        assert!(err.contains("underscore"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_label_is_refused() {
+        let err = Host::parse("example..com").unwrap_err();
+        assert!(err.contains("empty label"), "got: {err}");
+    }
+
+    #[test]
+    fn a_non_ascii_host_is_refused() {
+        let err = Host::parse("café.com").unwrap_err();
+        assert!(err.contains("ASCII"), "got: {err}");
+    }
+
+    #[test]
+    fn the_read_key_names_hosts_as_its_replacement() {
+        let err = parse("return [read: [], write: [], search: true]").unwrap_err();
         assert!(
-            !std::path::Path::new(POLICY_PATH).exists(),
-            "this test assumes no real IT policy file is installed on the test machine"
-        );
-        let policy = load().expect("load() must fall back to the embedded default");
-        assert!(!policy.allow.is_empty());
-        assert_eq!(policy.max_response_bytes, 268_435_456);
-    }
-
-    #[test]
-    fn a_malformed_policy_is_a_hard_error_naming_the_offending_field() {
-        let err = parse("return [read: [], write: [], max-bytes: 1]").unwrap_err();
-        assert!(err.contains("missing 'rate-per-minute'"), "got: {err}");
-    }
-
-    #[test]
-    fn an_unknown_key_is_a_hard_error_naming_it() {
-        let err = parse(
-            "return [read: [], write: [], max-bytes: 1, rate-per-minute: 1, search: true, \
-             extra: 'x']",
-        )
-        .unwrap_err();
-        assert!(err.contains("unknown key 'extra'"), "got: {err}");
-    }
-
-    #[test]
-    fn a_negative_max_bytes_is_a_hard_error() {
-        let err =
-            parse("return [read: [], write: [], max-bytes: -1, rate-per-minute: 1, search: true]")
-                .unwrap_err();
-        assert!(
-            err.contains("'max-bytes' must be a non-negative Int"),
+            err.contains("'read' is retired") && err.contains("hosts"),
             "got: {err}"
         );
     }
 
     #[test]
-    fn a_non_string_read_entry_is_a_hard_error() {
-        let err =
-            parse("return [read: [7], write: [], max-bytes: 1, rate-per-minute: 1, search: true]")
-                .unwrap_err();
-        assert!(err.contains("'read' entries must be strings"), "got: {err}");
+    fn the_write_key_names_hosts_as_its_replacement() {
+        let err = parse("return [hosts: [], write: [], search: true]").unwrap_err();
+        assert!(
+            err.contains("'write' is retired") && err.contains("hosts"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_max_bytes_key_names_its_own_retirement() {
+        let err = parse("return [hosts: [], max-bytes: 1, search: true]").unwrap_err();
+        assert!(err.contains("'max-bytes' is retired"), "got: {err}");
+    }
+
+    #[test]
+    fn the_rate_per_minute_key_names_its_own_retirement() {
+        let err = parse("return [hosts: [], rate-per-minute: 1, search: true]").unwrap_err();
+        assert!(err.contains("'rate-per-minute' is retired"), "got: {err}");
+    }
+
+    #[test]
+    fn an_unknown_key_is_a_hard_error_naming_it() {
+        let err = parse("return [hosts: [], search: true, extra: 'x']").unwrap_err();
+        assert!(err.contains("unknown key 'extra'"), "got: {err}");
+    }
+
+    #[test]
+    fn the_built_in_policy_parses_and_admits_ports_ubuntu_com() {
+        let policy = parse(DEFAULT_POLICY_RAL).expect("the built-in default must parse");
+        assert!(policy.admits(&Host::parse("ports.ubuntu.com").unwrap()));
+        assert!(policy.search);
     }
 
     #[test]
     fn search_true_round_trips() {
-        let policy = parse(
-            "return [read: ['a'], write: [], max-bytes: 1, rate-per-minute: 1, search: true]",
-        )
-        .expect("a well-formed policy with search: true must parse");
+        let policy = parse("return [hosts: ['a.example'], search: true]")
+            .expect("a well-formed policy with search: true must parse");
         assert!(policy.search);
     }
 
     #[test]
     fn search_false_round_trips() {
-        let policy = parse(
-            "return [read: ['a'], write: [], max-bytes: 1, rate-per-minute: 1, search: false]",
-        )
-        .expect("a well-formed policy with search: false must parse");
+        let policy = parse("return [hosts: ['a.example'], search: false]")
+            .expect("a well-formed policy with search: false must parse");
         assert!(!policy.search);
     }
 
-    // -- one test per grammar rule --------------------------------------
-
     #[test]
-    fn a_non_list_read_is_a_hard_error() {
-        let err = parse(
-            "return [read: 'not-a-list', write: [], max-bytes: 1, rate-per-minute: 1, \
-             search: true]",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("'read' must be a list of strings"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn a_malformed_write_row_is_a_hard_error() {
-        let err = parse(
-            "return [read: [], write: ['not-a-row'], max-bytes: 1, rate-per-minute: 1, \
-             search: true]",
-        )
-        .unwrap_err();
-        assert!(err.contains("'write' rows must be maps"), "got: {err}");
-    }
-
-    #[test]
-    fn an_unknown_method_is_a_hard_error_naming_it() {
-        let err = parse(
-            "return [read: [], write: [[host: 'a.example', methods: ['TRACE']]], max-bytes: 1, \
-             rate-per-minute: 1, search: true]",
-        )
-        .unwrap_err();
-        assert!(err.contains("unknown method 'TRACE'"), "got: {err}");
-    }
-
-    #[test]
-    fn a_lowercase_method_is_a_hard_error_naming_it() {
-        let err = parse(
-            "return [read: [], write: [[host: 'a.example', methods: ['post']]], max-bytes: 1, \
-             rate-per-minute: 1, search: true]",
-        )
-        .unwrap_err();
-        assert!(err.contains("in lowercase"), "got: {err}");
-    }
-
-    #[test]
-    fn an_empty_methods_list_is_a_hard_error() {
-        let err = parse(
-            "return [read: [], write: [[host: 'a.example', methods: []]], max-bytes: 1, \
-             rate-per-minute: 1, search: true]",
-        )
-        .unwrap_err();
-        assert!(err.contains("empty 'methods' list"), "got: {err}");
-    }
-
-    #[test]
-    fn a_host_named_twice_across_read_and_write_is_a_hard_error() {
-        let err = parse(
-            "return [read: ['a.example'], write: [[host: 'a.example', methods: ['POST']]], \
-             max-bytes: 1, rate-per-minute: 1, search: true]",
-        )
-        .unwrap_err();
-        assert!(err.contains("named twice"), "got: {err}");
-    }
-
-    #[test]
-    fn write_grants_exactly_the_named_methods() {
-        let policy = parse(
-            "return [read: [], write: [[host: 'a.example', methods: ['POST', 'PUT']]], \
-             max-bytes: 1, rate-per-minute: 1, search: true]",
-        )
-        .expect("well-formed policy");
-        assert!(policy.allows("POST", "a.example"));
-        assert!(policy.allows("PUT", "a.example"));
-        assert!(
-            !policy.allows("GET", "a.example"),
-            "write grants only what it names"
-        );
-        assert!(!policy.allows("DELETE", "a.example"));
-    }
-
-    #[test]
-    fn nothing_on_the_shipped_default_accepts_a_write() {
-        let policy = parse(DEFAULT_POLICY_RAL).expect("the built-in default must parse");
-        assert!(
-            policy.allow.iter().all(|r| r.methods == ["GET", "HEAD"]),
-            "the shipped default is read-only: every rule must be a read entry"
-        );
+    fn a_missing_hosts_key_is_a_hard_error() {
+        let err = parse("return [search: true]").unwrap_err();
+        assert!(err.contains("missing 'hosts'"), "got: {err}");
     }
 }

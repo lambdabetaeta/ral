@@ -245,7 +245,11 @@ pub fn command_line(boot: &Boot, console: &str) -> String {
             let _ = write!(line, " {PREFIX}workspace={name} {PREFIX}plan9={port}");
         }
     }
-    let _ = write!(line, " {PREFIX}port={} {PREFIX}epoch={}", boot.port, boot.epoch);
+    let _ = write!(
+        line,
+        " {PREFIX}port={} {PREFIX}epoch={}",
+        boot.port, boot.epoch
+    );
     if boot.engine != DEFAULT_ENGINE {
         let _ = write!(line, " {PREFIX}engine={}", boot.engine);
     }
@@ -324,25 +328,28 @@ fn parse_net(value: &str) -> Result<Net, String> {
         )
     };
     let mut parts = value.splitn(3, ',');
-    let (Some(port), Some(cidr), Some(gateway)) = (parts.next(), parts.next(), parts.next())
-    else {
+    let (Some(port), Some(cidr), Some(gateway)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(bad());
     };
     let port = parse_vsock_port("net", port)?;
     let (address, prefix) = cidr.split_once('/').ok_or_else(bad)?;
-    let address: Ipv4Addr = address
-        .parse()
-        .map_err(|err| format!("`{PREFIX}net={value}` names `{address}` as the guest's address: {err}."))?;
+    let address: Ipv4Addr = address.parse().map_err(|err| {
+        format!("`{PREFIX}net={value}` names `{address}` as the guest's address: {err}.")
+    })?;
     let prefix: u8 = prefix.parse().ok().filter(|&p| p <= 32).ok_or_else(|| {
         format!(
             "`{PREFIX}net={value}` names `{prefix}` as the prefix length; it must be a whole \
              number from 0 to 32."
         )
     })?;
-    let gateway: Ipv4Addr = gateway.parse().map_err(|err| {
-        format!("`{PREFIX}net={value}` names `{gateway}` as the gateway: {err}.")
-    })?;
-    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    let gateway: Ipv4Addr = gateway
+        .parse()
+        .map_err(|err| format!("`{PREFIX}net={value}` names `{gateway}` as the gateway: {err}."))?;
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
     if u32::from(gateway) & mask != u32::from(address) & mask {
         return Err(format!(
             "`{PREFIX}net={value}` names a gateway, {gateway}, that is not inside \
@@ -496,7 +503,13 @@ mod tests {
         let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.netowrk=on")
             .expect_err("a misspelled setting must be refused");
         assert!(err.contains("does not understand"), "{err}");
-        for known in ["ral.workspace", "ral.plan9", "ral.port", "ral.epoch", "ral.net"] {
+        for known in [
+            "ral.workspace",
+            "ral.plan9",
+            "ral.port",
+            "ral.epoch",
+            "ral.net",
+        ] {
             assert!(
                 err.contains(known),
                 "the refusal lists every known key, and not {known}: {err}"
@@ -582,10 +595,9 @@ mod tests {
     /// all four fields at once.
     #[test]
     fn a_net_key_reads_into_its_four_fields() {
-        let boot = Boot::read(
-            "ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.2.2",
-        )
-        .expect("a well-formed net key must parse");
+        let boot =
+            Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.2.2")
+                .expect("a well-formed net key must parse");
         assert_eq!(
             boot.net,
             Some(Net {
@@ -601,10 +613,9 @@ mod tests {
     /// left for `SIOCADDRT` to answer with `ENETUNREACH`.
     #[test]
     fn a_gateway_outside_the_subnet_is_refused() {
-        let err = Boot::read(
-            "ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2",
-        )
-        .expect_err("a gateway outside the subnet must be refused");
+        let err =
+            Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.3.2")
+                .expect_err("a gateway outside the subnet must be refused");
         assert!(err.contains("not inside"), "{err}");
     }
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2a3d8a5
+generated_at_commit: 009e727
 generated_at_date: 2026-07-27
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -37,15 +37,18 @@ kind
 transport whose engine lives elsewhere, and refuses sub-agent forks at the
 desk).
 
-`Egress` bundles the three things a fleet's outbound network shares across
+`Egress` bundles the two things a fleet's outbound network shares across
 every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the IT-owned
 allowlist read from `/etc/exarch/net-policy.ral` or the embedded default —
-`read`/`write` host rules, `max-bytes`, `rate-per-minute`, `search`), a
-`RateLimiter`, and an `AuditLog` (both `exarch/src/egress.rs`). None of it is
-a model-facing verb any more — there is no `fetch-url` builtin
+an exact `hosts` list of lowercase ASCII DNS names plus `search`, with the
+retired `read`/`write`, `max-bytes` and `rate-per-minute` keys now hard
+errors naming their replacement) and an `AuditLog` (`exarch/src/egress.rs`),
+reduced to one `Tunnel` record per attempt: its final vetted address, and on
+close the byte count each direction carried — telemetry, not policy. None of
+it is a model-facing verb any more — there is no `fetch-url` builtin
 ([[map/exarch/builtins|builtins]]). The same `Egress` a trunk opens at launch
-is what `guest-net::Config::egress` takes: the policy, limiter, and ledger a
-synod session's guest network is gated by are the fleet's own, not a second
+is what `guest-net::Config::egress` takes: the policy and ledger a synod
+session's guest network is gated by are the fleet's own, not a second
 copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
 has no guest to police, still keeps `Egress` for one thing: the `search` bit
 that clamps the harness `agent [... search: …]` field

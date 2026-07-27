@@ -1,106 +1,23 @@
-//! The per-process rate budget and durable audit trail behind every
-//! host-side network access — bundled as [`Egress`], threaded through
-//! [`crate::agent::Agent`] exactly as `disk_warn_bytes` is.
+//! The durable audit trail behind every host-side CONNECT tunnel.
 //!
-//! Runs entirely host-side, in the exarch/synod process itself, never inside
-//! a jailed or virtualised guest.
-//!
-//! [`AuditLog`] and [`RateLimiter`] are `Arc`-backed and constructed once
-//! at the trunk's own launch, then inherited verbatim by every spawned
-//! child (`Agent::fork_with`) — a spawn shares its parent's IT policy, audit
-//! trail, and rate budget, never a fresh one of its own.
+//! Bundled as [`Egress`], threaded through [`crate::agent::Agent`] exactly
+//! as `disk_warn_bytes` is. Runs entirely host-side; constructed once at
+//! trunk launch and inherited verbatim by every spawned child — a spawn
+//! shares its parent's IT policy and audit trail, never a fresh one.
 
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-/// A fixed-window per-minute counter, shared by a process tree (the trunk
-/// and every fork) — not machine-wide: two fleets running on one machine
-/// each get their own budget.
-#[derive(Clone)]
-pub struct RateLimiter(Arc<Mutex<Window>>);
-
-struct Window {
-    started: Instant,
-    count: u32,
-    cap: u32,
-    span: Duration,
-}
-
-impl RateLimiter {
-    /// A limiter admitting `cap` requests per minute.
-    #[must_use]
-    pub fn new(cap: u32) -> Self {
-        Self::with_window(cap, Duration::from_mins(1))
-    }
-
-    /// [`Self::new`] with an explicit window span, for tests that cannot
-    /// afford to wait a real minute for the window to roll.
-    #[must_use]
-    pub fn with_window(cap: u32, span: Duration) -> Self {
-        Self(Arc::new(Mutex::new(Window {
-            started: Instant::now(),
-            count: 0,
-            cap,
-            span,
-        })))
-    }
-
-    /// Take one slot from the current window if any remain, rolling to a
-    /// fresh window first if the current one has elapsed.
-    ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned — only reachable after a
-    /// prior panic while holding it.
-    pub fn try_take(&self) -> bool {
-        let mut w = self.0.lock().expect("rate limiter poisoned");
-        if w.started.elapsed() >= w.span {
-            w.started = Instant::now();
-            w.count = 0;
-        }
-        if w.count >= w.cap {
-            return false;
-        }
-        w.count += 1;
-        true
-    }
-}
-
-impl PartialEq for RateLimiter {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-/// One audit-ledger line.
-///
-/// A `Name` is a DNS answer, a `Connect` is a TCP accept, a `Request` is one
-/// HTTP request/response — the three gates
-/// [`crate::net_policy::NetPolicy`] gets consulted at, each worth its own
-/// record shape rather than a single lowest-common-denominator one.
+/// One CONNECT attempt's verdict, then, on close, what it carried.
 #[derive(Clone, Copy)]
 pub enum Record<'a> {
-    Name {
-        name: &'a str,
-        allowed: bool,
-        addr: Option<Ipv4Addr>,
-    },
-    Connect {
-        name: Option<&'a str>,
-        addr: IpAddr,
-        port: u16,
-        allowed: bool,
-        note: Option<&'a str>,
-    },
-    Request {
-        method: &'a str,
-        url: &'a str,
+    Tunnel {
         host: &'a str,
+        addr: Option<std::net::SocketAddr>,
         allowed: bool,
-        status: Option<u16>,
-        bytes: Option<u64>,
         note: Option<&'a str>,
+        up: Option<u64>,
+        down: Option<u64>,
     },
 }
 
@@ -110,22 +27,54 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Rotation threshold: past this, the next write rotates the live file to
+/// `.1` first. 32 MiB holds weeks of tunnel records.
+const ROTATE_AT_BYTES: u64 = 32 * 1024 * 1024;
+
 /// The durable, append-only network ledger.
 ///
-/// One compact JSON object per line (NDJSON), never `AgentLog`'s
-/// pretty-printed multi-line JSON — an append-mode file's single `write()`
-/// places its bytes atomically at the file's current end, so concurrent
-/// exarch/synod processes sharing one machine can append to the same file
-/// without interleaving each other's records, provided each record is
-/// written in one syscall. Every access is recorded, allowed or refused,
-/// before the caller answers — a `"kind"` field on each line discriminates
-/// [`Record`]'s three shapes.
+/// One compact JSON object per line: an append-mode file's single `write()`
+/// lands atomically at the end, so concurrent exarch/synod processes can
+/// share the file without interleaving records. Rotation is additionally
+/// guarded by an `flock` on a sibling lock file (Unix only), so two
+/// processes racing the size check cannot each rotate and destroy the
+/// other's history.
 #[derive(Clone)]
-pub struct AuditLog(Arc<Mutex<std::fs::File>>);
+pub struct AuditLog(Arc<Mutex<LedgerFile>>);
+
+struct LedgerFile {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    #[cfg(unix)]
+    rotation_lock: std::fs::File,
+}
+
+/// Holds `rotation_lock` exclusively for the check-size/rotate/write
+/// sequence, across processes as well as threads. Unlocked on every path via
+/// `Drop`, including error returns. Locks a dup'd fd so the borrow of the
+/// `LedgerFile` it comes from ends before `record` needs to mutate it.
+#[cfg(unix)]
+struct RotationGuard(std::fs::File);
+
+#[cfg(unix)]
+impl RotationGuard {
+    fn take(file: &std::fs::File) -> std::io::Result<Self> {
+        let dup = file.try_clone()?;
+        rustix::fs::flock(&dup, rustix::fs::FlockOperation::LockExclusive)?;
+        Ok(Self(dup))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RotationGuard {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:net-audit] opens the per-installation network audit ledger under XDG state, appended to once per name/connect/request; infra bookkeeping, not turn-time model data I/O."
+    reason = "[io-door:silent:net-audit] opens the per-installation network audit ledger under XDG state, appended to once per tunnel; infra bookkeeping, not turn-time model data I/O."
 )]
 fn open_audit_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
@@ -137,9 +86,27 @@ fn open_audit_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:net-audit] rotates the network audit ledger once it exceeds its size cap."
+)]
+fn rotate(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let rotated = path.with_extension("jsonl.1");
+    std::fs::rename(path, &rotated)?;
+    open_audit_file(path)
+}
+
 impl AuditLog {
     fn at(path: &std::path::Path) -> std::io::Result<Self> {
-        Ok(Self(Arc::new(Mutex::new(open_audit_file(path)?))))
+        let file = open_audit_file(path)?;
+        #[cfg(unix)]
+        let rotation_lock = open_audit_file(&path.with_extension("jsonl.lock"))?;
+        Ok(Self(Arc::new(Mutex::new(LedgerFile {
+            path: path.to_path_buf(),
+            file,
+            #[cfg(unix)]
+            rotation_lock,
+        }))))
     }
 
     /// Open this app's ledger at `$XDG_STATE_HOME/<app>/net-audit.jsonl`,
@@ -164,61 +131,51 @@ impl AuditLog {
         Self::at(path).expect("test audit ledger")
     }
 
-    /// Append one record. A poisoned lock (only reachable after a prior
-    /// panic mid-write) drops the record rather than panicking again —
-    /// losing one audit line is the honest outcome, not a second crash.
-    pub fn record(&self, r: Record<'_>) {
+    /// Append one record. `Err` means the gate must close: an unauditable
+    /// proxy does not proxy. A poisoned lock (only reachable after a prior
+    /// panic mid-write) is also `Err`.
+    ///
+    /// # Errors
+    /// Returns `Err` if the ledger's lock is poisoned, if rotation fails, or
+    /// if the write itself fails.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:net-audit] checks the ledger's on-disk size before deciding whether to rotate it."
+    )]
+    pub fn record(&self, r: Record<'_>) -> std::io::Result<()> {
         let mut line = match r {
-            Record::Name {
-                name,
-                allowed,
-                addr,
-            } => serde_json::json!({
-                "kind": "name",
-                "ts": now_secs(),
-                "name": name,
-                "allowed": allowed,
-                "addr": addr.map(|a| a.to_string()),
-            }),
-            Record::Connect {
-                name,
-                addr,
-                port,
-                allowed,
-                note,
-            } => serde_json::json!({
-                "kind": "connect",
-                "ts": now_secs(),
-                "name": name,
-                "addr": addr.to_string(),
-                "port": port,
-                "allowed": allowed,
-                "note": note,
-            }),
-            Record::Request {
-                method,
-                url,
+            Record::Tunnel {
                 host,
+                addr,
                 allowed,
-                status,
-                bytes,
                 note,
+                up,
+                down,
             } => serde_json::json!({
-                "kind": "request",
+                "kind": "tunnel",
                 "ts": now_secs(),
-                "method": method,
-                "url": url,
                 "host": host,
+                "addr": addr.map(|a| a.to_string()),
                 "allowed": allowed,
-                "status": status,
-                "bytes": bytes,
                 "note": note,
+                "up": up,
+                "down": down,
             }),
         }
         .to_string();
         line.push('\n');
-        let Ok(mut f) = self.0.lock() else { return };
-        let _ = f.write_all(line.as_bytes());
+        let mut ledger = self
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("network audit ledger lock poisoned"))?;
+        // Cross-process rotation guard; non-Unix falls back to the mutex
+        // above, which only serialises threads within this process.
+        #[cfg(unix)]
+        let _rotation_guard = RotationGuard::take(&ledger.rotation_lock)?;
+        if ledger.file.metadata()?.len() + line.len() as u64 > ROTATE_AT_BYTES {
+            ledger.file = rotate(&ledger.path)?;
+        }
+        ledger.file.write_all(line.as_bytes())
     }
 }
 
@@ -228,24 +185,17 @@ impl PartialEq for AuditLog {
     }
 }
 
-/// The bundle a session threads everywhere `disk_warn_bytes` is threaded.
-///
-/// The IT-set policy, the durable audit ledger, and the shared rate budget.
-/// Cheap to clone (three `Arc`s); every spawned child inherits the same
-/// three instances verbatim — one policy, one ledger, one budget per
-/// process tree.
+/// The IT-set policy and the durable audit ledger, threaded everywhere
+/// `disk_warn_bytes` is. Cheap to clone; children inherit both verbatim.
 #[derive(Clone)]
 pub struct Egress {
     pub policy: Arc<crate::net_policy::NetPolicy>,
     pub audit: AuditLog,
-    pub limiter: RateLimiter,
 }
 
 impl PartialEq for Egress {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.policy, &other.policy)
-            && self.audit == other.audit
-            && self.limiter == other.limiter
+        Arc::ptr_eq(&self.policy, &other.policy) && self.audit == other.audit
     }
 }
 
@@ -258,35 +208,29 @@ impl Egress {
     /// be opened, naming which of the two failed.
     pub fn open(app: crate::bootstrap::App) -> Result<Self, String> {
         let policy = crate::net_policy::load()?;
-        let limiter = RateLimiter::new(policy.rate_per_minute);
         Ok(Self {
             policy: Arc::new(policy),
             audit: AuditLog::open(app).map_err(|e| format!("network audit ledger: {e}"))?,
-            limiter,
         })
     }
 
-    /// A test double: a permissive policy (fixed for the identity-seat and
-    /// wire-seat tests that use it), a throwaway ledger under a fresh
-    /// per-call path, and a generous rate budget.
+    /// A test double: a permissive policy (`example.com` and `a.example`),
+    /// and a throwaway ledger under a fresh per-call path.
+    ///
+    /// # Panics
+    /// Panics if either fixture host fails to parse — it cannot, since both
+    /// are literal valid host names.
     #[must_use]
     pub fn for_test() -> Self {
         let policy = crate::net_policy::NetPolicy {
-            allow: vec![
-                crate::net_policy::Rule {
-                    host: "example.com".to_string(),
-                    methods: vec!["GET".to_string(), "HEAD".to_string()],
-                },
-                crate::net_policy::Rule {
-                    host: "*.example.org".to_string(),
-                    methods: vec!["GET".to_string(), "HEAD".to_string()],
-                },
-            ],
-            max_response_bytes: 1_048_576,
-            rate_per_minute: 1_000,
+            hosts: [
+                crate::net_policy::Host::parse("example.com").expect("valid fixture host"),
+                crate::net_policy::Host::parse("a.example").expect("valid fixture host"),
+            ]
+            .into_iter()
+            .collect(),
             search: true,
         };
-        let limiter = RateLimiter::new(policy.rate_per_minute);
         let path = std::env::temp_dir().join(format!(
             "exarch-egress-test-{}-{}.jsonl",
             std::process::id(),
@@ -295,7 +239,6 @@ impl Egress {
         Self {
             policy: Arc::new(policy),
             audit: AuditLog::for_test(&path),
-            limiter,
         }
     }
 }
@@ -303,32 +246,6 @@ impl Egress {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// N requests within the window succeed, the next refuses, and a
-    /// later request succeeds again once the window has rolled — polled
-    /// with a generous deadline rather than a single fixed sleep, since
-    /// this host's timing jitter is high.
-    #[test]
-    fn rate_limiter_refuses_over_cap_then_resets_after_its_window() {
-        let limiter = RateLimiter::with_window(2, Duration::from_millis(200));
-        assert!(limiter.try_take());
-        assert!(limiter.try_take());
-        assert!(
-            !limiter.try_take(),
-            "a third request within the window must be refused"
-        );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if limiter.try_take() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the limiter never reset after its window elapsed"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
 
     fn tmp_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -338,30 +255,30 @@ mod tests {
     }
 
     /// Two successive records land as two independently-parseable JSON
-    /// lines — an allowed request and a blocked one alike.
+    /// lines — an allowed tunnel and a refused one alike.
     #[test]
     fn audit_log_records_two_independently_parseable_lines() {
         let path = tmp_path("audit-two-lines");
         let _ = std::fs::remove_file(&path);
         let log = AuditLog::for_test(&path);
-        log.record(Record::Request {
-            method: "GET",
-            url: "https://a.example/",
+        log.record(Record::Tunnel {
             host: "a.example",
+            addr: Some("93.184.216.34:443".parse().unwrap()),
             allowed: true,
-            status: Some(200),
-            bytes: Some(12),
             note: None,
-        });
-        log.record(Record::Request {
-            method: "GET",
-            url: "https://b.example/",
+            up: Some(120),
+            down: Some(4096),
+        })
+        .expect("write must succeed");
+        log.record(Record::Tunnel {
             host: "b.example",
+            addr: None,
             allowed: false,
-            status: None,
-            bytes: None,
             note: Some("refused: not on the allowlist"),
-        });
+            up: None,
+            down: None,
+        })
+        .expect("write must succeed");
         let text = std::fs::read_to_string(&path).expect("audit file readable");
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "each record is its own line");
@@ -371,5 +288,121 @@ mod tests {
         }
         assert!(lines[0].contains("a.example") && lines[0].contains("true"));
         assert!(lines[1].contains("b.example") && lines[1].contains("false"));
+    }
+
+    /// Once the ledger exceeds its cap, the next write rotates the old
+    /// contents to `.1` and keeps appending to a fresh file.
+    #[test]
+    fn a_ledger_that_exceeds_its_cap_rotates_and_keeps_appending() {
+        let path = tmp_path("audit-rotate");
+        let rotated = path.with_extension("jsonl.1");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+        let log = AuditLog::at(&path).expect("test ledger");
+        {
+            let ledger = log.0.lock().unwrap();
+            ledger.file.set_len(ROTATE_AT_BYTES).unwrap();
+        }
+        log.record(Record::Tunnel {
+            host: "a.example",
+            addr: None,
+            allowed: true,
+            note: None,
+            up: None,
+            down: None,
+        })
+        .expect("write must succeed after rotation");
+        assert!(rotated.exists(), "the oversized file must be rotated aside");
+        let text = std::fs::read_to_string(&path).expect("fresh ledger readable");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "the fresh file holds only the new record"
+        );
+    }
+
+    /// Two independent `AuditLog` handles on the same path — standing in for
+    /// two racing processes, since each has its own in-process mutex — write
+    /// across the cap boundary concurrently. The `flock` must serialise the
+    /// check-size/rotate/write sequence between them so every record lands
+    /// exactly once across the live file and its rotated `.1`.
+    #[test]
+    fn rotation_under_cross_process_contention_loses_no_record() {
+        let path = tmp_path("audit-race");
+        let rotated = path.with_extension("jsonl.1");
+        let lock = path.with_extension("jsonl.lock");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::remove_file(&lock);
+
+        let log_a = AuditLog::at(&path).expect("test ledger a");
+        let log_b = AuditLog::at(&path).expect("test ledger b");
+        {
+            let ledger = log_a.0.lock().unwrap();
+            ledger.file.set_len(ROTATE_AT_BYTES - 1).unwrap();
+        }
+
+        const PER_THREAD: usize = 20;
+        let race = |log: AuditLog, tag: &'static str| {
+            std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let marker = format!("{tag}-{i}");
+                    log.record(Record::Tunnel {
+                        host: "race",
+                        addr: None,
+                        allowed: true,
+                        note: Some(&marker),
+                        up: None,
+                        down: None,
+                    })
+                    .expect("write must succeed under contention");
+                }
+            })
+        };
+        let ta = race(log_a, "a");
+        let tb = race(log_b, "b");
+        ta.join().unwrap();
+        tb.join().unwrap();
+
+        let mut combined = std::fs::read_to_string(&path).expect("live file readable");
+        if rotated.exists() {
+            combined.push_str(&std::fs::read_to_string(&rotated).expect("rotated file readable"));
+        }
+        for tag in ["a", "b"] {
+            for i in 0..PER_THREAD {
+                // Quoted: a bare `a-1` is also a substring of `a-10`.
+                let marker = format!("\"note\":\"{tag}-{i}\"");
+                assert_eq!(
+                    combined.matches(&marker).count(),
+                    1,
+                    "record {tag}-{i} must appear exactly once"
+                );
+            }
+        }
+    }
+
+    /// A record that cannot be written reports `Err` rather than being
+    /// silently dropped — including when the ledger's lock is poisoned by
+    /// an earlier panic.
+    #[test]
+    fn a_record_that_cannot_be_written_reports_err() {
+        let path = tmp_path("audit-poisoned");
+        let _ = std::fs::remove_file(&path);
+        let log = AuditLog::at(&path).expect("test ledger");
+        let guard = log.clone();
+        let _ = std::thread::spawn(move || {
+            let _lock = guard.0.lock().unwrap();
+            panic!("poison the ledger lock on purpose");
+        })
+        .join();
+        let err = log.record(Record::Tunnel {
+            host: "a.example",
+            addr: None,
+            allowed: true,
+            note: None,
+            up: None,
+            down: None,
+        });
+        assert!(err.is_err(), "a poisoned lock must not be silently dropped");
     }
 }

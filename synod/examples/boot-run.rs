@@ -26,8 +26,6 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
-use std::io::Write as _;
-
 use ral_core::io::TerminalState;
 use ral_core::transport::{
     EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport,
@@ -35,7 +33,6 @@ use ral_core::transport::{
 };
 use ral_core::types::Capabilities;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
-use ral_daemon::packet::Prologue;
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
 #[cfg(unix)]
@@ -82,23 +79,11 @@ fn main() {
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
 
     let workspace = machine.workspace_path().to_path_buf();
-    // Both wires arrive at boot, and the guest waits on the net wire's
-    // prologue before it will start an engine at all — so a host that takes
-    // that wire and says nothing wedges the boot rather than merely going
-    // without a network. This example wants no network, only an engine, so it
-    // sends the shortest honest prologue there is (no resolver, no proxy to
-    // trust) and then holds the wire open: the pump ends the session the
-    // moment it reports EOF.
+    // Both wires arrive at boot; this example wants no network, only an
+    // engine, so the net wire is only held open until `main` returns — the
+    // pump ends the session the moment it reports EOF.
     let wires = machine.take_wires();
-    let mut net = NetStream::from(wires.net);
-    net.write_all(
-        &Prologue {
-            resolv_conf: Vec::new(),
-            ca_pem: Vec::new(),
-        }
-        .encode(),
-    )
-    .expect("write the net wire's prologue");
+    let _net = NetStream::from(wires.net);
 
     let transport = WireTransport::adopt(wires.control, Liveness::default())
         .expect("adopt the guest's control plane");

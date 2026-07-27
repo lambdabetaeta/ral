@@ -36,7 +36,6 @@ use exarch::provider::{
     models::{LiveSource, ModelCatalog, ModelSource, resolve_pinned_provider},
     oauth, pricing,
 };
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -423,15 +422,6 @@ impl Conversation {
     /// the model does not take is masked to `None` regardless of what was
     /// asked for — the model would otherwise refuse the request outright.
     ///
-    /// `blocked` is told, at most once per distinct host for this whole
-    /// conversation, whenever `guest-net`'s proxy gate refuses something the
-    /// guest tried to reach — the dedup that keeps one `git clone` against
-    /// an off-list host from carding hundreds of times over. The caller
-    /// supplies it already bound to wherever a user-facing narration goes
-    /// (a Tauri emitter, headless stderr, …); this module has no opinion on
-    /// that, the same way [`Self::exchange`] takes a generic
-    /// [`exarch::bus::Sink`] rather than importing one.
-    ///
     /// # Errors
     /// Returns `Err` if this computer cannot start a virtual machine at all
     /// — the wrong platform, missing boot media, or an unsigned build — if
@@ -440,13 +430,10 @@ impl Conversation {
     /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
     /// be made, if the system prompt cannot be assembled, if the agent
     /// cannot be started, if the before-checkpoint — the safety copy every
-    /// undo returns to — cannot be taken, or if guest networking
-    /// cannot start: its session certificate authority could not be minted,
-    /// its prologue could not be written to the net wire, or its outbound
-    /// client could not be built against this computer's own trust store —
-    /// see [`guest_net::upstream::client`]. Guest networking does not start
-    /// degraded; a conversation with no network it can trust is refused
-    /// outright rather than opened quietly without one.
+    /// undo returns to — cannot be taken, or if guest networking cannot
+    /// start. Guest networking does not start degraded; a conversation with
+    /// no network it can trust is refused outright rather than opened
+    /// quietly without one.
     ///
     /// # Panics
     /// Panics if the chosen provider is absent from `store` — an invariant
@@ -459,7 +446,6 @@ impl Conversation {
         folder: &Path,
         store: &Mutex<CredentialStore>,
         choice: Option<Choice>,
-        blocked: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
         // Handed as the *means* of readying the media rather than the media
@@ -535,7 +521,7 @@ impl Conversation {
             // own half of the same pair.
             let wires = machine.take_wires();
             let root_seat = control_seat(wires.control, workspace)?;
-            let net = net_seat(wires.net, egress.clone(), blocked)?;
+            let net = net_seat(wires.net, egress.clone())?;
 
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
@@ -665,8 +651,8 @@ impl Conversation {
     /// network is used for.
     ///
     /// # Errors
-    /// Returns `Err` if the machine does not stop cleanly — a failure
-    /// this never swallows.
+    /// Returns `Err` if the machine does not stop cleanly, or if a
+    /// guest-net worker panicked — failures this never swallows.
     pub fn end(self) -> Result<(), String> {
         let Self {
             machine,
@@ -675,10 +661,14 @@ impl Conversation {
             ..
         } = self;
         drop(agent);
+        // Joined, not merely stopped: ending a conversation must leave no
+        // guest-net thread behind, and `join` is what reports a worker panic.
         net.stop();
+        let net_end = net.join();
         machine
             .shutdown()
             .map_err(|e| format!("the machine did not stop cleanly: {e}"))
+            .and(net_end)
     }
 }
 
@@ -779,46 +769,20 @@ fn control_seat(
     })
 }
 
-/// Write the net wire's prologue — this session's own certificate authority
-/// and the `resolv.conf` pointing the guest's DNS at
-/// [`vm_manager::GUEST_LINK`]'s gateway — then hand the wire to
-/// [`guest_net::run`], which owns it from here on.
-///
-/// Every refusal `guest-net`'s proxy gate makes for the life of the
-/// returned session narrates through `blocked`, deduplicated per name; the
-/// ledger behind `egress` gets every one regardless — see
-/// `guest_net::proxy::handler`.
+/// Hand the net wire to [`guest_net::run`], which owns it from here on.
 ///
 /// # Errors
-/// Returns `Err` if this session's certificate authority cannot be minted,
-/// if the prologue cannot be written to the wire, or if `guest_net::run`
-/// itself cannot start — including its outbound client refusing to build
-/// against this computer's own trust store, in which case guest networking
-/// simply does not start.
+/// Returns `Err` if `guest_net::run` cannot start guest networking.
 fn net_seat(
     net: impl Into<NetWire>,
     egress: exarch::egress::Egress,
-    blocked: impl Fn(&str, &str) + Send + Sync + 'static,
 ) -> Result<guest_net::Session<NetWire>, String> {
-    let ca = Arc::new(
-        guest_net::ca::Ca::mint().map_err(|e| format!("could not start guest networking: {e}"))?,
-    );
-    let mut wire: NetWire = net.into();
-    let prologue = ral_daemon::packet::Prologue {
-        resolv_conf: format!("nameserver {}\n", vm_manager::GUEST_LINK.gateway).into_bytes(),
-        ca_pem: ca.pem().as_bytes().to_vec(),
-    };
-    wire.write_all(&prologue.encode())
-        .map_err(|e| format!("could not hand the guest its resolver and certificate: {e}"))?;
-
-    let handler = guest_net::proxy::handler(egress.clone(), ca, Arc::new(blocked))?;
     guest_net::run(
-        wire,
+        net.into(),
         guest_net::Config {
-            dns_rate_per_minute: egress.policy.rate_per_minute,
             egress,
             gateway: vm_manager::GUEST_LINK.gateway,
-            handler,
+            dialer: Arc::new(guest_net::vet::System),
         },
     )
     .map_err(|e| format!("could not start guest networking: {e}"))

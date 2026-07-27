@@ -18,11 +18,12 @@ boot.img     (ships w/ app)      kernel + ral-daemon + ral engine (build-boot.sh
 
 ## Why the image is what an agent may rely on
 
-The guest reaches the network only through the host's allowlist (§6), and no
-hypervisor here configures a network adapter: its only interface is a `tun`
-whose single peer is `guest-net`, a user-mode TCP/IP stack in a host process
-that answers DNS itself, terminates TCP, and intercepts 80 and 443 so a grant
-is a *verb on a host* rather than a hostname. So installs at runtime are
+The guest reaches the network only through the host's `CONNECT`-only proxy
+(§6), and no hypervisor here configures a network adapter: its only
+interface is a `tun` whose single peer is `guest-net`, a user-mode TCP/IP
+stack in a host process that admits TCP connections to port 443 of the
+public addresses an exact list of DNS names resolves to, once, on the host
+— and nothing else. So installs at runtime are
 possible — and they are also **forgotten at the next boot**, because the root
 overlay is per-session (§7). That is what makes the rootfs load-bearing: not
 that nothing can be installed, but that nothing installed *lasts*, so whatever

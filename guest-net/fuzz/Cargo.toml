@@ -12,8 +12,8 @@ guest-net = { path = ".." }
 libfuzzer-sys = "0.4"
 
 [[bin]]
-name = "dns"
-path = "fuzz_targets/dns.rs"
+name = "connect"
+path = "fuzz_targets/connect.rs"
 test = false
 doc = false
 bench = false

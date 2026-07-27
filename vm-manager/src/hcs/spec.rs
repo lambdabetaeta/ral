@@ -508,8 +508,15 @@ mod tests {
         assert!(line.contains("ral.plan9=564"), "{line}");
         assert!(line.contains("ral.port=1729"), "{line}");
         assert!(line.contains("ral.epoch=1771200000"), "{line}");
-        assert!(line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"), "{line}");
-        assert_ne!(PLAN9_PORT, super::super::CONTROL_PORT, "plan9/control collide");
+        assert!(
+            line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"),
+            "{line}"
+        );
+        assert_ne!(
+            PLAN9_PORT,
+            super::super::CONTROL_PORT,
+            "plan9/control collide"
+        );
         assert_ne!(PLAN9_PORT, crate::NET_PORT, "plan9/net collide");
         assert_ne!(
             super::super::CONTROL_PORT,

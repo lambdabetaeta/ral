@@ -1,0 +1,4 @@
+CONNECT example.com:443 HTTP/1.1
+Host: example.com:443
+User-Agent: curl/8.0
+
