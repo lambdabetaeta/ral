@@ -60,12 +60,10 @@ impl Shell {
     }
 
     /// Emit a `deputy` audit node when the stack just formed by the push
-    /// above — folded through `Capabilities::meet`, per
-    /// [`crate::capability::deputy_prefixes`]'s contract — admits a
-    /// prefix for both exec and write: the confused-deputy escape hatch
-    /// `design/grant.md`'s third concession names. Reports only; never
-    /// denies, never attenuates the grant that just landed. No-op when
-    /// audit is inactive or no layer opts in (SPEC §11.4–11.5).
+    /// above, meet-folded, is a confused deputy — see
+    /// [`crate::capability::deputy_prefixes`], whose contract (folded
+    /// frame, report-only) this implements at the grant-push site.
+    /// No-op when audit is inactive or no layer opts in (SPEC §11.4–11.5).
     fn audit_deputy_prefixes(&mut self) {
         if !self
             .mobile

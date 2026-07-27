@@ -131,13 +131,9 @@ pub(super) enum FsVerdict {
 /// Reads and writes consult the same deny set — there is one deny region
 /// per layer, not two.  See SPEC §11.2.
 ///
-/// Pure over its inputs: `resolved` is a value, `resolver` and `grants`
-/// are borrowed policy and the `Resolver`'s bound `home`/`cwd`, not a
-/// live filesystem consultation of *this* call's environment — the
-/// canonicalisation `resolver.check` performs is the one place this
-/// still touches disk (see `design/260727_policy_kernel_purity.md` §0:
-/// enforcement is a statement about the world and must re-resolve at the
-/// point of use).
+/// `resolver.check` re-resolves each prefix against the live disk, by
+/// design: enforcement is a statement about the world, composition about
+/// the policy (`dev/docs/260727_policy_kernel_purity.md` §0).
 pub(super) fn fs_verdict(
     grants: &GrantStack,
     resolver: &Resolver,

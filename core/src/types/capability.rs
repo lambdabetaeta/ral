@@ -138,12 +138,10 @@ pub enum ExecPolicy {
 /// are two-valued — a directory admits or denies binaries resolving
 /// inside it but cannot name subcommands — and stored as the
 /// partition itself: `allow_dirs` and `deny_dirs` are disjoint sets of
-/// [`NormalizedPrefix`].  Storing the partition (rather than one map
-/// keyed by verdict) is what lets [`Meet`]/[`Join`] combine each side
-/// directly — intersect the allows, union the denies — instead of
-/// splitting a unified map by verdict and re-minting every key on
-/// every composition.  Literal keys beat dir prefixes when both cover
-/// a candidate, and the deepest dir prefix wins among the dirs.
+/// [`NormalizedPrefix`], so [`Meet`]/[`Join`] combine each side
+/// directly — intersect the allows, union the denies.  Literal keys
+/// beat dir prefixes when both cover a candidate, and the deepest dir
+/// prefix wins among the dirs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecMap {
     #[serde(default)]
@@ -510,13 +508,9 @@ impl Capabilities {
     /// fs prefixes), AND (net, editor, shell), and union
     /// (`fs.deny_paths` — more denies = less authority).
     /// `audit` is not part of the lattice: it propagates upward
-    /// (logical OR).  The fs/exec-dir prefix intersections read the
-    /// `resolved` form each [`NormalizedPrefix`] already carries (via
-    /// [`meet_prefixes`]) — the same fidelity the point-of-use gate and
-    /// the sandbox projection use — so a symlinked deeper prefix cannot
-    /// survive the meet as authority reaching outside a shallower
-    /// ceiling.  No disk consultation happens here: it happened once, at
-    /// whichever freeze door minted each prefix.
+    /// (logical OR).  The fs/exec-dir prefix intersections run through
+    /// [`meet_prefixes`], judged on the `resolved` form each
+    /// [`NormalizedPrefix`] already carries — no disk consultation here.
     pub fn meet(self, other: Self) -> Self {
         // Per-field meets via the lattice trait (Option<T>: Meet does
         // the None-as-identity lift; ExecMap, bool, FsPolicy,

@@ -470,14 +470,9 @@ mod tests {
             policy,
             Some(SandboxProjection {
                 fs: crate::types::FsProjection::Restricted(crate::types::FsPolicy {
-                    // The wire boundary is trusted: it deserializes the
-                    // record's three fields verbatim without re-folding
-                    // (`NormalizedPrefix::from_surface` would fold `/tmp` to
-                    // `\tmp` on Windows and diverge from the JSON above), so
-                    // build the expected prefix through the same
-                    // non-folding deserialize path — a same-namespace,
-                    // no-symlink prefix, matching what the JSON literal
-                    // above actually carries.
+                    // The wire deserializes the record verbatim, without
+                    // re-folding (`from_surface` would fold `/tmp` to `\tmp`
+                    // on Windows), so mint the expected prefix the same way.
                     read_prefixes: vec![
                         serde_json::from_str::<crate::path::NormalizedPrefix>(
                             r#"{"surface":"/tmp","resolved":"/tmp","namespace":"Host"}"#,

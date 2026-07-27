@@ -544,20 +544,12 @@ fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
     }
 }
 
-/// A small, crafted universe of `{surface, resolved, namespace}` triples —
-/// minted with `NormalizedPrefix::for_test` rather than a disk, since
-/// minting is the only place this type ever needed one and the mint door
-/// records exactly the divergence a real symlink would produce.  Covers:
-/// a plain prefix and a genuine nested descendant; aliasing (`/a/alias`
-/// resolves to the same target as `/a` under a different surface
-/// spelling); divergence (`/a/link` nests lexically under `/a` but
-/// resolves to `/elsewhere`, what a symlink is once frozen); and the same
-/// surface/resolved pair minted in both namespaces, so cross-namespace
-/// overlap is in scope for every law below.
-///
-/// The laws are cheap to check exhaustively over every pair and triple
-/// here only because the meet is now total and pure — no disk read is
-/// re-issued per comparison.
+/// A small universe of `{surface, resolved, namespace}` triples, minted
+/// synthetically with `NormalizedPrefix::for_test`.  Covers a plain
+/// prefix, a genuine nested descendant, aliasing (`/a/alias` resolves to
+/// `/a`), symlink divergence (`/a/link` resolves to `/elsewhere`), and
+/// the same pair in both namespaces, so cross-namespace overlap is in
+/// scope for every law below.
 fn prefix_universe() -> Vec<crate::path::NormalizedPrefix> {
     use crate::path::Namespace;
     vec![
@@ -679,25 +671,19 @@ fn meet_fs_cross_namespace_prefixes_never_overlap() {
     );
 }
 
-/// Security regression at the composition layer, expressed without a
-/// filesystem.  A restrict grant whose deeper prefix *lexically* nests
-/// under the base ceiling but resolves to a different target — the
-/// divergent `surface`/`resolved` pair a symlink freezes to — must not
-/// survive the meet.  `NormalizedPrefix::for_test` mints that pair
-/// directly; the meet still does the catching, over frozen data — the
-/// same guarantee `PrefixSet::symlinked_grant_cannot_escape_a_shallower_ceiling`
-/// pins one layer down, here proved end-to-end through `Capabilities::meet`.
-/// `meet_fs_nested_grants_narrow_to_intersection` above is this test's
-/// positive control: a genuinely-nested prefix does survive, so this
-/// collapse is the escape being caught, not an always-empty meet.
+/// Security regression at the composition layer, over frozen data: a
+/// restrict prefix that *lexically* nests under the base ceiling but
+/// resolves elsewhere — the divergent pair a symlink freezes to — must
+/// not survive `Capabilities::meet`.  The layer-level pin is
+/// `PrefixSet::symlinked_grant_cannot_escape_a_shallower_ceiling`;
+/// `meet_fs_nested_grants_narrow_to_intersection` above is the positive
+/// control showing this collapse is the escape being caught.
 ///
-/// One hypothesis moves with this rewrite rather than disappearing: a
-/// symlink created *after* freeze is invisible to the meet.  The old
-/// disk-backed fixture pinned composition-time state; the theorem this
-/// test now carries rests on the freeze-to-use stability window
-/// (`dev/docs/260727_policy_kernel_purity.md` §5) — the gate and the
-/// sandbox projection still re-resolve against the live filesystem at
-/// use, which is why the end-to-end property holds regardless.
+/// Premise: a symlink created *after* freeze is invisible to the meet —
+/// the freeze-to-use stability window
+/// (`dev/docs/260727_policy_kernel_purity.md` §5).  The gate and the
+/// sandbox projection still re-resolve at use, which is why the
+/// end-to-end property holds regardless.
 #[test]
 fn meet_fs_symlinked_prefix_cannot_escape_ceiling() {
     use crate::path::Namespace;

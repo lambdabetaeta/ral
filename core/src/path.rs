@@ -87,7 +87,7 @@ pub fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] placeholder cwd for FreezeCtx-shaped test fixtures"
+    reason = "lexical Path::new for a test placeholder — no I/O behind it; the lint here guards path-construction discipline, and this shared fixture is its one sanctioned test door"
 )]
 pub(crate) fn test_cwd() -> &'static std::path::Path {
     std::path::Path::new("/")

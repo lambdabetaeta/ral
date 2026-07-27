@@ -33,15 +33,9 @@
 //! One door answers to a different operating system:
 //! [`NormalizedPrefix::from_guest`], for a prefix this process mints but
 //! never matches, because the gate that matches it runs inside a Linux
-//! guest.  It runs the same law in the guest's namespace
-//! ([`super::lex::fold_dots_posix`]), and — because there is no
-//! `realpath(3)` on this host for a path inside another machine —
-//! `resolved` is just `surface` again, tagged `Namespace::Guest`.  That
-//! tag is what makes composition namespace-correct: overlap is judged
-//! on `(namespace, resolved)`, so a host-namespace prefix and a
-//! guest-namespace prefix never overlap, and a cross-namespace meet is
-//! the empty, fail-closed intersection rather than a host kernel
-//! silently folding `/work` to `\work` and matching nothing.
+//! guest.  It folds with the guest's kernel and tags the result
+//! [`Namespace::Guest`] — the [`Namespace`] doc carries the
+//! cross-namespace overlap rule that tag exists for.
 //!
 //! Canonicalisation against `realpath(3)` is anchored on this normal
 //! form: [`ResolvedPath::canonicalise_strict`] /
@@ -148,10 +142,9 @@ pub enum Namespace {
 ///
 /// `surface` is absolute and `.`/`..`-collapsed, in the same normal
 /// form a [`ResolvedPath`] carries.  `resolved` is `surface` with
-/// symlinks followed, in `namespace`.  Carrying both — rather than
-/// re-deriving `resolved` from disk on every comparison — is what lets
-/// the lattice meets be pure: minting is the one place this type
-/// touches the filesystem.
+/// symlinks followed, in `namespace`.  Carrying both is what lets the
+/// lattice meets be pure (see the module doc): minting is the one
+/// place this type touches the filesystem.
 ///
 /// Private fields; the grant-side door is the freeze lexer
 /// ([`super::sigil`]), save for a prefix bound for another OS's
@@ -208,35 +201,20 @@ impl NormalizedPrefix {
     /// Synod is the case this exists for: the granted folder is admitted
     /// at its guest mount point (`/work`), and the gate that will match
     /// against the prefix runs *inside* the machine.  So the normaliser
-    /// that has to agree with the access side is Linux's, not this
-    /// process's — see [`fold_dots_posix`](super::lex::fold_dots_posix)
-    /// for what the host's own does to `/work` on Windows, and
-    /// `MachineSpec::resolve` for the same reasoning applied to
-    /// absoluteness (judged with `starts_with('/')`, never
-    /// `Path::is_absolute`).
+    /// that has to agree with the access side is Linux's
+    /// ([`fold_dots_posix`](super::lex::fold_dots_posix)), not this
+    /// process's — see `MachineSpec::resolve` for the same reasoning
+    /// applied to absoluteness.  Not interchangeable with
+    /// [`from_surface`](Self::from_surface): a prefix that will be
+    /// matched on *this* computer must go through that one, which is why
+    /// it takes an `AsRef<Path>` and this takes a `&str`.
     ///
-    /// Not a general-purpose door, and not interchangeable with
-    /// [`from_surface`](Self::from_surface): a prefix that will be matched
-    /// on *this* computer must go through that one, which is why it takes
-    /// an `AsRef<Path>` and this takes a `&str`.  There is no host whose
-    /// paths this normalises correctly except by coincidence.
-    ///
-    /// This namespace has no `realpath(3)` of its own to consult from
-    /// this host, so `resolved` is just `surface` again: the door does
-    /// no disk I/O because there is no oracle for it to consult, which
-    /// is exactly why `namespace` exists — so composition can tell a
-    /// guest-namespace prefix apart from a host one instead of silently
-    /// comparing spellings that were never meant to agree.
-    ///
-    /// One constraint travels with a prefix minted here: it must not be
-    /// *reduced* on the host.  Synod never narrows a guest grant — its
-    /// trunk runs with `fuel: 0`, so no sub-agent composition ever runs
-    /// against it — and a nested `grant` block inside the machine is
-    /// reduced *there*, by the guest's own kernel, which is the right
-    /// one.  A guest-namespace policy that ever does need host-side
-    /// narrowing is exactly what the `namespace` tag protects: the meet
-    /// keys overlap on `(namespace, resolved)`, so it can never fold a
-    /// guest prefix through the host's separator by mistake.
+    /// There is no `realpath(3)` on this host for a path inside another
+    /// machine, so `resolved` is just `surface` again, tagged
+    /// [`Namespace::Guest`].  That tag makes a host-side meet against a
+    /// guest prefix the empty, fail-closed intersection (see
+    /// [`Namespace`]), so the only place a guest grant can be narrowed
+    /// is inside the guest, by the guest's own kernel — the right one.
     #[must_use]
     pub fn from_guest(path: &str) -> Self {
         debug_assert!(
@@ -313,11 +291,8 @@ impl NormalizedPrefix {
     }
 
     /// Test-only mint with an explicit, possibly divergent
-    /// `surface`/`resolved` pair — the shape a real symlink would
-    /// produce, without touching a disk to produce it.  Every
-    /// production door derives `resolved` from `surface` itself; this
-    /// is the one place that invariant is deliberately broken, and it
-    /// exists only under `#[cfg(test)]` so it can never become a fifth
+    /// `surface`/`resolved` pair — the shape a real symlink freezes to,
+    /// without a disk.  `#[cfg(test)]` so it can never become a
     /// production door for fabricating a resolved form.
     #[cfg(test)]
     pub(crate) fn for_test(surface: &str, resolved: &str, namespace: Namespace) -> Self {

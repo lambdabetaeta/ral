@@ -49,16 +49,12 @@ pub(super) fn load_capabilities_ral(
     })
 }
 
-/// Warn — never fail — when the fully composed session ceiling admits a
-/// prefix for both exec and write: the confused-deputy escape hatch
-/// `design/grant.md`'s third concession names (drop a binary in the
-/// writable region, the next call admits it). Judged on `caps` as
+/// Warn — never fail — when the fully composed session ceiling is a
+/// confused deputy: see `ral_core::capability::deputy_prefixes` for the
+/// verdict and why it reports rather than denies.  Judged on `caps` as
 /// [`for_invocation`](super::for_invocation) hands it back after every
 /// `join`/`meet` has run, not on a single loaded file — two profiles can
-/// each be innocent and still compose into a deputy. A report only:
-/// `write: cwd:` plus exec under `cwd:` is the compile-and-run workflow
-/// every agent profile needs, so this never denies or attenuates the
-/// load it just finished.
+/// each be innocent and still compose into a deputy.
 pub(super) fn lint_deputy_prefixes(caps: &Capabilities) {
     let found = ral_core::capability::deputy_prefixes(caps);
     if found.is_empty() {

@@ -2,10 +2,10 @@
 //!
 //! Two internal types encode the per-layer and whole-stack verdicts;
 //! `evaluate_exec` folds the stack, `layer_exec_verdict` decides one
-//! layer.  Within a layer the unified exec map admits commands two
-//! ways: by literal key match (bare name or absolute path), or by
-//! subpath-prefix match (a key ending in `/` covering anything under
-//! it).  Literal beats subpath; deeper subpath beats shallower.
+//! layer.  Within a layer the exec map admits commands two ways: by
+//! literal key match (bare name or absolute path), or by
+//! directory-prefix match (an `allow_dirs`/`deny_dirs` entry covering
+//! anything under it).  Literal beats dir; deeper dir beats shallower.
 
 use crate::path;
 use crate::types::{ExecMap, ExecPolicy, GrantStack, Meet};
