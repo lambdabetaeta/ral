@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 009e727 -->
+<!-- verified_at_commit: 5f026b5 -->
 # ral(1) — language specification
 
 ## 0  Overview

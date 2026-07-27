@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 009e727
+generated_at_commit: 5f026b5
 generated_at_date: 2026-07-27
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
