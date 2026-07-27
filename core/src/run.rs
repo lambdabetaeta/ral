@@ -181,13 +181,15 @@ pub enum RunReport {
     /// renders the diagnostics and treats the run as status 1.
     Static { diagnostics: StaticDiagnostics },
     /// A compiled run ran. `status` is the transport status computed once;
-    /// `single_command` is whether the source compiled to a single command
-    /// (for runtime-error rendering); `captured` is `Some` under
+    /// `single_command` is whether the source compiled to a single command;
+    /// `root` is the [`FileId`] that source registered under. Together they
+    /// pick the runtime-error rendering. `captured` is `Some` under
     /// [`RunIo::Capture`]; `timed_out` is whether the wall fired.
     Ran {
         result: Settled<Value>,
         status: i32,
         single_command: bool,
+        root: FileId,
         captured: Option<Captured>,
         timed_out: bool,
     },
@@ -305,10 +307,11 @@ impl Shell {
                 let foreground = self.durable_root().foreground(under);
                 let wall = arm_wall(req.run.wall, None, &foreground);
 
-                let (comp, single_command) = match compile_run(self, src, &req.run.script_name) {
-                    Ok(parts) => parts,
-                    Err(diagnostics) => return RunReport::Static { diagnostics },
-                };
+                let (comp, single_command, root) =
+                    match compile_run(self, src, &req.run.script_name) {
+                        Ok(parts) => parts,
+                        Err(diagnostics) => return RunReport::Static { diagnostics },
+                    };
 
                 // "Committed" = reached evaluation: harvest the compiled
                 // program's referenced names and renew every one that is
@@ -320,7 +323,7 @@ impl Shell {
                         .renew(crate::ir::referenced_names(&comp));
                 }
 
-                self.run_built(req, foreground, wall, single_command, |m, s| {
+                self.run_built(req, foreground, wall, single_command, root, |m, s| {
                     crate::evaluator::eval_top_level(&comp, m, s)
                 })
             }
@@ -352,7 +355,7 @@ impl Shell {
                     TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
                 };
 
-                self.run_built(req, foreground, wall, false, |m, s| {
+                self.run_built(req, foreground, wall, false, FileId::DUMMY, |m, s| {
                     crate::builtins::apply(&hook.binding.value, &args, m, s)
                 })
             }
@@ -379,6 +382,7 @@ impl Shell {
         foreground: ForegroundScope,
         wall: Option<crate::process::Deadline>,
         single_command: bool,
+        root: FileId,
         body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
     ) -> RunReport {
         let RunRequest {
@@ -465,6 +469,7 @@ impl Shell {
             result,
             status,
             single_command,
+            root,
             captured,
             timed_out,
         }
@@ -563,10 +568,12 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Sou
 }
 
 /// Clear signal state, compile and typecheck `src` against the live session.
-/// `Ok((comp, single_command))` on a clean compile; `Err(diagnostics)` on a
-/// parse or type failure (the run never reaches evaluation). The
-/// `single_command` flag is harvested here because the host needs it to render
-/// runtime errors after `comp` is consumed.
+/// `Ok((comp, single_command, root))` on a clean compile; `Err(diagnostics)` on
+/// a parse or type failure (the run never reaches evaluation). The
+/// `single_command` flag and the root [`FileId`] are harvested here because the
+/// host needs both to render runtime errors after `comp` is consumed — and
+/// `root` cannot be read back later, since `session.root_file` is restored to
+/// [`FileId::DUMMY`] the moment the run's [`IoLoan`] drops.
 ///
 /// Peeks the [`FileId`] the next registration will mint *before* compiling,
 /// so the compiled program's spans carry this run's real file identity.
@@ -578,7 +585,7 @@ pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
     name: &str,
-) -> Result<(Arc<crate::ir::Comp>, bool), StaticDiagnostics> {
+) -> Result<(Arc<crate::ir::Comp>, bool, FileId), StaticDiagnostics> {
     crate::process::clear();
     let file = shell.session.sources.next_id();
 
@@ -609,7 +616,7 @@ pub(crate) fn compile_run(
     };
 
     let single_command = crate::ir::is_single_command(&comp);
-    Ok((comp, single_command))
+    Ok((comp, single_command, file))
 }
 
 /// Install the built run state, fire the lifecycle hooks around the eval
@@ -1449,5 +1456,75 @@ mod tests {
             shell.scope_lookup("desk_panic").is_none(),
             "the enquiring run's binding must be rolled back with the rest"
         );
+    }
+
+    // ── where a runtime error says it happened ───────────────────────────
+
+    /// Run `src` on `shell` and hand back the rendered runtime error.
+    fn rendered_fault(shell: &mut Shell, src: &str) -> String {
+        let report = shell.run(capture_req(src)).into_report(shell.sources());
+        let crate::transport::Report::Ran { result, .. } = report else {
+            panic!("{src:?} must reach evaluation");
+        };
+        match result {
+            Err(crate::transport::Break::Error { rendered, .. }) => rendered,
+            other => panic!("{src:?} must fault, got {other:?}"),
+        }
+    }
+
+    /// A lambda compiled by one run and called by the next draws its caret
+    /// into the text that defined it — the run boundary does not cost a
+    /// value its origin, because the source registry only grows.
+    #[test]
+    fn a_lambda_faults_against_the_run_that_compiled_it() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        assert!(
+            matches!(shell.run(capture_req("let boom = { |x| $undefined_name }")), RunReport::Ran { result, .. } if result.is_ok())
+        );
+        let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "boom 1"));
+        assert!(
+            rendered.contains("$undefined_name }"),
+            "the caret must be drawn into the defining run's text:\n{rendered}"
+        );
+    }
+
+    /// The compact one-liner is still what a single command that fails *in
+    /// its own text* gets: no header, no caret.
+    #[test]
+    fn a_single_command_faulting_in_its_own_text_renders_compact() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "no-such-command-xyz"));
+        assert!(
+            !rendered.contains('╭'),
+            "a fault in the text on screen needs no caret:\n{rendered}"
+        );
+    }
+
+    /// `single_command` reports the input's shape and nothing else. The
+    /// renderer no longer reads it, but exarch still does — to say whether a
+    /// non-zero exit aborted anything after it — so the flag must keep
+    /// answering the question it names.
+    #[test]
+    fn single_command_still_reports_the_input_shape() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        for (src, shape) in [
+            ("no-such-command-xyz", true),
+            ("no-such-command-xyz; true", false),
+        ] {
+            match shell.run(capture_req(src)) {
+                RunReport::Ran {
+                    single_command,
+                    result,
+                    ..
+                } => {
+                    assert_eq!(single_command, shape, "{src:?} misreports its shape");
+                    assert!(result.is_err(), "{src:?} must fault");
+                }
+                RunReport::Static { .. } => panic!("{src:?} must reach evaluation"),
+            }
+        }
     }
 }

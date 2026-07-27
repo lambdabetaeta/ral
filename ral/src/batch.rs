@@ -7,7 +7,6 @@ use ral_core::{
     elaborator::elaborate, syntax::parser::parse,
 };
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use crate::PRELUDE;
 use crate::cli::{BatchOpts, RunOpts};
@@ -185,16 +184,13 @@ pub(crate) fn run_batch(
         shell.enable_audit();
     }
 
-    let comp = match run_check(&bare) {
-        Ok(annotated) => Arc::new(annotated),
-        Err(errs) => {
-            eprint!(
-                "{}",
-                diagnostic::format_type_errors_ariadne(name, source, &errs)
-            );
-            return ExitCode::from(1u8);
-        }
-    };
+    if let Err(errs) = run_check(&bare) {
+        eprint!(
+            "{}",
+            diagnostic::format_type_errors_ariadne(name, source, &errs)
+        );
+        return ExitCode::from(1u8);
+    }
     tick!("typecheck");
 
     let terminal_access = if shell.terminal().startup_foreground {
@@ -202,7 +198,7 @@ pub(crate) fn run_batch(
     } else {
         RequestedTerminalAccess::Denied
     };
-    let result = match shell.run(RunRequest {
+    let (result, compact_root) = match shell.run(RunRequest {
         run: Run {
             program: Program::Source(source.to_string()),
             script_name: name.to_string(),
@@ -220,10 +216,15 @@ pub(crate) fn run_batch(
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { result, .. } => result,
+        RunReport::Ran {
+            result,
+            single_command,
+            root,
+            ..
+        } => (result, single_command.then_some(root)),
         // Batch already typechecked above, so a static report should not occur
         // here; treat it defensively as a fatal run (exit 1).
-        RunReport::Static { .. } => Err(Break::Escape(Escape::Exit(1))),
+        RunReport::Static { .. } => (Err(Break::Escape(Escape::Exit(1))), None),
     };
     tick!("evaluate");
 
@@ -237,20 +238,19 @@ pub(crate) fn run_batch(
         Ok(_) => shell.last_status().clamp(0, 255),
         Err(Break::Escape(Escape::Exit(code))) => (*code).clamp(0, 255),
         Err(Break::Error(e)) => {
-            let single_command = ral_core::ir::is_single_command(&comp);
             if audit {
                 diagnostic::report_runtime_error(
                     &mut std::io::sink(),
                     shell.sources(),
                     e,
-                    single_command,
+                    compact_root,
                 )
             } else {
                 diagnostic::report_runtime_error(
                     &mut std::io::stderr(),
                     shell.sources(),
                     e,
-                    single_command,
+                    compact_root,
                 )
             }
         }

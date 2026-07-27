@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-anchors: [run, Program, register_hook, RunRequest, RunReport, RunIo, RunState, RunGuard, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
+verified_at_commit: 16b2d1e
+verified_at_date: 2026-07-26
+anchors: [run, run_nested, Program, register_hook, RunRequest, RunReport, RunIo, Mooring, Disposition, RunGuard, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
 ---
 
 # A run, end to end
@@ -24,6 +24,14 @@ from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
 reduction primitive behind the door is crate-private, so a host cannot start an
 unframed evaluation against a stale frame
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
+
+**There are two doors, and which one you use is decided by what you hold.**
+`Shell::run` is for a host with no run in hand: its frame is minted under
+`SessionState::anchor`. Code *already inside* a run — a builtin body, a
+lifecycle hook — uses `Shell::run_nested(&mooring, req)`, handing it the
+`Mooring` it was given, so the nested frame is a child of the enclosing run's
+cancel scope: the outer run's interrupt unwinds the nest, and the outer wall
+reaches into it ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 
 **The request carries the policy axes as types, never flags.** A `RunRequest`
 is exactly the places hosts differ:
@@ -49,16 +57,16 @@ is exactly the places hosts differ:
   none).
 
 **The spine the door orchestrates is one straight line**, owning resources
-(`Sink`, `Source`, `RunState`, guards, buffers) while the request describes
+(`Sink`, `Source`, the run's frame, guards, buffers) while the request describes
 policy. `Shell::run` dispatches on the `Program` sum, and the arms differ only
 in *how the program resolves* — the source arm compiles first, the hook arm
 looks up the hook table; both then converge on `run_built` and the run
 module's framed scaffold:
 
-- Mint the run's foreground scope (a child of the shell's durable root, so a
-  foreground timeout never reaches a detached worker —
-  [[internals/cancellation|cancellation]]) and arm its wall, if any, **before
-  compiling**, so `wall` bounds the whole run — compile and typecheck
+- Mint the run's foreground scope — a child of the scope the door was entered
+  under, so a foreground timeout never reaches a detached worker
+  ([[internals/cancellation|cancellation]]) — and arm its wall, if any,
+  **before compiling**, so `wall` bounds the whole run — compile and typecheck
   included, not only evaluation. `compile_run`'s `process::clear` touches only
   the signal count, never the reaper, so the armed ceiling survives the compile.
 - The source arm's `compile_run` runs `compile_and_typecheck` seeded from the
@@ -71,19 +79,25 @@ module's framed scaffold:
   registered `DefaultPolicy` (capture, terminal authority, budget) folds into
   the run's conditions — the hook's to decide, not the dispatching host's.
 - `run_built` materialises the IO regime — `Capture` mints the buffers it reads
-  back, `Inherit` leaves the ambient streams to flow — then `build_run`
-  assembles the `RunState`, the whole run-local part of a `Shell` in one
-  field, seeded from the ambient session. The run-local `surface` and its
-  `deferred_lease`/`worker_cap` are seated on it here; the surface has no
-  liveness role, so a clone of it can never define run completion.
-- `run_framed` installs that state through a `RunGuard` and evaluates. The
-  guard swaps the new frame onto `shell.run` and publishes the foreground and
-  durable-root scopes into the signal-reachable slots. It is RAII: it restores
-  the prior frame on `Drop`, so teardown survives a caught worker panic. The
-  root context is installed, the pre-exec hook fires, and
+  back, `Inherit` leaves the ambient streams to flow — then assembles the run's
+  frame **in two halves, split by mutability**. What the run fixes once (the
+  `surface` sink, the deferred rail with its `deferred_lease` and `worker_cap`,
+  the desk, the nursery, and the foreground scope) is a `Mooring`, an owned
+  local on `run_built`'s own Rust stack frame; the surface has no liveness
+  role, so a clone of it can never define run completion. What changes within
+  the run — byte streams, source cursor, terminal authority — is the
+  `Disposition` `build_run` seeds from the ambient session.
+- `run_framed` borrows the mooring, installs the disposition through a
+  `RunGuard`, and evaluates. The guard is RAII over that one swap: it moves the
+  new residue onto `shell.run` and restores the previous one on `Drop`, so
+  teardown survives a caught worker panic. The mooring needs no guard — it
+  never moved, so an outer run's is back the instant this stack frame ends, and
+  `Mooring`'s own `Drop` empties the nursery on the unwinding path as surely as
+  on the clean one. The root context is installed, the pre-exec hook fires
+  (taking `&Mooring` beside the shell, as every in-run body does), and
   `with_capabilities(caps, body)` runs the run's program under the request's
-  capability ceiling — `eval_top_level(&comp, s)` for the source arm, the
-  in-frame `builtins::apply` of the resolved hook for the hook arm
+  capability ceiling — `eval_top_level(&comp, mooring, shell)` for the source
+  arm, the in-frame `builtins::apply` of the resolved hook for the hook arm
   ([[internals/evaluator-machine|the machine]];
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - `eval_top_level` installs the post-run `Mobile` on **every** outcome, so a
@@ -96,7 +110,7 @@ module's framed scaffold:
   misread a run that finished inside its budget as timed out. `timed_out` is
   then `true` only for a `Deadline` cause that genuinely elapsed; the captured
   bytes (if any) are drained, and everything flattens into
-  `RunReport::Ran { result, status, single_command, captured, timed_out }`,
+  `RunReport::Ran { result, status, single_command, root, captured, timed_out }`,
   carrying the `Settled<Value>` for the host to render.
 
 **The hosts differ only in the request they supply.**

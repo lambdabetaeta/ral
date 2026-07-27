@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 16b2d1e
+generated_at_date: 2026-07-26
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -31,11 +31,11 @@ keyed by `FileId`: it lives on `SessionState::sources` (a run resets and
 seeds it at run start; hosts read it after the run returns to render), while
 the run-local cursor — `LocationCursor` in `diagnostic.rs`, with the
 active-source cache, the `current` id, and the `CallSite` snapshot — rides on
-`RunState::loc`. `Shell::install_script_context` registers each source and
+`Disposition::loc`. `Shell::install_script_context` registers each source and
 makes it `current`; `ScriptContextGuard` (module loads, the REPL plugin
 loader) saves and restores `current` around a load, and core's per-run
-`RunGuard` swaps the whole cursor with the rest of the run frame, while the
-registered source stays in the db.
+`RunGuard` swaps the whole cursor with the rest of the run's mutable residue,
+while the registered source stays in the db.
 
 This is the structural fix for the cross-source caret: a runtime error raised
 inside a `source`d module carries the module's `FileId`, so the renderer
@@ -58,6 +58,14 @@ one-liner is used instead. The per-stage entry points are
 (resolving a `SourceLoc` against a `SourceDb`) / `_compact`, with `cmd_error` and
 `shell_warning` for unstructured command-layer output. Color is gated through
 `ansi::use_color`.
+
+`format_runtime_error_auto` picks between the two by asking where the error
+came from, not what the input looked like: it takes `compact_root:
+Option<FileId>` — `Some(root)` when the input compiled to a single command,
+carrying that input's own id — and renders compact only when the error's span
+is absent or names `root`. A single command that dispatches into an rc alias,
+a `source`d function or a lambda from an earlier run faults in text the user
+cannot see, so it gets the caret.
 
 **The raw ingredients of a span underline are exposed so an external renderer
 can draw one in its own coordinate system.** `text::byte_to_char`

@@ -222,9 +222,9 @@ pub struct RedirectV {
 /// `span: None`.
 pub type Comp = Spanned<CompKind>;
 
-/// True if this computation is a single external/builtin command call.
-/// Used to suppress the ariadne source-span arrow when the entire
-/// input is just one command.
+/// True if this computation is a single external/builtin command call —
+/// a fact about the input's shape, which hosts read to tailor what they say
+/// about a failure.
 pub fn is_single_command(comp: &Comp) -> bool {
     match &comp.item {
         CompKind::Exec(_) => true,

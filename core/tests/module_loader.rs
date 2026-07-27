@@ -233,7 +233,7 @@ fn sourced_module_runtime_error_points_into_module() {
         err.message
     );
 
-    let rendered = diagnostic::format_runtime_error_auto(shell.sources(), &err, false);
+    let rendered = diagnostic::format_runtime_error_auto(shell.sources(), &err, None);
     assert!(
         rendered.contains("ral_source_runtime_err.ral"),
         "the caret must be drawn against the module's source:\n{rendered}"

@@ -50,13 +50,16 @@ impl Span {
     }
 
     /// The origin span for source a host synthesises rather than reads from a
-    /// file: `FileId(0)` at offset `0..0`.  Used to stamp hook registrations
-    /// and other boot-time bindings that have no user-authored byte range.
+    /// file: [`FileId::DUMMY`] at offset `0..0`.  Used to stamp hook
+    /// registrations and other boot-time bindings that have no user-authored
+    /// byte range.  The file must be the unmintable placeholder: the registry
+    /// only grows, so any real id would claim that source's first bytes
+    /// forever.
     pub fn synthetic() -> Self {
         Self {
             start: 0,
             end: 0,
-            file: FileId(0),
+            file: FileId::DUMMY,
         }
     }
 

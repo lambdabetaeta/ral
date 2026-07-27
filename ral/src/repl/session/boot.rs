@@ -338,16 +338,23 @@ fn source_config_file(path: &str, ctx: &mut RcCtx<'_>) {
 fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let src = ral_core::source::normalize_source_text(src);
-    let comp = ral_core::compile(&src).map_err(|e| format!("{path}: {e}"))?;
     // The rc check always runs (it writes the evaluator's mode wires) and is
     // seeded from the live shell, so an earlier rc file's bindings are
     // visible to a later file's check.  A type error of any kind leaves the
     // file with no runnable annotation: it is reported and skipped while the
     // boot survives — a broken rc must not strand the user at no shell, the
     // parse-error precedent above.
-    let comp = match ral_core::typecheck(&comp, ctx.shell.session_schemes()) {
-        Ok(annotated) => std::sync::Arc::new(annotated),
-        Err(errs) => {
+    //
+    // Compiled against the `FileId` `evaluate_checked` registers the text
+    // under a moment later, exactly as a module load is: an alias or function
+    // the rc defines outlives this boot, and its spans have to keep naming
+    // the rc for the whole session.
+    let file = ctx.shell.sources().next_id();
+    let comp = match ral_core::compile_and_typecheck(&src, ctx.shell.session_schemes(), file, path)
+    {
+        ral_core::CompileOutcome::Compiled(annotated) => std::sync::Arc::new(annotated),
+        ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
+        ral_core::CompileOutcome::Types(errs) => {
             eprint!(
                 "{}",
                 diagnostic::format_type_errors_ariadne(path, &src, &errs)

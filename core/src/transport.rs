@@ -308,12 +308,12 @@ pub enum Break {
 
 /// Project an engine [`Break`](crate::types::Break) onto the transport
 /// [`Break`], rendering a caught runtime error against `sources` into its
-/// full diagnostic string. `single_command` selects the compact one-liner
+/// full diagnostic string. `compact_root` selects the compact one-liner
 /// over the source-span caret, exactly as the batch host chooses.
 fn render_break(
     break_: crate::types::Break,
     sources: &crate::source::SourceDb,
-    single_command: bool,
+    compact_root: Option<crate::source::FileId>,
 ) -> Break {
     use crate::types::{Break as EngineBreak, Escape};
     match break_ {
@@ -323,7 +323,7 @@ fn render_break(
                 crate::types::Status::Process(crate::process::CommandFailure::ExitCode(_))
             );
             Break::Error {
-                rendered: crate::diagnostic::format_runtime_error_auto(sources, &e, single_command),
+                rendered: crate::diagnostic::format_runtime_error_auto(sources, &e, compact_root),
                 command_exit,
             }
         }
@@ -368,6 +368,7 @@ impl crate::run::RunReport {
                 result,
                 status,
                 single_command,
+                root,
                 captured,
                 timed_out,
             } => Report::Ran {
@@ -379,7 +380,11 @@ impl crate::run::RunReport {
                             command_exit: false,
                         }),
                     },
-                    Err(break_) => Err(render_break(break_, sources, single_command)),
+                    Err(break_) => Err(render_break(
+                        break_,
+                        sources,
+                        single_command.then_some(root),
+                    )),
                 },
                 // Clamp here, at the single point a raw code becomes a
                 // transport code, so `status` and `Break::Exit` (clamped
@@ -2160,8 +2165,11 @@ mod runtime_error_seam_tests {
     fn runtime_error_projects_to_a_full_diagnostic_string() {
         let db = SourceDb::default();
         let err = Error::new("boom", 3).with_hint("try harder");
-        // `single_command` selects the compact one-liner, no source span.
-        let Break::Error { rendered, .. } = render_break(EngineBreak::Error(err), &db, true) else {
+        // A single command whose error carries no span: the compact one-liner.
+        let compact_root = Some(crate::source::FileId(0));
+        let Break::Error { rendered, .. } =
+            render_break(EngineBreak::Error(err), &db, compact_root)
+        else {
             panic!("an engine runtime error must project to a transport Break::Error");
         };
         assert!(

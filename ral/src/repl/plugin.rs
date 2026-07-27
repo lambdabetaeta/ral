@@ -443,7 +443,7 @@ pub(super) fn call_plugin_hook(
             // run's registry.
             let rendered_error = match &result {
                 Err(Break::Error(e)) => Some(
-                    diagnostic::format_runtime_error_auto(shell.sources(), e, false)
+                    diagnostic::format_runtime_error_auto(shell.sources(), e, None)
                         .trim_end()
                         .to_string(),
                 ),

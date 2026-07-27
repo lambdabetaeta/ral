@@ -366,17 +366,20 @@ pub fn format_runtime_error_ariadne(
 
 /// Render a runtime error, choosing the compact or ariadne format automatically.
 ///
-/// Uses the compact one-liner when `single_command` is true (no source span
-/// arrow adds information); falls back to the full ariadne rendering otherwise.
+/// `compact_root` is `Some(root)` when the input compiled to a single command,
+/// carrying that input's own [`FileId`](crate::source::FileId); `None` when it
+/// did not.  Shape alone cannot decide: `boom` at the prompt is one command,
+/// but if it is an alias the error is inside the rc, where only a caret points.
 pub fn format_runtime_error_auto(
     db: &SourceDb,
     err: &crate::types::Error,
-    single_command: bool,
+    compact_root: Option<crate::source::FileId>,
 ) -> String {
-    if single_command {
-        format_runtime_error_compact(err)
-    } else {
-        format_runtime_error_ariadne(db, err.span, &err.message, err.hint.as_deref())
+    match compact_root {
+        Some(root) if err.span.is_none_or(|sp| sp.file == root) => {
+            format_runtime_error_compact(err)
+        }
+        _ => format_runtime_error_ariadne(db, err.span, &err.message, err.hint.as_deref()),
     }
 }
 
@@ -392,9 +395,9 @@ pub fn report_runtime_error(
     out: &mut dyn std::io::Write,
     db: &SourceDb,
     err: &crate::types::Error,
-    single_command: bool,
+    compact_root: Option<crate::source::FileId>,
 ) -> i32 {
-    let rendered = format_runtime_error_auto(db, err, single_command);
+    let rendered = format_runtime_error_auto(db, err, compact_root);
     let _ = out.write_all(rendered.as_bytes());
     err.exit_code().clamp(0, 255)
 }
