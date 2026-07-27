@@ -79,3 +79,16 @@ pub fn process_cwd() -> Option<std::path::PathBuf> {
 pub fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/proc/self/fd/{raw}"))
 }
+
+/// A static absolute path for `#[cfg(test)]` fixtures that need a
+/// `cwd: &Path` (`sigil::FreezeCtx`, mainly) but not any particular
+/// directory — shared so callers stop reaching for `Path::new`
+/// themselves just to build a placeholder.
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] placeholder cwd for FreezeCtx-shaped test fixtures"
+)]
+pub(crate) fn test_cwd() -> &'static std::path::Path {
+    std::path::Path::new("/")
+}

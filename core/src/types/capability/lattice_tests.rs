@@ -5,11 +5,6 @@
 //! `pub(crate)` `decode_capability_map` and the crate-private `FreezeCtx`
 //! scaffolding — that an integration test in `core/tests/` cannot see.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
-)]
-
 use super::*;
 use crate::capability::decode_capability_map;
 use crate::types::{PolicyError, Value};
@@ -518,51 +513,204 @@ fn meet_fs_nested_grants_narrow_to_intersection() {
     );
 }
 
-/// Security regression at the composition layer.  A restrict grant whose
-/// deeper prefix *lexically* nests under the base ceiling but resolves —
-/// through a symlink — outside it must not survive the meet.  Before the
-/// meet judged overlap on the resolved form, the escaping prefix survived
-/// (dropping the shallower ceiling) and the point-of-use gate then
-/// canonicalised it to its out-of-ceiling target and granted access.
-/// Judging containment on the resolved form collapses it to the
-/// fail-closed empty meet instead — the same guarantee
-/// `PrefixSet::symlinked_grant_cannot_escape_a_shallower_ceiling` pins one
-/// layer down, here proved end-to-end through `Capabilities::meet`.
-#[cfg(unix)]
+/// A single-prefix fs grant, for folding the prefix universe below through
+/// `FsPolicy::meet`/`join` without a directory tree behind it.
+fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
+    FsPolicy {
+        read_prefixes: vec![p.clone()],
+        write_prefixes: vec![p.clone()],
+        deny_paths: Vec::new(),
+    }
+}
+
+/// A single-prefix exec-dir grant, for the same universe folded through
+/// `ExecMap`.
+fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
+    ExecMap {
+        literals: BTreeMap::new(),
+        allow_dirs: BTreeSet::from([p.clone()]),
+        deny_dirs: BTreeSet::new(),
+    }
+}
+
+/// The same single prefix folded through both dimensions of `Capabilities`
+/// at once, so the law checks below also exercise the `Option` lift and
+/// the cross-field composition, not just one policy type in isolation.
+fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
+    Capabilities {
+        exec: Some(exec_of(p)),
+        fs: Some(fs_of(p)),
+        ..Default::default()
+    }
+}
+
+/// A small, crafted universe of `{surface, resolved, namespace}` triples —
+/// minted with `NormalizedPrefix::for_test` rather than a disk, since
+/// minting is the only place this type ever needed one and the mint door
+/// records exactly the divergence a real symlink would produce.  Covers:
+/// a plain prefix and a genuine nested descendant; aliasing (`/a/alias`
+/// resolves to the same target as `/a` under a different surface
+/// spelling); divergence (`/a/link` nests lexically under `/a` but
+/// resolves to `/elsewhere`, what a symlink is once frozen); and the same
+/// surface/resolved pair minted in both namespaces, so cross-namespace
+/// overlap is in scope for every law below.
+///
+/// The laws are cheap to check exhaustively over every pair and triple
+/// here only because the meet is now total and pure — no disk read is
+/// re-issued per comparison.
+fn prefix_universe() -> Vec<crate::path::NormalizedPrefix> {
+    use crate::path::Namespace;
+    vec![
+        crate::path::NormalizedPrefix::for_test("/a", "/a", Namespace::Host),
+        crate::path::NormalizedPrefix::for_test("/a/sub", "/a/sub", Namespace::Host),
+        crate::path::NormalizedPrefix::for_test("/a/alias", "/a", Namespace::Host),
+        crate::path::NormalizedPrefix::for_test("/a/link", "/elsewhere", Namespace::Host),
+        crate::path::NormalizedPrefix::for_test("/a", "/a", Namespace::Guest),
+        crate::path::NormalizedPrefix::for_test("/a/sub", "/a/sub", Namespace::Guest),
+    ]
+}
+
+#[test]
+fn meet_commutative_over_prefix_universe() {
+    let u = prefix_universe();
+    for a in &u {
+        for b in &u {
+            assert_eq!(fs_of(a).meet(fs_of(b)), fs_of(b).meet(fs_of(a)));
+            assert_eq!(exec_of(a).meet(exec_of(b)), exec_of(b).meet(exec_of(a)));
+            assert_eq!(caps_of(a).meet(caps_of(b)), caps_of(b).meet(caps_of(a)));
+        }
+    }
+}
+
+#[test]
+fn meet_associative_over_prefix_universe() {
+    let u = prefix_universe();
+    for a in &u {
+        for b in &u {
+            for c in &u {
+                assert_eq!(
+                    fs_of(a).meet(fs_of(b).meet(fs_of(c))),
+                    fs_of(a).meet(fs_of(b)).meet(fs_of(c))
+                );
+                assert_eq!(
+                    exec_of(a).meet(exec_of(b).meet(exec_of(c))),
+                    exec_of(a).meet(exec_of(b)).meet(exec_of(c))
+                );
+                assert_eq!(
+                    caps_of(a).meet(caps_of(b).meet(caps_of(c))),
+                    caps_of(a).meet(caps_of(b)).meet(caps_of(c))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn meet_idempotent_over_prefix_universe() {
+    for a in &prefix_universe() {
+        assert_eq!(fs_of(a).meet(fs_of(a)), fs_of(a));
+        assert_eq!(exec_of(a).meet(exec_of(a)), exec_of(a));
+        assert_eq!(caps_of(a).meet(caps_of(a)), caps_of(a));
+    }
+}
+
+#[test]
+fn join_commutative_over_prefix_universe() {
+    let u = prefix_universe();
+    for a in &u {
+        for b in &u {
+            assert_eq!(fs_of(a).join(fs_of(b)), fs_of(b).join(fs_of(a)));
+            assert_eq!(exec_of(a).join(exec_of(b)), exec_of(b).join(exec_of(a)));
+            assert_eq!(caps_of(a).join(caps_of(b)), caps_of(b).join(caps_of(a)));
+        }
+    }
+}
+
+#[test]
+fn join_associative_over_prefix_universe() {
+    let u = prefix_universe();
+    for a in &u {
+        for b in &u {
+            for c in &u {
+                assert_eq!(
+                    fs_of(a).join(fs_of(b).join(fs_of(c))),
+                    fs_of(a).join(fs_of(b)).join(fs_of(c))
+                );
+                assert_eq!(
+                    exec_of(a).join(exec_of(b).join(exec_of(c))),
+                    exec_of(a).join(exec_of(b)).join(exec_of(c))
+                );
+                assert_eq!(
+                    caps_of(a).join(caps_of(b).join(caps_of(c))),
+                    caps_of(a).join(caps_of(b)).join(caps_of(c))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn join_idempotent_over_prefix_universe() {
+    for a in &prefix_universe() {
+        assert_eq!(fs_of(a).join(fs_of(a)), fs_of(a));
+        assert_eq!(exec_of(a).join(exec_of(a)), exec_of(a));
+        assert_eq!(caps_of(a).join(caps_of(a)), caps_of(a));
+    }
+}
+
+/// Namespace regression: overlap must key on `(namespace, resolved)`, not
+/// `resolved` alone.  A host-namespace prefix and a guest-namespace prefix
+/// that resolve to the identical string must never be judged overlapping —
+/// if they were, a guest grant could be narrowed by a host ceiling (or vice
+/// versa) into something that matches nothing on either side.  This is the
+/// case `synod/src/grant.rs`'s `from_guest` prefixes depend on: a guest
+/// grant must survive composition only against other guest grants.
+#[test]
+fn meet_fs_cross_namespace_prefixes_never_overlap() {
+    use crate::path::Namespace;
+    let host = crate::path::NormalizedPrefix::for_test("/work", "/work", Namespace::Host);
+    let guest = crate::path::NormalizedPrefix::for_test("/work", "/work", Namespace::Guest);
+    let met = fs_of(&host).meet(fs_of(&guest));
+    assert!(
+        met.read_prefixes.is_empty(),
+        "a host prefix and a guest prefix resolving to the same string must \
+         not overlap, got {:?}",
+        met.read_prefixes
+    );
+}
+
+/// Security regression at the composition layer, expressed without a
+/// filesystem.  A restrict grant whose deeper prefix *lexically* nests
+/// under the base ceiling but resolves to a different target — the
+/// divergent `surface`/`resolved` pair a symlink freezes to — must not
+/// survive the meet.  `NormalizedPrefix::for_test` mints that pair
+/// directly; the meet still does the catching, over frozen data — the
+/// same guarantee `PrefixSet::symlinked_grant_cannot_escape_a_shallower_ceiling`
+/// pins one layer down, here proved end-to-end through `Capabilities::meet`.
+/// `meet_fs_nested_grants_narrow_to_intersection` above is this test's
+/// positive control: a genuinely-nested prefix does survive, so this
+/// collapse is the escape being caught, not an always-empty meet.
+///
+/// One hypothesis moves with this rewrite rather than disappearing: a
+/// symlink created *after* freeze is invisible to the meet.  The old
+/// disk-backed fixture pinned composition-time state; the theorem this
+/// test now carries rests on the freeze-to-use stability window
+/// (`dev/docs/260727_policy_kernel_purity.md` §5) — the gate and the
+/// sandbox projection still re-resolve against the live filesystem at
+/// use, which is why the end-to-end property holds regardless.
 #[test]
 fn meet_fs_symlinked_prefix_cannot_escape_ceiling() {
-    use std::os::unix::fs::symlink;
-
-    let root = std::env::temp_dir().join(format!("ral-meet-escape-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok(); // clear any leftover from a crashed run
-    let ceiling = root.join("base");
-    let outside = root.join("outside");
-    let escape = ceiling.join("link");
-    std::fs::create_dir_all(&ceiling).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
-    symlink(&outside, &escape).unwrap();
-
-    let read_grant = |p: &std::path::Path| Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec![crate::path::NormalizedPrefix::from_surface(
-                p.to_string_lossy().into_owned(),
-            )],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let met = read_grant(&ceiling)
-        .meet(read_grant(&escape))
-        .fs
-        .expect("fs retained");
+    use crate::path::Namespace;
+    let ceiling = crate::path::NormalizedPrefix::for_test("/base", "/base", Namespace::Host);
+    let escape =
+        crate::path::NormalizedPrefix::for_test("/base/link", "/elsewhere", Namespace::Host);
+    let met = fs_of(&ceiling).meet(fs_of(&escape));
     assert!(
         met.read_prefixes.is_empty(),
         "a symlinked deeper prefix resolving outside the ceiling must collapse \
          to the fail-closed empty meet, got {:?}",
         met.read_prefixes
     );
-    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
@@ -903,6 +1051,6 @@ fn decode_accepts_bool_dimension_fields() {
 fn test_ctx(home: &str) -> crate::path::sigil::FreezeCtx<'_> {
     crate::path::sigil::FreezeCtx {
         home,
-        cwd: std::path::Path::new("/"),
+        cwd: crate::path::test_cwd(),
     }
 }
