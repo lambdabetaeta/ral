@@ -1,164 +1,271 @@
-/* site.css — shared "instrument plate" identity for the ral landing and docs.
-   Tokens, base elements, menubar, window chrome, footer.
-   Page-specific styles live in index.css (landing) and doc.css (docs).
-   The exarch sub-site has its own chrome under exarch/ and is not styled here. */
+/* site.css — shared chrome for the ral landing and docs.
+
+   The identity is a workstation window: a titlebar, a menubar carrying the
+   nav, a sunken client area holding the page, and a status bar underneath.
+   Everything is built from two bevels — raised for surfaces you act on,
+   sunken for surfaces that hold content — so depth is structural rather than
+   decorative.  There is no glow and no entrance motion; the only movement is
+   a bevel inverting under a press.
+
+   Two grounds, Silver and Graphite, selected by the `dark` class on <html>.
+   The class is authoritative and set by an inline script before first paint,
+   which is also how the exarch sub-site does it, so a visitor's choice
+   carries across both under the shared `ral-theme` key.
+
+   Page-specific styles live in index.css (landing) and doc.css (docs). */
 
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  --ink:      #1a160f;   /* page ground                       */
-  --plate:    #221c13;   /* raised window / panel surface      */
-  --panel:    #271f15;   /* inset code / label surface         */
-  --line:     #3a3024;   /* hairlines and borders              */
-  --title:    #2a2117;   /* window titlebar                    */
-  --text:     #e9e2d2;   /* primary ink                        */
-  --ink-2:    #c4b79e;   /* secondary ink                      */
-  --muted:    #a2937a;
-  --faint:    #6e624e;
-  --accent:   #dc8a5a;   /* warm — command / effect / !        */
-  --accent-2: #e8a878;   /* warm hover                         */
-  --val:      #6fb6a4;   /* cool — value  / data    / $        */
-  --str:      #6fb6a4;   /* strings read as values (cool)      */
-  --kw:       #dc8a5a;   /* keywords read as commands (warm)   */
-  --num:      #c9a24a;   /* numbers and constants (gold)       */
-  --bevel-hi: rgba(255, 238, 214, 0.05);
-  --bevel-lo: rgba(0, 0, 0, 0.45);
-  --mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  --serif: 'IBM Plex Serif', ui-serif, 'Iowan Old Style', 'Palatino Linotype',
+  --desktop:  #3f5a5a;   /* ground the window sits on          */
+  --face:     #d4d0c8;   /* chrome: menubar, buttons, panels   */
+  --face-hi:  #efedea;   /* bevel highlight on the face        */
+  --client:   #ffffff;   /* sunken area holding content        */
+  --bevel-lt: #ffffff;
+  --bevel-sh: #808080;
+  --bevel-dk: #404040;
+  --line:     #a9a49b;
+  --text:     #111111;
+  --muted:    #4d4a45;
+  --faint:    #6f6b64;
+  --title-a:  #0a246a;   /* titlebar gradient, left            */
+  --title-b:  #a6caf0;   /* titlebar gradient, right           */
+  --title-ink:#ffffff;
+  --val:      #0d6555;   /* cool — value  / data    / $        */
+  --cmd:      #9c4310;   /* warm — command / effect / !        */
+  --str:      #0d6555;   /* strings read as values (cool)      */
+  --kw:       #9c4310;   /* keywords read as commands (warm)   */
+  --num:      #7a5c14;   /* numbers and constants (gold)       */
+  --com:      #5f6f57;   /* comments                           */
+  --varc:     #2a3550;   /* variables                          */
+  --sel:      #0a246a;
+  --sel-ink:  #ffffff;
+  --ui:    Tahoma, Verdana, 'DejaVu Sans', system-ui, sans-serif;
+  --serif: 'IBM Plex Serif', 'Iowan Old Style', 'Palatino Linotype',
            Palatino, Georgia, serif;
+  --mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+:root.dark {
+  --desktop:  #0d1011;
+  --face:     #2f3339;
+  --face-hi:  #3b4048;
+  --client:   #15181c;
+  --bevel-lt: #4b5159;
+  --bevel-sh: #191c20;
+  --bevel-dk: #0a0c0e;
+  --line:     #454b53;
+  --text:     #e2e6ea;
+  --muted:    #a7aeb6;
+  --faint:    #7f878f;
+  --title-b:  #3f6ea8;
+  --title-ink:#eef3f8;
+  --val:      #57bfa7;
+  --cmd:      #e38d4f;
+  --str:      #57bfa7;
+  --kw:       #e38d4f;
+  --num:      #cfa93f;
+  --com:      #7d8c77;
+  --varc:     #b7c4d6;
+  --sel:      #2a4d8f;
 }
 
 html {
-  background: var(--ink);
+  background: var(--desktop);
   color: var(--text);
-  font-family: var(--serif);
-  font-size: 17px;
+  font-family: var(--ui);
+  font-size: 16px;
   -webkit-text-size-adjust: 100%;
-  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
+body { line-height: 1.5; }
 
-body {
-  min-height: 100vh;
-  overflow-x: hidden;
-  background: radial-gradient(130% 90% at 50% -10%, #221b12 0%, var(--ink) 62%) fixed;
-}
+::selection { background: var(--sel); color: var(--sel-ink); }
+:focus-visible { outline: 1px dotted var(--text); outline-offset: 2px; }
 
-::selection { background: var(--accent); color: var(--ink); }
-:focus-visible { outline: 2px solid var(--val); outline-offset: 3px; }
+a { color: var(--cmd); text-decoration: none; text-underline-offset: 0.18em; }
+a:hover { text-decoration: underline; }
 
-a { color: var(--accent); text-decoration: none; text-underline-offset: 0.18em; }
-a:hover { color: var(--accent-2); text-decoration: underline; }
-
-/* ── menubar ── */
-.menubar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
+/* ── the window ── */
+.desktop { padding: clamp(0px, 1.4vw, 1.25rem); }
+.app {
+  max-width: 100rem;
+  min-height: calc(100vh - 2.5rem);
+  margin: 0 auto;
   display: flex;
-  align-items: stretch;
-  gap: 0.05rem;
-  padding: 0.2rem 0.4rem;
-  background: color-mix(in srgb, var(--ink) 84%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--line);
-  font-family: var(--mono);
-  line-height: 1.2;
+  flex-direction: column;
+  background: var(--face);
+  border: 1px solid;
+  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
 }
-.menubar .spacer { flex: 1 1 auto; }
-.menubar .toc {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  align-items: center;
-  font-family: var(--mono);
-  font-size: 0.68rem;
-}
-.menubar .toc a { color: var(--muted); letter-spacing: 0.06em; }
-.menubar .toc a:hover { color: var(--accent); }
+.chrome { position: sticky; top: 0; z-index: 30; background: var(--face); }
 
-.menu-item {
-  display: flex;
-  align-items: center;
-  padding: 0.35rem 0.8rem;
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 0.8rem;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  border: 1px solid transparent;
-  transition: color 0.12s, border-color 0.12s;
-}
-.menu-item:hover { color: var(--text); text-decoration: none; border-color: var(--line); }
-.menu-item.current { color: var(--text); }
-.menu-item .ext { font-size: 0.7rem; opacity: 0.7; }
-
-/* ── window ── */
-.window {
-  background: var(--plate);
-  border: 1px solid var(--line);
-  box-shadow:
-    inset  1px  1px 0 var(--bevel-hi),
-    inset -1px -1px 0 var(--bevel-lo);
-}
 .titlebar {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.6rem;
-  background: var(--title);
-  color: var(--ink-2);
-  border-bottom: 1px solid var(--line);
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  letter-spacing: 0.06em;
+  padding: 0.28rem 0.45rem;
+  background: linear-gradient(90deg, var(--title-a), var(--title-b));
+  color: var(--title-ink);
+  font-size: 0.8rem;
+  font-weight: 700;
   user-select: none;
-  cursor: default;
 }
-.menu-box {
+.titlebar .ico {
   flex: 0 0 auto;
-  width: 1.1rem;
-  height: 1.1rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  box-shadow:
-    inset  1px  1px 0 var(--bevel-hi),
-    inset -1px -1px 0 var(--bevel-lo);
+  display: grid;
+  place-items: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  background: var(--face);
+  color: var(--cmd);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  border: 1px solid;
+  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
 }
-.menu-box.app-icon {
+.titlebar .grow { flex: 1 1 auto; }
+
+/* ── menubar: the site nav ── */
+.menubar {
+  display: flex;
+  align-items: stretch;
+  gap: 0.05rem;
+  padding: 0.16rem 0.2rem;
+  border-bottom: 1px solid var(--bevel-sh);
+  box-shadow: 0 1px 0 var(--bevel-lt);
+}
+.menubar .grow { flex: 1 1 auto; }
+.menu-item {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-family: var(--mono);
-  font-size: 0.5rem;
-  font-weight: 600;
-  color: var(--accent);
-  line-height: 1;
+  padding: 0.2rem 0.58rem;
+  color: var(--text);
+  font-size: 0.79rem;
+  text-decoration: none;
+  white-space: nowrap;
+  border: 1px solid transparent;
 }
-.title-text { flex: 0 1 auto; }
-.titlebar .spacer { flex: 1 1 auto; }
+.menu-item:hover { background: var(--sel); color: var(--sel-ink); text-decoration: none; }
+.menu-item.current {
+  background: var(--face-hi);
+  font-weight: 700;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+}
+.menu-item .ext { font-size: 0.7rem; opacity: 0.75; }
 
-/* ── footer ── */
-.footer {
-  position: relative;
-  z-index: 1;
-  max-width: 54rem;
-  margin: 0 auto;
-  padding: 1.4rem 1.2rem 2.4rem;
-  text-align: center;
-  font-family: var(--mono);
-  font-size: 0.76rem;
+/* ── controls ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  padding: 0.16rem 0.6rem;
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--text);
+  background: var(--face);
+  cursor: pointer;
+  appearance: none;
+  border: 1px solid;
+  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
+}
+.btn:hover { text-decoration: none; }
+.btn:active, .btn.pressed {
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+}
+
+/* ── client area ── */
+.client {
+  flex: 1 1 auto;
+  margin: 0.42rem;
+  background: var(--client);
+  border: 1px solid;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+}
+.wrap { max-width: 60rem; margin: 0 auto; padding: clamp(1.4rem, 4vw, 3rem) clamp(1rem, 3.5vw, 2.5rem); }
+.wrap.wide { max-width: 74rem; }
+
+/* ── status bar ── */
+.status {
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  gap: 0.28rem;
+  padding: 0.26rem 0.3rem;
+  background: var(--face);
+  border-top: 1px solid var(--bevel-lt);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.status i {
+  padding: 0.16rem 0.55rem;
+  font-style: normal;
+  min-width: 0;
+  border: 1px solid;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+}
+.status i:first-child { flex: 1 1 auto; }
+.status i a { color: var(--muted); }
+.status .n { font-variant-numeric: tabular-nums; }
+
+/* ── code panes, shared by the landing comparison and the examples ── */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+.pane { display: flex; flex-direction: column; min-width: 0; background: var(--face); }
+.pane .ph {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--bevel-sh);
+  box-shadow: 0 1px 0 var(--bevel-lt);
+}
+.pane.ral .ph { color: var(--cmd); font-weight: 700; }
+.pane .ph .n {
+  margin-left: auto;
+  letter-spacing: 0.02em;
+  text-transform: none;
   color: var(--faint);
-  border-top: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
 }
-.footer a { color: var(--muted); font-weight: 500; }
-.footer a:hover { color: var(--accent); }
+.pane pre {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.75rem 0.85rem;
+  font-family: var(--mono);
+  font-size: 0.775rem;
+  line-height: 1.65;
+  background: var(--client);
+  color: var(--text);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border: 1px solid;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+}
+pre::-webkit-scrollbar { height: 9px; }
+pre::-webkit-scrollbar-track { background: var(--face); }
+pre::-webkit-scrollbar-thumb {
+  background: var(--face);
+  border: 1px solid;
+  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+}
 
-/* ── responsive ── */
 @media (max-width: 36rem) {
-  .menu-item { padding: 0.35rem 0.55rem; font-size: 0.76rem; }
+  .menu-item { padding: 0.2rem 0.42rem; font-size: 0.75rem; }
 }
-
+@media (max-width: 60rem) {
+  .split { grid-template-columns: 1fr; }
+  .wrap { padding: 1.2rem 1rem; }
+}
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }

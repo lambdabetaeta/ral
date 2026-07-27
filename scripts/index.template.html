@@ -8,177 +8,183 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
   <link rel="stylesheet" href="index.css">
-</head>
-<body>
-  <nav class="menubar" aria-label="Documentation">
-    <a class="menu-item current" href="index.html">ral</a>
-    <a class="menu-item" href="tutorial.html">Tutorial</a>
-    <a class="menu-item" href="spec.html">Spec</a>
-    <a class="menu-item" href="rationale.html">Rationale</a>
-    <a class="menu-item" href="examples.html">Examples</a>
-    <a class="menu-item" href="wiki/index.html">Wiki</a>
-    <span class="spacer"></span>
-    <a class="menu-item" href="exarch/index.html">exarch<span class="ext"> ↗</span></a>
-  </nav>
-
-  <aside class="burst">
-    <span class="burst-text">The shell beneath the <a href="exarch/index.html"><code>exarch</code></a> coding agent</span>
-  </aside>
-
-  <main id="top">
-
-    <section class="hero">
-      <p class="sigil" aria-hidden="true"><span class="bang">!</span><span class="brace">{}</span></p>
-      <h1 class="wordmark">ral</h1>
-      <p class="thesis">A shell where data stays <em>data</em>.</p>
-      <p class="subthesis">Capture output without turning it back into source code.</p>
-    </section>
-
-    <section class="duality" aria-label="value versus command">
-      <div class="duo val">
-        <span class="duo-sigil" aria-hidden="true">$</span>
-        <span class="duo-label">value</span>
-        <p class="duo-line">A value <em>is</em>.</p>
-        <p class="duo-note">Strings, lists, records. Keep them, pass them, transform them.</p>
-      </div>
-      <div class="seam" aria-hidden="true"></div>
-      <div class="duo cmd">
-        <span class="duo-sigil" aria-hidden="true">!</span>
-        <span class="duo-label">command</span>
-        <p class="duo-line">A command <em>does</em>.</p>
-        <p class="duo-note">Work in the world. Capture its output, handle its failure, bound its authority.</p>
-      </div>
-    </section>
-
-    <section class="prose">
-      <p class="eyebrow">say which world you mean</p>
-      <p>Traditional shells make text serve as data, command name, and source
-      code. ral refuses that ambiguity. <code class="val">$</code> reads a
-      value; <code class="cmd">!</code> runs a stored command. Once output has
-      become a value, the shell never splits it, expands it, or executes it by
-      surprise.</p>
-    </section>
-
-    <section class="taste" aria-label="bash versus ral">
-      <p class="eyebrow">one task, two contracts</p>
-      <p class="taste-lead">Fetch JSON from many URLs in parallel and keep every
-      outcome. A string shell needs a text protocol between workers. In ral,
-      each worker returns an ordinary value: <code>ok</code> or <code>err</code>,
-      ready to write as one report.</p>
-      <div class="compare">
-        <div class="panel bash">
-          <div class="panel-label">bash</div>
-<pre><span class="c"># invent a text protocol; parse it later</span>
-xargs -P8 -I{} sh -c '
-  body=$(curl -fsSL "$1") &amp;&amp;
-    printf "ok\t%s\t%s\n" "$1" "$body" ||
-    printf "err\t%s\n" "$1"
-' sh {} &lt; urls.txt &gt; manifest.tsv</pre>
-        </div>
-        <div class="seam" aria-hidden="true"></div>
-        <div class="panel ral">
-          <div class="panel-label">ral</div>
-<pre><span class="k">let</span> urls = from-lines-list <span class="s">'urls.txt'</span>
-<span class="k">let</span> report = <span class="k">par</span> { |u|
-    <span class="k">try</span> {
-        <span class="k">let</span> data = curl -fsSL <span class="v">$u</span> | from-json
-        <span class="k">return</span> [url: <span class="v">$u</span>, result: `ok <span class="v">$data</span>]
-    } { |e| <span class="k">return</span> [url: <span class="v">$u</span>, result: `err <span class="v">$e</span>[message]] }
-} <span class="v">$urls</span> 8
-to-json <span class="v">$report</span> &gt; <span class="s">'manifest.json'</span></pre>
-        </div>
-      </div>
-    </section>
-
-    <section class="prose">
-      <p class="eyebrow">less shell to remember</p>
-      <p>ral's value language is small, typed, and purely functional. Bindings do
-      not mutate. Lists and records are values, not encodings. Use
-      <code>map</code>, <code>filter</code>, and <code>fold</code> instead of
-      arranging a procession of text filters.</p>
-      <p>Parallel work needs no shared mutable state. Give <code>par</code> a
-      block and a collection; its workers return values in input order. Decode
-      bytes at an explicit boundary with <code>from-json</code>,
-      <code>from-lines</code>, or another codec.</p>
-      <p>Commands remain visible as effects on the world. Their output can be
-      captured, their failure handled, their interpretation replaced, and their
-      authority narrowed with <code>grant</code>. An audit records the commands
-      that ran and the permissions under which they ran.</p>
-    </section>
-
-    <section class="get">
-      <p class="eyebrow">get ral</p>
-      <div class="install">
-        <span class="install-prompt" aria-hidden="true">$</span>
-        <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
-              aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
-        <button class="btn" id="install-copy" type="button" aria-live="polite">copy</button>
-      </div>
-      <div class="downloads">
-        <div class="dl-grid">
-{{DOWNLOAD_GROUPS}}
-        </div>
-        <div class="dl-src">
-          <span class="label">source:</span>
-          <a class="dl-btn dl-repo" href="https://github.com/lambdabetaeta/ral">
-            <svg class="gh-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-            lambdabetaeta/ral
-          </a>
-          <span class="dl-sep" aria-hidden="true">·</span>
-          <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>.tar.gz</a>
-          <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>.zip</a>
-        </div>
-      </div>
-    </section>
-
-    <section class="foundations">
-      <p class="eyebrow center">one idea, followed through</p>
-      <p>The value–command split is <em>call-by-push-value</em> (Levy). Running an
-      external command is an <em>algebraic effect</em> (Plotkin and Power): an
-      operation whose interpretation can be handled, audited, or confined. The
-      <a href="spec.html">specification</a> says what ral does; the
-      <a href="rationale.html">rationale</a> says why. ral runs Unix programs,
-      but it is not POSIX shell — Bash scripts do not run unchanged.</p>
-    </section>
-
-  </main>
-
-  <footer class="footer">
-    © <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a>
-  </footer>
-
   <script>
     (function () {
-      var cmd  = document.getElementById('install-cmd');
-      var copy = document.getElementById('install-copy');
-      var text = cmd.textContent.trim();
-      var timer;
-      function flash() {
-        copy.textContent = 'copied';
-        copy.classList.add('done', 'pressed');
-        clearTimeout(timer);
-        timer = setTimeout(function () {
-          copy.textContent = 'copy';
-          copy.classList.remove('done', 'pressed');
-        }, 1800);
-      }
-      function doCopy() {
-        copy.classList.add('pressed');
-        if (navigator.clipboard) {
-          navigator.clipboard.writeText(text).then(flash, function () {
-            copy.classList.remove('pressed');
-          });
-        } else { flash(); }
-      }
-      copy.addEventListener('click', doCopy);
-      cmd.addEventListener('click', doCopy);
-      cmd.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
-      });
+      var s = localStorage.getItem('ral-theme');
+      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (s === 'dark') document.documentElement.classList.add('dark');
     })();
   </script>
+</head>
+<body>
+<div class="desktop">
+  <div class="app">
+
+    <div class="chrome">
+      <div class="titlebar">
+        <span class="ico" aria-hidden="true">!{}</span>
+        <span class="grow">ral — a shell where data stays data</span>
+      </div>
+{{MENUBAR}}
+    </div>
+
+    <div class="client">
+      <div class="wrap">
+
+        <section class="hero">
+          <p class="sigil" aria-hidden="true"><span class="bang">!</span><span class="brace">{}</span></p>
+          <h1 class="wordmark">ral</h1>
+          <p class="thesis">A shell where data stays <em>data</em>.</p>
+          <p class="subthesis">Capture output without turning it back into source code.</p>
+        </section>
+
+        <div class="duality">
+          <fieldset class="duo val">
+            <legend>value</legend>
+            <p class="duo-sigil" aria-hidden="true">$</p>
+            <p class="duo-line">A value <em>is</em>.</p>
+            <p class="duo-note">Strings, lists, records. Keep them, pass them, transform them.</p>
+          </fieldset>
+          <fieldset class="duo cmd">
+            <legend>command</legend>
+            <p class="duo-sigil" aria-hidden="true">!</p>
+            <p class="duo-line">A command <em>does</em>.</p>
+            <p class="duo-note">Work in the world. Capture its output, handle its failure, bound its authority.</p>
+          </fieldset>
+        </div>
+
+        <section class="powers">
+          <div class="powers-bar"><span class="pico" aria-hidden="true">&#9656;</span>exarch</div>
+          <div class="powers-body">
+            <div class="powers-say">
+              <h2>ral now powers <b>exarch</b>.</h2>
+              <p>A coding agent whose only tool is ral itself. Every move it makes is a
+              ral program, run with authority the agent can use but cannot widen —
+              bounded by <code>grant</code>, and written to an audit.</p>
+            </div>
+            <a class="powers-go" href="exarch/index.html">Open exarch <span aria-hidden="true">&#8599;</span></a>
+          </div>
+        </section>
+
+        <section class="prose">
+          <p class="eyebrow">Say which world you mean</p>
+          <p>Traditional shells make text serve as data, command name, and source
+          code. ral refuses that ambiguity. <code class="val">$</code> reads a
+          value; <code class="cmd">!</code> runs a stored command. Once output has
+          become a value, the shell never splits it, expands it, or executes it by
+          surprise.</p>
+        </section>
+
+        <section class="prose">
+          <p class="eyebrow">One task, two contracts</p>
+          <p>Fetch JSON from many URLs in parallel and keep every outcome. A string
+          shell needs a text protocol between workers. In ral, each worker returns an
+          ordinary value — <code>ok</code> or <code>err</code> — ready to write as
+          one report.</p>
+        </section>
+
+      </div>
+
+      <div class="wrap wide" style="padding-top: 0">
+        <div class="split">
+{{LEAD_EXAMPLE}}
+        </div>
+      </div>
+
+      <div class="wrap" style="padding-top: 0">
+
+        <section class="prose">
+          <p class="eyebrow">Less shell to remember</p>
+          <p>ral's value language is small, typed, and purely functional. Bindings do
+          not mutate. Lists and records are values, not encodings. Use
+          <code>map</code>, <code>filter</code>, and <code>fold</code> instead of
+          arranging a procession of text filters.</p>
+          <p>Parallel work needs no shared mutable state. Give <code>par</code> a
+          block and a collection; its workers return values in input order. Decode
+          bytes at an explicit boundary with <code>from-json</code>,
+          <code>from-lines</code>, or another codec.</p>
+          <p>Commands remain visible as effects on the world. Their output can be
+          captured, their failure handled, their interpretation replaced, and their
+          authority narrowed with <code>grant</code>. An audit records the commands
+          that ran and the permissions under which they ran.</p>
+        </section>
+
+        <fieldset style="margin-top: 2.4rem">
+          <legend>get ral</legend>
+          <div class="install">
+            <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
+                  aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
+            <button class="btn" id="install-copy" type="button" aria-live="polite">Copy</button>
+          </div>
+          <table class="dl-table">
+            <thead>
+              <tr><th>Platform</th><th>Binary</th><th>With utils</th></tr>
+            </thead>
+            <tbody>
+{{DOWNLOAD_GROUPS}}
+            </tbody>
+          </table>
+          <div class="dl-src">
+            <span>Source:</span>
+            <a class="dl-repo" href="https://github.com/lambdabetaeta/ral">
+              <svg class="gh-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+              lambdabetaeta/ral
+            </a>
+            <a href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>.tar.gz</a>
+            <a href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>.zip</a>
+          </div>
+        </fieldset>
+
+        <section class="foundations">
+          <p>The value–command split is <em>call-by-push-value</em> (Levy). Running an
+          external command is an <em>algebraic effect</em> (Plotkin and Power): an
+          operation whose interpretation can be handled, audited, or confined. The
+          <a href="spec.html">specification</a> says what ral does; the
+          <a href="rationale.html">rationale</a> says why. ral runs Unix programs,
+          but it is not POSIX shell — Bash scripts do not run unchanged.</p>
+        </section>
+
+      </div>
+    </div>
+
+    <div class="status">
+      <i>Ready</i>
+      <i class="n">{{EXAMPLE_COUNT}} examples</i>
+      <i>&copy; <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a></i>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  (function () {
+    var cmd  = document.getElementById('install-cmd');
+    var copy = document.getElementById('install-copy');
+    var text = cmd.textContent.trim();
+    var timer;
+    function flash() {
+      copy.textContent = 'Copied';
+      copy.classList.add('done', 'pressed');
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        copy.textContent = 'Copy';
+        copy.classList.remove('done', 'pressed');
+      }, 1800);
+    }
+    function doCopy() {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(flash, flash);
+      } else { flash(); }
+    }
+    copy.addEventListener('click', doCopy);
+    cmd.addEventListener('click', doCopy);
+    cmd.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+    });
+  })();
+</script>
 </body>
 </html>

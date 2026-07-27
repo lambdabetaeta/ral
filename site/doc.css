@@ -1,208 +1,185 @@
-/* doc.css — long-form reading pages (tutorial, spec, rationale, examples).
-   A typeset monograph on the instrument plate: serif body, mono machine voice
-   for headings' kickers and code.  Shared tokens, menubar, window, footer live
-   in site.css. */
+/* doc.css — the reading pages (tutorial, spec, rationale) and the examples
+   explorer.
 
-html {
-  font-weight: 400;
-  line-height: 1.72;
-  scroll-behavior: smooth;
-  scroll-padding-top: 3rem;
-}
+   Chrome is the workstation sans; the document inside the client area is set
+   in serif, the way a word processor of the same era set the page it held.
+   Tokens, window, and the code panes live in site.css. */
 
-main {
-  position: relative;
-  z-index: 1;
-  max-width: 54rem;
-  margin: 0 auto;
-  padding: 1.2rem 1.2rem 2rem;
-}
+html { scroll-behavior: smooth; scroll-padding-top: 4rem; }
 
 /* ── article ── */
-article {
-  padding: 2rem 1.8rem;
-  font-family: var(--serif);
-  font-size: 1.06rem;
-  line-height: 1.74;
-  color: var(--text);
-}
-article h1 {
-  font-family: var(--serif);
-  font-size: clamp(1.9rem, 5vw, 2.5rem);
+.doc article { font-family: var(--serif); font-size: 1.04rem; line-height: 1.75; }
+.doc h1 {
+  margin-bottom: 1.3rem;
+  padding-bottom: 0.5rem;
+  font-size: clamp(1.7rem, 5vw, 2.2rem);
   font-weight: 600;
   line-height: 1.2;
-  color: var(--text);
-  margin-bottom: 1.5rem;
-  padding-bottom: 0.6rem;
-  border-bottom: 2px solid var(--accent);
+  border-bottom: 1px solid var(--cmd);
 }
-article h2 {
-  font-family: var(--serif);
-  font-size: 1.4rem;
-  font-weight: 600;
-  color: var(--text);
-  margin: 2.5rem 0 0.75rem;
-}
-article h3 {
-  font-family: var(--serif);
-  font-size: 1.15rem;
-  font-weight: 600;
-  color: var(--accent);
-  margin: 1.8rem 0 0.5rem;
-}
-article h4 {
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  font-weight: 600;
+.doc h2 { margin: 2rem 0 0.6rem; font-size: 1.32rem; font-weight: 600; }
+.doc h3 { margin: 1.5rem 0 0.45rem; font-size: 1.1rem; font-weight: 600; color: var(--cmd); }
+.doc h4 {
+  margin: 1.3rem 0 0.4rem;
+  font-family: var(--ui);
+  font-size: 0.76rem;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.14em;
   color: var(--muted);
-  margin: 1.4rem 0 0.4rem;
 }
-article p { margin-bottom: 1.1rem; }
-article ul, article ol { margin: 0.6rem 0 1.1rem 1.6rem; }
-article li { margin-bottom: 0.4rem; }
-article li > ul, article li > ol { margin-bottom: 0.2rem; }
-article strong { color: var(--text); font-weight: 600; }
-article em { font-style: italic; }
-article a { color: var(--accent); }
-article a:hover { color: var(--accent-2); }
+.doc p { margin-bottom: 1rem; max-width: 44rem; }
+.doc ul, .doc ol { margin: 0.5rem 0 1rem 1.5rem; }
+.doc li { margin-bottom: 0.3rem; }
+.doc li > ul, .doc li > ol { margin-bottom: 0.2rem; }
+.doc strong { font-weight: 600; }
+.doc em { font-style: italic; }
 
 /* ── code ── */
-article code {
+.doc code {
+  padding: 0.02em 0.3em;
   font-family: var(--mono);
   font-size: 0.85em;
   color: var(--val);
-  background: var(--panel);
-  padding: 0.05em 0.32em;
+  background: var(--face);
   border: 1px solid var(--line);
-  border-radius: 2px;
 }
-article pre {
+.doc pre {
+  max-width: 52rem;
+  margin: 0.9rem 0 1.2rem;
+  padding: 0.8rem 0.9rem;
   font-family: var(--mono);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   line-height: 1.7;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  box-shadow:
-    inset  1px  1px 0 var(--bevel-hi),
-    inset -1px -1px 0 var(--bevel-lo);
-  padding: 1rem 1.2rem;
-  margin: 1rem 0 1.4rem;
+  background: var(--face);
+  color: var(--text);
   overflow-x: auto;
   scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
+  border: 1px solid;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
 }
-article pre::-webkit-scrollbar { height: 4px; }
-article pre::-webkit-scrollbar-thumb { background: var(--line); }
-article pre code {
-  font-size: inherit;
-  color: var(--text);
-  background: none;
-  border: none;
-  padding: 0;
-}
+.doc pre code { padding: 0; font-size: inherit; color: inherit; background: none; border: none; }
 
 /* ── blockquote, rule, table ── */
-article blockquote {
-  border-left: 3px solid var(--accent);
-  padding: 0.1rem 0 0.1rem 1.1rem;
+.doc blockquote {
   margin: 1.1rem 0;
+  padding: 0.1rem 0 0.1rem 1.1rem;
+  border-left: 3px solid var(--cmd);
   color: var(--muted);
   font-style: italic;
 }
-article hr {
-  border: none;
-  border-top: 1px solid var(--line);
-  margin: 2.5rem 0;
-}
-article table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: 1.2rem 0;
-  font-size: 0.92rem;
-}
-article th, article td {
-  border: 1px solid var(--line);
-  padding: 0.5rem 0.85rem;
-  text-align: left;
-}
-article th { color: var(--text); font-weight: 600; background: var(--panel); }
+.doc hr { margin: 2.5rem 0; border: none; border-top: 1px solid var(--line); }
+.doc table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.92rem; }
+.doc th, .doc td { padding: 0.45rem 0.8rem; text-align: left; border: 1px solid var(--line); }
+.doc th { background: var(--face); font-weight: 600; }
 
-/* ── examples page ── */
-article > p.intro {
-  color: var(--muted);
-  font-size: 1.02rem;
-  margin-bottom: 3rem;
+/* ── examples: an explorer.  The picker holds still on the left while the
+      chosen program's two readings scroll on the right. ── */
+.exwrap { padding: 0.5rem; }
+.exsplit { display: grid; grid-template-columns: 18.5rem minmax(0, 1fr); gap: 0.5rem; align-items: start; }
+
+.exlist {
+  position: sticky;
+  top: 3.6rem;
+  height: calc(100vh - 5.6rem);
+  display: flex;
+  flex-direction: column;
+  background: var(--face);
+  border: 1px solid;
+  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
 }
-section.example { margin-bottom: 3rem; }
-section.example h2 {
-  font-size: 1.2rem;
-  margin: 0 0 0.5rem;
-  padding-bottom: 0.4rem;
-  border-bottom: 1px solid var(--line);
-}
-section.example h2 .name {
+.exfind { display: flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.5rem 0.4rem; }
+.exfind label { font-size: 0.7rem; color: var(--muted); }
+.exfind input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.3rem 0.45rem;
+  font: inherit;
   font-family: var(--mono);
-  font-size: 0.9rem;
-  color: var(--accent);
+  font-size: 0.78rem;
+  background: var(--client);
+  color: var(--text);
+  border: 1px solid;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  box-shadow: inset 1px 1px 0 var(--bevel-dk);
 }
-section.example .summary {
+.exlist ol {
+  flex: 1 1 auto;
+  margin: 0 0.5rem 0.5rem;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--client);
+  scrollbar-width: thin;
+  border: 1px solid;
+  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+}
+.exlist ol:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
+.exlist li { padding: 0.28rem 0.5rem; line-height: 1.35; cursor: default; }
+.exlist li b { display: block; font-family: var(--mono); font-size: 0.775rem; font-weight: 600; }
+.exlist li span {
+  display: block;
+  font-size: 0.67rem;
   color: var(--muted);
-  font-size: 0.95rem;
-  margin: 0.6rem 0 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-section.example .summary > :first-child { margin-top: 0; }
-section.example .summary > :last-child { margin-bottom: 0; }
-section.example pre.source { margin: 0; }
-.raw-link {
-  display: inline-block;
-  font-family: var(--mono);
-  font-size: 0.6rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--muted);
-  text-decoration: none;
-  margin-left: 0.8rem;
-  vertical-align: middle;
+.exlist li:hover { background: var(--face-hi); }
+.exlist li[aria-selected="true"] { background: var(--sel); }
+.exlist li[aria-selected="true"] b { color: var(--sel-ink); }
+.exlist li[aria-selected="true"] span { color: var(--sel-ink); opacity: 0.8; }
+.exlist li[hidden] { display: none; }
+.exfoot { padding: 0 0.55rem 0.45rem; font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.exdetail { min-width: 0; }
+.example {
+  background: var(--face);
+  border: 1px solid;
+  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
 }
-.raw-link:hover { color: var(--accent); }
+.example[hidden] { display: none; }
+.exbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.7rem;
+  padding: 0.36rem 0.65rem;
+  background: linear-gradient(90deg, var(--title-a), var(--title-b));
+  color: var(--title-ink);
+}
+.exbar b { font-family: var(--mono); font-size: 0.84rem; font-weight: 700; }
+.exbar span { font-size: 0.76rem; opacity: 0.92; }
+.exbody { padding: 0.85rem; }
+.exbody .summary { max-width: 60rem; font-family: var(--serif); font-size: 0.95rem; line-height: 1.7; color: var(--muted); }
+.exbody .summary > :last-child { margin-bottom: 0; }
+.exbody .split { margin-top: 0.85rem; }
+.exempty { padding: 2rem; text-align: center; font-size: 0.85rem; color: var(--muted); }
+.exempty[hidden] { display: none; }
 
-/* ── tree-sitter syntax highlighting (CSS classes) ──
-   Values run cool, commands run warm — the same two temperatures as the
-   landing.  Strings and constructors are data (cool); keywords, functions, and
-   embedded commands are effects (warm); numbers and constants are gold. */
-pre.source .comment                      { color: var(--faint); font-style: italic; }
-pre.source .keyword                      { color: var(--kw); font-weight: 600; }
-pre.source .keyword.return               { color: var(--kw); }
-pre.source .keyword.control              { color: var(--kw); }
-pre.source .keyword.control.conditional  { color: var(--kw); }
-pre.source .keyword.import               { color: var(--kw); }
-pre.source .keyword.operator             { color: var(--ink-2); }
-pre.source .string                       { color: var(--str); }
-pre.source .string.escape                { color: var(--kw); }
-pre.source .number                       { color: var(--num); }
-pre.source .number.float                 { color: var(--num); }
-pre.source .boolean                      { color: var(--num); }
-pre.source .constant.builtin             { color: var(--num); }
-pre.source .variable                     { color: var(--text); }
-pre.source .variable.builtin             { color: var(--val); }
-pre.source .variable.parameter           { color: var(--text); }
-pre.source .variable.declaration         { color: var(--ink-2); }
-pre.source .function                     { color: var(--accent); }
-pre.source .function.builtin             { color: var(--accent); }
-pre.source .function.call                { color: var(--accent); }
-pre.source .constructor                  { color: var(--val); }
-pre.source .operator                     { color: var(--ink-2); }
-pre.source .property                     { color: var(--str); }
-pre.source .embedded                     { color: var(--accent); }
-pre.source .punctuation.bracket          { color: var(--muted); }
-pre.source .punctuation.delimiter        { color: var(--muted); }
-pre.source .function-builtin             { color: var(--accent); }
+/* ── tree-sitter syntax highlighting ──
+   Values run cool, commands run warm, constants gold — the same two
+   temperatures the landing sets up. */
+pre .comment                      { color: var(--com); font-style: italic; }
+pre .keyword                      { color: var(--kw); font-weight: 600; }
+pre .keyword.operator             { color: var(--muted); }
+pre .string                       { color: var(--str); }
+pre .string.escape                { color: var(--kw); }
+pre .number,
+pre .boolean,
+pre .constant                     { color: var(--num); }
+pre .variable                     { color: var(--varc); }
+pre .variable.builtin             { color: var(--val); }
+pre .function,
+pre .embedded                     { color: var(--cmd); }
+pre .constructor,
+pre .property                     { color: var(--str); }
+pre .operator                     { color: var(--muted); }
+pre .punctuation                  { color: var(--faint); }
 
-/* ── responsive ── */
-@media (max-width: 36rem) {
-  main { padding: 0.8rem 0.7rem 2rem; }
-  article { padding: 1.5rem 1.2rem; }
-  .menubar .toc { font-size: 0.62rem; }
+@media (max-width: 60rem) {
+  .exsplit { grid-template-columns: 1fr; }
+  .exlist { position: static; height: auto; max-height: 20rem; }
 }
