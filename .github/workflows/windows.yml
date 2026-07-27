@@ -49,13 +49,24 @@ jobs:
       - name: cargo build (exarch)
         run: cargo build -p exarch
 
+      # The test steps report everything they know before the job ends.
+      # This is the only place the suites *run* on Windows, so a round trip
+      # here costs a full CI cycle: `--no-fail-fast` keeps cargo going past
+      # the first failing target within a step, and `!cancelled()` keeps the
+      # job going past a failing step, so one red run names every divergence
+      # rather than the first one.  A failed step still fails the job.
       - name: cargo test (core)
-        run: cargo test -p ral-core
+        if: ${{ !cancelled() }}
+        run: cargo test -p ral-core --no-fail-fast
       - name: cargo test (ral)
-        run: cargo test -p ral
+        if: ${{ !cancelled() }}
+        run: cargo test -p ral --no-fail-fast
       - name: cargo test (ral with grep + ripgrep)
-        run: cargo test -p ral --features grep,ripgrep
+        if: ${{ !cancelled() }}
+        run: cargo test -p ral --features grep,ripgrep --no-fail-fast
       - name: cargo test (ral with coreutils,diffutils,grep,ripgrep)
-        run: cargo test -p ral --features coreutils,diffutils,grep,ripgrep
+        if: ${{ !cancelled() }}
+        run: cargo test -p ral --features coreutils,diffutils,grep,ripgrep --no-fail-fast
       - name: cargo test (exarch)
-        run: cargo test -p exarch
+        if: ${{ !cancelled() }}
+        run: cargo test -p exarch --no-fail-fast
