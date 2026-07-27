@@ -230,7 +230,10 @@ impl NormalizedPrefix {
     }
 
     /// The prefix as a borrow, for containment matching.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
+    )]
     pub fn as_path(&self) -> &Path {
         Path::new(&self.surface)
     }
@@ -270,12 +273,6 @@ impl NormalizedPrefix {
         self.namespace == other.namespace
             && super::lex::path_within_str(&self.surface, &other.surface)
             && super::lex::path_within_str(&other.surface, &self.surface)
-    }
-
-    /// What composition intersects on — `(namespace, resolved)`. See
-    /// [`super::prefix_set::meet_prefixes`].
-    pub fn overlap_key(&self) -> (Namespace, &str) {
-        (self.namespace, &self.resolved)
     }
 
     /// Consume into the owned surface `String`, for the wire/render
