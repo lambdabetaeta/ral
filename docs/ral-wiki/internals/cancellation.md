@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 837cb5c
-verified_at_date: 2026-07-26
-anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
+verified_at_commit: 463cc2b
+verified_at_date: 2026-07-28
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring::cancel, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
 # Cancellation
@@ -24,7 +24,7 @@ The two pieces answer different questions:
 - **The scope tree** (`CancelScope`) answers *"which subtree should unwind, and
   why?"* — a structured-concurrency primitive that names a *cause* and reaches
   exactly the workers that inherited the cancelled scope. It is the only thing
-  `process::check(shell)` polls.
+  `process::check(mooring)` polls.
 - **The ladder** (`ESCALATION: AtomicU8`) answers *"is the user escalating
   toward kill?"* — the third delivery forces `_exit(128 + sig)`. It is a blunt,
   host-agnostic floor for a process whose cooperative delivery is wedged, never
@@ -88,7 +88,7 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`. Detached
   workers — `spawn`, `&`, `watch` — parent under it, so a *foreground* cancel
   never reaches them ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-- **`ForegroundScope`** (`shell.run.cancel`) is the run's work scope. It can be
+- **`ForegroundScope`** (`Mooring::cancel`) is the run's work scope. It can be
   minted *only* from a `DurableRoot` (or by nesting another foreground), so an
   unrelated root can never be installed as a foreground by accident.
 - Children are minted by two constructors that also fix which signals reach
@@ -151,7 +151,7 @@ into the signal handler.
 ## Where cancellation is observed: poll points
 
 A cancel is a *request*; nothing stops until the evaluator next polls. The poll is
-`process::check(shell)`, called at:
+`process::check(mooring)`, called at:
 
 - the **trampoline** (`evaluator/comp.rs`, `evaluator/trampoline.rs`) — every tail
   step, so any loop of `ral` calls is preemptible (the original

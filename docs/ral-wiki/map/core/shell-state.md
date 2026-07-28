@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19d53bb
+generated_at_commit: 463cc2b
 generated_at_date: 2026-07-28
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -217,10 +217,12 @@ and a Ctrl-C does not.
 The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
 `SurfaceSink = Arc<dyn EventSink>`) is the value-typed dual of the byte
 [[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
-borrowed `Value`; the `Mooring::surface` method forwards onto the installed
-sink and is inert when none is present (a bare REPL). Run-scoped, not a persistent capability — a
-run door installs it, so a clone of it has no liveness role and can never decide
-a run is over. A *detached* worker does not receive the live sink: its events
+borrowed first-order `FOValue`
+([[decisions/260706_enquiry-channel|enquiry-channel]]); the `Mooring::surface`
+method takes a borrowed `Value`, encodes it once at that door, and forwards onto
+the installed sink — inert when none is present (a bare REPL). Run-scoped, not
+a persistent capability — a run door installs it, so a clone of it has no
+liveness role and can never decide a run is over. A *detached* worker does not receive the live sink: its events
 buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
 the awaiting run's surface on the first `await` / `race`, or handed to the
 session-lived `deferred` sink at the worker's own completion, whichever renders

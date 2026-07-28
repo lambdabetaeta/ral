@@ -1578,6 +1578,7 @@ Nested grants can only reduce authority.  Per dimension:
 - `detach` — boolean AND.
 - `audit` — logical OR.
 - `editor` — per-boolean AND (inner can only disable).
+- `shell` — per-boolean AND (inner can only disable).
 
 For both `exec` subpath keys and `fs` prefixes, containment is
 judged on the symlink-resolved form: a prefix that lexically nests
@@ -3148,7 +3149,7 @@ stdin to EOF and executes the result as a ral script.  This allows:
 curl https://example.com/setup.ral | ral
 ```
 
-### 21.6  POSIX flags
+### 21.4  POSIX flags
 
 `ral` accepts the following POSIX-standard flags so that it can be
 registered as `$SHELL` without breaking tools (`tmux`, `ssh`, terminal
@@ -3164,7 +3165,7 @@ emulators) that pass them blindly:
 Long options also accept `--flag=value` as a separator in addition to
 the usual space-separated form.
 
-### 21.4  `-c` and POSIX compatibility
+### 21.5  `-c` and POSIX compatibility
 
 `ral -c CODE` interprets `CODE` as ral syntax, not POSIX shell syntax.
 Any tool that invokes `$SHELL -c POSIX_CMD` will receive POSIX behaviour
@@ -3174,7 +3175,7 @@ only if `$SHELL` refers to `ral-sh` (which forwards `-c` invocations to
 Do not set `$SHELL=ral` on a system where other tools may shell out via
 `$SHELL -c`.  Set `$SHELL=ral-sh` instead.
 
-### 21.5  Environment variables seeded at startup
+### 21.6  Environment variables seeded at startup
 
 On every startup `ral` ensures the following variables are present in the
 environment, falling back to platform defaults if not inherited:
@@ -3190,7 +3191,7 @@ process cwd, and child commands receive the right values through
 Within ral code, the current directory is always read via `cwd`; reading
 `$ENV[PWD]` returns nothing.
 
-### 21.6  Current working directory
+### 21.7  Current working directory
 
 The shell tracks the working directory as a logical value, not as the
 OS process cwd.  `cd` mutates the logical value; the kernel's

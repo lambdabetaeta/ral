@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19d53bb
+generated_at_commit: 463cc2b
 generated_at_date: 2026-07-28
-covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -10,7 +10,7 @@ Every redirect read (`<`), every redirect write (`>` family), and every external
 or bundled exec image the model launches surfaces on the rail — **one structural
 event per logical operation**, the rail then coalescing a burst into one card per
 kind. Coverage is a property of the **runtime**, not of kit discipline: the hooks
-sit at the evaluator doors where the operation actually happens, so a
+sit at the doors where the operation actually happens, so a
 read/write/exec surfaces no matter which helper — or no helper — issued it. Core
 emits a structural **I/O event** (a plain `Value` naming the
 operation); exarch binds it to a card from the existing
@@ -26,24 +26,35 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 
 ## The doors — core emits its own activity
 
-Two operation classes, each with its runtime door. Emission is the one
+Two operation classes, each hooked at the doors that realise it. Emission is the one
 `Mooring::surface(&self, ev: &Value)` method (`types/mooring.rs`), the public
 door onto the [[map/core/shell-state|`SurfaceSink`]] a run threads as the
 immutable `&Mooring` beside its shell; `emit_io` delegates to it. The typed
 builders and the `WriteOutcome` enum live in one place,
 `runtime/command/io_event.rs`. With no surface installed every door is inert.
 
-- **Redirects** funnel through the frame combinators (`evaluator/redirect.rs`)
-  over `open_file` and `install_stdin_redirect` (`runtime/command/redirect.rs`).
-  A **read** (`< file`, fd 0) emits eagerly when the file opens — `{io:"read",
-  path}`, no outcome — so it precedes the body it feeds. A **write** (`>`/`>>`/
-  `>~`/`>|`, fd 1/2) is recorded as a `WriteIntent` on the `RedirectFrame` when
-  the sink opens, and emitted when the **frame settles**, carrying the terminal
-  outcome the door alone can know: `committed` (body ok — atomic `>` only after
-  `commit_atomics` succeeds; `>>`/`>~` once the body succeeds), `aborted` (body
-  failed before commit), `failed` (open or commit failed). Mode is `write` /
-  `append` / `stream`. No byte count — path, mode, outcome, plus the bounded
-  content snapshots the write card previews and diffs from.
+- **Redirects** open through `open_file` and `install_stdin_redirect`
+  (`runtime/command/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
+  when the file opens — `{io:"read", path}`, no outcome — so it precedes the
+  body it feeds. A **write** (`>`/`>>`/`>~`/`>|`, fd 1/2) surfaces **when its
+  outcome becomes knowable**, which is one of two moments:
+  - *A ral body* — builtin, closure, or a `> file` scope — runs inside the frame
+    combinators (`evaluator/redirect.rs`): the open records a `WriteIntent` on
+    the `RedirectFrame` and `settle_writes` emits when the **frame settles**,
+    with the outcome the door alone can know — `committed` (body ok, an atomic
+    `>` only once its commit succeeds), `aborted` (body failed before commit),
+    `failed` (open or commit failed).
+  - *An external command* fuses its redirects into the spawn instead
+    (`wire_stdout_file` / `wire_stderr`, `runtime/command/stdio.rs`). A
+    non-atomic target — `>>`, `>~`, a `>` outside the atomic recipe, any `2>`
+    (`stderr_mode` coerces it to streaming) — has no later commit step, so it
+    emits **eagerly at the open**, `committed`, no snapshots; a failed open
+    surfaces nothing at all. Only an atomic `>` defers, settling post-`wait()`
+    in `command::run`: `committed` with snapshots, `failed` on a broken rename,
+    `aborted` when the child did not succeed and the staged temp is discarded.
+
+  Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
+  plus the bounded content snapshots the write card previews and diffs from.
 - **Exec images** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or builtin).
   The external / spawned-bundled path emits in `command::run`
