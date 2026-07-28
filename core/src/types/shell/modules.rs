@@ -1,17 +1,14 @@
-//! Module loader state.
+//! Module-loader state.
 //!
-//! [`Modules`] holds the active-load stack for cycle detection and the
-//! current recursion depth — module loads carry no cross-session cache, so
-//! every `use` / `source` re-evaluates the file fresh.  Plugin lifecycle
-//! state lives in `ral::repl::plugin::PluginRuntime` — outside core, since
-//! hooks and keybindings only fire inside the rustyline-driven REPL.
+//! Nothing about a load is cached, so this stack is all that keeps a
+//! recursive `use` / `source` terminating.  `evaluate_checked` in
+//! `core/src/builtins/modules.rs` is the sole mutator, popping even when
+//! a load fails.
 
-/// Module-loader state for `use` and `source`.
-///
-/// Both fields are push/pop balanced within a single load, so neither
-/// flows back from a child computation to its parent.
+/// Loads in flight, innermost last.  The top of `stack` anchors relative
+/// load paths, its length is the load depth, and it rides into child
+/// evaluations, so a cycle crossing a subprocess is still caught.
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Modules {
     pub stack: Vec<String>,
-    pub depth: usize,
 }

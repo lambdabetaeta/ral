@@ -1,9 +1,6 @@
-//! Exarch-owned agent search and edit primitives.
-//!
-//! These are static host builtins: process-owned Rust atoms registered
-//! with `ral-core` before the shell compiles user/model source.  Dynamic
-//! plugins remain source/alias/hook loaders; this module only publishes
-//! the resident agent surface that core should not own.
+//! Exarch's agent search-and-edit builtins: static Rust atoms registered with
+//! `ral-core` before any user or model source compiles — the resident agent
+//! surface core itself should not own.
 
 use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
@@ -27,26 +24,16 @@ mod harness;
 
 const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 
-/// The tag `Frame::Attach` carries to name this module's [`host_surface`] as
-/// the wire engine child's builtin surface.
-///
-/// See `core/src/engine.rs`'s installer table and the enquiry-channel ADR's
-/// shell-parity item.
+/// The boot-recipe tag a `Frame::Attach` names to select [`host_surface`] as the
+/// wire engine child's builtin surface; matched against the installer table in
+/// `core/src/engine.rs`.
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
-/// The exarch agent host's builtin surface on top of core's
-/// `CORE_BUILTINS`.
-///
-/// It carries exarch's own sets ([`EXARCH_BUILTINS`], the harness
-/// verbs) and core's host-selected `service`
-/// ([`ral_core::builtins::SERVICE_BUILTIN`] — the `watch` mechanism with
-/// the hosts swapped, kept out of `CORE_BUILTINS` so that only the agent
-/// host, under whose worker lease a durable birth means anything, gains
-/// it).  This is the one source of truth: the boot installs it, and the
-/// prompt's builtin index ([`crate::prompt`]) reads the booted shell's
-/// names back off it — the two cannot drift, by construction rather than
-/// by convention.  The REPL and batch hosts never carry it, so they never
-/// gain `service`.
+/// The agent host's builtin surface over core's `CORE_BUILTINS`: exarch's own
+/// sets plus core's [`ral_core::builtins::SERVICE_BUILTIN`], which core withholds
+/// from `CORE_BUILTINS` so `service` reaches only a host under whose worker lease
+/// a durable birth means anything.  The prompt's builtin index ([`crate::prompt`])
+/// reads the booted shell's names back off this, so the two cannot drift.
 pub fn host_surface() -> HostSurface {
     HostSurface {
         statics: vec![
@@ -58,15 +45,12 @@ pub fn host_surface() -> HostSurface {
     }
 }
 
-/// Source the embedded agent helper library into the live shell.
-///
-/// Also installs its one-line docs ([`agent_library_docs`]) into that same
-/// shell, so a shell that sources the library always gains its
-/// `help`/`explain` entries in the same act — the two can never drift apart.
+/// Source the embedded agent helper library into `shell`, installing its one-line
+/// docs ([`agent_library_docs`]) in the same act, so `help` can never list a
+/// helper the shell lacks nor miss one it has.
 ///
 /// # Errors
-/// Returns `Err` if sourcing the embedded library raises a ral error
-/// (re-surfaced as a signal) or propagates a non-error escape.
+/// If sourcing raises a ral error (re-surfaced as a signal) or escapes.
 pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let result = ral_core::builtins::modules::evaluate_source(
         mooring,
@@ -82,11 +66,9 @@ pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Va
     Ok(result)
 }
 
-/// One-line docs for the helper-library functions sourced from
-/// `agent.ral`.  These are ral closures, not registered builtins, so
-/// `help` cannot find them on its own; [`install_agent_library`] installs
-/// them into the sourcing shell's own session so the agent library is as
-/// discoverable as the prelude.
+/// One-line docs for `agent.ral`'s helpers.  They are ral closures, not
+/// registered builtins, so `help` cannot find them unaided;
+/// [`install_agent_library`] plants these in the sourcing shell's session.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
@@ -108,16 +90,10 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     .collect()
 }
 
-/// Content hash of a line for witnessed editing: the letter `h` followed
-/// by six hex characters of a Blake3 digest, trailing whitespace ignored.
-/// The `h` prefix keeps the witness un-lexable as a number — a bare
-/// all-digit token in `edit-hash`'s hash position would otherwise elaborate to
-/// `Val::Int` and never compare equal to the recomputed `String` hash.
-///
-/// Private: the witness is never something the model constructs, only one it
-/// copies out of a `view-text` read, so neither this nor the
-/// window hash is exposed to ral — `view-text`, `view-text-around`,
-/// and `edit-hash` are the whole surface.
+/// A line's content hash, trailing whitespace ignored: `h` plus six hex of a
+/// Blake3 digest.  The `h` keeps a witness un-lexable as a number — an all-digit
+/// token in `edit-hash`'s hash position would elaborate to `Val::Int` and never
+/// compare equal to the recomputed `String`.
 fn line_hash(line: &str) -> String {
     let stripped = line.trim_end();
     let hex = blake3::hash(stripped.as_bytes()).to_hex();
@@ -125,46 +101,32 @@ fn line_hash(line: &str) -> String {
 }
 
 /// The freshness floor: every witness folds in at least ±`MIN_RADIUS` lines of
-/// context, even a line unique on its own, so an edit anywhere within that
-/// window invalidates the witness and forces a re-read.  The adaptive-context
-/// search starts here and only grows.
+/// context, even one unique on its own, so an edit anywhere nearby invalidates
+/// it and forces a re-read.
 const MIN_RADIUS: usize = 5;
 
-/// The cap on how far a line's window grows before it falls back to its
-/// absolute index.  A line is addressed by the smallest symmetric window (at
-/// least ±[`MIN_RADIUS`]) that makes it unique (see [`window_hashes`]); only a
-/// run of identical lines longer than `2 * MAX_RADIUS` exhausts this, and the
-/// residual is then named by index — the honest positional floor for content
-/// that genuinely repeats.
+/// The cap on window growth.  Only a run of identical lines longer than
+/// `2 * MAX_RADIUS` exhausts it; that residual is named by index instead — the
+/// honest positional floor for content that genuinely repeats.
 const MAX_RADIUS: usize = 64;
 
-/// How a line was distinguished from every other: by a window of some radius,
-/// or — only inside a long verbatim run — by its absolute index.
+/// How a line is told apart from every other: by a window of some radius, or —
+/// only inside a long verbatim run — by its absolute index.
 enum Witness {
     Window(usize),
     Index,
 }
 
-/// The witness for *every* line of `rows`, addressing each by the smallest
-/// context that makes it unique.  A line's witness is the [`line_hash`] of the
-/// neighbours in the smallest symmetric window that no other line shares —
-/// prefixed by that radius and the target's offset within the (clamped) window.
-/// The window starts at ±[`MIN_RADIUS`] (the freshness floor: every witness
-/// folds in that much context, so an edit nearby invalidates it) and grows only
-/// as far as a repetition demands.  The witness carries no line number, so it
-/// goes stale on a *local* change, not on every insertion elsewhere; the lone
-/// exception is a verbatim run longer than `2 * MAX_RADIUS`, whose interior is
-/// named by index.
+/// A witness for every line of `rows`: the [`line_hash`]es of the smallest
+/// symmetric window — at least ±[`MIN_RADIUS`], at most ±[`MAX_RADIUS`] — that no
+/// other line shares, folded together with that radius and the target's offset in
+/// the (clamped) window.  Carrying no line number, a witness goes stale on a
+/// *local* change, not on every insertion elsewhere.  `view-text` and `edit-hash`
+/// both derive theirs here, so a read and the edit that follows it agree.
 ///
-/// Computed by partition refinement, the shape of DFA minimisation: group the
-/// lines by their ±[`MIN_RADIUS`] window, then repeatedly split only the still-
-/// colliding classes by one more line of context on each side.  A line that
-/// becomes a singleton is resolved and never re-examined, so the work is bounded
-/// by the total size of collision classes across radii — linear on real files,
-/// where almost every line is unique at the floor.
-///
-/// Shared verbatim by `view-text` and `edit-hash`, so a read and the
-/// edit that follows it derive identical witnesses from identical content.
+/// Computed by partition refinement, the shape of DFA minimisation: group at the
+/// floor radius, then split only the still-colliding classes by one more line of
+/// context each side, so a singleton is resolved once and never revisited.
 fn window_hashes(rows: &[String]) -> Vec<String> {
     let n = rows.len();
     if n == 0 {
@@ -172,9 +134,8 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
     }
     let lh: Vec<String> = rows.iter().map(|line| line_hash(line)).collect();
 
-    // The signature `edit-hash` and `view-text` agree on: two lines share a radius-`r`
-    // witness exactly when their signatures here are equal — the target's offset
-    // within its clamped window, then that window's line-hashes in order.
+    // Two lines collide at radius `r` exactly when these agree: the target's
+    // offset within its clamped window, then that window's hashes in order.
     let signature = |i: usize, r: usize| -> String {
         let lo = i.saturating_sub(r);
         let hi = (i + r + 1).min(n);
@@ -185,7 +146,6 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
         s
     };
 
-    // Group a set of line indices by a key; the partition's building block.
     let group = |members: &[usize], r: usize| -> Vec<Vec<usize>> {
         let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
         for &i in members {
@@ -196,8 +156,6 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
 
     let mut how: Vec<Witness> = (0..n).map(|_| Witness::Index).collect();
     let all: Vec<usize> = (0..n).collect();
-    // Start at the freshness floor: lines unique within ±MIN_RADIUS resolve
-    // there; only collisions grow past it.
     let mut classes = group(&all, MIN_RADIUS);
     let mut r = MIN_RADIUS;
     while !classes.is_empty() {
@@ -206,7 +164,6 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
             if class.len() == 1 {
                 how[class[0]] = Witness::Window(r);
             } else if r >= MAX_RADIUS {
-                // A verbatim run deeper than the cap: name each by index.
                 for i in class {
                     how[i] = Witness::Index;
                 }
@@ -220,8 +177,8 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
 
     (0..n)
         .map(|i| match how[i] {
-            // Fold the radius in too, so witnesses from different radii cannot
-            // collide just because their windows happen to coincide.
+            // The radius is folded in too, so witnesses resolved at different
+            // radii cannot collide when their windows happen to coincide.
             Witness::Window(r) => {
                 let lo = i.saturating_sub(r);
                 let hi = (i + r + 1).min(n);
@@ -236,20 +193,15 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Split a file body into rows that rejoin faithfully: a raw `\n` split keeps
-/// the trailing empty a terminal newline produces, so joining with `\n`
-/// reproduces the body exactly.  The byte-faithful split (as opposed to the
-/// edge-trimming `lines`) is what lets a file's trailing newline survive an
-/// edit and the window hashes be computed over its actual line structure.
+/// Split on raw `\n`, keeping the empty tail a terminal newline leaves, so
+/// `join("\n")` reproduces the body byte for byte — what lets a file's trailing
+/// newline survive an edit, where the edge-trimming `lines` would eat it.
 fn rows_of(body: &str) -> Vec<String> {
     body.split('\n').map(str::to_string).collect()
 }
 
-/// Surface the one `{io:"read", path}` card for a whole-file read.  `view-text`
-/// reads in Rust below the ral line (no `< path` redirect), so it raises its
-/// own read card — one logical surface per read, matching the shape the
-/// redirect frame would have pushed.  `edit-hash`/`edit-replace` are the
-/// exception: they read silently and speak only their `write` event.
+/// Raise the one `{io:"read", path}` card for a whole-file read: `view-text` reads
+/// in Rust below the ral line, so no redirect frame speaks for it.
 fn surface_read(mooring: &Mooring, path: &str) {
     mooring.surface(&Value::map(vec![
         ("io".into(), Value::String("read".into())),
@@ -257,7 +209,6 @@ fn surface_read(mooring: &Mooring, path: &str) {
     ]));
 }
 
-/// Parse a 1-or-greater bound argument for `view-text`.
 fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
     match arg.as_int() {
         Some(n) if n >= 1 => {
@@ -276,10 +227,9 @@ fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
     }
 }
 
-/// `view-text PATH START END` — show the half-open line range `[START, END)` of
-/// the file, each line tagged `<line-no>\t<hash>\t<text>`.  Reads the whole file
-/// (its witnesses depend on file-wide uniqueness), hashes it, and writes the
-/// requested slice; surfaces one read card.
+/// `view-text PATH START END` — the half-open line range `[START, END)`, each row
+/// carrying its witness.  Reads and hashes the whole file even for a small
+/// slice, since a witness depends on file-wide uniqueness.
 fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "view-text")?;
     let path = args[0].to_string();
@@ -312,14 +262,10 @@ fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::list(result_rows))
 }
 
-/// The one sanctioned [`WalkBuilder::build`](ignore::WalkBuilder::build) site.
-///
-/// An `ignore::Walk` runs to completion regardless of cancellation, so
-/// the callers below poll [`ral_core::process::check`] at the top of each
-/// iteration over the returned walk — surfacing a tool-timeout or Esc
-/// cancel as a status-130 `Break` before the next filesystem entry is
-/// processed.  Routing every walk through here keeps that contract in one
-/// place, backed by the `WalkBuilder::build` clippy ban.
+/// The one sanctioned `WalkBuilder::build` site, backed by a clippy ban: an
+/// `ignore::Walk` runs to completion regardless of cancellation, so every caller
+/// must poll [`ral_core::process::check`] atop each iteration to surface a
+/// timeout or Esc as a status-130 `Break` before the next entry.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:grep-walk] The one sanctioned WalkBuilder::build site, rooting the grep door's directory walk; the search emits one `grep` surface for the whole walk and polls check() per entry for cancel."
@@ -328,30 +274,24 @@ fn cancellable(builder: &WalkBuilder) -> ignore::Walk {
     builder.build()
 }
 
-/// One matching line found by [`search_tree`]: the file's tree-relative path,
-/// the 1-based line number, and the matched text (newline-trimmed).
+/// One matching line from [`search_tree`], its path relative to the walk root.
 struct SearchHit {
     file: String,
     line: u64,
     text: String,
 }
 
-/// Whether the cwd-relative `rel` is readable under the live grant — the
-/// resolve-then-[`check_fs_read`](Shell::check_fs_read) filter the tree walks
-/// apply to skip a denied entry rather than abort the whole listing.
+/// Whether cwd-relative `rel` survives the live grant.  Both tree walks filter on
+/// this to skip a denied entry rather than abort, so one off-limits path cannot
+/// blank a whole listing.
 fn readable(shell: &mut Shell, rel: &str) -> bool {
     let rp = shell.resolve(rel);
     shell.check_fs_read(&rp).is_ok()
 }
 
-/// Recursively search the cwd for `pattern` (ignore-aware, Rust regex),
-/// reading each matched file's bytes exactly once and collecting every matching
-/// line — its tree-relative path, 1-based line number, and matched text — in
-/// walk order.
-///
-/// Cancellation polling (`ral_core::process::check`), the per-file deny-path
-/// skip, and the `\x00` binary-detection quit all live here, the one search
-/// site `grep-files` composes over.
+/// Recursively search the cwd for `pattern` (ignore-aware, Rust regex), reading
+/// each file's bytes once.  The cancellation poll, the per-file deny skip, and
+/// the binary-detection quit all live here, the one site `grep-files` composes over.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:grep-read] The grep door's per-matched-file read, in Rust below the ral line so it never reaches the redirect frame; the logical search emits exactly one `grep` surface (scope + pattern), not one read card per file."
@@ -379,13 +319,9 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
             .unwrap_or(abs)
             .to_string_lossy()
             .into_owned();
-        // Honour the grant's deny_paths, but skip a denied file rather than
-        // aborting the whole search, so one off-limits path doesn't blank
-        // the results — the same policy `explore-dir` applies to its hits.
         if !readable(shell, &rel) {
             continue;
         }
-        // One read per file: the search runs over these bytes directly.
         let Ok(bytes) = fs::read(abs) else { continue };
         let _ = searcher.search_slice(
             &matcher,
@@ -403,14 +339,12 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
     Ok(results)
 }
 
-/// `grep-files PATTERN` — search the cwd in one read per matched file (see
-/// [`search_tree`]).  Returns `[{file, line, text}]`; emits exactly one `grep`
-/// surface naming the scope and pattern.
+/// `grep-files PATTERN` — [`search_tree`] over the cwd, emitting exactly one
+/// `grep` surface for the whole walk rather than a card per file read.
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "grep-files")?;
     let pattern = args[0].to_string();
 
-    // One logical search, one surface — the scope is the cwd the walk roots at.
     mooring.surface(&Value::map(vec![
         ("io".into(), Value::String("grep".into())),
         ("scope".into(), Value::String(".".into())),
@@ -435,19 +369,15 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     Ok(Value::list(results))
 }
 
-/// One resolved edit: the 0-based index of the line its hash uniquely named
-/// against the file as read, and the replacement text taken verbatim.
+/// A hash resolved against the file as read: the 0-based line it uniquely named.
 struct ResolvedEdit {
     at: usize,
     new: String,
 }
 
-/// Backslash letters that read as a C/Python-style escape but are not one:
-/// `edit-hash`/`edit-replace` take their replacement text verbatim, with no escaping
-/// of their own, so a literal `\n` in a replacement lands as two characters
-/// — backslash, n — not a newline.  A model reaching for a familiar escape
-/// syntax here almost always meant the real character; `has_suspicious_escapes`
-/// flags that so `edit-hash`'s stderr note can ask.
+/// Backslash letters that read as a C-style escape but are not one here:
+/// replacement text is verbatim, so `\n` lands as two characters.  A model
+/// reaching for the familiar syntax nearly always meant the real one.
 const SUSPECT_ESCAPE_LETTERS: [char; 7] = ['n', 't', 'r', '0', '\\', '\'', '"'];
 
 fn has_suspicious_escapes(text: &str) -> bool {
@@ -456,11 +386,8 @@ fn has_suspicious_escapes(text: &str) -> bool {
         .any(|i| bytes[i] == b'\\' && SUSPECT_ESCAPE_LETTERS.contains(&(bytes[i + 1] as char)))
 }
 
-/// Note a completed edit on stderr for the model, with a trailing warning if
-/// any replacement looks like it carries an unintended escape sequence.
-/// Surfaced separately from the `write` io event (which stays the forensic
-/// record of the commit) since this is a plain status line, not structured
-/// data for the card layer.
+/// Note a completed edit on stderr, kept apart from the `write` io event, which
+/// stays the structured record of the commit.
 fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escapes: bool) {
     let word = if plural { "lines" } else { "line" };
     let warning = if any_escapes {
@@ -475,23 +402,14 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 }
 
 /// `edit-hash PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
-/// read/rebuild/write pass, then surface one write io event carrying the
-/// whole-file diff.  The read runs in Rust (not a redirect), so it raises no
-/// read card; the write goes through core's atomic write door
-/// ([`Shell::atomic_write`]) below the redirect frame, so `edit-hash` owns its
-/// surface — one committed `write` event whose old/new snapshots the write card
-/// renders as a diff, exactly like a committed `>` over the same file.
+/// read/rebuild/write pass.  Every hash resolves against the file as read, before
+/// anything is written, so the edits cannot interfere (adjacent lines included)
+/// and the batch is atomic: nothing is written unless each hash picks exactly one
+/// line and no two records name the same one.
 ///
-/// Each `hash` resolves against the file as read, before anything is written, so
-/// the edits never interfere (adjacent lines included) and the batch is atomic:
-/// it fails, writing nothing, unless every hash picks exactly one line (a stale
-/// or now-ambiguous hash means the file moved) and no two records name the same
-/// line.  The `line` field is the replacement text, taken verbatim: empty
-/// deletes the line; a real newline inside it splits the line into several.
-///
-/// A commit also notes what changed on stderr (see [`note_edit`]), with a
-/// warning if a `line` looks like it carries an unintended `\n`/`\t`-style
-/// escape rather than the literal character (see [`has_suspicious_escapes`]).
+/// The read raises no card; the write goes through [`Shell::atomic_write`] below
+/// the redirect frame, so `edit-hash` owns its surface — one committed `write`
+/// event the card layer renders as a whole-file diff, as a committed `>` would.
 fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "edit-hash")?;
     let path = args[0].to_string();
@@ -515,9 +433,8 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     let n = rows.len();
     let hashes = window_hashes(&rows);
 
-    // Resolve each record to the unique index of the line its hash names,
-    // against the original snapshot.  A stale hash fails here, before the write —
-    // the failure messages are user-facing and pinned by tests.
+    // Resolved against the original snapshot, so a stale or now-ambiguous hash
+    // fails here, before anything is written.
     let mut resolved = Vec::with_capacity(edits.len());
     for e in edits {
         let m = match e {
@@ -533,7 +450,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             Some(v) => v.to_string(),
             None => {
                 return Err(sig(
-                    "edit-hash: each edit needs a `hash` field — the witness from view-text/witnesses."
+                    "edit-hash: each edit needs a `hash` field — the witness from view-text/view-text-around."
                         .to_string(),
                 ));
             }
@@ -563,8 +480,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             }
         }
     }
-    // Two records naming the same line is the analogue of the ral fold's
-    // length-`hit` > 1 guard: caught before the write, nothing rebuilt.
+    // Two records on one line: also caught before the write, nothing rebuilt.
     for w in 0..resolved.len() {
         for v in (w + 1)..resolved.len() {
             if resolved[w].at == resolved[v].at {
@@ -576,9 +492,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         }
     }
 
-    // Rebuild in one pass over the original rows: an untouched row passes
-    // through, a named row becomes its replacement (a real newline splits it
-    // into several; empty drops the line).
+    // Verbatim: an empty replacement drops the line, a real newline splits it.
     let mut out: Vec<String> = Vec::with_capacity(n);
     for (i, row) in rows.iter().enumerate() {
         match resolved.iter().find(|r| r.at == i) {
@@ -604,21 +518,16 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::Unit)
 }
 
-/// The largest either snapshot of an edit may reach before its `write` card
-/// falls back to a plain listing instead of a whole-file diff — mirrors core's
-/// write-preview cap (`PREVIEW_CAP` in `core/src/runtime/command/redirect.rs`), so an
-/// `edit-hash`/`edit-replace` write and a committed `>` over the same file make the
-/// identical diff-vs-listing choice.
+/// The largest either snapshot of an edit may reach before its `write` card falls
+/// back to a plain listing — mirrors `PREVIEW_CAP` in
+/// `core/src/runtime/command/redirect.rs`, so an edit and a committed `>` over the
+/// same file make the identical diff-vs-listing choice.
 const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
 
-/// Surface the structural `write` io event an `edit-hash`/`edit-replace` commit raises —
-/// the same event a committed `>` redirect emits, so the write card renders
-/// `old` vs `new` as a whole-file diff below its `write <path> committed`
-/// heading.  Both snapshots ride as `old_bytes`/`new_bytes`; `old_bytes` is
-/// withheld when either side exceeds [`DIFF_SNAPSHOT_CAP`], so a large edit
-/// falls back to a listing preview rather than an unwieldy diff — the same gate
-/// core's `old_snapshot_for_diff` applies to the redirect path.  `new_bytes` is
-/// capped to that prefix too, since past the cap it only ever seeds the listing.
+/// Raise the `write` io event an edit commits — the very event a committed `>`
+/// emits, so the card renders `old` against `new` as a whole-file diff.
+/// `old_bytes` is withheld once either side exceeds [`DIFF_SNAPSHOT_CAP`], the
+/// gate core's `old_snapshot_for_diff` applies to the redirect path.
 fn surface_write(mooring: &Mooring, path: &str, old: &str, new: &str) {
     let fits = old.len() <= DIFF_SNAPSHOT_CAP && new.len() <= DIFF_SNAPSHOT_CAP;
     let new_prefix = new.as_bytes()[..new.len().min(DIFF_SNAPSHOT_CAP)].to_vec();
@@ -635,16 +544,12 @@ fn surface_write(mooring: &Mooring, path: &str, old: &str, new: &str) {
     mooring.surface(&Value::map(fields));
 }
 
-/// Read a file as a UTF-8 string for the witness layer, gating the read through
-/// the active grant the way a `< path` redirect would.  The shared read door of
-/// `view-text`, `edit-hash`, and `edit-replace`: in Rust, below the ral line, so it
-/// never reaches the redirect frame.  Each caller decides its own surface —
-/// `view-text` raises one read card, `edit-hash`/`edit-replace` read silently
-/// and speak only their `write` event.  A non-UTF-8 file is named (the witness
-/// layer cannot address it); `tool` puts the calling builtin's name on the error.
+/// The witness layer's shared read door, gating on the live grant as a `< path`
+/// redirect would but staying in Rust, below the redirect frame — so each caller
+/// owns its own surface.  `tool` names the calling builtin in the error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit-hash), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit-hash/edit-replace read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
+    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/edit-hash/edit-replace), in Rust below the ral line so it never reaches the redirect frame. view-text surfaces its own read card; edit-hash/edit-replace read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
 )]
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
@@ -658,15 +563,10 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
     })
 }
 
-/// `edit-replace <path> <from> <to>` — read `path`, replace the one literal
-/// occurrence of `from` with `to` via the same match/error logic as
-/// `string-replace` (0 or >1 matches errors, leaving the file untouched),
-/// and write the result back.  Composed over the same read/write doors as
-/// `edit-hash`: the read is silent and the write goes through core's atomic door
-/// ([`Shell::atomic_write`]), so it surfaces one committed `write` io event
-/// whose old/new snapshots the write card renders as a whole-file diff.  It
-/// notes the change on stderr the same way `edit-hash` does, with the line range
-/// computed from where the match started (see [`note_edit`]).
+/// `edit-replace PATH FROM TO` — replace the one literal occurrence of `FROM`,
+/// borrowing `string-replace`'s match/error logic, so 0 or >1 matches errors and
+/// leaves the file untouched.  Composed over the same doors as `edit-hash`: a
+/// silent read, then [`Shell::atomic_write`], surfacing one committed `write`.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "edit-replace")?;
     let path = args[0].to_string();
@@ -683,9 +583,8 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     shell.atomic_write(&path, final_text.as_bytes())?;
     surface_write(mooring, &path, &body, &final_text);
 
-    // `string_replace` above already proved `from` matches exactly once, so
-    // the same offset it used is the one match here — safe to relocate for
-    // the line-range note without re-validating uniqueness.
+    // `string_replace` above already proved `from` matches exactly once, so this
+    // relocation for the line-range note needs no second uniqueness check.
     let start = body
         .find(&from)
         .expect("edit-replace: match vanished after string_replace confirmed it");
@@ -707,10 +606,8 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     Ok(Value::Unit)
 }
 
-/// `edit-replace` borrows `string-replace`'s match/error logic, but its
-/// diagnostics name that verb; re-label the `string-replace:` prefix to
-/// `edit-replace:` so a bad `edit-replace` call surfaces the verb the model
-/// actually invoked (core's own message stays correct for its own callers).
+/// Re-label a borrowed `string-replace:` diagnostic, so the model reads back the
+/// verb it actually called.
 fn relabel_string_replace(b: Break) -> Break {
     match b {
         Break::Error(mut e) => {
@@ -723,9 +620,8 @@ fn relabel_string_replace(b: Break) -> Break {
     }
 }
 
-/// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) up to `DEPTH`,
-/// via the one sanctioned walk site ([`cancellable`]); a denied entry is
-/// skipped, not fatal, the same policy [`search_tree`] applies to its hits.
+/// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) to `DEPTH`, through
+/// the one sanctioned walk site ([`cancellable`]).
 fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "explore-dir")?;
     let depth: usize = match &args[0] {
@@ -771,10 +667,6 @@ fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
                     .unwrap_or_else(|_| entry.path())
                     .to_string_lossy()
                     .into_owned();
-                // Honour the grant's deny_paths, skipping a denied entry
-                // rather than aborting the whole walk, so one off-limits path
-                // doesn't blank the listing — the same policy `grep-files`
-                // applies to its hits.
                 if !readable(shell, &rel) {
                     continue;
                 }
@@ -808,8 +700,7 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `view-text :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]` — `path`, then the half-open line
-/// range. Returns a list of records, one per line in [start, end).
+/// `view-text :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]`
 fn scheme_view_text(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
@@ -832,9 +723,7 @@ fn scheme_view_text(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `edit-hash :: Str → [{hash: Str, line: Str}] → F Unit` — `path` then a list
-/// of `[hash: …, line: …]` records.  Returns Unit: `edit-hash` writes and
-/// surfaces, it does not yield a value.
+/// `edit-hash :: Str → [[hash: Str, line: Str]] → F Unit`
 fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
@@ -853,8 +742,7 @@ fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `edit-replace :: Str → Str → Str → F Unit` — `path`, `from`, `to`.  Returns
-/// Unit: `edit-replace` writes and surfaces, it does not yield a value.
+/// `edit-replace :: Str → Str → Str → F Unit`
 fn scheme_edit_replace(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
@@ -868,8 +756,7 @@ fn scheme_edit_replace(_u: &mut Unifier) -> Scheme {
 }
 const DEFAULT_LIMIT: usize = 50;
 
-/// `fff QUERY` — fuzzy file-name search (frecency-ranked) over the
-/// working tree, returning a list of matching paths.
+/// `fff QUERY` — frecency-ranked fuzzy file-name search over the working tree.
 fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "fff")?;
     let query = args[0].to_string();
@@ -905,13 +792,12 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
 }
 
-/// `skill NAME` — load the full SKILL.md body of a skill (fresh scan at
-/// each call — picks up skills added or edited mid-session).
+/// `skill NAME` — load a skill's full body, rescanning at each call so a skill
+/// added or edited mid-session is found.
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "skill")?;
     let name = args[0].to_string();
-    // A malformed name can never name a discoverable skill, and rejecting it
-    // here keeps `root.join(&name)` from escaping the skills root.
+    // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(&name) {
         return Settled::Ok(Value::String(format!("skill not found: {name}")));
     }
@@ -925,8 +811,8 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             let Ok(body) = skill::read_skill_body(&dir) else {
                 return Settled::Ok(Value::String(format!("could not read skill: {name}")));
             };
-            // Surface only once the body is in hand, so the card never claims
-            // a load that did not happen.
+            // Only once the body is in hand, so the card never claims a load
+            // that did not happen.
             mooring.surface(&Value::map(vec![
                 ("io".into(), Value::String("skill".into())),
                 ("name".into(), Value::String(name)),
@@ -949,8 +835,8 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(pure(Ty::String)))
 }
 
-/// `skill-list` — list all available skills (fresh scan, filtered by
-/// the live grant). Returns one `name: description` per line.
+/// `skill-list` — every discoverable skill, one `name: description` per line,
+/// fresh-scanned and filtered by the live grant.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body."
@@ -984,8 +870,8 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     Settled::Ok(Value::String(out))
 }
 
-/// `service-handle :: ∀α. Int → F (Handle α)` — the same per-call-site α
-/// instantiation `race :: [Handle α] → …` already accepts.
+/// `service-handle :: ∀α. Int → F (Handle α)` — the per-call-site α instantiation
+/// `race :: [Handle α] → …` already accepts.
 fn scheme_service_handle(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
     let a = Ty::Var(av);
@@ -997,20 +883,12 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `service-handle <id>` — re-acquire a durable service's live `Handle` by
-/// id: looked up among this shell's `LeaseClass::Durable` entries only, and
-/// handed back bare so the ordinary eliminators resume — `await
-/// (service-handle 3)`, `cancel (service-handle 3)`.
-///
-/// An id naming an ephemeral `spawn`/`watch` worker is refused exactly
-/// like an unknown one: an ephemeral spawn is lease-bounded and
-/// rediscovered through its binding, not by id — by-id re-acquisition is
-/// carved out for services alone, not a general control plane over every
-/// worker.
-///
-/// A bare top-level `service-handle N` result cannot cross the host seam —
-/// a `Handle` is not ground — by design: it exists to be composed with an
-/// eliminator in the same run.
+/// `service-handle ID` — re-acquire a durable service's live `Handle`, looked up
+/// among this shell's `LeaseClass::Durable` entries alone and handed back bare so
+/// the ordinary eliminators resume.  An ephemeral `spawn`/`watch` id is refused
+/// like an unknown one: those are lease-bounded and rediscovered through their
+/// binding, so by-id re-acquisition stays carved out for services rather than
+/// becoming a control plane over every worker.
 fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "service-handle")?;
     let id = match args[0].as_int() {
@@ -1099,8 +977,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
 mod tests {
     use super::*;
 
-    /// Dress a bare test shell with exarch's host surface through the
-    /// test-only install doors.
+    /// Dress a bare test shell with exarch's host surface.
     fn dress(shell: &mut Shell) {
         let surface = host_surface();
         for set in surface.statics {
@@ -1123,10 +1000,8 @@ mod tests {
         assert_eq!(line_hash("x"), line_hash("x   "));
     }
 
-    /// Every witness folds in at least ±`MIN_RADIUS` of context (the freshness
-    /// floor).  In a file shorter than a full floor window every line's window
-    /// clamps to the whole file, so the lines are told apart by their offset
-    /// within it, each resolved at the floor radius.
+    /// In a file shorter than a full floor window, every window clamps to the
+    /// whole file, so lines are told apart by offset alone, all at the floor.
     #[test]
     fn window_hashes_floor_at_min_radius() {
         let rows: Vec<String> = ["a", "b", "c", "d"]
@@ -1135,8 +1010,6 @@ mod tests {
             .collect();
         let hashes = window_hashes(&rows);
         assert_eq!(hashes.len(), rows.len());
-        // The window clamps to the whole file, so every witness folds in the
-        // same body and differs only by the offset prefix, at radius MIN_RADIUS.
         let body: String = rows.iter().map(|r| line_hash(r)).collect();
         for (i, hash) in hashes.iter().enumerate() {
             let expected = line_hash(&format!("{MIN_RADIUS}:{i}:{body}"));
@@ -1146,9 +1019,8 @@ mod tests {
         assert_eq!(distinct.len(), rows.len(), "all distinct");
     }
 
-    /// Two identical lines, each deep enough in the interior to share the same
-    /// offset within its ±`MIN_RADIUS` window, are told apart only by the context
-    /// folded into the witness — what a bare line hash could not do.
+    /// Two identical lines sharing an offset within their floor windows are
+    /// separated by folded context alone — what a bare line hash cannot do.
     #[test]
     fn window_hashes_distinguish_repeated_lines_by_context() {
         let mut rows: Vec<String> = vec!["fn alpha() {".to_string()];
@@ -1184,11 +1056,9 @@ mod tests {
         );
     }
 
-    /// The property the adaptive-context witness buys over a fixed window: even
-    /// a long run of byte-identical lines — where every fixed-radius window
-    /// repeats — yields all-distinct witnesses, because each line grows its
-    /// context to the run's boundary, and the residual interior folds in its
-    /// index.  No two lines share a witness, so `edit-hash` never faces ambiguity.
+    /// What adaptive context buys over a fixed window: even a run where every
+    /// fixed-radius window repeats still witnesses distinctly, the interior
+    /// falling back to its index.
     #[test]
     fn window_hashes_are_unique_across_a_long_identical_run() {
         let mut rows: Vec<String> = vec!["head".to_string()];
@@ -1204,9 +1074,8 @@ mod tests {
         );
     }
 
-    /// A pre-cancelled scope aborts the search walk at its first poll,
-    /// before any filesystem entry is processed, surfacing status 130.  The
-    /// `grep-files` builtin owns that walk (`search_tree`).
+    /// A pre-cancelled scope aborts `search_tree`'s walk at its first poll,
+    /// before any filesystem entry is touched.
     #[test]
     fn search_files_honours_a_cancelled_scope() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1217,8 +1086,6 @@ mod tests {
         assert_eq!(status(err), 130);
     }
 
-    /// `explore-dir` likewise aborts at its first poll under a cancelled
-    /// scope, surfacing status 130 before listing any entry.
     #[test]
     fn explore_dir_honours_a_cancelled_scope() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1231,11 +1098,10 @@ mod tests {
 
     // ── `service-handle` builtin ─────────────────────────────────────────
 
-    /// A worker body that blocks until cancelled: it polls
-    /// `process::check` so the spawned thread genuinely stays `Running`
-    /// (rather than completing instantly). Named distinctly from
-    /// `agent.rs`'s own test-only blocker (`test-clear-block-forever`) so
-    /// registering both in the same test binary never collides on name.
+    /// A worker body that blocks until cancelled, polling `process::check` so the
+    /// thread genuinely stays `Running` rather than settling instantly.  Named
+    /// apart from `test-clear-block-forever` in `exarch/src/agent/testkit.rs` so
+    /// registering both in one test binary cannot collide.
     fn builtin_test_block_forever(
         _args: &[Value],
         mooring: &Mooring,
@@ -1258,11 +1124,8 @@ mod tests {
         body: BuiltinBody::Static(builtin_test_block_forever),
     }];
 
-    /// Run `src` as one top-level run with no deferred lease (so nothing
-    /// races a reap during the test) and no deferred sink (the tests below
-    /// never care where a deferred surface batch would land). Panics on a
-    /// static (parse/type) failure or a runtime error — every source this
-    /// helper runs is expected to compile and complete cleanly.
+    /// Run `src` as one top-level run, deliberately without a deferred lease so
+    /// nothing races a reap mid-test.  Panics on any failure.
     fn run_top_level(shell: &mut Shell, src: &str) {
         use ral_core::transport::{Program, Run};
         use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
@@ -1292,14 +1155,10 @@ mod tests {
         }
     }
 
-    /// Typecheck honesty, positive half: once a shell installs
-    /// `SERVICE_BUILTIN` (here via the host surface), `service` resolves to
-    /// its own `Handle`-returning scheme rather than falling through to an
-    /// external command, so binding its result straight into a `Handle`
-    /// consumer (`cancel`) typechecks clean.  The negative half — the same
-    /// source on a bare core-only table, where `service` is external and
-    /// the bind is a static mismatch — lives in `ral_core`'s own suite
-    /// (`service_is_external_on_a_bare_core_table`, `core/tests/typecheck.rs`).
+    /// Dressed, `service` resolves to its own `Handle`-returning scheme rather
+    /// than falling through to an external command, so feeding it to `cancel`
+    /// typechecks.  The negative half of this is
+    /// `service_is_external_on_a_bare_core_table` in `core/tests/typecheck.rs`.
     #[test]
     fn service_typechecks_on_an_exarch_dressed_shell() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1321,8 +1180,6 @@ mod tests {
         }
     }
 
-    /// A `service`-born worker registers under the durable class, its birth
-    /// description carried verbatim: `class: Durable`, `cmd` the description.
     #[test]
     fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1344,10 +1201,9 @@ mod tests {
             .cancel(ral_core::process::CancelCause::Explicit);
     }
 
-    /// The whole rediscovery idiom: birth a service without keeping its
-    /// binding, learn its id, reacquire its handle with `service-handle`,
-    /// and `await` it — the round trip a compaction-erased binding leaves
-    /// as the only way back.
+    /// The whole rediscovery idiom: birth a service without keeping its binding,
+    /// reacquire by id, `await` — the only way back once compaction erases the
+    /// binding that named it.
     #[test]
     fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1380,11 +1236,9 @@ mod tests {
         assert_eq!(record.get("value"), Some(&Value::Int(42)));
     }
 
-    /// A settled-but-unclaimed service — nothing has awaited, polled, or
-    /// cancelled it — still lingers in the registry (a durable birth arms
-    /// no retention-exempting lease of its own), so `service-handle`
-    /// resolves it exactly as it would a still-running one; `await` on the
-    /// reacquired handle then delivers the cached result, never blocking.
+    /// A settled service nothing has claimed still lingers, a durable birth
+    /// arming no retention-exempting lease of its own, so `service-handle`
+    /// resolves it as it would a running one.
     #[test]
     fn service_handle_reacquires_a_settled_but_unclaimed_service() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1432,7 +1286,6 @@ mod tests {
         assert_eq!(record.get("value"), Some(&Value::Int(42)));
     }
 
-    /// An id naming no registered worker at all is refused.
     #[test]
     fn service_handle_errors_on_an_unknown_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1445,10 +1298,8 @@ mod tests {
         assert!(err.message.contains("no durable service"));
     }
 
-    /// `service-handle`'s scope is durable services only: an ephemeral
-    /// `spawn`'s id is refused exactly like an unknown one, never handed
-    /// back — rediscovering an ordinary worker is the binding-lease
-    /// ledger's job, not this verb's.
+    /// An ephemeral `spawn`'s id is refused exactly like an unknown one:
+    /// rediscovering an ordinary worker is the binding-lease ledger's job.
     #[test]
     fn service_handle_refuses_an_ephemeral_worker_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1476,11 +1327,8 @@ mod tests {
             .cancel(ral_core::process::CancelCause::Explicit);
     }
 
-    /// Builtin-table hygiene: `service-handle` is exarch's own affordance,
-    /// never core's. The REPL installs `CORE_BUILTINS` alone and never
-    /// `EXARCH_BUILTINS`, so a bare ral host has no `service-handle` at
-    /// all — this pins the half of that story that doesn't require
-    /// booting a REPL to check: the name simply isn't in the core table.
+    /// `service-handle` is exarch's own affordance, never core's — so the REPL,
+    /// which installs `CORE_BUILTINS` alone, cannot reach it.
     #[test]
     fn service_handle_is_exarch_only_never_a_core_builtin() {
         assert!(
@@ -1498,10 +1346,9 @@ mod tests {
     }
 
     /// `service`'s availability mirrors `watch`'s with the hosts swapped:
-    /// implemented in core but absent from `CORE_BUILTINS` (and from the
-    /// `WATCH_BUILTIN` set the REPL adds), it reaches a shell only through
-    /// exarch's host surface — so a bare ral host has no `service` name to
-    /// resolve, while an agent shell dispatches it.
+    /// implemented in core but absent from both `CORE_BUILTINS` and the
+    /// `WATCH_BUILTIN` set the REPL adds, it reaches a shell only through
+    /// exarch's host surface.
     #[test]
     fn service_is_installed_by_exarch_and_absent_from_the_repl_sets() {
         assert!(
@@ -1534,13 +1381,10 @@ mod tests {
         );
     }
 
-    /// Registration hygiene, `service`'s story inverted: `detach` must
-    /// *not* ride the host surface.  [`host_surface`] is a bare fn pointer,
-    /// so a name it carried would arrive already armed on every shell that
-    /// dresses through it — including the child shells that never asked for
-    /// a budget.  The verb is installed per boot instead, by the one act
-    /// that also arms its policy
-    /// ([`crate::agent::seat::boot_root_shell`]).
+    /// `service`'s story inverted: the host surface is a bare fn pointer, so a
+    /// `detach` it carried would arrive armed on every shell dressed through it,
+    /// child shells that never asked for a budget included.  `boot_root_shell`
+    /// installs it per boot instead, in the same act that arms its policy.
     #[test]
     fn detach_is_absent_from_the_host_surface() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
@@ -1552,9 +1396,8 @@ mod tests {
         );
     }
 
-    /// Granted the verb, a boot gains the name and the budget in one act —
-    /// so a shell that can name the verb can always spend it, and the two
-    /// cannot drift.
+    /// Name and budget arrive together, so a shell that can name the verb can
+    /// always spend it.
     #[cfg(unix)]
     #[test]
     fn a_boot_granted_detach_gains_the_verb_and_its_budget() {
@@ -1578,11 +1421,9 @@ mod tests {
         );
     }
 
-    /// A boot denied the verb leaves `detach` an ordinary unknown command
-    /// — never a builtin that resolves and refuses.  The host's answer is
-    /// about the host (the headless runner has no use for survivors); what
-    /// a *sandbox* does to a call is a grant's business, asked of the live
-    /// stack at the call, so it cannot be read off a boot.
+    /// A boot denied the verb leaves `detach` an ordinary unknown command, never
+    /// a builtin that resolves and refuses: what a *sandbox* does to a call is a
+    /// grant's business, asked of the live stack, so it is never read off a boot.
     #[cfg(unix)]
     #[test]
     fn a_boot_denied_detach_leaves_it_an_unknown_name() {
@@ -1602,9 +1443,8 @@ mod tests {
         assert!(shell.detach_policy().is_none(), "and no policy is armed");
     }
 
-    /// `/clear` reboots through the same [`crate::agent::seat::boot_root_shell`], so the fresh
-    /// shell re-gains both the name and the budget from the seat's own
-    /// answer — there is no second install site to keep in step.
+    /// `/clear` reboots through the same `boot_root_shell`, so the fresh shell
+    /// re-gains name and budget together; there is no second install site.
     #[cfg(unix)]
     #[test]
     fn clear_reboots_a_shell_that_still_carries_detach() {
@@ -1645,11 +1485,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// `install_agent_library` sources the closures *and* installs their
-    /// docs into the same shell in one act — so `help`'s output on an
-    /// exarch-dressed shell carries a `Library:` section naming the sourced
-    /// helpers, while a bare core shell that never sourced the library
-    /// carries none.
+    /// Sourcing the closures and installing their docs is one act, so `help`
+    /// names the helpers on exactly the shells that have them.
     #[test]
     fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
         use ral_core::transport::{Program, Run};

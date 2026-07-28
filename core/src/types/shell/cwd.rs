@@ -1,13 +1,10 @@
 //! Logical working directory and path-resolution verbs.
 //!
-//! The shell-owned [`Cwd`] pair on `context.cwd` is
-//! the canonical "where are we" state; the process cwd is left alone
-//! because spawned ral threads would race it (a `spawn` / `par` /
-//! pipeline stage running in parallel would see a sibling's `cd` as a
-//! sudden reorder).  Child processes still see the right directory:
-//! [`crate::runtime::command::process::apply_env`] passes
-//! [`Shell::cwd`] as `Command::current_dir` and writes the pair into
-//! their env as `PWD` / `OLDPWD`.
+//! `cd` moves the shell-owned [`Cwd`] on `context.cwd`, never the process cwd:
+//! that one is OS-global, and a parallel `spawn` / `par` / pipeline stage would
+//! see a sibling's `cd` as a sudden reorder.  Children still land right —
+//! `apply_env` in `core/src/runtime/command/process.rs` passes [`Shell::cwd`]
+//! as `Command::current_dir` and exports the pair as `PWD` / `OLDPWD`.
 
 use super::Shell;
 use crate::path::process_cwd;
@@ -16,23 +13,11 @@ use crate::types::Error;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The shell-owned logical cwd pair.
+/// The shell-owned logical cwd pair: where `cd` last moved to, and from.
 ///
-/// `current` is the directory `cd` last moved to. The user-visible cwd;
-/// what `Shell::cwd()` returns when no `within [dir: …]` override is
-/// active.
-///
-/// `previous` is the directory `cd` last moved away from. It is surfaced
-/// to child processes as `OLDPWD` (via `apply_env`), so a child that
-/// itself runs `cd -` reads it; ral has no `cd -` of its own.
-///
-/// `current = None` means "uninitialised"; readers fall back through
-/// [`process_cwd`]. Front ends call `Shell::seed_default_env_vars` at
-/// startup, which seeds `current` from the process cwd and `previous`
-/// from `$OLDPWD` if the launching shell exported one. A front end whose
-/// own working directory is not the process cwd — an in-process engine
-/// hosted by a caller that never `chdir`s — instead calls
-/// [`Shell::seed_cwd`] to state it directly.
+/// `previous` exists only to export `OLDPWD` to children; ral has no `cd -` of
+/// its own.  `current = None` means unseeded — readers fall back through
+/// [`process_cwd`] until [`Shell::seed_default_env_vars`] or [`Shell::seed_cwd`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cwd {
     pub current: Option<PathBuf>,
@@ -40,56 +25,34 @@ pub struct Cwd {
 }
 
 impl Shell {
-    /// Logical working directory of the shell.  Precedence:
+    /// Effective logical cwd: the `within [dir: …]` override, else the
+    /// `cd`-tracked `cwd.current`, else [`process_cwd`] for an unseeded shell,
+    /// else `"."` if even `getcwd(3)` fails.
     ///
-    /// 1. `context.dir` — the `within [dir: …]` override, rolled back
-    ///    on scope exit.
-    /// 2. `context.cwd.current` — the shell-owned cwd `cd` mutates,
-    ///    persistent across thunks and snapshotted into spawned threads.
-    /// 3. [`process_cwd`] — the OS-level cwd, kept around as a fallback
-    ///    for shells that have not been seeded yet (defaulted test
-    ///    shells, the pipeline helper subprocess).
-    /// 4. `"."` — last resort if even `getcwd(3)` fails.
-    ///
-    /// The `cwd` builtin and every path-resolving builtin route
-    /// through this accessor so a `within` scope or a prior `cd` is
-    /// visible to the whole interpreter, not just to spawned child
-    /// processes.
+    /// Every path-resolving builtin routes through here, so a `within` scope or
+    /// a prior `cd` binds the whole interpreter, not just spawned children.
     pub fn cwd(&self) -> PathBuf {
         if let Some(p) = self.mobile.context.cwd_chain() {
             return p.to_path_buf();
         }
-        // Literal "." when no cwd resolves at all (no within
-        // override, no `cd`-tracked cwd, no process cwd).  Pure type
-        // lift, not path construction.
-        #[allow(clippy::disallowed_methods)]
-        let fallback = || PathBuf::from(".");
-        process_cwd().unwrap_or_else(fallback)
+        process_cwd().unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// Seed the shell's logical cwd from an explicit path, overriding
-    /// whatever [`Shell::seed_default_env_vars`] adopted from the process
-    /// cwd. The caller's stated directory is the source of truth when it
-    /// can diverge from the process cwd — an in-process engine hosted by a
-    /// caller that never `chdir`s the host process, for instance.
+    /// State the logical cwd outright, overriding whatever
+    /// [`Shell::seed_default_env_vars`] adopted, for a host that never
+    /// `chdir`s the process — exarch's `boot_root_shell` seats a session here.
     pub fn seed_cwd(&mut self, cwd: PathBuf) {
         self.mobile.context.cwd.current = Some(cwd);
     }
 
-    /// Change the shell's logical working directory, recording the prior
-    /// effective cwd as `previous` (the `OLDPWD` source).  `old` reads
-    /// through [`Self::cwd`], so a `within [dir: …]` override in force at
-    /// the call counts as "where we were."
-    ///
-    /// Tilde expansion is delegated to [`expand_tilde_path`]; an empty
-    /// `target` is treated as `~`.  Relative targets resolve against the
-    /// current logical cwd (matching bash's default `cd -L`: symlinks are
-    /// preserved; only `.` / `..` components are normalised).  Returns
-    /// `(old_path, new_path)` so the caller can fire the `chpwd` hook.
+    /// Move the logical cwd to `target`, recording the prior effective cwd —
+    /// read through [`Self::cwd`], so a `within [dir: …]` override counts as
+    /// where we were — as `previous`.  Empty `target` means `~`; relative ones
+    /// fold lexically, so symlinks survive as under bash's default `cd -L`.
+    /// Returns `(old, new)` for the caller's `chpwd` hook.
     ///
     /// # Errors
-    /// Returns `Err` if the resolved target cannot be stat'd (e.g. it does
-    /// not exist), or if it exists but is not a directory.
+    /// If the resolved target cannot be stat'd, or is not a directory.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
@@ -100,7 +63,6 @@ impl Shell {
         let home = self.mobile.context.home();
         let home = if home.is_empty() { ".".into() } else { home };
         let raw: String = if target.is_empty() {
-            // Bare `~`/no argument: always resolves to `home` itself.
             home
         } else if let Some(path) = TildePath::parse(target) {
             expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home).ok_or_else(
@@ -118,8 +80,6 @@ impl Shell {
             target.into()
         };
 
-        // Anchor relative paths against the current logical cwd and
-        // normalise `.` / `..` without touching the filesystem.
         let resolved = crate::path::resolve_path(Some(&old), &raw);
 
         let meta = std::fs::metadata(&resolved)
@@ -140,28 +100,19 @@ impl Shell {
         Ok((old_str, new_str))
     }
 
-    /// Resolve `path` against the shell's effective cwd
-    /// ([`Self::cwd`]), minting a [`crate::path::ResolvedPath`].  Forwards through
-    /// [`Context::resolver`](super::Context::resolver), so a
-    /// `within [dir: …]` override is honoured first and a prior `cd`
-    /// is honoured otherwise.  The fs gates consume this directly; a
-    /// caller that opens the file calls `.into_inner()` / `.as_path()`.
+    /// Resolve `path` against the effective cwd, minting a
+    /// [`crate::path::ResolvedPath`] that the fs gates consume directly; a
+    /// caller that opens the file takes `.into_inner()` / `.as_path()`.
     pub fn resolve(&self, path: &str) -> crate::path::ResolvedPath {
         self.mobile.context.resolver().resolve(path)
     }
 
-    /// Locate `name` on disk via the shell's effective `PATH` and
-    /// `cwd`.  Thin Shell-aware wrapper over
-    /// [`crate::path::locate`]; returns the absolute path of the
-    /// executable file the shell would run for `name`, or `None` if
-    /// no such file exists.
+    /// Absolute path of the executable the shell would run for `name`, via the
+    /// effective `PATH` and cwd; `None` if there is none.
     ///
-    /// Pure filesystem question ("is this command installed?");
-    /// admission against the active grant lives in
-    /// [`crate::capability::admits_head`] (head-only)
-    /// and [`Self::check_exec_args`] (full call).  Together they let
-    /// `which` and the dispatch error path tell "denied but
-    /// installed" apart from "not installed."
+    /// A filesystem question only — admission is `capability::admits_head`
+    /// (head alone) and [`Self::check_exec_args`] (full call).  `which` and the
+    /// dispatch error path pair the two to tell denied-but-installed from absent.
     pub fn locate_command(&self, name: &str) -> Option<PathBuf> {
         let env_path = self.mobile.context.env_overrides.get_or_host("PATH");
         let cwd = self.cwd();

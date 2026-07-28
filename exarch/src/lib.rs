@@ -1,11 +1,9 @@
-//! Exarch — a delegate driving ral in process under a user-chosen grant
-//! policy.  This library crate holds the whole agent: the CLI, the
-//! capability composition, the [`agent::Agent`] exchange driver, the
-//! [`provider::Provider`] transport, and the two frontends
-//! ([`tui::run`] / [`headless::run`]).  The `exarch` binary is a thin
-//! shell over [`run`]; integration tests in `tests/` link this library
-//! directly to drive [`agent::Agent::deliberate`] through a scripted
-//! provider (see [`provider::Provider::scripted`]).
+//! Exarch — a delegate driving ral in process under a user-chosen grant policy.
+//!
+//! The whole agent is here: the CLI, capability composition, the
+//! [`agent::Agent`] exchange driver, the [`provider::Provider`] transport, and
+//! the two frontends ([`tui::run`] / [`headless::run`]).  The `exarch` binary is
+//! a thin shell over [`run`]; integration tests link this library directly.
 #![allow(
     clippy::disallowed_methods,
     reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
@@ -32,14 +30,11 @@ use provider::{Engine, Provider};
 use std::sync::Arc;
 use tui::SessionInfo;
 
-/// Pre-`main` trampoline shared by the binary and every test binary.
-///
-/// A byte-mode pipeline stage re-execs the running binary with
-/// `--ral-pipeline-stage-helper`; under `cargo test` that is the test
-/// harness binary, which libtest would reject.  Teach core how to dress
-/// a sandbox-IPC child's fresh shell with exarch's host builtins, then
-/// serve the helper dispatch before libtest sees the flag.  The binary
-/// calls this from `main`; test binaries call it from a `#[ctor]`.
+/// Pre-`main` trampoline shared by the binary and every test binary: dress a
+/// sandbox-IPC child's fresh shell with exarch's host builtins, then serve any
+/// helper re-exec.  A pipeline stage re-execs the running binary, which under
+/// `cargo test` is the libtest harness, so the flag must be served before
+/// libtest sees argv and rejects it.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
     #[cfg(unix)]
@@ -58,26 +53,16 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     None
 }
 
-/// The full pre-`main` re-exec dispatch, shared by the binary's `main` and
-/// every test `#[ctor]`.
-///
-/// Serves helper re-execs
-/// ([`install_child_hooks_and_serve_helpers`] — which also sets the
-/// child-shell extension), then the OS-sandbox stage
-/// ([`ral_core::sandbox::serve_sandbox_early_init`]). Returns `Some(code)`
-/// when this process is a re-exec child that should exit now, `None` to
-/// continue to the frontend. `main` and the test ctors run this identical
-/// function; the only difference is how they act on `Some` (return vs exit).
+/// The full pre-`main` dispatch — helper re-execs, then the OS-sandbox stage —
+/// shared by the binary's `main` and every test `#[ctor]`.  `Some(code)` means
+/// this process is a re-exec child that should exit now.
 pub fn dispatch_pre_main() -> Option<u8> {
     install_child_hooks_and_serve_helpers().or_else(ral_core::sandbox::serve_sandbox_early_init)
 }
 
-/// Emit the pre-`main` re-exec `#[ctor]` shared by the binary and tests.
-///
-/// It serves helper / sandbox re-execs from a constructor and exits the
-/// child before libtest sees flags it would reject. Invoked once per binary
-/// (gate with `#[cfg(test)]` where the ctor is only wanted under test). See
-/// [`dispatch_pre_main`].
+/// Emit the `#[ctor]` running [`dispatch_pre_main`], which exits a re-exec child
+/// before libtest sees flags it would reject.  Once per binary; gate with
+/// `#[cfg(test)]` where only the test build wants it.
 #[macro_export]
 macro_rules! pre_main_ctor {
     () => {
@@ -90,16 +75,12 @@ macro_rules! pre_main_ctor {
     };
 }
 
-// The library's own unit-test binary; see [`dispatch_pre_main`].
 #[cfg(test)]
 pre_main_ctor!();
 
-/// The binary's entry point, lifted into the library so integration
-/// tests can link the whole crate.
-///
-/// Parses the CLI, composes the
-/// capability lattice, builds a [`Agent`] + [`Provider`], and hands
-/// off to a frontend.
+/// The binary's entry point, lifted into the library so integration tests can
+/// link the whole crate: parse the CLI, compose the capability lattice, build an
+/// [`Agent`] + [`Provider`], hand off to a frontend.
 ///
 /// # Errors
 /// Returns `Err` if the CLI is misused, if no provider is available, or if
@@ -112,9 +93,8 @@ pre_main_ctor!();
 /// invariant the selection step upholds.
 pub fn run() -> Result<(), String> {
     let c = cli::Cli::parse();
-    // A subcommand runs its action and exits before any session setup —
-    // notably before the provider-availability check below, since `login` is
-    // how the OpenAI provider becomes available.
+    // Subcommands act and exit before the provider-availability check below,
+    // since `login` is how the OpenAI provider becomes available.
     if let Some(command) = c.command {
         return match command {
             cli::Command::Login { device_auth } => provider::oauth::login(device_auth),
@@ -124,9 +104,8 @@ pub fn run() -> Result<(), String> {
                 if accounts.is_empty() {
                     eprintln!("No ChatGPT accounts signed in. Run `exarch login` to add one.");
                 } else {
-                    // Show the account id alongside the label only when the
-                    // label is an email — otherwise the label *is* the id and
-                    // printing it twice is noise.
+                    // The label is the login email when there is one, else the
+                    // account id itself — which printing twice would be noise.
                     for token in accounts {
                         if token.email.is_some() {
                             println!("{} ({})", token.label(), token.account_id);
@@ -139,30 +118,21 @@ pub fn run() -> Result<(), String> {
             }
         };
     }
-    // Belt-and-suspenders to the `requires = "headless"` on `--output-format`
-    // in cli.rs: `--output-format` only affects the headless frontend, so a
-    // `json` request without `--headless` is a mistake, not a silent no-op.
+    // Doubles the `requires = "headless"` in `cli`: `--output-format` reaches
+    // only the headless frontend, so asking for `json` alone is a mistake.
     if c.output_format == headless::OutputFormat::Json && !c.headless {
         return Err("--output-format is only meaningful with --headless".into());
     }
     let seed = cli::load_seed(c.prompt, c.file, c.trailing_prompt)?;
 
-    // Load the unusual-provider config (custom endpoints) from the trusted
-    // XDG config home, evaluated under a no-authority grant. Absent → none.
     let custom = config::load()?;
-    // The operator's disk-warn ceiling, if set — threaded to the trunk below.
     let disk_warn_bytes = config::disk_warn_bytes()?;
-    // The IT-set network policy, audit ledger, and rate budget — opened
-    // once here and threaded to the trunk below, exactly like disk_warn_bytes.
+    // Opened once at the trunk; every spawned child inherits this ledger.
     let egress = egress::Egress::open(bootstrap::EXARCH)?;
 
-    // Auto-discover providers and resolve their keys into the in-memory
-    // store, scrubbing every key var from the environment. The custom
-    // providers join the famous ones in the same sweep.
-    // SAFETY: startup is still single-threaded here — the tokio runtime
-    // and the session's worker threads are created below — so no other
-    // thread can race this env mutation. This is the only credential scrub;
-    // every spawned child therefore inherits an environment free of keys.
+    // SAFETY: startup is still single-threaded — the tokio runtime and the
+    // session's workers come later — so nothing races this env mutation.  It is
+    // the only scrub, so every child inherits an environment free of keys.
     let mut store = provider::credential::CredentialStore::resolve_and_scrub(custom);
     let available = store.available();
     if available.is_empty() {
@@ -177,9 +147,6 @@ pub fn run() -> Result<(), String> {
         std::env::current_dir().map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
     let state_dir = bootstrap::EXARCH.project_dir(&cwd);
 
-    // Resolve the initial selection: an explicit `--provider` pin, else an
-    // explicit `--model` override, else the persisted selection (when its
-    // provider is available), else the first available provider's default model.
     let mut catalog = provider::models::ModelCatalog::new(
         provider::models::LiveSource::new(&store),
         bootstrap::EXARCH,
@@ -193,23 +160,23 @@ pub fn run() -> Result<(), String> {
     )?;
     if let Some(keyword) = c.effort.as_deref() {
         tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword).ok_or_else(
-            || format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"),
+            || {
+                format!(
+                    "invalid effort '{keyword}' — expected zero|low|medium|high|xhigh|max|minimal"
+                )
+            },
         )?);
     }
-    // An unset model (the model-less launch of a custom provider with no
-    // default) is only meaningful for the interactive frontend, which opens
-    // the `/model` picker; a headless run has no picker and nothing to fall
-    // back on, so it must be told a model explicitly.
+    // An unset model means "the `/model` picker will choose"; a headless run has
+    // no picker, so it must be told one.
     if model.is_empty() && c.headless {
         return Err(format!(
             "custom provider '{}' has no default model — pass --model NAME for a headless run",
             id.label()
         ));
     }
-    // A `--model` override is a deliberate choice, so remember it: the next
-    // launch in this project restores it as the persisted selection, exactly
-    // as the `/model` picker's choice is remembered. (The empty-model launch
-    // has nothing to persist.)
+    // A `--model` override is a deliberate choice, remembered like the picker's,
+    // so the next launch in this project restores it.
     if c.model.is_some() && !model.is_empty() {
         let _ = provider::state::save(
             &state_dir,
@@ -224,13 +191,12 @@ pub fn run() -> Result<(), String> {
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
-    // The model selection is exarch's own runtime state under the XDG state
-    // home (`bootstrap::App::project_dir`), outside the agent's cwd sandbox, so a
-    // tool call cannot reach it — no deny-list entry is needed.
-    // RAL_DUMP_SANDBOX_PROFILE: emit the platform OS-sandbox profile
-    // (Seatbelt SBPL, bwrap argv, or AppContainer summary) the launcher
-    // would install for an external child under this projection.
-    // A throwaway shell mirrors the stack.
+    // The persisted selection lives under the XDG state home, outside the
+    // agent's cwd sandbox, so no deny-list entry is needed to keep tools off it.
+
+    // A throwaway shell carrying the same grants, only so
+    // `RAL_DUMP_SANDBOX_PROFILE` can print the profile an external child would
+    // be sandboxed under.
     {
         let mut probe = ral_core::Shell::new(ral_core::io::TerminalState::default());
         probe.push_session_capabilities(caps.clone());
@@ -246,21 +212,11 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| format!("log dir: {e}"))?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
-    // Whether the verb has meaning here at all — a question about the host,
-    // not about its capabilities. An interactive trunk converses and parks
-    // for a human who may well want a server left running, so it offers the
-    // name wherever the double fork exists; the headless runner, which
-    // terminates once its seeded work is idle, does not.
-    //
-    // Whether any particular call may spend it is a separate question, asked
-    // of the live grant stack at the call (`detach:` on the capability
-    // lattice). A sandboxed session therefore keeps the verb: a survivor
-    // born under a projection carries that confinement for its whole life,
-    // which is a stricter promise than an unsandboxed base makes, not a
-    // weaker one.
+    // Whether the double fork exists on this host at all; whether a given call
+    // may spend it is asked of the live grant stack (`detach:`).  A sandboxed
+    // session keeps the verb — a survivor carries its projection for life.
     let detach = cfg!(unix);
-    // Chat mode registers no tools, so there is nothing for a system prompt to
-    // describe: it is skipped entirely in favour of the minimal placeholder.
+    // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
         prompt::CHAT_SYSTEM.to_string()
     } else {
@@ -276,8 +232,7 @@ pub fn run() -> Result<(), String> {
     };
     let system_size = system.len();
 
-    // One shared runtime for the whole fleet; per-credential transports warm
-    // lazily as providers are built and borrow it.
+    // One runtime for the whole fleet; per-credential transports warm lazily.
     let engine = Engine::new();
     let provider = Arc::new(Provider::build(
         engine.clone(),
@@ -296,8 +251,8 @@ pub fn run() -> Result<(), String> {
             model,
             provider_label: label.to_string(),
             allow_schedule: c.allow_schedule,
-            // The interactive (TUI) trunk converses and parks for the human;
-            // a headless trunk terminates once its seeded work is idle.
+            // An interactive trunk parks for the human; a headless one
+            // terminates once its seeded work is idle.
             interactive: !c.headless,
             chat: c.chat,
             disk_warn_bytes,
@@ -346,23 +301,14 @@ pub fn run() -> Result<(), String> {
     }
 }
 
-/// Resolve the initial provider+model from, in priority order: an explicit
-/// `--provider` pin; an explicit `--model` override (its provider resolved by
-/// [`provider::models::resolve_model_provider`]); the persisted selection, when its
-/// provider is still available; else the first available provider's default
-/// model. The selection always names an *available* provider — a saved
-/// selection naming a provider whose key is no longer set falls through to the
-/// default rather than failing.
-///
-/// `--provider` pins the identity with no model-listing lookup and no
-/// saved-state consult: with `--model` it takes the pair verbatim (the way to
-/// reach a model the provider does not advertise), and alone it takes the
-/// provider's default model.
-///
-/// A custom provider (or a `ChatGPT` account) has no built-in default model, so
-/// when the selection would fall to one with no saved selection and no
-/// `--model` — whether pinned by `--provider` or defaulted to — the user is
-/// asked to name a model, since there is nothing to assume.
+/// Resolve the initial provider+model, in priority order: a `--provider` pin, a
+/// `--model` override (its provider found by
+/// [`provider::models::resolve_model_provider`]), the persisted selection while
+/// its provider is still available, else the first available provider's default
+/// model.  The result always names an *available* provider, so a saved selection
+/// whose key is gone falls through rather than failing.  A `--provider` pin is
+/// taken verbatim, consulting neither listing nor saved state — the way to reach
+/// a model the provider does not advertise.
 fn resolve_initial_selection(
     provider_override: Option<&str>,
     model_override: Option<&str>,
@@ -411,12 +357,9 @@ fn resolve_initial_selection(
             provider::Tuning::initial(),
             None,
         )),
-        // A custom provider has no built-in default model, but that is no
-        // reason to refuse to launch: open with the model *unset* (the empty
-        // sentinel) so the interactive frontend lands on the prompt with a
-        // "run /model" hint and the human picks from the live catalog. The
-        // headless frontend cannot open the picker, so `run` still rejects an
-        // unset model there — see the guard below.
+        // No built-in default is no reason to refuse to launch: open with the
+        // model unset — the empty sentinel — so the interactive frontend lands
+        // on its `/model` hint.  `run` rejects that for a headless launch.
         None => Ok((id, String::new(), provider::Tuning::initial(), None)),
     }
 }

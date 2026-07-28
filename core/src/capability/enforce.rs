@@ -1,16 +1,11 @@
 //! Point-of-use capability gates.
 //!
-//! Every runtime yes/no asked at the moment an action is attempted — an
-//! exec invocation and its argv, an fs read or write, the editor and
-//! shell feature flags, and head admission — is a function over a
-//! borrowed [`Context`] that folds the whole dynamic [`GrantStack`]
-//! (`ctx.grants`), so a verdict reflects authority intersected across
-//! every layer, never a single frame.  The exec and fs gates touch a
-//! real OS resource, so they emit an audit node when auditing is on; the
-//! editor/shell/head gates are coarse feature flags and do not.  The
-//! OS-renderable [`SandboxProjection`](crate::types::SandboxProjection)
-//! these gates share an authority model with is built in the sibling
-//! [`super::sandbox`].
+//! Every runtime yes/no asked as an action is attempted — exec and its
+//! argv, an fs read or write, the editor and shell flags, head admission
+//! — folds the whole dynamic [`GrantStack`], so a verdict is authority
+//! intersected across every layer, never one frame.  Only the exec and fs
+//! gates reach a real OS resource, and only they audit.  The sibling
+//! [`super::sandbox`] projects the same authority onto the OS sandbox.
 
 use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, Resolver, path_within};
@@ -19,8 +14,8 @@ use crate::types::{
     sig, sig_hint,
 };
 
-/// Validate an exec capability check against the active stack and emit
-/// an audit node if auditing is on.
+/// Gate a command and its argv against the stack's exec opinions.  Audits
+/// only when some layer holds such an opinion, as the fs gate does.
 pub(crate) fn check_exec_args(
     ctx: &Context,
     display_name: &str,
@@ -39,7 +34,7 @@ pub(crate) fn check_exec_args(
         ExecVerdict::Denied => Err(sig_hint(
             format!("command '{display_name}' denied by active grant"),
             "add the command to the grant exec map \
-             (or its directory to exec_dirs) to allow it",
+             (or its directory, keyed with a trailing '/') to allow it",
         )),
         ExecVerdict::Allowed(Admit::Subcommands(allowed)) => {
             let hint = || {
@@ -83,8 +78,6 @@ pub(crate) fn check_exec_args(
 }
 
 /// Which fs region a check consults: the read or the write prefix set.
-/// Carries both the audit label and the prefix accessor, so the
-/// read / write distinction is named once and lives in one place.
 pub(crate) enum FsOp {
     Read,
     Write,
@@ -106,34 +99,25 @@ impl FsOp {
     }
 }
 
-/// The pure half of [`check_fs_op`]'s decision: does the grant stack admit
-/// `op` on `resolved`, and under which prefix?  No layer with an opinion
-/// is `Unrestricted`; every opining layer's deny-then-prefix test is
-/// `Denied` or `Granted` with the last (innermost) hit prefix, matching a
-/// grant stack's overriding-inward semantics.
+/// The pure half of [`check_fs_op`]'s decision: does the stack admit `op`
+/// on the resolved path, and under which prefix?  `Unrestricted` exactly
+/// when no layer held an `fs` opinion, so there is nothing to audit.
 pub(super) enum FsVerdict {
-    /// No layer expressed an `fs` opinion — nothing to audit or check.
     Unrestricted,
-    /// Every opining layer granted; carries the prefix the audit trail
-    /// records.
+    /// The innermost matching prefix, for the audit record.
     Granted(String),
     Denied,
 }
 
-/// Fold the grant stack's `fs` opinions over a resolved path: the access
-/// succeeds when, at every layer with an `fs` opinion, the path falls
-/// inside some prefix in the op's region and outside every entry in
-/// `deny_paths`.  Region membership is alias-aware containment via
-/// [`path_within`], so a deny on `/etc/secrets` covers `/etc/secrets/foo`
-/// and a grant on `~/.local` (post-freeze: `/Users/.../.local`) covers
-/// everything underneath.
+/// Fold the stack's `fs` opinions over a resolved path: it passes when, at
+/// every opining layer, the path lies inside some prefix of the op's region
+/// and outside every `deny_paths` entry — one deny region per layer covers
+/// both reads and writes.  Membership is region containment,
+/// alias-aware, via [`path_within`].
 ///
-/// Reads and writes consult the same deny set — there is one deny region
-/// per layer, not two.  See SPEC §11.2.
-///
-/// `resolver.check` re-resolves each prefix against the live disk, by
-/// design: enforcement is a statement about the world, composition about
-/// the policy (`dev/docs/260727_policy_kernel_purity.md` §0).
+/// Prefixes are re-resolved against the live disk on every check rather
+/// than read off the frozen policy: composition is a statement about the
+/// policy, enforcement one about the world.
 pub(super) fn fs_verdict(
     grants: &GrantStack,
     resolver: &Resolver,
@@ -166,20 +150,9 @@ pub(super) fn fs_verdict(
     }
 }
 
-/// Decide an `op` (read / write) on a single resolved path, emit the
-/// audit node, and mint the `Break` on denial.  The decision itself is
-/// [`fs_verdict`]; this is the reporting layer around it — the only part
-/// of the check that touches `Value`, `Audit`, or the error type.
-///
-/// `path` is the sole input: a [`ResolvedPath`] the caller already
-/// minted through [`Shell::resolve`](crate::types::Shell::resolve), so
-/// the gate cannot see an un-resolved string.  `/dev/null` is a literal
-/// contract — always permitted — and a `ResolvedPath` of `/dev/null` is
-/// that absolute literal, so the short-circuit reads it off `path`
-/// directly.  Symlink-following is lenient on both sides: the access
-/// path canonicalises, each [`NormalizedPrefix`] canonicalises
-/// (idempotent on its already-folded form), so a grant on `/tmp/foo`
-/// still covers an access resolving through `/tmp` → `/private/tmp`.
+/// Decide an `op` on one resolved path, audit it, and mint the `Break` on
+/// denial: [`fs_verdict`] is the decision, this the reporting around it.
+/// `/dev/null` is exempt from both regions as a discard device.
 pub(crate) fn check_fs_op(
     ctx: &Context,
     path: &crate::path::ResolvedPath,
@@ -214,10 +187,9 @@ pub(crate) fn check_fs_op(
     }
 }
 
-/// Head-only admission: does the active stack permit a call whose head
-/// matches one of the [`CommandIdentity`](crate::runtime::command::CommandIdentity)'s
-/// policy keys?  Pre-args judgment that classification and the `which`
-/// inspector consult to short-circuit a denied head with a focused error.
+/// Head-only admission, before any argv is known: classification and the
+/// `which` inspector consult it to refuse a denied head with a focused
+/// error rather than let the call reach [`check_exec_args`].
 pub(crate) fn admits_head(ctx: &Context, id: &crate::runtime::command::CommandIdentity) -> bool {
     let allow = id.policy_names(ctx);
     let deny = id.deny_names_from(allow.clone());
@@ -230,7 +202,6 @@ pub(crate) fn admits_head(ctx: &Context, id: &crate::runtime::command::CommandId
     !matches!(evaluate_exec(&ctx.grants, names), ExecVerdict::Denied)
 }
 
-/// Check `editor.read` capability is available.
 pub(crate) fn check_editor_read(ctx: &Context, subcmd: &str) -> Settled<()> {
     check_grant_bool(
         ctx,
@@ -239,7 +210,6 @@ pub(crate) fn check_editor_read(ctx: &Context, subcmd: &str) -> Settled<()> {
     )
 }
 
-/// Check `editor.write` capability is available.
 pub(crate) fn check_editor_write(ctx: &Context, subcmd: &str) -> Settled<()> {
     check_grant_bool(
         ctx,
@@ -248,7 +218,6 @@ pub(crate) fn check_editor_write(ctx: &Context, subcmd: &str) -> Settled<()> {
     )
 }
 
-/// Check `editor.tui` capability is available.
 pub(crate) fn check_editor_tui(ctx: &Context) -> Settled<()> {
     check_grant_bool(
         ctx,
@@ -257,7 +226,6 @@ pub(crate) fn check_editor_tui(ctx: &Context) -> Settled<()> {
     )
 }
 
-/// Check `shell.chdir` capability is available.
 pub(crate) fn check_shell_chdir(ctx: &Context) -> Settled<()> {
     check_grant_bool(
         ctx,
@@ -266,12 +234,8 @@ pub(crate) fn check_shell_chdir(ctx: &Context) -> Settled<()> {
     )
 }
 
-/// Walk the capabilities stack; if any layer with a relevant policy
-/// votes `false`, return a denial error.  `test` returns
-/// `Some(allowed)` when the layer has an opinion, `None` to abstain.
-///
-/// Shared by the editor/shell bool gates; lives here because it's the
-/// reduction step those checks share.
+/// Deny if any layer votes `false`; `test` returns `None` to abstain, so
+/// silence permits.
 fn check_grant_bool(
     ctx: &Context,
     msg: impl Fn() -> String,

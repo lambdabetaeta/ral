@@ -1,29 +1,13 @@
 //! Path resolution for grant matching.
 //!
-//! Every grant-touching path obeys one operational rule, in this
-//! order, and each premise has its own sibling file:
-//!
-//! ```text
-//!   expand dyn p   ⇓  q     stage 1: ~ and xdg: at the head        (sigil)
-//!   lex   dyn q    ⇓  r     stage 2: cwd-anchor + ./.. normalise   (lex → ResolvedPath)
-//!   canon r        ⇓  c     stage 3: realpath, ancestor-walk fallback (canon)
-//!   match a c P             stage 4: alias-aware containment       (lex::path_within)
-//! ```
+//! Four stages, one sibling module each: sigil expansion of `~`/`xdg:` at
+//! the head (`sigil`), cwd-anchoring and `.`/`..` folding (`lex`),
+//! `realpath` with an ancestor-walk fallback (`canon`), and alias-aware
+//! containment (`lex::path_within`).
 //!
 //! Stage 2 mints a [`ResolvedPath`]; the grant side mints a
-//! [`NormalizedPrefix`] under the same kernel.  Both are single-
-//! constructor newtypes (see [`resolved`]), so canonicalisation and
-//! grant matching can only see a normalised path.
-//!
-//! [`tilde`] holds the syntactic shape consumed by stage 1 (and
-//! by the lexer) as well as [`home`] / [`home_from_env`] /
-//! [`home_from_env_or_dot`] for `$HOME` and [`user_name`] /
-//! [`user_name_from_env`] for `$USER` resolution; [`which`] is a
-//! sibling for `PATH` search.
-//!
-//! Most call sites want the most-used names without reaching
-//! into a child module — those are re-exported below.  The full
-//! API lives in the children, named by stage.
+//! [`NormalizedPrefix`] through the same folding kernel, so an access-side
+//! path and a grant-side prefix compare like-for-like.
 
 pub mod basedir;
 pub mod canon;
@@ -53,37 +37,22 @@ pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use which::{commands_on_path, file_exists_on_path, locate, resolve_in_path};
 
-/// Process working directory.
-///
-/// The one syscall behind the lint —
-/// `Shell::cwd` is the canonical accessor for shells; this helper is
-/// for the few shell-less callers (path resolver fallback, sandbox
-/// host snapshot, [`Resolver::resolve`] when no logical cwd is bound).
+/// Process working directory, for callers with no shell to ask; shells go
+/// through `Shell::cwd`, which honours a `within` override or a prior `cd`.
 #[allow(clippy::disallowed_methods)]
 pub fn process_cwd() -> Option<std::path::PathBuf> {
     std::env::current_dir().ok()
 }
 
-/// `/proc/self/fd/<raw>` as a `PathBuf`.
-///
-/// Linux-only: the magic
-/// procfs entry that names an open file descriptor by path, which
-/// the sandbox re-exec uses to pin the ral binary across the
-/// `execve` into the child.
-///
-/// The single caller is in `sandbox::reexec`; living here keeps the
-/// procfs literal in one place and out of the workspace-wide
-/// `disallowed_methods` lint for `PathBuf::from`.
+/// `/proc/self/fd/<raw>` as a `PathBuf`.  `sandbox::reexec` uses it to pin
+/// the running ral binary across the `execve` into the sandboxed child.
 #[cfg(target_os = "linux")]
-#[allow(clippy::disallowed_methods)]
 pub fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/proc/self/fd/{raw}"))
 }
 
-/// A static absolute path for `#[cfg(test)]` fixtures that need a
-/// `cwd: &Path` (`sigil::FreezeCtx`, mainly) but not any particular
-/// directory — shared so callers stop reaching for `Path::new`
-/// themselves just to build a placeholder.
+/// Placeholder absolute path for fixtures that need a `cwd: &Path`
+/// (`sigil::FreezeCtx`) but no particular directory.
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,

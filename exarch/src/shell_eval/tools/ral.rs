@@ -1,9 +1,6 @@
-//! `ral` — the one tool the provider is offered: evaluate ral source
-//! against the session's live shell.
-//!
-//! Runs synchronously on the dispatching thread.  Owns its own JSON
-//! parsing: a missing `cmd` or a non-object input each becomes an inline
-//! error block on the rail with no detour through the session.
+//! `ral` — the one tool the provider is offered: evaluate ral source against
+//! the session's live shell, synchronously on the dispatching thread.  Input
+//! that does not parse never reaches the session; it becomes an error block.
 
 use crate::agent::Agent;
 use crate::agent::event::ToolResult as SessionToolResult;
@@ -11,43 +8,27 @@ use crate::bus::{Emitter, Kind};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
-/// Stable identifier the model and the wire schema use to name this tool.
+/// The name on the wire; `Agent::invoke` recognises no other.
 pub(crate) const NAME: &str = "ral";
 
-/// One-paragraph description handed to the provider.
 const DESC: &str = "Run a ral shell command in the sandboxed working directory.";
 
-/// Parsed ral-tool input, split from `dispatch` so the parser stays
-/// trivially testable in isolation.
 #[cfg_attr(test, derive(Debug))]
 struct RalArgs {
     cmd: String,
-    /// Short, one-line summary of what this call does.  Shown to the
-    /// user on the rail; the full `cmd` is revealed when they open the
-    /// call.
+    /// The rail's collapsed label, with the full `cmd` behind it.
     description: String,
-    /// Wall-clock limit in seconds for this call.  Absent or `null` in
-    /// the input defaults to [`CALL_TIMEOUT_SECS`]; a caller raises it
-    /// for a command known to run long.
     timeout_secs: u64,
 }
 
-/// Default wall-clock bound on a single inline `ral` call, applied when
-/// the call omits `timeout_secs`.  It is the default, not a cap: a call
-/// may set `timeout_secs` higher for work known to run long, and there
-/// is no upper clamp.  Work you can overlap with other progress still
-/// belongs in a `spawn`ed block whose handle is polled and awaited
-/// across steps.
+/// Default wall bound on one call.  A default, not a cap: a call may raise it,
+/// and nothing clamps the value it names.
 const CALL_TIMEOUT_SECS: u64 = 60;
 
-/// Soft cap on `description` length.  The field is a one-line label
-/// for the user-facing rail, not a paragraph; an oversize input is
-/// truncated to this many characters with a trailing `...` rather than
-/// rejected, so a verbose call still succeeds.
+/// Character cap on `description`; oversize input truncates rather than rejects.
 const DESCRIPTION_MAX: usize = 60;
 
-/// Read the JSON object the model emitted into a [`RalArgs`], or a
-/// short reason string suitable for the rail's error block.
+/// Parse the model's JSON, or a reason short enough for the rail's error block.
 fn parse_args(input: &Value) -> Result<RalArgs, String> {
     let obj = input
         .as_object()
@@ -78,11 +59,8 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     } else {
         description
     };
-    // `timeout_secs` is optional. Inspect the raw value directly rather than
-    // a bare `as_u64` lookup: `as_u64` alone cannot tell absent (→ default)
-    // from a present-but-invalid value (→ reject). Absent or `null` takes the
-    // default; anything else must parse as a `u64` (so floats like `5.0`,
-    // strings, and negatives all reject) and be ≥1. No upper clamp.
+    // Absent or `null` takes the default, anything else must be a `u64`: a bare
+    // `as_u64` lookup could not tell those apart from present-but-junk.
     let timeout_secs = match obj.get("timeout_secs") {
         None | Some(Value::Null) => CALL_TIMEOUT_SECS,
         Some(v) => {
@@ -102,8 +80,6 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     })
 }
 
-/// JSON schema for `ral`'s input object.  Built once and cached in a
-/// `static`; cheap to call.
 fn schema() -> &'static Value {
     static S: OnceLock<Value> = OnceLock::new();
     S.get_or_init(|| {
@@ -131,36 +107,22 @@ fn schema() -> &'static Value {
     })
 }
 
-/// The wire-facing definition `provider.complete` advertises when this
-/// agent's tool is enabled — a plain data value, not a `dyn` trait object:
-/// there is exactly one tool, so no vtable or registry earns its keep.
+/// The definition `tool_defs` in `provider/request.rs` puts on the wire.
 pub(crate) fn wire_tool() -> genai::chat::Tool {
     genai::chat::Tool::new(NAME)
         .with_description(DESC)
         .with_schema(schema().clone())
 }
 
-/// The placeholder a malformed call passes for `display` when the JSON did
-/// not even parse into args — a sentinel the frontend reads to route such a
-/// call to an invisible boundary rather than render a stand-in token: there
-/// is nothing meaningful to show, only the error the model receives through
-/// the result body.  A call that *did* recover a real offending value (a bad
-/// cron string, say) passes that value instead, and it renders.
+/// Sentinel `cmd` for a call that did not parse.  `tui::app` renders no
+/// block for it — it exists only as the boundary its error result attaches to.
 pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
-/// Render the rail header and an error block for a malformed `ral` call,
-/// returning the [`SessionToolResult`] the dispatcher commits. `display` is
-/// the partial label the rail should show — typically the field that did
-/// parse, or [`INVALID_INPUT`] when nothing did.
-pub(crate) fn invalid_input(
-    id: String,
-    display: &str,
-    reason: &str,
-    emit: &Emitter,
-) -> SessionToolResult {
+/// Rail header and error block for a malformed call, and the result to commit.
+fn invalid_input(id: String, reason: &str, emit: &Emitter) -> SessionToolResult {
     emit.emit(Kind::ToolCall {
         tool: NAME,
-        cmd: display.to_string(),
+        cmd: INVALID_INPUT.to_string(),
         summary: None,
     });
     let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
@@ -168,9 +130,8 @@ pub(crate) fn invalid_input(
     SessionToolResult { id, content: msg }
 }
 
-/// Read `input`, render the rail header, run the call, and return its
-/// result.  Malformed input is reported by [`invalid_input`], so this
-/// always produces a result.
+/// Parse, announce on the rail, run.  Always yields a result: the provider
+/// protocol pairs one with every call, malformed or not.
 pub(crate) fn dispatch(
     id: String,
     input: &Value,
@@ -179,7 +140,7 @@ pub(crate) fn dispatch(
 ) -> SessionToolResult {
     let args = match parse_args(input) {
         Ok(a) => a,
-        Err(reason) => return invalid_input(id, INVALID_INPUT, &reason, emit),
+        Err(reason) => return invalid_input(id, &reason, emit),
     };
     emit.emit(Kind::ToolCall {
         tool: NAME,
@@ -256,7 +217,6 @@ mod tests {
         assert!(e.contains("`description`"));
     }
 
-    /// An absent `timeout_secs` takes the default bound.
     #[test]
     fn parse_timeout_defaults_when_absent() {
         let a = parse_args(&json!({
@@ -267,7 +227,7 @@ mod tests {
         assert_eq!(a.timeout_secs, CALL_TIMEOUT_SECS);
     }
 
-    /// An explicit positive integer is taken verbatim, with no upper clamp.
+    /// No upper clamp: an explicit bound is taken verbatim.
     #[test]
     fn parse_timeout_accepts_explicit() {
         let a = parse_args(&json!({
@@ -279,7 +239,6 @@ mod tests {
         assert_eq!(a.timeout_secs, 300);
     }
 
-    /// An explicit `null` is treated as absent and takes the default.
     #[test]
     fn parse_timeout_null_takes_default() {
         let a = parse_args(&json!({
@@ -291,7 +250,7 @@ mod tests {
         assert_eq!(a.timeout_secs, CALL_TIMEOUT_SECS);
     }
 
-    /// Zero parses as a `u64` but fails the ≥1 floor.
+    /// Zero parses as a `u64`, so the floor has to be a check of its own.
     #[test]
     fn parse_timeout_rejects_zero() {
         let e = parse_args(&json!({
@@ -304,7 +263,6 @@ mod tests {
         assert!(e.contains("≥1"));
     }
 
-    /// A negative number does not parse as a `u64`.
     #[test]
     fn parse_timeout_rejects_negative() {
         let e = parse_args(&json!({
@@ -317,8 +275,7 @@ mod tests {
         assert!(e.contains("positive integer"));
     }
 
-    /// A float — even one with an integral value like `5.0` — does not
-    /// parse as a `u64`.
+    /// Even an integral float like `5.0` is not a `u64` to serde.
     #[test]
     fn parse_timeout_rejects_float() {
         let e = parse_args(&json!({
@@ -331,7 +288,6 @@ mod tests {
         assert!(e.contains("positive integer"));
     }
 
-    /// A string does not parse as a `u64`.
     #[test]
     fn parse_timeout_rejects_string() {
         let e = parse_args(&json!({

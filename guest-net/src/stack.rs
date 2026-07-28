@@ -7,6 +7,7 @@
 //! aborted. Everything downstream — CONNECT head, policy, dialling,
 //! copying — is the worker's; this module never reads application data.
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,19 +64,15 @@ fn reap_now(socket_open: bool, worker_done: bool, since_fin: Option<Duration>) -
 
 const HANDSHAKE_TOO_LARGE: Refusal = Refusal {
     status: 431,
-    reason: "CONNECT head exceeded 8 KiB",
+    reason: Cow::Borrowed("CONNECT head exceeded 8 KiB"),
 };
 const HANDSHAKE_EOF: Refusal = Refusal {
     status: 400,
-    reason: "connection closed before a complete CONNECT head",
+    reason: Cow::Borrowed("connection closed before a complete CONNECT head"),
 };
 const HANDSHAKE_TIMEOUT: Refusal = Refusal {
     status: 408,
-    reason: "CONNECT head deadline exceeded",
-};
-const HOST_NOT_ADMITTED: Refusal = Refusal {
-    status: 403,
-    reason: "host not admitted by policy",
+    reason: Cow::Borrowed("CONNECT head deadline exceeded"),
 };
 
 /// Rung by the reader thread and every worker so the core thread's poll
@@ -471,14 +468,14 @@ fn rand_seed() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// Record the refusal, then write its HTTP status line — a courtesy to a
-/// curl running by hand, not part of the security argument.
-fn refuse(pipe: &mut ProxyPipe, egress: &Egress, host: &str, r: Refusal) {
+/// Record the refusal, then write its HTTP status line — the only path by
+/// which the reason reaches whoever asked.
+fn refuse(pipe: &mut ProxyPipe, egress: &Egress, host: &str, r: &Refusal) {
     let _ = egress.audit.record(Record::Tunnel {
         host,
         addr: None,
         allowed: false,
-        note: Some(r.reason),
+        note: Some(&r.reason),
         up: None,
         down: None,
     });
@@ -501,16 +498,16 @@ fn worker(
         match connect::decode(&buf[..len]) {
             Ok(Some(c)) => break c,
             Ok(None) => {}
-            Err(r) => return refuse(&mut pipe, egress, "", r),
+            Err(r) => return refuse(&mut pipe, egress, "", &r),
         }
         if len == buf.len() {
-            return refuse(&mut pipe, egress, "", HANDSHAKE_TOO_LARGE);
+            return refuse(&mut pipe, egress, "", &HANDSHAKE_TOO_LARGE);
         }
         match pipe.read_deadline(&mut buf[len..], deadline) {
-            Ok(0) => return refuse(&mut pipe, egress, "", HANDSHAKE_EOF),
+            Ok(0) => return refuse(&mut pipe, egress, "", &HANDSHAKE_EOF),
             Ok(n) => len += n,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                return refuse(&mut pipe, egress, "", HANDSHAKE_TIMEOUT);
+                return refuse(&mut pipe, egress, "", &HANDSHAKE_TIMEOUT);
             }
             Err(_) => return,
         }
@@ -518,12 +515,20 @@ fn worker(
 
     let host = connect.host.as_str().to_string();
     if !egress.policy.admits(&connect.host) {
-        return refuse(&mut pipe, egress, &host, HOST_NOT_ADMITTED);
+        return refuse(
+            &mut pipe,
+            egress,
+            &host,
+            &Refusal {
+                status: 403,
+                reason: Cow::Owned(exarch::net_policy::refusal(&host)),
+            },
+        );
     }
 
     let (origin, addr) = match vet::open(&connect.host, dialer, DIAL_TIMEOUT) {
         Ok(ok) => ok,
-        Err(r) => return refuse(&mut pipe, egress, &host, r),
+        Err(r) => return refuse(&mut pipe, egress, &host, &r),
     };
     let Ok(watch) = origin.try_clone() else {
         return;
@@ -603,6 +608,10 @@ mod tests {
     /// The guest cannot hold a tunnel slot by never closing its half.
     #[test]
     fn a_half_closed_connection_is_reaped_once_the_grace_expires() {
-        assert!(reap_now(true, true, Some(FIN_GRACE + Duration::from_secs(1))));
+        assert!(reap_now(
+            true,
+            true,
+            Some(FIN_GRACE + Duration::from_secs(1))
+        ));
     }
 }

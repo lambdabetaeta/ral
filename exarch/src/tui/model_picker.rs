@@ -1,12 +1,9 @@
-//! Model picker overlay orchestration — the `/model` command handler and its
-//! event loop.
+//! The `/model` overlay's orchestration.
 //!
-//! [`picker::Picker`] is the component half of the component/orchestration
-//! split [`super::login`] mirrors: a pure display+input state machine, not a
-//! generic widget reused elsewhere — this module is its one caller. It owns
-//! the credential store and [`ModelCatalog`], seeds and pumps the picker's
-//! model/serving-provider fetches, and turns a resolved [`picker::PickAction`]
-//! into a live [`Provider`] swap plus persisted [`state::State`].
+//! [`Picker`] is display and input only; this module, its one caller, owns the
+//! credential store, the [`ModelCatalog`], and the network seam, and turns a
+//! resolved [`picker::PickAction`] into a live [`Provider`] swap plus a saved
+//! [`state::State`]. [`super::login`] mirrors the split.
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -23,15 +20,11 @@ use super::picker::{self, Picker};
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 
 pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
-    // A shared reborrow: `pick_model` only reads the store (`/login`'s
-    // `add_oauth` is the one site that needs it mutably), so `ctx` stays
-    // whole for `apply_model_switch`'s later reborrow.
+    // A shared reborrow — only `/login`'s `add_oauth` needs the store mutably —
+    // so `ctx` stays whole for `apply_model_switch`.
     let store = &*ctx.store;
     let available = store.available();
-    // Each plan-backed provider's flavour, for the picker's labels: a ChatGPT
-    // login (the OAuth credential) reads as the ChatGPT plan, an otherwise-
-    // metered provider whose `ProviderId` declares a flat rate (opencode Go) as
-    // the generic subscription. A provider absent from the map is metered.
+    // The picker's plan flavours; a provider absent from the map reads as metered.
     let subscription = available
         .iter()
         .filter_map(|id| {
@@ -45,9 +38,8 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
             Some((id.clone(), kind))
         })
         .collect();
-    // Seed the tuning controls from the focused provider's live values, so the
-    // overlay opens showing the effort/temperature currently in force (a
-    // settled agent with no live handle falls back to the defaults).
+    // Open on the focused agent's live tuning; a settled one falls back to the
+    // defaults.
     let initial_tuning = ctx
         .agents
         .provider(tui.app.tabs.focused())
@@ -59,12 +51,8 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         &initial_tuning,
         crate::provider::pricing::caps_or_default,
     );
-    // Open every available provider's model listing: a provider already
-    // cached in the catalog seeds `Loaded` with no network touched; a miss
-    // seeds `Loading` and spawns its background fetch through the catalog's
-    // `ModelSource`, so the overlay opens instantly and the misses fill in as
-    // `drive_picker` pumps them. `Picker::new` already seeded every row
-    // `Loading`, so only the already-settled rows need forwarding here.
+    // `Picker::new` seeded every row `Loading`, so only the rows `Listing::open`
+    // settled from cache need forwarding; the misses land as `drive_picker` pumps.
     let listing = Listing::open(available, ctx.catalog);
     for (id, state) in listing.states() {
         match state {
@@ -85,9 +73,8 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     }
 }
 
-/// Poll keys and background-fetch results until the picker resolves.  Returns
-/// the chosen `(provider, model, tuning, route)`, or `None` on cancel. The
-/// `route` is the chosen `OpenRouter` serving-provider slug (`None` for auto).
+/// Poll keys and landed fetches until the picker resolves; `None` on cancel.
+/// The `route` is the `OpenRouter` serving-provider slug, `None` for auto.
 fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,
@@ -99,23 +86,16 @@ fn drive_picker(
     provider::Tuning,
     Option<String>,
 )> {
-    // The serving-provider fetch is intent-driven and spawned from inside the
-    // loop, so this pump lives for the loop's whole duration (unlike
-    // `listing`, whose fetches are all kicked off before the loop by
-    // `pick_model`).
+    // Spawned from inside the loop, unlike `listing`, whose fetches are all away
+    // before it.
     let mut endpoints: Fetches<String, Vec<ProviderEndpoint>> = Fetches::new();
     loop {
-        // Fold any landed model-list results into the picker; `Listing::pump`
-        // itself records each success into the catalog, on this thread, so
-        // the disk write stays single-threaded.
+        // The picker's copy is for render; `listing` stays authoritative.
         for id in listing.pump(catalog) {
             if let (Some(state), Some(p)) = (listing.state(&id), tui.app.picker_mut()) {
-                // The picker keeps its own render copy; `listing` holds the
-                // authoritative one.
                 p.set_models(&id, state.clone());
             }
         }
-        // Fold any landed serving-provider results the same way.
         for (model, result) in endpoints.landed() {
             let state = match result {
                 Ok(list) => {
@@ -128,10 +108,8 @@ fn drive_picker(
                 p.set_endpoints(&model, state);
             }
         }
-        // When the provider control is focused on an OpenRouter model whose
-        // serving providers we have not fetched, seed it from the catalog memo
-        // or spawn a background fetch. Seeding the state first dedups: the next
-        // poll no longer reports the model as needing a fetch.
+        // Seeding the state is also the dedup: the next poll no longer reports
+        // this model as needing a fetch.
         let needed = tui
             .app
             .picker_mut()
@@ -177,18 +155,11 @@ fn drive_picker(
     }
 }
 
-/// Rebuild the provider for the chosen `kind` + `model` over the same
-/// transcript and swap it into the **focused agent's** own provider handle
-/// (its next turn reads it), persist the selection to the project state dir,
-/// and update the live status bar. A persistence failure is noted but does not
-/// undo the in-memory switch.  A focused agent that settled between the picker
-/// opening and the selection has no handle to swap, so the switch is dropped.
-///
-/// A model switch is a *real* operational event, so it goes through `emit` —
-/// the UI-thread recording emitter carrying the trunk's transcript — as a
-/// [`Kind::SystemNote`].  It records in the trace and draws through the normal
-/// bus path, like a worker-raised note; the UI never fabricates an `Event` for
-/// it.  Its own failures, by contrast, are view chrome ([`App::push_error`]).
+/// Rebuild the provider for `model` and swap it into the *focused* agent's
+/// handle, which its next turn reads; a failed persist leaves that switch
+/// standing. The note rides `emit` as a [`Kind::SystemNote`], so a real
+/// operational event records in the trace and draws through the bus like a
+/// worker's; its own failures are view chrome.
 fn apply_model_switch(
     tui: &mut Tui,
     ctx: &CommandCtx<'_>,
@@ -200,24 +171,22 @@ fn apply_model_switch(
     let store = &*ctx.store;
     let info = ctx.info;
     let emit = ctx.emit;
-    let id = tui.app.tabs.root();
+    // Errors land where the user acted, which is also the tab being switched.
+    let focused = tui.app.tabs.focused();
     let Some(cred) = store.get(provider_id).cloned() else {
         tui.app.push_error(
-            id,
+            focused,
             &format!("{} has no resolved credential", provider_id.label()),
         );
         return;
     };
-    // Swap the *focused* agent's handle; if it has settled, there is nothing to
-    // swap and the selection is dropped (the user can reopen on a live tab).
-    let focused = tui.app.tabs.focused();
+    // A tab that settled while the picker was open has no handle to swap.
     let Some(provider) = ctx.agents.provider(focused) else {
         tui.app
-            .push_error(id, "the focused agent is no longer live");
+            .push_error(focused, "the focused agent is no longer live");
         return;
     };
-    // Capture the current provider's max_tokens_override before we swap,
-    // so the new provider carries the same user override.
+    // The token override is no part of the selection, so it rides across by hand.
     let current_override = provider.current().max_tokens_override();
     let engine = ctx.engine.clone();
     let new_provider = Arc::new(Provider::build(
@@ -238,7 +207,7 @@ fn apply_model_switch(
         &state::State::new(provider_id, model, tuning, route.map(String::as_str)),
     ) {
         tui.app
-            .push_error(id, &format!("could not persist selection: {e}"));
+            .push_error(focused, &format!("could not persist selection: {e}"));
     }
     emit.emit(Kind::SystemNote(format!(
         "[Switched to {label} {model}{}]",
@@ -246,9 +215,8 @@ fn apply_model_switch(
     )));
 }
 
-/// A human-readable suffix for the switch note describing any non-default
-/// tuning and route, e.g. ` · effort high · temp 0.7 · top_p 0.9 · via
-/// deepinfra`. Empty when every knob is auto and no route is pinned.
+/// The switch note's ` · effort high · temp 0.7 · via deepinfra` tail; empty
+/// when every knob is auto and no route is pinned.
 fn tuning_suffix(tuning: &provider::Tuning, route: Option<&str>) -> String {
     let mut parts = String::new();
     if let Some(effort) = &tuning.effort {

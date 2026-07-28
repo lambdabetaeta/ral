@@ -1,18 +1,13 @@
-//! The agent- and schedule-family harness builtins: `agent`, `agents`,
-//! `message`, `agent-cancel`, `schedule`, `schedules`, `unschedule`,
-//! `reply` — the model's action surface onto the
-//! `` `agent-start ``/`` `agent-list ``/`` `agent-cancel ``/`` `message ``/
-//! `` `schedule ``/`` `schedule-list ``/`` `unschedule ``/`` `reply ``
-//! enquiry classes [`crate::fleet::desk::ExarchDesk`] answers.
+//! The harness builtins — `agent`, `agents`, `message`, `agent-cancel`,
+//! `schedule`, `schedules`, `unschedule`, `reply` — with the type schemes
+//! that gate them.
 //!
-//! Each body validates its own arguments at the door — arity, the name
-//! contract, the six-label grant vocabulary, the trigger/label
-//! vocabularies — before it ever forks a session or puts an enquiry, so a
-//! malformed call never reaches the host. The spawning body (`agent`) forks
-//! this shell into the run's nursery
-//! ([`ral_core::Shell::fork_into_nursery`]) and enquires with the adopted
-//! session's id; every other body enquires directly. The desk answers class
-//! by class in `crate::fleet::desk`; this module only ever crosses that one seam.
+//! Each body validates at the door before it enquires, so a malformed call
+//! never reaches the host. `agent` forks this shell into the run's nursery
+//! ([`ral_core::Shell::fork_into_nursery`]) and enquires with the parked
+//! fork's id: the reentrancy law bars a desk handler from holding
+//! `&mut Shell` to fork one itself. [`crate::fleet::desk::ExarchDesk`]
+//! answers every class on the other side.
 
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::builtins::util::check_arity;
@@ -25,9 +20,8 @@ use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
-/// The six bake-in permission bases a spawn's `grant` argument may name —
-/// see `crate::policy::base::resolve_base`, whose profiles these mirror
-/// exactly.
+/// The bases a spawn's `grant` may name — exactly those
+/// `crate::policy::base::resolve_base` resolves, and kept in step by hand.
 const PERMISSION_LABELS: [&str; 6] = [
     "confined",
     "minimal",
@@ -37,12 +31,8 @@ const PERMISSION_LABELS: [&str; 6] = [
     "dangerous",
 ];
 
-/// True for names that fit the tab-bar contract — non-empty, ≤24 chars,
-/// ASCII alphanumeric plus `-`/`_`. Spaces and punctuation are excluded
-/// because the tab bar lays them out token-by-token. The `agent` builtin's
-/// `name` argument is mandatory — it identifies the child everywhere the
-/// model can see it, not just on the tab bar, so there is no default to
-/// fall back to; a door that can refuse simply refuses.
+/// The tab-bar contract: non-empty, ≤24 chars, ASCII alphanumeric plus
+/// `-`/`_`, since the tab bar lays a name out as a single token.
 pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 24
@@ -50,11 +40,9 @@ pub(crate) fn valid_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Decode an `agent` spawn's `type` argument into its bare tag, or a door
-/// error naming both legal memory modes. The argument's own type is
-/// row-open (see [`scheme_agent`]'s doc for why), so this runtime check is
-/// what actually closes the rule — the same shape [`permission_label`]
-/// closes for `grant`.
+/// Decode a spawn's `type` into its bare tag. [`scheme_agent`] leaves that
+/// row open, so the enumeration is closed here, where the error can name
+/// both memory modes.
 fn agent_type_label(v: &Value) -> Settled<String> {
     if let Value::Variant {
         label,
@@ -69,10 +57,8 @@ fn agent_type_label(v: &Value) -> Settled<String> {
     )))
 }
 
-/// Decode a `grant` argument into its bare tag, or a door error naming all
-/// six legal labels. The argument's own type is row-open (see
-/// [`scheme_agent`]'s doc for why), so this runtime check is what actually
-/// closes the rule.
+/// Decode a `grant` into its bare tag, closing the row [`scheme_agent`]
+/// leaves open so the error can enumerate every legal label.
 fn permission_label(v: &Value) -> Settled<String> {
     if let Value::Variant {
         label,
@@ -87,13 +73,9 @@ fn permission_label(v: &Value) -> Settled<String> {
     )))
 }
 
-/// Decode a `schedule` spec's `trigger` field — `` `cron '<expr>' `` or
-/// `` `after '<dur>' `` — re-running the real parsers
+/// Decode a `schedule` spec's `trigger`, re-running the real parsers
 /// ([`CronSchedule::parse`]/[`parse_duration`]) engine-side so a malformed
-/// expression or duration errors, carrying the parser's own message, before
-/// any enquiry crosses. The field's variant row is open (see
-/// [`scheme_schedule`]'s doc for why), so this runtime check is what
-/// actually closes the rule.
+/// expression carries their own message home before any enquiry crosses.
 fn schedule_trigger(v: &Value) -> Settled<FOValue> {
     let Value::Variant {
         label,
@@ -135,11 +117,8 @@ fn schedule_trigger(v: &Value) -> Settled<FOValue> {
     }
 }
 
-/// Decode a `schedule` spec's `label` field — `` `some '<name>' `` or
-/// `` `none `` — into the [`FOValue`] the desk expects, or a door error
-/// naming both legal shapes. The field's variant row is open, for the
-/// same reason [`schedule_trigger`] and `permission_label` hold theirs
-/// open.
+/// Decode a `schedule` spec's `label` — `` `some '<name>' `` or `` `none ``
+/// — into the [`FOValue`] the desk expects.
 fn schedule_label(v: &Value) -> Settled<FOValue> {
     match v {
         Value::Variant {
@@ -172,9 +151,7 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
     }
 }
 
-/// Decode a spawn enquiry's `` `started `` receipt into the record the
-/// builtin returns, or a didactic error naming the shape violation or the
-/// refusal — the builtin-body half of [`builtin_agent`]'s spawn.
+/// Unwrap the `` `started `` receipt `agent-start` answers with.
 fn spawn_receipt(answer: FOValue) -> Settled<Value> {
     let FOValue::Variant {
         label,
@@ -191,16 +168,13 @@ fn spawn_receipt(answer: FOValue) -> Settled<Value> {
     Ok(Value::from(*payload))
 }
 
-/// `agent [prompt: …, name: …, type: …, grant: …, search: …]` — validate the
-/// door, fork this shell into the run's nursery, and enquire
-/// `` `agent-start `` with the adopted session's id — the builtin-body half
-/// of a spawn, the desk's own launch spine
-/// ([`crate::fleet::desk::ExarchDesk::launch`]) the other half. The argument
-/// arrives as a [`Value::Map`] — the closed record row [`scheme_agent`]
-/// mints guarantees the five fields statically — but the `else` arms below
-/// stay didactic anyway, matching [`builtin_schedule`]'s own style: a
-/// defensive door costs nothing and never has to trust the type checker
-/// alone.
+/// `agent [prompt: …, name: …, type: …, grant: …, search: …]` — validate,
+/// fork this shell into the run's nursery, enquire `` `agent-start `` with
+/// the parked fork's id; the desk's `launch` is the other half.
+///
+/// [`scheme_agent`]'s closed row already guarantees the five fields, so the
+/// `else` arms below are unreachable through the type checker; they stay
+/// didactic rather than trust it alone.
 fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent")?;
     let Value::Map(spec) = &args[0] else {
@@ -254,9 +228,9 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     let prompt = prompt.to_string();
 
     let session = shell.fork_into_nursery(mooring)?;
-    // A NurseryId is a small monotonic per-run counter; `unwrap_or` never
-    // actually saturates in practice, but keeps this door total without an
-    // `as` cast's silent wraparound.
+    // `Nursery::park` mints ids from a monotonic per-run counter, so this
+    // never saturates; `unwrap_or` keeps the door total without an `as`
+    // cast's silent wraparound.
     let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
     let answer = shell.enquire(
         mooring,
@@ -283,8 +257,7 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     spawn_receipt(answer)
 }
 
-/// `agents` — thin wrapper around the `` `agent-list `` enquiry: silent, no
-/// chrome; the answer's listing is the return value directly.
+/// `agents` — the `` `agent-list `` enquiry's listing, returned as is.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body"
@@ -305,9 +278,8 @@ fn builtin_agents(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `message <name> <text>` — passes `name` through as the recipient's
-/// identity, then enquires `` `message ``; resolution, descendant-scoping,
-/// and delivery errors are the desk's.
+/// `message <name> <text>` — enquires `` `message ``; name resolution,
+/// descendant-scoping, and delivery errors all belong to the desk.
 fn builtin_message(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "message")?;
     let name = args[0].to_string();
@@ -327,9 +299,8 @@ fn builtin_message(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
     Ok(Value::Unit)
 }
 
-/// `agent-cancel <name>` — passes `name` through as the target's identity,
-/// then enquires `` `agent-cancel ``; resolution and descendant-scoping are
-/// the desk's.
+/// `agent-cancel <name>` — enquires `` `agent-cancel ``; resolution and
+/// descendant-scoping are the desk's.
 fn builtin_agent_cancel(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "agent-cancel")?;
     let name = args[0].to_string();
@@ -345,9 +316,7 @@ fn builtin_agent_cancel(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     Ok(Value::Unit)
 }
 
-/// Decode the `schedule` enquiry's receipt — a `` `[label: Str, next-s: Int] ``
-/// record — into the value the builtin returns, or a didactic error naming
-/// the shape violation, mirroring [`spawn_receipt`]'s own style.
+/// Check the `` `schedule `` receipt is the record shape before handing it on.
 fn schedule_receipt(answer: FOValue) -> Settled<Value> {
     let FOValue::Map { .. } = answer else {
         return Err(sig(
@@ -357,11 +326,10 @@ fn schedule_receipt(answer: FOValue) -> Settled<Value> {
     Ok(Value::from(answer))
 }
 
-/// `schedule <spec>` — decodes the spec record's `trigger`/`label` fields
-/// through [`schedule_trigger`]/[`schedule_label`] (re-running the real
-/// parsers so a malformed expression fails here, not at the desk), then
-/// enquires `` `schedule ``. The grant refusal and the label-uniqueness /
-/// reserved-namespace refusals are the desk's/registry's.
+/// `schedule <spec>` — decodes through
+/// [`schedule_trigger`]/[`schedule_label`], then enquires `` `schedule ``.
+/// The self-wakeup grant, label uniqueness, and the reserved `sched-<n>`
+/// namespace are refusals the desk and the schedule registry own.
 fn builtin_schedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "schedule")?;
     let Value::Map(spec) = &args[0] else {
@@ -401,8 +369,8 @@ fn builtin_schedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Set
     schedule_receipt(answer)
 }
 
-/// `schedules` — thin wrapper around the `` `schedule-list `` enquiry:
-/// silent, no chrome; the grant refusal is the desk's.
+/// `schedules` — the `` `schedule-list `` enquiry's listing; the
+/// self-wakeup grant refusal is the desk's.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body"
@@ -423,9 +391,8 @@ fn builtin_schedules(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `unschedule <label>` — passes `label` through as the target schedule's
-/// identity, then enquires `` `unschedule ``; resolution (including the
-/// no-op case) and the grant refusal are the desk's/registry's.
+/// `unschedule <label>` — enquires `` `unschedule ``; resolution (the
+/// unknown label is a no-op) and the grant refusal are the desk's.
 fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "unschedule")?;
     let label = args[0].to_string();
@@ -441,9 +408,9 @@ fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     Ok(Value::Unit)
 }
 
-/// `reply <value>` — the first-orderness door runs [`FOValue::try_from`]
-/// before any enquiry crosses, so a violation fails only this call,
-/// engine-side; the non-returning refusal is the desk's.
+/// `reply <value>` — `FOValue::try_from` runs before any enquiry crosses,
+/// so a non-first-order value fails this call alone and leaves the session
+/// running; the refusal for a non-returning agent is the desk's.
 fn builtin_reply(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "reply")?;
     let payload = FOValue::try_from(&args[0]).map_err(|_| {
@@ -464,36 +431,22 @@ fn builtin_reply(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     Ok(Value::Unit)
 }
 
-/// The `[name: Str, log-dir: Str]` receipt the `agent` builtin answers with.
 fn spawn_receipt_ty() -> Ty {
     closed_record(&[("name", Ty::String), ("log-dir", Ty::String)])
 }
 
 /// `agent :: ∀ρ1 ρ2. [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool] → F [name: Str, log-dir: Str]`
 ///
-/// The record row is closed: a record literal with literal keys infers an
-/// exact row (`infer_map_val` builds on `Row::Empty`), so unifying it
-/// against this closed row makes a missing or misspelled field a static
-/// error naming that field — the same rationale [`scheme_schedule`] gives
-/// for its own closed record row. `search` joins `prompt`/`name`/`type`/`grant`
-/// as a fifth required field, exactly `grant`'s own character: a spawn
-/// states its child's powers rather than inheriting them silently, and
-/// whether the child may reach the provider's built-in web search is one
-/// more such power.
+/// The record row is closed because a record literal with literal keys
+/// infers an exact one (`infer_map_val` builds on `Row::Empty`), so a
+/// missing or misspelled field is a static error naming it.
 ///
-/// The two variant rows *inside* the record — `type` and `grant` — stay
-/// open: a literal tag
-/// infers its *own* open row (`` `bogus `` infers `` [`bogus: Unit | ρ] ``,
-/// `typecheck::infer`'s doc on `Val::Variant`), so unifying it against a
-/// *closed* row here would make an unknown label a static type error —
-/// sound, but the wrong failure mode: it would never reach
-/// [`agent_type_label`]/[`permission_label`], so the model would see a bare
-/// row-mismatch diagnostic instead of the legal labels enumerated. The open
-/// row defers the whole check to those runtime doors, which is where
-/// "closed rule, named labels" actually lives for these two arguments — the
-/// same door [`valid_name`] already is for the name contract. `search` has
-/// only two states, not an enumeration, so `Ty::Bool` is the right type for
-/// it outright — no runtime door of its own to defer to.
+/// The `type` and `grant` rows *inside* stay open, because a literal tag
+/// infers its own open row: closing them would make `` `bogus `` a bare
+/// row-mismatch diagnostic that never reaches
+/// [`agent_type_label`]/[`permission_label`], which enumerate the legal
+/// labels. `search` is two-state rather than an enumeration, so `Ty::Bool`
+/// closes it outright.
 fn scheme_agent(u: &mut Unifier) -> Scheme {
     let type_row = u.fresh_row_var();
     let grant_row = u.fresh_row_var();
@@ -543,8 +496,6 @@ fn scheme_agent_cancel(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
 }
 
-/// The `[label: Str, trigger: Str, next-s: Int, fires: Int]` listing row
-/// `schedules` answers with.
 fn schedule_row_ty() -> Ty {
     closed_record(&[
         ("label", Ty::String),
@@ -554,26 +505,15 @@ fn schedule_row_ty() -> Ty {
     ])
 }
 
-/// The `[label: Str, next-s: Int]` receipt the `schedule` builtin answers
-/// with.
 fn schedule_receipt_ty() -> Ty {
     closed_record(&[("label", Ty::String), ("next-s", Ty::Int)])
 }
 
 /// `schedule :: ∀ρ1 ρ2. [trigger: Variant ρ1, label: Variant ρ2, prompt: Str] → F [label: Str, next-s: Int]`
 ///
-/// The record row is closed: a record literal with literal keys infers an
-/// exact row (`infer_map_val` builds on `Row::Empty`), so unifying it
-/// against this closed row makes a missing or misspelled field a static
-/// error naming that field — the accurate diagnostic a closed *variant* row
-/// could not give ([`scheme_agent`]'s doc), because a literal tag infers
-/// an open row where a record literal infers a closed one.
-///
-/// The two variant rows *inside* the record stay open, for exactly the
-/// closed-variant reason: an unknown `` `bogus `` trigger or label must
-/// reach the runtime doors [`schedule_trigger`]/[`schedule_label`], which
-/// error naming the legal labels, rather than dying as a generic
-/// row-unification mismatch.
+/// Closed record row, open variant rows within it, for the reason
+/// [`scheme_agent`] gives: an unknown trigger or label must reach
+/// [`schedule_trigger`]/[`schedule_label`], which name the legal shapes.
 fn scheme_schedule(u: &mut Unifier) -> Scheme {
     let trigger_row = u.fresh_row_var();
     let label_row = u.fresh_row_var();
@@ -607,10 +547,8 @@ fn scheme_unschedule(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
 }
 
-/// `reply :: ∀α. α → F Unit` — fully polymorphic in its argument, exactly
-/// the shape `service-handle`'s own `∀α` scheme mints
-/// (`builtins.rs`'s `scheme_service_handle`); first-orderness is a
-/// runtime door check ([`builtin_reply`]), not a static constraint on `α`.
+/// `reply :: ∀α. α → F Unit` — first-orderness is [`builtin_reply`]'s
+/// runtime door, not a static constraint on `α`.
 fn scheme_reply(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
     scheme(&[av], &[], &[], thunk(fun(Ty::Var(av), pure(Ty::Unit))))
@@ -674,6 +612,7 @@ pub static HARNESS_BUILTINS: &[BuiltinEntry] = &[
 )]
 mod tests {
     use super::*;
+    use crate::agent::testkit::ral_call;
 
     #[test]
     fn valid_name_boundaries() {
@@ -717,8 +656,7 @@ mod tests {
         }
     }
 
-    /// A tab-carrying payload on a grant variant is not a bare tag —
-    /// refused just like an unknown label, never silently truncated.
+    /// A payload-carrying tag is refused, never truncated to its label.
     #[test]
     fn permission_label_rejects_a_variant_carrying_a_payload() {
         let v = Value::Variant {
@@ -728,8 +666,8 @@ mod tests {
         assert!(permission_label(&v).is_err());
     }
 
-    /// A unique scratch directory per test, mirroring `tests/agent_deliberate.rs`'s
-    /// own `tmp` helper.
+    /// A scratch path unique per test and per process, so concurrent runs
+    /// never share a session log.
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p =
             std::env::temp_dir().join(format!("exarch-harness-test-{}-{tag}", std::process::id()));
@@ -737,10 +675,8 @@ mod tests {
         p
     }
 
-    /// An unknown `grant` label errors engine-side, naming all six legal
-    /// bases, before any enquiry crosses — the door validates `name`,
-    /// `type`, and `grant` before `fork_into_nursery`/`enquire` ever run, so
-    /// a malformed call never registers a child.
+    /// The door validates `name`, `type`, and `grant` before
+    /// `fork_into_nursery`/`enquire` ever run, so no child is registered.
     #[test]
     fn unknown_grant_label_errors_before_any_enquiry_crosses() {
         let dir = tmp("unknown-grant");
@@ -766,8 +702,6 @@ mod tests {
         );
     }
 
-    /// An unknown `type` tag errors engine-side, naming both legal memory
-    /// modes, before any enquiry crosses.
     #[test]
     fn unknown_type_tag_errors_before_any_enquiry_crosses() {
         let dir = tmp("unknown-type");
@@ -792,8 +726,6 @@ mod tests {
         );
     }
 
-    /// An invalid name errors engine-side, naming the tab-bar contract,
-    /// before any enquiry crosses.
     #[test]
     fn invalid_name_errors_before_any_enquiry_crosses() {
         let dir = tmp("invalid-name");
@@ -813,11 +745,8 @@ mod tests {
         );
     }
 
-    /// A spec record missing a required field is a *static* error naming
-    /// that field: the record literal infers a closed row, and unifying it
-    /// against `scheme_agent`'s closed record row reports exactly which
-    /// label is absent — mirroring `missing_spec_field_errors_statically_naming_the_field`
-    /// in the schedule family below.
+    /// Static, not a door error: `scheme_agent`'s closed record row reports
+    /// which label is absent.
     #[test]
     fn missing_agent_field_errors_statically_naming_the_field() {
         let dir = tmp("missing-agent-field");
@@ -841,18 +770,10 @@ mod tests {
         );
     }
 
-    /// The full stack, end to end: a scripted provider issues a `ral` tool
-    /// call whose script is
-    /// `` agent [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false] ``
-    /// — real source, parsed and type-checked, crossing the desk through a
-    /// real nursery fork — and the receipt record is the run's value,
-    /// while the child's own reply later settles into the parent's inbox.
-    ///
-    /// Drives `run_shell` directly rather than `Agent::deliberate`'s provider
-    /// loop: the spawned child inherits the parent's *own* `Arc<Provider>`
-    /// (`agent-start`'s `ProviderHandle::new(services.provider.current())`),
-    /// so a script consumed by both a driven parent exchange and its spawned
-    /// child races unpredictably over which one gets which stage.
+    /// Drives `run_shell` rather than `Agent::deliberate`'s provider loop:
+    /// the spawn seeds the child's handle from the parent's *own*
+    /// `Arc<Provider>`, so one script consumed by both a driven parent
+    /// exchange and its child races over which gets which stage.
     #[test]
     fn agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox() {
         let dir = tmp("full-stack-round-trip");
@@ -908,14 +829,11 @@ mod tests {
 
     // ── schedule family door tests ───────────────────────────────────────
     //
-    // In a record literal the fields are comma-delimited, so a nullary
-    // `` `none `` label can never absorb its neighbour as a payload
-    // (`Token::Comma` is a payload terminator, `at_tag_payload_end` in
-    // `core/src/syntax/parser.rs`) — the very reason `schedule` takes one
-    // spec record rather than three positional arguments.
+    // Tag payloads are greedy, but `at_tag_payload_end` in
+    // `core/src/syntax/parser.rs` stops one at a comma — so inside a record
+    // literal a nullary `` `none `` cannot swallow its neighbour. That is
+    // why `schedule` takes one spec record, not three positional arguments.
 
-    /// A malformed cron expression errors engine-side, carrying the
-    /// parser's own message, before any enquiry crosses.
     #[test]
     fn bad_cron_expr_errors_before_any_enquiry_crosses() {
         let dir = tmp("bad-cron-expr");
@@ -939,8 +857,6 @@ mod tests {
         );
     }
 
-    /// A malformed `after` duration errors engine-side, carrying the
-    /// parser's own message, before any enquiry crosses.
     #[test]
     fn bad_duration_errors_before_any_enquiry_crosses() {
         let dir = tmp("bad-duration");
@@ -964,8 +880,6 @@ mod tests {
         );
     }
 
-    /// A label that is neither `` `some `` nor `` `none `` errors
-    /// engine-side, naming both legal shapes, before any enquiry crosses.
     #[test]
     fn label_neither_some_nor_none_errors_before_any_enquiry_crosses() {
         let dir = tmp("bad-label");
@@ -986,8 +900,6 @@ mod tests {
         );
     }
 
-    /// A trigger that is neither `` `cron `` nor `` `after `` errors
-    /// engine-side, naming both legal shapes, before any enquiry crosses.
     #[test]
     fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
         let dir = tmp("bad-trigger");
@@ -1008,10 +920,8 @@ mod tests {
         );
     }
 
-    /// A spec record missing a required field is a *static* error naming
-    /// that field: the record literal infers a closed row, and unifying it
-    /// against `scheme_schedule`'s closed record row reports exactly which
-    /// label is absent.
+    /// Static, not a door error: `scheme_schedule`'s closed record row
+    /// reports which label is absent.
     #[test]
     fn missing_spec_field_errors_statically_naming_the_field() {
         let dir = tmp("missing-spec-field");
@@ -1035,9 +945,8 @@ mod tests {
         );
     }
 
-    /// A spec record carrying an unknown extra field is likewise a static
-    /// error naming the surplus label — the closed record row admits
-    /// exactly trigger/label/prompt.
+    /// The same closed row in the other direction: it admits exactly
+    /// trigger/label/prompt.
     #[test]
     fn unknown_extra_spec_field_errors_statically_naming_the_field() {
         let dir = tmp("extra-spec-field");
@@ -1061,15 +970,8 @@ mod tests {
         );
     }
 
-    /// The full stack, end to end: `` schedule [trigger: `after '1s',
-    /// label: `none, prompt: #'wake'#] `` — real source, parsed and
-    /// type-checked, crossing the desk — answers a receipt record naming
-    /// the resolved `sched-{n}` default label and the seconds to first
-    /// fire, and once it fires the marked wakeup lands in the inbox as a
-    /// [`crate::bus::Item::Wakeup`]. Mirrors `crate::fleet::schedule`'s own
-    /// `after_fires_once_then_is_removed` for how to wait for the fire — a
-    /// real second, since `parse_duration`'s smallest unit is whole
-    /// seconds.
+    /// The wait is generous because the fire really is a wall-clock second
+    /// away: `parse_duration`'s smallest unit is whole seconds.
     #[test]
     fn schedule_full_stack_round_trip_answers_receipt_and_fires_into_inbox() {
         let dir = tmp("schedule-full-stack");
@@ -1129,9 +1031,6 @@ mod tests {
         }
     }
 
-    /// `` unschedule <label> `` full stack: schedule one with an explicit
-    /// label, then remove it by that same label — real source, crossing
-    /// the desk and the registry — and confirm nothing live remains.
     #[test]
     fn unschedule_full_stack_removes_by_label() {
         let dir = tmp("unschedule-full-stack");
@@ -1171,28 +1070,11 @@ mod tests {
 
     // ── `reply` ───────────────────────────────────────────────────────────
 
-    /// A `ral` tool call carrying a real script as its `cmd` — the shape a
-    /// scripted child's own exchange issues, mirroring `agent.rs`'s private
-    /// helper of the same name (this test module has no access to it).
-    fn ral_call(id: &str, cmd: &str) -> genai::chat::ToolCall {
-        genai::chat::ToolCall {
-            call_id: id.into(),
-            fn_name: "ral".into(),
-            fn_arguments: serde_json::json!({
-                "cmd": cmd,
-                "description": "test command",
-            }),
-            thought_signatures: None,
-        }
-    }
-
-    /// The `reply` builtin's full stack, end to end: a spawned child's own
-    /// scripted exchange runs `` reply [files: $found] `` — real source, parsed
-    /// and type-checked, crossing the desk through a real enquiry — and the
-    /// structured record it built reaches the parent's inbox, not a
-    /// flattened string. Substitutes the child's own script for the
-    /// `reply` *tool* call `agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
-    /// uses, for the same non-driven-parent reason that test documents.
+    /// The record must reach the parent's inbox structured, not flattened
+    /// to a string. The child's script does the replying, for the
+    /// undriven-parent reason
+    /// `agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
+    /// gives.
     #[test]
     fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
         let dir = tmp("reply-full-stack-round-trip");
@@ -1248,12 +1130,8 @@ mod tests {
         }
     }
 
-    /// A non-first-order `reply` argument — a bare Block, which no ral
-    /// value the model can serialise across the host seam ever is — errors
-    /// engine-side, naming the first-order rule, before any enquiry
-    /// crosses. The refusal is an ordinary call error, not a termination:
-    /// the session stays usable and a later, well-formed `reply` succeeds
-    /// normally.
+    /// The refusal is an ordinary call error, not a termination: a later,
+    /// well-formed `reply` still succeeds.
     #[test]
     fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
         let dir = tmp("reply-non-first-order");
@@ -1276,8 +1154,6 @@ mod tests {
         );
     }
 
-    /// A double `reply` within one exchange is last-wins: the second call's
-    /// value is what the exchange settles `Replied` with.
     #[test]
     fn double_reply_in_one_exchange_is_last_wins() {
         let dir = tmp("double-reply-last-wins");

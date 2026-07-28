@@ -1,12 +1,9 @@
+//! The shell-state builtins: `alias`, `unalias`, and `cd`.
+
 use crate::types::{Settled, Shell, Value, sig};
 
-/// `alias NAME BODY` — install a per-name handler frame for `NAME`
-/// that runs `BODY` when the name is invoked.  Replaces any prior alias
-/// for the same name; never affects `within` frames.  Returns `Unit`.
-///
-/// Same write side as the rc-config / plugin-loader alias installers —
-/// the interactive form here and the data-driven loaders both call
-/// [`Shell::install_alias`].
+/// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],
+/// which the rc `aliases:` map and the plugin loader also come in through.
 pub(super) fn builtin_alias(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let (name, thunk) = match args {
         [
@@ -36,8 +33,7 @@ pub(super) fn builtin_alias(args: &[Value], shell: &mut Shell) -> Settled<Value>
     Ok(Value::Unit)
 }
 
-/// `unalias NAME` — remove a previously installed alias.  Errors if no
-/// alias for `NAME` is installed; never touches `within` frames.
+/// `unalias NAME` — remove the alias for `NAME`, erroring if none is installed.
 pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let name = match args {
         [Value::String(s)] => s.as_str(),
@@ -60,16 +56,10 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
     Ok(Value::Unit)
 }
 
-/// `cd [path]` — change the shell's working directory.
+/// `cd [path]` — move the shell's logical cwd, never the OS process cwd.
 ///
-/// Gated by the `shell.chdir` capability; denied when any enclosing `grant`
-/// frame restricts shell access without enabling `chdir`.  An empty or
-/// missing path means `$HOME`.
-///
-/// Only the shell-owned `Cwd` is updated, synchronously; the OS process cwd is left untouched.  Because the `chpwd` lifecycle
-/// hook must be fired by the REPL (which owns the plugin runtime), the
-/// `(old, new)` pair is stored on `shell.local.repl.pending_chpwd`; the REPL drains it
-/// after the evaluator returns.
+/// Only the REPL owns the plugin runtime that fires `chpwd`, so the
+/// `(old, new)` pair waits on `local.repl.pending_chpwd` for it to drain.
 pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let path = match args.first() {
         Some(Value::String(s)) => s.clone(),
@@ -84,11 +74,7 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
 
     shell.check_shell_chdir()?;
     let (old, new) = shell.apply_chdir(&path)?;
-    // String→PathBuf for the chpwd notification queue.  No path
-    // semantics in play — just storing the already-resolved cwd
-    // strings as paths for the listener.
-    #[allow(clippy::disallowed_methods)]
-    let pending = (std::path::PathBuf::from(old), std::path::PathBuf::from(new));
-    shell.local.repl.pending_chpwd = Some(pending);
+    shell.local.repl.pending_chpwd =
+        Some((std::path::PathBuf::from(old), std::path::PathBuf::from(new)));
     Ok(Value::Unit)
 }

@@ -15,8 +15,8 @@
 ;; in two places:
 ;;
 ;;   * paths are inlined at profile-build time rather than passed as
-;;     `(param "_RX1")`, since ral's `exec_dirs` toml is variable-length
-;;     and Seatbelt parameters are scalars; and
+;;     `(param "_RX1")`, since a grant's exec directory admits are
+;;     variable-length and Seatbelt parameters are scalars; and
 ;;   * read prefixes for the user's policy-allowed system roots are
 ;;     derived from the projection at runtime, not hard-coded — see
 ;;     `system_read_paths` in `macos.rs`.

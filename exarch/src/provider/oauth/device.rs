@@ -1,6 +1,5 @@
-//! Device-code login: the user opens a verification page and types a code
-//! while exarch polls the token endpoint. The poll response carries the PKCE
-//! verifier used in the final authorization-code exchange.
+//! Device-code login: the user types a code into a verification page while
+//! exarch polls. Unlike `browser`, the PKCE verifier arrives in the response.
 
 use super::{CLIENT_ID, ISSUER, LoginPhase};
 use serde::Deserialize;
@@ -10,21 +9,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
-/// The device-code poll deadline; the browser flow's own callback wait
-/// mirrors this value. Enforced client-side — the device-code response
-/// carries no `expires_in` of its own.
+/// The poll deadline. Enforced here — the usercode response carries no
+/// `expires_in` — and `browser`'s callback wait is in step with it.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
-/// [`MAX_WAIT`] rendered for the user-facing sign-in messages, so the shown
-/// duration cannot drift from the constant. `pub(super)`: the CLI adapter's
-/// [`LoginPhase::stderr_line`] reproduces this exact text.
-pub(super) fn max_wait_label() -> String {
+/// `MAX_WAIT` as the sign-in messages state it, so the two cannot drift.
+fn max_wait_label() -> String {
     format!("{} minutes", MAX_WAIT.as_secs() / 60)
 }
 
 #[derive(Deserialize)]
-// The `user_code` field repeats the struct name because that is the wire
-// field name, hence the lint allow — not the serde aliases below.
+// `user_code` repeats the struct name because that is the wire field name.
 #[allow(clippy::struct_field_names)]
 struct UserCode {
     device_auth_id: String,
@@ -38,8 +33,7 @@ fn default_interval() -> u64 {
     5
 }
 
-/// Accept the polling interval whether the server sends it as a number or a
-/// string.
+/// The server sends `interval` sometimes as a number, sometimes as a string.
 fn interval_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -85,7 +79,6 @@ pub(super) async fn run(
     .await
 }
 
-/// Request a one-time user code and the device auth id that identifies it.
 async fn request_user_code(client: &reqwest::Client) -> Result<UserCode, String> {
     let resp = client
         .post(format!("{ISSUER}/api/accounts/deviceauth/usercode"))
@@ -97,10 +90,8 @@ async fn request_user_code(client: &reqwest::Client) -> Result<UserCode, String>
     super::json_or_error(resp, "device code request").await
 }
 
-/// Poll the token endpoint until the user authorises the code or [`MAX_WAIT`]
-/// elapses. A 403 or 404 means the user has not finished yet. `cancel` is
-/// checked before each request; an in-flight request remains bounded by the
-/// HTTP client's own timeout.
+/// Poll until the user authorises or `MAX_WAIT` elapses. `cancel` is read
+/// between requests, so an in-flight one still runs out the client's timeout.
 async fn poll_for_code(
     client: &reqwest::Client,
     code: &UserCode,
@@ -123,9 +114,8 @@ async fn poll_for_code(
             .await
             .map_err(|e| format!("device token poll failed: {e}"))?;
 
-        // A 403/404 means the user has not finished; keep polling until the
-        // deadline.  Any other outcome — success or a hard failure — is the
-        // shared status/decode handling's to resolve.
+        // 403/404 is this endpoint's "not yet"; every other status is
+        // `json_or_error`'s to judge.
         if matches!(resp.status().as_u16(), 403 | 404) {
             if start.elapsed() >= MAX_WAIT {
                 return Err(format!(

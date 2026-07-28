@@ -6,16 +6,18 @@
 //! userinfo-confusion form (`user@ip`) that a naive `Authority` parse would
 //! decode cleanly. This is the crate's `cargo-fuzz` target.
 
+use std::borrow::Cow;
+
 /// The head cap: past this many bytes without a complete head, the
 /// connection is refused rather than read further.
 pub const HEAD_MAX: usize = 8 * 1024;
 
 /// Why a CONNECT was refused, and the status a pre-tunnel HTTP error may
-/// carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// carry. `reason` is owned where it names the host it refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     pub status: u16,
-    pub reason: &'static str,
+    pub reason: Cow<'static, str>,
 }
 
 /// One admitted CONNECT request head.
@@ -40,7 +42,7 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
             return if buf.len() > HEAD_MAX {
                 Err(Refusal {
                     status: 431,
-                    reason: "CONNECT head exceeds 8 KiB",
+                    reason: Cow::Borrowed("CONNECT head exceeds 8 KiB"),
                 })
             } else {
                 Ok(None)
@@ -49,32 +51,32 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
         Err(_) => {
             return Err(Refusal {
                 status: 400,
-                reason: "malformed request head",
+                reason: Cow::Borrowed("malformed request head"),
             });
         }
     };
     if head_len > HEAD_MAX {
         return Err(Refusal {
             status: 431,
-            reason: "CONNECT head exceeds 8 KiB",
+            reason: Cow::Borrowed("CONNECT head exceeds 8 KiB"),
         });
     }
     if buf.len() > head_len {
         return Err(Refusal {
             status: 400,
-            reason: "surplus bytes after CONNECT head",
+            reason: Cow::Borrowed("surplus bytes after CONNECT head"),
         });
     }
     if req.version != Some(1) {
         return Err(Refusal {
             status: 400,
-            reason: "HTTP/1.1 required",
+            reason: Cow::Borrowed("HTTP/1.1 required"),
         });
     }
     if req.method != Some("CONNECT") {
         return Err(Refusal {
             status: 405,
-            reason: "only CONNECT is accepted",
+            reason: Cow::Borrowed("only CONNECT is accepted"),
         });
     }
 
@@ -82,17 +84,17 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
     // must happen on the raw target, never delegated to a parse failure.
     let target = req.path.ok_or(Refusal {
         status: 400,
-        reason: "missing request target",
+        reason: Cow::Borrowed("missing request target"),
     })?;
     if target.as_bytes().contains(&b'@') {
         return Err(Refusal {
             status: 403,
-            reason: "userinfo not accepted in CONNECT target",
+            reason: Cow::Borrowed("userinfo not accepted in CONNECT target"),
         });
     }
     let authority: http::uri::Authority = target.parse().map_err(|_| Refusal {
         status: 400,
-        reason: "malformed CONNECT target",
+        reason: Cow::Borrowed("malformed CONNECT target"),
     })?;
 
     let host = authority.host();
@@ -103,7 +105,7 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
     if is_ip_literal {
         return Err(Refusal {
             status: 403,
-            reason: "IP literal target refused",
+            reason: Cow::Borrowed("IP literal target refused"),
         });
     }
     match authority.port_u16() {
@@ -111,13 +113,13 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
         Some(_) => {
             return Err(Refusal {
                 status: 403,
-                reason: "only port 443 is accepted",
+                reason: Cow::Borrowed("only port 443 is accepted"),
             });
         }
         None => {
             return Err(Refusal {
                 status: 403,
-                reason: "target is missing a port",
+                reason: Cow::Borrowed("target is missing a port"),
             });
         }
     }
@@ -132,14 +134,14 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
             if host_header.is_some() {
                 return Err(Refusal {
                     status: 400,
-                    reason: "repeated Host header",
+                    reason: Cow::Borrowed("repeated Host header"),
                 });
             }
             host_header = Some(
                 std::str::from_utf8(h.value)
                     .map_err(|_| Refusal {
                         status: 400,
-                        reason: "Host header is not UTF-8",
+                        reason: Cow::Borrowed("Host header is not UTF-8"),
                     })?
                     .trim()
                     .to_ascii_lowercase(),
@@ -148,18 +150,18 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
     }
     let host_header = host_header.ok_or(Refusal {
         status: 400,
-        reason: "missing Host header",
+        reason: Cow::Borrowed("missing Host header"),
     })?;
     if host_header != target_host && host_header != format!("{target_host}:443") {
         return Err(Refusal {
             status: 400,
-            reason: "Host header disagrees with target",
+            reason: Cow::Borrowed("Host header disagrees with target"),
         });
     }
 
     let host = exarch::net_policy::Host::parse(&target_host).map_err(|_| Refusal {
         status: 403,
-        reason: "host rejected by policy shape",
+        reason: Cow::Borrowed("host rejected by policy shape"),
     })?;
     Ok(Some(Connect { host }))
 }

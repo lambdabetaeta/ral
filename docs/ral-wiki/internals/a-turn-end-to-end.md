@@ -76,7 +76,7 @@ module's framed scaffold:
   no run state, no root context, no hooks; the host renders the diagnostics and
   treats it as status 1. The hook arm skips this: its program is an
   already-compiled value resolved by name in the hook table, and the hook's
-  registered `DefaultPolicy` (capture, terminal authority, budget) folds into
+  registered `DefaultPolicy` (capture, terminal authority) folds into
   the run's conditions — the hook's to decide, not the dispatching host's.
 - `run_built` materialises the IO regime — `Capture` mints the buffers it reads
   back, `Inherit` leaves the ambient streams to flow — then assembles the run's

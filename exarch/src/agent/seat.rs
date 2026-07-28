@@ -1,8 +1,6 @@
-//! The agent's seat: the transport its runs run through, plus the
-//! host-side state that seat kind owns.  Every engine-side reach — per-call
-//! installs, `/clear`'s rebuild, the registry's cancel reach — is a seat
-//! method, so a second seat kind (the wire engine) is one more variant
-//! here, never a second copy of the agent.
+//! The agent's seat: the transport its runs go through, plus whatever
+//! host-side state that seat kind owns.  Every engine-side reach is a
+//! method here, so a new seat kind is one more variant, not a second agent.
 
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
@@ -13,14 +11,11 @@ use ral_core::Shell;
 use ral_core::transport::{IdentityTransport, Transport};
 use std::sync::{Arc, Mutex};
 
-/// One agent's engine-side attachment.  A closed enum, not a trait object:
-/// the operations that differ per seat live off the [`Transport`] trait.
+/// One agent's engine-side attachment; what differs per call already lives
+/// off the [`Transport`] trait, so this stays a closed enum.
 pub(crate) enum Seat {
-    /// In-process: owns the session [`Scratch`] (`/clear` reboots from it),
-    /// the working directory the shell is re-seeded with on every such
-    /// reboot, whether the host granted `detach` (see [`boot_root_shell`]),
-    /// and the run-scope cell the registry interrupts through, which must
-    /// stay live across a `/clear` rebuild.
+    /// In-process.  `/clear` rebuilds it, but onto the *same* `run_scope`:
+    /// the cell the registry interrupts through must outlive the rebuild.
     Identity {
         transport: Box<IdentityTransport>,
         scratch: Arc<Scratch>,
@@ -28,22 +23,17 @@ pub(crate) enum Seat {
         detach: bool,
         run_scope: RunScope,
     },
-    /// Out-of-process: the engine lives on the far end of `transport`, one
-    /// process per session. It holds nothing per call: a wire run's desk
-    /// and applier ride
-    /// [`Agent::run_shell`](crate::agent::Agent::run_shell)'s own arguments
-    /// into the drain loop's enquiry arm — the engine asks over
-    /// [`ral_core::transport::Event::Enquiry`], never a direct call, so there is no engine-side
-    /// slot to fill or retire. No scratch: the session's real one lives
-    /// inside the guest this transport dials. No nursery: sub-agent forks
-    /// are refused at the desk (fuel 0), so there is nothing to adopt into.
+    /// Out-of-process, one engine per session, holding nothing per call: a
+    /// wire run's desk and applier ride `Agent::run_shell`'s arguments into
+    /// the drain loop's enquiry arm, the real scratch lives in the guest,
+    /// and forks are refused at the desk for fuel 0, so no nursery either.
     Wire {
         transport: Box<ral_core::transport::WireTransport>,
     },
 }
 
-/// One `ral` call's capture set, installed for the extent of the eval —
-/// built fresh per call so nothing a desk handler captures can go stale.
+/// One `ral` call's capture set, built fresh per call so nothing a desk
+/// handler captures can go stale.
 pub(crate) struct RunInstall {
     pub(crate) desk: Arc<ExarchDesk>,
     pub(crate) apply: SurfaceApplier,
@@ -51,10 +41,9 @@ pub(crate) struct RunInstall {
     pub(crate) nursery: ral_core::types::Nursery,
 }
 
-/// Retires the install on drop — [`AbsentDesk`] back in, nursery cleared —
-/// on *every* exit, including a panic [`crate::agent::Agent::attend`] recovers from, where
-/// straight-line teardown would leave the desk's whole capture (its
-/// [`crate::bus::Emitter`] included) installed for the rest of the session.
+/// Retires the install on *every* exit, including a panic `Agent::attend`
+/// recovers from — straight-line teardown would leave the desk's whole
+/// capture installed for the rest of the session.
 pub(crate) struct RunGuard<'s>(&'s Seat);
 
 impl Drop for RunGuard<'_> {
@@ -70,9 +59,8 @@ impl Drop for RunGuard<'_> {
 }
 
 impl Seat {
-    /// The identity ceremony — trunk construction, every fork, and the
-    /// desk's spawn spine all route here; `/clear` re-runs it through
-    /// [`Self::clear`] onto the same run-scope cell.
+    /// Trunk construction, every fork, and the desk's spawn spine all seat
+    /// here; [`Self::clear`] re-runs the ceremony onto the same cell.
     pub(crate) fn identity(
         shell: Shell,
         scratch: Arc<Scratch>,
@@ -91,11 +79,8 @@ impl Seat {
         }
     }
 
-    /// The wire ceremony: attach `transport` over `cwd`/`home` — stated
-    /// explicitly by the caller, never read from this process's own state,
-    /// since under a VM the workspace is a guest path this host cannot even
-    /// resolve — tagged with exarch's compiled-in builtin installer, then
-    /// seat it with no per-call install yet.
+    /// `cwd` and `home` are the caller's word, never read from this
+    /// process: under a VM they are guest paths this host cannot resolve.
     pub(crate) fn wire(
         transport: ral_core::transport::WireTransport,
         cwd: std::path::PathBuf,
@@ -116,7 +101,6 @@ impl Seat {
         }
     }
 
-    /// The transport a dispatch or probe runs against.
     pub(crate) fn transport(&self) -> &dyn Transport {
         match self {
             Self::Identity { transport, .. } => &**transport,
@@ -124,33 +108,26 @@ impl Seat {
         }
     }
 
-    /// Direct engine-state access, identity-only — the test suite's state
-    /// inspection door and [`crate::agent::Agent::fork_with`]'s [`Shell::fork_session`] reach. Panics on a
-    /// wire seat (see the panic message).
+    /// Identity-only: the test suite's state-inspection door and
+    /// `Agent::fork_with`'s [`Shell::fork_session`] reach.
     pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::transport::EngineInner> {
         match self {
             Self::Identity { transport, .. } => transport.shell_mut(),
             Self::Wire { .. } => panic!(
                 "direct engine-state access has no meaning on a wire seat: the engine lives in \
                  a separate process, reachable only through Transport's dispatch/probe/control \
-                 frames — docs/ral-wiki/decisions/260722_session-is-a-process.md"
+                 frames"
             ),
         }
     }
 
-    /// Install one call's capture set; the guard retires it on every exit.
-    /// A wire seat has nothing to install: its run's desk and applier ride
-    /// [`Agent::run_shell`](crate::agent::Agent::run_shell)'s own arguments
-    /// into the drain loop's enquiry arm, so the slots this fills are
-    /// identity-only.
     pub(crate) fn install_run(&self, install: RunInstall) -> RunGuard<'_> {
         match self {
             Self::Identity { transport, .. } => {
                 transport.set_deferred_sink(install.deferred);
                 transport.set_nursery(install.nursery);
-                // The drain-then-handle adapter: a handler's chrome must
-                // never jump ahead of surface output still queued on the
-                // event channel.
+                // Drain-then-handle: a handler's chrome must never jump
+                // ahead of surface output still queued on the channel.
                 transport.set_desk(Arc::new(DeskBinding {
                     desk: install.desk,
                     events: transport.events_shared(),
@@ -162,7 +139,6 @@ impl Seat {
         RunGuard(self)
     }
 
-    /// The cancel reach the fleet registry stores for this agent.
     pub(crate) fn eval_reach(&self) -> EvalReach {
         match self {
             Self::Identity {
@@ -177,11 +153,9 @@ impl Seat {
         }
     }
 
-    /// `/clear`'s engine half: reboot the shell from the owned scratch and
-    /// re-run the ceremony onto the *same* run-scope cell.  Replacing the
-    /// transport drops the outgoing shell, whose teardown cancels its
-    /// registered workers — `/clear` outranks every lease. Panics on a wire
-    /// seat (see the panic message).
+    /// `/clear`'s engine half: reboot from the owned scratch onto the
+    /// *same* run-scope cell.  Replacing the transport drops the outgoing
+    /// shell, whose teardown cancels its workers: `/clear` outranks leases.
     pub(crate) fn clear(&mut self, log: &AgentLog) {
         match self {
             Self::Identity {
@@ -199,31 +173,24 @@ impl Seat {
                 );
             }
             Self::Wire { .. } => panic!(
-                "/clear has no meaning on a wire seat as a transport swap: session-is-a-process \
-                 says a wire session clears by killing its engine process and booting a fresh \
-                 one from the same recipe, not by rebuilding this seat in place — a front-end \
-                 starts over by replacing the child process, so no caller routes /clear here \
-                 and reaching this arm is a host bug \
-                 (docs/ral-wiki/decisions/260722_session-is-a-process.md)"
+                "/clear has no meaning on a wire seat as a transport swap: a wire session clears \
+                 by killing its engine process and booting a fresh one from the same recipe, not \
+                 by rebuilding this seat in place — a front-end starts over by replacing the \
+                 child process, so no caller routes /clear here and reaching this arm is a host \
+                 bug"
             ),
         }
     }
 }
 
-/// Boot a root session shell: the shared exarch boot plus `cwd` seeded as
-/// its logical working directory and the scratch's env/binding seeding.
-/// Forks instead snapshot their parent through [`Shell::fork_session`],
-/// inheriting the seeding.
+/// Boot a root session shell; forks instead snapshot their parent through
+/// [`Shell::fork_session`], inheriting the seeding.
 ///
-/// `detach` says whether the host decided the verb has meaning at all — a
-/// question about the host and its platform, not about its capabilities,
-/// which a `grant` answers separately at each call. Naming the verb and
-/// arming its budget is deliberately one act: a shell that has the name
-/// always has the budget, and the two cannot drift. Where `detach` is false
-/// the name is simply absent, and calling it is an ordinary unknown-command
-/// diagnostic rather than a builtin that resolves and refuses. `/clear`
-/// reboots through here, so a fresh shell re-gains both from the seat's own
-/// answer — there is no second install site.
+/// `detach` asks whether the verb means anything on this platform at all,
+/// which is the host's question, not a capability a `grant` answers per
+/// call.  Naming the verb and arming its budget is one act so the two
+/// cannot drift, and where `detach` is false the name is simply absent —
+/// calling it is an unknown-command diagnostic, not a refusal.
 #[cfg_attr(
     not(unix),
     allow(
@@ -233,10 +200,9 @@ impl Seat {
 )]
 pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach: bool) -> Shell {
     let mut shell = crate::bootstrap::boot_shell();
-    // The trunk session owns this process's signals: an Esc or an async
-    // SIGINT interrupts its in-flight run, a SIGTERM its whole session. A
-    // sub-agent's session is a `fork_session` of it, and stays deaf — the
-    // registry stops one through its own cancel handle.
+    // The trunk owns this process's signals: an Esc or async SIGINT
+    // interrupts its in-flight run, a SIGTERM the session. A sub-agent's
+    // `fork_session` stays deaf; the registry stops one by cancel handle.
     shell.face_signals();
     shell.seed_cwd(cwd);
     scratch.install_into(&mut shell);
@@ -248,21 +214,19 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach
     shell
 }
 
-/// Seed the session-dir variable, arm the ledgers over everything just
-/// seeded (seeding then arming stay one visible sequence), then seat the
-/// shell behind a fresh transport observing `run_scope` and attach the
-/// host endpoint.
-/// `cwd` is the same directory [`boot_root_shell`] seeded onto the shell —
-/// restated here only because [`Transport::attach`]'s signature is shared with the wire
-/// transport, which does read its `cwd` argument.
+/// Seed first, then arm: the binding ledger exempts whatever is bound when
+/// it is armed, so a name seeded afterwards would fall under the lease and
+/// be reaped for idleness.  `cwd` is what [`boot_root_shell`] already put
+/// on the shell, restated because [`Transport::attach`]'s signature is
+/// shared with the wire transport — the one that reads it.
 fn identity_ceremony(
     mut shell: Shell,
     log: &AgentLog,
     run_scope: &RunScope,
     cwd: std::path::PathBuf,
 ) -> IdentityTransport {
-    // `EXARCH_SESSION_DIR` must always point at the live session's
-    // event-log directory, on construction and every `/clear` rebuild.
+    // Must point at the live session's event-log directory, on
+    // construction and on every `/clear` rebuild alike.
     crate::bootstrap::seed_var(
         &mut shell,
         "EXARCH_SESSION_DIR",
@@ -285,15 +249,11 @@ fn identity_ceremony(
     transport
 }
 
-// Wire-seat tests drive a *real* engine child (`std::env::current_exe()`
-// re-exec'd with `--engine`, exactly the pre_exec handoff
-// `WireTransport::new`/`exarch/tests/wire_liveness.rs` use), never an
-// in-process `engine_session` thread. `engine_session` faces its process's
-// signals, so its runs fold the process-lifetime ambient cancel causes;
-// core serialises its own tests against those cells with a lock that is
-// `pub(crate)` to core and unreachable here. A same-process engine thread
-// would race the cells against whatever sibling test in this same lib
-// binary is mid-run; a child process owns its cells alone.
+// These drive a real `--engine` child, never an in-process
+// `engine_session` thread: that faces its process's signals, so a
+// same-process engine would race the ambient cancel cells against whatever
+// sibling test in this lib binary is mid-run, and core's lock over those
+// cells is unreachable from here.
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
@@ -327,10 +287,8 @@ mod tests {
         }
     }
 
-    /// A session log under a scratch dir unique to this call, mirroring
-    /// `fleet::desk`'s own test fixture — tests run in parallel, and one
-    /// fixed path would race a sibling's `remove_dir_all` against this
-    /// call's `create_dir_all`.
+    /// Unique per call, as in `fleet::desk`'s fixture: a fixed path would
+    /// race a parallel sibling's `remove_dir_all` against this call's own.
     fn test_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -340,11 +298,9 @@ mod tests {
         AgentLog::root(&root, n, "test", "test", 0).expect("session log")
     }
 
-    /// Spawn a real `--engine` child over a fresh socketpair and adopt the
-    /// host end by hand — the guest end crosses as fd 3, the same `pre_exec`
-    /// handoff `WireTransport::new` performs internally, done here through
-    /// `adopt` instead since that is the one constructor `Seat::wire` (and
-    /// so synod) actually calls.
+    /// Hand-rolls `WireTransport::new`'s fd-3 handoff so the host end can
+    /// be taken with `adopt` — the constructor `Seat::wire`, and so synod,
+    /// actually calls.
     fn spawn_engine(liveness: Liveness) -> (WireTransport, std::process::Child) {
         let (host, guest) = UnixStream::pair().expect("socketpair");
         let guest_fd = guest.as_raw_fd();
@@ -353,10 +309,8 @@ mod tests {
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
-        // SAFETY: runs between fork and exec, calling only the
-        // async-signal-safe `dup2`/`close` with no allocation and no
-        // locking — the same pre_exec `WireTransport::new` and
-        // `exarch/tests/wire_liveness.rs` use.
+        // SAFETY: runs between fork and exec, calling only async-signal-safe
+        // `dup2`/`close`, with no allocation and no locking.
         unsafe {
             use std::os::unix::process::CommandExt;
             cmd.pre_exec(move || {
@@ -370,8 +324,8 @@ mod tests {
             });
         }
         let child = cmd.spawn().expect("spawn engine child");
-        // The guest end has crossed into the child as fd 3; holding it here
-        // too would hide the child's death from this end's own EOF.
+        // The child holds it as fd 3 now; a copy kept here would hide the
+        // child's death from this end's own EOF.
         drop(guest);
         (
             WireTransport::adopt(host, liveness).expect("adopt host stream"),
@@ -385,9 +339,8 @@ mod tests {
         (Seat::wire(transport, dir.clone(), dir), child)
     }
 
-    /// A [`HostServices`] fixture with a fresh registry and no scratch — the
-    /// wire seat's own shape (`Agent::host_services`), sufficient for the
-    /// `agent-list` enquiry the round-trip test drives.
+    /// The wire seat's own shape as `Agent::host_services` builds it:
+    /// fresh registry, no scratch.
     fn wire_host_services(emit: &Emitter, registry: &AgentRegistry) -> HostServices {
         HostServices {
             registry: registry.clone(),
@@ -421,9 +374,6 @@ mod tests {
         }
     }
 
-    /// A wire-seat run round-trips through a real engine child: dispatch,
-    /// drain, and a live `` `surface `` value reaches `on_surface` in order
-    /// before the terminal `Report`.
     #[test]
     fn wire_seat_run_round_trips_and_surfaces_a_value() {
         let (seat, mut child) = wire_seat(Liveness::default());
@@ -455,12 +405,8 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// An enquiry the engine raises mid-run (the `agents` builtin's
-    /// `` `agent-list ``) crosses as a real `Event::Enquiry` frame and is
-    /// answered by an `ExarchDesk` in the drain loop's enquiry arm — the
-    /// production binding exactly: `Agent::run_shell` hands its desk
-    /// straight to `shell_eval::run_shell`'s closure, never through the
-    /// seat.
+    /// The binding is production's exactly: `Agent::run_shell` hands its
+    /// desk straight to `shell_eval::run_shell`'s closure, not to the seat.
     #[test]
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
         let (seat, mut child) = wire_seat(Liveness::default());
@@ -493,10 +439,8 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// `eval_reach().interrupt()` — the registry's per-tab interrupt path —
-    /// cancels an in-flight wire run promptly: a `sleep 30` that could not
-    /// settle inside the ceiling on its own does, once cancelled.  Generous
-    /// timing throughout: the dev fleet includes a jittery VM.
+    /// `eval_reach().interrupt()` is the registry's per-tab interrupt path.
+    /// Generous timing throughout: the dev fleet includes a jittery VM.
     #[test]
     fn wire_eval_reach_cancel_settles_an_in_flight_run_promptly() {
         const WAIT: Duration = Duration::from_secs(20);
@@ -513,8 +457,7 @@ mod tests {
                     |_| unreachable!("this run raises no enquiry"),
                 )
             });
-            // Let the engine actually enter the sleep before interrupting,
-            // so what gets cancelled is a genuinely in-flight run.
+            // Interrupt only once the engine is genuinely inside the sleep.
             std::thread::sleep(Duration::from_secs(1));
             let started = Instant::now();
             reach.interrupt();
@@ -537,9 +480,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// `/clear` on a wire seat panics with the didactic session-is-a-process
-    /// message — no real engine communication is needed to prove it, since
-    /// the panic fires before any frame would cross.
+    /// No engine child needed: the panic fires before a frame would cross.
     #[test]
     #[should_panic(expected = "/clear has no meaning on a wire seat")]
     fn wire_seat_clear_panics_didactically() {
@@ -550,8 +491,6 @@ mod tests {
         seat.clear(&test_log());
     }
 
-    /// `shell_mut` on a wire seat panics with the didactic
-    /// session-is-a-process message.
     #[test]
     #[should_panic(expected = "direct engine-state access has no meaning on a wire seat")]
     fn wire_seat_shell_mut_panics_didactically() {

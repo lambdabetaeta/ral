@@ -34,8 +34,8 @@ between parent and child shells.
   `Terminal` precisely so denial of byte input and denial of foreground stay
   separate effects.
 - `sink.rs` — `Sink`, byte output and child stdio routing (`ChildStdioPlan`):
-  terminal, stderr, kernel pipe, redirect file, in-memory `ByteBuffer` capture,
-  tee, frontend printer, line-framing adapter. `child_stdout` / `child_stderr`
+  terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee,
+  frontend printer, line-framing adapter. `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
   hand.
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /

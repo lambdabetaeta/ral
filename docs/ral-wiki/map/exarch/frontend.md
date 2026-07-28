@@ -264,7 +264,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card`, `legend_panel`, ART/EAGLE constants
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
-        - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, `tab_bar`, justified row projection, `step_cells`
+        - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues)
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`

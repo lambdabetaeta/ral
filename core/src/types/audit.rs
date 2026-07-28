@@ -1,51 +1,35 @@
 //! Audit collector and execution tree.
 //!
-//! This module owns every shape used by audit: the per-shell collector
-//! [`Audit`], the storage [`AuditTrail`], the transport [`AuditFragment`],
-//! the per-node value parts ([`AuditIo`], [`AuditTime`]),
-//! and the node itself [`ExecNode`].  Construction of normal `command`
-//! and `capability-check` nodes lives here too, so the rest of the tree
-//! never reaches for raw `ExecNode { … }` syntax.
-//!
-//! Audit is lexical.  A scope-introducing operator (`grant`, `within`,
-//! `guard`, `try`, `audit`) owns every node produced by its body —
-//! including sandboxed subprocess nodes and pipeline stage nodes.
-//! Process boundaries only transport audit fragments; the wrapping
-//! scope is what decides where they land in the tree.
+//! Audit is lexical: a scope-introducing operator (`grant`, `within`, `guard`,
+//! `try`, `audit`) owns every node its body produces, sandboxed subprocess and
+//! pipeline-stage nodes included.  A process boundary only transports
+//! fragments; the wrapping scope decides where they land in the tree.
 
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::source::Span;
 use serde::{Deserialize, Serialize};
 
-/// Cap applied to per-node `stderr` when bytes are being captured
-/// (`CapturePolicy::Bytes`).  See SPEC §10.3.
+/// Cap on one node's recorded `stderr`; `evaluator::audit` truncates to it.
 pub const STDERR_CAP_BYTES: usize = 64 * 1024;
 
-/// Raw bytes carried by one audit node.  `stdout` and `stderr` are the
-/// per-command captures produced under `CapturePolicy::Bytes`, or the
-/// empty vector when bytes are not being captured.
+/// Bytes captured for one node under `CapturePolicy::Bytes`, empty otherwise.
 #[derive(Clone, Debug, Default)]
 pub struct AuditIo {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
 
-/// Wall-clock window for one audit node.  Microseconds since the Unix
-/// epoch.
+/// A node's wall-clock window, in microseconds since the Unix epoch.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuditTime {
     pub start: i64,
     pub end: i64,
 }
 
-/// Byte-capture policy.
-///
-/// `Off` is the default — fd 1 and fd 2 stream
-/// live with no buffering, the normal §4.3 path.  `Bytes` installs the
-/// dispatcher-level tee that captures each command's stdout / stderr
-/// into its audit node (§10.3).  Set by `audit`; inherited by nested
-/// scopes through [`Audit::set_capture`].
+/// Whether per-command bytes are teed into audit nodes.  `Off` lets fd 1 and
+/// fd 2 stream live, unbuffered; `Bytes` installs the tee that
+/// `evaluator::capture` wraps each command in.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapturePolicy {
     #[default]
@@ -53,30 +37,15 @@ pub enum CapturePolicy {
     Bytes,
 }
 
-/// Backing storage for the in-flight audit tree.  Private to this
-/// module; everything outside reads/writes through [`Audit`] / through
-/// [`AuditFragment`] on a process boundary.
+/// Backing storage for the in-flight tree; reachable only through [`Audit`].
 #[derive(Default, Debug)]
 pub struct AuditTrail {
     nodes: Vec<ExecNode>,
 }
 
-impl AuditTrail {
-    /// Drain the trail's accumulated nodes.  Used by sandbox helpers
-    /// and pipeline helpers to ship audit back across a process
-    /// boundary as an [`AuditFragment`].
-    pub fn into_nodes(self) -> Vec<ExecNode> {
-        self.nodes
-    }
-}
-
-/// Audit nodes detached from a trail.
-///
-/// Process boundaries (sandbox
-/// child, pipeline helper, internal builtins) produce a fragment;
-/// the receiving side merges it into the surrounding scope.  Distinct
-/// from [`AuditTrail`] only in ownership: the trail belongs to a live
-/// `Audit`, the fragment is in transit.
+/// Nodes detached from a trail — a sandbox child, a pipeline helper, or a
+/// closed lexical scope hands one up, and the receiving side merges it into
+/// the surrounding scope.  Same shape as [`AuditTrail`], but in transit.
 #[derive(Default, Debug, Clone)]
 pub struct AuditFragment {
     nodes: Vec<ExecNode>,
@@ -97,120 +66,78 @@ impl AuditFragment {
     }
 }
 
-/// Audit collector — one per `Shell`.
-///
-/// Two orthogonal pieces of state: a `trail` that is `Some` when audit
-/// is active (a scope is collecting nodes), and a `capture` policy that
-/// the dispatcher-level Tee consults when wrapping per-command bytes.
-/// `trail` and `capture` are private; the methods on this type are the API,
-/// so adding a field (or rewriting the trail representation) does not
-/// ripple through call sites. `call_site` is the one exception: it is the
-/// dispatch register the dispatcher writes directly
-/// (`shell.local.audit.call_site = span`) and [`Shell::call_site`](super::shell::Shell::call_site)
-/// reads directly, so it is `pub(crate)` rather than method-gated.
+/// Audit collector — one per `Shell`, collecting exactly while `trail` is
+/// `Some`.
 #[derive(Default, Debug)]
 pub struct Audit {
     trail: Option<AuditTrail>,
     capture: CapturePolicy,
-    /// Span of the node that dispatched the command now running — the
-    /// register every audit node and capability check resolves its site
-    /// from, held across `_`-prefixed dispatches so prelude wrappers name
-    /// the user's call rather than their own (SPEC §10.3).  `None` before
-    /// the first dispatch of a run.  Written by `run_call`'s guarded write
-    /// (`command_call.rs`); read by [`Shell::call_site`](super::shell::Shell::call_site).
-    /// Bracketed per run by `crate::run::IoLoan`, which saves and `None`s it
-    /// on install and restores it on drop, so a nested run cannot leave its
-    /// register in the outer run's.
+    /// Where the command now running was dispatched from — the register every
+    /// node and capability check resolves its site against, `None` before a
+    /// run's first dispatch.  `run_call` in `runtime::command_call` skips the
+    /// write for `_`-prefixed names, so a prelude wrapper's nodes name the
+    /// user's call rather than the wrapper's; `IoLoan` in `crate::run` clears
+    /// the register per run and restores it on drop.
     pub(crate) call_site: Option<Span>,
 }
 
 impl Audit {
-    /// True when an audit scope is collecting.
+    /// True when a scope is collecting.
     pub fn active(&self) -> bool {
         self.trail.is_some()
     }
 
-    /// True when per-command bytes should be captured by the
-    /// dispatcher-level Tee.
+    /// True when the tee should record each command's bytes.
     pub fn captures_bytes(&self) -> bool {
         matches!(self.capture, CapturePolicy::Bytes)
     }
 
-    /// Top-level activation — used by `ral --audit` and by the
-    /// re-execed pipeline / sandbox children that inherit "audit on"
-    /// from their parent.  No-op when already active.
-    pub fn enable(&mut self) {
-        if self.trail.is_none() {
-            self.trail = Some(AuditTrail::default());
-        }
-    }
-
-    /// Set the current byte-capture policy.  Use the scoped switch in
-    /// [`crate::evaluator::audit`] instead of poking this directly.
+    /// Overwrite the capture policy.  A scope wants `with_capture_policy` in
+    /// [`crate::evaluator::audit`], whose merge is monotonic: an inner `try`
+    /// must not silence an outer `audit`.
     pub fn set_capture(&mut self, policy: CapturePolicy) {
         self.capture = policy;
     }
 
-    /// Read the current byte-capture policy.
+    /// The current capture policy.
     pub fn capture_policy(&self) -> CapturePolicy {
         self.capture
     }
 
-    /// Capture policy iff a scope is currently collecting.  The
-    /// natural shape for a process boundary: the sandbox / pipeline
-    /// child needs to know both whether to enable its trail *and*
-    /// which byte-capture policy to install, and the two questions
-    /// always travel together.  Returns `None` when audit is
-    /// inactive (no trail to inherit).
-    ///
-    /// The re-exec'd-child IPC seam (`ChildEvalRequest`, the only frame
-    /// that crosses to a helper now that a bundled tool rides as an
-    /// ordinary external stage) carries the return value of this in a
-    /// dedicated `audit_policy` field rather than embedding it in the mobile
-    /// snapshot: audit policy is an **instruction** to the helper
-    /// process, not a snapshot property — `WireMobile` carries
-    /// mobile-only state with no local audit on it.  And the policy
-    /// is `Option<CapturePolicy>` rather than a `bool` so a stage inside
-    /// `try { … }` rides as `None` (live streaming) and one inside
-    /// `audit { … }` rides as `Some(Bytes)` (recorded).
+    /// The policy to inherit across a process boundary, `Some` iff a scope is
+    /// collecting — a helper learns in one answer whether to open a trail and
+    /// which policy to install.  Rides in `ChildEvalRequest`'s own
+    /// `audit_policy` field: it instructs the child, it is not snapshot state.
     pub fn active_policy(&self) -> Option<CapturePolicy> {
         self.active().then_some(self.capture)
     }
 
-    /// Inverse of [`Self::active_policy`]: install an inherited
-    /// policy on the receiver, enabling the trail when `Some` and
-    /// leaving the audit inactive when `None`.  Used by the sandbox
-    /// child and pipeline-helper subprocesses to mirror the parent's
-    /// audit state — the two-step (enable + `set_capture`) sequence is
-    /// awkward to keep in sync at every call site.
+    /// Inverse of [`Self::active_policy`]: open a trail and set the policy on
+    /// `Some`, stay inactive on `None`.  An already-open trail keeps its nodes.
     pub fn install_active_policy(&mut self, policy: Option<CapturePolicy>) {
         if let Some(policy) = policy {
-            self.enable();
-            self.set_capture(policy);
+            self.trail.get_or_insert_default();
+            self.capture = policy;
         }
     }
 
-    /// Append one node to the active trail.  No-op when audit is
-    /// inactive — the dispatcher path can call this unconditionally
-    /// after building a node it has decided to record.
+    /// Append a node; no-op when inactive, so the dispatcher need not ask.
     pub fn push(&mut self, node: ExecNode) {
         if let Some(trail) = self.trail.as_mut() {
             trail.nodes.push(node);
         }
     }
 
-    /// Merge a fragment into the active trail.  No-op when audit is
-    /// inactive (the fragment is dropped).
+    /// Merge a fragment into the trail; when inactive the fragment is dropped.
     pub fn merge(&mut self, fragment: AuditFragment) {
         if let Some(trail) = self.trail.as_mut() {
             trail.nodes.extend(fragment.into_nodes());
         }
     }
 
-    /// Enter a lexical audit scope: move the parent trail aside and
-    /// install a fresh child trail.  Pairs with [`Self::leave_child`];
-    /// only installs when audit was already active, so an inactive
-    /// surrounding context leaves the body unaudited.
+    /// Move the parent trail aside for a fresh child.  Pairs with
+    /// [`Self::leave_child`]; does nothing when audit is off, so an unaudited
+    /// context leaves the body unaudited too.
     pub fn enter_child(&mut self) -> Option<AuditTrail> {
         if self.trail.is_some() {
             self.trail.replace(AuditTrail::default())
@@ -219,27 +146,21 @@ impl Audit {
         }
     }
 
-    /// Forced variant: install a fresh child trail regardless of
-    /// parent state.  Used by `try` and `audit`, which collect
-    /// children even when no surrounding `audit { … }` is active so
-    /// they can name the failing command / return the full subtree.
+    /// Install a child trail whatever the parent's state — `try` needs the
+    /// subtree to name the failing command, `audit` to return it.
     pub fn enter_forced_child(&mut self) -> Option<AuditTrail> {
         self.trail.replace(AuditTrail::default())
     }
 
-    /// Leave the lexical audit scope: take the child trail, restore the
-    /// saved parent, and return the child's nodes as a fragment.
+    /// Restore `parent` and hand back what the child collected.
     pub fn leave_child(&mut self, parent: Option<AuditTrail>) -> AuditFragment {
         let child = self.trail.take().unwrap_or_default();
         self.trail = parent;
         AuditFragment::from_nodes(child.nodes)
     }
 
-    /// Drain the current trail's accumulated nodes as a fragment,
-    /// leaving the trail empty.  Used at process boundaries (sandbox
-    /// child, pipeline helper) to ship the audit accumulated during
-    /// child evaluation back to the parent.  Returns the empty
-    /// fragment when audit is inactive.
+    /// Drain the trail, leaving it open but empty — how a sandbox or pipeline
+    /// child ships its audit home.  Empty fragment when inactive.
     pub fn take_fragment(&mut self) -> AuditFragment {
         match self.trail.as_mut() {
             Some(trail) => AuditFragment::from_nodes(std::mem::take(&mut trail.nodes)),
@@ -247,22 +168,18 @@ impl Audit {
         }
     }
 
-    /// STT-in for a same-thread thunk body — see
-    /// [`crate::types::Shell::inherit_from`].  Moves the trail and the
-    /// capture policy into the child, and copies the call-site register in
-    /// (the stage child's flow-in, and every other same-thread body's) —
-    /// never back on [`Self::return_to`]: the asymmetry is the point, so a
-    /// body's own dispatches don't leak their site into the caller's next
-    /// one.
+    /// STT-in for a same-thread thunk body.  The trail and policy move in and
+    /// the call site is copied in, but it never flows back on
+    /// [`Self::return_to`]: the asymmetry keeps a body's own dispatches from
+    /// leaking their site into the caller's next one.
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.trail = parent.trail.take();
         self.capture = parent.capture;
         self.call_site = parent.call_site;
     }
 
-    /// STT-out for a same-thread thunk body.  Returns the (possibly
-    /// extended) trail and policy back to the parent.  The call site does
-    /// not flow back.
+    /// STT-out: the trail the body extended, and the policy, go back to the
+    /// parent.  The call site does not.
     pub fn return_to(&mut self, parent: &mut Self) {
         parent.trail = self.trail.take();
         parent.capture = self.capture;
@@ -300,7 +217,7 @@ impl std::fmt::Display for ExecNodeKind {
     }
 }
 
-/// A node in the execution tree. Every node has the same shape.
+/// A node in the execution tree; both kinds share this one shape.
 #[derive(Debug, Clone)]
 pub struct ExecNode {
     pub kind: ExecNodeKind,
@@ -314,18 +231,16 @@ pub struct ExecNode {
     pub stderr: Vec<u8>,
     pub value: Value,
     pub children: Vec<Self>,
-    pub start: i64,        // wall-clock start: microseconds since epoch
-    pub end: i64,          // wall-clock end: microseconds since epoch
-    pub principal: String, // $USER at time of recording
+    pub start: i64,        // microseconds since the Unix epoch
+    pub end: i64,          // microseconds since the Unix epoch
+    pub principal: String, // $USER at the time of recording
 }
 
 impl ExecNode {
-    /// Build a command node.  Every audit-tree command node — every
-    /// builtin, every external command, every scope (`grant`, `try`,
-    /// `audit`, …) — and the batch-mode root in `ral::batch` flow through
-    /// this constructor, so the only other place that synthesises
-    /// `ExecNode` by struct literal is `subprocess::WireExecNode::into_runtime`,
-    /// rehydrating a wire-transported node.
+    /// Build a command node.  Every builtin, external, and scope node, and the
+    /// batch-mode root in `ral::batch`, comes through here; the one struct
+    /// literal elsewhere is `WireExecNode::into_runtime` in `crate::child_eval`,
+    /// rehydrating a node off the wire.
     #[allow(clippy::too_many_arguments)]
     pub fn command(
         cmd: impl Into<String>,
@@ -356,10 +271,9 @@ impl ExecNode {
         }
     }
 
-    /// Build a capability-check event node.  `fields` is spliced into
-    /// the same map that already carries `resource` and `decision`,
-    /// per SPEC §10.3.  Capability nodes have no captured I/O and no
-    /// children: a single check is leaf-shaped.
+    /// Build a capability-check node.  `fields` splices into the same map as
+    /// `resource` and `decision`; a check is leaf-shaped, so no I/O, no
+    /// children, and start and end are the same instant.
     pub fn capability_check(
         resource: &str,
         decision: &str,
@@ -393,10 +307,9 @@ impl ExecNode {
         }
     }
 
-    /// Convert to a `Value::Map` matching the execution tree node shape.
-    /// For `capability-check` nodes the fields stored in `self.value` are
-    /// also spliced into the top-level map so that `resource`, `decision`,
-    /// and the resource-specific fields appear alongside `cmd`/`status`.
+    /// Render the node as a map.  A capability check splices `self.value`'s
+    /// fields into the top level as well, so `resource` and `decision` sit
+    /// beside `cmd` and `status`.
     pub fn to_value(&self) -> Value {
         let args_list: Vec<Value> = self.args.iter().map(|a| Value::String(a.clone())).collect();
         let children_list: Vec<Value> = self.children.iter().map(Self::to_value).collect();

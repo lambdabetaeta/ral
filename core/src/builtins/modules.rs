@@ -1,25 +1,15 @@
 //! `source` and `use` — load and evaluate `.ral` files.
 //!
-//! Both run the file through [`evaluate_source`], the shared guarded
-//! parse + elaborate + evaluate core, and differ only in scope and path
-//! policy: `source` runs the file in the caller's scope (its bindings
-//! leak) and yields the file's terminal value; `use` runs it under a
-//! fresh top scope and projects the resulting bindings into a Map.  Module
-//! loads carry no cache — each call re-evaluates the file fresh, so the
-//! cycle and depth guards in `evaluate_source` are what keep re-evaluation
-//! terminating.
+//! Both go through [`evaluate_source`] and differ only in scope and path
+//! policy: `source` runs the file in the caller's scope and yields its
+//! terminal value; `use` runs it in a fresh top scope and returns its
+//! bindings as a Map.  Nothing is cached, so the cycle and depth guards in
+//! [`evaluate_checked`] are what keep repeated loads terminating.
 //!
-//! Each load registers the file's text in the session's source registry
-//! under its path, so the module's own spans resolve to it — the same
-//! primitive used by `_plugin 'load'`.
-//!
-//! `evaluate_source` is also the single pipeline used by the
-//! capability-file loader (`crate::capability::load`) and the REPL plugin
-//! loader.  Callers that need to typecheck with their own error surface
-//! ahead of evaluation — the REPL's rc-config loader, which renders type
-//! errors through ariadne — call [`evaluate_checked`] directly with their
-//! own already-checked `Comp`, still sharing the guarded evaluate step.
-//! No second evaluate sequence exists in the tree.
+//! Every runtime source load funnels through here: the plugin loader and
+//! [`crate::capability::load_capabilities_from_str`] call
+//! [`evaluate_source`]; the REPL's rc loader, which renders type errors
+//! itself, calls [`evaluate_checked`] with an already-checked `Comp`.
 
 use std::path::Path;
 
@@ -30,24 +20,16 @@ use super::util::arg0_str;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
-/// Run an already-checked `comp` with `source` registered under
-/// `virtual_path`, sharing the cycle-detection stack and recursion-depth
-/// guard with [`evaluate_source`].
+/// Evaluate an already-checked `comp` under the cycle-detection stack and
+/// depth guard, registering `source` under `virtual_path`.
 ///
-/// Split out for callers that need their
-/// own compile/typecheck error surface ahead of evaluation — the REPL's
-/// rc-config loader reports type errors through ariadne before ever
-/// reaching this point — but still want the guarded evaluate every other
-/// source-evaluation path shares.
-///
-/// Errors are returned raw — callers add their own surface prefix so the
-/// same machinery can serve every loader without baking one caller's
-/// identity into the others.
+/// Errors come back raw; each caller prefixes its own surface name
+/// (`source:`, `use:`, `capability file <path>:`).
 ///
 /// # Errors
 /// Returns `Err` if `virtual_path` is already on the module stack (a
-/// circular dependency), if the recursion-depth limit is exceeded, or if
-/// evaluating `comp` fails.
+/// circular dependency), if the depth limit is exceeded, or if evaluating
+/// `comp` fails.
 pub fn evaluate_checked(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -70,37 +52,26 @@ pub fn evaluate_checked(
             cycle.join(" -> ")
         )));
     }
-    if shell.mobile.context.modules.depth >= MAX_SOURCE_DEPTH {
+    if shell.mobile.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
         return Err(sig(format!(
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
     }
     shell.install_script_context(&key, source);
     shell.mobile.context.modules.stack.push(key);
-    shell.mobile.context.modules.depth += 1;
     let result = crate::evaluate(comp, mooring, shell);
-    shell.mobile.context.modules.depth -= 1;
     shell.mobile.context.modules.stack.pop();
     result
 }
 
-/// Parse + elaborate + evaluate `source`, registered under `virtual_path`.
+/// Parse, elaborate, check, and evaluate `source` under `virtual_path`.
 ///
-/// The path is virtual in the sense that the
-/// caller is responsible for any filesystem read; this function only
-/// uses it to name the registered source (so error messages and
-/// nested `source`/`use` resolutions point back to the right file) and
-/// to participate in the cycle-detection stack.
-///
-/// Errors are returned raw — callers add their own surface prefix
-/// (`source:`, `use:`, `capability file <path>:`) so the same machinery
-/// can serve every loader without baking one caller's identity into
-/// the others.
+/// The path is virtual: the caller owns the filesystem read; this only
+/// names the registered source and keys the cycle stack.
 ///
 /// # Errors
-/// Returns `Err` if parsing, elaboration, or typechecking `source` fails,
-/// or if the subsequent guarded evaluation fails (see
-/// [`evaluate_checked`]).
+/// Returns `Err` if `source` fails to compile, or for any error from
+/// [`evaluate_checked`].
 pub fn evaluate_source(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -111,27 +82,17 @@ pub fn evaluate_source(
     evaluate_checked(mooring, shell, &comp, source, virtual_path)
 }
 
-/// Parse, elaborate, and check `source` against the live session before
-/// it evaluates.  The inference pass is what writes the evaluator's mode
-/// wires, so a loaded file passes through the checker exactly as a REPL
-/// run does.  A type error is fatal, surfaced as a `Break::Error` so the
-/// file is reported and not run.  The schemes seed the check from the
-/// caller's scope, so a `source`d file sees the names already installed.
+/// Compile `source` seeded from the live session's schemes, so a loaded
+/// file sees the names already installed.  `virtual_path` is the compile
+/// door's script name too, so the file's `$SCRIPT` references bake to it.
 ///
-/// Peeks the [`FileId`](crate::source::FileId) the module's own
-/// registration ([`evaluate_checked`], right after this returns) will
-/// mint, so the compiled program's spans carry its real file identity —
-/// nothing else registers a source into the session between the peek and
-/// that registration.  `virtual_path` doubles as the compile door's
-/// script name, so the module's own `$SCRIPT` references bake to it.
+/// The [`FileId`](crate::source::FileId) is peeked, not minted: the
+/// registration [`evaluate_checked`] performs a moment later lands on it,
+/// and nothing else registers a source in between.
 ///
-/// Also the shared harvest seam for the binding-lease ledger
-/// (`decisions/260629_agent-binding-reaping`): every runtime-compiled load —
-/// `source`, `use`, capability files, plugin loads — funnels through here,
-/// so renewing the compiled program's referenced names once, right here,
-/// covers all of them. The load is executing inside an already-committed
-/// run, so its references are real uses, unlike the run-boundary tick
-/// which this door does not touch.
+/// Also the binding-lease harvest seam: every runtime-compiled load passes
+/// through here inside an already-committed run, so its referenced names
+/// count as real uses and renewing them once here covers all of them.
 fn check_source(
     source: &str,
     virtual_path: &str,
@@ -151,11 +112,8 @@ fn check_source(
     Ok(comp)
 }
 
-/// Read `resolved` from disk and normalise its line endings, the byte
-/// preparation both `source` and `use` need before [`evaluate_source`].
-/// `check_fs_read` and the error messages are keyed on `abs_path` (the
-/// path as the caller resolved it); `who` (`"source"` / `"use"`) prefixes
-/// the surfaced errors so each verb keeps its own identity.
+/// Read and normalise a module's text.  `check_fs_read` and the errors key
+/// on `abs_path`, the path as the caller resolved it; `who` names the verb.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:module-load] `source`/`use` module loading reads program text from disk, gated by `check_fs_read`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
@@ -178,12 +136,9 @@ fn read_and_normalize(
     Ok(crate::source::normalize_source_text(source))
 }
 
-/// Tag a loader failure with `who` while preserving its status, location,
-/// and hint — status is the failure-propagation currency, so a sourced
-/// `fail [status: 7]` must reach the caller's handler as status 7, not the
-/// `1` a fresh `sig` would impose.  Skips the prefix when the message
-/// already carries it, so a `source` inside a `source` does not stack
-/// `source: source:`.
+/// Prefix `who` onto a loader failure while keeping its status: a sourced
+/// `fail [status: 7]` must reach the caller's handler as 7, not the `1` a
+/// fresh `sig` imposes.  Idempotent, so `source` in `source` does not stack.
 fn tag_loader_error(who: &str, e: Break) -> Break {
     match e {
         Break::Error(mut err) => {
@@ -218,6 +173,7 @@ pub(super) fn builtin_source(
 pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = arg0_str(args, "use")?;
     let resolved = resolve_relative_to_current_script(&path, shell);
+    // Unlike `source`, `use` falls back to a RAL_PATH search for a bare name.
     let abs_path = shell
         .resolve(&resolved.to_string_lossy())
         .canonicalise_strict()
@@ -235,6 +191,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
             .scope
             .top_scope()
             .iter()
+            // A leading underscore marks a name the module keeps private.
             .filter(|(k, _)| !k.starts_with('_'))
             .map(|(k, b)| (k.clone(), b.value.clone()))
             .collect();
@@ -244,11 +201,9 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     result.map_err(|e| tag_loader_error("use", e))
 }
 
-/// Resolve `path` against the directory of the innermost `source`/`use`
-/// currently loading — `context.modules.stack`'s top, pushed by every
-/// `source`/`use`/plugin/capability load through [`evaluate_checked`] —
-/// falling back to the run's own root source when no load is in flight
-/// (a bare top-level `source`/`use`).
+/// Resolve `path` against the directory of the innermost load in flight —
+/// the top of the stack [`evaluate_checked`] pushes to — falling back to
+/// the run's own root source at top level, where the stack is empty.
 fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
     let script = shell.mobile.context.modules.stack.last().map_or_else(
         || {

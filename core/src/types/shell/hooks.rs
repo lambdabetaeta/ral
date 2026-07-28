@@ -1,20 +1,12 @@
-//! Hook table: a session-lived namespace of named run-entry points
-//! registered by the host (rc file, plugin loader) and dispatched by the
-//! engine at lifecycle moments — prompt render, startup, plugin hooks,
-//! keybindings.
+//! The hook table: a session-lived namespace of named run roots the host
+//! (rc file, plugin loader) registers and the engine dispatches at lifecycle
+//! moments — prompt render, startup, plugin events, keybindings.
 //!
-//! A hook is a [`Value::Block`] / [`Value::Lambda`] the host already
-//! holds in compiled form.  **Registering** it = storing it by name in
-//! the session-lived [`Context::hooks`] table.  **Running** it =
-//! dispatching a [`Program::Hook`](crate::transport::Program) run through
-//! [`Shell::run`], which looks up the hook and applies it through
-//! the shared framed scaffold.
-//!
-//! The table is a separate namespace from both the user lexical scope
-//! ([`Env`]) and the handler stack ([`HandlerStack`]): a hook is a run
-//! root, never a command; it is never resolved by `$name` and never
-//! consulted at command position.  This keeps host entry points out of
-//! the user's value/command namespace.
+//! A hook is a [`Value::Block`] or [`Value::Lambda`] the host already holds
+//! compiled; running one is a `Program::Hook` dispatch through [`Shell::run`],
+//! which looks it up here and applies it. The table is a namespace apart from
+//! the lexical scope and the handler stack: a hook is never resolved by
+//! `$name` and never consulted at command position.
 
 use crate::source::Span;
 use crate::types::Binding;
@@ -23,18 +15,15 @@ use crate::types::Value;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::time::Duration;
 // ── Hook identity ───────────────────────────────────────────────────────
 
-/// Plugin identity: the unique name a plugin was loaded under.
+/// The unique name a plugin was loaded under.
 pub type PluginId = String;
 
 /// Which namespace a hook lives in.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Namespace {
-    /// Session-global: rc-declared prompt, startup block.
     Session,
-    /// Scoped to one loaded plugin.
     Plugin(PluginId),
 }
 
@@ -72,32 +61,26 @@ impl fmt::Display for HookName {
 
 // ── Hook signature ──────────────────────────────────────────────────────
 
-/// The fixed-arity signature of a hook kind — the typed contract checked
-/// at registration so a hook declared for the wrong arity is rejected at
-/// load time, not at dispatch time.
-///
-/// Each variant carries the expected input arity (0 for a prompt body
-/// Block, 1 for a Lambda receiving a single record argument) and a
-/// human-readable label for diagnostics.
+/// A hook kind's fixed arity and diagnostic label, checked at registration so
+/// a wrongly-shaped hook is rejected at load time rather than at dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookSig {
-    /// Zero-input hook: `{ … }` — used for the prompt body and the
-    /// startup block.  A `Block` (no parameters).
+    /// A parameterless `Block`: the prompt body and the startup block.
     Prompt,
-    /// One-input hook receiving a ground record: `{ |ctx| … }` —
-    /// prompt hook, buffer-change, keybinding, lifecycle hooks.
-    Hook { kind: String },
-    /// Plugin factory: one-input Lambda receiving the options map.
+    Hook {
+        kind: String,
+    },
+    /// A `Lambda` over the plugin's options map.
     PluginFactory,
-    /// In-frame lifecycle hook: applied directly inside the command's
-    /// run frame rather than as a fresh run root.
-    Lifecycle { kind: String },
+    /// Applied in place inside the caller's run frame rather than as a fresh
+    /// run root — `pre-exec`, `post-exec`, `chpwd`.
+    Lifecycle {
+        kind: String,
+    },
 }
 
 impl HookSig {
-    /// The expected parameter count for a thunk registered under this
-    /// signature: 0 for a `Prompt` (Block), 1 for everything else
-    /// (Lambda).
+    /// Parameters a thunk must take to register under this signature.
     pub fn expected_arity(&self) -> usize {
         match self {
             Self::Prompt => 0,
@@ -105,7 +88,7 @@ impl HookSig {
         }
     }
 
-    /// Human-readable label for diagnostics ("prompt body", "prompt hook", …).
+    /// Human-readable label for diagnostics.
     pub fn label(&self) -> &str {
         match self {
             Self::Prompt => "prompt body",
@@ -124,16 +107,13 @@ pub enum TerminalPolicy {
     Leased,
 }
 
-/// The host-stated policy for a registered hook's runs: terminal
-/// access, capture regime, and optional run budget.
+/// The host-stated policy for a hook's runs, which [`Shell::run`] applies over
+/// the dispatching request: `terminal` replaces the requested authority and
+/// `capture` can only tighten it.
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy {
-    /// Terminal authority for runs from this hook.
     pub terminal: TerminalPolicy,
-    /// Capture stdout/stderr for this hook's runs.
     pub capture: bool,
-    /// Optional per-run wall; `None` = uncapped.
-    pub budget: Option<Duration>,
 }
 
 impl DefaultPolicy {
@@ -141,7 +121,6 @@ impl DefaultPolicy {
         Self {
             terminal: TerminalPolicy::Denied,
             capture: false,
-            budget: None,
         }
     }
 
@@ -149,7 +128,6 @@ impl DefaultPolicy {
         Self {
             terminal: TerminalPolicy::Leased,
             capture: false,
-            budget: None,
         }
     }
 
@@ -157,38 +135,29 @@ impl DefaultPolicy {
         Self {
             terminal: TerminalPolicy::Denied,
             capture: true,
-            budget: None,
         }
     }
 }
 
 // ── Hook ────────────────────────────────────────────────────────────────
 
-/// One entry in the hook table: a named, typechecked, policy-tagged
-/// run root.
+/// One entry in the hook table: a named, typechecked, policy-tagged run root.
 #[derive(Debug, Clone)]
 pub struct Hook {
-    /// The lexical binding — `{ value: Block/Lambda, scheme }` — built
-    /// by the same scheme-inference path an ordinary session `let` uses.
+    /// Built by the same scheme-inference path an ordinary session `let` uses.
     pub binding: Binding,
-    /// The engine-declared fixed-arity signature this hook was
-    /// checked against at registration.
     pub sig: HookSig,
-    /// The host-stated default policy for runs from this hook.
     pub policy: DefaultPolicy,
     /// Declaration site, for diagnostics.
     pub origin: Span,
 }
 impl Hook {
-    /// The single registration gate: the bound value must be a `Block` or
-    /// a `Lambda`, and its parameter count must match the signature's
-    /// expected arity (0 for `Prompt`, 1 for `Hook`/`Lifecycle`/
-    /// `PluginFactory`).
+    /// The single registration gate: the bound value must be a `Block` or a
+    /// `Lambda` of the arity `sig` expects.
     ///
     /// # Errors
-    /// Returns [`RegisterError::NotFunction`] if the bound value is neither
-    /// a `Block` nor a `Lambda`, or [`RegisterError::ArityMismatch`] if its
-    /// parameter count differs from the signature's expected arity.
+    /// [`RegisterError::NotFunction`] if it is neither,
+    /// [`RegisterError::ArityMismatch`] if the parameter count differs.
     pub fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
         let actual = match &self.binding.value {
@@ -218,13 +187,11 @@ impl Hook {
 
 #[derive(Debug, Clone)]
 pub enum RegisterError {
-    /// The value is not a Block or Lambda.
     NotFunction {
         name: HookName,
         origin: Span,
         actual: String,
     },
-    /// The value's arity does not match the expected signature.
     ArityMismatch {
         name: HookName,
         origin: Span,
@@ -232,8 +199,10 @@ pub enum RegisterError {
         actual: usize,
         sig_label: String,
     },
-    /// A hook with this name is already registered.
-    AlreadyRegistered { name: HookName, origin: Span },
+    AlreadyRegistered {
+        name: HookName,
+        origin: Span,
+    },
 }
 
 impl fmt::Display for RegisterError {
@@ -274,26 +243,16 @@ impl fmt::Display for RegisterError {
 // ── The session's registration surface ──────────────────────────────────
 
 impl Shell {
-    /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
-    /// as a named run-entry point in the session-lived hook table.
+    /// Register a compiled [`Value`] — a `Block` or `Lambda` — as a named run
+    /// root in the session hook table.
     ///
-    /// The hook is stored by `name`; it is never readable as `$name`
-    /// and never invokable as a command — it fires only when the host
-    /// dispatches a [`Program::Hook`](crate::transport::Program) run at a
-    /// lifecycle moment (prompt render, startup, plugin hook, keybinding).
-    ///
-    /// A re-registration of an already-registered `name` short-circuits
-    /// before any scheme inference.  Otherwise the hook is built with the
-    /// same scheme-inference path an ordinary session `let` uses, and
-    /// [`Hook::validate`] is the single check that `value` is a `Block` or
-    /// `Lambda` of the arity `sig` expects.  On success the hook is
-    /// inserted into `context.hooks`, keyed by `name`; on failure the
-    /// caller renders the [`RegisterError`] as a diagnostic at `origin`.
+    /// It fires only on a host-dispatched `Program::Hook` run, never as `$name`
+    /// and never as a command.  On failure the caller renders the
+    /// [`RegisterError`] as a diagnostic at `origin`.
     ///
     /// # Errors
-    /// Returns [`RegisterError::AlreadyRegistered`] if a hook named `name`
-    /// already exists, or whatever [`Hook::validate`] raises if `value` is
-    /// not a `Block`/`Lambda` or its arity does not match `sig`.
+    /// [`RegisterError::AlreadyRegistered`] if `name` is taken, otherwise
+    /// whatever [`Hook::validate`] raises.
     pub fn register_hook(
         &mut self,
         name: HookName,
@@ -302,14 +261,13 @@ impl Shell {
         policy: DefaultPolicy,
         origin: Span,
     ) -> Result<(), RegisterError> {
-        // Re-registration short-circuits before any scheme inference.
+        // Short-circuit before any scheme inference.
         if self.mobile.context.hooks.contains_key(&name) {
             return Err(RegisterError::AlreadyRegistered { name, origin });
         }
 
-        // Build the Binding with the same scheme inference an ordinary
-        // session `let` uses. A non-thunk value gets no scheme; the
-        // `validate` below is the one gate that rejects it.
+        // The same scheme inference an ordinary session `let` uses.  A
+        // non-thunk gets no scheme; `validate` below is the gate that rejects it.
         let arm = match &value {
             Value::Lambda { param, body, .. } => Some((Some(param), body)),
             Value::Block { body, .. } => Some((None, body)),
@@ -332,24 +290,21 @@ impl Shell {
         Ok(())
     }
 
-    /// Return true when a hook with the given `name` is registered.
+    /// Whether a hook named `name` is registered.
     pub fn has_hook(&self, name: &HookName) -> bool {
         self.mobile.context.hooks.contains_key(name)
     }
 
-    /// Remove a single registered hook by name, returning whether one was
-    /// present.  The inverse of [`Self::register_hook`] for a one-shot entry
-    /// point (a plugin factory) once it has served its purpose.
+    /// Remove one hook by name, reporting whether it was there — the inverse of
+    /// [`Self::register_hook`] for a spent one-shot entry point, such as a
+    /// plugin factory.
     pub fn unregister_hook(&mut self, name: &HookName) -> bool {
         self.mobile.context.hooks.remove(name).is_some()
     }
 
-    /// Remove every hook registered under a plugin's namespace, returning
-    /// the number dropped.  A plugin's hook events and keybinding handlers
-    /// all live under `Namespace::Plugin(plugin_id)`; unloading the plugin
-    /// removes them in one sweep so no dispatchable entry point outlives the
-    /// plugin that owned it.  This is also the rollback path for a load that
-    /// fails after some of its hooks were committed.
+    /// Drop every hook under a plugin's namespace, returning the count.  One
+    /// sweep at unload, so no dispatchable entry point outlives the plugin that
+    /// owned it; also the rollback path for a load that fails partway.
     pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
         let before = self.mobile.context.hooks.len();
         self.mobile

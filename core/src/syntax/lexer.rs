@@ -1,45 +1,23 @@
-//! Lexer: source text → token stream.
+//! Lexer: source text → a flat `Vec<(Token, Span)>`.  Spans carry byte
+//! offsets and a [`FileId`]; line and column are recovered at render time.
 //!
-//! Produces a flat `Vec<(Token, Span)>` from raw source.  Spans are the
-//! canonical [`crate::source::Span`] — byte offsets plus a [`FileId`]; line
-//! and column are recovered at render time from the source text, not carried
-//! on every token.  Newlines are statement separators except inside `[...]`
-//! (lists/maps), where they are whitespace; this is decided by the innermost
-//! open delimiter so nested `{ [ ] }` and `[ { } ]` both behave.
+//! Newlines separate statements except inside `[…]`, where they are
+//! whitespace.  The *innermost* open delimiter decides, so `{ [ ] }` and
+//! `[ { } ]` both behave.
 //!
-//! Bare-word recognition is broad: anything not in the metacharacter set
-//! is part of a word, including `:` and `=`.  `:` only splits when followed
-//! by space, newline, or `]` — so `host:5432` stays one token but `host:`
-//! splits.  `$`, `^`, `!`, `~` introduce structured forms (deref, expr
-//! block, force, tilde path) and never appear mid-word.
-//! Commas are punctuation only while lexing inside `[...]`; elsewhere they
-//! are ordinary bare-word characters.
-//!
-//! **Single-quoted strings** `'…'` are verbatim literals with no escapes
-//! and no interpolation.  Hash-bumping handles `'` in the body: the opener
-//! is `n` `#`s followed by `'` (n ≥ 0); the close is `'` followed by `n`
-//! `#`s.  A `'` in the body followed by fewer than `n` `#`s is literal.
-//! At top level, a run of `#`s not followed by `'` is a comment.
-//!
-//! **Nested syntactic forms** (`!{…}` and `$[…]` inside `"…"`, plus
-//! `$name[k]` index keys, and the top-level `$[…]`) are lexed *in
-//! place*: the lexer recurses via [`Lexer::scan_token_group`] and
-//! stores the resulting `Vec<(Token, Span)>` inside the enclosing
-//! [`StringPart`] or [`Token::Expr`].  The parser builds a sub-parser
-//! over that stream rather than re-lexing the raw source bytes — lex
-//! once, not twice — and inner-token spans already attribute to the
-//! outer file so diagnostics underline the right columns.
+//! Nested forms — `!{…}` and `$[…]` inside `"…"`, `$name[k]` keys, and the
+//! top-level `$[…]` — are lexed in place and stored as token streams inside
+//! the enclosing [`StringPart`] or [`Token::Expr`].  The parser sub-parses
+//! those streams instead of re-lexing the bytes, and their spans already
+//! point into the outer file, so diagnostics underline the right columns.
 
 use crate::path::tilde::TildePath;
 use crate::source::{FileId, Span, Spanned};
 use crate::syntax::ast::{RedirectMode, Word};
 use std::fmt;
 
-/// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`: a name may start
-/// with an ASCII letter or `_`, and continue with those plus digits and
-/// `-`.  The lexer scans names char-by-char; [`is_ident`] validates a
-/// whole candidate string.  Both forms live here so the alphabet is
-/// defined once.
+/// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`, as the two
+/// predicates the char-by-char scan needs.
 pub(crate) fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_'
 }
@@ -58,27 +36,14 @@ pub(crate) fn is_ident(s: &str) -> bool {
     chars.all(is_ident_cont)
 }
 
-/// True when `ch` may appear in a bare word.
+/// True when `ch` may appear in a bare word; the rest are metacharacters
+/// that always need quoting.
 ///
-/// The complementary
-/// metacharacters (whitespace, the brackets/braces, quote markers,
-/// operators) terminate or refuse a bare word and so always need
-/// quoting in source.
-///
-/// Notes that don't fit the static character set:
-///
-/// - `:` and `=` are bare; `scan_bare_word` decides when they split a
-///   token (only when `:` is followed by space, newline, or `]`).
-/// - `,` is bare outside `[...]`; inside list/map context the lexer
-///   treats it as punctuation instead.  For quoting-from-strings we
-///   don't know the surrounding context, so callers that need a
-///   context-free decision should consider `,` non-bare too.
-///
-/// This is the single source of truth for the per-character bare-word
-/// alphabet: the lexer's own scanning ([`Lexer::scan_bare_word`]) consults
-/// it directly, and the tree-sitter grammar mirrors it.  Context-sensitive
-/// bareness ([`crate::syntax::quote::is_bare_word`]) is decided by full
-/// lexing via [`lex`], not by this predicate.
+/// The per-character source of truth, mirrored by the tree-sitter grammar.
+/// It cannot see position, though: `scan_bare_fragment` still splits a `:`
+/// before space, newline, or `]`, and punctuates a `,` inside `[…]`.  The
+/// whole-string question is answered by [`crate::syntax::quote::is_bare_word`],
+/// which lexes rather than scanning chars.
 pub(crate) fn is_bare_char(ch: char) -> bool {
     !matches!(
         ch,
@@ -106,28 +71,16 @@ pub(crate) fn is_bare_char(ch: char) -> bool {
 }
 
 /// Parts of an interpolated (double-quoted) string.
-///
-/// Nested syntactic forms (`!{…}`, `$[…]`, and index keys `[k]`) are
-/// lexed *in place* — the lexer recurses into them and stores the
-/// resulting token stream alongside its outer-source spans.  The parser
-/// builds a sub-parser over that stream rather than re-lexing the
-/// original bytes; this keeps "lex once" honest and means diagnostic
-/// spans inside an interpolation point at the right column of the
-/// outer source.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringPart {
     Literal(String),
     Variable(String),
-    /// `!{…}` (or `!$name`) inside `"…"`.  Carries the inner token
-    /// stream with outer-file spans.
+    /// `!{…}` or `!$name`, carrying its already-lexed token stream.
     Force(Vec<(Token, Span)>),
-    /// `$[…]` inside `"…"`.  Carries the expression-block token stream
-    /// (already with `&&`/`||` fused — see [`Lexer::scan_expr_block`]).
+    /// `$[…]`, carrying its token stream with `&&`/`||` already fused.
     Expr(Vec<(Token, Span)>),
-    /// Variable with adjacent index keys: `$name[k1][k2]`.  The name is
-    /// a [`Spanned`] over the `$name` head; each key is a [`Spanned`]
-    /// over its own token stream, with span covering opening bracket
-    /// through closing bracket for diagnostic narrowing.
+    /// `$name[k1][k2]`.  Each key's span runs from its opening bracket to
+    /// its closing one, so a diagnostic can narrow to the key alone.
     Index {
         name: Spanned<String>,
         keys: Vec<Spanned<Vec<(Token, Span)>>>,
@@ -153,15 +106,11 @@ pub enum Token {
     RParen,
     Comma,
     Spread,
-    /// Variant tag `` `ident `` — the label is stored without its backtick.
-    /// Construction (`` `ok 5 ``), tag-keyed record keys (`` [`ok: 5] ``), and case
-    /// handler tables share this token.
+    /// Variant tag `` `ident ``, stored without its backtick.
     Tag(String),
-    /// Deref resolved by lexer: `$name`, `$(name)`, `$name[key]`.
+    /// Deref resolved by the lexer: `$name`, `$(name)`, `$name[key]`.
     Deref(StringPart),
-    /// Expression block `$[…]` outside of strings.  Carries the
-    /// expression-block token stream (already with `&&`/`||` fused —
-    /// see [`Lexer::scan_expr_block`]).
+    /// Expression block `$[…]` outside strings, with `&&`/`||` fused.
     Expr(Vec<(Self, Span)>),
     Bang,
     Newline,
@@ -228,14 +177,13 @@ impl Token {
     }
 }
 
-/// Which lexical form a string came from.  Used in
-/// [`LexErrorKind::UnterminatedString`] so the diagnostic can name the
-/// shape that wasn't closed.
+/// Which lexical form a string came from, so an unterminated-string
+/// diagnostic can name the shape that wasn't closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringForm {
     SingleQuoted,
     DoubleQuoted,
-    /// `n` extra `#`s on each side, e.g. `#'…'#` (1) or `##'…'##` (2).
+    /// `n` extra `#`s on each side: `#'…'#` is 1, `##'…'##` is 2.
     BumpedSingle(usize),
 }
 
@@ -249,48 +197,37 @@ impl fmt::Display for StringForm {
     }
 }
 
-/// Structured lexer error.
-///
-/// The `Other` arm preserves the original
-/// free-form messages; the named arms exist so consumers (REPL
-/// continuation, Ariadne renderer) can reason about *what* was
-/// unterminated and *where* it opened.
-///
-/// Each arm carries a single [`Span`] anchoring the opening delimiter.
-/// The diagnostic layer recovers line/column at render time from the
-/// originating source text — there is no precomputed `(line, col)` here.
+/// Structured lexer error.  The named arms let `needs_continuation` in
+/// `core/src/syntax/parser.rs` and the ariadne renderer say *what* was left
+/// open and *where* it opened — each carries its opener's [`Span`], with
+/// line and column recovered at render time.
 #[derive(Debug, Clone)]
 pub enum LexErrorKind {
-    /// A string literal hit EOF before its closing delimiter.
-    /// `inner` carries a nested-form failure (e.g. an unclosed `!{…}`
-    /// inside a double-quoted string) so the diagnostic can both
-    /// anchor at the outer string and explain the inner culprit.
+    /// A string hit EOF before its close.  `inner` carries a nested failure
+    /// — an unclosed `!{…}` within — so the diagnostic can anchor at the
+    /// outer string and still name the inner culprit.
     UnterminatedString {
         form: StringForm,
         opened: Span,
         inner: Option<Box<Self>>,
     },
-    /// A balanced delimiter pair (`{}`, `[]`) opened inside an
-    /// interpolation or expression block was not closed.  Anchored at
-    /// the opening delimiter.
+    /// A `{}` or `[]` pair that never closed.
     UnterminatedBalanced {
         open: char,
         close: char,
         opened: Span,
     },
-    /// A `$(...)` dereference was opened and never closed.
+    /// A `$(…)` that never closed.
     UnclosedDeref { opened: Span },
-    /// Free-form lexer errors — invalid escapes, unexpected characters,
-    /// expected-X-found-Y, redirect parse errors, and so on.
+    /// Everything unstructured: bad escapes, unexpected characters,
+    /// expected-X-found-Y, redirect faults.
     Other(String),
 }
 
 impl LexErrorKind {
-    /// True for the still-open arms — a string, balanced pair, or `$(…)`
-    /// that ran past end of input.  These are the kinds that mean "the
-    /// user is mid-typing": the REPL prompts for more, and an inner one is
-    /// re-anchored into its enclosing string.  The single source of truth
-    /// for which lexer kinds signal incompleteness.
+    /// True for the arms that mean "the user is still typing" — the REPL
+    /// prompts for more input, and an inner one is re-anchored into its
+    /// enclosing string.
     pub fn is_incomplete(&self) -> bool {
         matches!(
             self,
@@ -300,11 +237,9 @@ impl LexErrorKind {
         )
     }
 
-    /// Render this kind as a single user-facing message line.
-    ///
-    /// The opening-delimiter position is *not* in this string: the
-    /// ariadne renderer draws a secondary label at `opened`, so a `(line,
-    /// col)` suffix here would duplicate what the underline already shows.
+    /// One user-facing line.  The opening position is deliberately absent:
+    /// the renderer draws a secondary label at `opened`, so a `(line, col)`
+    /// here would only repeat the underline.
     pub fn message(&self) -> String {
         match self {
             Self::UnterminatedString { form, inner, .. } => {
@@ -327,15 +262,13 @@ impl LexErrorKind {
 #[derive(Debug)]
 pub struct LexError {
     pub kind: LexErrorKind,
-    /// Byte range of the *primary* anchor (the opening delimiter for
-    /// "unterminated …" kinds, or the location reported by `error()`
-    /// for free-form ones).
+    /// The opening delimiter for the "unterminated" kinds, the offending
+    /// position for free-form ones.
     pub span: Span,
 }
 
 impl LexError {
-    /// User-facing message synthesised from `kind`.  Single source of
-    /// truth — there is no separate `message` field to drift from it.
+    /// Synthesised from `kind`; no stored message that could drift from it.
     pub fn message(&self) -> String {
         self.kind.message()
     }
@@ -350,19 +283,17 @@ impl fmt::Display for LexError {
 /// Tokenise `source` with a placeholder file id.
 ///
 /// # Errors
-/// Returns `Err` if a string, balanced delimiter, or `$(…)` runs to EOF
-/// unterminated, or on a free-form lexical fault — an invalid escape or an
-/// unexpected character.
+/// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
+/// an invalid escape or an unexpected character.
 pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
     lex_with(source, FileId::DUMMY)
 }
 
-/// Tokenise `source` attributing every token's byte-range to `file`.
+/// Tokenise `source`, attributing every token's byte range to `file`.
 ///
 /// # Errors
-/// Returns `Err` if a string, balanced delimiter, or `$(…)` runs to EOF
-/// unterminated, or on a free-form lexical fault — an invalid escape or an
-/// unexpected character.
+/// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
+/// an invalid escape or an unexpected character.
 pub fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexError> {
     let mut lexer = Lexer::new(source, file);
     let mut tokens = Vec::new();
@@ -378,33 +309,27 @@ pub fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexErr
 }
 
 struct Lexer {
-    /// (`byte_offset`, char) for each char. Byte offsets let us stamp byte-range
-    /// spans while keeping O(1) peek-by-char-index semantics.
+    /// (`byte_offset`, char) per char: the offsets stamp byte-range spans,
+    /// the vector keeps peek-by-char-index at O(1).
     chars: Vec<(usize, char)>,
     source_len: u32,
     pos: usize,
     file: FileId,
-    /// Stack of currently-open delimiters, innermost last.  Newlines are
-    /// suppressed when the innermost open delimiter is a `[`-style
-    /// bracket — this makes multiline list/map literals work regardless
-    /// of whether they appear inside a block body.  Each entry also keeps
-    /// the opener's span so an unterminated delimiter at EOF can be
-    /// reported (and the REPL can prompt for continuation).
+    /// Open delimiters, innermost last.  The innermost decides newline
+    /// suppression, and every entry keeps its opener's span so a delimiter
+    /// still open at EOF can be reported where it began.
     delim_stack: Vec<OpenDelim>,
 }
 
-/// Which kind of paired delimiter is open.
+/// Which paired delimiter is open: a `{…}` block, whose newlines separate
+/// statements, or a `[…]` list/map, whose newlines are whitespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelimKind {
-    /// `{ … }` — a block; newlines inside are statement separators.
     Brace,
-    /// `[ … ]` — a list/map literal; newlines inside are whitespace.
     Bracket,
 }
 
 impl DelimKind {
-    /// The `(open, close)` characters for this delimiter kind, for
-    /// building an [`LexErrorKind::UnterminatedBalanced`].
     fn chars(self) -> (char, char) {
         match self {
             Self::Brace => ('{', '}'),
@@ -413,8 +338,6 @@ impl DelimKind {
     }
 }
 
-/// An open delimiter on the lexer's stack: its kind plus the span of the
-/// opener, so an unterminated delimiter can be anchored at where it opened.
 #[derive(Debug, Clone, Copy)]
 struct OpenDelim {
     kind: DelimKind,
@@ -437,7 +360,7 @@ impl Lexer {
         }
     }
 
-    /// Current byte offset (one past the last-consumed char).
+    /// Byte offset of the next char, i.e. one past the last consumed.
     fn byte_pos(&self) -> u32 {
         self.chars.get(self.pos).map_or(self.source_len, |(b, _)| {
             #[allow(
@@ -450,8 +373,8 @@ impl Lexer {
         })
     }
 
-    /// Zero-width span at the current cursor; the byte range is extended
-    /// to cover the full token by [`Self::finish`] once it is consumed.
+    /// Zero-width span at the cursor; [`Self::finish`] stretches it over the
+    /// token once that has been consumed.
     fn span(&self) -> Span {
         Span::point(self.file, self.byte_pos())
     }
@@ -469,8 +392,7 @@ impl Lexer {
         LexError { kind, span }
     }
 
-    /// Build an `UnterminatedString` error anchored at `span` (the
-    /// opening delimiter), optionally carrying an inner-form failure.
+    /// `span` must be the opening delimiter — it becomes the anchor.
     fn err_unterminated_string(
         span: Span,
         form: StringForm,
@@ -486,11 +408,9 @@ impl Lexer {
         )
     }
 
-    /// If `inner` reports a nested unterminated form, re-anchor it as
-    /// the outer string's failure (the user's mistake is "I opened a
-    /// string and a `!{…}` inside it; both are still open").  Other
-    /// failures (an invalid escape, "expected identifier after `$(`")
-    /// pass through unchanged so the user still sees the precise spot.
+    /// A still-open inner form becomes the outer string's failure: both are
+    /// open, and the string is the mistake.  Definite faults — a bad escape,
+    /// a missing identifier — pass through, keeping their precise spot.
     fn rewrap_inner_into_string(outer_span: Span, form: StringForm, inner: LexError) -> LexError {
         if inner.kind.is_incomplete() {
             Self::err_unterminated_string(outer_span, form, Some(Box::new(inner.kind)))
@@ -526,12 +446,9 @@ impl Lexer {
     }
 
     fn suppress_newline(&self) -> bool {
-        // Newlines are whitespace inside a `[...]` but separate statements
-        // inside a `{...}`.  What matters is the *innermost* currently-open
-        // delimiter, not whether any bracket is open somewhere in the stack:
-        // a block containing a list (`{ [ ... ] }`) suppresses newlines
-        // inside the list, while a list containing a block (`[ { ... } ]`)
-        // treats newlines inside the block as statement separators.
+        // The *innermost* delimiter decides, not whether a bracket is open
+        // anywhere: `{ [ … ] }` suppresses newlines inside the list, while
+        // `[ { … } ]` keeps them as separators inside the block.
         matches!(
             self.delim_stack.last().map(|d| d.kind),
             Some(DelimKind::Bracket)
@@ -558,12 +475,10 @@ impl Lexer {
         }
     }
 
-    /// Resolve end of input.  A top-level `{` / `[` left open is an
-    /// unterminated delimiter, not a clean EOF: report it anchored at the
-    /// innermost opener.  This both gives batch scripts a real diagnostic
-    /// and lets the REPL's `needs_continuation` (which keys off
-    /// `UnterminatedBalanced`) prompt for the rest of the input.  `span`
-    /// is the position the clean `Eof` token should carry.
+    /// End of input — unless a `{` or `[` is still open, which is an
+    /// unterminated delimiter anchored at the innermost opener rather than a
+    /// clean EOF, and is what lets the REPL prompt for the rest.  `span` is
+    /// where a clean `Eof` token sits.
     fn eof_or_unterminated(&self, span: Span) -> Result<(Token, Span), LexError> {
         if let Some(open) = self.delim_stack.last().copied() {
             let (o, c) = open.kind.chars();
@@ -604,10 +519,8 @@ impl Lexer {
                                 continue;
                             }
                             Some('\n') => Ok(self.scan_separator(span)),
-                            // The comment ran to end of input — the `Eof`
-                            // token spans the end of the source, not the
-                            // `#` that opened the comment, but an open
-                            // `{` / `[` is still unterminated.
+                            // The comment ran to end of input: the `Eof`
+                            // token sits there, not at the opening `#`.
                             _ => self.eof_or_unterminated(self.span()),
                         }
                     }
@@ -652,7 +565,7 @@ impl Lexer {
                     Ok((Token::Spread, self.finish(span)))
                 }
                 '`' => {
-                    self.bump(); // consume '`'
+                    self.bump();
                     let label = self.scan_ident();
                     if label.is_empty() {
                         Err(Self::error(
@@ -677,7 +590,7 @@ impl Lexer {
         (token, self.finish(span))
     }
 
-    /// Consume a two-character operator and emit it as a plain word.
+    /// Two-char operators lex as plain words, not as tokens of their own.
     fn two_char_word(&mut self, op: &str, span: Span) -> (Token, Span) {
         self.bump();
         self.bump();
@@ -692,13 +605,11 @@ impl Lexer {
         (token, opened)
     }
 
-    /// Emit a closing-delimiter token, popping the matching opener off
-    /// the delim stack.  The pop is *conditional*: it fires only when the
-    /// innermost open delimiter is the `kind` this closer matches.  A
-    /// wrong-kind closer (`}` while a `[` is open) or one at depth 0
-    /// emits its token without touching the stack, so the
-    /// newline-suppression state stays in sync with the genuinely open
-    /// delimiters and the parser is left to report the mismatch.
+    /// Emit a closing token, popping only when it matches the innermost
+    /// opener.  A wrong-kind closer (`}` while a `[` is open) or one at
+    /// depth 0 leaves the stack alone, so newline suppression stays in step
+    /// with the genuinely open delimiters and the parser reports the
+    /// mismatch.
     fn close_delim(&mut self, token: Token, kind: DelimKind) -> (Token, Span) {
         let span = self.span();
         self.bump();
@@ -722,11 +633,8 @@ impl Lexer {
         (Token::Newline, self.finish(span))
     }
 
-    /// At a `:` held in `peek()`, does it break the bare word rather than
-    /// belong to it?  `host: val` splits into `Bare("host"), Colon`; the
-    /// `:` in `host:5432` does not.  The rule is the follower after the
-    /// colon — defined once and shared by `scan_bare_word` (a leading `:`)
-    /// and `scan_bare_fragment` (a `:` mid-fragment).
+    /// Does the `:` under `peek()` break the bare word?  Only when space,
+    /// newline, or `]` follows: `host: val` splits, `host:5432` does not.
     fn colon_splits_here(&self) -> bool {
         self.peek_n(1)
             .is_none_or(|next| matches!(next, ' ' | '\t' | '\r' | '\n' | ']'))
@@ -754,13 +662,12 @@ impl Lexer {
                 break;
             }
 
-            // Inside `[...]`, comma is punctuation, not part of the word.
+            // `suppress_newline` reads as "we are inside `[…]`", where a
+            // comma punctuates instead of joining the word.
             if ch == ',' && self.suppress_newline() {
                 break;
             }
 
-            // `host: val`  → Bare("host"), Colon, Bare("val")
-            // `host:5432`  → Bare("host:5432")
             if ch == ':' && self.colon_splits_here() {
                 break;
             }
@@ -772,7 +679,7 @@ impl Lexer {
     }
 
     fn scan_tilde(&mut self, span: Span) -> (Token, Span) {
-        self.bump(); // consume '~'
+        self.bump();
         let suffix = match self.peek() {
             Some(ch) if is_bare_char(ch) => self.scan_bare_fragment(),
             _ => String::new(),
@@ -782,9 +689,7 @@ impl Lexer {
         (Token::Word(Word::Tilde(path)), self.finish(span))
     }
 
-    /// Count the run of `#`s starting at the current position without
-    /// consuming.  Used to disambiguate a hash-bumped string opener from
-    /// a comment.
+    /// Length of the `#` run at the cursor, consuming nothing.
     fn count_hash_run(&self) -> usize {
         let mut n = 0;
         while self.peek_n(n) == Some('#') {
@@ -793,17 +698,14 @@ impl Lexer {
         n
     }
 
-    /// At a `#`, does the run of `#`s open a hash-bumped single-quoted
-    /// string rather than a comment?  A run of `level` hashes followed by
-    /// `'` opens `#'…'#`; any other follower is a comment.  Shared by
-    /// `next_token` and `scan_separator` so the two cannot disagree.
+    /// A `#` run followed by `'` opens `#'…'#`; anything else is a comment.
+    /// Shared by `next_token` and `scan_separator` so they cannot disagree.
     fn hash_opens_quoted(&self) -> bool {
         self.peek_n(self.count_hash_run()) == Some('\'')
     }
 
-    /// Scan the body of a hash-bumped literal at the given level, calling
-    /// `push` for each body char.  Consumes the closing `'` and its
-    /// `level` `#`s.  Errs on EOF before the close.
+    /// Push each body char and consume the closing `'` with its `level`
+    /// `#`s.  A `'` trailed by fewer than `level` `#`s is body text.
     fn scan_quoted_body<F: FnMut(char)>(
         &mut self,
         span: Span,
@@ -826,9 +728,9 @@ impl Lexer {
                         hashes += 1;
                     }
                     if hashes >= level {
-                        self.bump(); // '
+                        self.bump();
                         for _ in 0..level {
-                            self.bump(); // matching #s
+                            self.bump();
                         }
                         return Ok(());
                     }
@@ -843,12 +745,10 @@ impl Lexer {
         }
     }
 
-    /// Scan a single-quoted string at the given hash level.  The leading
-    /// `#`s (if any) have already been consumed; the opening `'` is still
-    /// in the stream.  Body bytes are verbatim — no escapes, no
-    /// interpolation.
+    /// The leading `#`s are already consumed; the opening `'` is not.  Body
+    /// bytes are verbatim — no escapes, no interpolation.
     fn scan_quoted(&mut self, span: Span, level: usize) -> Result<(Token, Span), LexError> {
-        self.bump(); // opening '
+        self.bump();
         let mut body = String::new();
         self.scan_quoted_body(span, level, |c| body.push(c))?;
         Ok((Token::SingleQuoted(body), self.finish(span)))
@@ -859,16 +759,14 @@ impl Lexer {
         let file = span.file;
         let mut parts: Vec<Spanned<StringPart>> = Vec::new();
         let mut literal = String::new();
-        // Byte offset of the first char buffered into `literal` since the
-        // last flush; `None` when the buffer is empty.
+        // Offset of the first char buffered since the last flush; `None`
+        // while the buffer is empty.
         let mut literal_start: Option<u32> = None;
         let form = StringForm::DoubleQuoted;
 
         loop {
-            // Byte position of the next char before any bumping.  Used
-            // both as the start of a non-literal part and as the start
-            // of a literal run when the next char ends up appended to
-            // `literal`.
+            // Where whatever this iteration produces begins — a part, or a
+            // literal run — read before any bumping.
             let cursor = self.byte_pos();
             match self.peek() {
                 None => {
@@ -883,10 +781,9 @@ impl Lexer {
                     let before = literal.len();
                     self.bump();
                     self.scan_double_quoted_escape(cursor, &mut literal)?;
-                    // A `\<newline>` continuation emits nothing.  Anchor the
-                    // literal run's start only when the escape actually
-                    // produced a char, so a leading continuation does not
-                    // stretch the following literal's span back over itself.
+                    // A `\<newline>` continuation emits nothing, so anchor
+                    // the run only when a char actually appeared — else the
+                    // following literal's span stretches back over it.
                     if literal.len() > before {
                         literal_start.get_or_insert(cursor);
                     }
@@ -948,9 +845,8 @@ impl Lexer {
                                 cursor,
                                 file,
                             );
-                            // `!$name` desugars to `!{<deref>}` — synthesise
-                            // a single-token group rather than re-lexing
-                            // `${name}`.  The deref span covers `$name`.
+                            // `!$name` is `!{$name}`: synthesise the
+                            // one-token group instead of re-lexing.
                             let deref_span = self.span();
                             self.bump();
                             let name = self.scan_deref_ident();
@@ -987,17 +883,16 @@ impl Lexer {
         Ok((Token::DoubleQuoted(parts), self.finish(span)))
     }
 
-    /// Consume one escape sequence after the `\` (already bumped by the
-    /// caller).  `escape_start` is the byte offset of the `\`, so a
-    /// malformed escape underlines `\q` itself rather than the string's
-    /// opening quote.
+    /// Consume one escape after the `\`, which the caller has bumped.
+    /// `escape_start` is that `\`'s offset, so a malformed escape underlines
+    /// `\q` itself rather than the string's opening quote.
     fn scan_double_quoted_escape(
         &mut self,
         escape_start: u32,
         literal: &mut String,
     ) -> Result<(), LexError> {
-        // Span of the escape so far: from the `\` to the cursor.  Built
-        // at each error site after the offending char is consumed.
+        // The escape so far, from the `\` to the cursor; built at each error
+        // site once the offending char is consumed.
         macro_rules! span {
             () => {
                 Span::new(self.file, escape_start, self.byte_pos())
@@ -1070,7 +965,7 @@ impl Lexer {
                 }
                 #[allow(
                     clippy::cast_possible_truncation,
-                    reason = "n is guarded < 0x80 on line 1048; fits u8"
+                    reason = "the `n >= 0x80` guard above has already returned; fits u8"
                 )]
                 literal.push(n as u8 as char);
             }
@@ -1096,7 +991,7 @@ impl Lexer {
                 if digits.is_empty() {
                     return Err(Self::error(span!(), "\\u{X..} expects 1–6 hex digits"));
                 }
-                self.bump(); // '}'
+                self.bump();
                 let cp = u32::from_str_radix(&digits, 16).unwrap();
                 let ch = char::from_u32(cp).ok_or_else(|| {
                     Self::error(span!(), format!("\\u{{{digits}}} is not a Unicode scalar"))
@@ -1120,13 +1015,9 @@ impl Lexer {
         Ok(())
     }
 
-    /// Push the buffered literal as a [`StringPart::Literal`] spanned over
-    /// the byte range `start..end`.  Caller threads `start` as the byte
-    /// position where the first literal char landed and `end` as the byte
-    /// position immediately past the last literal char.  Always clears
-    /// `start`, so a no-op flush at a non-literal part cannot leave a
-    /// stale offset for the next literal run to inherit.  No push when the
-    /// buffer is empty.
+    /// Push the buffered literal spanned `start..end`, or nothing if the
+    /// buffer is empty.  `start` is cleared either way: a no-op flush must
+    /// not leave a stale offset for the next literal run to inherit.
     fn flush_literal(
         parts: &mut Vec<Spanned<StringPart>>,
         literal: &mut String,
@@ -1144,19 +1035,14 @@ impl Lexer {
         }
     }
 
-    /// Scan a deref after $: $name, $(name), $name[key], $[arith].  The
-    /// bare `$name` form reads its name with [`Self::scan_deref_ident`],
-    /// which stops before a trailing `-` so `$os-$arch` splits into two
-    /// derefs; the explicit-boundary form `$(name)` uses [`Self::scan_ident`]
-    /// directly and keeps a trailing `-`.  Both draw on the identifier
-    /// alphabet `[a-zA-Z_][a-zA-Z0-9_-]*` ([`is_ident_start`]/[`is_ident_cont`]).
-    /// Returns None for bare $ (not followed by ident/paren/bracket).
+    /// A deref after the `$` the caller consumed: `$name`, `$(name)`,
+    /// `$name[key]`, `$[expr]`, or `None` for a bare `$`.  The bare form
+    /// stops before a trailing `-` (see [`Self::scan_deref_ident`]); the
+    /// explicit `$(name)` keeps one.
     fn scan_deref(&mut self) -> Result<Option<StringPart>, LexError> {
         match self.peek() {
             Some(ch) if is_ident_start(ch) => {
-                // `self.span()` here is the cursor position after the
-                // `$` (consumed by the caller); the ident runs from
-                // there to wherever `scan_ident` leaves the cursor.
+                // The `$` is gone, so the cursor is the name's first byte.
                 let name_start = self.span().start;
                 let name_file = self.span().file;
                 let name = self.scan_deref_ident();
@@ -1167,10 +1053,8 @@ impl Lexer {
                     let open = self.span();
                     self.bump();
                     let body = self.scan_token_group(open, '[', ']')?;
-                    // `scan_token_group` returns once it has consumed
-                    // the matching `]`; `self.span()` is now the byte
-                    // span of the token *after* `]`, so its `.start`
-                    // is exactly one past the closing bracket.
+                    // `scan_token_group` has consumed the matching `]`, so
+                    // the cursor sits exactly one past it.
                     let after_close = self.span().start;
                     let key_span = Span::new(open.file, open.start, after_close);
                     keys.push(Spanned::new(key_span, body));
@@ -1185,10 +1069,9 @@ impl Lexer {
                 let span = self.span();
                 self.bump();
                 let name = self.scan_ident();
-                // Distinguish "syntactic mistake" from "still open at EOF":
-                // `$(123)` is the former, `$(` then EOF is the latter, and
-                // the latter belongs to UnclosedDeref so an enclosing
-                // double-quoted string can re-anchor it.
+                // `$(123)` is a mistake; `$(` at EOF is merely unfinished,
+                // and only that one may be re-anchored as still-open by an
+                // enclosing double-quoted string.
                 if self.peek().is_none() {
                     return Err(Self::typed_error(
                         span,
@@ -1231,12 +1114,9 @@ impl Lexer {
         name
     }
 
-    /// Scan the name of a bare `$name` or `!$name` dereference.  A `-` is a
-    /// valid interior name char, but a *trailing* one is left in the stream
-    /// as literal text rather than eaten into the name: `$os-$arch`
-    /// interpolates `os` and `arch` around a literal `-`, and `$foo-` names
-    /// `foo`.  The explicit-boundary form `$(name)` keeps a trailing `-`,
-    /// since its parens already fix where the name ends.
+    /// The name of a bare `$name` or `!$name`.  A `-` is an interior name
+    /// char, but a trailing one goes back to the stream as literal text, so
+    /// `$os-$arch` is two derefs around a `-`.
     fn scan_deref_ident(&mut self) -> String {
         let mut name = self.scan_ident();
         while name.ends_with('-') {
@@ -1246,23 +1126,15 @@ impl Lexer {
         name
     }
 
-    /// Lex tokens inside a balanced `open`/`close` pair until the
-    /// matching close.  The opening delimiter is *already consumed* by
-    /// the caller; `opener` is its span (used to anchor an
-    /// `UnterminatedBalanced` error if EOF arrives first).  The closing
-    /// delimiter is consumed by this method and *not* included in the
-    /// returned stream.
+    /// Lex a balanced `open`/`close` body: the caller has already consumed
+    /// the opener (`opener` is its span, anchoring an `UnterminatedBalanced`
+    /// if EOF comes first), and this consumes the closer without emitting it.
     ///
-    /// Newline handling matches the rest of the lexer: a `[` opener
-    /// makes newlines whitespace (list/map-literal style), a `{` opener
-    /// makes them statement separators (block style).  Both are managed
-    /// by the existing `delim_stack` — the caller already consumed the
-    /// open without going through [`Self::open_delim`], so we push
-    /// once on entry.  Nested groups inside the body push/pop through
-    /// [`Self::open_delim`] / [`Self::close_delim`] in
-    /// [`Self::next_token`], so the recursion depth is already tracked
-    /// centrally — we watch `delim_stack.len()` drop back below the
-    /// entry level to recognise our matching close.
+    /// That bypass of [`Self::open_delim`] is why we push onto `delim_stack`
+    /// here — it gives the body the right newline rule and makes the stack
+    /// falling below our entry depth the signal that our own closer arrived.
+    /// [`Self::close_delim`] does that pop on success; each error path pops
+    /// explicitly.
     fn scan_token_group(
         &mut self,
         opener: Span,
@@ -1270,23 +1142,15 @@ impl Lexer {
         close: char,
     ) -> Result<Vec<(Token, Span)>, LexError> {
         debug_assert!(matches!((open, close), ('{', '}') | ('[', ']')));
-        // Lexer recursion runs through this method (interpolation
-        // `!{…}`, expression block `$[…]`, indexed deref `$name[k]`),
-        // so `delim_stack.len()` doubles as the recursion depth.  Cap
-        // it so adversarial input like `$[$[$[$[…` rejects cleanly
-        // rather than overflowing the call stack.  Real programs sit
-        // well below the cap.
+        // Every lexer recursion runs through here, so `delim_stack.len()`
+        // bounds the recursion depth.  Cap it, or `$[$[$[$[…` overflows the
+        // call stack instead of failing cleanly.
         if self.delim_stack.len() >= crate::syntax::NESTING_DEPTH_LIMIT {
             return Err(Self::error(
                 opener,
                 crate::syntax::nesting_too_deep_message(),
             ));
         }
-        // The caller already consumed the opener without going through
-        // `open_delim`, so we mirror its delim_stack push here.  On a
-        // successful matching close, `next_token`'s `close_delim` pops
-        // it for us; on every error exit we pop explicitly to leave
-        // the lexer's state coherent.
         self.delim_stack.push(OpenDelim {
             kind: match open {
                 '[' => DelimKind::Bracket,
@@ -1307,22 +1171,16 @@ impl Lexer {
                 }
             };
             match (&tok, open) {
-                // The matching close: `next_token`'s `close_delim`
-                // already popped our delim, so the stack now sits one
-                // below the entry level.  Mismatched openers (e.g. a
-                // `]` while scanning a `{…}` group) fall through to
-                // the catch-all and are pushed as-is — the parser
-                // catches those.
+                // Our closer: `close_delim` already popped us, so the stack
+                // sits below the entry depth.  A mismatched one (`]` while
+                // scanning `{…}`) falls through and the parser reports it.
                 (Token::RBrace, '{') | (Token::RBracket, '[')
                     if self.delim_stack.len() < entry_depth =>
                 {
                     return Ok(tokens);
                 }
-                // EOF inside an open group is unreachable: `next_token`
-                // routes end of input through `eof_or_unterminated`, which
-                // returns `Err(UnterminatedBalanced …)` whenever a delim is
-                // open — and our own group delim is always open here.  That
-                // `Err` is caught above, so the loop never sees an `Eof`.
+                // With our delim open, `eof_or_unterminated` turns end of
+                // input into the `Err` caught above.
                 (Token::Eof, _) => {
                     unreachable!("next_token cannot yield Eof while a delim is open")
                 }
@@ -1331,13 +1189,10 @@ impl Lexer {
         }
     }
 
-    /// Lex the body of an expression block `$[…]`.  The opening `[` is
-    /// already consumed.  Inside an expression block, adjacent `&` /
-    /// `|` pairs are the logical operators `&&` / `||` — the lexer
-    /// fuses them here so the parser sees the same tokens it would for
-    /// a bare-word `&&` outside any nesting.  Fusion lives in the
-    /// lexer because the contextual cue (we're inside `$[…]`) is
-    /// lexical; SPEC §1 documents the rule.
+    /// Lex the body of `$[…]`, whose `[` the caller consumed.  Inside an
+    /// expression block adjacent `&`/`|` pairs are the logical `&&`/`||`,
+    /// and fusing them belongs to the lexer because the cue — being inside
+    /// `$[…]` — is lexical.
     fn scan_expr_block(&mut self, opener: Span) -> Result<Vec<(Token, Span)>, LexError> {
         let raw = self.scan_token_group(opener, '[', ']')?;
         Ok(fuse_paired_pipeline_ops(raw))
@@ -1363,19 +1218,15 @@ impl Lexer {
                 let fd = Some(Self::parse_fd(&fd_digits, span)?);
                 self.scan_redirect_lt(fd, span)
             }
-            // `scan_fd_redirect` is only entered after `is_fd_redirect_start`
-            // confirmed a `>`/`<` follows the digit run, and `take_while`
-            // consumed exactly that run — so the next char is always one of them.
+            // `is_fd_redirect_start` already saw a `>`/`<` past the digits,
+            // and `take_while` consumed exactly those digits.
             _ => unreachable!("scan_fd_redirect entered without a trailing '>' or '<'"),
         }
     }
 
-    /// Parse the digit-prefix of an fd redirect.  Empty input is a bug
-    /// (the caller only enters this path after seeing at least one digit
-    /// followed by `>` or `<`), so the digit string must be non-empty.
-    /// Overflow is a hard error — silently coercing `99999999999>` to
-    /// fd 1 is exactly the bash-style sloppy inheritance we want to
-    /// avoid.
+    /// Parse the digit prefix of an fd redirect.  Overflow is a hard error:
+    /// silently coercing `99999999999>` to fd 1 is the bash sloppiness we
+    /// refuse.
     fn parse_fd(digits: &str, span: Span) -> Result<u32, LexError> {
         debug_assert!(!digits.is_empty(), "scan_fd_redirect called without digits");
         digits.parse::<u32>().map_err(|_| {
@@ -1386,8 +1237,6 @@ impl Lexer {
         })
     }
 
-    /// Build a `Token::Redirect` and finish its span — one place to keep
-    /// the field order and the span-finish call in sync.
     fn finish_redirect(
         &self,
         fd: Option<u32>,
@@ -1411,11 +1260,9 @@ impl Lexer {
             self.bump();
             return Ok(self.finish_redirect(fd, RedirectMode::Append, None, span));
         }
-        // `>~` is the stream-write operator only when the `~` stands
-        // alone; `>~/path` and `>~user/path` are a plain write whose
-        // target is a tilde path, so a bare char after `~` (the start of
-        // a tilde-path suffix) yields a `Write` redirect and lets the
-        // following `~…` lex as its own `Tilde` word.
+        // `>~` is the stream-write operator only when the `~` stands alone.
+        // `>~/path` is a plain write to a tilde path, so a bare char after
+        // the `~` leaves it to lex as its own `Tilde` word.
         if self.peek() == Some('~') && !self.peek_n(1).is_some_and(is_bare_char) {
             self.bump();
             return Ok(self.finish_redirect(fd, RedirectMode::StreamWrite, None, span));
@@ -1444,11 +1291,9 @@ impl Lexer {
                      feeds a string to stdin, so drop one `<`",
                 ));
             }
-            // A payload glued to `<<` is near-certainly the bash heredoc
-            // reflex (`<<EOF`, `<<'EOF'`); a genuine here-string is spelled
-            // with a space. Rejecting the glued form here keeps the quoted
-            // heredoc delimiter from silently becoming stdin while the
-            // intended body lines run as stray commands.
+            // A payload glued to `<<` is the bash heredoc reflex; a genuine
+            // here-string takes a space.  Rejecting it stops the quoted
+            // delimiter becoming stdin while the body lines run as commands.
             if self.peek().is_some_and(|ch| !ch.is_whitespace()) {
                 return Err(Self::error(
                     self.finish(span),
@@ -1463,18 +1308,10 @@ impl Lexer {
     }
 }
 
-/// Fuse adjacent `&` / `|` pairs in an expression-block token stream
-/// into the logical operators `&&` / `||`.  This is purely a contextual
-/// rewrite: outside `$[…]` the standalone `&` and `|` keep their
-/// pipeline meaning, so the lexer only invokes this from
-/// [`Lexer::scan_expr_block`].
-///
-/// The two members must be byte-adjacent: `&&` is one operator, but
-/// `& &` (a space between) is two pipeline backgrounders and is left
-/// alone.  The output operator takes the span of the first member of the
-/// pair — adequate for diagnostics at the operator position, and the
-/// second member's span is one byte to the right so error labels stay
-/// tight.
+/// Fuse byte-adjacent `&`/`|` pairs into the logical `&&`/`||`, taking the
+/// first member's span.  A space between them (`& &`) leaves two pipeline
+/// backgrounders, and outside `$[…]` the single-char meaning stands — hence
+/// only [`Lexer::scan_expr_block`] calls this.
 fn fuse_paired_pipeline_ops(tokens: Vec<(Token, Span)>) -> Vec<(Token, Span)> {
     let mut out: Vec<(Token, Span)> = Vec::with_capacity(tokens.len());
     let mut iter = tokens.into_iter().peekable();
@@ -1540,16 +1377,16 @@ mod tests {
         }
     }
 
-    /// F13: a bad escape underlines the escape itself, not the string's
-    /// opening quote.  In `"abc\q"` the `\q` is at bytes 4..6.
+    /// A bad escape underlines the escape — `\q` at bytes 4..6 — not the
+    /// string's opening quote.
     #[test]
     fn bad_escape_spans_the_escape_not_the_quote() {
         let span = lex_err_span(r#""abc\q""#);
         assert_eq!((span.start, span.end), (4, 6));
     }
 
-    /// F13: a comment that runs to end of input yields an `Eof` token
-    /// spanned at the end of the source, not at the `#` that opened it.
+    /// A comment running to end of input leaves `Eof` spanned at the end of
+    /// the source, not at the `#` that opened it.
     #[test]
     fn trailing_comment_eof_spans_end_of_input() {
         let src = "echo a # tail";
@@ -1564,9 +1401,8 @@ mod tests {
         }
     }
 
-    /// After a newline or `;` separator, a hash-bumped single-quoted
-    /// string opens a literal; only a bare `#` run starts a comment.  The
-    /// `#'…'#` opener must survive the separator run, not be swallowed.
+    /// A `#'…'#` opener must survive the run of separators rather than be
+    /// swallowed as a comment.
     #[test]
     fn hash_quoted_string_after_separator() {
         let expect = vec![
@@ -1580,10 +1416,8 @@ mod tests {
         assert_eq!(tok_types("echo a;#'hi'#"), expect);
     }
 
-    /// A `\`-continuation in a double-quoted string appends nothing, so
-    /// the no-op flush at the following `$x` must not leak the backslash
-    /// offset into the trailing literal's span.  In `"\<nl>$x y"` the
-    /// trailing literal ` y` is at bytes 5..7, not 1..7.
+    /// A `\`-continuation appends nothing, so the no-op flush at `$x` must
+    /// not leak the backslash's offset into the trailing literal's span.
     #[test]
     fn line_continuation_does_not_stretch_literal_span() {
         let toks = lex("\"\\\n$x y\"").unwrap();
@@ -1599,10 +1433,8 @@ mod tests {
         assert_eq!((lit.start, lit.end), (5, 7));
     }
 
-    /// The same rule when the continuation is *adjacent* to literal text
-    /// with no intervening flush: a leading `\`-continuation emits nothing,
-    /// so the literal run must start at the first real char.  In
-    /// `"\<nl>abc"` the literal `abc` is at bytes 3..6, not 1..6.
+    /// The same rule with no flush in between: the literal run starts at the
+    /// first real char, byte 3, not at the continuation.
     #[test]
     fn line_continuation_does_not_stretch_following_literal() {
         let toks = lex("\"\\\nabc\"").unwrap();
@@ -1626,7 +1458,7 @@ mod tests {
 
     #[test]
     fn assignment() {
-        // With `let`, = is just a bare word. No special lexer rule.
+        // With `let`, `=` is an ordinary bare word.
         let toks = tok_types("let x = hello");
         assert_eq!(
             toks,
@@ -1729,10 +1561,9 @@ mod tests {
         );
     }
 
-    /// F12: a wrong-kind closer must not pop the delim stack — otherwise
-    /// the newline-suppression state desyncs for the rest of the group.
-    /// Here a stray `}` sits inside a `[…]`; the bracket stays open, so
-    /// the newline after it is still suppressed (no `Newline` token).
+    /// A wrong-kind closer must not pop the stack, or newline suppression
+    /// desyncs for the rest of the group: the stray `}` leaves the `[` open,
+    /// so no `Newline` follows it.
     #[test]
     fn mismatched_closer_does_not_desync_newline_suppression() {
         let toks = tok_types("[a }\nb]");
@@ -1852,9 +1683,8 @@ mod tests {
         ));
     }
 
-    /// F6: `>~/path` is a plain write whose target is a tilde path —
-    /// the `>~` stream-write operator must not swallow the `~`, or the
-    /// redirect would target `/path` instead of `$HOME/path`.
+    /// If `>~` swallowed the `~` in `>~/path`, the redirect would target
+    /// `/path` instead of `$HOME/path`.
     #[test]
     fn redirect_gt_then_tilde_path() {
         let toks = tok_types("echo hi >~/dir");
@@ -1873,8 +1703,7 @@ mod tests {
         assert_eq!(toks[3], tilde_tok(None, Some("/dir")));
     }
 
-    /// `>~` stays the stream-write operator when the `~` stands alone
-    /// (no tilde-path suffix follows).
+    /// With no tilde-path suffix after it, `>~` stays stream-write.
     #[test]
     fn redirect_gt_tilde_standalone_is_stream_write() {
         let toks = tok_types("echo hi >~ sock");
@@ -1950,7 +1779,7 @@ mod tests {
     #[test]
     fn double_quoted_interpolation() {
         let toks = tok_types("echo \"hello $name\"");
-        assert_eq!(toks.len(), 3); // echo, doubleQuoted, eof
+        assert_eq!(toks.len(), 3);
         match &toks[1] {
             Token::DoubleQuoted(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -1961,9 +1790,8 @@ mod tests {
         }
     }
 
-    /// A bare `$name` never eats a trailing `-`: `"$os-$arch"` splits into
-    /// two derefs around a literal `-`, so kebab-adjacent interpolations
-    /// don't silently fold the dash into the first name.
+    /// A bare `$name` never eats a trailing `-`, so a kebab-adjacent
+    /// interpolation cannot fold the dash into the first name.
     #[test]
     fn interpolation_stops_before_trailing_dash() {
         let toks = tok_types("\"$os-$arch\"");
@@ -1981,8 +1809,8 @@ mod tests {
         );
     }
 
-    /// A `-` with more name after it is still an interior name char, so a
-    /// genuine kebab identifier `$os-arch` stays a single deref.
+    /// A `-` with more name after it is interior, so a genuine kebab
+    /// identifier stays one deref.
     #[test]
     fn interpolation_keeps_interior_dash() {
         let toks = tok_types("\"$os-arch\"");
@@ -1993,8 +1821,7 @@ mod tests {
         assert_eq!(parts[0].item, StringPart::Variable("os-arch".into()));
     }
 
-    /// A trailing `-` at end of string names the identifier without it and
-    /// leaves the `-` as literal text.
+    /// A `-` at end of string is literal text, not part of the name.
     #[test]
     fn interpolation_trailing_dash_at_end() {
         let toks = tok_types("\"$foo-\"");
@@ -2011,8 +1838,8 @@ mod tests {
         );
     }
 
-    /// The explicit-boundary form `$(name)` fixes where the name ends, so it
-    /// keeps a trailing `-` that the bare form would drop.
+    /// `$(name)` fixes where the name ends, so it keeps the trailing `-`
+    /// that the bare form drops.
     #[test]
     fn explicit_boundary_keeps_trailing_dash() {
         let toks = tok_types("\"$(foo-)\"");
@@ -2023,8 +1850,7 @@ mod tests {
         assert_eq!(parts[0].item, StringPart::Variable("foo-".into()));
     }
 
-    /// A bare deref outside strings (`Token::Deref`) obeys the same rule:
-    /// `$os-$arch` is two derefs around a literal-`-` bare word.
+    /// A bare deref outside strings obeys the same rule.
     #[test]
     fn bare_deref_stops_before_trailing_dash() {
         let toks = tok_types("$os-$arch");
@@ -2048,8 +1874,8 @@ mod tests {
                 let StringPart::Force(inner) = &parts[0].item else {
                     panic!("expected Force");
                 };
-                // Two tokens lexed inline from the inner `echo hello`:
-                // the lexer no longer slices a raw substring back out.
+                // The inner `echo hello` is lexed in place, not sliced back
+                // out as raw text.
                 let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
                 assert_eq!(kinds, vec![&plain("echo"), &plain("hello")]);
             }
@@ -2070,11 +1896,8 @@ mod tests {
         assert_eq!(t(r#""\x41""#), "A");
         assert_eq!(t(r#""\x7F""#), "\x7F");
         assert_eq!(t(r#""\x00""#), "\x00");
-        // \x80 is rejected.
         assert!(lex_err(r#""\x80""#).contains("\\xNN"));
-        // Non-hex digits rejected.
         assert!(lex_err(r#""\xZZ""#).contains("two hex digits"));
-        // Only one hex digit (bare 'r' is unknown escape after that).
         assert!(lex_err(r#""\x4""#).contains("two hex digits"));
     }
 
@@ -2087,11 +1910,10 @@ mod tests {
             },
             _ => panic!("expected DoubleQuoted"),
         };
-        // Basic code points.
         assert_eq!(t(r#""\u{41}""#), "A");
         assert_eq!(t(r#""\u{0}""#), "\x00");
         assert_eq!(t(r#""\u{1F600}""#), "😀");
-        // Surrogate, out-of-range, too many digits, no braces all rejected.
+        // Surrogate, out of range, too many digits, no braces.
         assert!(lex_err(r#""\u{D800}""#).contains("Unicode scalar"));
         assert!(lex_err(r#""\u{110000}""#).contains("Unicode scalar"));
         assert!(lex_err(r#""\u{1234567}""#).contains("1–6 hex digits"));
@@ -2111,8 +1933,7 @@ mod tests {
 
     #[test]
     fn dollar_bracket_fuses_logical_ops() {
-        // `&&` and `||` are paired by the lexer inside `$[…]` —
-        // outside, they remain single-char pipeline punctuation.
+        // Outside `$[…]` these stay single-char pipeline punctuation.
         let toks = tok_types("$[1 && 0]");
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
@@ -2121,8 +1942,7 @@ mod tests {
         assert_eq!(kinds, vec![&plain("1"), &plain("&&"), &plain("0")]);
     }
 
-    /// F9: fusion is by byte adjacency — `& &` with a space between is
-    /// two separate backgrounders, not the `&&` operator.
+    /// Fusion is by byte adjacency: `& &` is two backgrounders, not `&&`.
     #[test]
     fn dollar_bracket_does_not_fuse_spaced_ampersands() {
         let toks = tok_types("$[1 & & 0]");
@@ -2143,16 +1963,15 @@ mod tests {
 
     #[test]
     fn dollar_bracket_inner_spans_offset_into_outer_source() {
-        // Spans on inner tokens point at the outer source bytes, so
-        // diagnostics raised inside `$[…]` underline the right column.
+        // Inner spans index the outer source, so a diagnostic raised inside
+        // `$[…]` underlines the right column.
         let toks = tok_types("$[42]");
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
         assert_eq!(inner.len(), 1);
         let (_, span) = &inner[0];
-        // `42` lives at bytes 2..4 of the input — the `$` and `[`
-        // each take one byte.
+        // The `$` and `[` take one byte each, so `42` is at bytes 2..4.
         assert_eq!(span.start, 2);
         assert_eq!(span.end, 4);
     }
@@ -2175,20 +1994,18 @@ mod tests {
 
     #[test]
     fn colon_context_sensitive() {
-        // Trailing colon before whitespace → splits
         let toks = tok_types("host: val");
         assert_eq!(
             toks,
             vec![plain("host"), Token::Colon, plain("val"), Token::Eof,]
         );
-        // Embedded colon → stays as one token
         let toks = tok_types("localhost:5432");
         assert_eq!(toks, vec![plain("localhost:5432"), Token::Eof]);
     }
 
     #[test]
     fn equals_not_special() {
-        // = is a normal bare char. No context-sensitive splitting.
+        // `=` is an ordinary bare char — no splitting rule.
         let toks = tok_types("x = 5");
         assert_eq!(toks, vec![plain("x"), plain("="), plain("5"), Token::Eof,]);
         let toks = tok_types("-DFOO=bar");
@@ -2285,14 +2102,12 @@ mod tests {
 
     #[test]
     fn backslash_not_special_in_middle() {
-        // \ not before \n: tokenizes as part of a bare word.
         let toks = tok_types("foo\\bar");
         assert_eq!(toks, vec![plain("foo\\bar"), Token::Eof]);
     }
 
     #[test]
     fn backslash_standalone_not_special() {
-        // Standalone \ surrounded by spaces: still a bare word.
         let toks = tok_types("foo \\ bar");
         assert_eq!(
             toks,
@@ -2302,15 +2117,15 @@ mod tests {
 
     #[test]
     fn windows_path_unchanged() {
-        // C:\Users\foo must tokenize as a single bare word.
+        // One bare word, backslashes and drive colon included.
         let toks = tok_types("C:\\Users\\foo");
         assert_eq!(toks, vec![plain("C:\\Users\\foo"), Token::Eof]);
     }
 
     #[test]
     fn deref_paren_requires_ident() {
-        // EOF immediately after `$(` is an unclosed deref, not an
-        // "expected identifier" mistake — there's nothing to expect yet.
+        // EOF straight after `$(` is unclosed, not "expected identifier" —
+        // there is nothing to expect yet.
         let err = lex("$(").expect_err("expected lex error");
         assert!(
             matches!(err.kind, LexErrorKind::UnclosedDeref { .. }),
@@ -2319,15 +2134,14 @@ mod tests {
         );
         assert!(err.message().contains("unclosed"));
 
-        // A real syntactic error: the body is not an identifier.
+        // A real mistake: the body is not an identifier.
         let err = lex("$(1)").expect_err("expected lex error");
         assert!(err.message().contains("expected identifier after '$('"));
     }
 
     #[test]
     fn deref_paren_requires_closing_paren() {
-        // `$(name` runs out of input before the closing paren — that's
-        // an unclosed deref, anchored at `(`.
+        // Out of input before the `)`: unclosed, anchored at the `(`.
         let err = lex("$(name").expect_err("expected lex error");
         assert!(
             matches!(err.kind, LexErrorKind::UnclosedDeref { .. }),
@@ -2336,8 +2150,7 @@ mod tests {
         );
         assert!(err.message().contains("unclosed"));
 
-        // A `(` followed by a name and a non-`)` character before EOF
-        // still falls through to the explicit-paren error.
+        // A non-`)` char before EOF still reaches the explicit-paren error.
         let err = lex("$(name ]").expect_err("expected lex error");
         assert!(
             err.message()
@@ -2345,8 +2158,7 @@ mod tests {
         );
     }
 
-    /// `<<` lexes as the here-string redirect, fd-prefixable like the
-    /// other redirect operators.
+    /// `<<` is the here-string redirect, fd-prefixable like the others.
     #[test]
     fn herestring_redirect() {
         let tokens = lex("cat << x").unwrap();
@@ -2375,9 +2187,8 @@ mod tests {
         );
     }
 
-    /// A payload glued to `<<` is the bash heredoc reflex (`<<EOF`,
-    /// `<<'EOF'`); a genuine here-string takes a space before its
-    /// payload, so the glued form is a targeted lex error.
+    /// A payload glued to `<<` is the bash heredoc reflex; a here-string
+    /// takes a space, so the glued form gets a targeted error.
     #[test]
     fn glued_herestring_payload_is_rejected() {
         for src in ["cat <<EOF", "cat <<'EOF'", "cat <<\"EOF\"", "cat 0<<$x"] {
@@ -2390,9 +2201,8 @@ mod tests {
         }
     }
 
-    /// `<<<` is the bash-herestring reflex; ral's `<<` already does that
-    /// job, so a third `<` is a targeted lex error rather than a stray
-    /// `Read` redirect token that would confuse the parser downstream.
+    /// `<<` already does the here-string job, so a third `<` is a targeted
+    /// error rather than a stray `Read` token the parser would choke on.
     #[test]
     fn triple_lt_is_rejected() {
         for src in ["cat <<< x", "cat 0<<< x"] {
@@ -2461,11 +2271,9 @@ mod tests {
         );
     }
 
-    /// A raw string is verbatim: a source authored with CRLF line endings
-    /// (Notepad, VS Code set to CRLF) carries the `\r` into the literal's
-    /// value rather than losing it — that's the raw-string contract, not
-    /// a CRLF-intolerance bug. What must still work regardless is finding
-    /// the closing `'#` on the far side of the embedded `\r\n`.
+    /// A raw string is verbatim, so a CRLF-authored source keeps the `\r` in
+    /// the value — the contract, not a bug.  What must hold either way is
+    /// that the closing `'#` is found past the embedded `\r\n`.
     #[test]
     fn bumped_string_multiline_preserves_embedded_cr() {
         let toks = tok_types("#'line1\r\nline2'#");
@@ -2477,7 +2285,7 @@ mod tests {
 
     #[test]
     fn bumped_string_no_escape_processing() {
-        // \n inside a literal is two literal bytes, not a newline.
+        // `\n` in a raw literal is two bytes, not a newline.
         let toks = tok_types(r"#'\n\t\\'#");
         assert_eq!(
             toks,
@@ -2500,7 +2308,7 @@ mod tests {
 
     #[test]
     fn hash_run_without_quote_is_comment() {
-        // # / ## / ### followed by anything other than ' is just a comment.
+        // A `#` run followed by anything but `'` is a comment.
         assert_eq!(tok_types("# foo"), vec![Token::Eof]);
         assert_eq!(tok_types("## foo"), vec![Token::Eof]);
         assert_eq!(tok_types("###foo"), vec![Token::Eof]);
@@ -2514,21 +2322,20 @@ mod tests {
 
     #[test]
     fn bumped_string_unterminated_needs_hash() {
-        // Body has a bare ' but no '#, so never closes at level 1.
+        // A bare `'` with no `#` never closes a level-1 literal.
         let err = lex("#'body with ' but no hash").expect_err("should fail");
         assert!(err.message().contains("unterminated"));
     }
 
     #[test]
     fn bumped_string_close_followed_by_comment() {
-        // #'foo'#  # comment — the trailing # after the close starts a comment.
+        // The `#` after the close starts a comment.
         let toks = tok_types("#'foo'# # comment");
         assert_eq!(toks, vec![Token::SingleQuoted("foo".into()), Token::Eof]);
     }
 
     #[test]
     fn bumped_string_byte_span() {
-        // Span should cover the full #'…'# token including the surrounding #s.
         let src = "#'hi'#";
         let toks = lex(src).unwrap();
         assert_eq!(&src[toks[0].1.range()], "#'hi'#");
@@ -2538,29 +2345,22 @@ mod tests {
 
     #[test]
     fn byte_spans_cover_full_tokens() {
-        // ASCII: spans should be [start, start + len).
         let toks = lex("echo hi").unwrap();
-        // echo
         assert_eq!(toks[0].1.start, 0);
         assert_eq!(toks[0].1.end, 4);
-        // hi
         assert_eq!(toks[1].1.start, 5);
         assert_eq!(toks[1].1.end, 7);
-        // EOF
         assert!(matches!(toks[2].0, Token::Eof));
     }
 
     #[test]
     fn byte_spans_multibyte() {
-        // "日本" = 6 bytes (each char 3 bytes in UTF-8). `= ` precedes, `hi`
-        // trails. Underlines must align with byte boundaries, not char indices.
+        // Spans must land on byte boundaries, not char indices: `日本` is
+        // 6 bytes, so slicing by them would panic if the two disagreed.
         let src = "日本 = hi";
         let toks = lex(src).unwrap();
-        // 日本 — bare word, 6 bytes
         assert_eq!(&src[toks[0].1.range()], "日本");
-        // =
         assert_eq!(&src[toks[1].1.range()], "=");
-        // hi
         assert_eq!(&src[toks[2].1.range()], "hi");
     }
 
@@ -2568,7 +2368,6 @@ mod tests {
     fn byte_spans_quoted_string() {
         let src = "'héllo'";
         let toks = lex(src).unwrap();
-        // Whole quoted token including the surrounding quotes.
         assert_eq!(&src[toks[0].1.range()], "'héllo'");
     }
 }

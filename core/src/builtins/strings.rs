@@ -10,8 +10,7 @@ use super::util::{arg0_str, check_arity, f64_to_i64};
 #[cfg(not(feature = "grep"))]
 const NO_GREP: &str = "regex operations require the grep feature — rebuild with --features grep";
 
-/// Parse a `Value` as a non-negative `usize` index.  Errors descriptively
-/// rather than silently coercing junk to zero.
+/// Parse a `Value` as a `usize` index; junk errors rather than coercing to zero.
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
     match v {
         Value::Int(n) => usize::try_from(*n)
@@ -27,9 +26,8 @@ fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
 }
 
 pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
-    let val = args
-        .first()
-        .ok_or_else(|| sig("length requires 1 argument"))?;
+    check_arity(args, 1, "length")?;
+    let val = &args[0];
     let n = match val {
         Value::String(s) => s.chars().count(),
         Value::Bytes(b) => b.len(),
@@ -84,9 +82,7 @@ pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
     let s = arg0_str(args, "shell-split")?;
-    // shlex returns `None` on malformed input (e.g. unterminated quote)
-    // without distinguishing the cause; the underlying tokenizer simply
-    // halts.  A single message is honest about that.
+    // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(&s)
         .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
     Ok(Value::list(parts.into_iter().map(Value::String).collect()))
@@ -103,11 +99,8 @@ fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
     regex::Regex::new(pattern).map_err(|e| sig(regex_err(ctx, pattern, &e.to_string())))
 }
 
-/// The prologue the regex builtins share: arity-check, then — behind the
-/// `grep` feature — compile `args[0]` and hand the regex plus the full
-/// argument list to `f`.  Without the feature every regex builtin returns
-/// the same `NO_GREP` refusal, so the feature gate is defined once here
-/// rather than duplicated across the six regex builtins.
+/// Arity-check, compile `args[0]`, hand the regex to `f`.  The `grep` gate lives
+/// here so the six regex builtins need not each repeat the `NO_GREP` refusal.
 fn with_regex(
     ctx: &'static str,
     args: &[Value],
@@ -127,12 +120,8 @@ fn with_regex(
     }
 }
 
-/// Regex replace of the *unique* match of `pattern` in `input`.  Like its
-/// literal counterpart [`builtin_string_replace`], it errors when the pattern
-/// matches zero or more than once: a surgical replacement only means anything
-/// when the target is unique, and silently editing the first of several (or
-/// nothing at all) is a footgun.  [`builtin_replace_all`] is the every-match
-/// variant.
+/// Errors unless the pattern matches exactly once, like its literal counterpart
+/// [`builtin_string_replace`]; [`builtin_replace_all`] is the every-match variant.
 pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
     with_regex("re-replace", args, 3, |re, args| {
         let input = args[2].to_string();
@@ -154,21 +143,13 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
     })
 }
 
-/// Literal-string replace of the unique occurrence of `from` in `s`
-/// with `to`.
-///
-/// Errors when `from` is empty, absent, or matches more
-/// than once: surgical replacement operations only mean anything when
-/// the target is unique, and silently
-/// accepting a 0- or many-match request would be a footgun.  No regex
-/// involvement — `from` and `to` are taken verbatim, so braces,
-/// dollars, and backslashes carry no special meaning.  `pub` (not
-/// `pub(super)`) so exarch's `edit-replace` builtin can share this exact
-/// match/error logic rather than duplicating it.
+/// Literal replace of the unique occurrence of `from` in `s` with `to`; no regex,
+/// so braces, dollars, and backslashes are verbatim.  `pub` so exarch's
+/// `edit-replace` can share this match/error logic.
 ///
 /// # Errors
-/// Returns `Err` if fewer than three arguments are given, if `from` is
-/// empty, or if `from` occurs zero or more than one time in the input.
+/// If given fewer than three arguments, if `from` is empty, or if `from` does not
+/// occur in `s` exactly once.
 pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     check_arity(args, 3, "string-replace")?;
     let from = args[0].to_string();
@@ -241,23 +222,14 @@ pub(super) fn builtin_find_matches(args: &[Value]) -> Settled<Value> {
     })
 }
 
-/// Number of leading whitespace *characters* on `line`.  Counts characters,
-/// not bytes, so a multibyte whitespace (NBSP, ideographic space) advances
-/// the indent by one — the byte-count form panicked when a later slice
-/// landed mid-character.
+/// Leading whitespace of `line` counted in *characters*, because [`dedent`] strips
+/// it with `chars().skip` — a byte count would slice mid-character.
 fn leading_whitespace_chars(line: &str) -> usize {
     line.chars().take_while(|c| c.is_whitespace()).count()
 }
 
-/// Strip the common leading whitespace from every non-blank line of `s`.
-///
-/// The indent level is the minimum count of leading whitespace characters
-/// across all lines that contain at least one non-whitespace character.
-/// Blank framing lines around the block fall away, so the common
-/// `dedent #'\n  text\n'#` shape does not leave an opener/closer line in
-/// the value.  Interior blank lines are preserved unchanged, and an interior
-/// `\r` belonging to a CRLF terminator stays put: `s` is split on `\n` and
-/// rejoined on `\n`.
+/// Strip the common leading whitespace — the minimum across non-blank lines — from
+/// `s`, dropping the blank framing lines a multi-line literal opens and closes with.
 fn dedent(s: &str) -> String {
     let lines = s.split('\n').collect::<Vec<_>>();
     let start = lines.iter().position(|line| !line.trim().is_empty());
@@ -275,15 +247,15 @@ fn dedent(s: &str) -> String {
         .map(|line| leading_whitespace_chars(line))
         .min()
         .expect("block contains a non-blank line");
-    // A single content line has no peers to share a common indent with:
-    // its own leading whitespace *is* the minimum.  Stripping it would erase
-    // all indentation, so leave `min_indent` at zero.
+    // A lone content line is its own minimum; stripping would erase all its indent.
     let min_indent = if start == end { 0 } else { min_indent };
 
     block
         .iter()
         .enumerate()
         .map(|(offset, line)| {
+            // Only the last line, and only if a `\n` followed it: that `\r` is half
+            // of a CRLF terminator the split already ate.  Interior ones stay.
             let line = if start + offset == end && end + 1 < lines.len() {
                 line.strip_suffix('\r').unwrap_or(line)
             } else {
@@ -304,8 +276,7 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
     let val = &args[0];
     match val {
         Value::Int(n) => Ok(Value::Int(*n)),
-        // An integral magnitude too large for `i64` is not representable, so
-        // refuse it rather than report a silently clamped value.
+        // An integral magnitude `i64` cannot hold is refused, not silently clamped.
         Value::Float(f) if f.fract() == 0.0 => f64_to_i64("int", *f).map(Value::Int),
         Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
             sig_hint(
@@ -346,10 +317,8 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
     }
 }
 
-/// `str <val>` renders any value to its `String` form via [`Value`]'s
-/// `Display`.  Bytes render as lossy UTF-8 (like `List`/`Map`, which are
-/// equally non-round-trippable); faithful byte→text decoding is `from-string`,
-/// which errors on invalid UTF-8.  This is the renderer `echo` lowers through.
+/// The renderer `echo` lowers through ([`Value`]'s `Display`).  Bytes go lossy
+/// here; `from-string` is the faithful decode, and errors on invalid UTF-8.
 pub(super) fn builtin_to_string(args: &[Value]) -> Settled<Value> {
     check_arity(args, 1, "str")?;
     Ok(Value::String(args[0].to_string()))

@@ -1,11 +1,10 @@
-//! The multi-agent status strip: one row per live session, rendered above
-//! the transcript by [`super::render`].  Like [`matrix_bar`], the whole
-//! module is a render-time projection over the `tabs`/`viewports` model
-//! [`super::tabs`] and [`super::viewport`] own — nothing here holds state;
-//! every row is recomputed each frame from that model.
+//! The multi-agent status strip: one row per live session, drawn above the
+//! transcript by [`super::render`].  Pure projection of the state
+//! [`super::tabs`] and [`super::viewport`] own — nothing here is retained, and
+//! every row is recomputed from that state each frame.
 
 use super::line;
-use super::palette::{AGENT_HUES, CYAN, SLATE};
+use super::palette::{AGENT_HUES, SLATE};
 use super::rail;
 use super::viewport::Viewport;
 use crate::bus::AgentId;
@@ -15,11 +14,8 @@ use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// How the agent×step matrix orders its rows — a render-time projection
-/// of the same `tabs`/`viewports` model, never a reshuffle of the
-/// underlying state.  [`MatrixSort::Spawn`] is the default (the `tabs`
-/// order, root first then subagents as born); [`MatrixSort::Cost`]
-/// surfaces the budget-burner by sorting on cumulative token spend.
+/// Row order for the matrix: `Spawn` leaves the `tabs` order alone (root first,
+/// subagents as born), `Cost` sorts on cumulative token spend.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum MatrixSort {
     #[default]
@@ -27,41 +23,13 @@ pub(super) enum MatrixSort {
     Cost,
 }
 
-/// Max name characters a matrix row's label keeps; a longer name is
-/// truncated to this. Column alignment down the rows comes from the
-/// measured [`MatrixWidths`], not this cap.
+/// Name characters a row label keeps; the column is then measured, not fixed here.
 pub(super) const MATRIX_LABEL_W: usize = 10;
-/// Most-recent step cells a matrix row shows; a longer run keeps the tail.
+/// Step cells a row shows, the most recent kept.
 pub(super) const MATRIX_STEPS_W: usize = 8;
 
-/// One-row tab bar.  Focused tab in bold + cyan, live subagents in
-/// slate, dying subagents in slate dim until they age out.  Shown only
-/// when there is more than one tab — root-only sessions skip the row
-/// entirely.
-pub(super) fn tab_bar(
-    tabs: &[AgentId],
-    names: &HashMap<AgentId, String>,
-    focused: AgentId,
-    dying: &HashMap<AgentId, Instant>,
-) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(tabs.len() * 2);
-    for (i, &id) in tabs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("  "));
-        }
-        let name = names.get(&id).map_or("?", String::as_str);
-        let hue = if id == focused { CYAN } else { SLATE };
-        let (label, style) = focus_label(name, hue, id == focused, dying.contains_key(&id));
-        spans.push(Span::styled(label, style));
-    }
-    Line::from(spans)
-}
-
-/// The focused-label idiom shared by [`tab_bar`] and [`MatrixRow::new`]:
-/// `[{name}]` bold when focused, ` {name} ` otherwise, dimmed while
-/// `dying`. `hue` is the caller's — [`tab_bar`] passes [`CYAN`]/[`SLATE`],
-/// the matrix its per-agent hue — so the two never drift apart on the text
-/// or the modifiers, only the colour.
+/// A promoted row's label and ink: the focused tab bracketed and bold, the rest
+/// spaced, dim while dying.
 fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, Style) {
     let text = if focused {
         format!("[{name}]")
@@ -78,21 +46,12 @@ fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, S
     (text, style)
 }
 
-/// The multi-agent matrix: one row per live session, columns
-/// `label  steps  tokens  sizebar`.  Rows = agents in `sort` order,
-/// coloured by each agent's rail hue so the matrix and the rail share one
-/// identity.  A *projection* of the existing `tabs`/`viewports` model —
-/// with a single session it collapses to [`tab_bar`]'s exact output, so
-/// the common case is visually unchanged.
+/// One row per live session, columns `label  steps  tokens  sizebar`, each row in
+/// its agent's rail hue so matrix and rail name the same agent the same colour.
 ///
-/// `rows` pairs each tab's id with its viewport (matrix figures are
-/// derived from the viewport: step cells, lines touched, token spend);
-/// `names`/`focused`/`dying` carry the same row state `tab_bar` reads.
-/// `demoted` maps each idle-and-parked tab to its current idle span — a row
-/// present renders compact (undecorated label, idle-age mark in place of
-/// step glyphs) and sorts into a stable block below every promoted row,
-/// regardless of `sort`; a live agent stays in the strip either way, never
-/// invisible.
+/// `demoted` maps an idle, parked tab to its idle span; such a row renders
+/// compact and sinks into a block below every promoted row whatever `sort` says,
+/// so a live agent is demoted but never dropped.
 pub(super) fn matrix_bar(
     rows: &[(AgentId, &Viewport)],
     names: &HashMap<AgentId, String>,
@@ -102,13 +61,7 @@ pub(super) fn matrix_bar(
     demoted: &HashMap<AgentId, Duration>,
     sort: MatrixSort,
 ) -> Vec<Line<'static>> {
-    if rows.len() <= 1 {
-        let tabs: Vec<AgentId> = rows.iter().map(|(id, _)| *id).collect();
-        return vec![tab_bar(&tabs, names, focused, dying)];
-    }
-    // Render-time row order: spawn keeps `rows` (the `tabs` order); cost
-    // sorts by cumulative spend, descending, so the budget-burner floats
-    // to the top.  A stable sort preserves spawn order among ties.
+    // Stable, so spawn order still decides between equal spenders.
     let mut order: Vec<usize> = (0..rows.len()).collect();
     if sort == MatrixSort::Cost {
         order.sort_by_key(|&i| {
@@ -116,12 +69,10 @@ pub(super) fn matrix_bar(
             std::cmp::Reverse(u.input + u.output)
         });
     }
-    // The value ramp is relative to the heaviest spender this frame: the
-    // top row(s) read near-white, the rest step down, so "which child
-    // burned the budget" is pre-attentive even though raw token counts
-    // dwarf `rail::value_step`'s line-count thresholds.  Root is excluded —
-    // its magnitude is never displayed (its token/step/bar cells are blank),
-    // so folding it in would leave the ramp short whenever root spends most.
+    // The ramp is relative to this frame's heaviest spender, because token
+    // counts dwarf `rail::value_step`'s line-count thresholds.  Root is left
+    // out: its cells are blank, so counting its spend would only flatten the
+    // ramp for everyone else.
     let max_tokens = rows
         .iter()
         .filter(|(id, _)| *id != root)
@@ -131,8 +82,7 @@ pub(super) fn matrix_bar(
         })
         .max()
         .unwrap_or(0);
-    // Promoted rows first, demoted rows as a stable block below — each
-    // keeps the order the sort above produced; only the partition moves.
+    // `partition` keeps relative order, so the sort above survives the split.
     let (mut display_rows, demoted_rows): (Vec<MatrixRow>, Vec<MatrixRow>) = order
         .into_iter()
         .map(|i| {
@@ -193,9 +143,8 @@ struct MatrixRow {
     hue: Color,
     token_style: Style,
     dim: bool,
-    /// This row's idle span if it is demoted, `None` if promoted — the sort
-    /// key [`matrix_bar`] partitions on, and the switch [`Self::render`]
-    /// reads to right-align the steps column instead of left.
+    /// Idle span if demoted, `None` if promoted: both the key [`matrix_bar`]
+    /// partitions on and the switch [`Self::render`] right-aligns steps by.
     idle: Option<Duration>,
 }
 
@@ -305,10 +254,8 @@ impl MatrixRow {
     }
 }
 
-/// A demoted row's idle-age mark, minute granularity: `12m` below the
-/// hour, `1h05m` past it. Fixed-position (right-aligned in the steps
-/// column) and unanimated — it changes only when the minute value itself
-/// changes.
+/// A demoted row's idle age: `12m`, or `1h05m` past the hour.  Minute
+/// granularity holds the cell still across redraws.
 fn idle_age_mark(idle: Duration) -> String {
     let mins = idle.as_secs() / 60;
     if mins < 60 {
@@ -318,10 +265,9 @@ fn idle_age_mark(idle: Duration) -> String {
     }
 }
 
-/// The matrix row's step glyphs: `done` leads the cell run with `√`
-/// (session in its linger window) or `╳` (last block an error); otherwise
-/// each step renders `●` (a tool call landed within it) or `○` (none).
-/// Capped to [`MATRIX_STEPS_W`] keeping the most-recent steps.
+/// The row's step glyphs, most recent [`MATRIX_STEPS_W`] kept: `●` a step that
+/// made a tool call, `○` one that did not.  A `dying` row — one in its linger
+/// window — leads with `√`, or `╳` if it ended on an error.
 fn step_cells(vp: &Viewport, dying: bool) -> String {
     let steps = vp.steps();
     let tail = steps.len().saturating_sub(MATRIX_STEPS_W);
@@ -336,10 +282,8 @@ fn step_cells(vp: &Viewport, dying: bool) -> String {
     s
 }
 
-/// Bucket `tokens` against the frame's `max_tokens` into a `0..=3`
-/// value step for [`rail::lighten`]: the heaviest spender reads brightest,
-/// the rest step down by quartile of the maximum.  `max_tokens == 0`
-/// (no spend yet) reads flat at the base hue.
+/// Bucket `tokens` by quartile of the frame's `max_tokens` into a `0..=3` step
+/// for [`rail::lighten`]; with no spend anywhere, every row reads at base hue.
 fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
     if max_tokens == 0 {
         return 0;

@@ -1,27 +1,21 @@
-//! Atomic write recipe (`> file` to a regular file), fd-level redirects
-//! for bundled tools and unsupported fd shapes (`apply_redirects` /
-//! `restore_redirects`), and the `<file → fd 0` handoff that parks the
-//! file in `shell.io.stdin` so every dispatch arm reads input
-//! through the same `Source` channel.
+//! Opening redirect targets: the atomic `>` recipe, the fd-level path for the
+//! shapes a `Sink` cannot model, and the `< file` handoff into `shell.io.stdin`.
+//! The frames in `evaluator::redirect` drive all three.
 
 use crate::syntax::ast::RedirectMode;
 use crate::types::{Break, Error, Mooring, Settled, Shell};
 
 use super::io_event;
 
-/// A redirect whose target has been evaluated to a concrete file
-/// path or fd.  The evaluator walks the AST's `ValRedirectTarget`
-/// and hands one of these to [`super::run`] and to [`apply_redirects`]
-/// (for builtins).
+/// A redirect target resolved to a concrete path or fd.
 #[derive(Clone, Debug)]
 pub(crate) enum EvalRedirect {
     File(String),
     Fd(u32),
 }
 
-/// One evaluated redirect: the runtime counterpart of the IR's
-/// [`crate::ir::RedirectV`], with `target` already resolved to a
-/// concrete file path or fd.
+/// The runtime counterpart of the IR's [`crate::ir::RedirectV`], as
+/// `evaluator::redirect::eval_redirects` resolves it.
 #[derive(Clone, Debug)]
 pub(crate) struct EvalRedirectV {
     pub(crate) fd: u32,
@@ -29,8 +23,8 @@ pub(crate) struct EvalRedirectV {
     pub(crate) target: EvalRedirect,
 }
 
-/// Coerce `>` to streaming for stderr — atomic semantics make no sense for
-/// diagnostic output.  All other modes pass through unchanged.
+/// `>` on stderr streams instead: staging diagnostics for an atomic commit
+/// would withhold them until the frame settles.
 pub(crate) fn stderr_mode(mode: RedirectMode) -> RedirectMode {
     match mode {
         RedirectMode::Write => RedirectMode::StreamWrite,
@@ -38,11 +32,6 @@ pub(crate) fn stderr_mode(mode: RedirectMode) -> RedirectMode {
     }
 }
 
-/// Map a `std::io::Error` from a path operation into a [`Break`],
-/// rendering `NotFound` / `PermissionDenied` as their canonical messages
-/// and any other kind as the underlying error.  `ctx` is the path the
-/// operation touched, used as the message prefix.  The error carries exit
-/// code 1.
 fn io_error(ctx: &str, e: &std::io::Error) -> Break {
     let msg = match e.kind() {
         std::io::ErrorKind::NotFound => format!("{ctx}: no such file or directory"),
@@ -59,134 +48,26 @@ use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
 };
 
-/// Pending tmp-to-target rename for an atomic `>` redirect.
+/// Pending tmp-to-target rename for an atomic `>`.  `commit` renames; `Drop`
+/// discards the tmp, so an abandoned or failed redirect leaves the target
+/// exactly as it was.
 ///
-/// Drop removes the tmp; `commit` fsyncs and renames it into place.
-///
-/// # The atomic-write recipe, and what each step buys you
-///
-/// 1. **Resolve symlinks via `canonicalize`.**  Without this, writing
-///    to a symlink would replace the link itself with a regular file
-///    — silently breaking anyone else who held the link as a path.
-///    For new files (no canonical form yet) we fall through to the
-///    literal path.  Done in [`open_atomic`].
-///
-/// 2. **Place the tmp file in the same directory as the target.**
-///    `rename(2)` is only atomic within a single filesystem; cross-fs
-///    rename returns `EXDEV` and the recipe fails outright.  Using
-///    `/tmp` for the staging file would break on every machine where
-///    `/tmp` is a separate mount (which is most of them, post-tmpfs).
-///    Done in [`open_atomic`].
-///
-/// 3. **Use a cryptographically random tmp name.**  A predictable
-///    name (e.g. `target.tmp`) races with concurrent writers and
-///    invites symlink-attack-shaped surprises in shared dirs.
-///    `tempfile::Builder` picks the name with `O_EXCL` semantics and
-///    RAII-deletes the file if we error out before persisting, so we
-///    never leak `.tmp` detritus.  Done in [`open_atomic`].
-///
-/// 4. **Write the contents, then flush them to disk before rename.**
-///    Skip this and a power loss in the window between rename and
-///    background data flush leaves a renamed-but-zero-length file:
-///    the directory entry was committed, the data blocks weren't.
-///    This is the ext4 `data=ordered` bug from 2009 that ate config
-///    files all over the Linux desktop (see "Further reading").
-///    Step 4a (write) is the redirect's writer; step 4b (flush) is
-///    the `sync_all` in [`AtomicCommit::commit`].
-///
-/// 5. **Copy the target's existing mode onto the tmp before rename
-///    (or default to 0644 for new files).**  Skip this and a
-///    previously-0644 file silently becomes 0600 (tempfile's default),
-///    narrowing access — or, on platforms where the default differs,
-///    becomes world-readable.  Either way the resulting permissions
-///    don't match what the user had before.  Done in [`open_atomic`].
-///
-/// 6. **Atomic `rename(tmp, target)`.**  Skip this in favour of
-///    "truncate target, write" and you reintroduce exactly the bug
-///    we're fixing: a crash or `^C` mid-write leaves a half-written
-///    file with no recovery path.  Skip it for "copy then unlink"
-///    and there's a window where the target doesn't exist; readers
-///    racing the swap see `ENOENT`.  Done in [`AtomicCommit::commit`].
-///
-/// 7. **Best-effort flush the parent directory to disk.**  Skip this
-///    and a kernel panic right after the rename can roll back the
-///    directory entry: the data is on disk under the tmp name, but
-///    on next boot the rename appears never to have happened.
-///    Errors here don't roll back the rename, so we ignore them;
-///    on platforms that don't support directory-level flush (Windows)
-///    the open itself fails and we fall through silently.  Done in
-///    [`AtomicCommit::commit`].
-///
-/// # Things this deliberately does *not* handle
-///
-/// - **Hardlinks are not preserved.**  Atomic rename creates a fresh
-///   inode; any other names that pointed at the old inode keep its
-///   old contents.  Every editor accepts this tradeoff — preserving
-///   the inode would mean truncate-and-write, which is non-atomic.
-///   Pick one.
-/// - **Owner/group, xattrs, ACLs, `SELinux` contexts** are not copied
-///   over.  Kernel default-inheritance handles the common case;
-///   explicit copying belongs in a separate "preserve" path if it's
-///   ever needed.
-/// - **Concurrent writers** race normally — atomic rename gives
-///   crash safety, not mutual exclusion.  Last writer wins.
-///
-/// # New failure mode vs. plain `fs::write`
-///
-/// Atomic rename requires write permission on the *parent
-/// directory*, not just the target file.  Callers that previously
-/// relied on file-only write perms will now see `EACCES` here.
-/// This is the standard tradeoff for crash safety.
-///
-/// # Platform notes
-///
-/// On Linux/macOS the recipe is exact: `rename(2)` swaps the inode
-/// even if other processes have the target open, and the open
-/// handles keep reading the old inode until close.
-///
-/// On Windows, `tempfile::persist` calls
-/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is atomic on NTFS
-/// in the no-observable-intermediate-state sense — but it *fails*
-/// (rather than silently swapping) if another process has the target
-/// open with a sharing mode that excludes deletion.  Live readers
-/// (editors, tail-followers, AV scanners) therefore turn what would
-/// be a silent success on Linux into a hard error on Windows.
-/// Mode preservation (step 5) and directory-level flush (step 7) are
-/// no-ops on Windows: the former because the POSIX permission
-/// bitfield doesn't apply to NTFS DACLs, the latter because NTFS
-/// commits directory-entry changes via its own journal and there's
-/// no API to force it from a regular file handle.
-///
-/// # Further reading
-///
-/// - [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html)
-///   — atomicity guarantees and the same-filesystem constraint.
-/// - [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html)
-///   — what gets flushed; why the directory-level flush matters.
-/// - [Theodore Ts'o, "Don't fear the fsync!"](https://lwn.net/Articles/322823/)
-///   — the ext4 `data=ordered` zero-length-after-rename saga that
-///   forced flush-before-rename into common practice.
-/// - [Pillai et al., "All File Systems Are Not Created Equal"](https://www.usenix.org/conference/osdi14/technical-sessions/presentation/pillai)
-///   — academic survey showing how often application code gets
-///   crash-safe updates wrong.  This recipe passes their checks.
-/// - [Dan Luu, "Files are hard"](https://danluu.com/file-consistency/)
-///   — accessible overview of the surprising failure modes.
+/// The rename mints a fresh inode: hardlinks to the old one keep the old
+/// contents, and owner, xattrs and ACLs fall to kernel inheritance.  It also
+/// needs write permission on the *parent directory*, not just on the file.
+/// Concurrent writers race as usual — this buys crash safety, not exclusion.
 pub(crate) struct AtomicCommit {
     tmp: tempfile::NamedTempFile,
     target: std::path::PathBuf,
 }
 
-/// The largest prefix of a written file read to seed the host's write-card
-/// preview — generous enough to hold the first several lines of any realistic
-/// file, so a large write is never pulled into memory wholesale to show a head.
+/// Cap on the bytes read to seed a write card's preview, so a large write is
+/// never pulled into memory whole to show a head.
 const PREVIEW_CAP: u64 = 64 * 1024;
 
 impl AtomicCommit {
-    /// Read a bounded prefix — at most [`PREVIEW_CAP`] bytes — of the temp
-    /// file: a best-effort snapshot of the *head* of what will land at `target`
-    /// if `commit` succeeds.  The write surface previews only the first few
-    /// lines, so the whole file (which may be large) is never read.  Returns
-    /// `None` on any OS error.
+    /// The head of the staged file: what will land at `target` if `commit`
+    /// succeeds.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's preview surface: read the head of the tmp file before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
@@ -202,14 +83,10 @@ impl AtomicCommit {
         Some(buf)
     }
 
-    /// The pre-existing target's whole content, read before `commit()` — the
-    /// atomic recipe leaves `target` completely untouched until the rename,
-    /// so this is a free look at "what was there before", the same snapshot
-    /// `edit-hash`/`edit-replace` read explicitly to build their diff card.  `None`
-    /// for a new file (nothing to diff against) or when either side would
-    /// exceed [`PREVIEW_CAP`]: diffing only ever a truncated prefix of one
-    /// side would describe a change that doesn't match what actually
-    /// landed, which is worse than the plain write-preview fallback.
+    /// The target's content before the rename — untouched until `commit`, so
+    /// the write card can diff against it.  `None` for a new file, and when
+    /// either side exceeds [`PREVIEW_CAP`]: a diff of truncated prefixes would
+    /// describe a change that never landed.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:surface:atomic-old-read] Sub-step of the atomic `>` write door's diff-eligibility check: stat and read the target's pre-existing content before the rename commits it, exactly mirroring temp_preview's read of the new side. Not a separate model operation — the write/diff card surfaces when the redirect frame settles."
@@ -231,17 +108,20 @@ impl AtomicCommit {
         reason = "[io-door:surface:atomic-commit] The atomic `>` write door's commit step: re-open the target's parent directory only to fsync the rename durable. The write surface fires when the redirect frame settles (committed once this returns Ok); this open carries written bytes to disk, it is not a separate model read."
     )]
     pub fn commit(self) -> std::io::Result<()> {
-        // (4b) Durably commit data blocks before any directory entry change.
+        // Data blocks before any directory entry, or a crash can commit the
+        // entry with the blocks still unwritten — a renamed zero-length file.
         self.tmp.as_file().sync_all()?;
-        // (6) Atomic rename.  `tempfile::persist` calls `rename(2)`; on
-        // success the tmp's RAII cleanup is disarmed automatically.
+        // `persist` is `rename(2)`; on Windows it is
+        // `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which *fails* rather than
+        // swapping when another process holds the target open without delete
+        // sharing, so a live reader turns a silent success into a hard error.
         self.tmp
             .persist(&self.target)
             .map(|_| ())
             .map_err(|e| e.error)?;
-        // (7) Best-effort directory-level flush.  Errors don't unwind
-        // the rename, so we eat them; platforms without directory-level
-        // flush (Windows) just fail to open the dir as a regular file.
+        // Without the parent fsync a panic can roll the directory entry back.
+        // Errors don't unwind the rename, and Windows has no directory handle
+        // to flush, so both just fall through.
         if let Ok(dir) = std::fs::File::open(crate::path::parent_or_cwd(&self.target)) {
             let _ = dir.sync_all();
         }
@@ -249,8 +129,8 @@ impl AtomicCommit {
     }
 }
 
-/// True for non-existent paths or regular files.  Non-regular files (TTYs,
-/// /dev/null, named pipes) get streaming semantics — atomicity is meaningless.
+/// True for new paths and regular files.  TTYs, `/dev/null` and named pipes
+/// stream instead — there is no inode to rename.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:atomic-eligible] Stat of the `>` write door's target to choose atomic vs. streaming semantics. A sub-step of the surfacing write door (open_file), not a model read; the write card is the operation's surface."
@@ -270,36 +150,34 @@ fn open_atomic(
     path: &str,
     target: &crate::path::ResolvedPath,
 ) -> Settled<(std::fs::File, AtomicCommit)> {
-    // (1) Symlink resolution.  `canonicalise_strict` errors on
-    // non-existent paths — for a fresh file the literal target is
-    // the right thing.
+    // Resolve symlinks, or the rename replaces the link itself with a regular
+    // file.  `canonicalise_strict` errors on a path that does not exist yet;
+    // for a fresh file the literal target is the right one.
     let target = target
         .canonicalise_strict()
         .unwrap_or_else(|_| target.as_path().to_path_buf());
-    // (2) Same-directory tmp.  `Path::parent` returns `Some("")` for
-    // a bare filename; [`crate::path::parent_or_cwd`] treats empty as
-    // "current directory" so the tempfile call doesn't choke.
+    // Stage beside the target: `rename(2)` is atomic only within one
+    // filesystem.  `parent_or_cwd` reads `Path::parent`'s `Some("")` for a
+    // bare filename as the cwd.
     let parent = crate::path::parent_or_cwd(&target);
-    // (3) Random tmp name with RAII-cleanup on early return.  Dot
-    // prefix hides it from `ls`; `O_EXCL` semantics inside.
+    // A random name, not `target.tmp`: a predictable one races concurrent
+    // writers in a shared directory.  Dot-prefixed to hide it; `O_EXCL`
+    // inside, and RAII removes it on an early return.
     let tmp = tempfile::Builder::new()
         .prefix(".")
         .suffix(".ral-write.tmp")
         .tempfile_in(parent)
         .map_err(|e| io_error(path, &e))?;
-    // tempfile defaults to 0600 for security; redirects expect umask-style
-    // permissions.  Preserve the existing target's mode if it exists; for a
-    // new file, mirror what a plain `open(2)` create would produce —
-    // `0o666 & !umask` — rather than a hardcoded mode that ignores the
-    // process umask.
+    // tempfile creates at 0600, and a redirect must not silently narrow a
+    // 0644 file.  Carry the target's mode over; for a new file mirror what
+    // `open(2)` would have created.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&target).ok().map_or_else(
             || {
-                // `rustix::process::umask` is a combined getter/setter with
-                // no read-only variant: set a throwaway value to read the
-                // current mask, then restore it immediately.
+                // `rustix::process::umask` has no read-only form: set a
+                // throwaway value to read the mask, then put it back.
                 let prev = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
                 rustix::process::umask(prev);
                 #[allow(clippy::useless_conversion)] // libc::mode_t is u16 on macOS/BSD
@@ -322,19 +200,13 @@ fn open_atomic(
     Ok((file, AtomicCommit { tmp, target }))
 }
 
-/// Open a redirect target.  Returns the file plus an optional atomic-commit
-/// token for `>` redirects to regular files.  Callers must call `.commit()` on
-/// the token after the writer completes; dropping it removes the tmp file.
-///
-/// `>` is atomic for regular files (tmp + fsync + rename), streaming for
-/// non-regular targets.  `>~` is always streaming.  `>>` is append.
-///
-/// Relative paths are resolved against the shell's scoped cwd so that
-/// `within [dir: ...]` redirects target the right directory even from
-/// builtins, where the host process cwd is not changed.
+/// Open a redirect target.  `>` to a regular file returns an [`AtomicCommit`]
+/// the caller must fire once the writer finishes; every other shape streams.
+/// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
+/// redirect lands right even from a builtin, where the host cwd never moves.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:open-file] The redirect read/write door for `<`/`>`/`>>`/`>|` on fd 1/2: every model redirect opens here. The read/write card is fused onto the operation by the redirect frame that wraps this open (committed/aborted/failed outcome on settle)."
+    reason = "[io-door:surface:open-file] The redirect read/write door for `<`/`>`/`>>`/`>~` on fd 1/2: every model redirect opens here. The read/write card is fused onto the operation by the redirect frame that wraps this open (committed/aborted/failed outcome on settle)."
 )]
 pub(crate) fn open_file(
     path: &str,
@@ -359,8 +231,8 @@ pub(crate) fn open_file(
         RedirectMode::Read => std::fs::File::open(rp.as_path())
             .map(|f| (f, None))
             .map_err(|e| io_error(path, &e)),
-        // A here-string carries its payload in the redirect itself; it is
-        // routed by `install_stdin_redirect` and never opens a file.
+        // The payload is the redirect word itself; `install_stdin_redirect`
+        // routes it without touching the filesystem.
         RedirectMode::HereString => {
             unreachable!("here-string redirects never reach the file-open door")
         }
@@ -377,15 +249,10 @@ pub(crate) fn open_file(
     }
 }
 
-/// Atomically write `bytes` to `path` through the full `>`-redirect recipe —
-/// symlink-resolved, mode-preserving, fsync-durable ([`open_atomic`] then
-/// [`AtomicCommit::commit`]) — while emitting no io event: the caller owns the
-/// surface.  The shared write door for a host builtin that must write *below*
-/// the redirect frame (exarch's `edit-hash`/`edit-replace`, which speak their own write
-/// card) rather than fork a weaker temp-file recipe that drops the mode,
-/// symlink, and fsync steps.  A non-regular target (a TTY, `/dev/null`, a pipe)
-/// takes the streaming truncating write [`open_file`] already picks for it,
-/// exactly as a bare `>` would.
+/// The whole `>` recipe with no io event — the caller owns the surface.
+/// exarch's `edit-hash` and `edit-replace` write below the redirect frame and
+/// speak their own card, so they share this door rather than fork a weaker
+/// temp-file write that drops the symlink, mode and fsync steps.
 pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     use std::io::Write as _;
     let (mut file, commit) = open_file(path, RedirectMode::Write, shell)?;
@@ -398,15 +265,9 @@ pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settl
     }
 }
 
-/// One backed-up file descriptor: `dup(fd) → backup` (`F_DUPFD_CLOEXEC`), taken before
-/// [`apply_redirects`]'s `dup2` overwrote `fd`.  `Drop` undoes the redirect
-/// by `dup2`-ing the backup back over `fd` and closing the backup.
-///
-/// Restoration is therefore RAII: even when [`apply_redirects`] short-
-/// circuits half-built via `?`, every `dup2` already performed is reversed
-/// when the partial [`RedirectGuard`] falls out of scope.  The bug class
-/// "fd 1 silently keeps pointing at a redirect file forever after a mid-
-/// loop failure, *and* the backup fd leaks" is unwritable.
+/// One descriptor `F_DUPFD_CLOEXEC`'d aside before [`apply_redirects`] `dup2`'d
+/// over `fd`.  Restoration is RAII, so a [`RedirectGuard`] left half-built by a
+/// `?` still reverses every `dup2` already installed.
 #[cfg(unix)]
 pub(crate) struct BackupFd {
     pub(crate) fd: u32,
@@ -416,8 +277,7 @@ pub(crate) struct BackupFd {
 #[cfg(unix)]
 impl Drop for BackupFd {
     fn drop(&mut self) {
-        // Best-effort: clobber_slot failures inside Drop have nowhere to
-        // go.  `backup`'s own `Drop` closes it once this returns.
+        // A failure here has nowhere to go; `backup` closes itself after.
         use std::os::fd::AsFd;
         #[allow(
             clippy::cast_possible_wrap,
@@ -427,14 +287,10 @@ impl Drop for BackupFd {
     }
 }
 
-/// Windows analog of [`BackupFd`].  `apply_redirects` calls
-/// `GetStdHandle(std_handle) → prev`, then `SetStdHandle(std_handle, new)`;
-/// `Drop` restores the slot.  `owned` carries the redirect target's handle
-/// when we opened it ourselves (file redirects) — `Drop` closes it after
-/// the slot is restored, mirroring the Unix `dup` + `close(raw)` pair that
-/// drives the kernel ref count back to zero.  `owned: None` is used for
-/// `Fd→Fd` merges (e.g. `2>&1`), which alias an existing std slot's handle
-/// without taking ownership.
+/// Windows analog of `BackupFd`: `Drop` puts `prev` back in the std slot,
+/// then closes `owned` — the handle we opened for a file target, mirroring the
+/// Unix `close(raw)`.  An `Fd→Fd` merge (`2>&1`) aliases a live slot's handle
+/// and so leaves `owned` empty.
 #[cfg(windows)]
 pub(crate) struct BackupHandle {
     pub(crate) std_handle: u32,
@@ -445,10 +301,8 @@ pub(crate) struct BackupHandle {
 #[cfg(windows)]
 impl Drop for BackupHandle {
     fn drop(&mut self) {
-        // Best-effort: SetStdHandle / CloseHandle failures inside Drop have
-        // nowhere to go.  Order matters: restore the slot first so the
-        // owned handle is no longer reachable through any std slot before
-        // we close it.
+        // Restore the slot first, so the owned handle is unreachable through
+        // any std slot before we close it.  Failures have nowhere to go.
         unsafe {
             SetStdHandle(self.std_handle, self.prev);
             if let Some(h) = self.owned {
@@ -458,8 +312,7 @@ impl Drop for BackupHandle {
     }
 }
 
-/// State to undo `apply_redirects`: backed-up fds (LIFO-restored on `Drop`)
-/// plus pending atomic commits.
+/// Undo state for [`apply_redirects`]: backups to restore, commits to fire.
 pub(crate) struct RedirectGuard {
     #[cfg(unix)]
     saved: Vec<BackupFd>,
@@ -468,37 +321,30 @@ pub(crate) struct RedirectGuard {
     commits: Vec<AtomicCommit>,
 }
 
-/// LIFO-restore any backups still in the guard.  Both `restore_redirects`
-/// (success path) and `?`-driven early returns from `apply_redirects`
-/// (error path) reach the actual fd work via this `Drop`.  `Vec::drop`
-/// would unwind in forward order; we want the reverse so that overlapping
-/// `dup2`s (e.g. swapping fd 1 and fd 2) compose correctly.
+/// Pop, rather than let `Vec::drop` unwind forwards: overlapping `dup2`s — a
+/// swap of fd 1 and fd 2 — only compose back correctly in reverse.
 #[cfg(unix)]
 impl Drop for RedirectGuard {
     fn drop(&mut self) {
         while let Some(_b) = self.saved.pop() {
-            // `_b` drops here — `BackupFd::Drop` performs the dup2 + close.
+            // The pop is the work: `BackupFd::Drop` does the dup2 and close.
         }
     }
 }
 
-/// Windows analog of the Unix `Drop`: LIFO-restore via `BackupHandle::Drop`
-/// so overlapping `SetStdHandle` swaps unwind in the reverse order they
-/// were applied.
+/// Windows analog, LIFO for the same reason.
 #[cfg(windows)]
 impl Drop for RedirectGuard {
     fn drop(&mut self) {
         while let Some(_b) = self.saved.pop() {
-            // `_b` drops here — `BackupHandle::Drop` restores the slot and
-            // closes any owned handle.
+            // The pop is the work: `BackupHandle::Drop` restores the slot.
         }
     }
 }
 
-/// Stdin redirects to fd 0 — `< file` and the here-string `<< str` — are
-/// owned by `shell.io.stdin` (set up by [`install_stdin_redirect`]);
-/// `apply_redirects` and `wire_stdin` must agree to leave them alone.  This
-/// predicate is the single point where that rule is named.
+/// fd-0 file redirects belong to `shell.io.stdin` via
+/// [`install_stdin_redirect`]; `apply_redirects` here and `wire_stdin` in
+/// `stdio.rs` must both leave them alone.
 #[cfg(any(unix, windows))]
 fn is_stdin_file_redirect(r: &EvalRedirectV) -> bool {
     matches!(
@@ -511,10 +357,8 @@ fn is_stdin_file_redirect(r: &EvalRedirectV) -> bool {
     )
 }
 
-/// Map a redirect fd to the matching Win32 `STD_*_HANDLE` slot id.
-/// Bundled uutils tools only touch 0/1/2; higher fds aren't reachable
-/// via `SetStdHandle`, so reject them outright rather than silently
-/// dropping the redirect.
+/// Only fds 0, 1 and 2 have a `SetStdHandle` slot, so a higher one is rejected
+/// rather than silently dropped.
 #[cfg(windows)]
 fn fd_to_std_handle(fd: u32) -> Settled<u32> {
     match fd {
@@ -531,12 +375,11 @@ fn fd_to_std_handle(fd: u32) -> Settled<u32> {
     }
 }
 
-/// Apply fd redirects (for builtins that print via stdout/stderr directly).
-/// Returns a guard whose `commits` must be fired by `restore_redirects` after
-/// the builtin runs successfully.
-///
-/// Read+File redirects to fd 0 are skipped: they are owned by
-/// [`install_stdin_redirect`], not by the dup2 path.
+/// Install, at the fd level, the shapes no `Sink` can model — fd ≥ 3 targets
+/// above all — which is everything the redirect frame in `evaluator::redirect`
+/// passes down here.  The guard's commits must be taken out by
+/// `restore_redirects` before it drops; fd-0 file redirects are skipped, since
+/// [`install_stdin_redirect`] owns them.
 #[cfg(unix)]
 pub(crate) fn apply_redirects(
     redirects: &[EvalRedirectV],
@@ -554,16 +397,14 @@ pub(crate) fn apply_redirects(
         match target {
             EvalRedirect::File(path) => {
                 let effective_mode = if *fd == 2 { stderr_mode(*mode) } else { *mode };
-                // `?`-propagation is safe: any backups already pushed onto
-                // `guard.saved` will LIFO-restore via `RedirectGuard::Drop`
-                // when `guard` falls out of scope on the error return.
+                // Safe under `?`: backups already pushed LIFO-restore when
+                // `guard` drops on the error return.
                 let (file, commit) = open_file(path, effective_mode, shell)?;
                 if let Some(c) = commit {
                     guard.commits.push(c);
                 }
-                // `owned` closes on drop at the end of this arm — on the
-                // success path once installed onto `*fd`, and just as well
-                // on the `?`-propagated error path below.
+                // `owned` closes at the end of this arm; the `dup2` has taken
+                // its own reference to the open file by then.
                 use std::os::fd::AsRawFd;
                 let owned: std::os::fd::OwnedFd = file.into();
                 install_dup2(owned.as_raw_fd(), *fd, &mut guard)?;
@@ -580,32 +421,24 @@ pub(crate) fn apply_redirects(
     Ok(guard)
 }
 
-/// Redirect `dst_fd` onto `src_fd`, backing the prior `dst_fd` up first so the
-/// guard's `Drop` can restore it.
+/// Point `dst_fd` at `src_fd`, backing `dst_fd` up first.
 ///
-/// The backup `dup(dst_fd)` (`F_DUPFD_CLOEXEC`) is the redirect's only restore path.  When it
-/// fails — `EBADF` for a `dst_fd` that was never opened, the normal state for
-/// an fd ≥ 3 — there is nothing to restore *to*, so installing the `dup2`
-/// would leak `dst_fd` pointing at the target for the life of the shell.  Skip
-/// the `dup2` and error cleanly instead.  The `dup2` return is checked: a
-/// failure leaves `dst_fd` unchanged, and the already-pushed [`BackupFd`]
-/// restores it on unwind.
+/// That backup is the only restore path, so when it fails — `EBADF` for a
+/// `dst_fd` that was never opened, the normal state for an fd ≥ 3 — we error
+/// rather than install a `dup2` that would pin `dst_fd` at the target for the
+/// life of the shell.
 #[cfg(unix)]
 fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<()> {
     use std::os::fd::BorrowedFd;
 
-    // `F_DUPFD_CLOEXEC` rather than a bare `dup`: this backup is internal
-    // bookkeeping for the redirect guard, not a descriptor meant for any
-    // child — a child spawned while the guard is live (a nested external
-    // launched from inside the redirected builtin body) must not inherit
-    // it.
+    // `CLOEXEC`, not a bare `dup`: the backup is guard bookkeeping, and an
+    // external spawned from inside the redirected body must not inherit it.
     #[allow(
         clippy::cast_possible_wrap,
         reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
     )]
-    // SAFETY: `dst_fd` is the slot this redirect is about to overwrite; the
-    // caller's contract (`apply_redirects`) guarantees it names a live fd
-    // for the life of this borrow, which ends with this statement.
+    // SAFETY: `dst_fd` names the slot this redirect is about to overwrite,
+    // live for the borrow, which ends with this statement.
     let backup =
         unsafe { rustix::io::fcntl_dupfd_cloexec(BorrowedFd::borrow_raw(dst_fd as i32), 0) }
             .map_err(|e| {
@@ -622,10 +455,8 @@ fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<
         clippy::cast_possible_wrap,
         reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
     )]
-    // SAFETY: `src_fd` is kept open by its caller for the length of this
-    // call (either the just-opened file's `OwnedFd`, or a live standard
-    // slot); `dst_fd` is the redirect target slot, and retargeting it onto
-    // `src_fd` is exactly the redirect `apply_redirects` is installing.
+    // SAFETY: the caller holds `src_fd` open across this call — either the
+    // just-opened file's `OwnedFd` or a live standard slot.
     if let Err(e) =
         unsafe { crate::process::clobber_slot(BorrowedFd::borrow_raw(src_fd), dst_fd as i32) }
     {
@@ -637,17 +468,9 @@ fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<
     Ok(())
 }
 
-/// Windows analog of the Unix `apply_redirects`.  `SetStdHandle` replaces
-/// `dup2`: Rust's `std::io::stdout()` calls `GetStdHandle(STD_OUTPUT_HANDLE)`
-/// on every write, so `SetStdHandle` retroactively redirects subsequent
-/// stdio writes — the kernel-level analog of `dup2` for the std slots.
-///
-/// The body mirrors the Unix arm structurally: skip stdin-file redirects
-/// (owned by `install_stdin_redirect`), open file targets through the
-/// shared [`open_file`], push a [`BackupHandle`] for every slot we touch
-/// so the guard's `Drop` LIFO-restores under `?`-propagation, and for
-/// `Fd→Fd` merges (`2>&1`) alias the existing slot's handle without
-/// taking ownership.
+/// Windows analog, structurally mirroring the Unix arm.  `SetStdHandle` stands
+/// in for `dup2`: Rust's `std::io::stdout()` calls `GetStdHandle` on every
+/// write, so replacing the slot retargets writes already in flight.
 #[cfg(windows)]
 pub(crate) fn apply_redirects(
     redirects: &[EvalRedirectV],
@@ -666,9 +489,8 @@ pub(crate) fn apply_redirects(
         match target {
             EvalRedirect::File(path) => {
                 let effective_mode = if *fd == 2 { stderr_mode(*mode) } else { *mode };
-                // `?`-propagation is safe: any backups already pushed onto
-                // `guard.saved` will LIFO-restore via `RedirectGuard::Drop`
-                // when `guard` falls out of scope on the error return.
+                // Safe under `?`: backups already pushed LIFO-restore when
+                // `guard` drops on the error return.
                 let (file, commit) = open_file(path, effective_mode, shell)?;
                 if let Some(c) = commit {
                     guard.commits.push(c);
@@ -676,10 +498,8 @@ pub(crate) fn apply_redirects(
                 use std::os::windows::io::IntoRawHandle;
                 let raw = file.into_raw_handle() as HANDLE;
                 let prev = unsafe { GetStdHandle(dst_slot) };
-                // Push before SetStdHandle: on success Drop restores the
-                // slot and closes `raw`; on failure Drop's SetStdHandle is
-                // a no-op (slot unchanged) and Drop still closes `raw`, so
-                // the opened file isn't leaked.
+                // Push before the set, so `Drop` closes `raw` either way and
+                // a set that never happens cannot leak the opened file.
                 guard.saved.push(BackupHandle {
                     std_handle: dst_slot,
                     prev,
@@ -707,11 +527,8 @@ pub(crate) fn apply_redirects(
     Ok(guard)
 }
 
-/// Fallback stub for non-Unix non-Windows targets.  The in-process
-/// redirect implementation is `cfg(any(unix, windows))`-gated, so this
-/// branch is unreachable in practice; the stub exists so
-/// `restore_redirects` and the redirect scaffolding compile on
-/// unrelated targets.
+/// Stub so the redirect scaffolding compiles where neither the `dup2` nor the
+/// `SetStdHandle` path exists.
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn apply_redirects(
     _redirects: &[EvalRedirectV],
@@ -720,16 +537,15 @@ pub(crate) fn apply_redirects(
     Ok(RedirectGuard { commits: vec![] })
 }
 
-/// Run after a redirected builtin returns, regardless of success — otherwise
-/// the shell's stdout/stderr stays broken.  The fd-level restore happens
-/// inside [`RedirectGuard::Drop`] when `guard` falls out of scope at the end
-/// of this function; we just need the commits out before that.
+/// Take the commits out before `guard` drops at the end of this call, since
+/// that `Drop` is the fd-level restore — which must run whether or not the
+/// redirected body succeeded.
 pub(crate) fn restore_redirects(mut guard: RedirectGuard) -> Vec<AtomicCommit> {
     std::mem::take(&mut guard.commits)
 }
 
-/// Fire pending atomic commits.  Call only on the success path; dropping
-/// the Vec on the error path discards each commit's tmp file.
+/// Fire pending commits.  Success path only — dropping the `Vec` instead
+/// discards each staged tmp.
 pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
     for commit in commits {
         commit
@@ -739,28 +555,19 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
     Ok(())
 }
 
-/// Install the fd-0 redirect — `< file` or the here-string `<< str` — as
-/// `shell.io.stdin`.
+/// Park the fd-0 redirect — `< file` or the here-string `<< str` — on
+/// `shell.io.stdin`, returning a [`StdinRedirectGuard`] that puts back
+/// whatever `Source` was there.  When several redirects name fd 0 the last
+/// wins, as in POSIX shells.
 ///
-/// Returns a [`StdinRedirectGuard`] whose `restore` puts back whatever Source
-/// was previously installed (a pipeline pipe, an outer redirect, or
-/// Terminal).  When several redirects target fd 0, the last one wins — same
-/// as POSIX shells.  No-op when no such redirect is present, in which case
-/// `shell.io.stdin` is left untouched.
+/// `<< str` drops one leading newline, so a body may start on the line below
+/// the command, and pushes the payload through a pipe from a detached thread:
+/// a payload past the kernel buffer would otherwise deadlock, and a consumer
+/// that stops reading merely leaves that thread a broken pipe.
 ///
-/// `< file` opens the path and emits a read event.  `<< str` feeds the
-/// payload string itself: one newline at its very front is dropped (so a
-/// multiline body can start on the line below the command), and the bytes
-/// are pushed through an anonymous pipe by a detached writer thread — no
-/// filesystem involvement, no read event (the payload is already visible in
-/// the command), and no pipe-buffer deadlock for payloads past the kernel
-/// buffer.  A body the consumer abandons early ends the writer with a
-/// broken-pipe error it deliberately ignores.
-///
-/// Routing both through `Source` rather than `dup2` is what keeps the
-/// cached `startup_stdin_tty` from lying to downstream consumers (codecs,
-/// `lines`): they consult the cache only when `Source` is `Terminal`, and
-/// `Terminal` truly does mean "fall through to the inherited fd 0".
+/// Routing through `Source` rather than `dup2` is what keeps the cached
+/// `startup_stdin_tty` honest — consumers trust it only when `Source` is
+/// `Terminal`, which then really does mean the inherited fd 0.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:stdin-redirect] The `< file` read door on fd 0: opens the model's stdin redirect and emits the read card eagerly (so the read precedes the body/exec it feeds, e.g. `cat < a`). The open IS the surfaced read."
@@ -785,10 +592,8 @@ pub(crate) fn install_stdin_redirect(
             let rp = shell.resolve(word);
             shell.check_fs_read(&rp)?;
             let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(word, &e))?;
-            // Door 1 — READ: announce the open eagerly so the read event
-            // precedes the body/exec it feeds (e.g. the read card before
-            // exec in `cat < a`).  Read has no outcome: a failed open
-            // returns above before this point.
+            // Door 1 — READ, emitted eagerly so the read card precedes the
+            // body or exec it feeds, as in `cat < a`.
             mooring.emit_io(&io_event::read(word));
             crate::io::Source::File(f)
         }
@@ -804,8 +609,7 @@ pub(crate) fn install_stdin_redirect(
                 .name("ral-here-string".into())
                 .spawn(move || {
                     use std::io::Write;
-                    // Broken pipe just means the consumer stopped reading;
-                    // the remaining payload is deliberately dropped.
+                    // A broken pipe is the consumer stopping early, not a fault.
                     let _ = writer.write_all(&bytes);
                 })
                 .map_err(|e| Break::Error(Error::new(format!("here-string: {e}"), 1)))?;
@@ -836,8 +640,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// The fd table is process-global; these tests mutate it and assert on
-    /// it, so they must not race each other or concurrent fd allocation.
+    /// The fd table is process-global; these tests mutate it and assert on it.
     static FD_TABLE: Mutex<()> = Mutex::new(());
 
     /// `F_GETFD` returns `EBADF` exactly when `fd` is not open.
@@ -845,11 +648,8 @@ mod tests {
         unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
     }
 
-    /// An fd ≥ 3 (the shape `3>…` reaches) that is not open and stays so even
-    /// once `apply_redirects` opens its own descriptors.  We pin a barrier fd
-    /// well above the low range the redirect machinery allocates into, then
-    /// target the slot just past it: `open_file`'s descriptors land in the
-    /// free low slots, never on the target.  The barrier's guard closes it.
+    /// A free fd ≥ 3 that stays free: pin a barrier well above the low slots
+    /// `open_file` allocates into, then target the one just past it.
     fn pinned_unopened_fd() -> (u32, BarrierFd) {
         let barrier = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 32) };
         assert!(barrier >= 0, "could not pin a high barrier fd");
@@ -867,7 +667,6 @@ mod tests {
         (target, BarrierFd(barrier))
     }
 
-    /// Closes the pinned barrier fd on drop, so the test leaks nothing.
     struct BarrierFd(i32);
     impl Drop for BarrierFd {
         fn drop(&mut self) {
@@ -875,9 +674,8 @@ mod tests {
         }
     }
 
-    /// `echo hi 3>/tmp/x`-shape: a file redirect to an unopened fd has no
-    /// descriptor to back up, so it must error rather than install a
-    /// `dup2` with no restore path.  The fd stays unopened afterward.
+    /// `echo hi 3>/tmp/x`: nothing to back up, so the redirect must error
+    /// rather than install a `dup2` with no restore path.
     #[test]
     fn file_redirect_to_unopened_fd_errors_and_leaks_nothing() {
         let _serial = FD_TABLE
@@ -907,8 +705,7 @@ mod tests {
         );
     }
 
-    /// The `n>&m`-shape (`EvalRedirect::Fd`) to an unopened fd is rejected
-    /// for the same reason — no backup, no restore path.
+    /// The `n>&m` shape is rejected for the same reason.
     #[test]
     fn fd_dup_redirect_to_unopened_fd_errors_and_leaks_nothing() {
         let _serial = FD_TABLE

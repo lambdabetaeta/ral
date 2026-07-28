@@ -1,38 +1,16 @@
-//! One top-level run lifted into core, behind one host entry.
+//! One top-level run, lifted into core behind one host entry.
 //!
-//! A run is the unit a host evaluates over a persistent [`Shell`]: clear the
-//! signal state, fix the run's program (compiled from source, or an
-//! already-evaluated thunk applied to argument values), install the run's
-//! dynamic frame, evaluate, and classify the [`Settled<Value>`] into a
-//! transport status. The hosts that drive this — the interactive REPL,
-//! exarch's tool evaluator, batch — go through one door, [`Shell::run`],
-//! whose [`Run`] carries the program ([`Program`]: source text or a
-//! registered hook) and the conditions it runs under: where the byte streams
-//! go, whether a capability frame is pushed, the wall and deferred limits,
-//! and which lifecycle hooks fire.
+//! A run is the unit a host evaluates over a persistent [`Shell`]. The REPL,
+//! exarch's tool evaluator and batch all enter through [`Shell::run`], which
+//! resolves the [`Run`]'s [`Program`] — source text or a registered hook — then
+//! drives [`compile_run`], [`build_run`] and [`run_framed`] to a
+//! [`Settled<Value>`] and a transport status.
 //!
-//! The door and the types a host describes its policy with ([`RunIo`],
-//! [`RunStdin`], [`RequestedTerminalAccess`], [`RunRequest`]) live here, and
-//! behind them the spine they orchestrate: [`compile_run`] (parse/typecheck),
-//! [`build_run`] (materialise the run's `Io`), and [`run_framed`]
-//! (install, hook, evaluate, classify).
-//!
-//! A run's frame is split by mutability — **borrow when you can, loan when
-//! you must**. What the run fixes once — its surface sink, deferred rail,
-//! desk, nursery, cancel scope, worker lease and cap, and its terminal
-//! authority — is a [`Mooring`], an owned local on [`Shell::run_built`]'s own
-//! stack frame that every callee borrows; an outer run's mooring is restored
-//! by the stack unwinding, and a [`NurseryGuard`] beside it empties its
-//! nursery on that same unwinding. What genuinely changes within a run — the
-//! byte streams, the source cursor, the dispatch call-site register — is
-//! taken on loan: installing a run is one swap, [`IoLoan`] moves the new `Io`
-//! into `shell.io` (and the two `Copy` registers, `session.root_file` and
-//! `local.audit.call_site`, alongside it) and restores the previous ones on
-//! `Drop`, even when the evaluation unwinds (a host may catch a worker panic
-//! and continue the session on the same `Shell`). The IO regime is a sum of
-//! two cases: under `Inherit` the new frame's byte sinks are cloned from the
-//! ambient session streams; under `Capture` they are the fresh set the host
-//! reads back. The swap is total in both cases — only the seed differs.
+//! The frame splits by mutability. What a run fixes once is a [`Mooring`], an
+//! owned local every callee borrows, so the stack unwinding restores an outer
+//! run's. What changes — byte streams, root file, call-site register — is taken
+//! on loan through [`IoLoan`], which restores on `Drop` even on unwind, since a
+//! host may catch a worker panic and carry the same `Shell` on.
 
 use crate::io::{Io, Sink, Source};
 use crate::process::{CancelCause, ForegroundScope};
@@ -48,13 +26,9 @@ use crate::{CompileOutcome, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Optional per-run lifecycle hooks. The REPL supplies pre/post-exec
-/// plugin hooks; a host with none uses the no-op `()` impl.
-///
-/// A hook body is ordinary in-run code, so it receives the run's
-/// [`Mooring`] beside the shell — the same pairing every builtin body sees,
-/// and the only way a hook can surface, enquire, or start a nested run under
-/// the run it is hooking.
+/// Optional per-run lifecycle hooks; a host with none uses the `()` impl. A
+/// hook holds the run's [`Mooring`], which is what lets it surface, enquire, or
+/// nest a run under the run it is hooking.
 pub trait RunLifecycle {
     fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {}
     fn post_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str, _status: i32) {}
@@ -66,108 +40,71 @@ impl RunLifecycle for () {}
 pub enum StaticDiagnostics {
     Parse(ParseError),
     Types(Vec<TypeError>),
-    /// A host-level error that prevented the run from starting:
-    /// hook not found, non-ground argument, etc.
+    /// A host-level error that stopped the run before it started: hook not
+    /// found, non-ground argument, and the like.
     Host(crate::types::Error),
 }
 
 // ── The run entry: one synchronous, runtime-agnostic host seam ──────────────
 //
-// Hosts start an evaluation through exactly one door:
-// `Shell::run(RunRequest)` runs one whole `Run` — its `Program` is
-// either source text or a registered hook applied to first-order arguments
-// (`Shell::register_hook` stores compiled hooks by name in the session-lived
-// hook table).  It returns one flat `RunReport`.  Hosts describe *policy*
-// (the protocol `Run`, `RunIo`, `SurfaceSink`, lifecycle hooks); core owns
-// *resources* (`Sink`, `Source`, `Mooring`, `Io`, guards, buffers, cancel
-// scopes).  Completion is the call returning — never a channel disconnecting
-// — so a deferred worker holding a surface clone cannot keep a run from
-// ending.  This door is the only way into evaluation: the reduction
-// primitive behind it is crate-private, so a host cannot start an unframed
+// Hosts describe *policy*; core owns *resources*. The reduction primitive
+// behind the door is crate-private, so no host can start an unframed
 // evaluation that would foreground or capture against a stale frame.
 
-/// The IO regime of a run: intent, materialised into resources by the run
-/// doors.
+/// The IO regime of a run — intent, which the run doors turn into resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunIo {
-    /// Run on the session's live streams: the run's byte sinks are cloned
-    /// from the ambient `shell.io`. The interactive REPL (whose stdout is
-    /// the external printer) and batch (the process streams).
+    /// Clone the run's byte sinks from the ambient `shell.io`: the REPL and
+    /// batch.
     Inherit,
-    /// Mint fresh stdout/stderr buffers core returns in
-    /// [`RunReport::Ran`]'s `captured`. Independent of [`RunStdin`]: byte
-    /// output regime and byte input source are separate choices. exarch's tool
-    /// capture.
+    /// Mint fresh stdout/stderr buffers, returned in [`RunReport::Ran`]'s
+    /// `captured`: exarch's tool runs.
     Capture,
 }
 
-/// Whether a run may hand the controlling terminal to a child.
-///
-/// The host-facing half of the terminal lease: the host states the run's
-/// authority, and core decides whether the session's
-/// [`TerminalLease`](crate::process::TerminalLease) is reachable from it (see
-/// [`Shell::terminal_lease`]). `ExplicitLoan` is deliberately absent — a host
-/// cannot seed it; it is a within-run elevation a loan token raises.
+/// Whether a run may hand the controlling terminal to a child: the host states
+/// it, and [`Shell::terminal_lease`] decides whether the session's
+/// [`TerminalLease`](crate::process::TerminalLease) is reachable from it.
+/// `ExplicitLoan` is absent because no host can seed it — only a within-run
+/// loan token raises it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestedTerminalAccess {
-    /// No child/job foreground handoff in this run. exarch tool runs and any
-    /// launch that does not own the terminal foreground.
     Denied,
-    /// This run may foreground terminal-bound children. The interactive REPL
-    /// and a terminal-launched script.
     Leased,
 }
 
-/// The byte source a run's stdin reads from.
-///
-/// Orthogonal to [`RunIo`] (the *output* regime) and to
-/// [`RequestedTerminalAccess`] (foreground authority): a piped `ral -c` is
-/// `Denied` foreground yet still reads its inherited pipe (`Inherit`), while an
-/// exarch tool run is `Denied` *and* reads no terminal (`Empty`).
+/// The byte source a run's stdin reads from — orthogonal to [`RunIo`] (the
+/// *output* regime) and to [`RequestedTerminalAccess`] (foreground authority):
+/// a piped `ral -c` is `Denied` yet still reads its inherited pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunStdin {
-    /// Use the session stdin source — the inherited fd 0, which may be a
-    /// terminal, a pipe, or a redirected file.
+    /// The inherited fd 0 — a terminal, a pipe, or a redirected file.
     Inherit,
-    /// Install an empty source: reads as immediate EOF, a child's stdin wires
-    /// to `/dev/null`, and there is no fall-through to fd 0.
+    /// Immediate EOF, a child's stdin wired to `/dev/null`, no fall-through to
+    /// fd 0.
     Empty,
 }
 
 /// The engine door for one run: the protocol [`Run`] plus the live,
-/// non-transportable handles the host lends it.
-///
-/// Composition, not
-/// mirroring — a field added to [`Run`] crosses the seam and reaches the
-/// engine in one declaration.
+/// non-transportable handles the host lends it. Composition, not mirroring — a
+/// field added to [`Run`] reaches the engine in one declaration.
 pub struct RunRequest<'a> {
-    /// The run, exactly as it crosses (or would cross) the host seam.
     pub run: Run,
-    /// The run-local structured-event sink, installed only for this run.
-    /// `None` is the identity (a bare REPL). Same-thread children inherit it;
-    /// deferred workers buffer into bounded deferred storage instead.
+    /// Run-local sink for structured events; `None` is the identity.
     pub surface: Option<SurfaceSink>,
-    /// The session-lived destination a deferred worker delivers its surface
-    /// batch to when it settles, rendered by the host at the next run
-    /// boundary. `None` outside an agent host (a bare REPL): then a deferred
-    /// worker's surface reaches a sink only via `await`/`race`.
+    /// Session-lived destination a settling worker delivers its surface batch
+    /// to; `None` leaves it reachable only through `await`/`race`.
     pub deferred: Option<Arc<dyn DeferredSink>>,
-    /// The run-local enquiry desk, installed only for this run. `None` is
-    /// the honest absence a host that answers no enquiries reports (a bare
-    /// REPL, and exarch until the migration installs its desk). Same-thread
-    /// children inherit it; deferred workers never receive it.
+    /// Run-local enquiry desk. Same-thread children inherit it, as they do the
+    /// nursery below; deferred workers get neither.
     pub desk: Option<Desk>,
-    /// The run-local nursery for engine-side session forks, installed only
-    /// for this run. `None` outside a host that installs one. Same-thread
-    /// children inherit it; deferred workers never receive it.
+    /// Run-local nursery for engine-side session forks.
     pub nursery: Option<Nursery>,
-    /// Per-run lifecycle hooks; `Box::new(())` for a host with none.
     pub lifecycle: Box<dyn RunLifecycle + 'a>,
 }
 
-/// The byte streams captured under [`RunIo::Capture`], returned in
-/// [`RunReport::Ran`] and carried verbatim on the protocol
-/// [`Report`](crate::transport::Report).
+/// The byte streams captured under [`RunIo::Capture`], carried verbatim onto
+/// the protocol [`Report`](crate::transport::Report).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub stdout: Vec<u8>,
@@ -177,14 +114,10 @@ pub struct Captured {
 /// One flat result the host matches once. `captured`/`timed_out` live on
 /// `Ran`, where they mean something — a `Static` run never ran.
 pub enum RunReport {
-    /// A parse/type failure: the run never reached evaluation. The host
-    /// renders the diagnostics and treats the run as status 1.
+    /// The run never reached evaluation; the host renders the diagnostics and
+    /// treats it as status 1.
     Static { diagnostics: StaticDiagnostics },
-    /// A compiled run ran. `status` is the transport status computed once;
-    /// `single_command` is whether the source compiled to a single command;
-    /// `root` is the [`FileId`] that source registered under. Together they
-    /// pick the runtime-error rendering. `captured` is `Some` under
-    /// [`RunIo::Capture`]; `timed_out` is whether the wall fired.
+    /// `single_command` and `root` together pick the runtime-error rendering.
     Ran {
         result: Settled<Value>,
         status: i32,
@@ -195,23 +128,13 @@ pub enum RunReport {
     },
 }
 
-/// Resolve a run's armed wall clock from every source that can bind it:
-/// the host's requested `wall` and — for a hook run — its
-/// registered budget. Both bind the same foreground scope, tightest wins
-/// (`min`, not `or`), so a host wall can never be silently widened by a
-/// hook's own budget or vice versa. `None` from both leaves the run
-/// unarmed, exactly as before.
+/// Bind the host's requested `wall` to this run's foreground scope, so the
+/// deadline reaches every frame nested under it.
 fn arm_wall(
     wall: Option<std::time::Duration>,
-    hook_budget: Option<std::time::Duration>,
     foreground: &crate::process::ForegroundScope,
 ) -> Option<crate::process::Deadline> {
-    let effective = match (wall, hook_budget) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (None, None) => None,
-    };
-    effective.map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d))
+    wall.map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d))
 }
 
 /// The message of a recovered panic payload, for either string shape.
@@ -224,49 +147,30 @@ fn panic_text(payload: &dyn std::any::Any) -> String {
 }
 
 impl Shell {
-    /// Run one whole [`Run`] under `req`, synchronously, and return one
-    /// flat [`RunReport`]. The single run door: the run's
-    /// [`Program`] is resolved here — source text compiles and typechecks
-    /// against the live session, a hook resolves in the session-lived hook
-    /// table — and either program then runs through the shared framed
-    /// scaffold ([`Self::run_built`]): materialising the IO regime, minting
-    /// the run's foreground scope and arming its wall, installing the
-    /// run-local surface, evaluating under the capability ceiling, and
-    /// folding in the captured bytes and `timed_out`.
+    /// Run one whole [`Run`] synchronously and report it — the single run door,
+    /// for a host with no run in hand.
     ///
-    /// Run completion is *this call returning* — never a channel
-    /// disconnecting. A deferred worker may hold a clone of the surface sink
-    /// forever; it changes nothing, because nothing waits on that sink to
-    /// decide the run is over.
-    ///
-    /// The run door is also the durability boundary
-    /// (`decisions/260706_enquiry-channel` §5): the shell checkpoints its
-    /// [`Mobile`](crate::types::Mobile) at entry and a panic anywhere in the
-    /// run — compile, eval, hook body, desk handler, ready-boundary
-    /// housekeeping — restores it, so a panicked run reports as a failed
-    /// run with the shell already rolled back. State-owner rollback, one
-    /// mechanism for every transport and host; a snapshot never crosses the
-    /// seam.
+    /// Completion is *this call returning*, never a channel disconnecting: a
+    /// worker may hold a clone of the surface sink forever without keeping the
+    /// run alive. It is also the durability boundary — a panic anywhere in the
+    /// run restores the [`Mobile`](crate::types::Mobile) checkpointed at entry,
+    /// so the shell rolls itself back and no snapshot crosses the host seam.
     pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
         let anchor = self.session.anchor.clone();
         self.enter(&anchor, req)
     }
 
-    /// Run `req` as a *nested* run: its frame is a child of `parent`, the
-    /// mooring of the run it nests in, rather than of the session anchor.
-    ///
-    /// The door a builtin body or a lifecycle hook uses, since both hold the
-    /// enclosing run's mooring. Nesting is what makes the cancel tree the
-    /// runs' LIFO extent: the nested run observes the interrupt its outer run
-    /// already carries, and the outer run's wall reaches into the nest.
-    /// [`Self::run`] is for a host with no run in hand.
+    /// Run `req` with its frame a child of `parent` rather than of the session
+    /// anchor — the door a builtin body or lifecycle hook uses, both holding the
+    /// enclosing run's mooring. Nesting is what makes the cancel tree the runs'
+    /// LIFO extent: the nested run observes the interrupt its outer run already
+    /// carries, and the outer run's wall reaches into the nest.
     pub fn run_nested(&mut self, parent: &Mooring, req: RunRequest<'_>) -> RunReport {
         self.enter(&parent.cancel, req)
     }
 
-    /// Both doors' body: check the [`Mobile`](crate::types::Mobile) in, run
-    /// under `under`, roll back on a panic. Separated so the durability
-    /// wrapper is the only way through either door.
+    /// Both doors' body, so that the durability wrapper is the only way
+    /// through either.
     fn enter(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
         let checkpoint = self.mobile.clone();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(under, req))) {
@@ -283,29 +187,23 @@ impl Shell {
         }
     }
 
-    /// Resolve the run's [`Program`] and hand it to the framed scaffold,
-    /// with this run's foreground frame minted under `under`.
+    /// Resolve the run's [`Program`] and hand it to the framed scaffold, with
+    /// this run's foreground frame minted under `under`.
     fn dispatch(&mut self, under: &ForegroundScope, mut req: RunRequest<'_>) -> RunReport {
         match req.run.program {
             Program::Source(ref src) => {
-                // The two session ledgers' committed-run clock: one tick
-                // per source dispatch, whether or not it goes on to compile —
-                // a failed run ages the ledgers' scratch without renewing it
-                // (`decisions/260629_agent-binding-reaping`). No-ops when
-                // unarmed, so the REPL/batch pay two branches and nothing
-                // else.
+                // The two session ledgers' clock: one tick per source dispatch
+                // whether or not it goes on to compile, so a failed run ages
+                // their scratch without renewing it. Both no-op when unarmed.
                 self.local.bindings.tick();
                 self.local.workers.tick_epoch();
 
-                // Mint the run's foreground scope and arm its wall *before*
-                // compiling, so the limit bounds the whole run — compile and
-                // typecheck included, not only evaluation. `compile_run`'s
-                // `process::clear` touches only the signal count, never the
-                // reaper, so an entry armed here survives the compile. The
-                // `Deadline` guard disarms when `wall` drops, so an early
-                // `Static` return leaves no pending reaper entry.
+                // Armed *before* compiling, so the limit bounds compile and
+                // typecheck too: `compile_run`'s `process::clear` touches only
+                // the signal escalation count, never the reaper. The guard
+                // disarms on drop, so an early `Static` return leaves no entry.
                 let foreground = self.durable_root().foreground(under);
-                let wall = arm_wall(req.run.wall, None, &foreground);
+                let wall = arm_wall(req.run.wall, &foreground);
 
                 let (comp, single_command, root) =
                     match compile_run(self, src, &req.run.script_name) {
@@ -313,10 +211,8 @@ impl Shell {
                         Err(diagnostics) => return RunReport::Static { diagnostics },
                     };
 
-                // "Committed" = reached evaluation: harvest the compiled
-                // program's referenced names and renew every one that is
-                // already leased. Gated on `armed()` so an unarmed host
-                // (REPL, batch) never pays for the walk.
+                // Reaching evaluation is what renews a lease. Gated so an
+                // unarmed host skips the walk over referenced names.
                 if self.local.bindings.armed() {
                     self.local
                         .bindings
@@ -337,16 +233,15 @@ impl Shell {
                     };
                 };
 
-                // The host conveys data, not closures, across the dispatch
-                // boundary: hook args are first-order by type (`FOValue`).
+                // The host conveys data, not closures: hook args are
+                // first-order by type (`FOValue`).
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
 
                 let foreground = self.durable_root().foreground(under);
-                let wall = arm_wall(req.run.wall, hook.policy.budget, &foreground);
+                let wall = arm_wall(req.run.wall, &foreground);
 
-                // Fold the hook's registered `DefaultPolicy` into the run's
-                // conditions: capture, terminal authority, and budget are the
-                // hook's to decide, not the dispatching host's.
+                // Capture and terminal authority are the registered hook's to
+                // decide, not the dispatching host's.
                 if hook.policy.capture {
                     req.run.io = RunIo::Capture;
                 }
@@ -362,20 +257,13 @@ impl Shell {
         }
     }
 
-    /// The framed scaffold behind the run door: materialise the IO regime
-    /// from the run's conditions, build this run's [`Mooring`] on the
-    /// pre-minted `foreground` and install its `Io`, evaluate
-    /// `body` under the capability ceiling and lifecycle hooks, then disarm
-    /// the `wall` and fold the captured bytes and `timed_out` into the
-    /// report. `body` is the run's resolved program — the source arm's
-    /// `eval_top_level`, the hook arm's in-frame `apply`.
+    /// The framed scaffold both program arms share, `body` being the resolved
+    /// program — `eval_top_level` for source, `builtins::apply` for a hook.
     ///
-    /// The mooring is an owned local on *this* Rust stack frame and is only
-    /// ever lent onward, so an outer run's mooring is restored by the stack
-    /// unwinding rather than by a guard — and the [`NurseryGuard`] built
-    /// alongside it empties its nursery on the panic path as surely as on the
-    /// clean one, since both are owned locals inside `enter`'s
-    /// `catch_unwind`.
+    /// The [`Mooring`] is an owned local on *this* stack frame and is only ever
+    /// lent onward, so an outer run's is restored by the unwinding rather than
+    /// by a guard; the [`NurseryGuard`] beside it empties its nursery on the
+    /// panic path too, both being locals inside `enter`'s `catch_unwind`.
     fn run_built(
         &mut self,
         req: RunRequest<'_>,
@@ -394,16 +282,12 @@ impl Shell {
             lifecycle,
         } = req;
 
-        // The source text the lifecycle hooks and root context see: the
-        // program itself for a source run, empty for a hook run (whose
-        // program is an already-compiled value, not text).
+        // A hook run has no text: its program is an already-compiled value.
         let src = match &run.program {
             Program::Source(src) => src.as_str(),
             Program::Hook { .. } => "",
         };
 
-        // Materialise the IO regime: `Capture` mints buffers we read back,
-        // `Inherit` leaves the ambient streams to flow through `build_run`.
         let (capture, capture_bufs) = match run.io {
             RunIo::Inherit => (None, None),
             RunIo::Capture => {
@@ -416,9 +300,6 @@ impl Shell {
             }
         };
 
-        // Stdin source and terminal authority are independent of the output
-        // regime: `Capture` does not imply `Source::Terminal`. A tool run
-        // is `Denied` + `Empty`; a piped `ral -c` is `Denied` + `Inherit`.
         let stdin = match run.stdin {
             RunStdin::Inherit => Source::Terminal,
             RunStdin::Empty => Source::Empty,
@@ -451,12 +332,9 @@ impl Shell {
             body,
         );
 
-        // Disarm the wall before reading the cause. While it stays armed the
-        // reaper can still fire; classifying against a live ceiling lets a run
-        // that finished inside its budget be misread as timed out should the
-        // reaper trip in the gap between eval returning and this read. Dropping
-        // the guard removes the entry, so `cause` is `Deadline` below only for a
-        // deadline that genuinely elapsed during the run.
+        // Disarm before reading the cause: while armed, the reaper can still
+        // trip in the gap between eval returning and this read, and a run that
+        // finished inside its budget would be misread as timed out.
         drop(wall);
 
         let timed_out = mooring.cancel.cause() == Some(CancelCause::Deadline);
@@ -478,9 +356,7 @@ impl Shell {
 
 // ── The spine behind the door: compile, build, install, classify ────────────
 
-/// The transport status of one settled run: the success status for a
-/// normal return, the error's exit code for a caught error, the requested
-/// code for `exit`, and `128 + signal` for a stopped job.
+/// The transport status of one settled run, computed once.
 fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
     match result {
         Ok(_) => shell.mobile.control.last_status,
@@ -491,19 +367,11 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
     }
 }
 
-/// Saves what a run takes on loan from the shell on install and restores it
-/// on `Drop`: the byte streams, plus two `Copy` registers this run's frame
-/// also owns for its life — `session.root_file` and `local.audit.call_site`.
-/// Restoring under `Drop` rather than an explicit epilogue keeps the
-/// persistent `Shell` clean even when the evaluation unwinds — a host that
-/// catches a worker panic and continues the session on the same `Shell`
-/// would otherwise inherit a stale cursor, a stale root file, a stale call
-/// site, and (had the run captured IO) the prior run's buffers.
-///
-/// A swap and nothing more: what the previous run must *stop* being reachable
-/// through — its surface sink, its scope, its nursery, its terminal
-/// authority — is its [`Mooring`], which was never on the shell and needs no
-/// restoring.
+/// Holds what a run takes on loan from the shell — the byte streams,
+/// `session.root_file`, `local.audit.call_site` — and restores it on `Drop`, so
+/// an unwinding run leaves nothing stale on the persistent `Shell`. Everything
+/// else a run installs lives on the [`Mooring`], which was never on the shell
+/// and so needs no restoring.
 struct IoLoan<'s> {
     shell: &'s mut Shell,
     saved: Io,
@@ -512,9 +380,8 @@ struct IoLoan<'s> {
 }
 
 impl<'s> IoLoan<'s> {
-    /// Swap `next` into `shell.io`, and `None`/`DUMMY` the call-site and
-    /// root-file registers, holding the displaced values for restoration on
-    /// `Drop`.
+    /// The run starts with the registers cleared, not inherited: a fresh run
+    /// has no call site and no root file until it registers one.
     fn install(shell: &'s mut Shell, next: Io) -> Self {
         let saved = std::mem::replace(&mut shell.io, next);
         let saved_root = std::mem::replace(&mut shell.session.root_file, FileId::DUMMY);
@@ -534,24 +401,18 @@ impl<'s> IoLoan<'s> {
 
 impl Drop for IoLoan<'_> {
     fn drop(&mut self) {
-        // Swap the saved streams back in; the displaced ones move into
-        // `saved` and drop with the guard. The two `Copy` registers just
-        // overwrite.
+        // Swap rather than assign, so the run's own streams move into `saved`
+        // and close with the guard.
         std::mem::swap(&mut self.shell.io, &mut self.saved);
         self.shell.session.root_file = self.saved_root;
         self.shell.local.audit.call_site = self.saved_site;
     }
 }
 
-/// Build the `Io` a run installs, seeded from the ambient `shell`.
-///
-/// `capture` is `Some` only under [`RunIo::Capture`],
-/// where the run's byte *output* streams are redirected into host-read
-/// buffers; under `Inherit` it is `None` and the ambient streams flow through
-/// unchanged. `stdin` is supplied independently of the output regime (the
-/// host's [`RunStdin`]): it is always installed, so `Capture` does not
-/// imply `Source::Terminal`. Terminal authority is not part of this return
-/// value — it lives on the [`Mooring`] the caller builds separately.
+/// Build the `Io` a run installs, seeded from the ambient `shell`. `stdin` is
+/// installed independently of `capture`, so [`RunIo::Capture`] does not imply
+/// `Source::Terminal`; terminal authority is not here at all, but on the
+/// [`Mooring`] the caller builds separately.
 pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Source) -> Io {
     let mut run_io = shell.io.try_clone().unwrap_or_else(|_| Io {
         terminal: shell.io.terminal,
@@ -567,20 +428,17 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Sou
     run_io
 }
 
-/// Clear signal state, compile and typecheck `src` against the live session.
-/// `Ok((comp, single_command, root))` on a clean compile; `Err(diagnostics)` on
-/// a parse or type failure (the run never reaches evaluation). The
-/// `single_command` flag and the root [`FileId`] are harvested here because the
-/// host needs both to render runtime errors after `comp` is consumed — and
-/// `root` cannot be read back later, since `session.root_file` is restored to
-/// [`FileId::DUMMY`] the moment the run's [`IoLoan`] drops.
+/// Clear signal state, then compile and typecheck `src` against the live
+/// session.
 ///
-/// Peeks the [`FileId`] the next registration will mint *before* compiling,
-/// so the compiled program's spans carry this run's real file identity.
-/// [`Shell::install_root_context`] performs the actual registration once the
-/// run frame exists to install it into ([`run_framed`]); nothing between here
-/// and there touches the registry — which only ever grows, never resets — so
-/// the id it mints always agrees with the one peeked here.
+/// `single_command` and the root [`FileId`] come back here because the host
+/// needs both to render runtime errors once `comp` is consumed, and `root`
+/// cannot be read back later: [`IoLoan`] restores `session.root_file` to
+/// [`FileId::DUMMY`] on drop. The id is *peeked* before compiling so the
+/// program's spans carry this run's file identity, while
+/// [`Shell::install_root_context`] registers for real from [`run_framed`], once
+/// a frame exists to install into — sound only because nothing in between
+/// registers a source and the registry never shrinks.
 pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
@@ -619,16 +477,10 @@ pub(crate) fn compile_run(
     Ok((comp, single_command, file))
 }
 
-/// Install the built run state, fire the lifecycle hooks around the eval
-/// `body` under `capabilities`, compute the transport status, and tear the
-/// frame down before returning `(result, status)`. The `body` is the run's
-/// program: the source door evaluates a compiled [`Comp`](crate::ir::Comp)
-/// (`eval_top_level`); the value door applies an already-evaluated thunk in
-/// place (`builtins::apply`). Both settle to one [`Settled<Value>`], so the
-/// lifecycle/capability/status spine is shared verbatim. The [`IoLoan`]
-/// restores the prior streams and registers on `Drop`, even on unwind. The
-/// caller ([`Shell::run_built`]) owns the mooring, IO materialisation, limit
-/// arming, and the `timed_out`/capture classification.
+/// Install the built run state, fire the lifecycle hooks around `body` under
+/// `capabilities`, compute the transport status, and tear the frame down. Both
+/// program arms settle to one [`Settled<Value>`], so this spine is shared
+/// verbatim; the caller keeps the mooring, the limits and the classification.
 #[allow(
     clippy::too_many_arguments,
     reason = "the run spine's whole frame in one place; a carrier struct would just relay the same fields"
@@ -655,13 +507,10 @@ pub(crate) fn run_framed<'a>(
 
     lifecycle.post_exec(mooring, shell, src, status);
 
-    // Push this run's ready-boundary housekeeping — the lease chain's reap
-    // notices as `` `notice `` surface classes, the large-binding warning onto
-    // the run's own stderr — while this run's frame (its surface sink and
-    // capture streams) is still installed, so each rides this run's own
-    // stream, ordered before its Report (`decisions/260706_enquiry-channel`
-    // §4.2). After `guard` drops below, `shell.io` reverts and there is no
-    // sink left to push through.
+    // Ready-boundary housekeeping — reap notices as `` `notice `` surface
+    // classes, the large-binding warning onto stderr — must go out while this
+    // run's frame is still installed, so each rides this run's own stream and
+    // is ordered before its Report. Once `guard` drops there is no sink left.
     shell.emit_ready_boundary_notices(mooring);
 
     drop(guard);
@@ -675,11 +524,8 @@ mod tests {
     use crate::io::ByteBuffer;
     use std::sync::{Arc, Mutex};
 
-    /// A capturing request under the ⊤ capability ceiling with no surface
-    /// sink and no lifecycle hooks — the minimal request a host with no
-    /// surface decoder or plugin policy supplies. Mirrors exarch's tool run:
-    /// foreground `Denied`, stdin `Empty`. Core mints the capture buffers and
-    /// returns them in `RunReport::Ran { captured, .. }`.
+    /// The minimal request, shaped like exarch's tool run: ⊤ ceiling, no
+    /// surface, foreground `Denied`, stdin `Empty`.
     fn capture_req<'a>(src: &str) -> RunRequest<'a> {
         RunRequest {
             run: Run {
@@ -701,8 +547,6 @@ mod tests {
         }
     }
 
-    /// A clean run over a simple expression settles to an `Ok` value
-    /// with a zero transport status.
     #[test]
     fn clean_run_settles_with_zero_status() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -716,8 +560,6 @@ mod tests {
         }
     }
 
-    /// Malformed source never reaches evaluation: it returns a parse
-    /// diagnostic.
     #[test]
     fn parse_failure_is_static() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -733,7 +575,6 @@ mod tests {
         }
     }
 
-    /// A type error never reaches evaluation: it returns type diagnostics.
     #[test]
     fn type_failure_is_static() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -749,8 +590,6 @@ mod tests {
         }
     }
 
-    /// `exit N` settles to an `Escape::Exit(N)` and reports N as the
-    /// transport status.
     #[test]
     fn exit_escape_reports_code() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -767,7 +606,6 @@ mod tests {
         }
     }
 
-    /// `RunIo::Capture` returns the run's stdout in `Ran::captured`.
     #[test]
     fn capture_returns_stdout_bytes() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -785,10 +623,8 @@ mod tests {
         }
     }
 
-    /// A run's frame is minted under the session anchor and dies with the
-    /// run, so a settled run leaves the anchor neither replaced nor
-    /// cancelled — the next top-level run is the anchor's child and not the
-    /// last run's.
+    /// A run's frame is minted under the session anchor and dies with the run,
+    /// so the next top-level run is the anchor's child and not the last run's.
     #[test]
     fn a_settled_run_leaves_the_anchor_untouched() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -815,9 +651,7 @@ mod tests {
         );
     }
 
-    /// A `RunLifecycle` that parks a fork into the run's nursery during
-    /// `pre_exec` (mirroring how a desk handler's builtin body would) and
-    /// records the minted id for the test to redeem afterward.
+    /// Parks a fork mid-run, as a desk handler's builtin body would.
     struct ParkDuringRun(std::sync::Arc<Mutex<Option<crate::types::NurseryId>>>);
     impl RunLifecycle for ParkDuringRun {
         fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
@@ -828,9 +662,8 @@ mod tests {
         }
     }
 
-    /// A fork parked during the run and never adopted is gone from the
-    /// host's own `Nursery` clone afterward: the run's mooring goes out of
-    /// scope when the run returns, and its `Drop` empties the nursery.
+    /// The host's own `Nursery` clone is empty afterward: teardown reaches
+    /// through the clone, not just the run's copy.
     #[test]
     fn nursery_is_emptied_at_run_teardown() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -855,19 +688,16 @@ mod tests {
         );
     }
 
-    /// A settling run's ready-boundary housekeeping surfaces the expected
-    /// `` `notice `` class (`decisions/260706_enquiry-channel` §4.2): a
-    /// worker the lease chain reaps between runs has no live sink to push
-    /// through until the *next* run installs one — installed here on that
-    /// next run, it captures the reap as a `notice` variant, ordered before
-    /// this run's own settling.
+    /// A worker the lease chain reaps *between* runs has no live sink until the
+    /// next run installs one, so its reap surfaces as a `` `notice `` there,
+    /// ordered before that run's own settling.
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
-        // Spawn a worker under a millisecond-scale idle lease and never
-        // poll it, so the background lease chain reaps it quickly.
+        // Never polled, under a millisecond-scale idle lease, so the background
+        // lease chain reaps it quickly.
         let mut req = capture_req("spawn { sleep 10 }");
         req.run.deferred_lease = Some(crate::types::WorkerLease {
             idle: std::time::Duration::from_millis(20),
@@ -884,8 +714,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        // A live sink installed only on this *next* run: the pending reap
-        // has nowhere to push through until now.
+        // The first live sink of the session: until this run, the pending reap
+        // has nowhere to push through.
         struct CapturingSink(Arc<Mutex<Vec<crate::serial::FOValue>>>);
         impl crate::types::EventSink for CapturingSink {
             fn emit(&self, ev: &crate::serial::FOValue) {
@@ -921,8 +751,6 @@ mod tests {
         );
     }
 
-    /// A lifecycle test double records that both hooks fired and that
-    /// `post_exec` saw the computed transport status.
     #[test]
     fn lifecycle_hooks_fire_with_status() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -964,11 +792,9 @@ mod tests {
         );
     }
 
-    /// A run of a signal-facing session reads the interrupt watermark against
-    /// its own birth: a lifecycle hook that raises one (the role a signal
-    /// handler plays) is younger than the run's mooring, so the trampoline's
-    /// `process::check` unwinds the eval into a `Break::Error` with transport
-    /// status 130.
+    /// A run reads the interrupt watermark against its own birth: one raised
+    /// from `pre_exec` — the role a signal handler plays — is younger than the
+    /// run's mooring, so `process::check` unwinds the eval at 130.
     #[test]
     fn facing_session_carries_an_interrupt_into_eval() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -999,12 +825,9 @@ mod tests {
         }
     }
 
-    /// A nested run is a *child* of the run it nests in, so it observes what
-    /// that run observes. A hook that raises an interrupt and then dispatches
-    /// a nested run — the only re-entrant shape a lifecycle hook can build —
-    /// leaves both unwinding at 130: the nested frame is younger than the
-    /// interrupt and deaf to it on its own account, and reads it off the
-    /// outer frame it descends from.
+    /// A nested run observes what the run it nests in observes. Both unwind at
+    /// 130 though the nested frame is younger than the interrupt and deaf to it
+    /// on its own account: it reads it off the outer frame it descends from.
     #[test]
     fn a_nested_run_observes_the_interrupt_through_the_run_it_nests_in() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1039,12 +862,11 @@ mod tests {
         );
     }
 
-    /// An aside — a separate `Shell` the host runs beside its session, as the
-    /// REPL runs plugin hooks ([`Shell::join_session`]) — can neither absorb
-    /// an interrupt aimed at the session's run nor keep it from it. It is not
-    /// a matter of authority: the aside's frames are minted under its own
-    /// boot frame, so an interrupt older than every one of them is unreadable
-    /// from the aside and stands undisturbed for the run it was aimed at.
+    /// An aside — a separate `Shell` beside the session, as the REPL runs plugin
+    /// hooks ([`Shell::join_session`]) — can neither absorb an interrupt aimed
+    /// at the session's run nor withhold it. Not authority but age: the aside
+    /// mints its frames under its own boot frame, so an interrupt older than all
+    /// of them is unreadable from there.
     #[test]
     fn an_aside_cannot_absorb_an_interrupt_older_than_its_frames() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1081,7 +903,7 @@ mod tests {
     }
 
     /// The other half: an interrupt raised *while* the aside runs does unwind
-    /// it, so arbitrary plugin code is interruptible for its whole life.
+    /// it, so plugin code is interruptible for its whole life.
     #[test]
     fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1107,10 +929,9 @@ mod tests {
         }
     }
 
-    /// Cancelling a session through [`Shell::cancel_handle`] — how a host
-    /// stops a session it owns — reaches the aside running beside it, because
-    /// the aside shares that very root. Nothing else can: the handle names the
-    /// root and the aside is deaf to every cell the session does not hear.
+    /// [`Shell::cancel_handle`] — how a host stops a session it owns — does
+    /// reach the aside beside it, the one thing that can, because the handle
+    /// names the very root the aside shares.
     #[test]
     fn cancelling_a_session_by_handle_reaches_its_aside() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1134,13 +955,10 @@ mod tests {
         }
     }
 
-    /// A forked session ([`Shell::fork_session`]) is not the signal-facing
-    /// session, so nothing on its runs' chains folds the ambient causes: an
-    /// interrupt raised mid-run (the role a signal handler plays) leaves the
-    /// eval undisturbed. Its host stops it through
-    /// [`Shell::cancel_handle`] instead — the companion assertion below
-    /// cancels the handle and sees the unwind the requested cause could not
-    /// produce.
+    /// A forked session ([`Shell::fork_session`]) does not face signals, so
+    /// nothing on its runs' chains folds the ambient causes and a mid-run
+    /// interrupt leaves the eval undisturbed. Its host stops it through
+    /// [`Shell::cancel_handle`] instead, as the second half asserts.
     #[test]
     fn a_forked_session_is_deaf_to_the_requested_causes() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1173,9 +991,6 @@ mod tests {
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
 
-        // The host-side path: cancelling the forked session's handle unwinds
-        // its next run at the evaluator's poll, exactly as the requested cause
-        // does for the signal-facing session.
         struct CancelHandleInPreExec(crate::process::DurableRoot);
         impl RunLifecycle for CancelHandleInPreExec {
             fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
@@ -1198,12 +1013,9 @@ mod tests {
         }
     }
 
-    /// A signal-facing session's durable root folds the requested shutdown
-    /// cause: a lifecycle hook that requests a root abort (the role a SIGQUIT
-    /// handler plays) reaches the root, and the foreground scope — a child of
-    /// the root — observes the abort through its parent chain. The
-    /// trampoline's `process::check` unwinds the eval into a `Break::Error`
-    /// with transport status 130.
+    /// A signal-facing session's durable root folds the requested shutdown cause
+    /// — the role a SIGQUIT handler plays — and the run's foreground scope,
+    /// being its child, observes it through the parent chain.
     #[test]
     fn facing_session_carries_a_root_abort_into_eval() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1220,8 +1032,8 @@ mod tests {
             lifecycle: Box::new(AbortInPreExec),
             ..capture_req("let x = 42\nreturn $x")
         });
-        // Hand the cell back before asserting: it is one-way in production,
-        // and every later session in this test binary would inherit the abort.
+        // One-way in production, so nothing clears it: without this, every
+        // later session in the test binary would inherit the abort.
         crate::process::cancel::clear_root_request();
         match report {
             RunReport::Ran { result, status, .. } => {
@@ -1235,10 +1047,8 @@ mod tests {
         }
     }
 
-    /// A run whose wall is armed and whose foreground scope is
-    /// cancelled with `Deadline` reports `timed_out`. Driven through a
-    /// lifecycle hook that fires the deadline cause directly, so the test
-    /// pins the `timed_out` classification without sleeping on the reaper.
+    /// The hook fires the `Deadline` cause directly, pinning the `timed_out`
+    /// classification without sleeping on the reaper.
     #[test]
     fn deadline_cancel_reports_timed_out() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1270,11 +1080,9 @@ mod tests {
         }
     }
 
-    /// Under `RunIo::Inherit` the run evaluates on a clone of the session's
-    /// streams and the guard restores them on teardown: the session's stdout
-    /// sink is the *same* object before and after the run (its `Arc` is
-    /// shared into the run and restored after), and the run's output lands
-    /// in it.
+    /// Under `RunIo::Inherit` the guard restores the session's stdout sink to
+    /// the *same* object it was before the run, and the run's output lands in
+    /// it.
     #[test]
     fn inherit_leaves_session_streams_untouched() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1308,13 +1116,10 @@ mod tests {
 
     // ── Run-door durability ──────────────────────────────────────────
     //
-    // The run door is the durability boundary (`decisions/260706_
-    // enquiry-channel` §5): a panic anywhere in the run reports as a
-    // failed run with the shell's `Mobile` already rolled back to its
-    // run-entry state. State-owner rollback — no host holds a snapshot.
+    // A panic anywhere in the run reports as a failed run with the shell's
+    // `Mobile` already rolled back to its run-entry state.
 
-    /// A nullary builtin whose body panics — stands in for any Rust panic
-    /// the evaluator can raise mid-run.
+    /// Stands in for any Rust panic the evaluator can raise mid-run.
     fn builtin_panic_now(
         _args: &[crate::types::Value],
         _mooring: &Mooring,
@@ -1335,9 +1140,8 @@ mod tests {
         body: crate::types::BuiltinBody::Static(builtin_panic_now),
     }];
 
-    /// A mid-eval panic reports as a failed run naming the panic, with the
-    /// panicking run's own partial mutations rolled back, a pre-run
-    /// binding intact, and the shell evaluating the next run cleanly.
+    /// Rollback is to the run's entry, not to session birth: the panicking run's
+    /// partial binding goes, a pre-run one stays, and the shell runs on.
     #[test]
     fn panicking_run_reports_failed_and_rolls_back() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1387,9 +1191,8 @@ mod tests {
         }
     }
 
-    /// A panic in a lifecycle hook — after evaluation, outside the
-    /// evaluator proper — is caught by the same door: the whole run spine
-    /// is inside the checkpoint.
+    /// A panic after evaluation, outside the evaluator proper: the whole run
+    /// spine is inside the checkpoint, not just the eval.
     struct PanicInPostExec;
     impl RunLifecycle for PanicInPostExec {
         fn post_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str, _status: i32) {
@@ -1417,8 +1220,8 @@ mod tests {
         );
     }
 
-    /// A desk handler that panics mid-enquiry unwinds through the run and
-    /// is caught at the door like any other panic during a run.
+    /// A host-supplied handler panicking mid-enquiry unwinds back through the
+    /// run, so the door catches it like any other.
     struct PanickingDesk;
     impl crate::types::EnquiryDesk for PanickingDesk {
         fn enquire(
@@ -1460,7 +1263,7 @@ mod tests {
 
     // ── where a runtime error says it happened ───────────────────────────
 
-    /// Run `src` on `shell` and hand back the rendered runtime error.
+    /// The rendered runtime error of a run that must fault.
     fn rendered_fault(shell: &mut Shell, src: &str) -> String {
         let report = shell.run(capture_req(src)).into_report(shell.sources());
         let crate::transport::Report::Ran { result, .. } = report else {
@@ -1472,9 +1275,9 @@ mod tests {
         }
     }
 
-    /// A lambda compiled by one run and called by the next draws its caret
-    /// into the text that defined it — the run boundary does not cost a
-    /// value its origin, because the source registry only grows.
+    /// A lambda compiled by one run and called by the next draws its caret into
+    /// the text that defined it: the registry only grows, so a run boundary
+    /// costs a value nothing of its origin.
     #[test]
     fn a_lambda_faults_against_the_run_that_compiled_it() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1489,8 +1292,7 @@ mod tests {
         );
     }
 
-    /// The compact one-liner is still what a single command that fails *in
-    /// its own text* gets: no header, no caret.
+    /// A fault in text the user can already see needs no header and no caret.
     #[test]
     fn a_single_command_faulting_in_its_own_text_renders_compact() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1502,10 +1304,8 @@ mod tests {
         );
     }
 
-    /// `single_command` reports the input's shape and nothing else. The
-    /// renderer no longer reads it, but exarch still does — to say whether a
-    /// non-zero exit aborted anything after it — so the flag must keep
-    /// answering the question it names.
+    /// exarch reads `single_command` to say whether a non-zero exit aborted
+    /// anything after it, so the flag must keep reporting the input's shape.
     #[test]
     fn single_command_still_reports_the_input_shape() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();

@@ -320,7 +320,12 @@ fn a_denied_connect_never_dials() {
     assert!(established, "the proxy port must accept the handshake");
     guest.tcp_send(handle, &connect_request("off-list.example"));
     assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
-    assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 403"));
+    let refused = String::from_utf8(guest.tcp_recv(handle)).expect("the status line is UTF-8");
+    assert!(refused.starts_with("HTTP/1.1 403"), "got: {refused}");
+    assert!(
+        refused.contains(&exarch::net_policy::refusal("off-list.example")),
+        "the guest must be handed the policy's own wording, not a second copy: {refused}"
+    );
     let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_peer_closed(handle));
     assert!(closed, "a denied host must close the connection");
     assert_eq!(

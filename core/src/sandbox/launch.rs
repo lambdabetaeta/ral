@@ -1,49 +1,33 @@
-//! Per-command OS sandbox launching.
+//! Confining one external or bundled child under the platform's OS sandbox.
+//! `build_command` in `runtime::command::process` routes here whenever a
+//! projection is active and no guest jail already confines the child.
 //!
-//! This module confines a single external/bundled child: it takes the
-//! already-folded effective [`SandboxProjection`] and builds a `Command`
-//! that runs one target program under the platform backend.  The command
-//! runner's `build_command` routes through here whenever a projection is
-//! active (see `decisions/260617_sandbox-external-children`).
-//!
-//! Env/cwd and resource limits are deliberately **not** applied here. The
-//! caller layers `apply_env` + `apply_resource_limits` on the returned
-//! `Command` uniformly, exactly as it does for the unsandboxed path, so
-//! the two paths cannot drift on how a child inherits cwd/PWD/overrides.
-//! Linux is the one place the in-sandbox cwd needs explicit help: bwrap
-//! does not honour the launcher's `current_dir`, so the target's logical
-//! cwd is threaded into the bwrap argv as `--chdir <cwd>` from `shell`.
+//! Env, cwd and resource limits are the caller's, layered on the returned
+//! launch exactly as on the unsandboxed path so the two cannot drift.  Linux
+//! is the exception: bwrap ignores the launcher's `current_dir` and starts the
+//! child in its namespace root, so the logical cwd rides the argv as `--chdir`.
 
 use crate::types::{Break, Error, Settled, Shell};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 
-/// What [`sandboxed_command`] should run under the OS sandbox.  A host
-/// program is its resolved path/bare name; a bundled tool is run as a
-/// child placement of ral itself (`ral --ral-bundled-tool <tool> …`).
+/// What to run under the sandbox: a host program by resolved path or bare
+/// name, or a bundled tool as a child placement of ral itself
+/// (`ral --ral-bundled-tool <tool> …`).
 #[derive(Clone, Copy)]
 pub(crate) enum LaunchTarget<'a> {
     Host { program: &'a str },
     BundledTool { tool: &'a str },
 }
 
-/// Whether the session keeps owning what it launches — the one thing the
-/// *envelope's* lifetime turns on.
-///
-/// A [`Kept`](Self::Kept) child is one this process waits on and can
-/// signal, so its confinement is built to die with us: bwrap gets
-/// `--die-with-parent`, and an envelope orphaned by a crash cannot outlive
-/// the session that authorised it.  A `Surrendered`
-/// one is a `detach` (SPEC §13.7), where that flag would kill the survivor
-/// moments after birth and hand back a receipt for nothing.  Dropping it
-/// there is not a hole: the confinement still applies for the survivor's
-/// whole life, frozen as the frame that birthed it left it, and no later
-/// frame can widen what a process nothing can name is allowed to do.
-///
-/// Read only by the Linux backend.  macOS enters Seatbelt in-process and
-/// `execve`s the target in place, so there is no envelope process to tie
-/// to a parent, and Windows has no `detach` at all — which is why
-/// surrender is a distinction only where the verb that makes it exists.
+/// Whether the session keeps owning what it launches.  Read only by the Linux
+/// backend: `Kept` adds bwrap's `--die-with-parent`, so an envelope orphaned
+/// by a crash cannot outlive the session that authorised it, while
+/// `Surrendered` — the `detach` verb, whose child is meant to survive us —
+/// must drop that flag or the survivor dies moments after birth.  No hole: the
+/// confinement holds for the survivor's whole life, frozen as the frame that
+/// birthed it left it.  macOS `execve`s the target in place and Windows has no
+/// `detach`, so neither has an envelope to tie to a parent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ownership {
     Kept,
@@ -51,19 +35,13 @@ pub(crate) enum Ownership {
     Surrendered,
 }
 
-/// Build a [`Launch`](crate::process::Launch) that runs `target` + `args`
-/// under the OS sandbox for `projection`.  The caller has already confirmed
-/// [`super::projection_enforceable`].  Env/cwd and resource limits are
-/// applied by the caller afterwards, not here.
+/// Build a [`Launch`](crate::process::Launch) running `target` + `args` under
+/// the sandbox for `projection`; the caller has already cleared
+/// [`super::projection_enforceable`] and applies env, cwd and limits after.
 ///
-/// Linux and macOS build a `std::process::Command` (bwrap argv / a Seatbelt
-/// self re-exec) and adopt it via [`Launch::from_command`](crate::process::Launch::from_command);
-/// Windows builds the target `Launch` directly and attaches the `AppContainer`
-/// `SECURITY_CAPABILITIES` the parent's spawn applies (no re-exec).
-///
-/// `shell` is taken only for the target's logical cwd, which Linux folds
-/// into the bwrap argv as `--chdir`; `ownership` likewise reaches only the
-/// Linux backend, which alone builds an envelope process to tie to us.
+/// `shell` is taken only for the logical cwd Linux folds in as `--chdir`, and
+/// `ownership` likewise reaches Linux alone, the one backend that builds an
+/// envelope process to tie to us.
 #[cfg_attr(
     not(target_os = "linux"),
     allow(
@@ -101,37 +79,28 @@ pub(crate) fn sandboxed_command(
     }
 }
 
-/// Windows: build the target's [`Launch`](crate::process::Launch) directly
-/// and confine it under the session `AppContainer`.
-///
-/// There is no re-exec into the sandbox as on macOS/Linux — the parent
-/// applies the `LowBox` token at spawn time via
-/// [`Launch::security_capabilities`](crate::process::Launch::security_capabilities)
-/// (wired in [`super::windows::session::confine`]).  A
-/// [`LaunchTarget::BundledTool`] is therefore a plain
-/// `ral --ral-bundled-tool <tool> …` self-placement that runs confined under
-/// that token, carrying no `--sandbox-projection`: its own `early_init` has
-/// nothing to enter, matching [`super::reexec::maybe_enter_process_sandbox`].
+/// Windows: the parent applies the `LowBox` token at spawn time
+/// (`super::windows::session::confine`), so there is no re-exec into the
+/// sandbox as on macOS/Linux.  A bundled tool is therefore a plain
+/// `ral --ral-bundled-tool <tool> …` self-placement carrying no
+/// `--sandbox-projection`: a Windows child has nothing to enter, and
+/// `super::reexec::maybe_enter_process_sandbox` fails closed if it sees one.
 #[cfg(windows)]
 fn windows_sandboxed_command(
     projection: &crate::types::SandboxProjection,
     target: LaunchTarget,
     args: &[String],
 ) -> Settled<crate::process::Launch> {
-    // The AppContainer child must be able to read+execute its program image;
-    // a user-installed binary is not readable by the LowBox token otherwise
-    // (only the ALL APPLICATION PACKAGES system paths are).  `session::confine`
-    // stamps this path RO, mirroring the Linux backend binding the program
-    // path RO into the bwrap argv.
+    // The LowBox token reads only the ALL APPLICATION PACKAGES system paths,
+    // so a user-installed image needs `session::confine` to stamp its path RO,
+    // mirroring the Linux backend binding the program path into the bwrap argv.
     let (mut launch, image): (crate::process::Launch, Option<std::path::PathBuf>) = match target {
         LaunchTarget::Host { program } => {
             let mut launch = crate::process::Launch::new(program);
             launch.args(args);
-            // Only an absolute program path can be granted here: a bare name
-            // resolves on PATH by the loader (System32 tools are ALL
-            // APPLICATION PACKAGES-readable), and a name we have not resolved
-            // is not a path we can stamp — so a bare-name image's readability
-            // rests on the fs read projection / AAP, not on an image grant.
+            // A bare name resolves on PATH inside the loader and is not a path
+            // we can stamp, so its readability rests on the fs read projection
+            // or the ALL APPLICATION PACKAGES grants instead.
             let image =
                 crate::path::is_absolute(program).then(|| std::path::PathBuf::from(program));
             (launch, image)
@@ -146,8 +115,7 @@ fn windows_sandboxed_command(
             })?;
             launch.arg(tool);
             launch.args(args);
-            // The confined child is ral.exe itself; grant it RO so the token
-            // can load the image the `--ral-bundled-tool` self-reexec targets.
+            // The confined child is ral.exe itself; the token must load it.
             let image = super::reexec::self_exec_path();
             (launch, image)
         }
@@ -157,21 +125,10 @@ fn windows_sandboxed_command(
 }
 
 /// Linux: expand the target into the bwrap argv via
-/// [`super::linux::make_command_with_policy`], which binds an absolute
-/// program path RO so bwrap can exec it.  A [`LaunchTarget::BundledTool`]
-/// resolves to the on-disk self exe so bwrap re-execs *us* with
-/// `--ral-bundled-tool <tool> …`.
-///
-/// The self-path used here is the on-disk `arg0` (`current_exe()`), not
-/// the fd-pinned `exec_path` (`/proc/self/fd/N`): bwrap mounts a fresh
-/// `/proc`, so a `/proc/self/fd` target would neither bind nor resolve in
-/// the child.  This matches `respawn_under_bwrap`, which likewise hands
-/// bwrap `current_exe()`.
-///
-/// The target's logical cwd is threaded in as bwrap's `--chdir`: the
-/// caller's `apply_env` sets the launcher (bwrap) process cwd, but bwrap
-/// runs the child in its mount-namespace root by default, so the
-/// in-sandbox cwd must be requested explicitly.
+/// `super::linux::make_command_with_policy`, which binds an absolute program
+/// path RO so bwrap can exec it.  A bundled tool re-execs *us* through the
+/// on-disk `arg0`, not the fd-pinned `/proc/self/fd/N` exec path: bwrap mounts
+/// a fresh `/proc`, where that target would neither bind nor resolve.
 #[cfg(target_os = "linux")]
 fn linux_sandboxed_command(
     projection: &crate::types::SandboxProjection,
@@ -211,15 +168,10 @@ fn linux_sandboxed_command(
     }
 }
 
-/// macOS: re-exec ral with the folded projection so the child enters
-/// Seatbelt in `early_init`, then runs the target *inside* that Seatbelt.
-///
-/// - [`LaunchTarget::BundledTool`] uses the existing `--ral-bundled-tool`
-///   tail: after `early_init` enters Seatbelt, `try_run_bundled_tool`
-///   runs the tool in-process, confined — no further exec needed.
-/// - [`LaunchTarget::Host`] uses the [`super::SANDBOX_EXEC_FLAG`] tail:
-///   after Seatbelt is entered, [`super::serve_sandbox_exec`] `execve`s
-///   the host program inside the Seatbelt this process just entered.
+/// macOS: re-exec ral with the folded projection so the child enters Seatbelt
+/// in `early_init`, then runs the target *inside* it — a bundled tool
+/// in-process under the `--ral-bundled-tool` tail, a host program by the
+/// `execve` `serve_sandbox_exec` performs under the `--ral-sandbox-exec` one.
 #[cfg(target_os = "macos")]
 fn macos_sandboxed_command(
     projection: &crate::types::SandboxProjection,
@@ -232,9 +184,8 @@ fn macos_sandboxed_command(
             1,
         ))
     })?;
-    // Preserve binary-swap protection: refuse to re-exec if our pinned
-    // executable was swapped on disk since boot (e.g. a mid-session
-    // `cargo install`), which would otherwise launch a foreign build.
+    // Refuse to re-exec a pinned executable swapped on disk since boot (a
+    // mid-session `cargo install`), which would launch a foreign build.
     if let Some(s) = super::reexec::SANDBOX_SELF.get() {
         super::reexec::verify_unswapped(s).map_err(Break::Error)?;
     }
@@ -258,17 +209,11 @@ fn macos_sandboxed_command(
     Ok(cmd)
 }
 
-/// macOS hook: after `early_init` has entered Seatbelt, run the host
-/// program of a `LaunchTarget::Host` re-exec carried in the
-/// `--ral-sandbox-exec` tail.
-///
-/// `execve` replaces this process, so on
-/// success it never returns; a spawn failure surfaces as 127, the POSIX
-/// "command not found / cannot exec" code.
-///
-/// `args` is the post-`early_init` argv (Seatbelt already applied).  When
-/// it does not start with the sentinel this returns `None` and the normal
-/// dispatch continues.
+/// macOS: `execve` the host program carried in the `--ral-sandbox-exec` tail,
+/// now that `early_init` has entered Seatbelt.  `args` is the post-`early_init`
+/// argv, and `None` — the sentinel absent — lets normal dispatch continue.
+/// On success `execve` never returns; a failure surfaces as 127, the POSIX
+/// "cannot exec" code.
 #[cfg(target_os = "macos")]
 pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     use std::os::unix::process::CommandExt;
@@ -297,12 +242,9 @@ pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     Some(127)
 }
 
-/// Off-macOS the `--ral-sandbox-exec` tail is never emitted, so the hook
-/// is a no-op that always declines.
-///
-/// Linux expands the host target into the bwrap argv directly; Windows
-/// confines at the parent's spawn via the `LowBox` token, with no child
-/// re-entry.
+/// Off-macOS nothing emits the tail: Linux expands the host target into the
+/// bwrap argv and Windows confines at the parent's spawn, so a child never
+/// re-enters and has nothing to serve.
 #[cfg(not(target_os = "macos"))]
 pub fn serve_sandbox_exec(_args: &[String]) -> Option<u8> {
     None
@@ -316,9 +258,8 @@ pub fn serve_sandbox_exec(_args: &[String]) -> Option<u8> {
 mod tests {
     use super::*;
 
-    // Used only by the per-platform argv-shape tests (Linux / macOS); on
-    // other targets the only test is the sentinel-decline check, which
-    // needs neither helper.
+    // Needed only by the per-platform argv-shape tests; elsewhere the sentinel
+    // decline is the only test, and it needs no scaffolding.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::types::{FsPolicy, FsProjection, SandboxProjection};
 
@@ -342,9 +283,6 @@ mod tests {
             .collect()
     }
 
-    /// macOS renders a host launch as a self re-exec carrying the
-    /// projection and the `--ral-sandbox-exec` tail: the child enters
-    /// Seatbelt in `early_init`, then `execve`s the host program inside it.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_host_command_is_self_reexec_with_sandbox_exec_tail() {
@@ -366,9 +304,6 @@ mod tests {
         assert_eq!(&args[4..], ["-c", "echo x > /etc/ral_denied"]);
     }
 
-    /// macOS renders a bundled-tool launch with the existing
-    /// `--ral-bundled-tool` tail (no `--ral-sandbox-exec`): the tool runs
-    /// in-process inside Seatbelt, no further exec needed.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_bundled_tool_command_uses_bundled_tool_tail() {
@@ -389,21 +324,15 @@ mod tests {
         );
     }
 
-    /// `serve_sandbox_exec` declines argv that does not open with the
-    /// sentinel, so the normal post-`early_init` dispatch continues.
     #[test]
     fn serve_sandbox_exec_declines_without_sentinel() {
         assert_eq!(serve_sandbox_exec(&["echo".into(), "hi".into()]), None);
     }
 
-    /// A `SandboxProjection` whose only writable region is `write_dir`,
-    /// readable everywhere `/bin/sh` and bundled tools need (the baseline
-    /// `system_paths` reads under `/bin`, `/usr`, `/System`, `/lib`,
-    /// `/private/etc`, … are emitted unconditionally by the macOS profile,
-    /// so the grant need not re-list them) plus `write_dir` for read.
-    /// `net`/`exec` are left wide so the *only* thing the profile denies is
-    /// a write outside `write_dir` — the test then fails for that reason
-    /// alone, not because the interpreter could not start.
+    /// Writable only under `write_dir`, with `net`/`exec` left wide so the one
+    /// thing the profile denies is a write outside it.  The system reads
+    /// `/bin/sh` and the bundled tools need come from the macOS profile's
+    /// unconditional baseline, so the grant need not re-list them.
     #[cfg(target_os = "macos")]
     fn write_confined_to(write_dir: &str) -> SandboxProjection {
         SandboxProjection {
@@ -417,10 +346,8 @@ mod tests {
         }
     }
 
-    /// A process-unique temp directory under the system temp root, created
-    /// on the host (outside any sandbox) so the confined child can write
-    /// *into* it.  `std::process::id` keeps it unique without `Date.now` /
-    /// randomness, per the deterministic-temp rule.
+    /// Created on the host, outside any sandbox, so a confined child can write
+    /// *into* it; the pid keeps it unique without randomness.
     #[cfg(target_os = "macos")]
     fn unique_workdir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ral_launch_{tag}_{}", std::process::id()));
@@ -428,9 +355,8 @@ mod tests {
         dir
     }
 
-    /// Spawn `cmd` confined, wait, and report whether the child exited
-    /// successfully.  Stdio is silenced so a denied write's diagnostic does
-    /// not pollute the test runner's output.
+    /// Spawn `cmd` confined and report success; stdio is silenced so a denied
+    /// write's diagnostic stays out of the test runner's output.
     #[cfg(target_os = "macos")]
     fn run_confined(mut cmd: Command) -> bool {
         use std::process::Stdio;
@@ -438,20 +364,16 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().expect("spawn sandboxed child");
-        // A one-shot sandboxed test child that cannot be SIGSTOP'd by user
-        // code; the WUNTRACED dance of ChildHandle would be pointless here,
-        // matching `linux::respawn_under_bwrap` and the pipeline anchor.
+        // A one-shot child no user code can SIGSTOP, so `ChildHandle`'s
+        // WUNTRACED dance would buy nothing.
         #[allow(clippy::disallowed_methods)]
         let status = child.wait().expect("wait for sandboxed child");
         status.success()
     }
 
-    /// End-to-end per-command denial through the host seam on macOS: a
-    /// `LaunchTarget::Host { /bin/sh }` confined to `work` may write a file
-    /// *inside* `work` (positive control) but is denied a write *outside*
-    /// it — proving Seatbelt enforces the projection rather than failing
-    /// blanket.  `/bin/sh` needs no extra read grants: the profile's
-    /// baseline system reads cover its dylibs and `/bin/sh` itself.
+    /// The in-prefix write is what makes the denial meaningful: it shows
+    /// Seatbelt enforcing the projection rather than the child failing to
+    /// start at all.
     #[cfg(target_os = "macos")]
     #[test]
     fn external_denied_write_outside_fs_grant() {
@@ -459,7 +381,6 @@ mod tests {
         let work_s = work.to_string_lossy().into_owned();
         let proj = write_confined_to(&work_s);
 
-        // Positive control: a write inside the granted prefix succeeds.
         let allowed = work.join("allowed.txt");
         let allowed_s = allowed.to_string_lossy().into_owned();
         let ok = macos_sandboxed_command(
@@ -471,8 +392,6 @@ mod tests {
         assert!(run_confined(ok), "write into the write prefix must succeed");
         assert!(allowed.exists(), "in-prefix write should have landed");
 
-        // Denial: a write outside the granted prefix fails, and the file
-        // never appears.
         let denied = std::env::temp_dir().join(format!("ral_denied_ext_{}", std::process::id()));
         let _ = std::fs::remove_file(&denied);
         let denied_s = denied.to_string_lossy().into_owned();
@@ -495,9 +414,7 @@ mod tests {
         let _ = std::fs::remove_file(&denied);
     }
 
-    /// Same enforcement proof through the bundled-tool seam: `mkdir` run as
-    /// a confined `--ral-bundled-tool` child creates a directory inside the
-    /// write prefix (positive control) but is denied one outside it.
+    /// The same proof through the bundled-tool seam.
     #[cfg(all(target_os = "macos", feature = "coreutils"))]
     #[test]
     fn bundled_tool_denied_outside_fs_grant() {
@@ -505,7 +422,6 @@ mod tests {
         let work_s = work.to_string_lossy().into_owned();
         let proj = write_confined_to(&work_s);
 
-        // Positive control: mkdir inside the granted prefix succeeds.
         let allowed = work.join("sub");
         let allowed_s = allowed.to_string_lossy().into_owned();
         let ok = macos_sandboxed_command(
@@ -517,7 +433,6 @@ mod tests {
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
         assert!(allowed.is_dir(), "in-prefix mkdir should have landed");
 
-        // Denial: mkdir outside the granted prefix fails, dir never appears.
         let denied = std::env::temp_dir().join(format!("ral_denied_bun_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&denied);
         let denied_s = denied.to_string_lossy().into_owned();
@@ -540,8 +455,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&denied);
     }
 
-    /// Linux expands a host launch directly into the bwrap argv with the
-    /// in-sandbox cwd requested via `--chdir`, ending in `-- /bin/sh …`.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_host_command_is_bwrap_with_chdir_and_target_tail() {
@@ -550,6 +463,7 @@ mod tests {
             &restrictive(),
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), "echo x > /etc/ral_denied".into()],
+            Ownership::Kept,
             &shell,
         )
         .expect("build Linux host command");

@@ -1,22 +1,13 @@
-//! Hidden helper modes for process-staged pipelines.
+//! Child side of ral's hidden multicall flags, entered before the CLI.
 //!
-//! `--ral-pipeline-stage-helper` runs one ral stage in a fresh child
-//! shell.  The parent packs the stage and the ambient shell snapshot
-//! into a [`ChildEvalRequest`]; the helper reconstructs the shell,
-//! optionally reads one typed upstream value from `VALUE_IN_FD_ENV`, runs
-//! the stage via `invoke`, and emits a structured
-//! [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse) (with the
-//! final value embedded for the parent to recover after the helper exits).
-//!
-//! `--ral-pipeline-anchor` owns the pipeline pgid for the whole launch
-//! so a fast-exiting first stage cannot strand later stages.
-//!
-//! `--ral-bundled-tool <tool> <args...>` runs a bundled coreutils /
-//! diffutils / ripgrep tool in this process and exits with its status.
-//! Unlike the stage helper it exchanges no [`ChildEvalRequest`] /
-//! [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse) frame: its
-//! inherited env/cwd/stdio/process-group/sandbox are the execution
-//! context (see `decisions/260616_bundled-tools-as-exec-images`).
+//! `--ral-pipeline-stage-helper` rebuilds a shell from the
+//! [`ChildEvalRequest`] the parent writes into the job channel, optionally
+//! reads one upstream value, runs the stage, and writes one response frame
+//! back — the final value rides inside it.  `--ral-pipeline-anchor` holds
+//! the pipeline pgid open so a fast-exiting first stage cannot strand its
+//! successors.  `--ral-bundled-tool` exchanges no frame at all: the
+//! inherited env, cwd, stdio, process group and sandbox are the whole
+//! execution context.
 
 use crate::child_eval::{ChildEvalRequest, break_response, run_child_eval, transfer_error};
 use crate::serial::{InternCtx, ScopeTable, SerialValue, build_arcs};
@@ -24,9 +15,10 @@ use crate::subprocess_codec::{read_frame, write_frame};
 use crate::types::{Break, Error, Settled, Value};
 use serde::{Deserialize, Serialize};
 
-/// Hidden multicall sentinel for one pipeline-stage helper subprocess.
 pub(crate) const HELPER_FLAG: &str = "--ral-pipeline-stage-helper";
 
+// The parent fills these: stage channels in `protocol/{unix,windows}.rs`,
+// the anchor's in `group.rs`.
 #[cfg(unix)]
 pub(crate) const JOB_FD_ENV: &str = "RAL_PIPELINE_STAGE_JOB_FD";
 #[cfg(unix)]
@@ -47,27 +39,18 @@ pub(crate) const VALUE_IN_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_IN_HANDLE
 #[cfg(windows)]
 pub(crate) const VALUE_OUT_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_OUT_HANDLE";
 
-/// Hidden multicall sentinel for the stable pipeline pgid anchor.
 pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 
-/// Hidden multicall sentinel for a child placement of a bundled tool
-/// (`ral --ral-bundled-tool <tool> <args...>`).  Unlike the stage helper
-/// this child reads no [`ChildEvalRequest`] and sends no
-/// [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse): its
-/// inherited env/cwd/stdio/process-group/sandbox are the execution
-/// context, so it just runs `uutils_invoke` and exits with the tool
-/// status.  See `decisions/260616_bundled-tools-as-exec-images`.
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 
 /// One typed value crossing a process-staged pipeline boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct StageValue {
-    pub scope_table: ScopeTable,
-    pub value: SerialValue,
+struct StageValue {
+    scope_table: ScopeTable,
+    value: SerialValue,
 }
 
-/// Pack one value boundary for transport between helpers or back to the parent.
-pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
+fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
     let mut ctx = InternCtx::new();
     let value = SerialValue::from_runtime(value, &mut ctx).map_err(|e| transfer_error(&e))?;
     Ok(StageValue {
@@ -76,16 +59,13 @@ pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
     })
 }
 
-/// Rehydrate one transported value.
-pub(crate) fn unpack_stage_value(value: StageValue) -> Result<Value, Error> {
+fn unpack_stage_value(value: StageValue) -> Result<Value, Error> {
     let arcs = build_arcs(&value.scope_table)?;
     value.value.into_runtime(&arcs)
 }
 
-/// Read a required env var and parse it as `T`.  Absent or non-unicode
-/// collapse to `"{name} not set"`; present but unparseable becomes
-/// `"{name} is not {label}"` (so `label` should read with its article,
-/// e.g. `"an fd"`).
+/// `label` lands in `"{name} is not {label}"`, so it carries its own
+/// article: `"an fd"`.
 fn read_env_required<T>(
     name: &str,
     label: &str,
@@ -95,8 +75,7 @@ fn read_env_required<T>(
     parse(&s).ok_or_else(|| format!("{name} is not {label}"))
 }
 
-/// Read an optional env var.  Absent → `Ok(None)`; non-unicode is a
-/// structured error; present but unparseable becomes `"{name} is not {label}"`.
+/// As `read_env_required`, but an unset var is `Ok(None)` rather than an error.
 fn read_env_optional<T>(
     name: &str,
     label: &str,
@@ -111,19 +90,11 @@ fn read_env_optional<T>(
     }
 }
 
-/// Helper-side transport for a stage subprocess: turn the inheritable
-/// descriptors the parent passed in env vars into the `BufRead` / `Write`
-/// channels `serve_stage_core` runs over.
-///
-/// Both backends do the identical dance — read the job / report
-/// descriptors from env, immediately re-secure each against further
-/// inheritance, wrap job as a reader and report as a writer, then repeat
-/// for the optional value-in / value-out channels.  The only platform
-/// difference is the descriptor type (`fd` vs `HANDLE`) and the three
-/// primitives below; [`serve_from_env`] is generic over them.
+/// All that separates the two backends: the descriptor type and five
+/// primitives, so `serve_from_env` performs one dance on both.
 #[cfg(any(unix, windows))]
 trait HelperTransport {
-    /// Descriptor identity carried through an env var (an fd or a `HANDLE`).
+    /// An fd on Unix, a Win32 `HANDLE` on Windows.
     type Desc: Copy;
 
     const JOB: &'static str;
@@ -131,16 +102,12 @@ trait HelperTransport {
     const VALUE_IN: &'static str;
     const VALUE_OUT: &'static str;
 
-    /// Parse a required descriptor from env var `name`.
     fn read(name: &str) -> Result<Self::Desc, String>;
-    /// Parse an optional descriptor from env var `name` (absent → `None`).
     fn read_optional(name: &str) -> Result<Option<Self::Desc>, String>;
-    /// Re-secure an inherited descriptor against leaking into the stage's
-    /// own children (set `FD_CLOEXEC` / clear `HANDLE_FLAG_INHERIT`).
+    /// Stop the inherited descriptor leaking on into the stage's own
+    /// children (set `FD_CLOEXEC` / clear `HANDLE_FLAG_INHERIT`).
     fn secure(desc: Self::Desc) -> Result<(), String>;
-    /// Wrap a descriptor as a buffered reader.
     fn reader(desc: Self::Desc) -> Box<dyn std::io::BufRead>;
-    /// Wrap a descriptor as a writer.
     fn writer(desc: Self::Desc) -> Box<dyn std::io::Write>;
 }
 
@@ -171,10 +138,9 @@ fn serve_from_env<P: HelperTransport>() -> u8 {
     outcome.unwrap_or(1)
 }
 
-/// Read exactly one [`StageValue`] frame from `reader`.  EOF is a
-/// structured pipeline protocol error — the parent only wires a
-/// value-in channel when it expects an upstream value, so a closed
-/// pipe means the producer died before reaching its consumer.
+/// EOF is an error, not an empty read: the parent wires a value-in channel
+/// only when a value is coming, so a closed pipe means the producer died
+/// before reaching its consumer.
 fn read_required_stage_value<R: std::io::BufRead>(reader: &mut R) -> Settled<Value> {
     let frame = read_frame::<_, StageValue>(reader).map_err(|e| {
         Break::Error(Error::new(
@@ -191,9 +157,8 @@ fn read_required_stage_value<R: std::io::BufRead>(reader: &mut R) -> Settled<Val
     unpack_stage_value(value).map_err(Break::Error)
 }
 
-/// Send one [`StageValue`] over `writer`.  Two failure modes surfaced
-/// structurally: non-transferable value (handles etc.) and writer I/O
-/// failure (peer closed, EPIPE).
+/// A value that cannot be serialized — an open handle, say — fails here
+/// rather than at the peer.
 fn write_stage_value<W: std::io::Write>(writer: &mut W, value: &Value) -> Result<(), Error> {
     let packed = pack_stage_value(value)?;
     write_frame(writer, &packed).map_err(|e| {
@@ -204,13 +169,8 @@ fn write_stage_value<W: std::io::Write>(writer: &mut W, value: &Value) -> Result
     })
 }
 
-/// Shared stage-serve logic: block-read the [`ChildEvalRequest`],
-/// optionally read an upstream value, run the stage via the shared
-/// [`run_child_eval`], optionally forward the output value, and emit the
-/// [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse).
-/// Platform-specific I/O setup (fd/handle parsing, CLOEXEC,
-/// `from_raw_fd`/`from_raw_handle`) lives in the callers; this function
-/// works exclusively through `BufRead` / `Write`.
+/// One job frame in, one report frame out; the transport has already turned
+/// every descriptor into a stream.
 fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
     job_reader: &mut R,
     report_writer: &mut W,
@@ -229,10 +189,8 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
         }
     };
 
-    // A stage holding a value-out channel feeds a value consumer, so it
-    // forces its output once (`x | f = f !{x}`); a final or byte-mode
-    // stage holds none.  Derived here, before `value_out` is consumed by
-    // the value-forwarding match below.
+    // A value-out channel means a value consumer downstream, so the output
+    // is forced once (`x | f = f !{x}`).  Read before the match below moves it.
     let force_output = value_out.is_some();
 
     let upstream = match value_in {
@@ -276,9 +234,8 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
     0
 }
 
-// Helper-side error reporters.  Each consumes a `String` error and
-// emits a `cmd_error`, so call sites can `Result::map_err(report_*)?`
-// inside an IIFE that propagates `Err(())` to a single `unwrap_or(1)`.
+// Point-free `map_err` targets: each reports and yields `()`, so the IIFE
+// in `serve_from_env` can carry every failure to one `unwrap_or(1)`.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "point-free `map_err` target: takes the error String flowing off the fallible edge"
@@ -364,11 +321,8 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch>
 
 /// Build a helper command that re-execs the current ral binary.
 ///
-/// Windows has no sandbox-pinned self-path; we use the live
-/// `current_exe`.  The pipeline helpers are short-lived and the
-/// child re-enters via the multicall flag, so a swap of the
-/// on-disk binary between launch and exec is not a risk we
-/// guard against here.
+/// Windows has no sandbox-pinned self-path, so this takes the live
+/// `current_exe` and would follow an on-disk swap between launch and exec.
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
@@ -382,12 +336,6 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch>
 }
 
 // ── Windows helper IO ──────────────────────────────────────────────────────
-//
-// The Windows transport mirrors the Unix one but takes Win32 `HANDLE`
-// values out of env vars (decimal usize) instead of fd numbers, and its
-// `secure` clears `HANDLE_FLAG_INHERIT` (the analogue of `FD_CLOEXEC`)
-// so the handle does not propagate into nested children spawned during
-// stage evaluation.
 
 #[cfg(windows)]
 struct WindowsTransport;
@@ -435,14 +383,11 @@ impl HelperTransport for WindowsTransport {
     }
 }
 
-/// Hidden helper dispatch from the binary entrypoint.
+/// Hidden helper dispatch from the binary entrypoint; `None` when argv names
+/// no helper mode and the ordinary CLI should run.
 ///
-/// Each helper-serving function returns its raw POSIX-style exit code
-/// (`127` for exec not-found / I/O, `126` for permission denied, `0`
-/// on success, `1` for protocol-layer failures); the binary entrypoint
-/// converts to `ExitCode` once.  Collapsing to `0/1` here would discard
-/// the documented `126`/`127` distinction the trampoline relies on for
-/// `CommandFailure::Spawn` reconstruction at the parent.
+/// A stage's own errors ride home in the report frame, so the exit code is
+/// only ever `0`, or `1` for a failure below the protocol.
 pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     let mut args = std::env::args_os();
     let _argv0 = args.next();
@@ -450,6 +395,10 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     #[cfg(unix)]
     {
         crate::sandbox::register_self_for_helpers();
+        // Before the mode match, so every argv-bearing ral gets it: Rust's
+        // runtime ignores SIGPIPE, but a pipeline producer must die when its
+        // reader closes (`yes | head`).  Parent-side protocol writes, which
+        // need `EPIPE` instead, mask it per write in `subprocess_codec`.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }
@@ -462,9 +411,8 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     }
     #[cfg(windows)]
     {
-        // Windows recognises the stage helper only.  The pgid anchor
-        // (`ANCHOR_FLAG`) is Unix-only because the foreground race it
-        // exists to address does not exist on Windows.
+        // The anchor is Unix-only: Windows has no pgid for a fast first
+        // stage to strand.
         match mode.as_str() {
             HELPER_FLAG => Some(serve_from_env::<WindowsTransport>()),
             ANCHOR_FLAG => {
@@ -485,17 +433,10 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
 /// Hidden bundled-tool dispatch from the binary entrypoint
 /// (`ral --ral-bundled-tool <tool> <args...>`).
 ///
-/// Returns `None` when `args` does not start with [`BUNDLED_TOOL_FLAG`]
-/// (the normal CLI path runs); otherwise runs the bundled tool in this
-/// process and returns `Some(exit_code)`.
-///
-/// `args` is the post-`early_init` argv slice (sans the binary name) — by
-/// then the OS sandbox is already entered, so the tool runs confined.
-/// The child reads no `ChildEvalRequest` and emits no `ChildEvalResponse`:
-/// its inherited env/cwd/stdio/process-group/sandbox are the execution
-/// context.  The exit code comes from
-/// [`crate::builtins::uutils::invoke_bundled`] — the same bundled-tool
-/// exit-code protocol the inline `run_uutils_in_process` uses.
+/// `args` is the post-`early_init` argv sans the binary name, so the OS
+/// sandbox is already entered and the tool runs confined.  The exit code
+/// comes from `invoke_bundled`, shared with the inline
+/// `run_uutils_in_process` placement.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     use crate::builtins::uutils;
@@ -521,13 +462,9 @@ pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     Some(exit_code.clamp(0, 255) as u8)
 }
 
-/// No-bundled-features fallback so the binary entrypoint stays
-/// feature-clean.
-///
-/// Without any bundled tool linked in there is nothing
-/// `--ral-bundled-tool` could dispatch, so it is unreachable; recognise
-/// the sentinel anyway to turn it into a clear diagnostic rather than an
-/// opaque clap usage error.
+/// With no bundled tool linked in the sentinel is unreachable, but still
+/// recognised, so it fails as a clear diagnostic rather than a clap usage
+/// error.
 #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     let flag = args.first()?;

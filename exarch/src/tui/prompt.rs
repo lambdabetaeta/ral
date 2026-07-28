@@ -2,10 +2,7 @@ use super::commands;
 use crate::bus::Inbox;
 use prompt_editor::{EditMode, PromptEditor};
 use ratatui::style::{Color, Modifier, Style};
-/// The prompt editing state: editor, history, and draft management.
-///
-/// Extracted from [`super::App`] to keep the TUI struct flat and
-/// the prompt's concerns in one place.
+/// The prompt line: editor, history, and the draft stashed while browsing it.
 pub(super) struct PromptState {
     editor: PromptEditor,
     history: Vec<String>,
@@ -41,10 +38,8 @@ impl PromptState {
         Some(prompt)
     }
 
-    /// Pull every pending prompt back into the editor for revision, joined
-    /// with a blank line so each queued message stays distinct.  A non-empty
-    /// live draft wins over queue editing: Up keeps its ordinary history
-    /// behaviour rather than discarding text the user has started.
+    /// Pull every queued prompt back for revision, blank-line separated.  Declines
+    /// while a draft or a history browse is live, so Up never discards typed text.
     pub(super) fn edit_queued_prompt(&mut self, inbox: &Inbox) -> bool {
         if self.hist_pos.is_some() || !self.editor.is_empty() {
             return false;
@@ -62,53 +57,46 @@ impl PromptState {
         self.editor.insert_str(s);
     }
 
-    /// Adopt `text` returned by the external editor as the live prompt draft,
-    /// leaving any in-progress history browse so a later Up/Down does not
-    /// overwrite the edit.
+    /// Adopt the external editor's `text` as the live draft, ending any history
+    /// browse so a later Up/Down cannot overwrite the edit.
     pub(super) fn adopt_draft(&mut self, text: &str) {
         self.hist_pos = None;
         self.set_prompt(text);
     }
 
-    /// Take the pending `C-x C-e` request, if any: the UI loop calls this after
-    /// each edit key to learn whether it must suspend for the external editor.
+    /// Take the pending `C-x C-e` request — the UI loop drains it after every edit
+    /// key and suspends into `terminal::compose_in_editor`.
     pub(super) fn take_editor_request(&mut self) -> bool {
         std::mem::take(&mut self.editor_request)
     }
 
-    /// Note that Ctrl-X was just pressed: the next `C-e` opens the editor.
+    /// Arm the `C-x` prefix: the next `C-e` opens the editor.
     pub(super) fn set_cx_pending(&mut self) {
         self.cx_pending = true;
     }
 
-    /// Dismiss the Ctrl-X prefix without action — on any mouse event.
     pub(super) fn clear_cx_pending(&mut self) {
         self.cx_pending = false;
     }
 
-    /// Take and reset the `C-x` prefix: returns true if `C-x` was pending
-    /// and clears it, so the chord either fires or is consumed.
     pub(super) fn take_cx_pending(&mut self) -> bool {
         std::mem::take(&mut self.cx_pending)
     }
 
-    /// Request the external editor via `C-x C-e` — drained by the UI loop.
     pub(super) fn request_editor(&mut self) {
         self.editor_request = true;
     }
 
-    /// The prompt's current contents, lines newline-joined.
     pub(super) fn prompt_text(&self) -> String {
         self.editor.text()
     }
 
-    /// Recolor the prompt text in place: a line that names a known slash
-    /// command (so the UI loop will dispatch it) glows cyan and bold; anything
-    /// else stays plain white. Driven once per frame from [`super::App::draw`], so it
-    /// tracks every edit — typing, paste, history recall.
-    pub(super) fn style_prompt(&mut self, focused_steerable: bool) {
+    /// Glow cyan and bold when the line names a slash command and the trunk tab has
+    /// focus — `commands::route_submit` refuses one typed on a sub-agent tab.
+    /// Restyled every frame by `render::draw`.
+    pub(super) fn style_prompt(&mut self, on_trunk: bool) {
         let text = self.editor.text();
-        let style = if focused_steerable && commands::is_slash_command(&text) {
+        let style = if on_trunk && commands::is_slash_command(&text) {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
@@ -124,9 +112,7 @@ impl PromptState {
         self.editor.insert_str(s);
     }
 
-    /// Recall the previous prompt (Up from the first row).  The live
-    /// draft is stashed on entry; navigation clamps at the oldest
-    /// entry.  No-op when no prompts have been submitted yet.
+    /// Recall the previous prompt; the live draft is stashed on entry.
     pub(super) fn history_prev(&mut self) {
         let pos = match self.hist_pos {
             _ if self.history.is_empty() => return,
@@ -142,9 +128,7 @@ impl PromptState {
         self.set_prompt(&entry);
     }
 
-    /// Recall the next prompt (Down from the last row), or restore the
-    /// stashed draft once browsing walks past the newest entry.  No-op
-    /// when not browsing history.
+    /// Recall the next prompt, or the stashed draft once past the newest entry.
     pub(super) fn history_next(&mut self) {
         let Some(i) = self.hist_pos else {
             return;
@@ -160,9 +144,8 @@ impl PromptState {
         }
     }
 
-    /// Route a plain text-input key into the prompt.  Dispatches to
-    /// [`PromptEditor::handle_key`], which folds in vi-mode handling
-    /// and shell-line-edit chords (Ctrl-U) internally.
+    /// Route a text-input key to `PromptEditor::handle_key`, which absorbs vi mode
+    /// and the shell line-edit chords itself.
     pub(super) fn edit_input(&mut self, k: ratatui::crossterm::event::KeyEvent) {
         self.editor.handle_key(k);
     }

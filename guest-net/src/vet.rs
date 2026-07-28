@@ -1,5 +1,6 @@
 //! Classifies resolved addresses as public or not, and dials only the survivors.
 
+use std::borrow::Cow;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
@@ -127,19 +128,19 @@ pub fn open(
 ) -> Result<(TcpStream, SocketAddr), crate::connect::Refusal> {
     let addrs = dialer.resolve(host).map_err(|_| crate::connect::Refusal {
         status: 502,
-        reason: "resolution failed",
+        reason: Cow::Borrowed("resolution failed"),
     })?;
     if addrs.is_empty() {
         return Err(crate::connect::Refusal {
             status: 502,
-            reason: "resolution failed",
+            reason: Cow::Borrowed("resolution failed"),
         });
     }
     let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| is_public(a.ip())).collect();
     if public.is_empty() {
         return Err(crate::connect::Refusal {
             status: 403,
-            reason: "no public address",
+            reason: Cow::Borrowed("no public address"),
         });
     }
     for addr in &public {
@@ -149,7 +150,7 @@ pub fn open(
     }
     Err(crate::connect::Refusal {
         status: 502,
-        reason: "no address answered",
+        reason: Cow::Borrowed("no address answered"),
     })
 }
 
@@ -386,7 +387,7 @@ mod tests {
             refusal,
             crate::connect::Refusal {
                 status: 403,
-                reason: "no public address"
+                reason: Cow::Borrowed("no public address")
             }
         );
         assert!(dialer.dial_calls.lock().unwrap().is_empty());
@@ -401,7 +402,7 @@ mod tests {
             refusal,
             crate::connect::Refusal {
                 status: 502,
-                reason: "resolution failed"
+                reason: Cow::Borrowed("resolution failed")
             }
         );
         assert!(dialer.dial_calls.lock().unwrap().is_empty());
