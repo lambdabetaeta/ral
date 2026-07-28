@@ -9,7 +9,7 @@
 //! backends render; `detach` gates a verb instead of an OS rule, so it is folded
 //! at the call by [`GrantStack::permits_detach`] and reaches no projection.
 
-use crate::path::{NormalizedPrefix, meet_prefixes};
+use crate::path::{NormalizedPrefix, meet_prefixes, path_within_str, proper_ancestors};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -196,6 +196,17 @@ pub struct SandboxBindSpec {
     pub read_prefixes: Vec<String>,
     pub write_prefixes: Vec<String>,
     pub deny_paths: Vec<String>,
+    /// Every proper ancestor of a `deny_paths` entry that lies within some
+    /// write prefix.  The macOS backend pins each against rename and unlink,
+    /// or a confined child relocates the ancestor directory itself
+    /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
+    /// prefix root is the ancestor) and the denied bytes resurface at a name
+    /// no deny rule covers.  `deny_paths` already carries both a deny's
+    /// surface spelling and its symlink-resolved target
+    /// (`sandbox_projection` in `capability::sandbox`), so taking ancestors
+    /// of it pins both chains — closing a symlink swapped in after sandbox
+    /// entry too.
+    pub pinned_dirs: Vec<String>,
 }
 
 impl SandboxProjection {
@@ -205,17 +216,24 @@ impl SandboxProjection {
         let Some(fs) = self.fs.as_policy() else {
             return SandboxBindSpec::default();
         };
-        let dedup = |ps: &[NormalizedPrefix]| {
+        let dedup = |ps: &[NormalizedPrefix]| -> Vec<String> {
             ps.iter()
                 .map(|p| p.as_str().to_string())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()
         };
+        let write_prefixes = dedup(&fs.write_prefixes);
+        let deny_paths = dedup(&fs.deny_paths);
+        let pinned_dirs = proper_ancestors(deny_paths.iter().map(String::as_str))
+            .into_iter()
+            .filter(|dir| write_prefixes.iter().any(|w| path_within_str(dir, w)))
+            .collect();
         SandboxBindSpec {
             read_prefixes: dedup(&fs.read_prefixes),
-            write_prefixes: dedup(&fs.write_prefixes),
-            deny_paths: dedup(&fs.deny_paths),
+            write_prefixes,
+            deny_paths,
+            pinned_dirs,
         }
     }
 }
@@ -641,3 +659,54 @@ fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<Nor
 
 #[cfg(test)]
 mod lattice_tests;
+
+#[cfg(test)]
+mod pinned_dirs_tests {
+    use super::*;
+    use crate::path::Namespace;
+
+    fn prefix(surface: &str) -> NormalizedPrefix {
+        NormalizedPrefix::for_test(surface, surface, Namespace::Host)
+    }
+
+    fn spec(write: &[&str], read: &[&str], deny: &[&str]) -> SandboxBindSpec {
+        SandboxProjection {
+            fs: FsProjection::Restricted(FsPolicy {
+                read_prefixes: read.iter().copied().map(prefix).collect(),
+                write_prefixes: write.iter().copied().map(prefix).collect(),
+                deny_paths: deny.iter().copied().map(prefix).collect(),
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        }
+        .bind_spec()
+    }
+
+    /// The write prefix root is itself a proper ancestor of a deep-enough
+    /// deny, so it is pinned alongside the two intermediate directories —
+    /// the case that closes `mv /repo /scratch/r`.
+    #[test]
+    fn pins_every_ancestor_within_the_write_prefix_including_its_root() {
+        let pinned = spec(&["/repo"], &[], &["/repo/a/b/secret"]).pinned_dirs;
+        assert_eq!(
+            pinned,
+            [
+                "/repo".to_string(),
+                "/repo/a".to_string(),
+                "/repo/a/b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pins_nothing_when_no_write_prefix_covers_the_denys_chain() {
+        let pinned = spec(&[], &["/repo"], &["/repo/.ssh/id_rsa"]).pinned_dirs;
+        assert!(pinned.is_empty());
+    }
+
+    #[test]
+    fn pins_nothing_for_a_deny_outside_every_prefix() {
+        let pinned = spec(&["/repo"], &[], &["/etc/secret"]).pinned_dirs;
+        assert!(pinned.is_empty());
+    }
+}

@@ -93,6 +93,13 @@ pub(crate) fn make_command_with_policy(
     // mount point (unlike `--bind SRC DEST`), and a guard here would leave
     // a deny path that is absent at entry but under a writable bind
     // unmasked — a child could then create and write it.
+    //
+    // `bind_spec.pinned_dirs` goes unused here on purpose: a `--tmpfs` mask
+    // is a mount bound to the denied path, not to the path string that named
+    // it at mount time, so a rename of an ancestor carries the mount — and
+    // the mask — along with it.  Only the denied path's own name resists
+    // rename or removal, with `EBUSY`: the pin macOS renders explicitly,
+    // Linux gets for free.
     let mut denied_binds = bind_spec.deny_paths;
     denied_binds.sort();
     denied_binds.dedup();

@@ -107,3 +107,135 @@ fn no_flag_leaves_session_unrestricted() {
         out.stdout
     );
 }
+
+/// Content that must never survive a defeated `deny`.
+#[cfg(target_os = "macos")]
+const DENY_PIN_SENTINEL: &str = "ral-deny-pin-sentinel-do-not-leak";
+
+#[cfg(target_os = "macos")]
+fn scratch_dir(tag: &str) -> std::path::PathBuf {
+    let dir = common::fresh_tmp_path(&format!("pin_{tag}"), "dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[cfg(target_os = "macos")]
+fn seed_secret(dir: &std::path::Path) {
+    let ssh = dir.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_rsa"), DENY_PIN_SENTINEL).unwrap();
+}
+
+// A Seatbelt deny names a path, so `SandboxBindSpec::pinned_dirs` pins every
+// ancestor of a deny that lies within a write prefix, and the macOS backend
+// renders each as a `file-write-unlink` deny.  Only that backend needs it:
+// bwrap's deny is an object-anchored mount, which survives the same rename
+// unpinned.  Hence macOS-only.
+
+/// Renaming a denied file's parent must not carry the secret to a name no
+/// deny rule covers.
+#[cfg(target_os = "macos")]
+#[test]
+fn deny_pin_survives_ancestor_rename() {
+    let d = scratch_dir("ancestor");
+    seed_secret(&d);
+    let d_s = d.to_string_lossy().into_owned();
+
+    let out = ral(&[
+        "-c",
+        &format!(
+            "grant [fs: [read: ['{d_s}'], write: ['{d_s}'], deny: ['{d_s}/.ssh/id_rsa']]] \
+             {{ sh -c 'mv {d_s}/.ssh {d_s}/x && cat {d_s}/x/id_rsa' }}"
+        ),
+    ]);
+    // The rename must be *refused*, not merely followed by an unreadable
+    // file: a body that never ran would satisfy the sentinel check vacuously.
+    let refused = d.join(".ssh").join("id_rsa").exists() && !d.join("x").exists();
+    std::fs::remove_dir_all(&d).ok();
+
+    assert!(
+        !out.stdout.contains(DENY_PIN_SENTINEL) && !out.stderr.contains(DENY_PIN_SENTINEL),
+        "sentinel leaked past a renamed ancestor directory (exit {}); stdout:\n{}\nstderr:\n{}",
+        out.status,
+        out.stdout,
+        out.stderr
+    );
+    assert!(refused, "the ancestor rename was not refused");
+}
+
+/// The pin freezes only the ancestor's own name-in-parent (`literal`, not
+/// `subpath`) — mutating what's inside it must keep working, or the fix
+/// overshoots.
+#[cfg(target_os = "macos")]
+#[test]
+fn deny_pin_leaves_directory_entries_mutable() {
+    let d = scratch_dir("entries");
+    seed_secret(&d);
+    let d_s = d.to_string_lossy().into_owned();
+    let created = d.join(".ssh").join("created.txt");
+    let created_s = created.to_string_lossy().into_owned();
+    let under_grant = |body: String| {
+        format!(
+            "grant [fs: [read: ['{d_s}'], write: ['{d_s}'], deny: ['{d_s}/.ssh/id_rsa']]] {{ {body} }}"
+        )
+    };
+
+    let out_create = ral(&["-c", &under_grant(format!("sh -c 'touch {created_s}'"))]);
+    assert_eq!(
+        out_create.status, 0,
+        "creating a file inside the pinned directory must succeed; stderr:\n{}",
+        out_create.stderr
+    );
+    assert!(
+        created.exists(),
+        "new file inside the pinned directory did not land"
+    );
+
+    let out_remove = ral(&["-c", &under_grant(format!("sh -c 'rm {created_s}'"))]);
+    assert_eq!(
+        out_remove.status, 0,
+        "removing a file inside the pinned directory must succeed; stderr:\n{}",
+        out_remove.stderr
+    );
+    assert!(
+        !created.exists(),
+        "file inside the pinned directory survived removal"
+    );
+
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// A distinct escape: relocating the *write-prefix root* itself rather
+/// than an intermediate ancestor. Two prefixes share one deny; the pinned
+/// set must cover each root or the secret resurfaces under the sibling
+/// prefix once the rename lands.
+#[cfg(target_os = "macos")]
+#[test]
+fn deny_pin_survives_write_prefix_root_rename() {
+    let d = scratch_dir("root_d");
+    let s = scratch_dir("root_s");
+    seed_secret(&d);
+    let d_s = d.to_string_lossy().into_owned();
+    let s_s = s.to_string_lossy().into_owned();
+
+    let out = ral(&[
+        "-c",
+        &format!(
+            "grant [fs: [read: ['{d_s}', '{s_s}'], write: ['{d_s}', '{s_s}'], \
+             deny: ['{d_s}/.ssh/id_rsa']]] \
+             {{ sh -c 'mv {d_s} {s_s}/r && cat {s_s}/r/.ssh/id_rsa' }}"
+        ),
+    ]);
+    let refused = d.exists() && !s.join("r").exists();
+    std::fs::remove_dir_all(&d).ok();
+    std::fs::remove_dir_all(&s).ok();
+
+    assert!(
+        !out.stdout.contains(DENY_PIN_SENTINEL) && !out.stderr.contains(DENY_PIN_SENTINEL),
+        "sentinel leaked past a renamed write-prefix root (exit {}); stdout:\n{}\nstderr:\n{}",
+        out.status,
+        out.stdout,
+        out.stderr
+    );
+    assert!(refused, "the write-prefix root rename was not refused");
+}

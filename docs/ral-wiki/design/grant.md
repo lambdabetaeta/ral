@@ -11,6 +11,19 @@ everything it calls. Authority is never amplified:
 - a deny is anti-monotonic — further layers can add denies but never reopen a
   denied region.
 
+**A deny's reach is the content, not the spelling.** "Never reopen a denied
+region" must hold for what a deny protects, not just the string naming it: a
+writable region is otherwise mutable end to end, so a confined child that
+renames or removes a directory on the path to a denied file can make its bytes
+resurface under a name no deny rule covers, without any layer ever re-granting
+the denied path itself. The invariant is sharper than "the literal path stays
+blocked": no confined child can cause a denied path's contents to become
+reachable under a name the deny does not cover. Enforcing it is not free —
+some name on the path to a denied file stops being renameable or removable,
+and what that costs differs by backend — see
+[[internals/capability-enforcement|capability-enforcement]] for the rendering
+and the per-backend price.
+
 **The axes are independent:** each is a separate field whose absence is the meet
 identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
 

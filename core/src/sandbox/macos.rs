@@ -11,7 +11,7 @@
 //! one allow/deny bit rather than an endpoint list.
 
 use crate::path::{match_variants_list, proper_ancestors};
-use crate::types::{ExecProjection, FsProjection, SandboxProjection};
+use crate::types::{ExecProjection, FsProjection, SandboxBindSpec, SandboxProjection};
 use std::ffi::{CStr, CString};
 use std::fmt::Write;
 use std::os::raw::{c_char, c_int};
@@ -64,8 +64,9 @@ const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
 pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String> {
     let mut lines: Vec<String> = vec![BASE_PROFILE.to_string()];
+    let bind_spec = policy.bind_spec();
     let deny_paths = match &policy.fs {
-        FsProjection::Restricted(fs) => emit_fs_restricted(&mut lines, fs)?,
+        FsProjection::Restricted(_) => emit_fs_restricted(&mut lines, &bind_spec)?,
         FsProjection::Unrestricted => {
             // Pass fs through, so an exec-only grant can enter the sandbox
             // for exec gating without clamping the agent's cwd or HOME.
@@ -87,6 +88,17 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         lines.push(format!("(deny file-write* (subpath \"{escaped}\"))"));
         lines.push(format!("(deny file-link (subpath \"{escaped}\"))"));
     }
+    // A pinned dir keeps its entries mutable — only its own name-in-parent is
+    // frozen — so `literal`, never `subpath`, which would also block
+    // unlinking every entry inside it.  Unconditional on existence, like the
+    // deny paths above: an ancestor absent now can be created later under the
+    // write prefix that covers it.
+    for dir in match_variants_list(&bind_spec.pinned_dirs)? {
+        lines.push(format!(
+            "(deny file-write-unlink (literal \"{}\"))",
+            escape_path(&dir)
+        ));
+    }
     if policy.net {
         lines.push("(allow network*)".to_string());
     }
@@ -95,18 +107,18 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 }
 
 /// Emit the allow rules and ancestor-metadata carve-outs for a restricted fs
-/// policy, returning the expanded `deny_paths` for the caller to layer after
-/// every allow (Seatbelt is last-match-wins).
+/// bind spec, returning the expanded `deny_paths` for the caller to layer
+/// after every allow (Seatbelt is last-match-wins).
 ///
 /// `Err` when a prefix's firmlink expansion is not valid UTF-8, which
 /// [`crate::path::match_variants_list`] refuses rather than approximates.
 fn emit_fs_restricted(
     lines: &mut Vec<String>,
-    fs: &crate::types::FsPolicy,
+    bind_spec: &SandboxBindSpec,
 ) -> Result<Vec<String>, String> {
-    let read_prefixes = match_variants_list(&fs.read_prefixes)?;
-    let write_prefixes = match_variants_list(&fs.write_prefixes)?;
-    let deny_paths = match_variants_list(&fs.deny_paths)?;
+    let read_prefixes = match_variants_list(&bind_spec.read_prefixes)?;
+    let write_prefixes = match_variants_list(&bind_spec.write_prefixes)?;
+    let deny_paths = match_variants_list(&bind_spec.deny_paths)?;
     let system_read_paths = existing_system_read_paths()?;
     emit_ancestor_metadata(lines, system_read_paths.iter().map(String::as_str));
     emit_read_subpaths(lines, system_read_paths.iter().map(String::as_str));
@@ -595,5 +607,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The write prefix root and the intermediate `.ssh` directory both get
+    /// pinned against rename/unlink, each in both firmlink spellings, after
+    /// the write allow that covers them — the fix for the `mv /repo/.ssh
+    /// /repo/x` and `mv /repo /scratch/r` escapes.
+    #[test]
+    fn mac_profile_emits_pin_rules_for_deny_ancestors() {
+        let policy = SandboxProjection {
+            fs: FsProjection::Restricted(FsPolicy {
+                read_prefixes: Vec::new(),
+                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp/work")],
+                deny_paths: vec![crate::path::NormalizedPrefix::from_surface(
+                    "/tmp/work/.ssh/id_rsa",
+                )],
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        let profile = build_profile(&policy).unwrap();
+        for form in ["/tmp/work", "/private/tmp/work"] {
+            let allow_idx = profile
+                .find(&format!("(allow file-write* (subpath \"{form}\"))"))
+                .unwrap_or_else(|| panic!("write allow for {form} missing"));
+            for dir in [form.to_string(), format!("{form}/.ssh")] {
+                let pin_idx = profile
+                    .find(&format!("(deny file-write-unlink (literal \"{dir}\"))"))
+                    .unwrap_or_else(|| panic!("pin for {dir} missing:\n{profile}"));
+                assert!(
+                    allow_idx < pin_idx,
+                    "pin for {dir} must follow the write allow"
+                );
+            }
+        }
+        assert!(
+            !profile.contains("(deny file-write-unlink (subpath"),
+            "pins must be literal, not subpath — subpath would also block \
+             unlinking every entry inside the pinned directory"
+        );
     }
 }

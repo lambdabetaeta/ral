@@ -1380,6 +1380,19 @@ nested grant can never uncover a region the outer policy denied.
 Prefixes compose by intersection, so a nested grant can only
 narrow what is reachable.
 
+The anti-monotonic guarantee is about the denied bytes, not the
+denied spelling: no operation a grant permits may make a denied
+path's contents reachable under a name no `deny` entry covers.
+Where write authority would otherwise let a confined external
+process rename or remove a directory that sits on the path to a
+denied entry — carrying the denied bytes to a name nothing
+denies — that directory's name is frozen against rename, removal,
+and replacement instead; its contents stay as mutable as the rest
+of the writable region.  A grant that writes `/repo` and denies
+`/repo/.git/config` therefore also refuses `mv .git .git.bak` and
+`rmdir .git`: `.git` sits on the path to the denied entry.
+Platform support for this varies (§11.9).
+
 A prefix is not a string but a triple: the surface spelling as the
 author wrote it (`.`/`..`-folded), the symlink-resolved form, and
 the namespace that form was resolved in.  The triple is minted once,
@@ -1649,6 +1662,11 @@ OS-level enforcement varies:
   re-execed by interpreters like `sh -c "…"`, `xargs CMD`, or
   `find -exec`.  When `fs:` is absent the OS layer passes fs
   through (the user's working tree, HOME, etc. stay reachable).
+  Under an `fs:` restriction, every directory on the path to a
+  `deny` entry that lies inside a writable prefix — including the
+  prefix's own root — has its own name frozen: it cannot be
+  renamed, removed, or replaced, though traversing it and
+  creating, writing, or removing entries inside it remain allowed.
 - **Linux** — bubblewrap with seccomp BPF (x86-64, AArch64).
   A spawned command is wrapped in bwrap when `fs:` is present or
   `net` is `false`; pure exec attenuation does not enter the
@@ -1659,7 +1677,12 @@ OS-level enforcement varies:
   device and process trees are not bound into the sandbox — with
   system directories (`/bin`, `/usr`, `/lib*`, `/sys`, and
   selected `/etc` files) bound read-only alongside the granted
-  prefixes.
+  prefixes.  A `deny` entry is masked by an empty, unwritable
+  directory bound over it rather than refused by a path rule, so a
+  directory on the path to it may be freely renamed or removed —
+  the mask travels with it, since the bind follows the directory
+  rather than the name that mounted it — and only the denied
+  entry's own name is immovable.
 - **Windows** — a projection-keyed AppContainer (LowBox token): the
   session registers one profile per *distinct fs projection* it
   confines, created lazily the first time that projection becomes

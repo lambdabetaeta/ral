@@ -69,6 +69,43 @@ spawned process does on its own.**
   enforcement is the withheld network capability SIDs — a LowBox token
   without them cannot open a socket.
 
+**A `deny` must survive the filesystem moving around it, not just name a path
+to refuse.** [[design/grant|grant]] states the invariant: no confined child can
+cause a denied path's contents to become reachable under a name the deny does
+not cover. Writing, unlinking, or hard-linking a `deny_paths` entry itself is
+already blocked — the Seatbelt profile renders a `subpath` deny for each — but
+an *ancestor* of that entry sits outside its subpath and inside the write
+prefix's own allow, so a confined `mv` or `rm` could relocate the ancestor
+directory and carry the denied bytes to a name nothing covers.
+`SandboxBindSpec::pinned_dirs` (`core/src/types/capability.rs`) closes the
+gap: every proper ancestor of a `deny_paths` entry that lies within some write
+prefix — the write prefix root included — is collected, over both a deny's
+surface spelling and its symlink-resolved target, so a symlink swapped in
+after sandbox entry is covered too. `build_profile`
+(`core/src/sandbox/macos.rs`) emits `(deny file-write-unlink (literal
+"<dir>"))` for each pinned directory, after the write prefix's own covering
+allow (Seatbelt is last-match-wins); `literal`, never `subpath`, is what keeps
+a pinned directory's *entries* mutable — only its own name-in-parent is
+frozen. The price lands on macOS specifically: a grant that writes a repo and
+denies `.git/config` also refuses `mv .git .git.bak` and `rmdir .git`, since
+both `.git` and the repo root are pinned ancestors of the denied entry.
+
+**Linux renders no pin, and that is not an oversight.** bwrap realizes a
+`deny` as a `--tmpfs` overlay mounted at the literal denied path
+(`make_command_with_policy`, `core/src/sandbox/linux.rs`); a mount is bound to
+the directory it covers, not to the path string that named it at mount time,
+so renaming a non-mountpoint ancestor carries the mount along and the overlay
+keeps masking the real file at its new location, while renaming or removing
+the mountpoint itself fails with `EBUSY`. The invariant already holds by
+construction, so Linux pays a narrower price than macOS: only the denied
+path's own name is frozen, and every ancestor — the write prefix root
+included — stays freely renameable and removable. The two backends also fail
+differently: a denied read reports `EISDIR` or `ENOENT` on Linux (the tmpfs
+mask presents as an empty directory where a file was expected) against
+`EPERM` on macOS (Seatbelt's outright refusal), so a test of this invariant
+across platforms must assert that the real bytes are unreachable, never a
+specific errno.
+
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
 process, and `transport::dispatch` just runs that body locally — nested grants
