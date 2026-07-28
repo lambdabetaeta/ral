@@ -171,14 +171,6 @@ main { width: 100%; }
 
 /* ── 4. writs of authority (profiles as lattice) ── */
 .lattice { display: flex; flex-direction: column; }
-.lattice .bound-mark {
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--muted);
-  letter-spacing: 0.1em;
-  padding: 0.2rem 0;
-}
-.lattice .bound-mark .g { color: var(--gold); }
 .writ {
   display: grid;
   grid-template-columns: 1.4rem 9rem 1fr auto;
@@ -351,22 +343,14 @@ main { width: 100%; }
   text-transform: uppercase;
   color: var(--muted);
 }
-.dl-repo { display: inline-flex; align-items: center; }
+.dl-repo,
+.dl-archive { display: inline-flex; align-items: center; }
 .dl-repo .gh-mark { margin-right: 0.4rem; opacity: 0.8; vertical-align: -0.15em; }
+.dl-archive .archive-mark { margin-right: 0.35rem; opacity: 0.8; }
 .dl-repo:hover .gh-mark { opacity: 1; }
+.dl-archive:hover .archive-mark { opacity: 1; }
 
-/* ── divider + cta ── */
-.seal-divider {
-  text-align: center;
-  color: var(--gold);
-  font-family: var(--mono);
-  padding: 2.4rem 0 0;
-  font-size: 0.95rem;
-  opacity: 0.8;
-}
-.cta { text-align: center; }
-.cta .motto { font-family: var(--serif); font-style: italic; font-size: 1.15rem; color: var(--ink); margin: 0 0 1.2rem; }
-.cta .motto em { color: var(--porphyry); }
+/* ── section action ── */
 .cta-links { display: flex; gap: 0.7rem; justify-content: center; flex-wrap: wrap; }
 .cta-links a {
   font-family: var(--mono);
@@ -378,7 +362,7 @@ main { width: 100%; }
 .cta-links a:hover { border-color: var(--gold); text-decoration: none; }
 
 /* ── funder credit ── */
-.backer { text-align: center; padding-top: 2.4rem; }
+.backer { text-align: center; padding: 2.4rem 0 3.2rem; }
 .backer .column { display: flex; flex-direction: column; align-items: center; gap: 1.1rem; }
 .backer-note { font-family: var(--serif); font-size: 0.95rem; color: var(--ink-2); margin: 0; }
 .backer-link { display: inline-block; }

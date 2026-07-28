@@ -1,217 +1,224 @@
 # exarch capability profiles
 
-exarch wraps every model-emitted command in a `grant` block.  The
-`--base` flag selects the ceiling for that grant.  Bake-ins ship
-in the binary, in descending order of authority:
+Every program exarch runs is evaluated under a capability profile. The
+`--base` flag chooses one of the six profiles built into the binary;
+`reasonable` is the default.
 
-| profile      | net | reads                                              | writes                          | exec                                                                  |
-|--------------|-----|----------------------------------------------------|---------------------------------|-----------------------------------------------------------------------|
-| `dangerous`  | —   | inherit (no attenuation)                           | inherit                         | inherit                                                               |
-| `reasonable` | on  | broad: cwd + xdg:* + toolchain caches + ~/Library  | cwd + scratch + xdg:cache       | `system:` + xdg:bin + curated named tools incl. git                  |
-| `edit-only`  | on  | same as reasonable                                 | cwd + scratch                   | same as reasonable (build tools denied)                              |
-| `read-only`  | on  | same as reasonable                                 | scratch only                    | same as reasonable                                                    |
-| `minimal`    | on  | cwd + scratch                                      | cwd + scratch + xdg:cache       | `system:` (Homebrew opted back out) + cwd + scratch (no git/bash/zsh) |
-| `confined`   | off | cwd + scratch                                      | cwd + scratch                   | `system:` + `/usr/local/bin/` + cwd + scratch                        |
+A profile controls:
 
-`system:` is a sigil resolving to the platform's tool roots
-(`/usr/bin`+`/bin`+Homebrew-when-present on Unix; `%SystemRoot%\
-System32`+the PowerShell home+Git-for-Windows' `usr\bin`-when-present
-on Windows) — see `core/src/path/sigil.rs::system_tool_roots`.  Apple's
-toolchain (`/Library/Developer/CommandLineTools`,
-`/Applications/Xcode.app/Contents/Developer`) is folded into every
-profile's exec admit at the OS sandbox layer automatically — see
-`core/src/sandbox/macos.rs::system_paths`.  No profile needs to spell
-out where ld and as live.
+- which programs may run;
+- which paths may be read or written;
+- whether the network is available.
 
-A few profile entries are genuinely Unix-only literals (`/tmp`,
-`/usr/local/bin/`, `/opt/homebrew/`, …) with no Windows analogue — a
-rooted path with no drive letter.  Rather than failing the whole
-profile to load on a platform where such an entry can't resolve, the
-freeze pass (`core::capability::decode`) drops it as a dead grant, the
-same treatment a bundled-tool name Windows can't back already gets
-(`drop_dead_exec_grants`).  `policy show` never advertises a grant it
-can't back.  `bash`/`zsh` denies are mirrored by `cmd`/`powershell`/
-`pwsh` denies in `minimal`, `edit-only`, and `read-only` — the
-Windows shells `system:` admits unconditionally.
+The host installs this boundary around every run. The model can use the
+authority it receives, but it cannot widen it.
 
-## What to use when
+## Choose a profile
 
-```
-need network?
-├─ no  → confined
-└─ yes → need to write outside cwd?
-         ├─ no  → read-only
-         └─ yes → which tooling surface?
-                  ├─ system tools only                 → minimal
-                  ├─ system + brew + xdg:bin           → reasonable
-                  ├─ edit only, no persistent writes   → edit-only
-                  └─ paranoid / custom                 → dangerous + --restrict
-```
+- **For ordinary coding:** use `reasonable`.
+- **For patches with a smaller tool surface:** use `edit-only`.
+- **For review or investigation without project changes:** use `read-only`.
+- **For a small base you intend to extend yourself:** use `minimal`.
+- **For an offline build or transformation:** use `confined`.
+- **For a VM, container, or wholly custom restriction:** use `dangerous`.
 
-### `dangerous` — escape hatch / lattice top
+These profiles overlap; they are not a single scale from “safe” to “unsafe”.
+For example, `read-only` protects the project from writes but keeps the network
+on, while `confined` turns the network off but allows project writes.
 
-No attenuation.  ral runs with full ambient authority, equivalent to
-typing the commands yourself.  Used in two ways:
+| profile      | network | project       | reads beyond the project                  | executable surface                                  |
+|--------------|---------|---------------|-------------------------------------------|-----------------------------------------------------|
+| `dangerous`  | inherit | inherit       | inherit                                   | inherit                                             |
+| `reasonable` | on      | read + write  | broad config, state, and toolchain caches | `PATH`, system roots, user toolchains, named tools  |
+| `edit-only`  | on      | read + write  | broad config and toolchain caches         | system and editing tools; Git denied                |
+| `read-only`  | on      | read only     | broad config and toolchain caches         | system and review tools, including Git              |
+| `minimal`    | on      | read + write  | none; `xdg:cache` is writable             | system roots, project, and scratch                  |
+| `confined`   | off     | read + write  | none                                      | system roots, `/usr/local/bin`, project, and scratch |
 
-- **Pre-sandboxed environment** — running exarch inside a Docker
-  container or VM, where the container is the trust boundary and
-  in-process attenuation is redundant.  This is the default in
-  `exarch/docker/entrypoint.sh`.
-- **Paranoid custom profile** — combine with `--restrict <FILE>` to
-  start permissive and meet down to your hand-written allow-list:
-  `exarch --base dangerous --restrict mine.ral`.  Every entry in
-  the effective profile traces back to text you wrote.
+### `reasonable` — everyday coding
 
-### `reasonable` — everyday agent (default)
+This is the default: broad enough to edit code, run tests, fetch dependencies,
+and use installed development toolchains.
 
-The default.  Designed for an agent you don't fully trust (may
-hallucinate) but want to give maximal flexibility for real work.
+- **Reads:** the project and Git directory, scratch, XDG config/data/cache/state
+  directories, common toolchain caches, user toolchains, and macOS
+  `~/Library/Caches`.
+- **Writes:** the project and Git directory, scratch, and `xdg:cache`. Persistent
+  config, data, state, user binaries, SSH keys, and system directories are not
+  writable.
+- **Programs:** commands resolved through `PATH`, platform tool roots, common
+  user-toolchain directories, project and scratch executables, and a named set
+  of everyday tools.
+- **Network:** on.
 
-- Network on.
-- Reads: cwd + xdg config / data / cache / state / bin + most
-  toolchain caches (`~/.cargo/registry`, `~/.rustup`, `~/.npm`,
-  `~/.gradle/caches`, `~/.m2/repository`, …) + `~/Library/Caches`.
-- Writes: **only ephemeral / recoverable surfaces** — cwd, /tmp,
-  `tempdir:`, `xdg:cache`.  A hallucinating agent cannot corrupt
-  persistent state (`xdg:config`, `xdg:data`, `xdg:state`, `~/.ssh`,
-  `xdg:bin`, system dirs).
-- Exec: 80+ named tools (coreutils, curl, gh, rg, fd, jq,
-  python, tar, …) plus `system:` (the platform's tool roots) and
-  subpath admits for `/usr/local/bin/`, `/usr/sbin/`, etc.
-  `bash` and `zsh` explicitly denied — `sh` itself is allowed
-  because autoconf-style `configure` shells out via `/bin/sh -c`.
-  `git` is admitted: `~/.gitconfig` and `xdg:config/git` are in
-  the read set, so local subcommands (`status`, `log`, `diff`,
-  `add`, `commit` without signing) work out of the box.  SSH and
-  GPG keys (`~/.ssh`, `~/.gnupg`) stay unreadable, so SSH push
-  and signed commits fail by lack of admit; HTTPS push via
-  `osxkeychain` on macOS remains possible because securityd is
-  reached over Mach IPC, not the filesystem.
-- Credential dirs (`xdg:config/gh`, `xdg:config/op`,
-  `xdg:config/gcloud`) denied even for read.
+`bash`, `zsh`, and their Windows counterparts are denied; `sh` remains
+available for tools such as `configure` and `make`.
 
-Use for: editing code, running tests, fetching dependencies,
-"download and build neovim," day-to-day developer-assistant work.
+Git works locally, including unsigned commits. SSH and GPG keys are not
+readable, so SSH pushes and signed commits fail unless you deliberately extend
+the profile. On macOS, an HTTPS push may still use credentials held by the
+Keychain because that service is reached outside the filesystem.
 
-### `read-only` — review / audit / investigate
+`reasonable` is a practical coding boundary, not a secrecy boundary around the
+whole home directory. It deliberately reads broad XDG config, data, and state
+surfaces. Known credential directories for `gh`, 1Password, and Google Cloud
+are denied, but if other home data must remain private, start from `minimal` or
+add a restriction.
 
-Same reads and exec admits as `reasonable`, but `cwd:` is **not**
-in `write_prefixes`.  Writes go only to scratch.
+### `edit-only` — patch and refactor
 
-Use for: code review agents, "explain this repo," static analysis
-flows, "why is this build failing," any task where the agent
-should observe but not modify the project tree.
+Use `edit-only` when the agent should change source files with fewer developer
+tools available than `reasonable`.
 
-### `minimal` — additive starting point
+- It reads the project, common XDG directories, and common toolchain caches.
+- It writes only the project and scratch.
+- It keeps the network on for remote context.
+- It admits system tools, project and scratch executables, Python, search,
+  patch, archive, and network utilities.
+- It denies Git and interactive shells.
 
-Smallest profile that's actually useful as a base for
-`--extend-base` composition.
+The name describes the intended job, not a proof that no build can execute: a
+build tool under a system root, or an executable already in the project, may
+still run. If “no builds” is a hard requirement, add an explicit `--restrict`
+file for the executable surface you want.
 
-- Network on.
-- Reads: cwd + scratch only — no `xdg:*`, no `~/.cargo`, no
-  `~/Library`, nothing user-installed.
-- Writes: cwd + scratch + `xdg:cache`.
-- Exec: `system:` (covers coreutils, sh, make, find, xargs, awk,
-  sed, clang, pkg-config, … under the platform's tool roots) + cwd
-  + scratch.  No `xdg:bin`; Homebrew is explicitly denied even
-  though `system:` would otherwise fold it in when present.  `git`,
-  `bash`, and `zsh` denied (`cmd`/`powershell`/`pwsh` too, on
-  Windows) — minimal's principle is deliberate opt-ins, so even
-  tools that live under a tool root are excluded if they touch
-  surfaces outside cwd + scratch.  Add git back via
-  `--extend-base exarch/examples/git.exarch.ral`.
+### `read-only` — review and investigate
 
-Use for: "I want my agent to operate on this tree with the standard
-system tools, nothing it pulled from my home directory or homebrew,
-network on so it can fetch what I tell it to fetch."
+`read-only` can inspect the project and run review tools, but it cannot modify
+the project tree. Writes are limited to scratch.
 
-Typical pattern:
+Git is available for `log`, `show`, and `diff`; commands such as `commit` fail
+at the filesystem boundary. Tools that insist on writing into the project may
+also fail and should be pointed at `$EXARCH_SCRATCH` where possible.
 
-```
-exarch --base minimal --extend-base build-tools.ral --restrict project.ral
+The profile still has network access and broad reads of config and toolchain
+caches. “Read-only” describes project mutation, not confidentiality or
+network isolation.
+
+### `minimal` — a small base to extend
+
+`minimal` is the smallest useful starting point for a custom profile.
+
+- **Reads:** project and scratch only.
+- **Writes:** project, scratch, and `xdg:cache`.
+- **Programs:** platform system roots, project executables, and scratch
+  executables.
+- **Network:** on.
+
+It does not grant reads of home-directory config, XDG data, or toolchain
+caches. Interactive shells are denied, although `sh` remains available. On
+Unix, a Git binary under a system root may run, but Git config is not readable;
+the supplied extension adds Git config and admits Git wherever it is installed:
+
+```text
+exarch --base minimal --extend-base exarch/examples/git.exarch.ral
 ```
 
-where `build-tools.ral` adds whatever specific tools you trust
-(`/opt/homebrew/bin/`, `cargo`, `pip`, …) and `project.ral`
-confines fs to one subtree.
+`minimal` explicitly excludes `/opt/homebrew`; other system roots remain
+platform-dependent.
 
-### `confined` — build jail
+### `confined` — offline build jail
 
-Shaped after [BrianSwift/macOSSandboxBuild's `confined.sb`][confined-sb].
-Tight build-and-nothing-else profile.
+`confined` is for compiling or transforming one tree without network access.
+It is shaped after
+[BrianSwift/macOSSandboxBuild's `confined.sb`][confined-sb].
 
-- Network **off**.
-- Reads: cwd + scratch.
-- Writes: cwd + scratch.
-- Exec: `system:` + `/usr/local/bin/` + cwd + scratch
-  (subpath-only, no per-name lattice).
+- **Reads and writes:** project and scratch only.
+- **Programs:** platform system roots, `/usr/local/bin`, project executables,
+  and scratch executables.
+- **Network:** off.
 
-Apple's toolchain comes for free via the OS sandbox base, so
-`gcc → cc1 → as → ld` resolves end-to-end.
-
-Use for: agents whose job is to compile or process *this one tree*
-and nothing else.  Source already on disk; no fetching from
-upstream; no leakage.
+The platform supplies runtime and toolchain paths needed by the sandbox. On
+macOS, that includes Command Line Tools and Xcode, so a compiler can reach its
+assembler and linker without granting the rest of the home directory.
 
 [confined-sb]: https://github.com/BrianSwift/macOSSandboxBuild/blob/master/confined.sb
 
-## Composition
+### `dangerous` — ambient authority
 
-Profiles compose via `--extend-base` (load-time *join*; widens) and
-`--restrict` (meet; narrows).  The orchestrator runs all
-composition before a single freeze pass settles every `~` /
-`xdg:` / `cwd:` / `tempdir:` sigil, so paths in your profile bind
-to one fixed location at session start — later env mutation can't
-widen authority retroactively.
+`dangerous` applies no restriction. Agent programs receive the same ambient
+authority as commands typed at your own prompt.
 
+Use it when another boundary already exists, such as a disposable VM or
+container. It is also the starting point for a profile written entirely as a
+restriction:
+
+```text
+exarch --base dangerous --restrict mine.ral
 ```
-effective = base ⊔ extend_base ⊓ restrict₁ ⊓ restrict₂ ⊓ …
+
+## Compose a profile
+
+An optional `--extend-base` file widens the selected base. Any number of
+`--restrict` files then narrow it:
+
+```text
+effective = (base ⊔ extension) ⊓ restriction₁ ⊓ restriction₂ ⊓ …
 ```
 
-`--restrict` files are also added to the fs deny list, so the
-agent can never modify the input that shaped its own permissions.
+Each file is frozen as it loads: `~`, `xdg:`, `cwd:`, `tempdir:`, `gitdir:`,
+and `system:` resolve to fixed paths for that session before the capabilities
+are composed. Changing the environment later cannot move those grants.
 
-## Cache redirection (legacy build tools)
+A restriction file is itself added to the filesystem deny set, so the agent
+cannot rewrite the file that defines its boundary.
 
-`reasonable` and `minimal` admit `xdg:cache` for write, so any
-tool that respects `$XDG_CACHE_HOME` (uv, pnpm, bun, mise, ruff,
-hatch, deno, modern python, …) lands its cache writes inside the
-allowed surface automatically.
+A typical custom setup starts small, adds trusted build tools, then confines
+the result to the project:
 
-Six legacy build tools that pre-date or ignore XDG get explicit
-home-env redirection at session entry, so their caches land in
-`$EXARCH_SCRATCH/<tool>` instead of `~/.cargo`, `~/.npm`, etc.:
-
-| env var            | tool   | scratch sub  |
-|--------------------|--------|--------------|
-| `CARGO_HOME`       | cargo  | `cargo`      |
-| `npm_config_cache` | npm    | `npm-cache`  |
-| `GRADLE_USER_HOME` | gradle | `gradle`     |
-| `GOPATH`           | go     | `go`         |
-| `GOMODCACHE`       | go     | `go/pkg/mod` |
-| `RUSTUP_HOME`      | rustup | `rustup`     |
-
-Always overrides — the sandbox is the trust boundary, not the
-inherited environment.  A user pre-set `CARGO_HOME` pointing into
-`~/.cargo` would land outside the write set and fail loudly inside
-the agent, so we replace it.
-
-## OS-level enforcement
-
-The `grant` block produces a `SandboxProjection`; on macOS the
-projection renders to a Seatbelt SBPL profile, on Linux to a
-bubblewrap argv with a seccomp BPF filter.  See
-`core/src/sandbox/macos.rs` and `core/src/sandbox/linux.rs`.  The
-in-process capability check fires on every platform; OS-level
-enforcement is depth-in-defence for fs+net (and on macOS, also for
-exec — closing the `sh -c "PATH=…; cmd"` interpreter-bypass class).
-
-## Where the profiles live
-
-Each profile is a ral file in `exarch/data/`, embedded into the
-binary at build time via `include_str!`:
-
+```text
+exarch --base minimal --extend-base build-tools.ral --restrict project.ral
 ```
+
+## Platform tool roots
+
+The `system:` name expands to the platform's live tool roots:
+
+- `/usr/bin` and `/bin`, plus detected Homebrew or Linuxbrew roots, on Unix;
+- `%SystemRoot%\System32`, Windows PowerShell, and Git for Windows' `usr\bin`
+  when present, on Windows.
+
+macOS also supplies Command Line Tools and Xcode paths at the sandbox layer.
+Unix-only path entries are discarded on Windows rather than making the whole
+profile fail to load. `policy show` therefore reports only grants the current
+platform can back.
+
+## Build-tool caches
+
+`reasonable` and `minimal` permit writes to `xdg:cache`, so modern tools that
+honour `$XDG_CACHE_HOME` use an allowed cache automatically.
+
+For common tools that use older home-directory conventions, exarch redirects
+these variables into `$EXARCH_SCRATCH` when the session starts:
+
+| variable           | tool   | scratch directory |
+|--------------------|--------|-------------------|
+| `CARGO_HOME`       | Cargo  | `cargo`           |
+| `npm_config_cache` | npm    | `npm-cache`       |
+| `GRADLE_USER_HOME` | Gradle | `gradle`          |
+| `GOPATH`           | Go     | `go`              |
+| `GOMODCACHE`       | Go     | `go/pkg/mod`      |
+| `RUSTUP_HOME`      | rustup | `rustup`          |
+
+These values replace inherited ones. A build therefore writes to disposable
+scratch instead of silently targeting a real cache that the active profile
+does not permit.
+
+## Enforcement
+
+ral checks executable authority before spawning on every platform. Filesystem
+and network restrictions are also projected into the platform sandbox:
+Seatbelt on macOS, bubblewrap with seccomp on Linux, and an AppContainer
+LowBox token on Windows.
+
+This is defence in depth for a development tool, not a claim that exarch is a
+hardened jail.
+
+## Where the built-ins live
+
+The six profiles are ral programs embedded into the exarch binary:
+
+```text
 exarch/data/dangerous.exarch.ral
 exarch/data/reasonable.exarch.ral
 exarch/data/edit-only.exarch.ral
@@ -220,7 +227,5 @@ exarch/data/minimal.exarch.ral
 exarch/data/confined.exarch.ral
 ```
 
-There is no directory convention for adding more — bases are
-bake-ins.  To use your own profile from disk, write a ral file
-and pass it via `--restrict` or `--extend-base` against one of the
-six built-ins.
+Custom profiles do not need to live in a special directory. Pass a ral file to
+`--extend-base` or `--restrict`.

@@ -634,6 +634,13 @@ def render_docs() -> None:
 
 # ── exarch sub-site ─────────────────────────────────────────────────────────
 
+EXARCH_FOOTER = """<footer class="footer">
+    <a href="https://spdx.org/licenses/MIT">MIT</a>
+    &middot; <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache-2.0</a>
+    &middot; &copy;&nbsp;<a href="https://www.lambdabetaeta.eu">Alex Kavvos</a>
+  </footer>"""
+
+
 def render_exarch_downloads(downloads: dict) -> str:
     """Per-OS binary buttons for the exarch landing's get section.
 
@@ -717,10 +724,7 @@ def exarch_doc_page(title: str, body: str, titlebar: str) -> str:
       </article>
     </div>
   </main>
-  <footer class="footer">
-    exarch &mdash; a tiny coding agent driving a capability-secure shell.
-    &middot; <a href="index.html">home</a> &middot; <a href="../index.html">ral</a>
-  </footer>
+  {EXARCH_FOOTER}
   <script>
     (function () {{
       var root  = document.documentElement;
@@ -755,7 +759,11 @@ def render_exarch() -> None:
     """
     template = (ROOT / "scripts" / "exarch-index.template.html").read_text(
         encoding="utf-8")
-    for placeholder in ("{{MENUBAR}}", "{{EXARCH_DOWNLOADS}}"):
+    for placeholder in (
+        "{{MENUBAR}}",
+        "{{EXARCH_DOWNLOADS}}",
+        "{{EXARCH_FOOTER}}",
+    ):
         if placeholder not in template:
             raise SystemExit(
                 f"missing placeholder {placeholder} in exarch-index.template.html")
@@ -764,6 +772,7 @@ def render_exarch() -> None:
     rendered = template.replace("{{MENUBAR}}", exarch_menubar("index"))
     rendered = rendered.replace(
         "{{EXARCH_DOWNLOADS}}", render_exarch_downloads(downloads))
+    rendered = rendered.replace("{{EXARCH_FOOTER}}", EXARCH_FOOTER)
     (EXARCH_SITE / "index.html").write_text(rendered, encoding="utf-8")
 
     profiles_md = (EXARCH_DIR / "PROFILES.md").read_text(encoding="utf-8")

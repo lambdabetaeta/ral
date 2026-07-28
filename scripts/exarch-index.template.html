@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>exarch — a coding agent with bounded authority</title>
-  <meta name="description" content="exarch is a coding agent whose every action is a ral program. Choose what it may run, read, write, and reach; the agent can use that authority, but it cannot widen it.">
+  <meta name="description" content="exarch is a coding agent built on ral. Choose what it may read, write, run, and reach; those limits are enforced outside the model, where it cannot rewrite them.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,45 +39,49 @@
  ██╔══╝   ██╔██╗ ██╔══██║██╔══██╗██║     ██╔══██║
  ███████╗██╔╝ ██╗██║  ██║██║  ██║╚██████╗██║  ██║
  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝</pre></div></div>
-        <p class="thesis">A coding agent you can give<br>less than your whole machine.</p>
+        <p class="thesis">A coding agent that does not need<br>the keys to your whole machine.</p>
         <div class="rule"></div>
-        <p class="sub">Every move is a <a href="../index.html"><code>ral</code></a> program, run with authority the agent cannot widen.</p>
+        <p class="sub">Every action runs through <a href="../index.html"><code>ral</code></a>, under limits chosen by you and enforced outside the model.</p>
       </div>
     </div>
 
     <!-- 2. one language -->
     <section class="section decree">
       <div class="column">
-        <p class="eyebrow">One language for the work</p>
-        <p>exarch reads, edits, tests, and repeats. It does all of that through
-        one tool: a persistent <a href="../index.html"><code>ral</code></a>
-        session. Reading a file, changing it, and running the test suite are not
-        separate privileged APIs. They are programs in one small language.</p>
-        <p>Inside each program, results are values rather than text to split and
-        splice. They can be collected into lists and records; failures can be
-        caught and inspected. Bindings, environment changes, and the working
-        directory persist from one run to the next.</p>
-        <p>Every session is also written out in full. You can read back the
-        conversation, the commands exarch ran, and their complete output.</p>
+        <p class="eyebrow">The agent gets one tool</p>
+        <p>exarch reads code, edits files, and runs tests through one persistent
+        <a href="../index.html"><code>ral</code></a> session. There is no
+        privileged back door: every action is a program in the same small
+        language, under the same boundary.</p>
+        <p><code>ral</code> keeps data as data. Results can be decoded into
+        strings, lists, and records, not split and spliced into another
+        command. Failures can be caught, inspected, and handled.</p>
+        <p>The session remembers bindings, environment changes, and the working
+        directory between turns. exarch also logs the full conversation, every
+        program it ran, and the complete output.</p>
       </div>
     </section>
 
     <!-- 3. the boundary -->
     <section class="section boundary">
       <div class="column">
-        <p class="eyebrow">The boundary lives outside the prompt</p>
+        <p class="eyebrow">Permissions, not promises</p>
+        <p class="provider-note">Telling an agent what not to touch is advice.
+        exarch instead wraps every program in a grant supplied by the host. The
+        model can use that authority, but it cannot edit or remove the boundary
+        around it.</p>
         <div class="compare">
           <div class="panel">
             <div class="panel-label">an unrestricted shell tool</div>
-            <div class="body"><pre><span class="c"># the tool accepts source;</span>
-<span class="c"># the source decides what runs</span>
+            <div class="body"><pre><span class="c"># the model supplies the command;</span>
+<span class="c"># the command gets your authority</span>
 shell(<span class="s">"rm -rf build"</span>)
 shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
           </div>
           <div class="panel bound">
-            <div class="panel-label">exarch — ral under a grant</div>
-            <div class="body"><pre><span class="c"># the model writes the body;</span>
-<span class="c"># the host supplies the boundary</span>
+            <div class="panel-label">exarch — ral inside a grant</div>
+            <div class="body"><pre><span class="c"># the model supplies the program;</span>
+<span class="c"># you supply its authority</span>
 <span class="a">grant</span> [exec: [git:[], cargo:[]],
        fs:   [read:  [<span class="s">'&lt;cwd&gt;'</span>],
               write: [<span class="s">'&lt;cwd&gt;'</span>]],
@@ -92,53 +96,53 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
     <!-- 4. capability profiles -->
     <section class="section writs">
       <div class="column">
-        <p class="eyebrow">Choose the authority before the work begins</p>
-        <p class="provider-note">A profile controls which programs may run,
-        which paths may be read or written, and whether the network is
-        available. exarch installs it around every run; model-written code
-        cannot remove it. Restricted child processes are confined by the
-        platform sandbox as well as ral's own checks.</p>
+        <p class="eyebrow">Start with the smallest useful boundary</p>
+        <p class="provider-note">Pick a built-in profile for the job, then
+        narrow or extend it with your own <code>ral</code> file if needed.
+        Profiles govern executable programs, readable and writable paths, and
+        network access. ral checks every action; the platform sandbox also
+        confines child processes.</p>
         <div class="lattice">
-          <div class="bound-mark"><span class="g">⊤</span> full ambient authority</div>
-
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">dangerous</span>
-            <span class="desc">No attenuation — equivalent to running commands at your own prompt.</span>
+            <span class="desc">Full ambient authority. For a VM, container, or hand-written restriction.</span>
             <span class="caps"><span><span class="key">net</span> inherit</span><span><span class="key">exec</span> inherit</span></span>
           </div>
           <div class="writ default">
             <span class="seal">✚</span>
             <span class="name">reasonable</span>
-            <span class="desc">Everyday development. Writes stay in the project, caches, and scratch.</span>
+            <span class="desc">Daily coding. Common tools and network; writes stay in the project, caches, and scratch.</span>
             <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> curated toolchain</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">edit-only</span>
-            <span class="desc">May inspect and edit the project; build tools are denied.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> cwd + scratch</span></span>
+            <span class="desc">Patch and refactor with a smaller tool surface; writes stay in the project and scratch.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> git denied</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">read-only</span>
-            <span class="desc">May inspect the project and run tools; writes only to scratch.</span>
+            <span class="desc">Review and investigation. Project writes are denied; scratch remains available.</span>
             <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> scratch</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">minimal</span>
-            <span class="desc">Reads only the project and scratch; runs system tools.</span>
+            <span class="desc">A small base: project, scratch, system tools, and network, without home-directory reads.</span>
             <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> system tools</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">confined</span>
-            <span class="desc">One project tree, scratch space, and no network.</span>
+            <span class="desc">A compact build jail: one project, scratch space, system tools, and no network.</span>
             <span class="caps"><span><span class="key">net</span> <span class="off">off</span></span><span><span class="key">fs</span> cwd + scratch</span></span>
           </div>
 
-          <div class="bound-mark"><span class="g">⊥</span> least authority</div>
+        </div>
+        <div class="cta-links">
+          <a href="profiles.html">Read the profiles &rarr;</a>
         </div>
       </div>
     </section>
@@ -146,10 +150,11 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
     <!-- 5. providers -->
     <section class="section providers-sec">
       <div class="column">
-        <p class="eyebrow">Bring a model</p>
-        <p class="provider-note">exarch discovers provider credentials at startup,
-        keeps them in its own process, and removes them from the environment
-        before any agent-written program runs.</p>
+        <p class="eyebrow">Bring the model you want</p>
+        <p class="provider-note">Set an API key or sign in with ChatGPT. exarch
+        discovers available providers at startup, keeps their credentials in
+        its own process, and removes them from the environment before the agent
+        can run a program.</p>
         <div class="providers">
           <span class="chip">anthropic</span>
           <span class="chip">openai / chatgpt</span>
@@ -167,7 +172,7 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
     <section class="section get-sec">
       <div class="column">
         <p class="eyebrow">Get exarch</p>
-        <p class="get-note">One binary for macOS or Linux. The
+        <p class="get-note">One self-contained binary. The
         <a href="../index.html"><code>ral</code></a> shell is built in.</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
@@ -186,9 +191,18 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
               <svg class="gh-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
               lambdabetaeta/ral
             </a>
+            <a class="dl-btn dl-archive" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>
+              <svg class="archive-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 1h6l4 4v10H3V1zm1 1v12h8V6H8V2H4zm5 0v3h3L9 2zM7 4h2v1H7V4zm0 2h2v1H7V6zm0 2h2v1H7V8zm0 2h2v2H7v-2z"/></svg>
+              .tar.gz
+            </a>
+            <a class="dl-btn dl-archive" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>
+              <svg class="archive-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 1h6l4 4v10H3V1zm1 1v12h8V6H8V2H4zm5 0v3h3L9 2zM7 4h2v1H7V4zm0 2h2v1H7V6zm0 2h2v1H7V8zm0 2h2v2H7v-2z"/></svg>
+              .zip
+            </a>
           </div>
         </div>
-        <p class="get-note">Set a provider key, enter a project, and run:</p>
+        <p class="get-note">Set a provider key, enter the project you want it to
+        work on, and run:</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
           <code class="cmd" id="run-cmd" role="button" tabindex="0"
@@ -198,21 +212,9 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
       </div>
     </section>
 
-    <div class="seal-divider">✚</div>
-
-    <section class="section cta last">
-      <div class="column">
-        <p class="motto">One language for every move. <em>Authority that only narrows.</em></p>
-        <div class="cta-links">
-          <a href="profiles.html">Read the profiles &rarr;</a>
-          <a href="https://github.com/lambdabetaeta/ral/tree/main/exarch">Source &rarr;</a>
-        </div>
-      </div>
-    </section>
-
     <section class="section backer">
       <div class="column">
-        <p class="backer-note">Funded by the Advanced Research + Invention Agency (ARIA).</p>
+        <p class="backer-note">Built with funding from the Advanced Research + Invention Agency (ARIA).</p>
         <a class="backer-link" href="https://aria.org.uk" target="_blank" rel="noopener noreferrer">
           <img class="backer-logo" src="../assets/aria-logo.svg"
                alt="ARIA — Advanced Research + Invention Agency" width="122" height="48">
@@ -222,10 +224,7 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
 
   </main>
 
-  <footer class="footer">
-    exarch &mdash; a coding agent with bounded authority, built on <a href="../index.html">ral</a>.
-    &middot; <a href="profiles.html">profiles</a>
-  </footer>
+  {{EXARCH_FOOTER}}
 
   <script>
     (function () {
