@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
@@ -27,9 +27,10 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 ## The doors — core emits its own activity
 
 Two operation classes, each with its runtime door. Emission is the one
-`Shell::surface(&self, ev: &Value)` method (`types/shell/mod.rs`), the public door
-onto the run-local [[map/core/shell-state|`SurfaceSink`]]; `emit_io` delegates
-to it. The typed builders and the `WriteOutcome` enum live in one place,
+`Mooring::surface(&self, ev: &Value)` method (`types/mooring.rs`), the public
+door onto the [[map/core/shell-state|`SurfaceSink`]] a run threads as the
+immutable `&Mooring` beside its shell; `emit_io` delegates to it. The typed
+builders and the `WriteOutcome` enum live in one place,
 `runtime/command/io_event.rs`. With no surface installed every door is inert.
 
 - **Redirects** funnel through the frame combinators (`evaluator/redirect.rs`)
@@ -41,7 +42,8 @@ to it. The typed builders and the `WriteOutcome` enum live in one place,
   outcome the door alone can know: `committed` (body ok — atomic `>` only after
   `commit_atomics` succeeds; `>>`/`>~` once the body succeeds), `aborted` (body
   failed before commit), `failed` (open or commit failed). Mode is `write` /
-  `append` / `stream`. No byte count, no preview — path, mode, outcome.
+  `append` / `stream`. No byte count — path, mode, outcome, plus the bounded
+  content snapshots the write card previews and diffs from.
 - **Exec images** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or builtin).
   The external / spawned-bundled path emits in `command::run`
@@ -51,7 +53,10 @@ to it. The typed builders and the `WriteOutcome` enum live in one place,
   fast path returns earlier, so it emits its own exec event in
   `run_uutils_in_process` (`runtime/command/uutils.rs`) — exactly one event per
   exec, no double-fire ([[decisions/260616_bundled-tools-as-exec-images|bundled
-  tools as exec images]]).
+  tools as exec images]]). `detach` (`runtime/command/detach.rs`) is the third
+  door, and the one that surfaces at the spawn rather than the wait: a
+  surrendered process is never waited for, so its event carries status `0`
+  meaning *exec'd*, not *succeeded*.
 
 Not the capability gate (`audit_call`): it is the wrong granularity — it
 over-fires on `source`/`use`/`exists`/`list-dir` and under-fires on bundled
@@ -61,7 +66,7 @@ coreutils' internal reads. The doors name exactly the model's operations.
 
 ```
 {io:"read",  path}
-{io:"write", path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"failed"}
+{io:"write", path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"failed", new_bytes?, old_bytes?}
 {io:"exec",  argv:[prog, …args], outcome:"ok"|"bad", status}
 {io:"grep",  scope, pattern}                      # emitted by the grep builtin
 ```

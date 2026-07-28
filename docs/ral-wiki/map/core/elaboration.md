@@ -1,13 +1,14 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
 # Map: core / elaboration
 
 `core/src/elaborator.rs` lowers the surface AST into CBPV [[map/core/ir|IR]]. Its
-sole public function is `elaborate(&ast, bindings) -> Comp`.
+sole public function is
+`elaborate(ast, bindings, name) -> Result<Comp, ParseError>`.
 
 This is the one phase that knows about surface sugar: it enforces the
 value/computation split by binding effectful sub-expressions to fresh temporaries
@@ -27,6 +28,15 @@ It also resolves command heads against lexical scope
 
 The prelude's exports and the caller's live bindings (REPL env, tool harness) are
 pre-loaded into the outermost scope.
+
+`name` is the compiling source's display name, and `$SCRIPT` bakes to it as a
+`Val::String` rather than a `Val::Variable` lookup (`Elaborator::variable_val`),
+so self-location is lexical by construction. A source with no script identity
+(`path::lex::has_script_identity` — the REPL, `-c`, a synthetic `<…>` source)
+therefore has nothing to bake, and a `$SCRIPT` reference there is a static
+error. That is the only way elaboration can fail: the error is parked in one
+`Option<ParseError>` slot and checked once at the end, rather than threading
+`Result` through every traversal.
 
 `group::group_stmts` (`core/src/syntax/group.rs`) runs first to find mutually
 recursive binding groups. Over a run of adjacent `let`s it builds a dependency

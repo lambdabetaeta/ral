@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 16b2d1e
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -22,20 +22,23 @@ the IR free of presentation state.
 
 ## Runtime source identity — `SourceDb`
 
-**A runtime location carries a non-optional source identity, resolved once at
-render.** A `SourceLoc` (`diagnostic.rs` — the script position of a runtime
-error) carries the `FileId` of the source its `line`/`col` index — the script
-or module active when the error was raised — alongside `len`. `SourceDb`
-(`source.rs`) is the registry of every source the current run has loaded,
-keyed by `FileId`: it lives on `SessionState::sources` (a run resets and
-seeds it at run start; hosts read it after the run returns to render), while
-the run-local cursor — `LocationCursor` in `diagnostic.rs`, with the
-active-source cache, the `current` id, and the `CallSite` snapshot — rides on
-`Disposition::loc`. `Shell::install_script_context` registers each source and
-makes it `current`; `ScriptContextGuard` (module loads, the REPL plugin
-loader) saves and restores `current` around a load, and core's per-run
-`RunGuard` swaps the whole cursor with the rest of the run's mutable residue,
-while the registered source stays in the db.
+**A runtime error carries the span of the node it broke on, not a cursor the
+evaluator wrote down.** `Error` (`types/error.rs`) holds
+`span: Option<Span>` — `None` at mint, stamped by the break path with the
+innermost enclosing node's span as it unwinds (`Error::at_span`). Since a
+`Span` is already tagged with its `FileId`, the source identity is the
+value's own and no ambient position has to be maintained.
+
+`SourceDb` (`source.rs`) resolves that id at render time. It is the registry
+of every source the *session* has loaded, keyed by `FileId`, living on
+`SessionState::sources`: **append-only for the session's whole life**, so a
+nested run can never re-mint a `FileId` an outer run's live spans still
+name. `Shell::install_script_context` registers a source and
+`install_root_context` additionally seeds `SessionState::root_file` with the
+current run's root (`FileId::DUMMY` between runs); `SourceDb::next_id` peeks
+the id a registration will mint, so a compiler can stamp a program's spans
+before the source they name is itself in the db. Hosts read the db after a
+run returns to render.
 
 This is the structural fix for the cross-source caret: a runtime error raised
 inside a `source`d module carries the module's `FileId`, so the renderer
@@ -43,6 +46,12 @@ resolves the **module's** text and draws the caret into the module's bytes —
 not the top-level script's. An id the renderer cannot resolve (the placeholder
 `FileId::DUMMY`, or an unregistered source) renders messageless rather than
 indexing an unrelated text. ([[decisions/260614_structural-bug-prevention|structural-bug-prevention]] class 9.)
+
+`CallSite` (`diagnostic.rs`) is the audit-and-wire shape a `Span` resolves
+*to* — script name plus 1-indexed `(line, col)` — which hosts read off audit
+nodes and capability checks. It rides the [[map/core/shell-state|audit
+collector]] rather than the run frame, so a scope node carries the position
+of the node that opened it.
 
 Parse and type errors render against the source they were just handed, so their
 entry points still take `(file, source)` strings: a module's *compile* error is
@@ -55,7 +64,7 @@ crate with source-span underlining; when no span is available a compact
 one-liner is used instead. The per-stage entry points are
 `format_parse_error_ariadne`, `format_type_error_ariadne` (each taking
 `(file, source)`), and `format_runtime_error_ariadne` / `format_runtime_error_auto`
-(resolving a `SourceLoc` against a `SourceDb`) / `_compact`, with `cmd_error` and
+(resolving the error's `Span` against a `SourceDb`) / `_compact`, with `cmd_error` and
 `shell_warning` for unstructured command-layer output. Color is gated through
 `ansi::use_color`.
 

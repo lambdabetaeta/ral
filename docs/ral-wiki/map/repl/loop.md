@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -11,7 +11,7 @@ covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, 
 ([[map/repl/startup|startup]]). Builtins are shell-scoped: `Session::boot`
 hands the REPL's `ral_core::HostSurface` — the
 [[map/repl/plugins|`_ed-*` builtins]], `watch`, and the captured job/plugin
-commands — to `driver::boot_shell` before any rc file is checked, so the
+commands — to `boot::boot_shell` before any rc file is checked, so the
 typechecker and the runtime see one surface by construction.
 
 ## The session
@@ -66,9 +66,12 @@ when no rc `prompt:` key registered one already), and `create_frontend`.
 `claim_terminal` runs first in `setup_signals`, while SIGTTIN still has its
 default disposition: it parks the shell on SIGTTIN until it is foregrounded
 before `tcsetpgrp`, so `ral &` does not seize the terminal from a parent
-shell's current job. An rc file is checked through `typecheck` against the
-live session and, like a parse error, *reported and skipped* on any type
-error — the file has no runnable annotation — while the boot always survives
+shell's current job. An rc file goes through `compile_and_typecheck` against
+the live session, against the `FileId` `evaluate_checked` registers its text
+with, so an alias or function it defines keeps naming the rc for the whole
+session. Both failing `CompileOutcome` arms — `Parse` and `Types` — are
+*reported and skipped*: the file has no runnable annotation, while the boot
+always survives
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]); a
 stop signal escaping rc sourcing is reported, not swallowed, so it cannot
 orphan a process group. An rc `startup` block registers as the

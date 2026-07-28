@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/mode.rs]
 ---
 
@@ -99,10 +99,9 @@ evaluator's mode wires
 The pipeline-mode lattice — `PipeMode` / `ModeVar` / `PipeSpec` and the
 constructors `none`/`decode`, plus the ground `ByteMode` / `Wire`
 the annotation pass grounds into — lives in `core/src/mode.rs`. The equality rule
-(a value edge cannot meet a byte edge, `docs/SPEC.md` §4.2.1, §20.4) is now a plain
-method `Unifier::unify_mode` (`core/src/typecheck/unify.rs`); the `ModeStore` trait
-that once drove it through two variable stores is gone, its sharing job complete
-with one engine left
+(a value edge cannot meet a byte edge, `docs/SPEC.md` §4.2.1, §20.4) is one plain
+method, `Unifier::unify_mode` (`core/src/typecheck/unify.rs`), reached through
+the single variable store the single engine keeps
 ([[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]]).
 
 A builtin's boundary modes are the modal projection of its declared signature,
@@ -129,7 +128,10 @@ the stage is a plain channel consumer and the modes unify directly, so a
 `consumes_value_arg` resolves the stage's `spec.input` first: a stage whose
 input is ground `PipeMode::Bytes` is a channel consumer regardless of how
 polymorphic its return value is, so a `∅`-output producer feeding a byte decoder
-(`from-json : F[Bytes,∅] α`) is a static T0012. A Step-shaped piped value (a
+(`from-json : F[Bytes,∅] α`) is a static T0012. The `from-*` decoders are
+arity-0 for the same reason — their bytes come from the channel, never from an
+argument — so `from-json $x` is the static `DecoderTakesNoArgument` (T0054),
+whose hint names the encoder-pipe remedy ([[design/codecs|codecs]]). A Step-shaped piped value (a
 variant carrying `` `more `` / `` `done ``) is ordinary recursive data the
 consumer receives whole; on a clash, `apply_piped_value`'s hint points at the
 explicit `stream-each` / `stream-map` / `stream-to-list` eliminators —

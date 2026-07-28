@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2a3d8a5
-generated_at_date: 2026-07-27
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 

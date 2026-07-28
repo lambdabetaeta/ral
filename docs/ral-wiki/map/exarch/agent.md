@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5f026b5
-generated_at_date: 2026-07-27
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -79,7 +79,7 @@ for the self-wakeup family, so no agent is shown a verb the desk would
 certainly refuse) — the single source of truth, so the nudge layer, parking,
 reply availability, and the advertised vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
-`park_mode` (`agent.rs`, returning a `ParkMode` of `Held` / `Engaged` /
+`park_mode` (`agent/attend.rs`, returning a `ParkMode` of `Held` / `Engaged` /
 `HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus/inbox.rs`) is the `should_park`
 verdict: a conversing node parks `Held`, immune to cancellation; a returning,
 parented agent the registry has recorded a human exchange with parks

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -26,11 +26,12 @@ per-call one so `_ed-*` builtins resolve, applying the handler, then taking
 the (now-populated) context back and restoring the prior one. *Framing*
 decides whether the handler runs in the caller's run or a fresh one:
 
-- `HookFraming::InFrame` — lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`)
-  fire from inside the command's own run frame, so the handler is applied in
-  place; a second frame would nest. `run_lifecycle_hook` (a `fold_hook` over
-  the loaded plugins) is the entry [[map/repl/loop|`exec.rs`]] calls around
-  each dispatch.
+- `HookFraming::InFrame(&Mooring)` — lifecycle hooks (`pre-exec`, `post-exec`,
+  `chpwd`) bracket the command rather than belong to it, so the handler is
+  applied in place under the mooring the caller carries; a frame of its own
+  would make each one a run in its own right, with its own status and streams.
+  `run_lifecycle_hook` (a `fold_hook` over the loaded plugins) is the entry
+  [[map/repl/loop|`exec.rs`]] calls around each dispatch.
 - `HookFraming::Framed(FramedHook)` — keybinding, buffer-change, and prompt
   hooks fire during the frontend `read`, outside any frame, so they establish
   one through `Shell::run` (`framed_run_request`, a `Program::Hook`

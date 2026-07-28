@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 16b2d1e
-verified_at_date: 2026-07-26
-anchors: [eval_top_level, evaluate, with_thunk_body, Settled, trampoline, Mobile, Mooring, Disposition, SessionState]
+verified_at_commit: 19d53bb
+verified_at_date: 2026-07-28
+anchors: [eval_top_level, evaluate, with_thunk_body, Settled, trampoline, Mobile, Mooring, IoLoan, SessionState]
 ---
 
 # The evaluator as a trampolined CBPV machine
@@ -39,12 +39,12 @@ start an unframed reduction.
 
 **The run's frame is split by mutability.** What the run fixed — its `surface`
 sink, the `deferred` rail with its worker lease and cap, the `desk`, the
-`nursery`, and the foreground `cancel` scope — is the `Mooring`, which lives on
-the run door's Rust stack frame and is only ever borrowed. Nothing saves or
-restores it, because nothing moved it: the stack does that work, and its `Drop`
-empties the nursery on the unwinding path too. `&Mooring` and `&mut Shell` are
-disjoint borrows, so a body can surface an event while holding the shell
-mutably.
+`nursery`, the foreground `cancel` scope, and its terminal authority — is the
+`Mooring`, which lives on the run door's Rust stack frame and is only ever
+borrowed. Nothing saves or restores it, because nothing moved it: the stack
+does that work, and the `NurseryGuard` beside it empties the nursery on the
+unwinding path too. `&Mooring` and `&mut Shell` are disjoint borrows, so a body
+can surface an event while holding the shell mutably.
 
 **The `Shell` is partitioned into four regions by lifetime — the field name
 *is* the invariant** ([[decisions/260617_turn-local-state|turn-local-state]];
@@ -55,9 +55,11 @@ mutably.
   counters (`last_status`, `call_depth`, `recursion_limit`), and the dynamic
   `Context` (cwd, env overlays, grants, handlers, args, modules). The public
   embedding seam.
-- *Disposition* — the mutable residue of the run's frame, installed and
-  restored on teardown: the pipeline-stage `Io`, the source-position cursor,
-  and the run's `TerminalAccess`.
+- *Io* — the mutable residue of the run's frame: the pipeline-stage byte
+  streams, taken on loan by an `IoLoan` at install and restored on teardown
+  together with the two `Copy` registers the run owns for its life, the
+  root-source register `session.root_file` and the dispatch register
+  `local.audit.call_site`.
 - *SessionState* — what outlives every run's teardown: the durable cancel
   `root` detached workers parent under, the `sources` registry rendered against
   after a run returns, the `exit_hints` table, the host-installed `builtins`,

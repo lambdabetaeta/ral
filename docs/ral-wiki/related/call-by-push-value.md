@@ -1,6 +1,6 @@
 ---
-verified_at_commit: fc49779
-verified_at_date: 2026-07-23
+verified_at_commit: 19d53bb
+verified_at_date: 2026-07-28
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
 ---
 

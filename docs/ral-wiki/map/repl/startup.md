@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -128,10 +128,10 @@ rather than evaluating it directly**
 A run-evaluating host needs three things before rc files or capability
 frames: the prelude as a baked [[map/core|`Comp`]], its top-level scheme
 list, and its own builtin surface as a `ral_core::HostSurface`. `main`
-reaches for them through core's *driver* — the Shell-embedding seam — via a
-process-wide `PRELUDE: ral_core::driver::BakedPrelude` static built by the
+reaches for them through `ral_core::boot` — the Shell-embedding seam — via a
+process-wide `PRELUDE: ral_core::boot::BakedPrelude` static built by the
 `ral_core::baked_prelude!()` macro, and
-`ral_core::driver::boot_shell(terminal, &PRELUDE, surface)`, which constructs
+`ral_core::boot::boot_shell(terminal, &PRELUDE, surface)`, which constructs
 the shell, installs the surface next to `CORE_BUILTINS`, seeds default env
 vars, and registers builtins against the prelude comp. `BakedPrelude` lazily
 `postcard`-decodes the IR and scheme blobs on first access. Probing the
@@ -139,7 +139,7 @@ underlying machine is a separate concern, owned by `ral_core::host`.
 
 `build.rs` is the git-hash block — stamping `RAL_VERSION_SUFFIX` (`+<hash>`
 in a git checkout, empty in a release tarball) into the version string — plus
-one call to `ral_core::driver::bake_prelude_to_out_dir`, which
+one call to `ral_core::boot::bake_prelude_to_out_dir`, which
 parses, elaborates, and `bake_prelude`s `prelude.ral` (annotating each top-level
 bind with its inferred scheme and harvesting those same schemes off one checked
 pass), then serialises the *annotated* `Comp` and the harvested schemes into

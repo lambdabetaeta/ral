@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 837cb5c
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -126,7 +126,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   non-escalating twin, whose fan-out skips a detached worker's group — and
   `break_pipeline_group`, the SIGTERM-grade cooperative break a job teardown
   sends before escalating to `kill_pipeline_group`.
-- `launch.rs` — the owned launch value and its platform interpreters. Unix
+- `launch.rs` — the owned launch value and its platform interpreters, and the
+  two births: `spawn`, which hands back a child this process owns, and the
+  `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
+  to init — its pid comes back but nothing else does, so there is no handle,
+  no wait, and (below) no `JailCgroup`. Unix
   lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
@@ -147,7 +151,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   supplementary-group clear / `setresgid` / `setresuid` / `NO_NEW_PRIVS`,
   kill-whole via `cgroup.kill`, and `EBUSY`-polled removal. `JailCgroup`
   is plain data `RunningChild` carries uniformly (`None` off a real
-  guest). The jail itself is session state (`session.guest_jail`),
+  guest); a detached birth is handed none at all, since a caller that
+  cannot name the process cannot know when its cgroup is empty — the
+  survivor keeps the transient cgroup's limits and leaves one inert
+  directory until the guest reboots. The jail itself is session state (`session.guest_jail`),
   inherited exactly like the builtin table so workers, pipeline stages,
   and forks share one counter; only a guest engine (`RAL_GUEST`) installs
   it, and there it replaces the per-command OS projection

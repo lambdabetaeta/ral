@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 5f026b5 -->
+<!-- verified_at_commit: 19d53bb -->
 # ral(1) — language specification
 
 ## 0  Overview
@@ -1110,13 +1110,17 @@ Two kinds are emitted.  A `command` node records the execution of a
 single command — external program, builtin, or user function — and
 populates `cmd`, `args`, `status`, `stdout`, `stderr`, and `value` in
 the obvious way.  A `capability-check` node records a `grant` decision
-and additionally carries `resource: String` (`"exec"` or `"fs"`) and
-`decision: String` (`"allowed"` or `"denied"`); for an allowed `fs`
-check, the matched prefix appears as `granted: String`, and the
-resource-specific fields (`name`, `args` for `exec`; `op`, `path` for
-`fs`) are spliced into the same map.  `Node` is therefore open: a
-consumer reads `kind`, dispatches with `equal`, and accesses the
-kind-specific fields through row polymorphism (§20.1).
+and additionally carries `resource: String` (`"exec"`, `"fs"`, or
+`"deputy"`) and `decision: String` (`"allowed"`, `"denied"`, or
+`"flagged"`); for an allowed `fs` check, the matched prefix appears as
+`granted: String`, and the resource-specific fields (`name`, `args`
+for `exec`; `op`, `path` for `fs`; `prefixes` for `deputy`) are
+spliced into the same map.  The `deputy` resource is the one that
+reports a property of the frame rather than a decision at a gate: it
+is emitted when a `grant` block is entered, not before a gated
+action, and its `decision` is always `"flagged"` (§11.5).  `Node` is
+therefore open: a consumer reads `kind`, dispatches with `equal`, and
+accesses the kind-specific fields through row polymorphism (§20.1).
 
 **Scope nodes carry empty `args`.**  Nodes emitted by the five control
 operators (`within`, `grant`, `try`, `guard`, `audit`) record their
@@ -1227,8 +1231,8 @@ authority for `B` using the dynamic-context mechanism of §3.1.
 a compile-time error.  Each capability dimension `C` mentions is
 deny-by-default within the grant; dimensions `C` *omits* keep ambient
 authority — `grant [exec: …] body` tightens exec but leaves fs, net,
-editor, shell at whatever the caller had.  Seven keys are accepted:
-`exec`, `fs`, `net`, `detach`, `audit`, `editor`, `shell`.
+detach, editor, shell at whatever the caller had.  Seven keys are
+accepted: `exec`, `fs`, `net`, `detach`, `audit`, `editor`, `shell`.
 
 ```
 grant [
@@ -1307,10 +1311,16 @@ JSON) and never appear in user-written profiles or grant blocks.
    under a covering `'/bin/': 'allow'`.  An allow matches only the
    form the policy named, so a planted `/tmp/evil/rg` invoked by
    path never inherits a bare `'rg': 'allow'`.
-2. **Otherwise the longest matching subpath wins.**  Deeper prefix
+2. **Otherwise the deepest matching subpath wins.**  Deeper prefix
    beats shallower, so `'/usr/bin/sensitive/': 'Deny'` carves a
    hole inside `'/usr/bin/': 'Allow'` for binaries under the
-   inner directory.
+   inner directory.  Depth counts the components of the
+   alias-folded form (§11.2), not the characters of the spelling,
+   so the macOS alias `/private/tmp` does not outrank `/tmp/a/b`,
+   which nests deeper.  At equal depth a `Deny` displaces an
+   `Allow` — a `'/private/tmp/bin/': 'Deny'` alongside a
+   `'/tmp/bin/': 'Allow'` names one directory twice — because a
+   gate's ambiguity resolves to deny.
 3. **Otherwise the layer denies.**  A layer that opts into `exec`
    admits *only* what its map says; everything else is denied
    within that layer.
@@ -1356,8 +1366,10 @@ judged under Windows path identity: the comparison folds case,
 treats `/` and `\` as the same separator, and equates a
 `\\?\`-verbatim prefix (what canonicalisation produces there) with
 its plain spelling — `\\?\C:\Work` and `c:/work` name the same
-region.  Exec directory prefixes (§11.1) match under the same
-identity.
+region.  Two prefixes name the *same* region — for an exec key,
+the same directory — when each contains the other under that
+identity, rather than when they agree byte-for-byte.  Exec
+directory prefixes (§11.1) match, rank, and clash under it.
 
 Deny is symmetric: the same deny region blocks reads and writes.
 This is the simpler rule, and it has the right effect for the
@@ -1367,6 +1379,17 @@ more layers can only add denies (composition unions them), so a
 nested grant can never uncover a region the outer policy denied.
 Prefixes compose by intersection, so a nested grant can only
 narrow what is reachable.
+
+A prefix is not a string but a triple: the surface spelling as the
+author wrote it (`.`/`..`-folded), the symlink-resolved form, and
+the namespace that form was resolved in.  The triple is minted once,
+at the freeze boundary — when a `grant` block is entered or a
+profile is loaded (§11.2.1, §11.10) — and composition never consults
+the filesystem again: the intersection reads the resolved form off
+the value rather than asking the disk for it.  Composition is a
+statement about the policy, enforcement a statement about the world;
+the gate at the point of use re-resolves both the access path and
+each prefix against the live filesystem.
 
 `fs` does not restrict an external program's own I/O — those
 need their binary, linker, and system libraries — so use `exec`
@@ -1414,8 +1437,10 @@ not a path, and is exempt.
 Resolution is one-shot at policy load: tokens are rewritten into
 concrete absolute paths in the policy itself, so later mutation of
 HOME or `XDG_*_HOME` — or a later `cd` — cannot widen what was
-already authorised.  An
-`xdg:NAME[/sub]` token whose resolved base sits outside HOME is
+already authorised.  The same pass mints each entry's triple —
+surface, resolved form, namespace (§11.2) — so composition later
+reads the resolved form the entry carries instead of re-deriving it.
+An `xdg:NAME[/sub]` token whose resolved base sits outside HOME is
 rejected at load — for example, with `XDG_DATA_HOME=/etc` set in
 the calling environment, a policy naming `xdg:data` errors instead
 of granting `/etc` read.  Unknown names (`xdg:cofnig`) error at the
@@ -1436,12 +1461,12 @@ resolve against the session's home on every platform.
 Boolean.  ral has no in-process network primitives, so `net` governs
 only the network access of external programs spawned inside the
 grant.  There is therefore **no in-process gate** for `net` — unlike
-`exec`, `fs`, `editor`, and `shell`, which ral checks before the gated
-action, a `net: false` is enforced *solely* by the OS sandbox (§11.9),
-all-or-nothing, with no endpoint-level policy.  On a platform without
-an OS sandbox backend a `net`-restricting grant therefore fails closed
-(§11.9) rather than running unconfined.  Inside a guest the network is
-real — a `tun` device whose only peer is a host-side process — but `net`
+`exec`, `fs`, `detach`, `editor`, and `shell`, which ral checks before
+the gated action, a `net: false` is enforced *solely* by the OS sandbox
+(§11.9), all-or-nothing, with no endpoint-level policy.  On a platform
+without an OS sandbox backend a `net`-restricting grant therefore fails
+closed (§11.9) rather than running unconfined.  Inside a guest the network
+is real — a `tun` device whose only peer is a host-side process — but `net`
 still has no in-process gate to fold there either: what the guest may reach
 is a host-side policy outside ral's own grant machinery, an explicit
 CONNECT-only proxy admitting an exact list of public DNS names on port 443
@@ -1473,6 +1498,22 @@ build a tree, and once enabled it stays enabled across nested
 grants.  When such a tree is active, each `exec` or `fs` check emits
 a `capability-check` node (§10.3) just before the gated action — or
 alone if the action is denied — while `net` checks emit no nodes.
+
+Under the same conditions, entering a `grant` block emits a `deputy`
+node when the whole stack, meet-folded, admits `exec` on a prefix it
+also makes writable: a binary written there is admitted on the next
+call.  The node's `decision` is `"flagged"` and its `prefixes` names
+the offending regions in the surface spelling their author wrote.  It
+is a report and nothing more: no action is denied and no authority is
+attenuated by it, because write under `cwd:` together with exec under
+`cwd:` is the ordinary compile-and-run shape.  Overlap is judged on
+the resolved form each prefix carries (§11.2), so a write region
+reaching an exec-admitted tree through a symlink counts, and prefixes
+minted in different namespaces never overlap.  The verdict reads the
+folded frame rather than any one layer — two innocent layers compose
+into a finding — and stays silent when either `exec` or `fs` is
+unrestricted at the fold, since an unrestricted dimension names no
+prefixes to compare.
 
 ### 11.6  `editor`
 
@@ -1524,10 +1565,17 @@ Nested grants can only reduce authority.  Per dimension:
   intersect; `Deny` is sticky from any layer); subpath keys
   intersect by path containment (deeper survives on overlap);
   literal `Deny` and subpath `Deny` propagate even when only one
-  layer names them.
-- `fs` — narrow by path containment (and for externals under OS
-  sandboxing).
+  layer names them.  An allow subpath naming the same directory as
+  a deny subpath is then dropped: "same directory" is the gate's
+  own identity (§11.2) — mutual containment within one namespace,
+  not byte equality — judged on the surface form the gate matches,
+  since two freezes of one directory can carry different resolved
+  forms.  A deny of `/tmp/bin` is therefore not dodged by an allow
+  of `/private/tmp/bin`.
+- `fs` — narrow by path containment, judged on the resolved form
+  each prefix carries (and for externals under OS sandboxing).
 - `net` — boolean AND.
+- `detach` — boolean AND.
 - `audit` — logical OR.
 - `editor` — per-boolean AND (inner can only disable).
 
@@ -1535,7 +1583,19 @@ For both `exec` subpath keys and `fs` prefixes, containment is
 judged on the symlink-resolved form: a prefix that lexically nests
 under an outer layer's ceiling but resolves — through a symlink —
 outside it does not survive the intersection, so composition can
-only remove authority, never add it.
+only remove authority, never add it.  That resolved form is the one
+the prefix has carried since its freeze (§11.2), not one re-derived
+from the disk at meet time; the meet touches no filesystem at all.
+
+Overlap keys on the pair (namespace, resolved form), so prefixes
+minted in different namespaces never overlap and a cross-namespace
+meet is the empty, fail-closed intersection.  A host layer narrowing
+a grant whose prefixes were minted for a guest (§15.2) therefore
+yields no authority, rather than folding the guest's POSIX spelling
+by the host's rules — a Windows host would otherwise rewrite `/work`
+as `\work` and match nothing on either side of the wall.  A guest
+grant can be narrowed only inside the guest, by the guest's own
+kernel.
 
 A dimension that *no* layer in the stack opined on stays at ambient
 authority — there is no implicit deny from omission across the stack,
@@ -1545,11 +1605,11 @@ The dimensions are **independent**.  Each is a separate field whose
 absence is the meet identity (`None` = inherit = ⊤), so restricting one
 dimension leaves the others untouched: `grant [fs: [read: ['/tmp']]] {
 … }` narrows filesystem reads but does not touch `net`, `exec`,
-`editor`, or `shell`, which stay at the caller's authority.  A grant
-that means to confine network access must say `net: false` itself;
-tightening `fs` alone does not imply a network restriction.  The
-attenuation table above composes each dimension's field separately,
-never one from another.
+`detach`, `editor`, or `shell`, which stay at the caller's authority.
+A grant that means to confine network access must say `net: false`
+itself; tightening `fs` alone does not imply a network restriction.
+The attenuation table above composes each dimension's field
+separately, never one from another.
 
 Authority may be restricted but never amplified. `grant` affects
 ral-dispatched actions; if a permitted external program internally
@@ -1684,9 +1744,9 @@ sandbox backend there for it to fail closed *into*.
 
 A capability profile is an ordinary ral script whose terminal expression
 is a map shaped exactly like the argument of `grant [...] { body }`.
-The same six keys (`exec`, `fs`, `net`, `audit`, `editor`, `shell`)
-with the same lowercase string conventions.  Loading runs the file
-through the standard parse + elaborate + evaluate pipeline; the
+The same seven keys (`exec`, `fs`, `net`, `detach`, `audit`, `editor`,
+`shell`) with the same lowercase string conventions.  Loading runs the
+file through the standard parse + elaborate + evaluate pipeline; the
 returned map walks into a `Capabilities` via the same parser the
 inline `grant` operator uses, resolving every `~` / `xdg:` / `cwd:` /
 `tempdir:` / `gitdir:` sigil against the load-time home and working
@@ -1702,14 +1762,15 @@ return [
 ]
 ```
 
-**Loading at the CLI.** `ral --capabilities a.ral[,b.ral,...]` loads
-each profile, left-to-right `meet`s the raw policies, freezes once
-against `FreezeCtx { home, cwd }`, and pushes the result as a
-permanent session frame above `Capabilities::root()`.  Repeated
-`--capabilities` invocations append.  `meet` is commutative, so order
-doesn't change correctness — but each successive file narrows
-authority, never widens, and `audit: true` in any file makes the
-session audit (logical OR per §11.5).
+**Loading at the CLI.** `ral --capabilities a.ral[,b.ral,...]` freezes
+each profile as it loads, against one `FreezeCtx { home, cwd }` built
+once for the session — the moment every path prefix's triple is
+minted (§11.2) — then left-to-right `meet`s the already-frozen
+bundles and pushes the result as a permanent session frame above
+`Capabilities::root()`.  Repeated `--capabilities` invocations append.
+`meet` is commutative, so order doesn't change correctness — but each
+successive file narrows authority, never widens, and `audit: true` in
+any file makes the session audit (logical OR per §11.5).
 
 **Loading at runtime.** `source 'my-profile.ral'` returns the
 terminal-expression map, suitable for direct use:
@@ -1722,6 +1783,15 @@ The `source` evaluation runs under the *current* authority; a profile
 file that touches anything the active grant denies will fail at the
 gate.  Profiles intended for both startup (`--capabilities`) and
 mid-session use are easiest to keep effect-free.
+
+**Composition warnings.** exarch builds its session ceiling from a
+named base, an optional `--extend-base` `join`, and one `meet` per
+`--restrict` file.  It runs the confused-deputy verdict (§11.5) once
+over the fully composed result and writes any finding to stderr;
+loading never fails on it.  The check waits for the fold because the
+fold is where the shape appears — a base granting write under a
+directory and a restrict file admitting `exec` there are each
+innocent alone.
 
 ## 12  Testing
 

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-against: [design/grant, design/effects-handlers, design/cbpv, design/syscalls-are-effects, design/scoping]
+verified_at_commit: 19d53bb
+verified_at_date: 2026-07-28
+against: [design/grant, design/effects-handlers, design/cbpv, design/syscalls-are-effects, design/scoping, design/capability-freeze]
 ---
 
 # System C — effects and capabilities reconciled
@@ -46,10 +46,16 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
   (what is available) — grant's meet-narrowed authority; as output it is a
   context *requirement* (what the body actually uses). ral tracks only the
   restriction. Nothing in ral computes which operations a body will perform.
-- **Capability sets form a lattice; grant's meet is its dual.** System C orders
-  sets by inclusion (subeffecting). grant narrows authority by intersection with
-  anti-monotone denies ([[design/grant|grant]]) — the same lattice, read on
-  permission rather than on use.
+- **Capability sets form a lattice; ral's order is relative to a namespace.**
+  System C orders sets by inclusion (subeffecting) over *bound term variables* —
+  an order settled by binding, so α-equivalence carries it anywhere. grant
+  narrows authority by intersection with anti-monotone denies
+  ([[design/grant|grant]]): the same reading on permission rather than on use,
+  but over path prefixes, and containment between prefixes holds only against the
+  kernel that folds them ([[design/capability-freeze|capability-freeze]],
+  [[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]). A
+  bundle frozen for one namespace has no meet in another, since the meet re-mints
+  its prefixes through the local fold.
 - **Regions are `within`.** System C's scoped state (§5.2) needs no type ceremony
   while a handle is used second-class, and surfaces in the type only when *boxed*
   to escape. ral's `within [dir: …]` is morally a region; the pattern generalises
@@ -82,12 +88,15 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
 - **Selective boxing as a static-guarantee escape hatch — only where wanted.**
   ral stays scope-based by default. The case for crossing into types is a
   boundary that wants a *static* bound on the effect set rather than only the
-  runtime grant chokepoint: the [[design/exarch-architecture|exarch]] sandbox, or
-  a `spawn`'d thunk whose carried authority one wants to read off its type.
+  runtime grant chokepoint: the [[design/exarch-architecture|exarch]] sandbox.
   System C is the recipe; adopting it broadly would contradict
   [[design/syscalls-are-effects|syscalls-are-effects]]'s dynamic-authority
-  commitment, so it stays a hatch, not a turn. Rejected as a language feature
-  on review
+  commitment, so it stays a hatch, not a turn. Escape from a delimiter is not
+  such a boundary — where System C makes escape safe by re-requiring the set at
+  `unbox`, `detach` makes it safe by freezing the frame's projection into the
+  survivor for life, unnameable by any later frame and so unwidenable
+  ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]). A type would
+  add legibility there, not safety. Rejected as a language feature on review
   ([[decisions/260603_related-borrowables-rejected|related-borrowables-rejected]]).
 
 Cite: Brachthäuser, Schuster, Lee, Boruch-Gruszecki, *Effects, capabilities, and

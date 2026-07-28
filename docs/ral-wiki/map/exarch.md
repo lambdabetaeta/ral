@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6ef14dd
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -104,7 +104,7 @@ can inherit a live key.**
 - **`boot_shell`** — the identity seat's constructor: clear stale ral
   interrupts, install ral's handlers, chain exarch's cancel over them, then
   dress the shell via the shared `exarch_shell` — core's
-  [[map/repl/startup|`ral_core::driver::boot_shell`]] with exarch's
+  [[map/repl/startup|`ral_core::boot::boot_shell`]] with exarch's
   host surface (`builtins::host_surface()`) so the host builtins ride
   construction, the `agent.ral` library, ANSI colour suppressed at the
   source, the exit hints. Its sibling **`engine_boot_shell`** is the wire
@@ -113,8 +113,8 @@ can inherit a live key.**
   **`arm_session_ledgers`** — the one policy site arming the binding lease
   and settled-worker retention for both seats — with no signal ceremony
   (a cancel arrives as a `Control` frame) and no terminal probe.
-- **Machine probing** — `host::snapshot` formats the live machine into the
-  prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
+- **Machine probing** — `prompt::host::snapshot` formats the live machine into
+  the prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
   `user`, `home`, `git`, `exarch logs`), best-effort: a missing value drops its line.
 - **`Scratch`** — the disposable per-session directory, exposed under its
   `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with the

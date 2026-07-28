@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -28,15 +28,23 @@ Submodules:
 
 - `enforce.rs` — the point-of-use gates: head admission, the
   audit-bearing exec/fs checks (`check_exec_args`, `check_fs_op`), and
-  the editor/shell bool gates;
+  the editor/shell bool gates. The fs gate is split so the judgment is
+  reusable without the report: `fs_verdict` is the pure decision, and
+  `check_fs_op` is the layer that audits it and mints the `Break`;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder;
+- `deputy.rs` — `deputy_prefixes`, the confused-deputy predicate: a
+  prefix both `exec`-admitted and `fs`-writable, judged with `path::covers`
+  on a *folded* `Capabilities` (neither layer of a meet is guilty alone).
+  It reports rather than denies, and its findings surface at grant push and
+  at an exarch profile load ([[design/grant|grant]]);
 - `exec.rs` — per-layer exec verdicts; the admitted arm carries `Admit`
   (`Any` / `Subcommands`), so a `Deny` cannot reach an allowed verdict; the
   literal comparison is case- and PATHEXT-insensitive under Windows path
   semantics, so a bare `git` grant admits a resolved `GIT.EXE`;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
-  decoder per `exec` / `fs` / `net` / `editor` / `shell` / `audit` key; its
+  decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` / `audit`
+  key; its
   exec-map freeze expands the two *exec-only* sigils `path:` (every `$PATH`
   component) and `system:` (the platform's tool roots,
   `sigil::system_tool_roots`), and drops bundled-tool grants for coreutils a
@@ -48,9 +56,12 @@ The capability *types* live in [[map/core/shell-state|types/capability]]: the
 single always-frozen `Capabilities`, resolved at decode by the freeze pass
 inside `decode_capability_map` ([[design/capability-freeze|freeze boundary]]);
 plus `FsPolicy`, `GrantStack`,
-`Meet`, `Join`, and the exec authority `ExecMap { literals, dirs }` — `literals`
-keyed by name/path under the three-valued `ExecPolicy`, `dirs` keyed by
-slash-free directory prefix under the two-valued `ExecDir`
+`Meet`, `Join`, and the exec authority
+`ExecMap { literals, allow_dirs, deny_dirs }` — `literals` keyed by name/path
+under the three-valued `ExecPolicy`, the two directory sets stored already
+partitioned by verdict as `BTreeSet<NormalizedPrefix>`, so a meet folds the
+partition it will use rather than re-deriving it, and a deny survives the
+spelling and the depth it is judged on
 ([[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]).
 
 Path resolution for grant matching is `core/src/path/`: a fixed staged rule,
@@ -76,16 +87,22 @@ sigil-expansion-then-lex: the ordering is in the types, not convention.
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
 
-`prefix_set.rs` holds the `PrefixSet` algebra: each prefix kept in both its
-*surface* form (lexical — what the OS profile emits, since the sandbox matcher
-works lexically) and its *resolved* form (symlinks followed — what containment
-and intersection are judged on), so layers naming one directory through
-different symlinks unify. Both composition surfaces meet on the resolved form:
-the sandbox-projection fold via `PrefixSet::resolve` (which holds a `Resolver`)
-and the `Capabilities` meets via the resolver-free `PrefixSet::from_frozen`
-(frozen prefixes need only canonicalisation). The duality is load-bearing,
-not redundant: enforce the ceiling on the resolved form, emit the surface form the
-sandboxed body will actually open.
+A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical —
+what the OS profile emits, since the sandbox matcher works lexically), its
+`resolved` form (symlinks followed — what containment and intersection are
+judged on), and its `Namespace`, all fixed by one disk consultation at the
+freeze door. The duality is load-bearing, not redundant: enforce the ceiling
+on the resolved form, emit the surface form the sandboxed body will actually
+open.
+
+`prefix_set.rs` therefore contributes only the *set*-level algebra, pure and
+disk-free: `covers` is the one containment judgment, keyed on
+`(namespace, resolved)` so prefixes in different namespaces never overlap and
+a cross-namespace meet is the empty, fail-closed intersection; `meet_prefixes`
+is the kernel `PrefixSet::meet` and every `types::capability` lattice meet
+share. `PrefixSet::resolve` is the lone door here that still holds a
+`Resolver` — the sandbox-projection fold, which must render a prefix that was
+never frozen (a bare exec-dir string, a `~`-headed fs prefix).
 
 XDG base directories resolve through one resolver, `basedir.rs`
 (`XdgKind`, `resolve_xdg`): an absolute `$XDG_*_HOME` override else the
@@ -128,9 +145,12 @@ device for `net` to govern; the in-process gates apply unchanged
   tool). Skip it and `SANDBOX_SELF` stays unpinned, so the per-command launcher
   cannot pin the binary it re-execs.
 - `reexec.rs` — pins an immutable handle on this executable at boot so a
-  confined re-exec runs the same binary even under an on-disk swap, with a
-  per-platform identity check (`/proc/self/fd` on Linux, `(dev, ino)` snapshot on
-  macOS, `BY_HANDLE_FILE_INFORMATION` on Windows). On Unix
+  confined re-exec runs the same binary even under an on-disk swap. The `Pin`
+  variants say where a swap is even askable: `Fd` on Linux (the retained
+  descriptor, so `/proc/self/fd/N` resolves to the boot inode), `Stat` on
+  macOS (a `(dev, ino)` snapshot re-checked before each spawn), and
+  `Unguarded` on Windows, which has no parent-side self re-exec for a guard
+  to protect. On Unix
   `maybe_enter_process_sandbox` enters the OS sandbox in a per-command
   `--sandbox-projection` child; on Windows there is no child re-entry at all —
   confinement is the AppContainer token the *parent* attaches at
@@ -158,8 +178,13 @@ device for `net` to govern; the in-process gates apply unchanged
   spawn is the confinement point — never a re-exec child. The
   `--ral-sandbox-exec` sentinel and `serve_sandbox_exec`'s execve arm are
   `cfg(target_os = "macos")`, the only platform that emits the host re-exec
-  tail. The grant body itself evaluates locally — `transport::dispatch` no
-  longer re-execs it
+  tail. The launcher also takes an `Ownership` (`Kept` / `Surrendered`, the
+  second variant `cfg(unix)` since only there does the verb that makes the
+  distinction exist): it reaches the Linux backend alone, which is the one
+  that builds an envelope process to tie the child to us, so a `detach`ed
+  survivor keeps the birthing frame's projection for life while dropping
+  that tie ([[map/core/runtime|runtime]]). The grant body itself evaluates
+  locally, external children being confined per-command
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap), and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the

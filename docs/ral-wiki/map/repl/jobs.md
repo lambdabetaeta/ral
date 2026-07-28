@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -44,8 +44,9 @@ through the Job Object's KILL_ON_JOB_CLOSE flag.
 
 On Unix, **`fg` resumes a parked group only through a held terminal lease**: the
 controlling-terminal handoff is an unforgeable [[map/core/shell-state|TerminalLease]]
-the run is given, not a predicate `wait_foreground` re-derives. The accessor
-yields `Some(&TerminalLease)` only when the installed run's access permits and
+the run is given, not a predicate `wait_foreground` re-derives: it arrives as
+the `&Mooring` that threads beside the shell. `Shell::terminal_lease` yields
+`Some(&TerminalLease)` only when that mooring's terminal access permits and
 the session owns the lease (see [[decisions/260619_terminal-lease|terminal-lease]]);
 the [[map/core/io-process|ForegroundGuard]] acquires `tcsetpgrp` + the termios
 snapshot only on that borrow. Without a lease — a non-interactive resume — there

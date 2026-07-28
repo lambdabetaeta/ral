@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -10,20 +10,23 @@ covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 (`evaluator.rs`). **Evaluation is entered only through framed run doors; the
 machine's own verbs are crate-private.** Two reach outside the module:
 
-- `eval_top_level(comp, shell)` (`pub(crate)`) — the run-evaluation verb a tool
+- `eval_top_level(comp, mooring, shell)` (`pub(crate)`) — the run-evaluation
+  verb a tool
   call, a REPL run, or a script line settles through. Hosts never call it: they
-  enter through the framed `Shell::run` door (`core/src/run.rs`, over
-  the run spine in `core/src/run.rs`), the sole way into evaluation — its
-  `Run` carries a `Program` of source text or a registered hook
+  enter through the framed `Shell::run` door and the run spine behind it, both
+  in `core/src/run.rs`, the sole way into evaluation — its
+  `Run` (`core/src/transport.rs`) carries a `Program` of source text or a
+  registered hook
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
   [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
   The post-run `Mobile` is *installed* on the parent shell on every outcome
   (Ok / Error / Exit), because a top-level run is a resume point.
-- `evaluate(comp, shell)` — a bare tail-absorbed run with no mobile contract, for
+- `evaluate(comp, mooring, shell)` — a bare tail-absorbed run with no mobile
+  contract, for
   callers already inside a session (module load, prelude bootstrap, capability
   profiles, REPL plugin / config loading).
 
-`apply(callee, args, shell)` is `pub(crate)`: it reduces a `Value` (closure or
+`apply(callee, args, mooring, shell)` is `pub(crate)`: it reduces a `Value` (closure or
 thunk) applied to arguments, absorbing tail signals through the trampoline. A
 host reaches it only through the run door's hook-program arm or the
 in-frame builtin wrapper, so an unframed reduction is unconstructable.
@@ -35,8 +38,9 @@ guarantees (try does not swallow exit, grant does not bypass tail calls) are
 regression-tested ([[decisions/260514_escape-propagation-bugs|escape-propagation-bugs]]).
 
 A *same-thread thunk body* — forcing a block or applying a lambda — evaluates in
-place on the caller's `Shell`, sharing run, session, and local state by
-identity and swapping in only a mobile rescoped to the closure's `captured`
+place on the caller's `Shell`, sharing its `io`, session, and local state by
+identity (and its `&Mooring` by the borrow itself) while swapping in only a
+mobile rescoped to the closure's `captured`
 environment plus a fresh frame
 ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
 Block and lambda meet at one in-place routine, `Shell::with_thunk_body`, which
@@ -53,8 +57,9 @@ Internals:
   `apply`; the `Value::Thunk` arm delegates to the block contract `eval_block`,
   and `apply_lambda_frame` runs a lambda body in place via `with_thunk_body`.
   `comp.rs` — the `Comp` step functions; `val.rs` — the side-effect-free `Val`
-  layer (`eval_val`); `expr.rs` — `PrimOp` evaluation and value indexing;
-  `call.rs` — the application step (`invoke`).
+  layer (`eval_val`); `expr.rs` — the primitive operators the elaborator's
+  expression desugaring emits (`eval_not` / `eval_binary`) and value indexing
+  (`index_value`); `call.rs` — the application step (`invoke`).
 - `scope.rs` — dynamic frames implementing [[design/scoping|scoping]] and the five
   [[design/control-operators|control operators]]. The `within` form installs
   command handlers: a per-name handler and every alias must be a unary lambda

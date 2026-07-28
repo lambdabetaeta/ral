@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fc49779
-generated_at_date: 2026-07-23
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -22,7 +22,10 @@ widens the ceiling, then any number of commuting meets attenuate from it**:
 - resolves the named base (`resolve_base`);
 - joins an optional `--extend-base` (widens the ceiling);
 - meets each `--restrict` file (attenuates);
-- adds each restrict file's path to `fs.deny_paths` (below).
+- adds each restrict file's path to `fs.deny_paths` (below);
+- lints the composed ceiling for confused-deputy prefixes
+  (`lint_deputy_prefixes` over `ral_core::capability::deputy_prefixes`) — a
+  warning, never a denial, judged after every join and meet has run.
 
 Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
 `tempdir:` / `gitdir:` / `system:` sigil against the session's home, working
@@ -32,8 +35,8 @@ already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
 An `xdg:` path escaping `$HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::capability::load_capabilities_from_*` — the same surface as ral's
-`--capabilities <path>.ral` (`policy/load.rs` only wraps it with exarch's error
-format and the `absolute_in` cwd-join helper).
+`--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
+format, the `absolute_in` cwd-join helper, and the deputy lint).
 
 `narrow(parent, base_name, cwd)` is the **meet-sibling of `for_invocation`**: it
 freezes the named base against the child's working directory and returns

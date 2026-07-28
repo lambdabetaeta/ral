@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -29,8 +29,20 @@ guards
   Submodules: `identity.rs` (`CommandIdentity`, the classify-once
   name/shown/resolved triple), `vet.rs` (existence → argv shape → grant policy,
   yielding a `SpawnPlan` with its `ExecImage`), `process.rs`, `child.rs`,
-  `stdio.rs`, `redirect.rs`, `foreground.rs`, `io_event.rs`, plus `uutils.rs`
+  `stdio.rs`, `redirect.rs`, `foreground.rs`, `io_event.rs`, `detach.rs`, plus
+  `uutils.rs`
   for [[map/core/builtins|bundled coreutils]].
+  - `detach.rs` is that same machinery — `CommandIdentity`, `vet`,
+    `build_command` — up to the one act that differs: the child is born by
+    `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
+    pgid is never observed here and nothing can signal, await, or reap it.
+    What replaces the handle is a first-order `{pid, desc}` receipt. The
+    birthing frame's projection is rendered into the launch exactly as for a
+    child we keep, only with `sandbox::Ownership::Surrendered` dropping the
+    parent-death tie, so the survivor's authority is frozen as that frame
+    left it and no later frame can widen it — it cannot name the process at
+    all ([[map/core/capabilities|capabilities]]). All three of its standard
+    descriptors are `/dev/null`.
   - **A bundled coreutils/diffutils/ripgrep head is an `ExecImage::BundledTool`,
     run as a `ral --ral-bundled-tool <tool>` child whenever process semantics
     are required** — its inherited stdio, env, cwd, process group, and sandbox

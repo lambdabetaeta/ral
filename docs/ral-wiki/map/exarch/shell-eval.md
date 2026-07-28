@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2a3d8a5
-generated_at_date: 2026-07-27
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -94,12 +94,13 @@ Completion is `dispatch_to_report` returning its `Report`. A detached `spawn`ed 
 server, a watch — holds bounded deferred surface storage in core, never a clone
 of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool run
 from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Frame
-teardown — restoring the prior `RunState`, its byte sinks, its surface, and its
-terminal access — is core's `RunGuard`, which self-heals on a caught worker
-panic as well as on the normal return
-([[decisions/260612_exarch-panic-recovery|panic-recovery]]); exarch installs no
-per-call `IoGuard` of its own. The dynamic-context half of the contract lives in
-[[map/exarch/agent|agent]].
+teardown is core's: `IoLoan` brackets the byte streams and registers a run takes
+on loan from the shell, self-healing on a caught worker panic as well as on the
+normal return ([[decisions/260612_exarch-panic-recovery|panic-recovery]]), while
+the run's invariant half — surface, deferred sink, desk, nursery, cancel, the
+leases — threads as an immutable `&Mooring` the stack itself restores. Exarch
+brackets only its own per-call desk install (`seat::RunGuard`). The
+dynamic-context half of the contract lives in [[map/exarch/agent|agent]].
 
 **Surface decoding.** `decode_surface` is the single decoder both delivery
 regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`

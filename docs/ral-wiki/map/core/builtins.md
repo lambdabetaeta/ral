@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 16b2d1e
-generated_at_date: 2026-07-26
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -25,10 +25,11 @@ arm. Fixed arity is the registry's job ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
 (`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
-`driver::boot_shell`, so the typechecker and the runtime read one table —
-there is no process-global registry. `register` clones the baked prelude's
-bindings into each fresh environment. Two builtins sit *outside* the macro, a
-host-installed pair with the hosts swapped: the public `WATCH_BUILTIN`
+`boot::boot_shell` (`core/src/boot.rs`), so the typechecker and the runtime
+read one table — there is no process-global registry. `register` clones the
+baked prelude's bindings into each fresh environment. Three builtins sit
+*outside* the macro, implemented in core but installed by a host. Two are a
+pair with the hosts swapped: the public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
 `scheme::watch` so a host with a durable stdout sink (the interactive and
 batch ral hosts) installs it while an agent host omits it
@@ -36,7 +37,13 @@ batch ral hosts) installs it while an agent host omits it
 `SERVICE_BUILTIN` wraps `concurrency::builtin_service` / `scheme::service` so
 the agent host (exarch), whose lease frame reaps ordinary workers, installs
 the durable-birth verb while the ral hosts — which grant no lease, so every
-spawn of theirs already lives until cancel or exit — omit it.
+spawn of theirs already lives until cancel or exit — omit it. The third,
+`DETACH_BUILTIN` (`cfg(unix)`, `sig::DETACH` over
+`concurrency::builtin_detach`), is carried by a host that arms a detach
+policy: installing the verb and arming the budget (`Shell::arm_detach`) are
+one act, so absence is an unknown-name diagnostic rather than a veto, while
+whether a given call may spend it is the live grant stack's question
+(`GrantStack::permits_detach`).
 
 Bodies are grouped by concern, one submodule each:
 
@@ -45,12 +52,17 @@ Bodies are grouped by concern, one submodule each:
   common margin is stripped, while content-line whitespace is preserved;
 - `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`;
 - `shell.rs` — `cd`, `alias` / `unalias`;
-- `concurrency.rs` — `spawn` / `watch` / `service` and the handle verbs
+- `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
+  verbs
   `await` / `poll` / `race` / `cancel` (builtins under their bare names; `par`
   and the `is-done` predicate are prelude code over them, not builtins). All
-  but `watch` and `service` seed through `CORE_BUILTINS`; those two live here
-  too but are installed by their hosts via `WATCH_BUILTIN` /
-  `SERVICE_BUILTIN`, not core. On completion a
+  but the host-installed three seed through `CORE_BUILTINS`; those live here
+  too but reach a session via `WATCH_BUILTIN` / `SERVICE_BUILTIN` /
+  `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
+  alone — the birth itself is the ordinary external-command machinery down to
+  the double-fork in `runtime/command/detach.rs`
+  ([[map/core/runtime|runtime]]), and it yields a `{pid, desc}` receipt, not a
+  `Handle`, so none of the eliminators below apply to it. On completion a
   block's buffers drain *once* into a cached `CompletedHandle { stdout, stderr,
   outcome }` ([[map/core/shell-state|types/value.rs]]); the eliminators project that
   one settle. `try_settle` is the shared non-blocking sample (cached outcome, else a
@@ -128,8 +140,10 @@ Bodies are grouped by concern, one submodule each:
   rather than a generic failure
   ([[internals/capability-enforcement|capability-enforcement]]);
 - `modules.rs` — the cacheless `use` / `source` loader. `evaluate_source` is
-  the shared guarded parse + elaborate + evaluate core (cycle stack, depth
-  bound, `ScriptContextGuard`); `use` is a scope-projecting wrapper over it,
+  the shared parse + elaborate + evaluate core — `check_source` compiles
+  against the live session, peeking the `FileId` its own registration will
+  mint so the module's spans carry its real identity, and `evaluate_checked`
+  holds the cycle stack and depth bound; `use` is a scope-projecting wrapper over it,
   `source` evaluates into the caller's scope. Module loads carry no cache, so
   the guards keep re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];

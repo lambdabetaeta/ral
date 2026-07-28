@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -98,7 +98,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 
 ## The streaming and summary paths
 
-- `complete(system, messages, advertise_root_only, on_text, on_think, cancel)` —
+- `complete(system, messages, tool_enabled, search, on_text, on_think, cancel)` —
   streams one assistant reply, calling `on_text` for text and `on_think` for
   reasoning, and projects the `StreamEnd` into a `StepOut` (assistant message,
   tool calls, reasoning, `Usage`, `StopReason`). It preserves
@@ -196,4 +196,9 @@ and a per-process
 `prompt_cache_key` for OpenAI shard routing. The Responses adapter is the
 exception: its system prompt rides the top-level `instructions` field, since a
 `System` message would leave `instructions` empty and the Codex backend rejects
-that.
+that. `tool_defs(adapter, tool_enabled, search)` builds the request's tool array:
+the `ral` wire tool under `tool_enabled`, plus the provider's own hosted
+web-search tool under `search` — carried only on the three adapters genai maps it
+for (`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
+`external_web_access` config that switches codex from its cached index to the
+live internet; the bit is [[map/exarch/agent|agent]]'s `search`.

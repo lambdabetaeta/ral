@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5f026b5
-generated_at_date: 2026-07-27
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
 ---
 
@@ -14,8 +14,9 @@ plain-language change report after it, conflict-checked undo per file or whole
 job. It is not a fork of exarch and not a mode of it: it depends on exarch as
 a library and supplies only what differs
 ([[decisions/260721_synod-is-a-second-product|synod-is-a-second-product]]).
-And it is itself a library, not a binary: `synod-app`, the GUI, is the one
-process.
+It is one crate in two halves: the library modules are the engine anyone
+could drive, and the desktop shell rooted at `synod/src/main.rs` is the only
+thing that drives it.
 
 The design record is `dev/docs/VM/SYNOD.md`; the landed state is
 `dev/docs/VM/SYNOD-v1.md`. Every conversation boots a real hardware machine
@@ -43,14 +44,17 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   a Windows installation's `boot/` beside the executable, then the development
   pipeline's `vm-image/out/`. `BootPlan::realise` inflates a shipped zstd
   rootfs into the XDG cache against its `sha256` sidecar — a signed bundle is
-  read-only, so the cache is the only writable home the image has — and hands
-  `vm_manager::detect` a `BootArtifact`.
+  read-only, so the cache is the only writable home the image has — and yields
+  a `vm_manager::BootArtifact`. What `session::begin` hands
+  `vm_manager::detect` is a `vm_manager::BootMedia` closure over `realise`,
+  not the artifact itself.
 - `grant.rs` — the folder becomes a `ral_core::types::Capabilities`
   ([[design/grant|grant]]), and a `vm_manager::MachineSpec` naming the same
   folder. One grant, read twice: once as authority, once as a workspace.
 - `prompt.rs` + `data/*.md` — the office persona and the office toolbox,
   assembled through exarch's own section renderer (`exarch::prompt::render`)
-  over exarch's environment-and-grant section (`exarch::prompt::host_section`).
+  and grant rendering (`exarch::prompt::grant_summary`), over a `host_section`
+  of synod's own that tells the agent guest truths only.
 - `session.rs` — `Conversation`, one folder held open from first message to
   last. `begin` opens the grant, boots the machine, and seats exarch's agent
   on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over
@@ -92,7 +96,7 @@ ordinary `cargo test`:
   rename undoes both sides), `undo_all`, the headless run's plain-text
   rendering.
 
-## synod/app/ — the window
+## synod/src/shell/ — the window
 
 The desktop shell (Tauri v2, hand-written static frontend, no bundler, pure
 cargo) is the one process: it holds the `Conversation` in-process — no child
@@ -102,18 +106,19 @@ job; watch the assistant work, its narration streamed in; then read what
 changed and put anything back. `commands.rs` holds the folder picker, the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
-with the user's own applications; `signin.rs` runs the opening screen's
+with the user's own applications; `sink.rs` is the bridge that streams the
+conversation's narration into the window; `signin.rs` runs the opening screen's
 "Sign in with ChatGPT" button — one sign-in at a time, cancellable, its
 progress and outcome events (`sign-in-step`, `sign-in-done`) rendered beneath
 the button, and the account it wins arriving as the same `models-refreshed`
 the picker already renders through; with no account set up the sign-in is the
 screen's primary button and the folder picker waits for it; `review.rs`
-translates the workspace
-vocabulary into cards and runs the gentle-then-explicit conflict flow;
-`main.rs` runs exarch's `dispatch_pre_main` re-exec trampoline first, like
-every [[invariants/single-binary|multicall]] binary here.
+translates the workspace vocabulary into cards and runs the
+gentle-then-explicit conflict flow; `synod/src/main.rs` runs exarch's
+`dispatch_pre_main` re-exec trampoline first, like every
+[[invariants/single-binary|multicall]] binary here.
 
-The frontend is one file, `ui/index.html` — markup, style and script
+The frontend is one file, `synod/ui/index.html` — markup, style and script
 together — beside the three libraries it vendors and the nothing it fetches:
 `marked.min.js` (GFM), `purify.min.js`, and `katex/` (KaTeX 0.18.1, its
 stylesheet and its twenty `woff2` faces; the only web fonts the app ships).
@@ -138,18 +143,19 @@ wears a name above it — who spoke is said by the bubble's side and colour.
 
 ## vm-manager/ — the machine
 
-One trait each side of a boot: `Hypervisor::boot(&MachineSpec) -> Box<dyn
-Machine>`, with `MachineSpec::resolve` the one platform-independent judgment
-of a spec, called by every backend so a bad spec is refused in the same words
-everywhere. `BootArtifact::resolve` is its twin for the media, and makes every
-file absolute: the paths are opened by *another process* — `vmcompute` runs in
-`C:\Windows\System32` — so a relative path that resolved for the caller names
-nothing by the time the machine is built. `Machine::take_wires` is the one
-signature that varies — `Wires` holds an `OwnedFd` per wire on Unix and an
-`OwnedSocket` per wire on Windows — because each platform owns its own
-accepted sockets, and both are adopted by the host seam unchanged.
+One trait each side of a boot: `Hypervisor::boot(&MachineSpec) ->
+Result<Box<dyn Machine>, Error>`, with `MachineSpec::resolve` the one
+platform-independent judgment of a spec, called by every backend so a bad
+spec is refused in the same words everywhere. `BootArtifact::resolve` is its
+twin for the media, and makes every file absolute: the paths are opened by
+*another process* — `vmcompute` runs in `C:\Windows\System32` — so a relative
+path that resolved for the caller names nothing by the time the machine is
+built. `Machine::take_wires` is the one signature that varies — `Wires` holds
+an `OwnedFd` per wire on Unix and an `OwnedSocket` per wire on Windows —
+because each platform owns its own accepted sockets, and both are adopted by
+the host seam unchanged.
 
-**The crate boots only real machines.** `detect(Option<BootArtifact>)` answers
+**The crate boots only real machines.** `detect(Option<BootMedia>)` answers
 `Vz`, `Brokered`, or `Hyperv`, or refuses with a sentence for a
 non-programmer: not a platform with a hypervisor at all, no boot media, a
 macOS build unsigned for virtualization, or a Windows account the compute
@@ -281,11 +287,14 @@ read-only flag), and everything else about the machine is the service's own
   (`%ProgramData%\Synod\Machine`, machine-wide because the wrapped rootfs is
   identical for every user and `LocalSystem`'s `%LOCALAPPDATA%` is SYSTEM's
   profile).
-- `vm-manager/src/bin/synod-machine-broker.rs` — the program: the service
-  control dispatcher (`SERVICE_NAME` = `SynodMachineBroker`, report `RUNNING`
-  before serving, stop by process exit since the threads own the machines), and
-  `--console`, the same behaviour with a terminal attached, which is how a
-  maintainer sees the guest's own console say why a kernel did not come up.
+- `vm-manager/src/bin/synod-machine-broker/` — the program: `main.rs`, the
+  entry point every platform gets, since a Cargo binary target belongs to the
+  package and not to a platform; and `service.rs`, the two ways it starts on
+  Windows — the service control dispatcher (`SERVICE_NAME` =
+  `SynodMachineBroker`, report `RUNNING` before serving, stop by process exit
+  since the threads own the machines), and `--console`, the same behaviour with
+  a terminal attached, which is how a maintainer sees the guest's own console
+  say why a kernel did not come up.
 - `synod/wix/broker-service.wxs` — the installer side: a WiX fragment
   (referenced from `synod/tauri.windows.conf.json`) declaring the service into
   `INSTALLDIR`, so it shares the one `boot\` directory with the application;

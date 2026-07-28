@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 16b2d1e
-verified_at_date: 2026-07-26
-anchors: [run, run_nested, Program, register_hook, RunRequest, RunReport, RunIo, Mooring, Disposition, RunGuard, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
+verified_at_commit: 19d53bb
+verified_at_date: 2026-07-28
+anchors: [run, run_nested, Program, register_hook, RunRequest, RunReport, RunIo, Mooring, IoLoan, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
 ---
 
 # A run, end to end
@@ -82,19 +82,22 @@ module's framed scaffold:
   back, `Inherit` leaves the ambient streams to flow — then assembles the run's
   frame **in two halves, split by mutability**. What the run fixes once (the
   `surface` sink, the deferred rail with its `deferred_lease` and `worker_cap`,
-  the desk, the nursery, and the foreground scope) is a `Mooring`, an owned
-  local on `run_built`'s own Rust stack frame; the surface has no liveness
-  role, so a clone of it can never define run completion. What changes within
-  the run — byte streams, source cursor, terminal authority — is the
-  `Disposition` `build_run` seeds from the ambient session.
-- `run_framed` borrows the mooring, installs the disposition through a
-  `RunGuard`, and evaluates. The guard is RAII over that one swap: it moves the
-  new residue onto `shell.run` and restores the previous one on `Drop`, so
+  the desk, the nursery, the foreground scope, and the run's terminal
+  authority) is a `Mooring`, an owned local on `run_built`'s own Rust stack
+  frame; the surface has no liveness role, so a clone of it can never define
+  run completion. What genuinely changes within the run is taken on loan: the
+  byte streams — the `Io` `build_run` seeds from the ambient session — and the
+  two `Copy` registers the run's frame owns for its life, the root-source
+  register `session.root_file` and the dispatch register
+  `local.audit.call_site`.
+- `run_framed` borrows the mooring, installs the run's `Io` through an
+  `IoLoan`, and evaluates. The loan is RAII over that one swap: it moves the
+  new streams onto `shell.io` and restores the previous ones on `Drop`, so
   teardown survives a caught worker panic. The mooring needs no guard — it
   never moved, so an outer run's is back the instant this stack frame ends, and
-  `Mooring`'s own `Drop` empties the nursery on the unwinding path as surely as
-  on the clean one. The root context is installed, the pre-exec hook fires
-  (taking `&Mooring` beside the shell, as every in-run body does), and
+  the `NurseryGuard` beside it empties the nursery on the unwinding path as
+  surely as on the clean one. The root context is installed, the pre-exec hook
+  fires (taking `&Mooring` beside the shell, as every in-run body does), and
   `with_capabilities(caps, body)` runs the run's program under the request's
   capability ceiling — `eval_top_level(&comp, mooring, shell)` for the source
   arm, the in-frame `builtins::apply` of the resolved hook for the hook arm

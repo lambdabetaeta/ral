@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7cf93a
-generated_at_date: 2026-07-25
+generated_at_commit: 19d53bb
+generated_at_date: 2026-07-28
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -40,7 +40,7 @@ reduction primitive behind it. A host states policy; core owns resources.
 - The reduction host behind the door is crate-private, so a host cannot start an
   unframed evaluation that would foreground or capture against a stale frame.
 
-## host and driver
+## host and boot
 
 The crate splits driving a `Shell` from probing the machine it runs on.
 
@@ -49,8 +49,8 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   the builtin surface beyond the core set — at construction, so a half-dressed
   production shell is unrepresentable. The prelude is baked ahead of time
   into a schema-less `postcard` blob whose single encode site
-  (`driver::bake_prelude_to_out_dir`) and single decode site
-  (`driver::BakedPrelude`) sit beside one `cargo:rerun-if-changed` shape-file
+  (`boot::bake_prelude_to_out_dir`) and single decode site
+  (`boot::BakedPrelude`) sit beside one `cargo:rerun-if-changed` shape-file
   list, so the schema-evolution hazard is one list rather than three that must
   agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
   [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
