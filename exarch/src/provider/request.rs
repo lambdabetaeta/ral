@@ -34,13 +34,13 @@ impl Tuning {
 ///
 /// Exarch's `/model` overlay draws it as a rung ramp, synod's menu reads it
 /// as a plain list. `auto` first (the default, no option sent); then
-/// genai's keyword rungs from `none` up to `max`. `XHigh`'s keyword is
+/// genai's keyword rungs from `zero` up to `max`. `XHigh`'s keyword is
 /// `xhigh`; `Budget`/`Minimal` are intentionally omitted (the former carries
 /// a raw token count with no place on an ordered ladder, the latter is a
 /// legacy pre-gpt-5 alias for `low`).
 pub const EFFORT_LADDER: &[(&str, Option<ReasoningEffort>)] = &[
     ("auto", None),
-    ("none", Some(ReasoningEffort::None)),
+    ("zero", Some(ReasoningEffort::Zero)),
     ("low", Some(ReasoningEffort::Low)),
     ("med", Some(ReasoningEffort::Medium)),
     ("high", Some(ReasoningEffort::High)),
