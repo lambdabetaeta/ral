@@ -31,6 +31,8 @@ jobs:
   build:
     name: ${{ matrix.out }}
     runs-on: ${{ matrix.os }}
+    # Empty for every entry but one, which is the same as not being here.
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
@@ -57,9 +59,24 @@ jobs:
             pkg: ral
             bin: ral
             target: aarch64-unknown-linux-musl
+          # The one entry that is not like the others.  `allutils` pulls in
+          # `tikv-jemalloc-sys` (via ripgrep's `vendor/ripgrep-core`, on
+          # `cfg(all(target_env = "musl", target_pointer_width = "64"))`), and
+          # on a plain arm runner with `musl-tools` jemalloc 5.3.0's C build
+          # fails on aarch64-musl with
+          #   include/jemalloc/internal/atomic.h:48:24: error:
+          #     'atomic_memory_order_relaxed' undeclared
+          # because that toolchain trips a configure/atomics mismatch in
+          # jemalloc 5.3.0 (fixed upstream in 5.3.1, but tikv-jemalloc-sys is
+          # still pinned to 5.3.0).  The supported answer, and the one ripgrep
+          # and yazi use, is the official cross-rs container: it ships a
+          # known-good `aarch64-linux-musl-gcc` and points build scripts at it.
+          # No other entry needs it — without the `ripgrep` feature no
+          # jemalloc-sys is built at all.
           - out: ral-linux-arm64-allutils
             artifact: release-ral-linux-arm64-allutils
-            os: ubuntu-24.04-arm
+            os: ubuntu-latest
+            container: docker://ghcr.io/cross-rs/aarch64-unknown-linux-musl:edge
             pkg: ral
             bin: ral
             target: aarch64-unknown-linux-musl
@@ -119,15 +136,19 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # The C half of a musl build — jemalloc needs a compiler.  The
+      # containerised entry brings its own and has no sudo to do this with.
       - name: Install musl toolchain
-        if: endsWith(matrix.target, '-musl')
+        if: endsWith(matrix.target, '-musl') && !matrix.container
         run: sudo apt-get install -y musl-tools
       # bash on every runner, Windows included, so the build reads the same
       # way everywhere rather than once per host shell.
       - name: Build
         shell: bash
         run: |
-          rustup target add ${{ matrix.target }}
           cargo build --release -p ${{ matrix.pkg }} --target ${{ matrix.target }} \
             ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           mv target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.out }}
