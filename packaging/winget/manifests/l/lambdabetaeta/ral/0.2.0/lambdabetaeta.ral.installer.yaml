@@ -11,6 +11,6 @@ InstallModes:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/lambdabetaeta/ral/releases/download/v0.2.0/ral-windows.msi
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: 557FBB613F3A1EBA142C4EF817ACB8D8796B76153C69150AF83D42A0E63B389A
 ManifestType: installer
 ManifestVersion: 1.10.0
