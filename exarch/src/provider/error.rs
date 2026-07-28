@@ -230,18 +230,6 @@ fn retry_after_header(headers: &HeaderMap) -> Option<Duration> {
 }
 
 impl ProviderError {
-    /// The bare cause line, without the variant's framing — what a
-    /// [`crate::provider::CutShort::Stalled`] note quotes.  A committed stall
-    /// only ever yields the transient/other variants; the rest fall back to
-    /// the full `Display`.
-    pub(crate) fn brief(&self) -> String {
-        match self {
-            Self::Transient { cause, .. } | Self::RateLimited { cause, .. } => cause.clone(),
-            Self::Other(s) => s.clone(),
-            other => other.to_string(),
-        }
-    }
-
     /// One line, for a failure crossing an agent boundary as a flat string —
     /// the `AgentOutcome::Failed` a parent receives from a sub-agent.  The TUI's
     /// structured block is unreachable there and [`fmt::Display`] splices the raw

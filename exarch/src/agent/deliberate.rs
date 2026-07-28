@@ -225,12 +225,16 @@ impl Agent {
                         reason
                     }
                     CutShort::Stalled(cause) => {
-                        // A recovered hiccup, not a misconfiguration: a note.
-                        Self::note(
-                            format!("[Stream stalled: {}]", cause.replace('\n', " | ")),
-                            emit,
-                        );
-                        cause.clone()
+                        // Committing the streamed prefix salvages the turn; it does
+                        // not make the provider's failure any less of one, and the
+                        // cause — a refusal, a dropped connection — is the user's to
+                        // read in full.  Its own kind, not `ProviderError`: that one
+                        // ends an exchange, and this one is survived.
+                        let _ = self.log.lock().record_stall(cause);
+                        emit.emit(Kind::Stalled(cause.into()));
+                        // The block above carries the detail; what rides on as the
+                        // truncation reason is the one-line spelling.
+                        cause.summary()
                     }
                 };
                 return Err(ProviderError::Truncated { reason });

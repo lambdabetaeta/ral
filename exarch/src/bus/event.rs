@@ -104,6 +104,11 @@ pub enum Kind {
         cause: String,
     },
     ProviderError(ProviderErrorRecord),
+    /// The stream broke mid-turn, past the first chunk.  Distinct from
+    /// [`Kind::ProviderError`], which ends an exchange: the streamed prefix is
+    /// committed and the nudge re-drives the turn, so this reports a failure the
+    /// run survived.  Carries the same record, rendered under its own headline.
+    Stalled(ProviderErrorRecord),
     /// An async agent settled and its result drained into a parent's context
     /// (`agent::attend::announce`).  Stamped with the *draining* agent's id, yet
     /// the TUI lands the breadcrumb in root's scrollback whatever the nesting

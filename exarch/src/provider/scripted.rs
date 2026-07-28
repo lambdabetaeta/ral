@@ -26,8 +26,9 @@ impl Reply {
         }
     }
 
-    /// A turn whose stream broke after `text` reached the caller; the cause
-    /// mimics genai's timeout wording, which the driver surfaces verbatim.
+    /// A turn whose stream broke after `text` reached the caller.  The cause is
+    /// terminal — genai's shape for a frame it could not parse, which a retry
+    /// only re-loses — so the driver must report it rather than resend.
     pub fn stalled(text: &str) -> Self {
         Self {
             text: text.to_string(),
@@ -37,9 +38,9 @@ impl Reply {
                 reasoning: None,
                 usage: Usage::default(),
                 stop_reason: None,
-                cut_short: Some(CutShort::Stalled(
-                    "Web stream error: operation timed out".into(),
-                )),
+                cut_short: Some(CutShort::Stalled(ProviderError::Other(
+                    "Failed to parse stream data for model 'test-model'".into(),
+                ))),
             }),
         }
     }

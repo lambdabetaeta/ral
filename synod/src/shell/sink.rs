@@ -105,6 +105,13 @@ pub enum SynodEvent {
     ProviderError {
         record: ProviderErrorRecord,
     },
+    /// A stream that broke mid-turn.  Carries the same record as
+    /// [`Self::ProviderError`] and is deliberately a separate type: the window
+    /// grades it below a failure that ended the exchange, because the partial
+    /// reply already on screen stands and the turn resumes from it.
+    Stalled {
+        record: ProviderErrorRecord,
+    },
     /// A conversation failure, emitted directly by `commands.rs` — never by
     /// [`project`], since no [`Kind`] carries this fact.  A
     /// `Conversation::begin` refusal is terminal, and `synod-ended` follows;
@@ -162,6 +169,7 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         Kind::StopReason(reason) => SynodEvent::StopReason { reason },
         Kind::Error(message) => SynodEvent::Error { message },
         Kind::ProviderError(record) => SynodEvent::ProviderError { record },
+        Kind::Stalled(record) => SynodEvent::Stalled { record },
         // `fuel: 0` means synod's root never has a sub-agent, so
         // `SubagentDone` can never arrive on this bus; `Born`/`Died` name a
         // tab's lifecycle synod has no tab strip for.  `Boundary`,

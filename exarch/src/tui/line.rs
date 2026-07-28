@@ -1135,9 +1135,31 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
         return ls;
     }
     ls.push(headline(error_kind(e)));
+    ls.extend(render_field_rows(&error_fields(e), READ_W as usize));
+    ls
+}
 
-    let fields: Vec<FieldRow> = match e {
-        ProviderErrorRecord::Cancelled { .. } => unreachable!("handled above"),
+/// A stall as a block: the same weight and the same field list a fatal failure
+/// gets, under a headline that says the exchange survived it.  The `continuing`
+/// field is the whole distinction — without it the block would read as the end
+/// of the run, which is precisely what a stall is not.
+pub(super) fn stalled(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
+    let mut ls: Vec<Line<'static>> = vec![Line::default(), headline("stream stalled")];
+    let mut fields = error_fields(e);
+    fields.push(text_field(
+        "continuing",
+        "the partial reply above is kept; the turn resumes from it",
+    ));
+    ls.extend(render_field_rows(&fields, READ_W as usize));
+    ls
+}
+
+/// The ordered field list under either headline.  `Cancelled` never reaches
+/// here: [`provider_error`] returns before the call, and a cancel never commits
+/// as a stall — `Engine::complete` exempts it by name.
+fn error_fields(e: &ProviderErrorRecord) -> Vec<FieldRow> {
+    match e {
+        ProviderErrorRecord::Cancelled { .. } => unreachable!("cancellation carries no fields"),
         ProviderErrorRecord::RateLimited {
             retry_after_secs,
             cause,
@@ -1203,10 +1225,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
             ),
         ],
         ProviderErrorRecord::Other { cause } => vec![text_field("cause", prettify(cause))],
-    };
-
-    ls.extend(render_field_rows(&fields, READ_W as usize));
-    ls
+    }
 }
 
 /// The rate-limit wait as an aligned field: a human duration plus a

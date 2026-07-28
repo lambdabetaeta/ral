@@ -367,6 +367,9 @@ impl App {
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));
             }
+            Kind::Stalled(error) => {
+                self.push_chrome(id, RailShape::Error, line::stalled(&error));
+            }
             Kind::SubagentDone {
                 name,
                 outcome,

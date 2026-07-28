@@ -123,6 +123,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             ("nudge", json!({ "used": used, "max": max, "cause": cause }))
         }
         Kind::ProviderError(error) => ("provider_error", json!({ "error": error })),
+        Kind::Stalled(error) => ("stalled", json!({ "error": error })),
         Kind::SubagentDone {
             name,
             outcome,

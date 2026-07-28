@@ -2035,31 +2035,35 @@
     // `record` is defensive: the boundary carries whatever fields serde put
     // on that variant, and this renders the best available one-liner rather
     // than assuming every field is present.
-    function formatProviderError(record) {
-      if (!record || typeof record !== "object") return "[provider error]";
+    // `label` opens the note: the two events that carry a record — a failure
+    // that ended the exchange, and a stall the exchange survived — share every
+    // field and differ only in standing, so only the word differs.
+    function formatProviderError(record, label) {
+      const tag = "[" + label + ": ";
+      if (!record || typeof record !== "object") return tag + "error]";
       const kind = record.kind || "error";
       switch (kind) {
         case "cancelled":
-          return "[provider: cancelled" + (record.where ? " at " + record.where : "") + "]";
+          return tag + "cancelled" + (record.where ? " at " + record.where : "") + "]";
         case "transient":
-          return "[provider: transient" + (record.cause ? " — " + record.cause : "")
+          return tag + "transient" + (record.cause ? " — " + record.cause : "")
             + (record.attempts !== undefined ? " (attempt " + record.attempts + ")" : "") + "]";
         case "rate_limited":
-          return "[provider: rate limited"
+          return tag + "rate limited"
             + (record.retry_after_secs != null ? " — retry in " + record.retry_after_secs + "s" : "")
             + (record.cause ? " — " + record.cause : "") + "]";
         case "api":
-          return "[provider: api " + (record.status !== undefined ? record.status + " " : "")
+          return tag + "api " + (record.status !== undefined ? record.status + " " : "")
             + (record.model ? record.model + " " : "") + (record.message || "") + "]";
         case "truncated":
-          return "[provider: truncated" + (record.reason ? " — " + record.reason : "") + "]";
+          return tag + "truncated" + (record.reason ? " — " + record.reason : "") + "]";
         case "other":
-          return "[provider: " + (record.cause || "error") + "]";
+          return tag + (record.cause || "error") + "]";
         default: {
           const parts = Object.entries(record)
             .filter(([k]) => k !== "kind")
             .map(([k, v]) => k + "=" + v);
-          return "[provider: " + kind + (parts.length ? " " + parts.join(" ") : "") + "]";
+          return tag + kind + (parts.length ? " " + parts.join(" ") : "") + "]";
         }
       }
     }
@@ -2122,7 +2126,12 @@
           dialAddNote("error: " + p.message, "bad");
           break;
         case "provider_error":
-          dialAddNote(formatProviderError(p.record), providerErrorClass(p.record));
+          dialAddNote(formatProviderError(p.record, "provider"), providerErrorClass(p.record));
+          break;
+        // Always "warn", never "bad", whatever the cause: the exchange survived
+        // it and the partial reply above the note stands.
+        case "stalled":
+          dialAddNote(formatProviderError(p.record, "stalled"), "warn");
           break;
         case "failure":
           addSystemMessage(p.message);

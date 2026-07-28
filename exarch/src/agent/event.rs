@@ -203,6 +203,13 @@ pub enum SessionEvent {
     ProviderError {
         error: ProviderErrorRecord,
     },
+    /// A stream that broke after part of the turn had already reached the user.
+    /// The [`Self::AssistantMessage`] just before it holds the salvaged prefix,
+    /// and the turn resumes rather than ending — which is the whole reason this
+    /// is not a [`Self::ProviderError`].
+    Stalled {
+        error: ProviderErrorRecord,
+    },
     /// Tail bookend, written by `Agent`'s [`Drop`] impl — the one funnel every
     /// teardown path runs through.
     SessionEnded,
@@ -742,6 +749,12 @@ impl AgentLog {
     /// See the meta-events note above.
     pub fn record_provider_error(&mut self, e: &ProviderError) -> io::Result<()> {
         self.record(SessionEvent::ProviderError { error: e.into() })
+    }
+
+    /// # Errors
+    /// See the meta-events note above.
+    pub fn record_stall(&mut self, e: &ProviderError) -> io::Result<()> {
+        self.record(SessionEvent::Stalled { error: e.into() })
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────

@@ -13,6 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
+use exarch::agent::event::ProviderErrorRecord;
 use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
@@ -209,8 +210,10 @@ fn truncated_with_tool_calls_runs_and_continues() {
 /// A stream that stalls after some text has streamed must not discard the
 /// work and end the run: `deliberate` commits the streamed prefix as the
 /// assistant message and returns `Truncated` (carrying the stall cause) so
-/// the nudge continues the exchange with `continue`.  The recovery is an
-/// operational `SystemNote`, not an `Error`.
+/// the nudge continues the exchange with `continue`.  Salvaging the prefix
+/// does not soften the failure — it surfaces as `Kind::Stalled`, carrying the
+/// classified cause under the error chrome — but neither does it end the run,
+/// which is why the kind is its own and not `Kind::ProviderError`.
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
     let dir = tmp("stalled-stream");
@@ -223,7 +226,7 @@ fn stalled_stream_commits_partial_and_truncates() {
     let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("answer at length"));
     match outcome {
         Err(ProviderError::Truncated { reason }) => {
-            assert_eq!(reason, "Web stream error: operation timed out");
+            assert_eq!(reason, "Failed to parse stream data for model 'test-model'");
         }
         other => panic!("a committed stall must surface as Truncated, got {other:?}"),
     }
@@ -241,17 +244,21 @@ fn stalled_stream_commits_partial_and_truncates() {
             .any(|t| t == "partial answer before the stall"),
         "the streamed prefix must be committed, got {committed:?}",
     );
-    // A recovered stall is operational, not a misconfiguration: it surfaces
-    // as a slate note, never the red error chrome.
+    // The provider's own words reach the user whole and at error weight: a
+    // ` | `-joined slate note beside a model switch reads as housekeeping, and a
+    // stall is a refusal or a dropped connection the user has to act on.
     assert!(
-        kinds
-            .iter()
-            .any(|k| matches!(k, Kind::SystemNote(t) if t.contains("Stream stalled"))),
-        "the stall recovery must surface as a SystemNote",
+        kinds.iter().any(|k| matches!(
+            k,
+            Kind::Stalled(ProviderErrorRecord::Other { cause })
+                if cause == "Failed to parse stream data for model 'test-model'"
+        )),
+        "the stall cause must surface as Kind::Stalled",
     );
+    // Not the kind that ends an exchange: this run continues.
     assert!(
-        !kinds.iter().any(|k| matches!(k, Kind::Error(_))),
-        "a recovered stall must not surface an Error",
+        !kinds.iter().any(|k| matches!(k, Kind::ProviderError(_))),
+        "a survived stall is not a ProviderError",
     );
     assert!(session.is_ready());
     assert_admissible(&session);

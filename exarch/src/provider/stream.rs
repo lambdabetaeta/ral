@@ -21,11 +21,13 @@ pub struct StepOut {
 }
 
 /// Why an assistant turn ended before the model chose to stop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum CutShort {
     OutputCap,
     /// The stream broke after text or reasoning had already reached the caller.
-    Stalled(String),
+    /// The failure rides along whole — a stall is a provider error that arrived
+    /// too late to retry, and the user is owed the same detail either way.
+    Stalled(ProviderError),
 }
 
 /// One compaction summary response.
@@ -251,7 +253,7 @@ fn stalled_step_out(
         reasoning,
         usage: usage_from(model, &genai::chat::Usage::default(), metered, adapter),
         stop_reason: None,
-        cut_short: Some(CutShort::Stalled(cause.brief())),
+        cut_short: Some(CutShort::Stalled(cause.clone())),
     }
 }
 
@@ -309,7 +311,6 @@ mod tests {
             &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
             "test-model",
         );
-        let brief = cause.brief();
         let step = stalled_step_out(
             "test-model",
             "partial answer so far",
@@ -318,7 +319,14 @@ mod tests {
             false,
             AdapterKind::OpenAI,
         );
-        assert_eq!(step.cut_short, Some(CutShort::Stalled(brief)));
+        assert!(
+            matches!(
+                step.cut_short,
+                Some(CutShort::Stalled(ProviderError::Transient { .. }))
+            ),
+            "the classified cause must ride the stall whole, got {:?}",
+            step.cut_short
+        );
         assert!(step.tool_calls.is_empty());
         assert!(step.stop_reason.is_none());
         assert_eq!(

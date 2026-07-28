@@ -254,6 +254,9 @@ impl Sink for Headless<'_> {
             Kind::ProviderError(error) => {
                 let _ = writeln!(self.err, "provider error: {error:?}");
             }
+            Kind::Stalled(error) => {
+                let _ = writeln!(self.err, "stream stalled, turn resumes: {error:?}");
+            }
             // Every kind carrying a card projects the same way: only the card,
             // since the structural fact riding beside it is the trace's business.
             Kind::Card(card)
