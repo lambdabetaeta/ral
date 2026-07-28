@@ -1,95 +1,103 @@
 #!/bin/sh
-# Install ral.
+# Install ral on macOS or Linux.
 # Usage: curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh
-set -e
+#
+# Everything below is one function, called on the last line.  A script read
+# from a pipe is executed as it arrives, so a connection that dies mid-transfer
+# would otherwise run whatever prefix had landed — half an installer, with no
+# error.  Defined this way, a truncated download cannot call anything.
+set -eu
 
 REPO="lambdabetaeta/ral"
 TAG="latest"
 
-# ── Platform detection ────────────────────────────────────────────────────────
-
-os="$(uname -s)"
-arch="$(uname -m)"
-
-case "$os" in
-    Darwin)
-        case "$arch" in
-            arm64)  artifact="ral-macos-arm64" ;;
-            x86_64)
-                echo "No native x86_64 macOS build; using arm64 (requires Rosetta 2)."
-                artifact="ral-macos-arm64"
-                ;;
-            *) echo "Unsupported macOS architecture: $arch" >&2; exit 1 ;;
-        esac
-        ;;
-    Linux)
-        case "$arch" in
-            x86_64)  artifact="ral-linux-x86_64" ;;
-            aarch64) artifact="ral-linux-arm64"   ;;
-            *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-        esac
-        ;;
-    *)
-        echo "Unsupported OS: $os" >&2
-        exit 1
-        ;;
-esac
-
-# ── Download ──────────────────────────────────────────────────────────────────
-
-url="https://github.com/${REPO}/releases/download/${TAG}/${artifact}"
-
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-echo "Downloading ${artifact} from ${REPO} (${TAG})"
-curl -fL --progress-bar "$url"        -o "${tmp}/ral"
-curl -fL          --silent "$url.sha256" -o "${tmp}/ral.sha256"
-
-expected="$(cat "${tmp}/ral.sha256")"
-if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "${tmp}/ral" | cut -d' ' -f1)"
-elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "${tmp}/ral" | cut -d' ' -f1)"
-else
-    echo "Warning: sha256sum and shasum not found; skipping checksum verification." >&2
-    actual="$expected"
-fi
-if [ "$actual" != "$expected" ]; then
-    echo "Checksum mismatch!" >&2
-    echo "  expected: $expected" >&2
-    echo "  got:      $actual" >&2
+die() {
+    echo "install.sh: $*" >&2
     exit 1
-fi
-echo "Checksum OK."
+}
 
-# ── Install binary ────────────────────────────────────────────────────────────
+# The checksum published beside a release asset comes from the same origin as
+# the asset, so it proves the download arrived intact, not that the release is
+# ours.  That is worth having and worth not overstating: it catches truncation,
+# a corrupted proxy, and a stale CDN copy.  It is not a signature.
+verify() {
+    file="$1"
+    expected="$2"
+    if command -v sha256sum > /dev/null 2>&1; then
+        actual="$(sha256sum "$file" | cut -d ' ' -f 1)"
+    elif command -v shasum > /dev/null 2>&1; then
+        actual="$(shasum -a 256 "$file" | cut -d ' ' -f 1)"
+    elif command -v openssl > /dev/null 2>&1; then
+        actual="$(openssl dgst -sha256 "$file" | tr ' ' '\n' | tail -n 1)"
+    else
+        die "no sha256sum, shasum, or openssl: cannot verify the download"
+    fi
+    [ "$actual" = "$expected" ] || die "checksum mismatch
+  expected: $expected
+  actual:   $actual"
+}
 
-if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
-    install_dir="/usr/local/bin"
-else
-    install_dir="${HOME}/.local/bin"
-    mkdir -p "$install_dir"
-fi
+main() {
+    command -v curl > /dev/null 2>&1 || die "curl is required"
 
-install -m 755 "${tmp}/ral" "${install_dir}/ral"
-echo "Installed ${install_dir}/ral"
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "$os/$arch" in
+        Darwin/arm64)   artifact="ral-macos-arm64"   ;;
+        Darwin/x86_64)
+            echo "No native x86_64 macOS build; installing arm64 (needs Rosetta 2)."
+            artifact="ral-macos-arm64"
+            ;;
+        Linux/x86_64)   artifact="ral-linux-x86_64"  ;;
+        Linux/aarch64)  artifact="ral-linux-arm64"   ;;
+        Linux/arm64)    artifact="ral-linux-arm64"   ;;
+        *) die "unsupported platform: $os $arch" ;;
+    esac
 
-if [ "$os" = "Darwin" ]; then
-    codesign -s - "${install_dir}/ral" 2>/dev/null || true
-fi
+    url="https://github.com/${REPO}/releases/download/${TAG}/${artifact}"
 
-case ":${PATH}:" in
-    *":${install_dir}:"*) ;;
-    *)
-        echo ""
-        echo "Note: ${install_dir} is not in your PATH."
-        echo "Add to your shell profile (~/.zshrc, ~/.bashrc, etc.):"
-        echo ""
-        echo "  export PATH=\"${install_dir}:\$PATH\""
-        echo ""
-        ;;
-esac
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT INT TERM
 
-echo ""
-echo "ral is ready.  Run: ral"
+    echo "Downloading ${artifact} from ${REPO} (${TAG})"
+    curl -fL --proto '=https' --tlsv1.2 --progress-bar "$url" -o "$tmp/ral"
+    curl -fL --proto '=https' --tlsv1.2 --silent "$url.sha256" -o "$tmp/ral.sha256"
+
+    verify "$tmp/ral" "$(cut -d ' ' -f 1 < "$tmp/ral.sha256")"
+    echo "Checksum OK."
+
+    if [ -w /usr/local/bin ]; then
+        dir="/usr/local/bin"
+    else
+        dir="$HOME/.local/bin"
+        mkdir -p "$dir"
+    fi
+
+    # In through the neighbouring name, then a rename within one directory —
+    # which is atomic, and which, unlike writing through the path, does not
+    # fail with ETXTBSY when the ral being replaced is currently running: that
+    # process keeps the old inode and the next one gets the new.  The staging
+    # move may well cross a filesystem and copy; the move that matters cannot.
+    chmod 755 "$tmp/ral"
+    staged="$dir/.ral.$$"
+    mv "$tmp/ral" "$staged" || die "could not write to $dir"
+    mv "$staged" "$dir/ral" || { rm -f "$staged"; die "could not install into $dir"; }
+    echo "Installed $dir/ral"
+
+    case ":$PATH:" in
+        *":$dir:"*) ;;
+        *)
+            echo
+            echo "Note: $dir is not on your PATH."
+            echo "Add this to your shell profile (~/.zshrc, ~/.bashrc, ...):"
+            echo
+            echo "  export PATH=\"$dir:\$PATH\""
+            echo
+            ;;
+    esac
+
+    echo
+    echo "ral is ready.  Run: ral"
+}
+
+main "$@"

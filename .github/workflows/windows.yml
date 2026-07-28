@@ -14,18 +14,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   windows-check:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "stable"
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

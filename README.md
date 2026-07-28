@@ -151,18 +151,10 @@ unattended:
 msiexec /i ral-windows.msi /qn
 ```
 
-The installer carries the build with `coreutils`, `diffutils`, `grep` and
-`ripgrep` bundled, since Windows has no system coreutils to fall back on; the
-plain build is on the release page as `ral-windows.exe` for anyone who wants
-it. Nothing here is code-signed yet, so Windows will name an unknown
-publisher — the `.sha256` beside each asset is what to check against.
-
-Or via [Scoop](https://scoop.sh), installing the manifest directly (no bucket
-to add):
-
-```powershell
-scoop install https://raw.githubusercontent.com/lambdabetaeta/ral/main/packaging/scoop/ral.json
-```
+It carries `coreutils`, `diffutils`, `grep` and `ripgrep` bundled, since
+Windows has no system coreutils to fall back on. Nothing here is code-signed
+yet, so Windows will name an unknown publisher — the `.sha256` beside the asset
+is what to check against.
 
 A [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/)
 manifest lives at

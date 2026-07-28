@@ -1,166 +1,160 @@
 name: Build Binaries
-# Builds the release matrix and publishes binaries to this repo.
+# Builds the release matrix and publishes it to this repo.
 # Lives on the public lambdabetaeta/ral repo.
 #
 #   * workflow_dispatch (manual button) → rolling `latest` prerelease
-#                                          (release-latest job)
 #   * push of a `v*` tag                → versioned, non-prerelease
-#                                          (release-versioned job)
+#
+# What a release carries: a bare executable for every Linux and macOS target,
+# and on Windows an installer instead — `packaging/wix/ral.wxs` argues why a
+# copied .exe is the wrong shape there.  The Windows build still happens, but
+# it is the MSI's payload rather than an asset of its own.
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+
 jobs:
-  build-linux-x86_64:
-    runs-on: ubuntu-latest
+  # One job per artifact, from one description of it.  Every entry names its
+  # own output file, so a build renames what cargo produced *before* uploading
+  # and nothing downstream has to know how a target's binary was spelled.
+  #
+  # `artifact:` decides where the output goes: `release-*` is collected by the
+  # release job below and published, and anything else is an intermediate that
+  # some other job consumes.  The Windows ral build is the only intermediate —
+  # it exists to be wrapped.
+  #
+  # Every entry cross-compiles explicitly, including to its own host, so the
+  # binary always lands at target/<triple>/release/ and the musl targets are
+  # not a special case in the path.
+  build:
+    name: ${{ matrix.out }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ral.  The `-allutils` builds fold in a curated coreutils,
+          # diffutils, grep and ripgrep; Linux and macOS ship both, since
+          # those platforms have a system coreutils to fall back on.
+          - out: ral-linux-x86_64
+            artifact: release-ral-linux-x86_64
+            os: ubuntu-latest
+            pkg: ral
+            bin: ral
+            target: x86_64-unknown-linux-musl
+          - out: ral-linux-x86_64-allutils
+            artifact: release-ral-linux-x86_64-allutils
+            os: ubuntu-latest
+            pkg: ral
+            bin: ral
+            target: x86_64-unknown-linux-musl
+            features: coreutils,diffutils,grep,ripgrep
+          - out: ral-linux-arm64
+            artifact: release-ral-linux-arm64
+            os: ubuntu-24.04-arm
+            pkg: ral
+            bin: ral
+            target: aarch64-unknown-linux-musl
+          - out: ral-linux-arm64-allutils
+            artifact: release-ral-linux-arm64-allutils
+            os: ubuntu-24.04-arm
+            pkg: ral
+            bin: ral
+            target: aarch64-unknown-linux-musl
+            features: coreutils,diffutils,grep,ripgrep
+          - out: ral-macos-arm64
+            artifact: release-ral-macos-arm64
+            os: macos-latest
+            pkg: ral
+            bin: ral
+            target: aarch64-apple-darwin
+          - out: ral-macos-arm64-allutils
+            artifact: release-ral-macos-arm64-allutils
+            os: macos-latest
+            pkg: ral
+            bin: ral
+            target: aarch64-apple-darwin
+            features: coreutils,diffutils,grep,ripgrep
+
+          # The MSI's payload, and the only Windows ral build there is:
+          # Windows has no system coreutils to fall back on, so the bundled
+          # subset is the product rather than an add-on and a plain Windows
+          # build would only be the crippled one.
+          - out: ral.exe
+            artifact: payload-windows
+            os: windows-latest
+            pkg: ral
+            bin: ral.exe
+            target: x86_64-pc-windows-msvc
+            features: coreutils,diffutils,grep,ripgrep
+
+          # exarch, which ships as a bare executable everywhere including
+          # Windows.  No `-allutils` variant: those utilities are ral's, and
+          # exarch runs its work through ral.
+          - out: exarch-linux-x86_64
+            artifact: release-exarch-linux-x86_64
+            os: ubuntu-latest
+            pkg: exarch
+            bin: exarch
+            target: x86_64-unknown-linux-musl
+          - out: exarch-linux-arm64
+            artifact: release-exarch-linux-arm64
+            os: ubuntu-24.04-arm
+            pkg: exarch
+            bin: exarch
+            target: aarch64-unknown-linux-musl
+          - out: exarch-macos-arm64
+            artifact: release-exarch-macos-arm64
+            os: macos-latest
+            pkg: exarch
+            bin: exarch
+            target: aarch64-apple-darwin
+          - out: exarch-windows.exe
+            artifact: release-exarch-windows.exe
+            os: windows-latest
+            pkg: exarch
+            bin: exarch.exe
+            target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get install -y musl-tools
+      # bash on every runner, Windows included, so the build reads the same
+      # way everywhere rather than once per host shell.
+      - name: Build
+        shell: bash
         run: |
-          rustup target add x86_64-unknown-linux-musl
-          sudo apt-get install -y musl-tools
-      - name: Build
-        run: cargo build --release -p ral --target x86_64-unknown-linux-musl
-      - name: Upload
-        uses: actions/upload-artifact@v7
+          rustup target add ${{ matrix.target }}
+          cargo build --release -p ${{ matrix.pkg }} --target ${{ matrix.target }} \
+            ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+          mv target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.out }}
+      - uses: actions/upload-artifact@v7
         with:
-          name: ral-linux-x86_64
-          path: target/x86_64-unknown-linux-musl/release/ral
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.out }}
           if-no-files-found: error
 
-  build-linux-x86_64-allutils:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install musl toolchain
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-          sudo apt-get install -y musl-tools
-      - name: Build
-        run: cargo build --release -p ral --target x86_64-unknown-linux-musl --features coreutils,diffutils,grep,ripgrep
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-linux-x86_64-allutils
-          path: target/x86_64-unknown-linux-musl/release/ral
-          if-no-files-found: error
-
-  build-linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install musl toolchain
-        run: |
-          rustup target add aarch64-unknown-linux-musl
-          sudo apt-get install -y musl-tools
-      - name: Build
-        run: cargo build --release -p ral --target aarch64-unknown-linux-musl
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-linux-arm64
-          path: target/aarch64-unknown-linux-musl/release/ral
-          if-no-files-found: error
-
-  build-linux-arm64-allutils:
-    # The `allutils` build pulls in `tikv-jemalloc-sys` (via ripgrep's
-    # `vendor/ripgrep-core` on `cfg(all(target_env = "musl",
-    # target_pointer_width = "64"))`). On the plain `ubuntu-24.04-arm`
-    # runner with `musl-tools`, jemalloc 5.3.0's C build fails on
-    # aarch64-musl with errors like
-    #   include/jemalloc/internal/atomic.h:48:24: error:
-    #     'atomic_memory_order_relaxed' undeclared
-    # because the toolchain shipped by `musl-tools` triggers a
-    # configure/atomics mismatch in jemalloc 5.3.0 on aarch64-musl
-    # (fixed upstream in jemalloc 5.3.1, but `tikv-jemalloc-sys` is
-    # still pinned to 5.3.0). The supported workaround — used by
-    # ripgrep and yazi — is to build inside the official cross-rs
-    # container, which ships a known-good `aarch64-linux-musl-gcc` and
-    # sets `CC_aarch64_unknown_linux_musl` correctly for build scripts.
-    # The non-allutils arm64 job above doesn't need this because no
-    # jemalloc-sys is built without the `ripgrep` feature.
-    runs-on: ubuntu-latest
-    container:
-      image: docker://ghcr.io/cross-rs/aarch64-unknown-linux-musl:edge
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-      - name: Build
-        run: cargo build --release -p ral --target aarch64-unknown-linux-musl --features coreutils,diffutils,grep,ripgrep
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-linux-arm64-allutils
-          path: target/aarch64-unknown-linux-musl/release/ral
-          if-no-files-found: error
-
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --release -p ral
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-macos-arm64
-          path: target/release/ral
-          if-no-files-found: error
-
-  build-macos-allutils:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --release -p ral --features coreutils,diffutils,grep,ripgrep
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-macos-arm64-allutils
-          path: target/release/ral
-          if-no-files-found: error
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --release -p ral
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-windows
-          path: target/release/ral.exe
-          if-no-files-found: error
-
-  build-windows-allutils:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --release -p ral --features coreutils,diffutils,grep,ripgrep
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: ral-windows-allutils
-          path: target/release/ral.exe
-          if-no-files-found: error
-
-  # The Windows installer.  It packages the `-allutils` build and only that
-  # one — `packaging/wix/ral.wxs` argues why — so it hangs off that job rather
-  # than repeating the build, and it is the single artifact of this workflow
-  # produced from another job's output instead of from source.
+  # The Windows installer: ral.exe into Program Files\ral, on PATH, with an
+  # Add/Remove Programs entry and an upgrade path — the three things a copied
+  # executable cannot arrange for itself.  It wraps the build above rather
+  # than repeating it.
   #
   # WiX is a dotnet global tool, pinned rather than floating: an installer
   # rebuilt by a different toolset than the one that produced the last release
   # is not something to discover from a user's upgrade.  The UI extension is a
   # separate package and has to be added to the same toolset before `wix
   # build` will resolve `ui:WixUI`.
-  package-windows-msi:
-    needs: build-windows-allutils
+  #
+  # 6.0.2 and not the newer 7.0.0, which is not ours to take unilaterally: v7
+  # refuses to run at all until the Open Source Maintenance Fee EULA is
+  # accepted (`error WIX7015`), and agreeing to a licence on this project's
+  # behalf is a decision for whoever owns it, not for a build file.
+  msi:
+    name: ral-windows.msi
+    needs: build
     runs-on: windows-latest
     # wix is a framework-dependent app, and one of those does not cross a
     # major .NET version on its own: the day the runner image stops carrying
@@ -171,16 +165,15 @@ jobs:
     env:
       DOTNET_ROLL_FORWARD: LatestMajor
     steps:
-      - uses: actions/checkout@v5
-      - name: Download ral-windows-allutils
-        uses: actions/download-artifact@v8
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
-          name: ral-windows-allutils
+          name: payload-windows
           path: payload
       - name: Install WiX
         run: |
-          dotnet tool install --global wix --version 7.0.0
-          wix extension add -g WixToolset.UI.wixext/7.0.0
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add -g WixToolset.UI.wixext/6.0.2
       - name: Build MSI
         shell: pwsh
         run: |
@@ -197,206 +190,35 @@ jobs:
             -d Version=$version `
             -d RalExe=payload/ral.exe `
             -o ral-windows.msi
-      - name: Upload
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
-          name: ral-windows-msi
+          name: release-ral-windows.msi
           path: ral-windows.msi
           if-no-files-found: error
 
-  # exarch — built for Linux, macOS, and Windows (no
-  # `coreutils,diffutils,grep,ripgrep` features — those belong to ral).  Same
-  # toolchains as the ral matrix above.
-  build-exarch-linux-x86_64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install musl toolchain
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-          sudo apt-get install -y musl-tools
-      - name: Build
-        run: cargo build --release -p exarch --target x86_64-unknown-linux-musl
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: exarch-linux-x86_64
-          path: target/x86_64-unknown-linux-musl/release/exarch
-          if-no-files-found: error
-
-  build-exarch-linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install musl toolchain
-        run: |
-          rustup target add aarch64-unknown-linux-musl
-          sudo apt-get install -y musl-tools
-      - name: Build
-        run: cargo build --release -p exarch --target aarch64-unknown-linux-musl
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: exarch-linux-arm64
-          path: target/aarch64-unknown-linux-musl/release/exarch
-          if-no-files-found: error
-
-  build-exarch-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --release -p exarch
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: exarch-macos-arm64
-          path: target/release/exarch
-          if-no-files-found: error
-
-  build-exarch-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --release -p exarch
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: exarch-windows
-          path: target/release/exarch.exe
-          if-no-files-found: error
-
-  # Two publish jobs share the matrix.  They only differ in trigger
-  # and the resulting tag/prerelease flag; the rename + checksum block
-  # is identical, and softprops/action-gh-release uses GITHUB_TOKEN
-  # implicitly to publish to the repo that owns the workflow.  The rename
-  # block covers the binaries only: every build job uploads its artifact under
-  # cargo's name for it, whereas the MSI is built with its release name
-  # already and arrives needing nothing.
-
-  release-latest:
-    needs: &build_jobs
-      - build-linux-x86_64
-      - build-linux-x86_64-allutils
-      - build-linux-arm64
-      - build-linux-arm64-allutils
-      - build-macos
-      - build-macos-allutils
-      - build-windows
-      - build-windows-allutils
-      - package-windows-msi
-      - build-exarch-linux-x86_64
-      - build-exarch-linux-arm64
-      - build-exarch-macos
-      - build-exarch-windows
-    # Rolling `latest` prerelease: manual dispatch only.
-    # Tag pushes go to release-versioned below.
-    if: github.event_name == 'workflow_dispatch'
+  # One publish job for both triggers: they differ only in the tag they write
+  # and whether it is a prerelease.  Collecting `release-*` into one directory
+  # is what lets this job name no individual file — an artifact is published
+  # because it was built to be, not because it was also listed here.
+  release:
+    needs: [build, msi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
-          path: artifacts
-
-      - name: Rename binaries
-        run: |
-          mv artifacts/ral-linux-x86_64/ral             artifacts/ral-linux-x86_64/ral-linux-x86_64
-          mv artifacts/ral-linux-x86_64-allutils/ral    artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils
-          mv artifacts/ral-linux-arm64/ral              artifacts/ral-linux-arm64/ral-linux-arm64
-          mv artifacts/ral-linux-arm64-allutils/ral     artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils
-          mv artifacts/ral-macos-arm64/ral              artifacts/ral-macos-arm64/ral-macos-arm64
-          mv artifacts/ral-macos-arm64-allutils/ral     artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils
-          mv artifacts/ral-windows/ral.exe              artifacts/ral-windows/ral-windows.exe
-          mv artifacts/ral-windows-allutils/ral.exe     artifacts/ral-windows-allutils/ral-windows-allutils.exe
-          mv artifacts/exarch-linux-x86_64/exarch       artifacts/exarch-linux-x86_64/exarch-linux-x86_64
-          mv artifacts/exarch-linux-arm64/exarch        artifacts/exarch-linux-arm64/exarch-linux-arm64
-          mv artifacts/exarch-macos-arm64/exarch        artifacts/exarch-macos-arm64/exarch-macos-arm64
-          mv artifacts/exarch-windows/exarch.exe        artifacts/exarch-windows/exarch-windows.exe
-
+          pattern: release-*
+          merge-multiple: true
+          path: release
       - name: Generate checksums
         run: |
-          find artifacts -type f | while read -r f; do
-            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
-          done
-
-      - name: Publish 'latest' prerelease
-        uses: softprops/action-gh-release@v3
+          cd release
+          for f in *; do sha256sum "$f" | cut -d ' ' -f 1 > "$f.sha256"; done
+      - uses: softprops/action-gh-release@v3
         with:
-          tag_name: latest
-          name: latest
-          prerelease: true
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          prerelease: ${{ github.ref_type != 'tag' }}
           fail_on_unmatched_files: true
-          files: &release_files |
-            artifacts/ral-linux-x86_64/ral-linux-x86_64
-            artifacts/ral-linux-x86_64/ral-linux-x86_64.sha256
-            artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils
-            artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils.sha256
-            artifacts/ral-linux-arm64/ral-linux-arm64
-            artifacts/ral-linux-arm64/ral-linux-arm64.sha256
-            artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils
-            artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils.sha256
-            artifacts/ral-macos-arm64/ral-macos-arm64
-            artifacts/ral-macos-arm64/ral-macos-arm64.sha256
-            artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils
-            artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils.sha256
-            artifacts/ral-windows/ral-windows.exe
-            artifacts/ral-windows/ral-windows.exe.sha256
-            artifacts/ral-windows-allutils/ral-windows-allutils.exe
-            artifacts/ral-windows-allutils/ral-windows-allutils.exe.sha256
-            artifacts/ral-windows-msi/ral-windows.msi
-            artifacts/ral-windows-msi/ral-windows.msi.sha256
-            artifacts/exarch-linux-x86_64/exarch-linux-x86_64
-            artifacts/exarch-linux-x86_64/exarch-linux-x86_64.sha256
-            artifacts/exarch-linux-arm64/exarch-linux-arm64
-            artifacts/exarch-linux-arm64/exarch-linux-arm64.sha256
-            artifacts/exarch-macos-arm64/exarch-macos-arm64
-            artifacts/exarch-macos-arm64/exarch-macos-arm64.sha256
-            artifacts/exarch-windows/exarch-windows.exe
-            artifacts/exarch-windows/exarch-windows.exe.sha256
-
-  release-versioned:
-    needs: *build_jobs
-    # Versioned, non-prerelease cut on `v*` tag push.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-
-      - name: Rename binaries
-        run: |
-          mv artifacts/ral-linux-x86_64/ral             artifacts/ral-linux-x86_64/ral-linux-x86_64
-          mv artifacts/ral-linux-x86_64-allutils/ral    artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils
-          mv artifacts/ral-linux-arm64/ral              artifacts/ral-linux-arm64/ral-linux-arm64
-          mv artifacts/ral-linux-arm64-allutils/ral     artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils
-          mv artifacts/ral-macos-arm64/ral              artifacts/ral-macos-arm64/ral-macos-arm64
-          mv artifacts/ral-macos-arm64-allutils/ral     artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils
-          mv artifacts/ral-windows/ral.exe              artifacts/ral-windows/ral-windows.exe
-          mv artifacts/ral-windows-allutils/ral.exe     artifacts/ral-windows-allutils/ral-windows-allutils.exe
-          mv artifacts/exarch-linux-x86_64/exarch       artifacts/exarch-linux-x86_64/exarch-linux-x86_64
-          mv artifacts/exarch-linux-arm64/exarch        artifacts/exarch-linux-arm64/exarch-linux-arm64
-          mv artifacts/exarch-macos-arm64/exarch        artifacts/exarch-macos-arm64/exarch-macos-arm64
-          mv artifacts/exarch-windows/exarch.exe        artifacts/exarch-windows/exarch-windows.exe
-
-      - name: Generate checksums
-        run: |
-          find artifacts -type f | while read -r f; do
-            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
-          done
-
-      - name: Publish versioned release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          prerelease: false
-          fail_on_unmatched_files: true
-          files: *release_files
+          files: release/*

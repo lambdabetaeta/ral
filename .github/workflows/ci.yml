@@ -12,21 +12,18 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      # An explicit `toolchain:` input overrides rust-toolchain.toml, so the
-      # value here is authoritative; keep it in step with the channel in
-      # rust-toolchain.toml (both track `stable`).
+      # The ref names the channel and overrides rust-toolchain.toml; keep it in
+      # step with what that file tracks.
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -52,7 +49,7 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v9
 
       # Renders the whole site.  Without tree-sitter installed the examples
       # page falls back to the regex highlighter, which keeps this check cheap
