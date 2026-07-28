@@ -135,8 +135,33 @@ pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     if shell.has_active_capabilities() {
         // A loader hook makes an admitted binary run someone else's code, so
         // the grant's judgment about which program may run would mean nothing.
+        // On macOS the stakes are higher still: a sandboxed external is a
+        // re-exec of ral itself, and dyld honours these before `main` runs, so
+        // an injected dylib would execute before the child enters Seatbelt.
         for var in &["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
             cmd.env_remove(var);
         }
+        for var in dyld_vars(shell) {
+            cmd.env_remove(var);
+        }
     }
+}
+
+/// Every `DYLD_`-prefixed name the child would otherwise see, from this
+/// process's environment and from the shell's own overrides.  The whole prefix
+/// rather than dyld's current list: the loader owns that namespace, and a name
+/// added by a future dyld must not become a hole.
+fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
+    const PREFIX: &str = "DYLD_";
+    let inherited = std::env::vars_os()
+        .map(|(k, _)| k)
+        .filter(|k| k.to_string_lossy().starts_with(PREFIX));
+    let overridden = shell
+        .mobile
+        .context
+        .env_overrides()
+        .iter()
+        .filter(|(k, _)| k.starts_with(PREFIX))
+        .map(|(k, _)| std::ffi::OsString::from(k));
+    inherited.chain(overridden).collect()
 }
