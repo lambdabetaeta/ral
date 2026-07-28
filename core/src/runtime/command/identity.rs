@@ -49,9 +49,9 @@ impl CommandIdentity {
             let host_path = std::env::var("PATH").ok();
             let effective_path = ctx.env_overrides().get_or_host("PATH");
             if host_path != effective_path {
-                let baseline = host_path
-                    .as_deref()
-                    .and_then(|path| crate::path::resolve_in_path(&self.shown, path));
+                let baseline = host_path.as_deref().and_then(|path| {
+                    crate::path::resolve_in_path(&self.shown, path, ctx.dir.as_deref())
+                });
                 if baseline.as_deref() != Some(self.resolved.as_str())
                     && self.resolved != self.shown
                 {
@@ -128,7 +128,7 @@ fn walk_path(name: &CommandName, ctx: &Context) -> String {
     let rendered = render(name, ctx);
     if let CommandName::Bare(_) = name {
         let path = ctx.env_overrides().get_or_host("PATH").unwrap_or_default();
-        if let Some(resolved) = crate::path::resolve_in_path(&rendered, &path) {
+        if let Some(resolved) = crate::path::resolve_in_path(&rendered, &path, ctx.dir.as_deref()) {
             return resolved;
         }
     }

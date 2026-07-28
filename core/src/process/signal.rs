@@ -139,6 +139,11 @@ impl ChildHandle {
                 ChildRepr::RawWindows(child) => child.wait_handling_stop(),
             }
         }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let ChildRepr::Std(child) = &mut self.0;
+            wait_handling_stop(child, pgid, park_on_stop)
+        }
     }
 
     /// Non-blocking peer of [`Self::wait_handling_stop`]; `Ok(None)` when
@@ -162,6 +167,11 @@ impl ChildHandle {
                 ChildRepr::Std(child) => windows::try_wait_handling_stop(child, pgid, park_on_stop),
                 ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
             }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let ChildRepr::Std(child) = &mut self.0;
+            try_wait_handling_stop(child, pgid, park_on_stop)
         }
     }
 
@@ -259,13 +269,26 @@ where
     spawn_with_pgid(cmd, pgid)
 }
 
+// Without job control there is no stop to park on and no group to signal, so
+// the bare `Child` calls are the whole of the contract here.  They stay private,
+// as their `unix` and `windows` peers are: `ChildHandle` is the only caller.
+
 #[cfg(not(any(unix, windows)))]
-pub fn wait_handling_stop(
+fn wait_handling_stop(
     child: &mut std::process::Child,
     _pgid: Option<Pgid>,
     _park_on_stop: bool,
 ) -> std::io::Result<WaitOutcome> {
     child.wait().map(WaitOutcome::from_exit_status)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn try_wait_handling_stop(
+    child: &mut std::process::Child,
+    _pgid: Option<Pgid>,
+    _park_on_stop: bool,
+) -> std::io::Result<Option<WaitOutcome>> {
+    Ok(child.try_wait()?.map(WaitOutcome::from_exit_status))
 }
 
 #[cfg(not(any(unix, windows)))]

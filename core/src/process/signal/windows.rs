@@ -82,10 +82,10 @@ mod win_groups {
         CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
     };
     use windows_sys::Win32::System::JobObjects::{
-        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
-        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectAssociateCompletionPortInformation, JobObjectBasicLimitInformation,
-        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+        CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectAssociateCompletionPortInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
     use windows_sys::Win32::System::Threading::{
@@ -120,8 +120,8 @@ mod win_groups {
     /// live at once, so the linear walk costs nothing.
     pub(super) static GROUPS: Mutex<Vec<(i32, GroupState)>> = Mutex::new(Vec::new());
 
-    /// `size_of::<T>()` as the `u32` a `SetInformationJobObject` length argument
-    /// wants — written once rather than as four bare `as` casts at the calls.
+    /// `size_of::<T>()` as the `u32` a job-information length argument wants —
+    /// written once rather than as a bare `as` cast at each call.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "called only for Win32 information-class structs — fixed layouts of a few dozen bytes, so size_of is a compile-time constant nowhere near u32::MAX"
@@ -573,17 +573,31 @@ mod win_groups {
 
     /// The shared kernel call behind both the per-child sandbox job
     /// (`sandbox::windows::apply_job_limits`) and the pipeline-group limit.
+    ///
+    /// Read-modify-write, because one `LimitFlags` word carries every limit the
+    /// job has: assigning it would strip `KILL_ON_JOB_CLOSE` off a group's job
+    /// and leave [`release`] unable to kill the members it still owns.
     pub(crate) fn set_active_process_limit(job: HANDLE, limit: u32) -> bool {
         unsafe {
-            let mut info: JOBOBJECT_BASIC_LIMIT_INFORMATION = std::mem::zeroed();
-            info.LimitFlags =
-                windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-            info.ActiveProcessLimit = limit;
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            let mut returned: u32 = 0;
+            if QueryInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw mut info).cast(),
+                cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
+                &raw mut returned,
+            ) == 0
+            {
+                return false;
+            }
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            info.BasicLimitInformation.ActiveProcessLimit = limit;
             SetInformationJobObject(
                 job,
-                JobObjectBasicLimitInformation,
+                JobObjectExtendedLimitInformation,
                 (&raw const info).cast(),
-                cb::<JOBOBJECT_BASIC_LIMIT_INFORMATION>(),
+                cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
             ) != 0
         }
     }
@@ -613,6 +627,43 @@ mod win_groups {
 
     pub(crate) fn wait_job_blocking(leader: i32) -> ReapStatus {
         wait_job(leader, INFINITE)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A grant's process cap lands on a job already armed by
+        /// [`install_kill_on_close`], and [`release`] kills surviving members by
+        /// closing the last handle to it — so the cap must leave that arm alone.
+        #[test]
+        fn process_cap_preserves_kill_on_close() {
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
+            assert!(!job.is_null());
+            install_kill_on_close(job);
+            assert!(set_active_process_limit(job, 7));
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            let mut returned: u32 = 0;
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    (&raw mut info).cast(),
+                    cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
+                    &raw mut returned,
+                )
+            };
+            unsafe {
+                CloseHandle(job);
+            }
+            assert_ne!(queried, 0);
+
+            let flags = info.BasicLimitInformation.LimitFlags;
+            assert_ne!(flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
+            assert_ne!(flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS, 0);
+            assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 7);
+        }
     }
 }
 

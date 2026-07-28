@@ -8,15 +8,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// First executable named `name` on the colon-separated `path`; `None`
-/// when `name` bears a separator, which is a path, not `PATH`'s business.
-/// Supplies no `cwd`, so a relative `PATH` entry resolves against the
-/// process cwd — callers holding a shell want [`locate`].
-pub fn resolve_in_path(name: &str, path: &str) -> Option<String> {
+/// First executable named `name` on the colon-separated `path`, with
+/// relative `PATH` entries anchored to `cwd`; `None` when `name` bears a
+/// separator, which is a path, not `PATH`'s business.
+pub fn resolve_in_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<String> {
     if name_has_separator(name) {
         return None;
     }
-    locate(name, Some(path), None).map(|p| p.to_string_lossy().into_owned())
+    locate(name, Some(path), cwd).map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Resolve a command head to its executable on disk: a separator-bearing
@@ -196,6 +195,21 @@ mod tests {
         // prompt stops reflecting the shell's notion of "here".
         let names = commands_on_path("./bin", Some(tmp.path()));
         assert!(names.contains(&"runme".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn resolve_in_path_anchors_relative_entries_to_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        touch(&bin.join("runme"), 0o755);
+        // Against the supplied cwd, not the process cwd: dispatch and the
+        // exec gate must land on the binary the shell's own `./bin` names.
+        let hit = resolve_in_path("runme", "./bin", Some(tmp.path())).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&hit).unwrap(),
+            std::fs::canonicalize(bin.join("runme")).unwrap(),
+        );
     }
 
     #[test]

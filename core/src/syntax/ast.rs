@@ -246,6 +246,8 @@ pub enum Expr {
     /// `!atom` inside `$[…]`; the span covers only the operand.
     Force(Spanned<Box<Ast>>),
     BinOp(Box<Self>, BinaryOp, Box<Self>),
+    /// `-e`, strict.
+    Negate(Box<Self>),
     /// `not e`, strict.
     Not(Box<Self>),
     /// `a && b` — short-circuiting, so the RHS runs only when the LHS is true.

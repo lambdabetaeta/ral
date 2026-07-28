@@ -1344,16 +1344,7 @@ impl Parser {
             Token::Word(Word::Plain(s)) if s == "-" => {
                 self.advance();
                 let inner = self.parse_expr_atom()?;
-                // Folded into the literal where there is one: the `0 - x`
-                // fallback unifies the two operand types, so it would reject
-                // `-1.5` for pairing an `Int` zero with a `Float`.
-                Ok(match inner {
-                    Expr::Integer(n) => Expr::Integer(-n),
-                    Expr::Number(n) => Expr::Number(-n),
-                    other => {
-                        Expr::BinOp(Box::new(Expr::Integer(0)), BinaryOp::Sub, Box::new(other))
-                    }
-                })
+                Ok(Expr::Negate(Box::new(inner)))
             }
             Token::Word(Word::Plain(s)) if s == "not" => {
                 self.advance();

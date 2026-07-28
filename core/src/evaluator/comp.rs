@@ -56,6 +56,7 @@ pub(crate) fn eval_comp(
         CompKind::Interpolation(parts) => eval_interpolation(parts, shell),
 
         CompKind::Binary(op, lhs, rhs) => expr::eval_binary(*op, lhs, rhs, shell).map_err(Into::into),
+        CompKind::Negate(val) => expr::eval_negate(val, shell).map_err(Into::into),
         CompKind::Not(val) => expr::eval_not(val, shell).map_err(Into::into),
 
         CompKind::Index { target, keys, .. } => eval_index(target, keys, shell),

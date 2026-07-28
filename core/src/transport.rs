@@ -611,9 +611,11 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 /// Out-of-band control sender.
 #[derive(Clone)]
 pub struct ControlSender {
-    /// `Some` writes `Control` frames to a `WireChannel`; `None` acts on the
-    /// in-process foreground scope instead.
-    wire: Option<Arc<Mutex<crate::wire::WireChannel>>>,
+    /// `Some` writes `Control` frames to a `WireChannel`, carrying that
+    /// transport's death flag so a failed control write declares the death a
+    /// failed data write declares; `None` acts on the in-process foreground
+    /// scope instead.
+    wire: Option<(Arc<Mutex<crate::wire::WireChannel>>, Arc<AtomicBool>)>,
     /// Shared with the transport's own event-correlation bookkeeping, so
     /// `cancel_current` names a real dispatch rather than a sentinel.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
@@ -629,10 +631,11 @@ impl ControlSender {
 
     pub(crate) fn new_wire(
         ch: Arc<Mutex<crate::wire::WireChannel>>,
+        death: Arc<AtomicBool>,
         current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
-            wire: Some(ch),
+            wire: Some((ch, death)),
             current_dispatch,
         }
     }
@@ -663,11 +666,15 @@ impl ControlSender {
         reason = "the wire arm moves `ctrl` into the `Frame` it writes, and `Control` is not `Copy`; only the identity fallback below merely reads it"
     )]
     pub fn send(&self, ctrl: Control) {
-        if let Some(ch) = &self.wire {
-            let frame = Frame::Control(ctrl);
-            // A failed write is swallowed: this sender holds no death flag,
-            // and the reader's EOF declares the same death anyway.
-            let _ = ch.lock().unwrap().write_frame(&frame);
+        if let Some((ch, death)) = &self.wire {
+            // A control frame that cannot be written is as fatal as a dispatch
+            // that cannot: the peer is gone, and waiting on the reader's
+            // eventual EOF to say so leaves a cancel silently lost meanwhile.
+            let outcome = ch.lock().unwrap().write_frame(&Frame::Control(ctrl));
+            if let Err(e) = outcome {
+                death.store(true, Ordering::SeqCst);
+                eprintln!("wire: engine process died ({e})");
+            }
             return;
         }
         match ctrl {
@@ -1279,7 +1286,8 @@ impl WireTransport {
 
         let write_tx = Arc::new(Mutex::new(writer));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let control = ControlSender::new_wire(write_tx.clone(), current_dispatch.clone());
+        let control =
+            ControlSender::new_wire(write_tx.clone(), death.clone(), current_dispatch.clone());
 
         Ok(Self {
             events_recv: EventReceiver::new(event_rx),
@@ -1323,7 +1331,8 @@ impl WireTransport {
 
         let write_tx = Arc::new(Mutex::new(writer));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let control = ControlSender::new_wire(write_tx.clone(), current_dispatch.clone());
+        let control =
+            ControlSender::new_wire(write_tx.clone(), death.clone(), current_dispatch.clone());
 
         Ok(Self {
             events_recv: EventReceiver::new(event_rx),
@@ -2126,5 +2135,26 @@ mod wire_liveness_tests {
             transport.dead(),
             "a hangup is death under every teardown path"
         );
+    }
+
+    /// The control path holds the same law as the data path: a `Cancel` the
+    /// wire will not take is death now, not once the reader gets round to an
+    /// EOF.
+    #[test]
+    fn a_failed_control_write_marks_the_transport_dead() {
+        let (front, back) = UnixStream::pair().unwrap();
+        // Only the front's write half is shut, so a write fails while `back`,
+        // held open and unattached, leaves the reader nothing to read and the
+        // ticker unspawned: the control write is the sole possible cause.
+        front.shutdown(std::net::Shutdown::Write).unwrap();
+        let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
+
+        transport.control().send(Control::Cancel(DispatchId(1)));
+
+        assert!(
+            transport.dead(),
+            "a cancel that cannot be written is death, not silence"
+        );
+        drop(back);
     }
 }

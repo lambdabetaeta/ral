@@ -1,5 +1,6 @@
 //! Arithmetic, comparison, negation, and subscripting: the leaves `comp.rs`
-//! dispatches `CompKind::Binary`, `CompKind::Not`, and `CompKind::Index` to.
+//! dispatches `CompKind::Binary`, `CompKind::Negate`, `CompKind::Not`, and
+//! `CompKind::Index` to.
 
 use super::val::eval_val;
 use crate::ir::Val;
@@ -80,6 +81,20 @@ pub(crate) fn eval_not(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
             "use a comparison or explicit Bool",
             1,
         )),
+    }
+}
+
+/// `-v` on a number, `Int` overflow-checked as [`arithmetic`] is.
+pub(crate) fn eval_negate(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
+    let v = eval_val(val, shell)?;
+    require_numeric(&v, shell)?;
+    match v {
+        Value::Int(n) => n
+            .checked_neg()
+            .map(Value::Int)
+            .ok_or_else(|| shell.err(format!("integer overflow: -{n} exceeds i64 range"), 1)),
+        // Cleared `require_numeric` and is not an `Int`, so `as_float` holds.
+        other => Ok(Value::Float(-other.as_float().unwrap())),
     }
 }
 

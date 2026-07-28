@@ -216,7 +216,9 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_val(a, out);
             walk_val(b, out);
         }
-        CompKind::Force(v) | CompKind::Return(v) | CompKind::Not(v) => walk_val(v, out),
+        CompKind::Force(v) | CompKind::Return(v) | CompKind::Negate(v) | CompKind::Not(v) => {
+            walk_val(v, out)
+        }
         CompKind::Index { target, keys } => {
             walk_val(target, out);
             for key in keys {
@@ -411,6 +413,10 @@ pub enum CompKind {
     },
     /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
     Binary(BinaryOp, Val, Val),
+    /// `-v` on a number.  Its own variant rather than a subtraction from a
+    /// literal zero, which would have to pick that zero's type and so force
+    /// the operand to match it — negating a `Float` would not typecheck.
+    Negate(Val),
     /// `not v` on a `Bool`.  Its own variant so the IR cannot spell a
     /// two-operand `not` or a one-operand `Add`; evaluator and typechecker
     /// dispatch on the tag rather than a runtime arity guard.

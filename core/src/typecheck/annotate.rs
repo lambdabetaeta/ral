@@ -139,6 +139,7 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
         CompKind::Binary(op, lhs, rhs) => {
             CompKind::Binary(*op, annotate_val(lhs, ctx), annotate_val(rhs, ctx))
         }
+        CompKind::Negate(value) => CompKind::Negate(annotate_val(value, ctx)),
         CompKind::Not(value) => CompKind::Not(annotate_val(value, ctx)),
         CompKind::Index { target, keys } => CompKind::Index {
             target: annotate_val(target, ctx),

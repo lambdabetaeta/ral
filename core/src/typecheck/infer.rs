@@ -1603,6 +1603,9 @@ impl Inferencer<'_> {
             CompKind::Pipeline { stages, .. } => self.infer_pipeline(stages),
             CompKind::Chain(parts) => self.infer_chain(parts),
             CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),
+            // The operand's own type, unconstrained — `Arith` below leaves
+            // numeric-ness to the evaluator too, so `-` agrees with `-`.
+            CompKind::Negate(val) => CompTy::pure(self.infer_val(val)),
             CompKind::Not(val) => CompTy::pure(self.infer_not(val)),
             CompKind::Interpolation(parts) => {
                 for value in parts {

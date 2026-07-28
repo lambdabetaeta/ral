@@ -144,6 +144,9 @@ fn drive_picker(
                         ) {
                             Ok(id) => return Some((id, query, tuning, None)),
                             Err(e) => {
+                                // The dialogue's own failure, not an action on an
+                                // agent, so it lands on root and not the tab a
+                                // switch addresses.
                                 let root = tui.app.tabs.root();
                                 tui.app.push_error(root, &e);
                             }
@@ -171,7 +174,8 @@ fn apply_model_switch(
     let store = &*ctx.store;
     let info = ctx.info;
     let emit = ctx.emit;
-    // Errors land where the user acted, which is also the tab being switched.
+    // Every failure below answers one gesture on this tab, so it lands here —
+    // the persist too, whose file is project-wide but whose message is not.
     let focused = tui.app.tabs.focused();
     let Some(cred) = store.get(provider_id).cloned() else {
         tui.app.push_error(

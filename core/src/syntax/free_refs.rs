@@ -223,7 +223,7 @@ impl Expr {
                 l.collect_free_refs(candidates, scopes, out);
                 r.collect_free_refs(candidates, scopes, out);
             }
-            Self::Not(inner) => {
+            Self::Negate(inner) | Self::Not(inner) => {
                 inner.collect_free_refs(candidates, scopes, out);
             }
         }

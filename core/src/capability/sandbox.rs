@@ -123,7 +123,7 @@ fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> Exec
         }
     }
     ExecProjection::Restricted {
-        allow_paths: admitted_literal_paths(grants, &literal_names, path_env),
+        allow_paths: admitted_literal_paths(grants, &literal_names, resolver, path_env),
         allow_dirs: surface_strings(subpath_allow.unwrap_or_default()),
         deny_paths,
         deny_dirs: surface_strings(subpath_deny),
@@ -134,11 +134,11 @@ fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> Exec
 /// Resolve one literal exec key to the absolute path the OS gate names.
 /// Bare names walk the grant's `PATH` override alone — no host fallback,
 /// so an unresolvable name fails closed (reduced-authority-witness B6).
-fn resolve_literal(name: &str, path_env: &str) -> Option<String> {
+fn resolve_literal(name: &str, resolver: &Resolver, path_env: &str) -> Option<String> {
     if crate::path::is_absolute(name) {
         Some(name.to_string())
     } else {
-        crate::path::resolve_in_path(name, path_env)
+        crate::path::resolve_in_path(name, path_env, resolver.cwd)
     }
 }
 
@@ -154,11 +154,12 @@ fn resolve_literal(name: &str, path_env: &str) -> Option<String> {
 fn admitted_literal_paths(
     grants: &GrantStack,
     names: &BTreeSet<String>,
+    resolver: &Resolver,
     path_env: &str,
 ) -> Vec<String> {
     let mut allowed = BTreeSet::new();
     for name in names {
-        let Some(resolved) = resolve_literal(name, path_env) else {
+        let Some(resolved) = resolve_literal(name, resolver, path_env) else {
             crate::dbg_trace!(
                 "sandbox-exec",
                 "exec '{}' not on PATH at projection time; OS gate cannot pin it",

@@ -2375,6 +2375,21 @@ fn arith_negate_variable() {
     assert_eq!(must_succeed("let xv = 10\nreturn $[-$xv]"), Value::Int(-10));
 }
 
+/// Negation takes its operand's type rather than imposing one, so a `Float`
+/// behind a variable negates as readily as the `-1.5` literal does.
+#[test]
+fn arith_negate_float_variable() {
+    assert_eq!(
+        must_succeed("let xv = 1.5\nreturn $[-$xv]"),
+        Value::Float(-1.5)
+    );
+}
+
+#[test]
+fn arith_negate_rejects_non_numeric() {
+    must_fail("let xv = hello\nreturn $[-$xv]");
+}
+
 // ── quoted map keys ─────────────────────────────────────────────────────
 
 #[test]

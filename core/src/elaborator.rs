@@ -844,6 +844,10 @@ impl Elaborator {
                 let rv = self.expr_to_val(r, binds);
                 comp!(self, CompKind::Binary(*op, lv, rv))
             }
+            Expr::Negate(inner) => {
+                let v = self.expr_to_val(inner, binds);
+                comp!(self, CompKind::Negate(v))
+            }
             Expr::Not(inner) => {
                 let v = self.expr_to_val(inner, binds);
                 comp!(self, CompKind::Not(v))
