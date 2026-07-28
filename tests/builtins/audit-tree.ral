@@ -33,7 +33,7 @@ echo !{length $grant_node[children]}
 echo $grant_node[children][0][cmd]
 
 # within nests its body's audit events as children
-let within_report = audit { within [dir: '/tmp'] { echo 'inside' } }
+let within_report = audit { within [dir: $CWD] { echo 'inside' } }
 let within_node = $within_report[children][0]
 echo $within_node[cmd]
 echo !{length $within_node[children]}

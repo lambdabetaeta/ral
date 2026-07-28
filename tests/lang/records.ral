@@ -38,7 +38,7 @@ echo $extended[x]
 echo $extended[z]
 
 # Record used as argument to row-polymorphic function
-let get_x = { |r| return $rec[x] }
+let get_x = { |r| return $r[x] }
 echo !{get_x [x: 99, y: 0]}
 echo !{get_x [label: a, x: 42]}
 
