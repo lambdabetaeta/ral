@@ -192,7 +192,11 @@ the home for cross-cutting concept pages too (e.g. [[design/grant|grant]],
 [[design/exarch-architecture|exarch-architecture]]); there is no separate
 `concepts/` folder.
 
-**Lint.** Periodically health-check:
+**Lint.** Periodically health-check. The mechanical checks below — map drift,
+missing `anchors`, `related/` staleness, and the `docs/SPEC.md` stamp — are what
+`./scripts/wiki-drift.sh` performs, at no token cost; it prints one
+tab-separated line per finding, so its output serves directly as the work-list.
+Run it first and reserve judgement for what it cannot decide.
 - *Map drift (mechanical):* for each `map/` page, run
   `git log <generated_at_commit>..HEAD -- <covers_paths>`. Non-empty output means
   the page may be stale; re-ingest it. Never silently trust an unstamped or

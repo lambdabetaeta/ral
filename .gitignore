@@ -3,6 +3,11 @@ target-host/
 .build-cache/
 .worktrees/
 
+# Private dev-notes checkout (lambdabetaeta/ral-dev). Kept alongside the source
+# for convenience; deliberately not part of the public repository, so it is
+# ignored outright rather than declared as a submodule no clone could fetch.
+dev/
+
 # qmd project-local search index (generated; rebuild with scripts/wiki-index.sh)
 .qmd/
 

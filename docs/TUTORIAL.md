@@ -362,8 +362,7 @@ is no `break`.  For early termination, reach instead for a combinator:
 `take-while` / `drop-while` for predicates, `first` for the first
 matching element (which fails if none matches), or a `fold` that
 threads the decision through its accumulator.  Use `explain NAME` for any
-function'\''s exact signature.
-type.
+function's exact signature.
 
 ## 11  Pipelines and codecs
 
@@ -720,13 +719,13 @@ and Ctrl-Z to park a foreground job.  `quit` (or Ctrl-D) exits.
 
 `alias NAME { |args| … }` installs an invocable alias;
 `unalias NAME` removes it.  `help` lists all commands, `explain NAME`
-shows a function'\''s signature and source location.
-types.
+shows a function's signature and source location.
 
 Startup configuration lives in `~/.ralrc` (or
 `$XDG_CONFIG_HOME/ral/rc`) — a ral script returning a map with optional
 keys `env`, `prompt`, `aliases`, `bindings`, `edit_mode`, `plugins`,
-and `theme`.  See the specification for the RC and plugin schema.
+and `theme`.  `docs/rc.example` is a worked file to copy from; see the
+specification for the RC and plugin schema.
 
 ## 21  A complete example
 

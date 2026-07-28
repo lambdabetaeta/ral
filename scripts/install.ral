@@ -1,6 +1,6 @@
 #!/usr/bin/env ral
 
-# build-install.ral — build and install ral from source.
+# install.ral — build and install ral from source.
 # May be run from anywhere; locates the repo root via $SCRIPT.
 
 let here      = dirname $SCRIPT
