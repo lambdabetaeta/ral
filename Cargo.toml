@@ -14,6 +14,16 @@ members = [
     "vendor/ripgrep-core",
 ]
 
+# One version for the whole tree.  ral, exarch and synod ship from a single
+# `v*` tag into a single release, and every internal dependency is a path dep,
+# so a per-crate number would carry no compatibility information — only drift.
+# Members inherit with `version.workspace = true`.  The exception is
+# vendor/ripgrep-core, whose version records upstream provenance instead.
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
 # Shared third-party versions.  Member crates point at these with
 # `dep = { workspace = true }` so a version bump happens in one place.
 # `windows-sys` carries only its version here — each crate selects its own
