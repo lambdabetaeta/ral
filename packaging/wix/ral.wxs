@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ral.wxs — the Windows installer for ral.
+
+  What this package installs is `ral-windows-allutils.exe`, under the name
+  `ral.exe`, and nothing else.  The flavour is not a choice the installer
+  offers, for the same reason `packaging/scoop/ral.json` and the winget
+  manifest do not offer it: Windows has no system coreutils to fall back on,
+  so the bundled subset (coreutils, diffutils, grep, ripgrep) is the product
+  rather than an add-on, and the plain build is the crippled one rather than
+  the lean one.  Anyone who wants the plain build wants it deliberately and
+  can take `ral-windows.exe` from the release page.  An MSI whose one question
+  is "would you like the working shell or the other one" would be asking the
+  least expert audience we have to answer something we have already answered
+  correctly everywhere else.  (MSI could not ask it cleanly in any case:
+  features are additive checkboxes, and two builds competing for one
+  `ral.exe` are not additive.)
+
+  What the MSI is for, then, is not choice but the three things a copied
+  executable cannot do for itself — an Add/Remove Programs entry, an in-place
+  upgrade over the previous version, and PATH.  That last one is the honest
+  motive: the install script this replaces could only *print* the PATH edit
+  and ask the reader to run it, because a script piped into `iex` has no
+  business rewriting the environment behind the reader's back.  An installer
+  does have that business, and Windows already knows how to undo it.
+
+  `Scope="perMachine"` follows from PATH being a machine-wide edit and from
+  the Program Files location; it costs one UAC prompt at install time, which
+  is the prompt a user expects from an installer and would be surprised not
+  to see.  Note that nothing here is code-signed yet, so that prompt names an
+  unknown publisher — a reason to keep publishing the bare `.exe` assets
+  beside this, not a reason to withhold the MSI.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+    <!--
+      `Version` and `RalExe` come from the build (`-d` on the `wix build`
+      command line in .github/workflows/build-binaries.yml): the version out
+      of `[workspace.package]` in Cargo.toml, which is the tree's single
+      source of truth for it, and the path to the artifact the
+      `build-windows-allutils` job produced.  Neither is written here, so
+      neither can drift from what was actually built.
+
+      `UpgradeCode` is the opposite: it is the identity of "ral, the installed
+      product" across every version there will ever be, so it is a constant
+      and must never be regenerated.  Change it and Windows stops recognising
+      an installed ral as the thing a new MSI upgrades, leaving two entries in
+      Add/Remove Programs both claiming the same `ral.exe`.
+    -->
+    <Package Name="ral"
+             Manufacturer="lambdabetaeta"
+             Version="$(var.Version)"
+             UpgradeCode="7957025A-1B1B-47D8-83E1-5BC63CFEB716"
+             Scope="perMachine"
+             Compressed="yes"
+             Language="1033">
+        <!--
+          Removes the older ral before laying down the newer one, and refuses
+          to install *under* a newer one rather than silently downgrading.
+        -->
+        <MajorUpgrade DowngradeErrorMessage="A newer version of ral is already installed. Uninstall it first if you mean to go back." />
+
+        <!-- One embedded cabinet: the download is the installer, not a folder of parts. -->
+        <MediaTemplate EmbedCab="yes" />
+
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="INSTALLFOLDER" Name="ral" />
+        </StandardDirectory>
+
+        <ComponentGroup Id="RalFiles" Directory="INSTALLFOLDER">
+            <Component Bitness="always64">
+                <File Id="RalExe" Name="ral.exe" Source="$(var.RalExe)" KeyPath="yes" />
+
+                <!--
+                  `Part="last"` appends rather than shadowing whatever the
+                  machine already resolves `ral` to, and `Permanent="no"`
+                  means the uninstall takes the entry back out again.  A
+                  shell that put itself first on PATH and then left itself
+                  there after removal would be the sort of thing this project
+                  complains about elsewhere.
+                -->
+                <Environment Id="RalPath"
+                             Name="PATH"
+                             Value="[INSTALLFOLDER]"
+                             Action="set"
+                             Part="last"
+                             System="yes"
+                             Permanent="no" />
+            </Component>
+        </ComponentGroup>
+
+        <!--
+          One feature, because there is one thing to install.  It exists at
+          all because MSI requires every component to be reachable from one.
+        -->
+        <Feature Id="Main" Title="ral">
+            <ComponentGroupRef Id="RalFiles" />
+        </Feature>
+
+        <!--
+          `WixUI_InstallDir` is the smallest stock UI that still lets someone
+          put ral somewhere other than Program Files; a silent install picks
+          the same directory up as `INSTALLFOLDER=...` on the msiexec command
+          line.  The licence it shows is `license.rtf` beside this file — the
+          MIT half of the dual licence, copied into RTF because the dialog
+          reads nothing else, and the half LicenseUrl already points at in the
+          winget manifest.  It is named unqualified and found
+          through the `-bindpath` the build passes, so this file does not have
+          to know where the repository sits or where `wix build` was run from.
+        -->
+        <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+        <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    </Package>
+</Wix>

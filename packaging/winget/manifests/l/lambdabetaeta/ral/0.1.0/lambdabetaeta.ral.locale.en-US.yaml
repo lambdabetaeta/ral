@@ -7,8 +7,7 @@
 # should (a) restore the "real OS-level confinement on every platform"
 # claim once it points at a build with the AppContainer sandbox, and
 # (b) switch the installer to the ral-windows-allutils.exe asset — see
-# packaging/scoop/ral.json and scripts/install.ps1, which already made
-# that switch.
+# packaging/scoop/ral.json, which already made that switch.
 PackageIdentifier: lambdabetaeta.ral
 PackageVersion: 0.1.0
 PackageLocale: en-US

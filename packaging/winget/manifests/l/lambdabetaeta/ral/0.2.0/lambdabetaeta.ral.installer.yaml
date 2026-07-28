@@ -1,11 +1,10 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
 #
-# Tracks ral-windows-allutils.exe, as packaging/scoop/ral.json and
-# scripts/install.ps1 already do: there is no system coreutils to fall back
-# on on Windows, so the bundled subset (coreutils, diffutils, grep, ripgrep)
-# is the product. The hash is the sha256 published alongside the release
-# asset as ral-windows-allutils.exe.sha256 -- update both together on every
-# version bump.
+# Tracks ral-windows-allutils.exe, as packaging/scoop/ral.json does: there is
+# no system coreutils to fall back on on Windows, so the bundled subset
+# (coreutils, diffutils, grep, ripgrep) is the product. The hash is the sha256
+# published alongside the release asset as ral-windows-allutils.exe.sha256 --
+# update both together on every version bump.
 PackageIdentifier: lambdabetaeta.ral
 PackageVersion: 0.2.0
 InstallerType: portable

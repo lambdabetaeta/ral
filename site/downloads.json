@@ -19,7 +19,8 @@
     {
       "os": "Windows",
       "primary": "ral-windows.exe",
-      "allutils": "ral-windows-allutils.exe"
+      "allutils": "ral-windows-allutils.exe",
+      "installer": "ral-windows.msi"
     }
   ]
 }

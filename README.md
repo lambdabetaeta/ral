@@ -141,11 +141,21 @@ brew install ral       # the shell, with ral-sh
 brew install exarch    # optional: the coding agent
 ```
 
-On Windows:
+On Windows, take `ral-windows.msi` from the [latest
+release](https://github.com/lambdabetaeta/ral/releases/latest) and run it. It
+installs `ral.exe` into `Program Files\ral`, adds that directory to PATH, and
+registers an entry in Add/Remove Programs, so the uninstall undoes both. Or,
+unattended:
 
 ```powershell
-irm https://lambdabetaeta.github.io/ral/scripts/install.ps1 | iex
+msiexec /i ral-windows.msi /qn
 ```
+
+The installer carries the build with `coreutils`, `diffutils`, `grep` and
+`ripgrep` bundled, since Windows has no system coreutils to fall back on; the
+plain build is on the release page as `ral-windows.exe` for anyone who wants
+it. Nothing here is code-signed yet, so Windows will name an unknown
+publisher — the `.sha256` beside each asset is what to check against.
 
 Or via [Scoop](https://scoop.sh), installing the manifest directly (no bucket
 to add):

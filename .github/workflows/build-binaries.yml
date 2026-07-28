@@ -149,6 +149,61 @@ jobs:
           path: target/release/ral.exe
           if-no-files-found: error
 
+  # The Windows installer.  It packages the `-allutils` build and only that
+  # one — `packaging/wix/ral.wxs` argues why — so it hangs off that job rather
+  # than repeating the build, and it is the single artifact of this workflow
+  # produced from another job's output instead of from source.
+  #
+  # WiX is a dotnet global tool, pinned rather than floating: an installer
+  # rebuilt by a different toolset than the one that produced the last release
+  # is not something to discover from a user's upgrade.  The UI extension is a
+  # separate package and has to be added to the same toolset before `wix
+  # build` will resolve `ui:WixUI`.
+  package-windows-msi:
+    needs: build-windows-allutils
+    runs-on: windows-latest
+    # wix is a framework-dependent app, and one of those does not cross a
+    # major .NET version on its own: the day the runner image stops carrying
+    # the runtime this build of wix was compiled against, it installs happily
+    # and then refuses to start ("You must install .NET to run this
+    # application").  Rolling forward costs nothing now and turns that from a
+    # broken release into a newer runtime.
+    env:
+      DOTNET_ROLL_FORWARD: LatestMajor
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download ral-windows-allutils
+        uses: actions/download-artifact@v8
+        with:
+          name: ral-windows-allutils
+          path: payload
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix --version 7.0.0
+          wix extension add -g WixToolset.UI.wixext/7.0.0
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          # `cargo metadata --no-deps` reads the workspace and no registry, so
+          # the version reaches the MSI from [workspace.package] in Cargo.toml
+          # — the same single number the tag and every other channel carry —
+          # without this job parsing TOML by hand.
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object { $_.name -eq 'ral' }).version
+          wix build packaging/wix/ral.wxs `
+            -arch x64 `
+            -ext WixToolset.UI.wixext `
+            -bindpath packaging/wix `
+            -d Version=$version `
+            -d RalExe=payload/ral.exe `
+            -o ral-windows.msi
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ral-windows-msi
+          path: ral-windows.msi
+          if-no-files-found: error
+
   # exarch — built for Linux, macOS, and Windows (no
   # `coreutils,diffutils,grep,ripgrep` features — those belong to ral).  Same
   # toolchains as the ral matrix above.
@@ -215,7 +270,10 @@ jobs:
   # Two publish jobs share the matrix.  They only differ in trigger
   # and the resulting tag/prerelease flag; the rename + checksum block
   # is identical, and softprops/action-gh-release uses GITHUB_TOKEN
-  # implicitly to publish to the repo that owns the workflow.
+  # implicitly to publish to the repo that owns the workflow.  The rename
+  # block covers the binaries only: every build job uploads its artifact under
+  # cargo's name for it, whereas the MSI is built with its release name
+  # already and arrives needing nothing.
 
   release-latest:
     needs: &build_jobs
@@ -227,6 +285,7 @@ jobs:
       - build-macos-allutils
       - build-windows
       - build-windows-allutils
+      - package-windows-msi
       - build-exarch-linux-x86_64
       - build-exarch-linux-arm64
       - build-exarch-macos
@@ -288,6 +347,8 @@ jobs:
             artifacts/ral-windows/ral-windows.exe.sha256
             artifacts/ral-windows-allutils/ral-windows-allutils.exe
             artifacts/ral-windows-allutils/ral-windows-allutils.exe.sha256
+            artifacts/ral-windows-msi/ral-windows.msi
+            artifacts/ral-windows-msi/ral-windows.msi.sha256
             artifacts/exarch-linux-x86_64/exarch-linux-x86_64
             artifacts/exarch-linux-x86_64/exarch-linux-x86_64.sha256
             artifacts/exarch-linux-arm64/exarch-linux-arm64
