@@ -593,7 +593,10 @@ def render_index(examples: list[dict]) -> None:
 
 # ── docs ───────────────────────────────────────────────────────────────────
 
-_BLOCK_CODE_RE = re.compile(r"<pre><code>(.*?)</code></pre>", re.DOTALL)
+_BLOCK_CODE_RE = re.compile(
+    r'<pre><code(?: class="language-ral")?>(.*?)</code></pre>',
+    re.DOTALL,
+)
 
 
 def highlight_doc_blocks(body: str) -> str:

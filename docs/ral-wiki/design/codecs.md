@@ -80,18 +80,16 @@ while the memory profile matches the other decoders. One codec is genuinely
   stage to `F[Bytes, Bytes] α` — a decoder that re-encodes is back to `ext`.
   The mode is inferred from what the callback does, not declared.
 
-## Strict in, lossy across the line boundary
+## Strict values, lossy lines
 
-The structured decoders are **strict**: invalid UTF-8 is an error that points at
-`from-bytes`, because a `String` or JSON value you will compute with must not
-silently carry a replacement character. The line path is **lossy, hence total** —
-`from-lines` decodes with replacement, matching how an [[design/types|external
-command's captured stdout]] decodes at a `let`. The contrast is deliberate:
-scanning text tolerates a `�` and wants totality; building a value does not.
+The structured decoders and an [[design/types|external command captured by
+`let`]] are **strict**: invalid UTF-8 is an error that points at `from-bytes`,
+because a `String` or JSON value you will compute with must not silently carry a
+replacement character. `from-lines` alone is **lossy, hence total**: scanning
+lines tolerates a `�`, while constructing a scalar `String` does not.
 
 See also [[design/builtins|builtins]], [[design/pipelines|pipelines]],
 [[design/types|types]], [[design/cbpv|cbpv]]; [[map/core/builtins|map: builtins]],
 [[map/core/io-process|io-process]].
-Cite: RATIONALE §"External commands return strings",
-§"Byte pipelines are processes; value pipelines are folds";
+Cite: RATIONALE §"Values and commands", §"Pipelines follow their edges";
 `docs/SPEC.md` §4.2, §16, §20.

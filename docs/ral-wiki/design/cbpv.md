@@ -44,6 +44,5 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (commands are the 
 
 **Realised in** [[internals/compilation-ladder|compilation-ladder]] and [[internals/evaluator-machine|evaluator-machine]].
 
-Cite: RATIONALE §"Values and commands", §"Two
-sigils", §"Blocks as the single abstraction mechanism"; `docs/SPEC.md` §0, §3,
-§4.
+Cite: RATIONALE §"Values and commands", §"One form, one meaning";
+`docs/SPEC.md` §0, §3, §4.

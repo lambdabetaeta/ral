@@ -50,7 +50,7 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an ope
 [[design/pipelines|pipelines]],
 [[design/control-operators|control-operators]], [[design/types|types]],
 [[design/cbpv|cbpv]].
-Cite: RATIONALE §"Piping and failure", §"No command-level `||`"; `docs/SPEC.md`
-§4.4, §10, §10.1–§10.2; `eval_chain` / `eval_return` in
+Cite: RATIONALE §"Failure is not truth", §"Pipelines follow their edges";
+`docs/SPEC.md` §4.4, §10, §10.1–§10.2; `eval_chain` / `eval_return` in
 `core/src/evaluator/comp.rs`, `try` / `guard` typing in
 `core/src/typecheck/scope.rs`.

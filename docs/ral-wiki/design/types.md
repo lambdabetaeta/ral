@@ -27,8 +27,9 @@ variable `μ`. A parameterised block has type `{A → B}`.
 - **This is where the value/command distinction becomes a *typing* discipline.**
   An external command has shape `F[I, Bytes] String` — bytes on the output
   channel, return type still `String`.
-- **Decoding to that `String` is a *lossy*, hence total, UTF-8 conversion,**
-  deferred to the `let` boundary rather than performed inside the pipe.
+- **Decoding to that `String` is strict UTF-8 conversion,** deferred to the
+  `let` boundary rather than performed inside the pipe. Invalid text fails with
+  a hint to keep the bytes via `from-bytes`.
 
 Inference is annotation-free; generalisation happens at the `Bind` boundary. Its
 soundness rests on two independent legs:
@@ -52,5 +53,5 @@ declined). The volatile code map is [[map/core/typecheck|typecheck]].
 
 **Realised in** [[internals/type-inference|type-inference]].
 
-Cite: `docs/SPEC.md` §20;
-RATIONALE §"Three layers, one asymmetry", §"External commands return strings".
+Cite: RATIONALE §"Values and commands", §"Pipelines follow their edges",
+§"Structured values cross once"; `docs/SPEC.md` §20.

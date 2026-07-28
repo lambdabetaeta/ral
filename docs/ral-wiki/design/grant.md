@@ -87,6 +87,5 @@ model this lattice instantiates — composition over a Belnap bilattice).
 
 **Realised in** [[internals/capability-enforcement|capability-enforcement]].
 
-Cite: RATIONALE
-§"Scoped execution contexts", §"Capability-checked dispatch"; `docs/SPEC.md`
-§11.
+Cite: RATIONALE §"`grant` attenuates authority",
+§"Lexical data, dynamic authority"; `docs/SPEC.md` §11.

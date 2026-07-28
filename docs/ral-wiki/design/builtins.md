@@ -109,5 +109,5 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (builtins are the 
 [[design/failure|failure]], [[design/pipelines|pipelines]];
 [[internals/builtins-registry|builtins-registry]], [[map/core/builtins|map: builtins]],
 [[map/core/typecheck|map: typecheck]].
-Cite: RATIONALE §"Syscall bridge, not text parsing",
-§"Control flow is library"; `docs/SPEC.md` §16, §17, §21.
+Cite: RATIONALE §"Structured values cross once",
+§"The grammar is the residue"; `docs/SPEC.md` §16, §17, §21.

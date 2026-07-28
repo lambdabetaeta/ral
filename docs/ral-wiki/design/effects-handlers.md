@@ -45,4 +45,5 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]], [[design/control-
 
 **Realised in** [[internals/handler-dispatch|handler-dispatch]].
 
-Cite: RATIONALE §"Effect handlers: deep with self-masking"; `docs/SPEC.md` §3.2.
+Cite: RATIONALE §"Effect handlers reinterpret external names";
+`docs/SPEC.md` §3.2.

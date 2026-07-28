@@ -47,6 +47,5 @@ See also [[design/types|types]], [[design/cbpv|cbpv]],
 
 **Realised in** [[internals/pipeline-execution|pipeline-execution]].
 
-Cite: RATIONALE §"Byte pipelines are processes;
-value pipelines are folds", §"Piping and failure", §"No command-level `||`",
-§"Concurrency: isolation, not shared state"; `docs/SPEC.md` §4, §13, §20.4.
+Cite: RATIONALE §"Pipelines follow their edges", §"Failure is not truth",
+§"Lexical data, dynamic authority"; `docs/SPEC.md` §4, §13, §20.4.

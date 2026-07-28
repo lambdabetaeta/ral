@@ -179,5 +179,4 @@ See also [[design/pipelines|pipelines]],
 [[internals/capability-enforcement|capability-enforcement]]; map
 [[map/core/runtime|runtime]], [[map/core/io-process|io-process]],
 [[map/repl/jobs|jobs]].
-`docs/SPEC.md` §4, §13, §18; RATIONALE §"Byte pipelines are processes; value pipelines
-are folds".
+`docs/SPEC.md` §4, §13, §18; RATIONALE §"Pipelines follow their edges".

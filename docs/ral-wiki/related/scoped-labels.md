@@ -31,7 +31,8 @@ divergence below traces to that cut.
   shared tail when the tail is a variable; the row-spine occurs check on the
   tail variable ([[internals/type-inference|type-inference]]) is Leijen's
   termination side condition `tail(r) ∉ dom(θ₁)` — the one TREX got wrong.
-  RATIONALE names the permutation the Rémy rewrite; it is Leijen's Figure 3.
+  The implementation calls the procedure the Rémy rewrite; this permutation is
+  Leijen's Figure 3.
 - **No type-system tax.** The selling point ral bought: no *lacks* predicates
   (Gaster–Jones), no flags (Rémy) — a new mono-type equality plus the extended
   unifier, orthogonal to the rest of the type system. This is what lets
@@ -79,5 +80,5 @@ Restriction and the shadow warning were rejected on review
 the implementation menu stands as reference.
 
 Cite: Leijen, *Extensible records with scoped labels*, Trends in Functional
-Programming 2005. Zotero `AKRCBMLD`. ral side: RATIONALE §"Record types and
-scoped labels"; `docs/SPEC.md` §20.7.
+Programming 2005. Zotero `AKRCBMLD`. ral side: RATIONALE §"Structured values
+cross once"; `docs/SPEC.md` §20.7.

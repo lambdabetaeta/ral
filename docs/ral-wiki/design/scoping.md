@@ -59,6 +59,4 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (dynamic scope is 
 
 **Realised in** [[internals/evaluator-machine|evaluator-machine]] (the dynamic frame stack).
 
-Cite: RATIONALE
-§"Shadowing, not mutation", §"Scoped execution contexts"; `docs/SPEC.md` §3,
-§3.1.
+Cite: RATIONALE §"Lexical data, dynamic authority"; `docs/SPEC.md` §3, §3.1.

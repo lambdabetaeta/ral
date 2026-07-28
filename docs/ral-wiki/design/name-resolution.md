@@ -73,7 +73,6 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (the layering is t
 [[design/pipelines|pipelines]], [[design/control-operators|control-operators]],
 [[design/grant|grant]]; [[internals/builtins-registry|builtins-registry]],
 [[map/core/builtins|map: builtins]].
-Cite: RATIONALE §"External commands return strings",
-§"Bundled coreutils are mandatory in exarch, optional in ral",
-§"Syscall bridge, not text parsing", §"Control flow is library";
+Cite: RATIONALE §"Values and commands", §"Structured values cross once",
+§"The grammar is the residue";
 `docs/SPEC.md` §4.2, §16, §17, §21.

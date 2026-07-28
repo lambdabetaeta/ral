@@ -584,16 +584,17 @@ Principal return types at the `let` boundary:
 
 | Stage                                              | Return              |
 |----------------------------------------------------|---------------------|
-| buffering byte-output (externals, `echo`, `grep`)  | decoded `String`    |
-| line rewriter (`map-lines`)                        | decoded `String`    |
+| buffering byte-output (externals, `echo`, `grep`)  | strict UTF-8 `String` |
+| line rewriter (`map-lines`)                        | strict UTF-8 `String` |
 | streaming consumer (`filter-lines`, `each-line`)   | `Unit`; lines flush |
 | encoder (`to-X`)                                   | `Bytes`             |
 | decoder (`from-X`), value builtin, ordinary function | its structured value |
 
 The general rule behind the first two rows is the value-boundary rule
 of §4.3: a byte-output stage whose value is `Unit` binds its bytes,
-decoded as a `String` with one trailing newline stripped; any other
-value binds directly.
+decoded strictly as a `String` with one trailing newline stripped; any
+other value binds directly. Invalid UTF-8 fails with a hint to finish
+the pipeline with `from-bytes`.
 
 A returned `String` is data, never re-lexed, split, or globbed. For
 binary, finish the pipeline with `| from-bytes`. Mode mismatches
@@ -697,8 +698,8 @@ rejects the implicit conversion.
 ### 4.3  Block return
 
 A block returns its last command's result. If that last command is
-byte-output with a `Unit` value, the block yields the decoded
-`String` for its bytes alone, with one trailing newline stripped;
+byte-output with a `Unit` value, the block yields the strictly decoded
+UTF-8 `String` for its bytes alone, with one trailing newline stripped;
 any other value is returned as itself. `{}` yields `Unit`.
 
 ```
