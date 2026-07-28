@@ -1,13 +1,20 @@
 /* site.css — shared chrome for the ral landing and docs.
 
-   The identity is a workstation window: a titlebar, a menubar carrying the
-   nav, a sunken client area holding the page, and a status bar underneath.
-   Everything is built from two bevels — raised for surfaces you act on,
-   sunken for surfaces that hold content — so depth is structural rather than
-   decorative.  There is no glow and no entrance motion; the only movement is
-   a bevel inverting under a press.
+   The identity is a Unix workstation desktop: a stippled root window, an
+   application frame with a centred titlebar, a menubar carrying the nav, a
+   sunken client area holding the page, and a front panel along the bottom
+   with a workspace switcher, a clock, and the status readout.
 
-   Two grounds, Silver and Graphite, selected by the `dark` class on <html>.
+   Everything is built from Motif's two-pixel shadows — a widget is raised by
+   a light top-left and a dark bottom-right, sunken by the reverse — and
+   separators are etched, a dark rule over a light one.  There is no glow and
+   no entrance motion; the only movement is a bevel inverting under a press.
+
+   The face is CDE's lilac-grey.  The accents are X11 colour names, which is
+   where this era took its palette from: darkslateblue on the active title,
+   cadetblue, darkgoldenrod, seagreen and coral through the rest.
+
+   Two grounds, Workspace and Night, selected by the `dark` class on <html>.
    The class is authoritative and set by an inline script before first paint,
    which is also how the exarch sub-site does it, so a visitor's choice
    carries across both under the shared `ral-theme` key.
@@ -17,221 +24,362 @@
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  --desktop:  #3f5a5a;   /* ground the window sits on          */
-  --face:     #d4d0c8;   /* chrome: menubar, buttons, panels   */
-  --face-hi:  #efedea;   /* bevel highlight on the face        */
-  --client:   #ffffff;   /* sunken area holding content        */
-  --bevel-lt: #ffffff;
-  --bevel-sh: #808080;
-  --bevel-dk: #404040;
-  --line:     #a9a49b;
-  --text:     #111111;
-  --muted:    #4d4a45;
-  --faint:    #6f6b64;
-  --title-a:  #0a246a;   /* titlebar gradient, left            */
-  --title-b:  #a6caf0;   /* titlebar gradient, right           */
-  --title-ink:#ffffff;
-  --val:      #0d6555;   /* cool — value  / data    / $        */
-  --cmd:      #9c4310;   /* warm — command / effect / !        */
-  --str:      #0d6555;   /* strings read as values (cool)      */
-  --kw:       #9c4310;   /* keywords read as commands (warm)   */
-  --num:      #7a5c14;   /* numbers and constants (gold)       */
-  --com:      #5f6f57;   /* comments                           */
-  --varc:     #2a3550;   /* variables                          */
-  --sel:      #0a246a;
-  --sel-ink:  #ffffff;
-  --ui:    Tahoma, Verdana, 'DejaVu Sans', system-ui, sans-serif;
+  --workspace:   #4a4a63;   /* root window                        */
+  --workspace-2: #53536d;   /* the other half of the stipple      */
+  --face:        #a8a8c0;   /* widget face                        */
+  --face-hi:     #bdbdd2;
+  --face-arm:    #8686a4;   /* armed / selected                   */
+  --top:         #d0d0e2;   /* Motif top shadow                   */
+  --bot:         #5a5a76;   /* Motif bottom shadow                */
+  --client:      #ffffff;   /* text areas                         */
+  --text:        #0a0a14;
+  --muted:       #33334a;
+  --faint:       #57576e;
+  --line:        #8686a4;
+  --title:       #483d8b;   /* darkslateblue — active title       */
+  --title-ink:   #ffffff;
+  --teal:        #2f7f8c;   /* cadetblue                          */
+  --gold:        #b8860b;   /* darkgoldenrod                      */
+  --sea:         #2e8b57;   /* seagreen                           */
+  --coral:       #c05a3e;
+  --orchid:      #8a4f9e;
+  --val:         #1a6a72;   /* cool — value  / data    / $        */
+  --cmd:         #b0523a;   /* warm — command / effect / !        */
+  --str:         #1a6a72;   /* strings read as values (cool)      */
+  --kw:          #b0523a;   /* keywords read as commands (warm)   */
+  --num:         #8a6410;   /* numbers and constants (gold)       */
+  --com:         #3d6b52;   /* comments (seagreen)                */
+  --varc:        #3f3a72;   /* variables (darkslateblue)          */
+  --sel:         #483d8b;
+  --sel-ink:     #ffffff;
+  --ui:    'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif;
   --serif: 'IBM Plex Serif', 'Iowan Old Style', 'Palatino Linotype',
            Palatino, Georgia, serif;
   --mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 
 :root.dark {
-  --desktop:  #0d1011;
-  --face:     #2f3339;
-  --face-hi:  #3b4048;
-  --client:   #15181c;
-  --bevel-lt: #4b5159;
-  --bevel-sh: #191c20;
-  --bevel-dk: #0a0c0e;
-  --line:     #454b53;
-  --text:     #e2e6ea;
-  --muted:    #a7aeb6;
-  --faint:    #7f878f;
-  --title-b:  #3f6ea8;
-  --title-ink:#eef3f8;
-  --val:      #57bfa7;
-  --cmd:      #e38d4f;
-  --str:      #57bfa7;
-  --kw:       #e38d4f;
-  --num:      #cfa93f;
-  --com:      #7d8c77;
-  --varc:     #b7c4d6;
-  --sel:      #2a4d8f;
+  --workspace:   #15151f;
+  --workspace-2: #1b1b27;
+  --face:        #3d3d52;
+  --face-hi:     #4b4b63;
+  --face-arm:    #5c5c78;
+  --top:         #5f5f7d;
+  --bot:         #22222e;
+  --client:      #161620;
+  --text:        #e8e8f2;
+  --muted:       #adadc2;
+  --faint:       #8a8aa2;
+  --line:        #5f5f7d;
+  --title:       #5b4fa8;
+  --teal:        #63b6c4;
+  --gold:        #d4af4a;
+  --sea:         #5fae7d;
+  --coral:       #dd8563;
+  --orchid:      #b481c9;
+  --val:         #5fc3c9;
+  --cmd:         #e0a06a;
+  --str:         #5fc3c9;
+  --kw:          #e0a06a;
+  --num:         #d4af4a;
+  --com:         #79a887;
+  --varc:        #b0a8e0;
+  --sel:         #5b4fa8;
 }
 
 html {
-  background: var(--desktop);
   color: var(--text);
   font-family: var(--ui);
-  font-size: 16px;
+  font-size: 18px;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
 }
-body { line-height: 1.5; }
+/* The root window is stippled, the way X dithered two colours into one. */
+body {
+  line-height: 1.55;
+  background-color: var(--workspace);
+  background-image: repeating-conic-gradient(var(--workspace-2) 0% 25%, var(--workspace) 0% 50%);
+  background-size: 4px 4px;
+}
 
 ::selection { background: var(--sel); color: var(--sel-ink); }
-:focus-visible { outline: 1px dotted var(--text); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 
 a { color: var(--cmd); text-decoration: none; text-underline-offset: 0.18em; }
 a:hover { text-decoration: underline; }
 
 /* ── the window ── */
-.desktop { padding: clamp(0px, 1.4vw, 1.25rem); }
+.workspace { padding: clamp(0px, 1.4vw, 1.1rem); }
 .app {
-  max-width: 100rem;
-  min-height: calc(100vh - 2.5rem);
+  max-width: 104rem;
+  min-height: calc(100vh - 2.2rem);
   margin: 0 auto;
+  padding: 4px;
   display: flex;
   flex-direction: column;
   background: var(--face);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
 .chrome { position: sticky; top: 0; z-index: 30; background: var(--face); }
 
 .titlebar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.28rem 0.45rem;
-  background: linear-gradient(90deg, var(--title-a), var(--title-b));
+  gap: 0.6rem;
+  padding: 0.34rem 0.4rem;
+  background: var(--title);
   color: var(--title-ink);
-  font-size: 0.8rem;
-  font-weight: 700;
-  user-select: none;
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
+/* The sigil is three glyphs, so the tile is sized to its text rather than
+   squared — a fixed square wraps the braces onto a second line. */
 .titlebar .ico {
   flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  width: 1.05rem;
-  height: 1.05rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 1.6rem;
+  padding: 0 0.38rem;
+  white-space: nowrap;
   background: var(--face);
   color: var(--cmd);
   font-family: var(--mono);
-  font-size: 0.62rem;
+  font-size: 0.82rem;
   font-weight: 700;
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
-.titlebar .grow { flex: 1 1 auto; }
+.titlebar .grow {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: 0.98rem;
+  font-weight: 700;
+  user-select: none;
+}
+.titlebar .pad { flex: 0 0 auto; width: 2.6rem; }
 
 /* ── menubar: the site nav ── */
-.menubar {
-  display: flex;
-  align-items: stretch;
-  gap: 0.05rem;
-  padding: 0.16rem 0.2rem;
-  border-bottom: 1px solid var(--bevel-sh);
-  box-shadow: 0 1px 0 var(--bevel-lt);
-}
+.menubar { display: flex; align-items: stretch; gap: 0.1rem; padding: 0.3rem 0.2rem; }
 .menubar .grow { flex: 1 1 auto; }
 .menu-item {
   display: flex;
   align-items: center;
-  padding: 0.2rem 0.58rem;
+  padding: 0.26rem 0.7rem;
   color: var(--text);
-  font-size: 0.79rem;
+  font-size: 0.92rem;
   text-decoration: none;
   white-space: nowrap;
-  border: 1px solid transparent;
+  border: 2px solid transparent;
 }
-.menu-item:hover { background: var(--sel); color: var(--sel-ink); text-decoration: none; }
+.menu-item:hover {
+  text-decoration: none;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+}
 .menu-item.current {
   background: var(--face-hi);
   font-weight: 700;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
-.menu-item .ext { font-size: 0.7rem; opacity: 0.75; }
+.menu-item .ext { font-size: 0.8rem; opacity: 0.8; }
+
+/* Etched separator: a dark rule over a light one. */
+.sep {
+  margin: 0 0.2rem;
+  height: 2px;
+  border-top: 1px solid var(--bot);
+  border-bottom: 1px solid var(--top);
+}
 
 /* ── controls ── */
 .btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.36rem;
-  padding: 0.16rem 0.6rem;
+  gap: 0.4rem;
+  padding: 0.26rem 0.8rem;
   font: inherit;
-  font-size: 0.72rem;
+  font-size: 0.85rem;
   color: var(--text);
   background: var(--face);
   cursor: pointer;
   appearance: none;
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
 .btn:hover { text-decoration: none; }
 .btn:active, .btn.pressed {
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
-  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
 
 /* ── client area ── */
+/* A document window's client area is white; a form's is the widget face,
+   with its controls raised off it.  The landing and the examples explorer
+   are forms; the reading pages are documents. */
 .client {
   flex: 1 1 auto;
-  margin: 0.42rem;
+  margin: 0.45rem 0.2rem;
   background: var(--client);
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
-  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
-.wrap { max-width: 60rem; margin: 0 auto; padding: clamp(1.4rem, 4vw, 3rem) clamp(1rem, 3.5vw, 2.5rem); }
-.wrap.wide { max-width: 74rem; }
+.client.form { background: var(--face); }
 
-/* ── status bar ── */
-.status {
-  position: sticky;
-  bottom: 0;
-  z-index: 30;
-  display: flex;
-  gap: 0.28rem;
-  padding: 0.26rem 0.3rem;
+/* ── titled panel ──
+   Motif frames a group with a header strip, not a label sunk into the
+   border: a caption that interrupts a two-pixel bevel reads as damage. */
+.group {
   background: var(--face);
-  border-top: 1px solid var(--bevel-lt);
-  font-size: 0.72rem;
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+}
+.group-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
   color: var(--muted);
+  background: var(--face-hi);
+  border-bottom: 1px solid var(--bot);
+  box-shadow: 0 1px 0 var(--top);
 }
-.status i {
-  padding: 0.16rem 0.55rem;
-  font-style: normal;
+.group-bar .gico {
+  flex: 0 0 auto;
+  width: 0.9rem;
+  height: 0.9rem;
+  background: var(--c);
+  border: 1px solid var(--bot);
+}
+.group-body { padding: 1.2rem 1.3rem 1.35rem; }
+.wrap { max-width: 62rem; margin: 0 auto; padding: clamp(1.5rem, 4vw, 3.2rem) clamp(1.1rem, 3.5vw, 2.6rem); }
+.wrap.wide { max-width: 78rem; }
+
+/* ── front panel ──
+   The desktop's own bar: a workspace switcher whose workspaces are the
+   pages, a clock, and the status readout. */
+.fp {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.45rem 0.2rem 0;
+  padding: 0.4rem;
+  background: var(--face);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+}
+.fp-ws {
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
+  padding: 0.32rem;
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
+}
+.fp-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.22rem;
+  padding: 0.34rem 0.8rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--face);
+  text-decoration: none;
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+}
+.fp-tile:hover { text-decoration: none; background: var(--face-hi); }
+/* CDE marks a tile that opens a subpanel with a small arrow above it. */
+.fp-tile::before {
+  content: "\25b2";
+  font-size: 0.5rem;
+  line-height: 1;
+  color: var(--faint);
+}
+.fp-tile .ico {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  background: var(--c);
+  color: #ffffff;
+  font-size: 0.9rem;
+  line-height: 1;
+  border: 1px solid var(--bot);
+}
+.fp-tile.current {
+  background: var(--face-arm);
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
+}
+.fp-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 8.5rem;
+  padding: 0.3rem 1rem;
+  background: var(--client);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
+}
+.fp-clock b { font-size: 1.02rem; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.fp-clock span { font-size: 0.78rem; color: var(--muted); }
+.fp-status { flex: 1 1 14rem; display: flex; gap: 0.4rem; align-items: stretch; min-width: 0; }
+.fp-status i {
+  display: flex;
+  align-items: center;
+  padding: 0.22rem 0.8rem;
   min-width: 0;
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  font-style: normal;
+  font-size: 0.84rem;
+  color: var(--muted);
+  background: var(--face);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
-.status i:first-child { flex: 1 1 auto; }
-.status i a { color: var(--muted); }
-.status .n { font-variant-numeric: tabular-nums; }
+.fp-status i:first-child { flex: 1 1 auto; }
+.fp-status i a { color: var(--muted); }
+.fp-status .n { font-variant-numeric: tabular-nums; }
 
 /* ── code panes, shared by the landing comparison and the examples ── */
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
-.pane { display: flex; flex-direction: column; min-width: 0; background: var(--face); }
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; margin-top: 1.1rem; }
+/* Stacked, for the examples: the pair medians 17 lines, so verticality is
+   cheap, and at full width the longest line in the corpus (116 columns)
+   never scrolls.  Capped so a four-line script doesn't sprawl. */
+.split.stack { grid-template-columns: minmax(0, 1fr); max-width: 66rem; }
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--face);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+}
 .pane .ph {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.3rem 0.6rem;
-  font-size: 0.68rem;
+  padding: 0.36rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   color: var(--muted);
-  border-bottom: 1px solid var(--bevel-sh);
-  box-shadow: 0 1px 0 var(--bevel-lt);
+  border-bottom: 1px solid var(--bot);
+  box-shadow: 0 1px 0 var(--top);
 }
-.pane.ral .ph { color: var(--cmd); font-weight: 700; }
+.pane.ral .ph { color: var(--cmd); }
 .pane .ph .n {
   margin-left: auto;
+  font-weight: 400;
   letter-spacing: 0.02em;
   text-transform: none;
   color: var(--faint);
@@ -239,32 +387,34 @@ a:hover { text-decoration: underline; }
 }
 .pane pre {
   flex: 1 1 auto;
-  margin: 0;
-  padding: 0.75rem 0.85rem;
+  margin: 3px;
+  padding: 0.85rem 0.95rem;
   font-family: var(--mono);
-  font-size: 0.775rem;
-  line-height: 1.65;
+  font-size: 0.875rem;
+  line-height: 1.62;
   background: var(--client);
   color: var(--text);
   overflow-x: auto;
-  scrollbar-width: thin;
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
-pre::-webkit-scrollbar { height: 9px; }
-pre::-webkit-scrollbar-track { background: var(--face); }
+/* Motif scrollbar: a sunken trough with a raised thumb. */
+pre::-webkit-scrollbar { height: 15px; }
+pre::-webkit-scrollbar-track {
+  background: var(--face);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
+}
 pre::-webkit-scrollbar-thumb {
   background: var(--face);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
 
-@media (max-width: 36rem) {
-  .menu-item { padding: 0.2rem 0.42rem; font-size: 0.75rem; }
-}
-@media (max-width: 60rem) {
+@media (max-width: 64rem) {
   .split { grid-template-columns: 1fr; }
-  .wrap { padding: 1.2rem 1rem; }
+  .wrap { padding: 1.3rem 1rem; }
+  .menu-item { padding: 0.26rem 0.5rem; font-size: 0.86rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }

@@ -1,230 +1,188 @@
 /* index.css — the landing page.
 
-   Reads top to bottom as an argument: the thesis, the two worlds it separates,
-   what that buys downstream, the same task written both ways, then how to get
-   it.  Chrome, tokens, and the code panes live in site.css. */
+   The client area here is a form, not a document: the face colour carries
+   the page and every group is a titled panel raised off it.  Reads top to
+   bottom as an argument — the thesis, the two worlds it separates, what ral
+   is beneath, what the split buys, the same task written twice, then how to
+   get it.  Chrome, tokens, panels and code panes live in site.css. */
 
 /* ── hero ── */
 .hero { text-align: center; }
 .sigil {
   font-family: var(--mono);
-  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-size: clamp(1.7rem, 4vw, 2.3rem);
   font-weight: 600;
   line-height: 1;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   user-select: none;
 }
 .sigil .bang  { color: var(--cmd); }
 .sigil .brace { color: var(--val); }
 .wordmark {
-  margin-top: 0.5rem;
+  margin-top: 0.55rem;
   font-family: var(--mono);
   font-weight: 700;
-  font-size: clamp(3.2rem, 11vw, 5.6rem);
+  font-size: clamp(3.6rem, 12vw, 6.4rem);
   line-height: 0.9;
-  letter-spacing: -0.055em;
+  letter-spacing: -0.05em;
 }
 .thesis {
-  margin-top: 1.1rem;
+  margin-top: 1.2rem;
   font-family: var(--serif);
-  font-size: clamp(1.25rem, 3vw, 1.7rem);
-  line-height: 1.35;
+  font-size: clamp(1.45rem, 3.2vw, 2rem);
+  line-height: 1.32;
   text-wrap: balance;
 }
 .thesis em { font-style: italic; color: var(--cmd); }
-.subthesis { margin-top: 0.7rem; font-size: 0.85rem; color: var(--muted); }
+.subthesis { margin-top: 0.8rem; font-size: 1rem; color: var(--muted); }
 
 /* ── the two worlds ── */
-.duality { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 2.2rem; }
-fieldset {
-  padding: 1.1rem 1.2rem 1.25rem;
-  border: 1px solid var(--bevel-sh);
-  border-right-color: var(--bevel-lt);
-  border-bottom-color: var(--bevel-lt);
-}
-legend {
-  padding: 0 0.42rem;
-  margin-left: 0.3rem;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--faint);
-}
-.duo-sigil { font-family: var(--mono); font-size: 2rem; font-weight: 600; line-height: 1; }
+.duality { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; margin-top: 2.4rem; }
+.duo-sigil { font-family: var(--mono); font-size: 2.3rem; font-weight: 600; line-height: 1; }
 .duo.val .duo-sigil { color: var(--val); }
 .duo.cmd .duo-sigil { color: var(--cmd); }
-.duo-line { margin-top: 0.55rem; font-family: var(--serif); font-size: 1.28rem; }
+.duo-line { margin-top: 0.6rem; font-family: var(--serif); font-size: 1.42rem; }
 .duo-line em { font-style: italic; }
 .duo.val .duo-line em { color: var(--val); }
 .duo.cmd .duo-line em { color: var(--cmd); }
-.duo-note { margin-top: 0.5rem; font-size: 0.86rem; line-height: 1.6; color: var(--muted); }
+.duo-note { margin-top: 0.55rem; font-size: 0.98rem; line-height: 1.6; color: var(--muted); }
 
 /* ── what ral is beneath ── */
-.powers {
-  margin-top: 1rem;
-  background: var(--face);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
-}
-.powers-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.34rem 0.65rem;
-  background: linear-gradient(90deg, var(--title-a), var(--title-b));
-  color: var(--title-ink);
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-.powers-bar .pico {
-  display: grid;
-  place-items: center;
-  width: 1.05rem;
-  height: 1.05rem;
-  background: var(--face);
-  color: var(--cmd);
-  font-size: 0.6rem;
-  line-height: 1;
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-}
+.powers { margin-top: 1.1rem; }
 .powers-body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 1.4rem;
-  padding: 1.3rem 1.35rem;
+  gap: 1.5rem;
+  padding: 1.4rem;
 }
-.powers-say { flex: 1 1 24rem; min-width: 0; }
+.powers-say { flex: 1 1 25rem; min-width: 0; }
 .powers-say h2 {
   font-family: var(--serif);
-  font-size: clamp(1.35rem, 3vw, 1.7rem);
+  font-size: clamp(1.5rem, 3vw, 1.9rem);
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.24;
   text-wrap: balance;
 }
 .powers-say h2 b { color: var(--cmd); font-weight: 600; }
 .powers-say p {
-  margin-top: 0.6rem;
-  max-width: 40rem;
+  margin-top: 0.65rem;
+  max-width: 42rem;
   font-family: var(--serif);
-  font-size: 1rem;
-  line-height: 1.7;
+  font-size: 1.1rem;
+  line-height: 1.68;
   color: var(--muted);
 }
+/* Motif's default button: the push button, plus the ring that marks it. */
 .powers-go {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.9rem 1.7rem;
-  font-size: 0.95rem;
+  gap: 0.6rem;
+  padding: 1rem 1.9rem;
+  font-size: 1.08rem;
   font-weight: 700;
   color: var(--sel-ink);
-  background: var(--sel);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-  box-shadow: inset 1px 1px 0 color-mix(in srgb, var(--sel-ink) 28%, transparent),
-              inset -1px -1px 0 rgba(0, 0, 0, 0.45);
+  background: var(--teal);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+  outline: 2px solid var(--bot);
+  outline-offset: 3px;
 }
-.powers-go:hover {
-  background: color-mix(in srgb, var(--sel) 86%, var(--sel-ink));
-  text-decoration: none;
-}
-.powers-go:active {
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
-  box-shadow: inset 1px 1px 0 rgba(0, 0, 0, 0.5);
-  padding: 0.94rem 1.66rem 0.86rem 1.74rem;
-}
+.powers-go:hover { background: color-mix(in srgb, var(--teal) 84%, #ffffff); text-decoration: none; }
+.powers-go:active { border-color: var(--bot) var(--top) var(--top) var(--bot); }
 
 /* ── prose ── */
-.prose { margin-top: 2.4rem; }
+.prose { margin-top: 2.6rem; }
 .eyebrow {
-  margin-bottom: 0.7rem;
-  font-size: 0.67rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.18em;
   color: var(--cmd);
 }
 .prose p {
-  max-width: 44rem;
-  margin-bottom: 0.95rem;
+  max-width: 46rem;
+  margin-bottom: 1rem;
   font-family: var(--serif);
-  font-size: 1.06rem;
-  line-height: 1.75;
+  font-size: 1.18rem;
+  line-height: 1.72;
 }
 .prose p:last-child { margin-bottom: 0; }
 .prose code {
-  padding: 0.02em 0.3em;
+  padding: 0.04em 0.32em;
   font-family: var(--mono);
-  font-size: 0.86em;
-  background: var(--face);
+  font-size: 0.87em;
+  background: var(--client);
   border: 1px solid var(--line);
 }
 .prose code.val { color: var(--val); }
 .prose code.cmd { color: var(--cmd); }
 
 /* ── get ral ── */
-.install { display: flex; gap: 0.4rem; margin-top: 1rem; }
+.get { margin-top: 2.6rem; }
+.install { display: flex; gap: 0.5rem; }
 .install-cmd {
   flex: 1 1 auto;
-  padding: 0.45rem 0.6rem;
+  padding: 0.5rem 0.7rem;
   font-family: var(--mono);
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   background: var(--client);
   color: var(--text);
   white-space: nowrap;
   overflow-x: auto;
   cursor: pointer;
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
-  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
-.install .btn { padding: 0 1.1rem; font-size: 0.76rem; }
-.install .btn.done { font-weight: 700; }
+.install .btn { padding: 0 1.3rem; font-size: 0.9rem; }
 
-.dl-table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.8rem; background: var(--client); }
+.dl-table { width: 100%; border-collapse: collapse; margin-top: 1.1rem; font-size: 0.92rem; background: var(--client); }
 .dl-table th {
-  padding: 0.32rem 0.7rem;
+  padding: 0.4rem 0.8rem;
   text-align: left;
-  font-size: 0.67rem;
-  font-weight: 400;
+  font-size: 0.8rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.13em;
+  letter-spacing: 0.1em;
   color: var(--muted);
   background: var(--face);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
-.dl-table td { padding: 0.36rem 0.7rem; border-bottom: 1px solid var(--line); }
+.dl-table td { padding: 0.42rem 0.8rem; border-bottom: 1px solid var(--line); }
 .dl-table tr:last-child td { border-bottom: none; }
 .dl-table td.os { font-family: var(--mono); }
 .dl-src {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem 1.1rem;
+  gap: 0.6rem 1.2rem;
   align-items: center;
-  margin-top: 0.9rem;
-  font-size: 0.78rem;
+  margin-top: 1rem;
+  font-size: 0.9rem;
   color: var(--muted);
 }
-.dl-repo { display: inline-flex; align-items: center; gap: 0.4rem; }
+.dl-repo { display: inline-flex; align-items: center; gap: 0.45rem; }
 .gh-mark { flex: 0 0 auto; opacity: 0.85; }
 .dl-repo:hover .gh-mark { opacity: 1; }
 
 /* ── coda ── */
-.foundations { margin-top: 2.6rem; padding-top: 1.3rem; border-top: 1px solid var(--line); }
+.foundations {
+  margin-top: 2.8rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--bot);
+  box-shadow: inset 0 1px 0 var(--top);
+}
 .foundations p {
-  max-width: 46rem;
+  max-width: 48rem;
   font-family: var(--serif);
-  font-size: 0.96rem;
-  line-height: 1.8;
+  font-size: 1.06rem;
+  line-height: 1.76;
   color: var(--muted);
 }
 .foundations em { font-style: italic; color: var(--text); }
 
-@media (max-width: 60rem) {
+@media (max-width: 64rem) {
   .duality { grid-template-columns: 1fr; }
 }

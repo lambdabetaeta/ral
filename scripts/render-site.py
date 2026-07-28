@@ -82,7 +82,7 @@ THEME_BOOT = """  <script>
     })();
   </script>"""
 
-THEME_TOGGLE = """  <script>
+CHROME_SCRIPT = """  <script>
     (function () {
       var root  = document.documentElement;
       var btn   = document.getElementById('theme-toggle');
@@ -91,7 +91,7 @@ THEME_TOGGLE = """  <script>
       function sync() {
         var dark = root.classList.contains('dark');
         glyph.textContent = dark ? '\\u263e' : '\\u2600';
-        label.textContent = dark ? 'Graphite' : 'Silver';
+        label.textContent = dark ? 'Night' : 'Workspace';
       }
       sync();
       btn.addEventListener('click', function () {
@@ -99,8 +99,49 @@ THEME_TOGGLE = """  <script>
         localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
         sync();
       });
+
+      var time = document.getElementById('fp-time');
+      var date = document.getElementById('fp-date');
+      function tick() {
+        var d = new Date();
+        time.textContent = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+        date.textContent = d.toLocaleDateString(undefined,
+          { weekday: 'short', day: 'numeric', month: 'short' });
+      }
+      tick();
+      setInterval(tick, 20000);
     })();
   </script>"""
+
+# The front panel's workspaces are the pages, each with its own X11 hue.
+PANEL_TILES = [
+    ("index.html", "ral", "index", "teal", "&#9636;"),
+    ("tutorial.html", "Tutorial", "tutorial", "gold", "&#9637;"),
+    ("spec.html", "Spec", "spec", "sea", "&#9638;"),
+    ("rationale.html", "Rationale", "rationale", "coral", "&#9639;"),
+    ("examples.html", "Examples", "examples", "orchid", "&#9640;"),
+]
+
+
+def front_panel(current: str, status: str, count: int) -> str:
+    """The desktop's bar: a workspace switcher over the pages, a clock, and
+    the status readout.  The clock is filled in by CHROME_SCRIPT."""
+    tiles = "\n".join(
+        f'          <a class="fp-tile{" current" if key == current else ""}" href="{href}">'
+        f'<span class="ico" style="--c: var(--{hue})" aria-hidden="true">{glyph}</span>{label}</a>'
+        for href, label, key, hue, glyph in PANEL_TILES
+    )
+    return f"""    <div class="fp">
+      <div class="fp-ws">
+{tiles}
+      </div>
+      <div class="fp-clock"><b id="fp-time">--:--</b><span id="fp-date">&#160;</span></div>
+      <div class="fp-status">
+        <i>{status}</i>
+        <i class="n">{count} examples</i>
+        <i>&copy; <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a></i>
+      </div>
+    </div>"""
 
 
 def menubar(current: str) -> str:
@@ -117,7 +158,7 @@ def menubar(current: str) -> str:
         '<span class="ext"> &#8599;</span></a>\n'
         '        <span class="grow"></span>\n'
         '        <button class="btn" id="theme-toggle" type="button" aria-label="Switch theme">\n'
-        '          <span id="theme-glyph">&#9788;</span><span id="theme-label">Silver</span>\n'
+        '          <span id="theme-glyph">&#9788;</span><span id="theme-label">Workspace</span>\n'
         '        </button>\n'
         '      </nav>'
     )
@@ -125,10 +166,11 @@ def menubar(current: str) -> str:
 
 # ── shared page shell ──────────────────────────────────────────────────────
 
-def doc_page(title: str, current: str, body: str, titlebar: str,
-             count: int, wrap: str = '<div class="wrap doc">') -> str:
+def doc_page(title: str, current: str, body: str, source: str,
+             count: int, wrap: str = '<div class="wrap doc">',
+             client: str = "client") -> str:
     """The reading-page shell: window chrome around a client area, styled by
-    doc.css.  ``titlebar`` is the source filename shown in the title bar."""
+    doc.css.  ``source`` is the filename reported in the status readout."""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -144,32 +186,30 @@ def doc_page(title: str, current: str, body: str, titlebar: str,
 {THEME_BOOT}
 </head>
 <body>
-<div class="desktop">
+<div class="workspace">
   <div class="app">
 
     <div class="chrome">
       <div class="titlebar">
         <span class="ico" aria-hidden="true">!{{}}</span>
         <span class="grow">ral — {title}</span>
+        <span class="pad" aria-hidden="true"></span>
       </div>
 {menubar(current)}
+      <div class="sep" aria-hidden="true"></div>
     </div>
 
-    <div class="client">
+    <div class="{client}">
       {wrap}
 {body}
       </div>
     </div>
 
-    <div class="status">
-      <i>{titlebar}</i>
-      <i class="n">{count} examples</i>
-      <i>&copy; <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a></i>
-    </div>
+{front_panel(current, source, count)}
 
   </div>
 </div>
-{THEME_TOGGLE}
+{CHROME_SCRIPT}
 </body>
 </html>
 """
@@ -413,7 +453,7 @@ def render_examples(examples: list[dict]) -> None:
         f'<span>{html.escape(e["task"])}</span></div>\n'
         f'            <div class="exbody">\n'
         f'              <div class="summary">{e["note"]}</div>\n'
-        f'              <div class="split">\n{both_readings(e)}\n              </div>\n'
+        f'              <div class="split stack">\n{both_readings(e)}\n              </div>\n'
         f'            </div>\n'
         f'          </section>'
         for i, e in enumerate(examples)
@@ -436,7 +476,7 @@ def render_examples(examples: list[dict]) -> None:
           </div>
         </div>"""
     page = doc_page("examples", "examples", body, "examples/", len(examples),
-                    wrap='<div class="exwrap">')
+                    wrap='<div class="exwrap">', client="client form")
     page = page.replace("</body>", EXAMPLES_SCRIPT + "\n</body>")
     (SITE / "examples.html").write_text(page, encoding="utf-8")
 
@@ -462,11 +502,12 @@ def render_index(examples: list[dict]) -> None:
         ("{{MENUBAR}}", menubar("index")),
         ("{{DOWNLOAD_GROUPS}}", rows),
         ("{{LEAD_EXAMPLE}}", both_readings(lead)),
-        ("{{EXAMPLE_COUNT}}", str(len(examples))),
+        ("{{FRONT_PANEL}}", front_panel("index", "Ready", len(examples))),
     ]:
         if placeholder not in template:
             raise SystemExit(f"missing placeholder {placeholder} in index.template.html")
         template = template.replace(placeholder, value)
+    template = template.replace("</body>", CHROME_SCRIPT + "\n</body>")
     (SITE / "index.html").write_text(template, encoding="utf-8")
 
 

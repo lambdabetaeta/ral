@@ -1,126 +1,124 @@
 /* doc.css — the reading pages (tutorial, spec, rationale) and the examples
    explorer.
 
-   Chrome is the workstation sans; the document inside the client area is set
-   in serif, the way a word processor of the same era set the page it held.
-   Tokens, window, and the code panes live in site.css. */
+   Chrome is the workstation sans; the document inside a white client area is
+   set in serif, the way a word processor of the same era set the page it
+   held.  The examples explorer is a form rather than a document, so it sits
+   on the widget face with its panels raised off it.
 
-html { scroll-behavior: smooth; scroll-padding-top: 4rem; }
+   Tokens, window, panels and code panes live in site.css. */
+
+html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
 
 /* ── article ── */
-.doc article { font-family: var(--serif); font-size: 1.04rem; line-height: 1.75; }
+.doc article { font-family: var(--serif); font-size: 1.16rem; line-height: 1.74; }
 .doc h1 {
-  margin-bottom: 1.3rem;
-  padding-bottom: 0.5rem;
-  font-size: clamp(1.7rem, 5vw, 2.2rem);
+  margin-bottom: 1.4rem;
+  padding-bottom: 0.55rem;
+  font-size: clamp(1.9rem, 5vw, 2.3rem);
   font-weight: 600;
   line-height: 1.2;
-  border-bottom: 1px solid var(--cmd);
+  border-bottom: 2px solid var(--teal);
 }
-.doc h2 { margin: 2rem 0 0.6rem; font-size: 1.32rem; font-weight: 600; }
-.doc h3 { margin: 1.5rem 0 0.45rem; font-size: 1.1rem; font-weight: 600; color: var(--cmd); }
+.doc h2 { margin: 2.1rem 0 0.65rem; font-size: 1.5rem; font-weight: 600; }
+.doc h3 { margin: 1.6rem 0 0.5rem; font-size: 1.22rem; font-weight: 600; color: var(--cmd); }
 .doc h4 {
-  margin: 1.3rem 0 0.4rem;
+  margin: 1.4rem 0 0.45rem;
   font-family: var(--ui);
-  font-size: 0.76rem;
+  font-size: 0.86rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.14em;
   color: var(--muted);
 }
-.doc p { margin-bottom: 1rem; max-width: 44rem; }
-.doc ul, .doc ol { margin: 0.5rem 0 1rem 1.5rem; }
-.doc li { margin-bottom: 0.3rem; }
+.doc p { margin-bottom: 1.05rem; max-width: 46rem; }
+.doc ul, .doc ol { margin: 0.55rem 0 1.05rem 1.6rem; }
+.doc li { margin-bottom: 0.32rem; }
 .doc li > ul, .doc li > ol { margin-bottom: 0.2rem; }
 .doc strong { font-weight: 600; }
 .doc em { font-style: italic; }
 
 /* ── code ── */
 .doc code {
-  padding: 0.02em 0.3em;
+  padding: 0.04em 0.32em;
   font-family: var(--mono);
-  font-size: 0.85em;
+  font-size: 0.86em;
   color: var(--val);
   background: var(--face);
   border: 1px solid var(--line);
 }
 .doc pre {
-  max-width: 52rem;
-  margin: 0.9rem 0 1.2rem;
-  padding: 0.8rem 0.9rem;
+  max-width: 56rem;
+  margin: 1rem 0 1.3rem;
+  padding: 0.9rem 1rem;
   font-family: var(--mono);
-  font-size: 0.8rem;
-  line-height: 1.7;
+  font-size: 0.9rem;
+  line-height: 1.66;
   background: var(--face);
   color: var(--text);
   overflow-x: auto;
-  scrollbar-width: thin;
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
 .doc pre code { padding: 0; font-size: inherit; color: inherit; background: none; border: none; }
 
 /* ── blockquote, rule, table ── */
 .doc blockquote {
-  margin: 1.1rem 0;
+  margin: 1.2rem 0;
   padding: 0.1rem 0 0.1rem 1.1rem;
-  border-left: 3px solid var(--cmd);
+  border-left: 4px solid var(--teal);
   color: var(--muted);
   font-style: italic;
 }
-.doc hr { margin: 2.5rem 0; border: none; border-top: 1px solid var(--line); }
-.doc table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.92rem; }
-.doc th, .doc td { padding: 0.45rem 0.8rem; text-align: left; border: 1px solid var(--line); }
-.doc th { background: var(--face); font-weight: 600; }
+.doc hr { margin: 2.5rem 0; height: 2px; border: none; border-top: 1px solid var(--bot); border-bottom: 1px solid var(--top); }
+.doc table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 1rem; }
+.doc th, .doc td { padding: 0.5rem 0.85rem; text-align: left; border: 1px solid var(--line); }
+.doc th { background: var(--face); font-weight: 700; }
 
 /* ── examples: an explorer.  The picker holds still on the left while the
       chosen program's two readings scroll on the right. ── */
-.exwrap { padding: 0.5rem; }
-.exsplit { display: grid; grid-template-columns: 18.5rem minmax(0, 1fr); gap: 0.5rem; align-items: start; }
+.exwrap { padding: 0.55rem; }
+.exsplit { display: grid; grid-template-columns: 20rem minmax(0, 1fr); gap: 0.6rem; align-items: start; }
 
 .exlist {
   position: sticky;
-  top: 3.6rem;
-  height: calc(100vh - 5.6rem);
+  top: 4.6rem;
+  height: calc(100vh - 7.4rem);
   display: flex;
   flex-direction: column;
   background: var(--face);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
-.exfind { display: flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.5rem 0.4rem; }
-.exfind label { font-size: 0.7rem; color: var(--muted); }
+.exfind { display: flex; align-items: center; gap: 0.45rem; padding: 0.55rem 0.55rem 0.45rem; }
+.exfind label { font-size: 0.85rem; font-weight: 700; color: var(--muted); }
 .exfind input {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 0.3rem 0.45rem;
+  padding: 0.34rem 0.5rem;
   font: inherit;
   font-family: var(--mono);
-  font-size: 0.78rem;
+  font-size: 0.88rem;
   background: var(--client);
   color: var(--text);
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
-  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
 .exlist ol {
   flex: 1 1 auto;
-  margin: 0 0.5rem 0.5rem;
+  margin: 0 0.55rem 0.55rem;
   overflow-y: auto;
   list-style: none;
   background: var(--client);
-  scrollbar-width: thin;
-  border: 1px solid;
-  border-color: var(--bevel-sh) var(--bevel-lt) var(--bevel-lt) var(--bevel-sh);
-  box-shadow: inset 1px 1px 0 var(--bevel-dk);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
-.exlist ol:focus-visible { outline: 1px dotted var(--text); outline-offset: -3px; }
-.exlist li { padding: 0.28rem 0.5rem; line-height: 1.35; cursor: default; }
-.exlist li b { display: block; font-family: var(--mono); font-size: 0.775rem; font-weight: 600; }
+.exlist ol:focus-visible { outline: 2px solid var(--text); outline-offset: -4px; }
+.exlist li { padding: 0.34rem 0.55rem; line-height: 1.36; cursor: default; }
+.exlist li b { display: block; font-family: var(--mono); font-size: 0.88rem; font-weight: 600; }
 .exlist li span {
   display: block;
-  font-size: 0.67rem;
+  font-size: 0.78rem;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -129,39 +127,38 @@ html { scroll-behavior: smooth; scroll-padding-top: 4rem; }
 .exlist li:hover { background: var(--face-hi); }
 .exlist li[aria-selected="true"] { background: var(--sel); }
 .exlist li[aria-selected="true"] b { color: var(--sel-ink); }
-.exlist li[aria-selected="true"] span { color: var(--sel-ink); opacity: 0.8; }
+.exlist li[aria-selected="true"] span { color: var(--sel-ink); opacity: 0.85; }
 .exlist li[hidden] { display: none; }
-.exfoot { padding: 0 0.55rem 0.45rem; font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.exfoot { padding: 0 0.6rem 0.5rem; font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .exdetail { min-width: 0; }
 .example {
   background: var(--face);
-  border: 1px solid;
-  border-color: var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
-  box-shadow: inset 1px 1px 0 var(--face-hi), inset -1px -1px 0 var(--bevel-sh);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
 }
 .example[hidden] { display: none; }
 .exbar {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.7rem;
-  padding: 0.36rem 0.65rem;
-  background: linear-gradient(90deg, var(--title-a), var(--title-b));
-  color: var(--title-ink);
+  gap: 0.8rem;
+  padding: 0.42rem 0.75rem;
+  background: var(--face-hi);
+  border-bottom: 1px solid var(--bot);
+  box-shadow: 0 1px 0 var(--top);
 }
-.exbar b { font-family: var(--mono); font-size: 0.84rem; font-weight: 700; }
-.exbar span { font-size: 0.76rem; opacity: 0.92; }
-.exbody { padding: 0.85rem; }
-.exbody .summary { max-width: 60rem; font-family: var(--serif); font-size: 0.95rem; line-height: 1.7; color: var(--muted); }
+.exbar b { font-family: var(--mono); font-size: 1rem; font-weight: 700; }
+.exbar span { font-size: 0.92rem; color: var(--muted); }
+.exbody { padding: 0.9rem; }
+.exbody .summary { max-width: 62rem; font-family: var(--serif); font-size: 1.05rem; line-height: 1.66; color: var(--muted); }
 .exbody .summary > :last-child { margin-bottom: 0; }
-.exbody .split { margin-top: 0.85rem; }
-.exempty { padding: 2rem; text-align: center; font-size: 0.85rem; color: var(--muted); }
+.exempty { padding: 2.2rem; text-align: center; font-size: 0.95rem; color: var(--muted); }
 .exempty[hidden] { display: none; }
 
 /* ── tree-sitter syntax highlighting ──
-   Values run cool, commands run warm, constants gold — the same two
-   temperatures the landing sets up. */
+   Values run cool, commands run warm, constants gold — the same X11 hues the
+   chrome is built from. */
 pre .comment                      { color: var(--com); font-style: italic; }
 pre .keyword                      { color: var(--kw); font-weight: 600; }
 pre .keyword.operator             { color: var(--muted); }
@@ -179,7 +176,7 @@ pre .property                     { color: var(--str); }
 pre .operator                     { color: var(--muted); }
 pre .punctuation                  { color: var(--faint); }
 
-@media (max-width: 60rem) {
+@media (max-width: 64rem) {
   .exsplit { grid-template-columns: 1fr; }
-  .exlist { position: static; height: auto; max-height: 20rem; }
+  .exlist { position: static; height: auto; max-height: 22rem; }
 }
