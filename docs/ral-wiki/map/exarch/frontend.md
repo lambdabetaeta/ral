@@ -14,9 +14,10 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   consumes them. A `Kind` is a token or reasoning run (a streamed `Thinking`
   delta, committed by a final `Reasoning` event), boundary, usage, tool or
   harness call/result,
-  sub-agent lifecycle, a transient `Phase` label naming the worker's current
-  synchronous op (shown beside the spinner, recorded to `events.json`), or a
-  decoded surface class — a `Card` render document a kit raises through the
+  sub-agent lifecycle, a transition into one of the five `AgentState`s the agent
+  is ever in (`Ready`/`AwaitingModel`/`Evaluating`/`Compacting`/
+  `WaitingOnAgents` — a total state named on the status rule, never recorded:
+  the model never saw it), or a decoded surface class — a `Card` render document a kit raises through the
   `surface` builtin, a structural `Io` event, a housekeeping `Notice`, a
   `Pin`/`Unpin`, or a worker's `Done` — decoded onto the bus by
   [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` and drawn by one
@@ -38,7 +39,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 - the channel itself (`bus/channel.rs`) is bounded and coalescing, not a bare `mpsc` pair
   (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
-  pushing `Token`/`Thinking` (concatenate) or `Phase` (replace) merges into the
+  pushing `Token`/`Thinking` (concatenate) or `State` (replace) merges into the
   queue's tail entry when it is the same class and the same agent id; every
   other `Kind` — lifecycle, tool frames, cards, errors — is reserved and always
   enqueued on its own, so a producer flood can only ever grow one coalescing
@@ -148,9 +149,13 @@ Two `Sink` implementations:
  (`RenderWindow::scroll_pct`, rendered `⇣ 72%` / `⇣ bot`) rather than an
  animated right-margin scrollbar.
 
- The `rule_line` carries a value-ramp `ctx%` bar and an elapsed-wait bar
- (elapsed wall-time on the live phase, resetting per round-trip); the live
- phase lives on `Viewport`, not `App`.
+ The `rule_line` carries a value-ramp `ctx%` bar, the agent's state in a
+ fixed-width slot, and an elapsed-wait bar reading the time *in that state* —
+ anchored to the transition, never reset by an arriving event, so an
+ `awaiting model` whose streamed-character count has stopped growing under a
+ rising `Ns` is a stalled stream and reads as one. The `StateSpan` (state,
+ entry instant, characters streamed since) lives on `Viewport`, not `App`, so
+ each tab times its own.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
  (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
  rows dim and keep their final step cells without a countdown. The conversing

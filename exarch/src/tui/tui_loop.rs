@@ -264,7 +264,7 @@ fn ui_loop(
                 // events still buffered; nothing drains after this returns, so
                 // empty the channel uncapped before the final frame.
                 drain_pass(rx, done, None, |ev| tui.app.handle(ev, rx));
-                tui.app.busy_off();
+                tui.app.mark_ready();
                 draw(&mut tui.app, tui.guard.term())?;
                 return Ok(());
             }
@@ -471,9 +471,18 @@ mod tests {
             }
             _ => panic!("expected Kind::Resources"),
         }
+        // The park the loop settles into announces itself, and nothing else
+        // follows: a command is not a turn, so no state ran before the fold.
+        assert!(
+            matches!(
+                rx.try_recv().map(|e| e.kind),
+                Ok(Kind::State(crate::bus::AgentState::Ready))
+            ),
+            "the fold is followed by the ready-boundary state alone"
+        );
         assert!(
             rx.try_recv().is_err(),
-            "one /resources command, exactly one event"
+            "one /resources command, exactly one fold"
         );
     }
 }

@@ -2,7 +2,7 @@
 //! — same method names, same error types — so `Emitter` and `sink.rs`'s
 //! `drain_pass` need only name the type.
 //!
-//! Pushing a `Token`/`Thinking` (concatenate) or `Phase` (replace) merges into
+//! Pushing a `Token`/`Thinking` (concatenate) or `State` (replace) merges into
 //! the tail entry iff that tail is the same class and the same agent; every
 //! other [`Kind`] is reserved, always pushed as its own entry, never merged,
 //! never dropped. So a token run can never migrate across a `ToolCall` of the
@@ -26,24 +26,24 @@ use std::time::{Duration, Instant};
 enum MergeClass {
     Token,
     Thinking,
-    Phase,
+    State,
 }
 
 fn merge_class(kind: &Kind) -> Option<MergeClass> {
     match kind {
         Kind::Token(_) => Some(MergeClass::Token),
         Kind::Thinking(_) => Some(MergeClass::Thinking),
-        Kind::Phase(_) => Some(MergeClass::Phase),
+        Kind::State(_) => Some(MergeClass::State),
         _ => None,
     }
 }
 
-/// Cap on a merged `Token`/`Thinking` entry's accumulated text. `Phase`
+/// Cap on a merged `Token`/`Thinking` entry's accumulated text. `State`
 /// replaces rather than grows, so it never reaches the cap.
 pub(crate) const MERGE_TEXT_CAP: usize = 256 * 1024;
 
 /// One resident entry, plus the bytes shed off its front past
-/// [`MERGE_TEXT_CAP`] — zero for `Phase` and for every reserved kind.
+/// [`MERGE_TEXT_CAP`] — zero for `State` and for every reserved kind.
 struct QueueEntry {
     id: AgentId,
     kind: Kind,
@@ -102,18 +102,14 @@ fn merge_into(tail: &mut QueueEntry, incoming: Kind, bytes: &mut usize) {
                 *bytes -= cut;
             }
         }
-        (Kind::Phase(acc), Kind::Phase(add)) => {
-            *bytes -= acc.len();
-            *acc = add;
-            *bytes += acc.len();
-        }
+        (Kind::State(acc), Kind::State(add)) => *acc = add,
         _ => unreachable!("merge_class agrees the incoming and tail kinds match"),
     }
 }
 
 fn payload_len(kind: &Kind) -> usize {
     match kind {
-        Kind::Token(s) | Kind::Thinking(s) | Kind::Phase(s) => s.len(),
+        Kind::Token(s) | Kind::Thinking(s) => s.len(),
         _ => 0,
     }
 }
@@ -122,7 +118,7 @@ fn overflow_note(class: MergeClass, elided: u64) -> String {
     let label = match class {
         MergeClass::Token => "token",
         MergeClass::Thinking => "thinking",
-        MergeClass::Phase => "phase",
+        MergeClass::State => "state",
     };
     format!(
         "presentation bus: elided {elided} B of coalesced {label} output past the {MERGE_TEXT_CAP}-B cap"
@@ -465,29 +461,34 @@ mod tests {
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
-    /// A `Phase` is superseded by the next one, so the merge rule replaces it
-    /// in place rather than growing the entry.
+    /// A `State` is superseded by the next one, so the merge rule replaces it
+    /// in place rather than growing the entry: a frontend that fell behind
+    /// resumes at the state the agent is in, not the one it was leaving.
     #[test]
-    fn bus_queue_newer_phase_replaces_older() {
+    fn bus_queue_newer_state_replaces_older() {
         let (tx, rx) = channel();
         tx.send(Event {
             id: 1,
-            kind: Kind::Phase("thinking".into()),
+            kind: Kind::State(crate::bus::AgentState::AwaitingModel),
         })
         .unwrap();
         tx.send(Event {
             id: 1,
-            kind: Kind::Phase("compacting".into()),
+            kind: Kind::State(crate::bus::AgentState::Compacting),
         })
         .unwrap();
         assert_eq!(
             rx.depth(),
             1,
-            "a same-agent Phase run replaces in place rather than growing"
+            "a same-agent State run replaces in place rather than growing"
         );
         match rx.try_recv().unwrap().kind {
-            Kind::Phase(p) => assert_eq!(p, "compacting", "the newer phase replaced the older"),
-            _ => panic!("expected Phase"),
+            Kind::State(s) => assert_eq!(
+                s,
+                crate::bus::AgentState::Compacting,
+                "the newer state replaced the older"
+            ),
+            _ => panic!("expected State"),
         }
     }
 

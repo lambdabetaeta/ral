@@ -216,7 +216,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         }),
         ("elapsed", {
             let mut v = wait_bar(Duration::from_secs(18));
-            v.push(note("grows with the current phase's wall-time"));
+            v.push(note("grows with the time spent in the current state"));
             v
         }),
     ]));

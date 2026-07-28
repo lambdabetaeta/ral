@@ -13,8 +13,8 @@ use super::line::{self, is_blank, plain, size_bar};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
-use crate::bus::AgentId;
 use crate::bus::card::{Card, Hunk, ObservationKind};
+use crate::bus::{AgentId, AgentState};
 use crate::provider::Usage;
 use ratatui::text::Line;
 use std::fs;
@@ -80,13 +80,41 @@ pub(super) struct Viewport {
     /// Whether the last logged line was blank, so blanks collapse on disk as
     /// they do on screen.
     log_prev_blank: bool,
-    /// The live phase and its start — the elapsed-wait bar; `None` hides it.
-    phase: Option<(String, Instant)>,
+    /// Total, never absent: the status line always has a state to name.
+    state: StateSpan,
     /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
     /// column.  Never logged, and wiped by [`Self::reset`] so a pin is
     /// generation-bounded like the scrollback.  A `Vec`, not a map, so render
     /// order is first-seen insertion order.
     pins: Vec<(String, Card)>,
+}
+
+/// The agent's state, when it was entered, and the model text that has arrived
+/// since — the status line's whole datum, so one transition resets all three.
+/// The instant anchors the elapsed-wait bar to that transition rather than to
+/// the last event of any kind, which is what makes a silent stream legible.
+#[derive(Clone, Copy)]
+pub(super) struct StateSpan {
+    pub(super) state: AgentState,
+    since: Instant,
+    /// Characters of model text arrived in this state.  A count that stops
+    /// growing under a growing [`Self::elapsed`] is a stalled stream.
+    pub(super) streamed: usize,
+}
+
+impl StateSpan {
+    pub(super) fn new(state: AgentState) -> Self {
+        Self {
+            state,
+            since: Instant::now(),
+            streamed: 0,
+        }
+    }
+
+    /// Time in state.
+    pub(super) fn elapsed(self) -> Duration {
+        self.since.elapsed()
+    }
 }
 
 pub(super) struct RenderWindow {
@@ -201,7 +229,7 @@ impl Viewport {
             log: open_log(&log_path),
             log_path,
             log_prev_blank: true,
-            phase: None,
+            state: StateSpan::new(AgentState::Ready),
             pins: Vec::new(),
         }
     }
@@ -265,23 +293,23 @@ impl Viewport {
             bytes as u64,
         )
     }
-    /// Begin a phase, restarting the elapsed-wait clock; phases never overlap.
-    pub(super) fn set_phase(&mut self, label: String) {
-        self.phase = Some((label, Instant::now()));
+    /// Enter `state`, restarting the clock and the streamed count.  Re-entering
+    /// the state already held is a no-op: a step that re-drives the same wait
+    /// must not reset the clock measuring how long that wait has run.
+    pub(super) fn set_state(&mut self, state: AgentState) {
+        if self.state.state != state {
+            self.state = StateSpan::new(state);
+        }
     }
 
-    /// Clear the live phase, hiding the elapsed-wait bar.  A no-op when none is
-    /// live, so every non-`Phase` event may call it.
-    pub(super) fn clear_phase(&mut self) {
-        self.phase = None;
+    /// Count `chars` of arriving model text against the current state — what
+    /// separates a stream that is delivering from one that has gone silent.
+    pub(super) fn note_streamed(&mut self, chars: usize) {
+        self.state.streamed = self.state.streamed.saturating_add(chars);
     }
 
-    pub(super) fn phase_label(&self) -> Option<&str> {
-        self.phase.as_ref().map(|(label, _)| label.as_str())
-    }
-
-    pub(super) fn phase_elapsed(&self) -> Option<Duration> {
-        self.phase.as_ref().map(|(_, start)| start.elapsed())
+    pub(super) fn state(&self) -> StateSpan {
+        self.state
     }
 
     /// Wipe scrollback, scroll state, and streaming buffers, truncating

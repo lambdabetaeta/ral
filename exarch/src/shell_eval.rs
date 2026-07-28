@@ -15,7 +15,7 @@ use crate::agent::transcript::Transcript;
 use crate::bus::card::{
     done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin,
 };
-use crate::bus::{AgentId, Emitter, Kind, Mailbox, Post};
+use crate::bus::{AgentId, AgentState, Emitter, Kind, Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -234,7 +234,7 @@ pub(crate) fn run_shell(
 ) -> Outcome {
     let name = "<tool>";
 
-    emit.emit(Kind::Phase("evaluating".into()));
+    emit.emit(Kind::State(AgentState::Evaluating));
 
     // Trace-only timing.
     #[cfg(debug_assertions)]

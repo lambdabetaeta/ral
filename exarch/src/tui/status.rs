@@ -1,21 +1,21 @@
 //! The status rule under the transcript: two value-ramp bars — elapsed wait and
-//! context fill — around the phase label, with usage right-aligned. `/legend` in
+//! context fill — around the state label, with usage right-aligned. `/legend` in
 //! `super::banner` draws the same two bars as samples.
 
 use super::line::usage_text;
 use super::palette::{CYAN, PURPLE, SLATE};
 use super::rail;
+use super::viewport::StateSpan;
+use crate::bus::AgentState;
 use crate::provider::Usage;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn rule_line(
     width: usize,
-    phase: Option<&str>,
-    wait_elapsed: Option<Duration>,
+    state: StateSpan,
     scroll_pct: Option<u16>,
     usage: &Usage,
     last_input: u64,
@@ -24,17 +24,15 @@ pub(super) fn rule_line(
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    // The `Ns` digit ticks once a second: a bar that stops growing is a wedged turn.
-    let elapsed = wait_elapsed.unwrap_or(Duration::ZERO);
-    spans.extend(wait_bar(elapsed));
-    let mut label = match phase {
-        Some(p) => format!("{p}… "),
-        None => String::new(),
-    };
+    // The `Ns` digit ticks once a second, and the clock runs from the state's
+    // own start: an `awaiting model` that reads minutes with a frozen streamed
+    // count is a stalled stream, which a per-event reset could never show.
+    spans.extend(wait_bar(state.elapsed()));
+    let mut label = state_label(state);
     // Pad by display width: `…` is three bytes and one column, so `label.len()`
     // would leave the slot short and shift every field after it.
     let label_w = UnicodeWidthStr::width(label.as_str());
-    label.push_str(&" ".repeat(PHASE_SLOT_W.saturating_sub(label_w)));
+    label.push_str(&" ".repeat(STATE_SLOT_W.saturating_sub(label_w)));
     spans.push(Span::styled(label, Style::default().fg(SLATE)));
     spans.push(Span::styled(
         if status_model.is_empty() {
@@ -85,6 +83,40 @@ pub(super) fn rule_line(
     Line::from(spans)
 }
 
+/// The state's name, plus — while a step is open and something has come back —
+/// how much text has arrived in it.  Only [`AgentState::Ready`] goes
+/// unpunctuated: nothing is outstanding, so nothing is awaited.
+fn state_label(span: StateSpan) -> String {
+    let mut label = span.state.label().to_owned();
+    if span.state == AgentState::AwaitingModel && span.streamed > 0 {
+        label.push(' ');
+        label.push_str(&streamed_count(span.streamed));
+    }
+    if span.state.pending() {
+        label.push('…');
+    }
+    // One column of gutter even at the slot's full width, so the longest label
+    // never butts against the model name.
+    label.push(' ');
+    label
+}
+
+/// A character count in at most four columns: `938`, `1.2k`, `47k`, `1.4M`.
+/// Coarse on purpose — the datum is whether it is still moving, not its value.
+fn streamed_count(chars: usize) -> String {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a streamed-character count never approaches f64's exact range"
+    )]
+    let n = chars as f64;
+    match chars {
+        0..=999 => chars.to_string(),
+        1_000..=9_999 => format!("{:.1}k", n / 1_000.0),
+        10_000..=999_999 => format!("{:.0}k", n / 1_000.0),
+        _ => format!("{:.1}M", n / 1_000_000.0),
+    }
+}
+
 /// Width of the ctx% value-ramp bar, in cells.
 pub(super) const CTX_BAR_W: usize = 10;
 
@@ -127,7 +159,10 @@ pub(super) fn ctx_ramp(pct: u64) -> Vec<Span<'static>> {
 
 /// Width of the elapsed-wait bar, in cells.
 pub(super) const WAIT_BAR_W: usize = 10;
-pub(super) const PHASE_SLOT_W: usize = 16; // fixed phase-label slot: stops status-line jitter
+/// Fixed state-label slot, wide enough for the longest label plus a streamed
+/// count (`awaiting model 1.2k… `): a state change never shifts the fields
+/// after it.
+pub(super) const STATE_SLOT_W: usize = 22;
 /// Elapsed seconds to a `0..=3` lightness step. Not [`rail::value_step`], whose
 /// 4/20/80 thresholds are calibrated for line counts and would burn this bar
 /// white on nearly every turn.
@@ -140,8 +175,8 @@ pub(super) fn wait_step(secs: u64) -> u8 {
     }
 }
 
-/// The elapsed-wait bar: [`WAIT_BAR_W`] cells growing with the current phase's
-/// seconds and lightening as the wait drags, then a ` Ns ` readout. [`PURPLE`]
+/// The elapsed-wait bar: [`WAIT_BAR_W`] cells growing with the seconds spent in
+/// the current state and lightening as the wait drags, then a ` Ns ` readout. [`PURPLE`]
 /// rather than the ctx ramp's cyan, so the two bars stay apart.
 pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     let secs = elapsed.as_secs();

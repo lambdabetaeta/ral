@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::str;
 
 use crossterm::{
     execute,
@@ -17,7 +16,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::bus::AgentId;
+use crate::bus::{AgentId, AgentState};
 
 use super::App;
 use super::app::Overlay;
@@ -29,6 +28,7 @@ use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::select::highlight_range;
 use super::status::rule_line;
 use super::terminal::Term;
+use super::viewport::{StateSpan, Viewport};
 
 const PROMPT_PAD_H: u16 = 1;
 
@@ -176,11 +176,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     app.prompt_state.style_prompt(focused == app.tabs.root());
     // Owned copies from here down: the `'static` draw closure below may
     // capture no borrow of `app`.
-    let (phase, wait_elapsed) = app
+    let state = app
         .tabs
         .viewport(focused)
-        .map(|vp| (vp.phase_label().map(str::to_owned), vp.phase_elapsed()))
-        .unwrap_or_default();
+        .map_or_else(|| StateSpan::new(AgentState::Ready), Viewport::state);
     let usage = app.total_usage;
     let last_input = app.last_input;
     let context_window = app.context_window;
@@ -224,8 +223,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         f.render_widget(
             Paragraph::new(rule_line(
                 text_rect.width.min(READ_W) as usize,
-                phase.as_deref(),
-                wait_elapsed,
+                state,
                 scroll_pct,
                 &usage,
                 last_input,

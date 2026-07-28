@@ -141,7 +141,8 @@ pub struct ViewFigures {
 pub struct BusFigures {
     /// Queue entries — a merged run and a reserved kind each count as one.
     pub depth: u64,
-    /// Resident merged `Token`/`Thinking`/`Phase` text bytes.
+    /// Resident merged `Token`/`Thinking` text bytes.  `State` coalesces by
+    /// replacement and carries no text, so it weighs nothing here.
     pub bytes: u64,
 }
 

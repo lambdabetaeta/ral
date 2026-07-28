@@ -2092,16 +2092,14 @@
             openDial = null;
             streamingProse = pushBlock({ kind: "assistant", raw: p.text });
           }
-          setStatus("Working…");
           break;
-        case "thinking":
-          setStatus("Thinking…");
-          break;
-        case "phase":
-          setStatus(capitalize(p.label) + "…");
+        // The agent's state is the status bar's only writer, so the label never
+        // flickers back to a coarser word as tokens arrive; `ready` carries no
+        // spinner, which is what an empty bar means here.
+        case "state":
+          setStatus(p.pending ? capitalize(p.label) + "…" : "");
           break;
         case "step":
-          setStatus("Working… · step " + p.n);
           dialAddNote("[step " + p.n + "]", "muted");
           break;
         case "tool_call":

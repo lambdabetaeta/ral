@@ -266,7 +266,8 @@ impl Inbox {
             .expect("UserSteering is idempotent and never rejects");
     }
 
-    #[cfg(test)]
+    /// Whether anything is queued.  The attend loop's ready boundary reads it
+    /// to tell an idle pass from one that already has work in hand.
     pub(crate) fn is_empty(&self) -> bool {
         self.shared.lock().is_empty()
     }

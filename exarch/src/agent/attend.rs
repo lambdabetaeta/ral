@@ -9,7 +9,9 @@ use crate::agent::cancel;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
 use crate::agent::{Agent, deliberate, panic_msg, render_reply};
-use crate::bus::{AgentOutcome, Emitter, Item, Kind, ParkMode, Post, WORKER_PANIC_PREFIX};
+use crate::bus::{
+    AgentOutcome, AgentState, Emitter, Item, Kind, ParkMode, Post, WORKER_PANIC_PREFIX,
+};
 use crate::provider::ProviderError;
 use crate::shell_eval;
 use ral_core::serial::FOValue;
@@ -76,6 +78,13 @@ impl Agent {
             // a long idle surfaces once an item next runs.
             self.reconcile_service_pins(emit);
             self.check_disk_warn(emit);
+            // The state a frontend shows over the coming silence is this park's
+            // own verdict.  Only on an empty queue: with an item already in
+            // hand the agent is not idle for any observable moment, and the
+            // deliberation's own transitions are the truth.
+            if self.inbox.is_empty() {
+                emit.emit(Kind::State(idle_state(self.park_mode())));
+            }
             // `next_or_idle` recomputes the park verdict on every wake.  An
             // un-engaged idle returning agent breaks here, yet its outcome
             // reaches its parent through the worker epilogue, not this break.
@@ -386,6 +395,19 @@ pub(super) fn announce(item: &Item, emit: &Emitter) {
             }
         }
         Item::Nudge(_) | Item::Command(_) => {}
+    }
+}
+
+/// The state an idle agent is in, read off the park verdict that is about to
+/// hold it there: a wait on the fleet is the one idleness that is not the
+/// human's turn, and every other park — including the [`ParkMode::Quiesce`]
+/// that ends the loop — leaves nothing outstanding.
+fn idle_state(mode: ParkMode) -> AgentState {
+    match mode {
+        ParkMode::HeldByChildren => AgentState::WaitingOnAgents,
+        ParkMode::Held | ParkMode::Engaged | ParkMode::UntilCancelled | ParkMode::Quiesce => {
+            AgentState::Ready
+        }
     }
 }
 

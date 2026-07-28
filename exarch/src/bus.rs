@@ -13,7 +13,7 @@ mod sink;
 
 pub use channel::{BusReceiver, BusSender, channel};
 pub use emitter::Emitter;
-pub use event::{Event, Kind};
+pub use event::{AgentState, Event, Kind};
 pub use inbox::{InboxReject, Mailbox};
 pub use post::AgentOutcome;
 pub use sink::Sink;

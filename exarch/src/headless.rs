@@ -296,7 +296,7 @@ impl Sink for Headless<'_> {
             | Kind::UserPromptEcho(_)
             | Kind::Reasoning { .. }
             | Kind::Thinking(_)
-            | Kind::Phase(_) => {}
+            | Kind::State(_) => {}
             // A pin overwrites a TUI register; headless has none.
             Kind::Pin { .. } | Kind::Unpin { .. } => {}
         }

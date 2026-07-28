@@ -19,7 +19,7 @@ use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use crate::bus::card::IoEvent;
-use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
+use crate::bus::{AgentId, AgentState, BusReceiver, Event, Inbox, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
 use crate::provider::{Provider, Usage};
 use ratatui::{
@@ -196,11 +196,13 @@ impl App {
         }
     }
 
-    pub fn busy_off(&mut self) {
-        // An exchange ending supersedes any live phase label.
+    /// Settle the focused tab's state for the final frame.  The worker emits its
+    /// own [`AgentState::Ready`] at every park; this covers the one boundary it
+    /// cannot — the exit, where the loop is over and nothing more will arrive.
+    pub fn mark_ready(&mut self) {
         let focused = self.tabs.focused();
         if let Some(vp) = self.tabs.viewport_mut(focused) {
-            vp.clear_phase();
+            vp.set_state(AgentState::Ready);
         }
     }
 
@@ -208,11 +210,11 @@ impl App {
     /// drive it: the elapsed-wait bar, the tab-title spinner, or a copy toast —
     /// which needs one draw past its own expiry to erase itself, hence `margin`.
     pub(super) fn animating(&self, margin: Duration) -> bool {
-        let phase_live = self
+        let pending = self
             .tabs
             .viewport(self.tabs.focused())
-            .is_some_and(|vp| vp.phase_label().is_some());
-        phase_live || self.gesture.toast_live(margin) || !self.focused_waiting()
+            .is_some_and(|vp| vp.state().state.pending());
+        pending || self.gesture.toast_live(margin) || !self.focused_waiting()
     }
 
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
@@ -258,13 +260,6 @@ impl App {
                 return;
             }
         }
-        // A phase label names the silent gap before the next thing happens, so
-        // any other event supersedes it and resets the elapsed-wait bar.
-        if !matches!(kind, Kind::Phase(_))
-            && let Some(vp) = self.tabs.viewport_mut(id)
-        {
-            vp.clear_phase();
-        }
         match kind {
             Kind::Born {
                 log_dir,
@@ -299,12 +294,21 @@ impl App {
                     vp.add_usage(u);
                 }
             }
+            // Arriving text counts against the open state, so `awaiting model`
+            // carries how much has come back — a frozen count under a growing
+            // clock is what a stalled stream looks like.
             Kind::Token(text) => {
                 let floor = self.context_floor();
-                self.with_viewport(id, |vp| vp.push_token(&text, floor));
+                self.with_viewport(id, |vp| {
+                    vp.note_streamed(text.chars().count());
+                    vp.push_token(&text, floor);
+                });
             }
             Kind::Thinking(text) => {
-                self.with_viewport(id, |vp| vp.push_thinking(&text));
+                self.with_viewport(id, |vp| {
+                    vp.note_streamed(text.chars().count());
+                    vp.push_thinking(&text);
+                });
             }
             Kind::Boundary => {
                 let floor = self.context_floor();
@@ -315,9 +319,7 @@ impl App {
                 self.with_viewport(id, |vp| vp.commit_thinking(text, answer_chars));
             }
             Kind::Step { n, .. } => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
-            // `set_phase` restarts the clock, so a consecutive Phase resets the
-            // bar rather than stacking.
-            Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
+            Kind::State(state) => self.with_viewport(id, |vp| vp.set_state(state)),
             // A desk verb changed the world outside the turn, so it renders as
             // an act — a barrier the coalescing projection never folds into a
             // run of observations.

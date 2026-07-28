@@ -63,12 +63,15 @@ pub enum SynodEvent {
     Token {
         text: String,
     },
-    Thinking,
     Step {
         n: u32,
     },
-    Phase {
-        label: String,
+    /// The agent's whole state, not a passing label: the status bar names this
+    /// one until the next arrives, and `pending` says whether anything is
+    /// outstanding — the spinner's warrant.
+    State {
+        label: &'static str,
+        pending: bool,
     },
     ToolCall {
         tool: &'static str,
@@ -136,9 +139,11 @@ pub enum SynodEvent {
 pub fn project(kind: Kind) -> Option<SynodEvent> {
     Some(match kind {
         Kind::Token(text) => SynodEvent::Token { text },
-        Kind::Thinking(_) => SynodEvent::Thinking,
         Kind::Step { n, .. } => SynodEvent::Step { n },
-        Kind::Phase(label) => SynodEvent::Phase { label },
+        Kind::State(state) => SynodEvent::State {
+            label: state.label(),
+            pending: state.pending(),
+        },
         Kind::ToolCall { tool, cmd, summary } => SynodEvent::ToolCall { tool, cmd, summary },
         Kind::HarnessCall {
             verb,
@@ -176,16 +181,20 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         // `Reasoning`, and `UserPromptEcho` are TUI presentation blocks —
         // the content they carry already round-trips to the model on the
         // assistant message, so there is nothing here for the window to
-        // add.  `ToolResult`/`HarnessResult` are forensic pairings for
-        // their call, kept in the transcript for post-mortem, never shown
-        // live.  `Pin`/`Unpin` write a TUI register slot synod does not
-        // have.  `Nudge` and `SystemNote` are the harness minding itself — an
-        // empty-turn correction, a truncation recovery, a compaction's byte
-        // counts — named in the operator's terms, so the window is not told;
-        // the phase a compaction announces is its whole user-facing surface.
+        // add.  A live `Thinking` chunk has no block of its own here and the
+        // status bar already names the wait, so only the committed reasoning
+        // matters, and that reaches the transcript.  `ToolResult`/
+        // `HarnessResult` are forensic pairings for their call, kept in the
+        // transcript for post-mortem, never shown live.  `Pin`/`Unpin` write a
+        // TUI register slot synod does not have.  `Nudge` and `SystemNote` are
+        // the harness minding itself — an empty-turn correction, a truncation
+        // recovery, a compaction's byte counts — named in the operator's terms,
+        // so the window is not told; the state a compaction announces is its
+        // whole user-facing surface.
         Kind::Born { .. }
         | Kind::Died
         | Kind::Boundary
+        | Kind::Thinking(_)
         | Kind::Nudge { .. }
         | Kind::SystemNote(_)
         | Kind::Reasoning { .. }

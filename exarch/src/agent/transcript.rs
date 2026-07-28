@@ -186,7 +186,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // Rendering, prose, and interactive chrome — plus the pin register,
         // which is state that *is*, not a thing that happened.
         Kind::Card(_)
-        | Kind::Phase(_)
+        | Kind::State(_)
         | Kind::Token(_)
         | Kind::Thinking(_)
         | Kind::Boundary

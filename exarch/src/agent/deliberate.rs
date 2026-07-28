@@ -14,7 +14,7 @@ use crate::agent::digest::{
     summary_cap_tokens,
 };
 use crate::agent::event::{QuiesceReason, ToolResult as SessionToolResult};
-use crate::bus::{Emitter, Item, Kind};
+use crate::bus::{AgentState, Emitter, Item, Kind};
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use ral_core::serial::FOValue;
 use std::sync::Arc;
@@ -110,7 +110,7 @@ impl Agent {
             let t_req = std::time::Instant::now();
             #[cfg(debug_assertions)]
             let mut first_token: Option<std::time::Duration> = None;
-            emit.emit(Kind::Phase("awaiting model".into()));
+            emit.emit(Kind::State(AgentState::AwaitingModel));
             let step_out = {
                 let token_emit = emit.clone();
                 let reasoning_emit = emit.clone();
@@ -334,7 +334,7 @@ impl Agent {
             return;
         };
         Self::note(format!("[Compacting history: {detail} → summary]"), emit);
-        emit.emit(Kind::Phase("compacting".into()));
+        emit.emit(Kind::State(AgentState::Compacting));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
                 let recorded = self.log.lock().record_usage(summary.usage.into());
