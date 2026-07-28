@@ -4,6 +4,10 @@
 # is a list of String values, never a re-lexed token soup, so a name
 # with spaces cannot fracture.
 
-let names = if !{is-empty $ARGS} { return [world] } else { return $ARGS }
+let names = if !{is-empty $ARGS} {
+    return [world]
+} else {
+    return $ARGS
+}
 
 for $names { |n| echo "hello, $n" }

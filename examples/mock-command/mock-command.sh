@@ -18,4 +18,4 @@ curl() { echo '{"status":"ok","rev":"abc123"}'; }
 deploy prod.example.com
 deploy staging.example.com
 
-unset -f curl   # easy to forget — until then, every curl in the script is mocked
+unset -f curl   # easy to forget!

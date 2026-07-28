@@ -1,10 +1,10 @@
 /* index.css — the landing page.
 
    The client area here is a form, not a document: the face colour carries
-   the page and every group is a titled panel raised off it.  Reads top to
-   bottom as an argument — the thesis, the two worlds it separates, what ral
-   is beneath, what the split buys, the same task written twice, then how to
-   get it.  Chrome, tokens, panels and code panes live in site.css. */
+   the page and every group is a titled panel raised off it.  The page follows
+   one argument: an external command is an operation, the OS is its default
+   interpretation, and values remain inert on the other side.  Chrome, tokens,
+   panels and code panes live in site.css. */
 
 /* ── hero ── */
 .hero { text-align: center; }
@@ -27,14 +27,15 @@
   letter-spacing: -0.05em;
 }
 .thesis {
+  max-width: 52rem;
   margin-top: 1.2rem;
+  margin-inline: auto;
   font-family: var(--serif);
   font-size: clamp(1.45rem, 3.2vw, 2rem);
   line-height: 1.32;
   text-wrap: balance;
 }
 .thesis em { font-style: italic; color: var(--cmd); }
-.subthesis { margin-top: 0.8rem; font-size: 1rem; color: var(--muted); }
 
 /* ── the two worlds ── */
 .duality { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; margin-top: 2.4rem; }
@@ -46,9 +47,10 @@
 .duo.val .duo-line em { color: var(--val); }
 .duo.cmd .duo-line em { color: var(--cmd); }
 .duo-note { margin-top: 0.55rem; font-size: 0.98rem; line-height: 1.6; color: var(--muted); }
+.duo-note span { display: block; }
 
-/* ── what ral is beneath ── */
-.powers { margin-top: 1.1rem; }
+/* ── proof and exarch callouts ── */
+.powers { margin-top: 2.6rem; }
 .powers-body {
   display: flex;
   flex-wrap: wrap;
@@ -73,6 +75,13 @@
   line-height: 1.68;
   color: var(--muted);
 }
+.powers-say p code {
+  padding: 0.04em 0.3em;
+  font-family: var(--mono);
+  font-size: 0.84em;
+  background: var(--client);
+  border: 1px solid var(--line);
+}
 /* Motif's default button: the push button, plus the ring that marks it. */
 .powers-go {
   flex: 0 0 auto;
@@ -95,12 +104,21 @@
 /* ── prose ── */
 .prose { margin-top: 2.6rem; }
 .eyebrow {
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.55rem;
   font-size: 0.8rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.18em;
   color: var(--cmd);
+}
+.prose h2 {
+  max-width: 48rem;
+  margin-bottom: 0.85rem;
+  font-family: var(--serif);
+  font-size: clamp(1.55rem, 3vw, 2rem);
+  font-weight: 600;
+  line-height: 1.28;
+  text-wrap: balance;
 }
 .prose p {
   max-width: 46rem;
@@ -120,6 +138,100 @@
 .prose code.val { color: var(--val); }
 .prose code.cmd { color: var(--cmd); }
 
+.example-more {
+  margin-top: 0.7rem;
+  text-align: right;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.landing-split pre {
+  white-space: pre-wrap;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* Invariants are promises about impossible states, not a feature grid. */
+.invariants {
+  display: grid;
+  max-width: 50rem;
+  gap: 0.55rem;
+  margin-top: 1.1rem;
+  list-style: none;
+}
+.invariants li {
+  position: relative;
+  padding: 0.72rem 0.9rem 0.72rem 2rem;
+  font-family: var(--serif);
+  font-size: 1.06rem;
+  line-height: 1.5;
+  background: var(--client);
+  border: 2px solid;
+  border-color: var(--top) var(--bot) var(--bot) var(--top);
+}
+.invariants li::before {
+  position: absolute;
+  left: 0.8rem;
+  content: "\2192";
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--cmd);
+}
+.invariants code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+}
+
+/* ── native sandbox ── */
+.sandbox { margin-top: 2.6rem; }
+.sandbox-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(20rem, 0.85fr);
+  gap: 1.3rem 1.6rem;
+  align-items: start;
+  padding: 1.4rem;
+}
+.sandbox-copy h2 {
+  font-family: var(--serif);
+  font-size: clamp(1.55rem, 3vw, 2rem);
+  font-weight: 600;
+  line-height: 1.28;
+  text-wrap: balance;
+}
+.sandbox-copy p,
+.sandbox-floor {
+  font-family: var(--serif);
+  font-size: 1.06rem;
+  line-height: 1.68;
+  color: var(--muted);
+}
+.sandbox-copy p { margin-top: 0.8rem; }
+.sandbox-copy code,
+.sandbox-floor code {
+  padding: 0.04em 0.3em;
+  font-family: var(--mono);
+  font-size: 0.84em;
+  background: var(--client);
+  border: 1px solid var(--line);
+}
+.sandbox-code {
+  margin: 0;
+  padding: 0.85rem 0.95rem;
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: var(--client);
+  border: 2px solid;
+  border-color: var(--bot) var(--top) var(--top) var(--bot);
+}
+.sandbox-floor {
+  grid-column: 1 / -1;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
 /* ── get ral ── */
 .get { margin-top: 2.6rem; }
 .install { display: flex; gap: 0.5rem; }
@@ -135,8 +247,25 @@
   cursor: pointer;
   border: 2px solid;
   border-color: var(--bot) var(--top) var(--top) var(--bot);
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+  box-shadow: inset 4px 0 0 var(--gold);
 }
+.install-cmd:hover,
+.install-cmd:focus-visible { outline-color: var(--gold); }
 .install .btn { padding: 0 1.3rem; font-size: 0.9rem; }
+
+.bundle-note {
+  margin-top: 1rem;
+  padding: 0.75rem 0.9rem;
+  font-family: var(--serif);
+  font-size: 1rem;
+  line-height: 1.55;
+  background: var(--client);
+  border-left: 3px solid var(--sea);
+}
+.bundle-note strong { color: var(--text); }
+.bundle-note code { font-family: var(--mono); font-size: 0.86em; }
 
 .dl-table { width: 100%; border-collapse: collapse; margin-top: 1.1rem; font-size: 0.92rem; background: var(--client); }
 .dl-table th {
@@ -164,8 +293,11 @@
   color: var(--muted);
 }
 .dl-repo { display: inline-flex; align-items: center; gap: 0.45rem; }
+.dl-archive { display: inline-flex; align-items: center; gap: 0.35rem; }
 .gh-mark { flex: 0 0 auto; opacity: 0.85; }
+.archive-mark { flex: 0 0 auto; opacity: 0.8; }
 .dl-repo:hover .gh-mark { opacity: 1; }
+.dl-archive:hover .archive-mark { opacity: 1; }
 
 /* ── coda ── */
 .foundations {
@@ -181,8 +313,13 @@
   line-height: 1.76;
   color: var(--muted);
 }
+.foundations p + p { margin-top: 0.9rem; }
+.foundations strong { color: var(--text); }
 .foundations em { font-style: italic; color: var(--text); }
+.foundations code { font-family: var(--mono); font-size: 0.88em; }
 
 @media (max-width: 64rem) {
   .duality { grid-template-columns: 1fr; }
+  .sandbox-body { grid-template-columns: 1fr; }
+  .sandbox-floor { grid-column: auto; }
 }

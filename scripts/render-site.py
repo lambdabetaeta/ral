@@ -35,6 +35,7 @@ resolved automatically.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -62,8 +63,29 @@ CURATED_ORDER = [
     "tail-multi", "safe-eval",
 ]
 
-# The landing's one-task-two-contracts comparison.
-LEAD_EXAMPLE = "fanout-fetch"
+# The landing argues on both sides of the value/command boundary.
+# Keep these as examples, not copied snippets, so the homepage always shows
+# the same programs as the examples explorer.
+LANDING_EXAMPLES = {
+    "effect": {
+        "slug": "mock-command",
+        "sh_start": "# Mock:",
+        "ral_start": "within [",
+    },
+    "value": {
+        "slug": "hello",
+        "sh_start": 'for name in "$@"; do',
+        "ral_start": "let names =",
+    },
+}
+
+SANDBOX_EXAMPLE = """grant [
+    exec: [git: ['status']],
+    fs: [read: ['cwd:'], write: []],
+    net: false,
+] {
+    git status
+}"""
 
 NAV = [
     ("index.html", "ral", "index"),
@@ -122,8 +144,18 @@ PANEL_TILES = [
     ("examples.html", "Examples", "examples", "orchid", "&#9640;"),
 ]
 
+LICENSE_STATUS = (
+    '<span class="fp-license">'
+    '<a href="https://spdx.org/licenses/MIT">'
+    '<span class="fp-license-icon" style="--c: var(--teal)" aria-hidden="true">'
+    '&#9638;</span>MIT</a>'
+    '<a href="https://www.apache.org/licenses/LICENSE-2.0">'
+    '<span class="fp-license-icon" style="--c: var(--gold)" aria-hidden="true">'
+    '&#9638;</span>Apache-2.0</a></span>'
+)
 
-def front_panel(current: str, status: str, count: int) -> str:
+
+def front_panel(current: str, status: str) -> str:
     """The desktop's bar: a workspace switcher over the pages, a clock, and
     the status readout.  The clock is filled in by CHROME_SCRIPT."""
     tiles = "\n".join(
@@ -138,8 +170,7 @@ def front_panel(current: str, status: str, count: int) -> str:
       <div class="fp-clock"><b id="fp-time">--:--</b><span id="fp-date">&#160;</span></div>
       <div class="fp-status">
         <i>{status}</i>
-        <i class="n">{count} examples</i>
-        <i>&copy; <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a></i>
+        <i>&copy;&nbsp;<a href="https://www.lambdabetaeta.eu">Alex Kavvos</a></i>
       </div>
     </div>"""
 
@@ -166,8 +197,17 @@ def menubar(current: str) -> str:
 
 # ── shared page shell ──────────────────────────────────────────────────────
 
+def asset_url(name: str) -> str:
+    """Return a content-versioned URL for a generated site's static asset."""
+    path = SITE / name
+    if not path.is_file():
+        raise SystemExit(f"render-site: shared asset is missing: {path}")
+    version = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    return f"{name}?v={version}"
+
+
 def doc_page(title: str, current: str, body: str, source: str,
-             count: int, wrap: str = '<div class="wrap doc">',
+             wrap: str = '<div class="wrap doc">',
              client: str = "client") -> str:
     """The reading-page shell: window chrome around a client area, styled by
     doc.css.  ``source`` is the filename reported in the status readout."""
@@ -181,8 +221,8 @@ def doc_page(title: str, current: str, body: str, source: str,
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="doc.css">
+  <link rel="stylesheet" href="{asset_url("site.css")}">
+  <link rel="stylesheet" href="{asset_url("doc.css")}">
 {THEME_BOOT}
 </head>
 <body>
@@ -205,7 +245,7 @@ def doc_page(title: str, current: str, body: str, source: str,
       </div>
     </div>
 
-{front_panel(current, source, count)}
+{front_panel(current, source)}
 
   </div>
 </div>
@@ -353,27 +393,47 @@ def collect_examples() -> list[dict]:
             "stem": ral.stem,
             "note": markdown.markdown(note, extensions=["extra", "sane_lists"]),
             "task": task,
+            "ral_source": ral_body,
+            "sh_source": sh_body,
             "ral": highlight_ral(ral_body),
             "sh": highlight_sh(sh_body),
-            "ral_lines": ral_body.count("\n") + 1,
-            "sh_lines": sh_body.count("\n") + 1,
         })
     order = {name: i for i, name in enumerate(CURATED_ORDER)}
     found.sort(key=lambda e: (order.get(e["slug"], len(CURATED_ORDER)), e["slug"]))
     return found
 
 
-def pane(label: str, lang: str, lines: int, code: str) -> str:
+def pane(label: str, lang: str, code: str) -> str:
     return (f'          <div class="pane {lang}">\n'
-            f'            <div class="ph">{html.escape(label)}'
-            f'<span class="n">{lines} lines</span></div>\n'
+            f'            <div class="ph">{html.escape(label)}</div>\n'
             f'            <pre><code>{code}</code></pre>\n'
             f'          </div>')
 
 
 def both_readings(e: dict) -> str:
-    return (pane(f'{e["stem"]}.sh — bash', "sh", e["sh_lines"], e["sh"]) + "\n"
-            + pane(f'{e["stem"]}.ral — ral', "ral", e["ral_lines"], e["ral"]))
+    return (pane(f'{e["stem"]}.sh — bash', "sh", e["sh"]) + "\n"
+            + pane(f'{e["stem"]}.ral — ral', "ral", e["ral"]))
+
+
+def source_tail(example: dict, language: str, marker: str) -> str:
+    lines = example[f"{language}_source"].splitlines()
+    start = next((i for i, line in enumerate(lines) if marker in line), None)
+    if start is None:
+        name = f'{example["stem"]}.{language}'
+        raise SystemExit(
+            f"render-site: landing excerpt marker {marker!r} is missing from {name}"
+        )
+    return "\n".join(lines[start:])
+
+
+def landing_readings(example: dict, spec: dict) -> str:
+    sh = source_tail(example, "sh", spec["sh_start"])
+    ral = source_tail(example, "ral", spec["ral_start"])
+    return (
+        pane(f'{example["stem"]}.sh', "sh", highlight_sh(sh))
+        + "\n"
+        + pane(f'{example["stem"]}.ral', "ral", highlight_ral(ral))
+    )
 
 
 EXAMPLES_SCRIPT = """  <script>
@@ -475,7 +535,7 @@ def render_examples(examples: list[dict]) -> None:
             <p class="exempty" id="exempty" hidden>No example matches that.</p>
           </div>
         </div>"""
-    page = doc_page("examples", "examples", body, "examples/", len(examples),
+    page = doc_page("examples", "examples", body, "examples/",
                     wrap='<div class="exwrap">', client="client form")
     page = page.replace("</body>", EXAMPLES_SCRIPT + "\n</body>")
     (SITE / "examples.html").write_text(page, encoding="utf-8")
@@ -487,22 +547,42 @@ def render_index(examples: list[dict]) -> None:
     template = (ROOT / "scripts" / "index.template.html").read_text(encoding="utf-8")
     downloads = json.loads((SITE / "downloads.json").read_text(encoding="utf-8"))
     base = f'https://github.com/{downloads["release_repo"]}/releases/download/latest'
+    # The installer column is Windows-only for now, and `installer` is absent
+    # from the other targets rather than empty: an em dash is the cell for a
+    # platform that has no such thing, not for one whose file we forgot.
+    def cell(target: dict, key: str) -> str:
+        name = target.get(key)
+        if not name:
+            return "<td>&mdash;</td>"
+        return f'<td><a href="{base}/{name}" download>{html.escape(name)}</a></td>'
+
     rows = "\n".join(
         f'              <tr><td class="os">{html.escape(t["os"])}</td>'
-        f'<td><a href="{base}/{t["primary"]}" download>{html.escape(t["primary"])}</a></td>'
-        f'<td><a href="{base}/{t["allutils"]}" download>{html.escape(t["allutils"])}</a></td></tr>'
+        f'{cell(t, "primary")}{cell(t, "allutils")}{cell(t, "installer")}</tr>'
         for t in downloads["targets"]
     )
-    lead = next((e for e in examples if e["slug"] == LEAD_EXAMPLE), None)
-    if lead is None:
-        raise SystemExit(f"render-site: the landing's lead example "
-                         f"{LEAD_EXAMPLE!r} is missing from examples/")
+    by_slug = {example["slug"]: example for example in examples}
+    missing = {
+        spec["slug"] for spec in LANDING_EXAMPLES.values()
+    } - by_slug.keys()
+    if missing:
+        absent = ", ".join(sorted(missing))
+        raise SystemExit(f"render-site: landing examples missing from examples/: {absent}")
 
     for placeholder, value in [
+        ("{{SITE_CSS}}", asset_url("site.css")),
+        ("{{INDEX_CSS}}", asset_url("index.css")),
         ("{{MENUBAR}}", menubar("index")),
         ("{{DOWNLOAD_GROUPS}}", rows),
-        ("{{LEAD_EXAMPLE}}", both_readings(lead)),
-        ("{{FRONT_PANEL}}", front_panel("index", "Ready", len(examples))),
+        ("{{EFFECT_EXAMPLE}}",
+         landing_readings(by_slug[LANDING_EXAMPLES["effect"]["slug"]],
+                          LANDING_EXAMPLES["effect"])),
+        ("{{VALUE_EXAMPLE}}",
+         landing_readings(by_slug[LANDING_EXAMPLES["value"]["slug"]],
+                          LANDING_EXAMPLES["value"])),
+        ("{{SANDBOX_EXAMPLE}}", highlight_ral(SANDBOX_EXAMPLE)),
+        ("{{EXAMPLE_COUNT}}", str(len(examples))),
+        ("{{FRONT_PANEL}}", front_panel("index", LICENSE_STATUS)),
     ]:
         if placeholder not in template:
             raise SystemExit(f"missing placeholder {placeholder} in index.template.html")
@@ -530,7 +610,7 @@ def highlight_doc_blocks(body: str) -> str:
     )
 
 
-def render_docs(count: int) -> None:
+def render_docs() -> None:
     for src, title, key, dst in [
         (DOCS_DIR / "TUTORIAL.md", "tutorial", "tutorial", "tutorial.html"),
         (DOCS_DIR / "SPEC.md", "specification", "spec", "spec.html"),
@@ -545,7 +625,7 @@ def render_docs(count: int) -> None:
         body = highlight_doc_blocks(body)
         (SITE / dst).write_text(
             doc_page(title, key, f"        <article>\n{body}\n        </article>",
-                     src.name, count),
+                     src.name),
             encoding="utf-8")
 
 
@@ -694,7 +774,7 @@ def main() -> int:
     ensure_tree_sitter()
     examples = collect_examples()
     render_index(examples)
-    render_docs(len(examples))
+    render_docs()
     render_examples(examples)
     render_exarch()
     print(f"render-site: {len(examples)} examples, {len(NAV) + 1} pages")

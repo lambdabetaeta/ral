@@ -11,7 +11,13 @@ let deploy = { |host|
     else { fail [status: 1, message: "deploy to $host rejected"] }
 }
 
-within [handlers: [curl: { |args| echo #'{"status": "ok", "rev": "abc123"}'# }]] {
+within [
+    handlers: [
+        curl: { |args|
+            echo #'{"status": "ok", "rev": "abc123"}'#
+        }
+    ]
+] {
     deploy 'prod.example.com'
     deploy 'staging.example.com'
 }

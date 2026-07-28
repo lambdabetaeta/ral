@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ral — a shell where data stays data</title>
-  <meta name="description" content="ral is a typed shell that keeps values separate from commands. Capture output without re-parsing it, handle failure directly, run work in parallel, and confine what commands may do.">
+  <title>ral — a Unix shell grounded on algebraic effects</title>
+  <meta name="description" content="ral is a statically typed Unix shell that treats external commands as algebraic operations. Keep values inert; handle, confine, and audit effects.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="index.css">
+  <link rel="stylesheet" href="{{SITE_CSS}}">
+  <link rel="stylesheet" href="{{INDEX_CSS}}">
   <script>
     (function () {
       var s = localStorage.getItem('ral-theme');
@@ -26,7 +26,7 @@
     <div class="chrome">
       <div class="titlebar">
         <span class="ico" aria-hidden="true">!{}</span>
-        <span class="grow">ral — a shell where data stays data</span>
+        <span class="grow">ral</span>
         <span class="pad" aria-hidden="true"></span>
       </div>
 {{MENUBAR}}
@@ -39,8 +39,7 @@
         <section class="hero">
           <p class="sigil" aria-hidden="true"><span class="bang">!</span><span class="brace">{}</span></p>
           <h1 class="wordmark">ral</h1>
-          <p class="thesis">A shell where data stays <em>data</em>.</p>
-          <p class="subthesis">Capture output without turning it back into source code.</p>
+          <p class="thesis">Running a command is an <em>effect</em>.</p>
         </section>
 
         <div class="duality">
@@ -49,7 +48,10 @@
             <div class="group-body">
               <p class="duo-sigil" aria-hidden="true">$</p>
               <p class="duo-line">A value <em>is</em>.</p>
-              <p class="duo-note">Strings, lists, records. Keep them, pass them, transform them.</p>
+              <p class="duo-note">
+                <span>A string, list, record, variant, or block; immutable.</span>
+                <span>Retrieve it; it cannot act by itself.</span>
+              </p>
             </div>
           </section>
           <section class="group duo cmd">
@@ -57,65 +59,131 @@
             <div class="group-body">
               <p class="duo-sigil" aria-hidden="true">!</p>
               <p class="duo-line">A command <em>does</em>.</p>
-              <p class="duo-note">Work in the world. Capture its output, handle its failure, bound its authority.</p>
+              <p class="duo-note">
+                <span>A computation that may read, emit bytes, return, or fail.</span>
+                <span>Force it; the surrounding scope supplies its interpretation.</span>
+              </p>
             </div>
           </section>
         </div>
 
-        <section class="group powers">
-          <div class="group-bar"><span class="gico" style="--c: var(--orchid)" aria-hidden="true"></span>exarch</div>
-          <div class="powers-body">
-            <div class="powers-say">
-              <h2>ral now powers <b>exarch</b>.</h2>
-              <p>A coding agent whose only tool is ral itself. Every move it makes is a
-              ral program, run with authority the agent can use but cannot widen —
-              bounded by <code>grant</code>, and written to an audit.</p>
-            </div>
-            <a class="powers-go" href="exarch/index.html">Open exarch <span aria-hidden="true">&#8599;</span></a>
-          </div>
-        </section>
-
         <section class="prose">
-          <p class="eyebrow">Say which world you mean</p>
-          <p>Traditional shells make text serve as data, command name, and source
-          code. ral refuses that ambiguity. <code class="val">$</code> reads a
-          value; <code class="cmd">!</code> runs a stored command. Once output has
-          become a value, the shell never splits it, expands it, or executes it by
-          surprise.</p>
-        </section>
-
-        <section class="prose">
-          <p class="eyebrow">One task, two contracts</p>
-          <p>Fetch JSON from many URLs in parallel and keep every outcome. A string
-          shell needs a text protocol between workers. In ral, each worker returns an
-          ordinary value — <code>ok</code> or <code>err</code> — ready to write as
-          one report.</p>
+          <p class="eyebrow">Effect handlers</p>
+          <h2>The program stays put; its world changes.</h2>
+          <p>Both programs below test a deployment without touching the network.
+          Bash makes <code>curl</code> a global shell function and must remember
+          to remove it. <code>ral</code> installs another interpretation of
+          <code>curl</code> for one dynamic extent. At the closing brace, the
+          operating system is the interpretation again.</p>
         </section>
 
       </div>
 
       <div class="wrap wide" style="padding-top: 0">
-        <div class="split">
-{{LEAD_EXAMPLE}}
+        <div class="split landing-split">
+{{EFFECT_EXAMPLE}}
         </div>
+        <p class="example-more"><a href="examples.html#mock-command">Open the full programs and footgun <span aria-hidden="true">&#8594;</span></a></p>
       </div>
 
       <div class="wrap" style="padding-top: 0">
 
         <section class="prose">
-          <p class="eyebrow">Less shell to remember</p>
-          <p>ral's value language is small, typed, and purely functional. Bindings do
-          not mutate. Lists and records are values, not encodings. Use
-          <code>map</code>, <code>filter</code>, and <code>fold</code> instead of
-          arranging a procession of text filters.</p>
-          <p>Parallel work needs no shared mutable state. Give <code>par</code> a
-          block and a collection; its workers return values in input order. Decode
-          bytes at an explicit boundary with <code>from-json</code>,
-          <code>from-lines</code>, or another codec.</p>
-          <p>Commands remain visible as effects on the world. Their output can be
-          captured, their failure handled, their interpretation replaced, and their
-          authority narrowed with <code>grant</code>. An audit records the commands
-          that ran and the permissions under which they ran.</p>
+          <p class="eyebrow">Values, not words</p>
+          <h2>Data is not a command waiting to happen.</h2>
+          <p>Most shells make safe argument passing a matter of quoting
+          discipline. <code>ral</code> removes word splitting from the language.
+          <code>$ARGS</code> is a list of strings, and <code>for</code>
+          receives those exact values: <code>carol smith</code> cannot fracture
+          into two names.</p>
+        </section>
+
+      </div>
+
+      <div class="wrap wide" style="padding-top: 0">
+        <div class="split landing-split">
+{{VALUE_EXAMPLE}}
+        </div>
+        <p class="example-more"><a href="examples.html#hello">Open the full programs and footgun <span aria-hidden="true">&#8594;</span></a></p>
+      </div>
+
+      <div class="wrap" style="padding-top: 0">
+
+        <section class="group sandbox">
+          <div class="group-bar"><span class="gico" style="--c: var(--sea)" aria-hidden="true"></span>native sandboxing</div>
+          <div class="sandbox-body">
+            <div class="sandbox-copy">
+              <h2>The sandbox is part of the language.</h2>
+              <p><code>grant</code> wraps a block with narrower authority over
+              commands, filesystem paths, and the network. Every function and
+              command called inside inherits that boundary. A nested
+              <code>grant</code> intersects with its caller; it can take
+              authority away, never give it back.</p>
+            </div>
+            <pre class="sandbox-code"><code>{{SANDBOX_EXAMPLE}}</code></pre>
+            <p class="sandbox-floor">This is enforcement, not metadata.
+            <code>ral</code> checks its own redirects and dispatch in-process;
+            external and bundled commands enter Seatbelt on macOS,
+            <code>bwrap</code> on Linux, or an AppContainer on Windows. If a
+            requested restriction cannot be enforced, the command fails
+            closed.</p>
+          </div>
+        </section>
+
+        <section class="prose">
+          <p class="eyebrow">The difference</p>
+          <h2>Everyday use looks like a shell. The difference is what cannot happen.</h2>
+          <ul class="invariants">
+            <li><code>$file</code> cannot split into two arguments.</li>
+            <li><code>false</code> cannot masquerade as a failed command.</li>
+            <li>A byte/value pipeline mismatch cannot start half a pipeline.</li>
+            <li>A spawned block cannot race a shared mutable variable (there are none).</li>
+            <li>A nested <code>grant</code> cannot widen its caller's authority.</li>
+            <li><code>&gt;</code> cannot leave a regular file half-written.</li>
+          </ul>
+        </section>
+
+        <section class="prose">
+          <p class="eyebrow">Two pipes, one bar</p>
+          <h2>The pipe follows the data.</h2>
+          <p><code>cat log | grep ERROR</code> remains a genuine Unix byte
+          pipeline. <code>range 1 21 | filter $even | sum</code> is typed
+          function composition. Codecs such as <code>from-json</code> name the
+          exact point where bytes become values; a mismatched edge is rejected
+          before any process starts.</p>
+          <p>Failure travels on a different axis. <code>|</code> moves data;
+          <code>?</code> chooses a fallback after failure; <code>if</code>
+          branches on a <code>Bool</code>. Falsehood and failure never trade
+          places.</p>
+        </section>
+
+        <section class="group powers proof">
+          <div class="group-bar"><span class="gico" style="--c: var(--gold)" aria-hidden="true"></span>examples</div>
+          <div class="powers-body">
+            <div class="powers-say">
+              <h2><b>{{EXAMPLE_COUNT}}</b> ordinary jobs, written twice.</h2>
+              <p>Paths with spaces. <code>grep</code> returning 1. Atomic file
+              updates. Quoted CSV. Cancelled races. Scoped mocks.
+              Network-denied builds. Each example names the Bash footgun, then
+              places the Bash and <code>ral</code> programs side by side.</p>
+            </div>
+            <a class="powers-go" href="examples.html">Open examples <span aria-hidden="true">&#8594;</span></a>
+          </div>
+        </section>
+
+        <section class="group powers">
+          <div class="group-bar"><span class="gico" style="--c: var(--orchid)" aria-hidden="true"></span>exarch</div>
+          <div class="powers-body">
+            <div class="powers-say">
+              <h2>A shell an agent can be given.</h2>
+              <p><b>exarch</b> executes every model action as a <code>ral</code> program
+              under a grant installed by the host. The agent may use that
+              authority but cannot widen it; the execution tree is the audit.
+              exarch does not bolt a sandbox around <code>ral</code> &mdash; it uses the
+              shell's own semantics.</p>
+            </div>
+            <a class="powers-go" href="exarch/index.html">Open exarch <span aria-hidden="true">&#8599;</span></a>
+          </div>
         </section>
 
         <section class="group get">
@@ -126,9 +194,16 @@
                     aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
               <button class="btn" id="install-copy" type="button" aria-live="polite">Copy</button>
             </div>
+            <p class="bundle-note"><strong><span aria-hidden="true">🔋</span> Batteries included.</strong> The
+            <b>&ldquo;with utils&rdquo;</b> build folds a curated set of
+            <a href="https://uutils.org/"><code>uutils</code> coreutils</a> &mdash; the
+            cross-platform Rust reimplementation of GNU coreutils &mdash;
+            into <code>ral</code> (<code>ls</code>, <code>cat</code>, <code>cp</code>,
+            <code>mv</code>, etc.). <code>diffutils</code>,
+            <code>grep</code>, and <code>ripgrep</code> are bundled too.</p>
             <table class="dl-table">
               <thead>
-                <tr><th>Platform</th><th>Binary</th><th>With utils</th></tr>
+                <tr><th>Platform</th><th>Binary</th><th>With utils</th><th>Installer</th></tr>
               </thead>
               <tbody>
 {{DOWNLOAD_GROUPS}}
@@ -140,19 +215,29 @@
                 <svg class="gh-mark" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
                 lambdabetaeta/ral
               </a>
-              <a href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>.tar.gz</a>
-              <a href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>.zip</a>
+              <a class="dl-archive" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>
+                <svg class="archive-mark" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 1h6l4 4v10H3V1zm1 1v12h8V6H8V2H4zm5 0v3h3L9 2zM7 4h2v1H7V4zm0 2h2v1H7V6zm0 2h2v1H7V8zm0 2h2v2H7v-2z"/></svg>
+                .tar.gz
+              </a>
+              <a class="dl-archive" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>
+                <svg class="archive-mark" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 1h6l4 4v10H3V1zm1 1v12h8V6H8V2H4zm5 0v3h3L9 2zM7 4h2v1H7V4zm0 2h2v1H7V6zm0 2h2v1H7V8zm0 2h2v2H7v-2z"/></svg>
+                .zip
+              </a>
             </div>
           </div>
         </section>
 
         <section class="foundations">
-          <p>The value–command split is <em>call-by-push-value</em> (Levy). Running an
-          external command is an <em>algebraic effect</em> (Plotkin and Power): an
-          operation whose interpretation can be handled, audited, or confined. The
-          <a href="spec.html">specification</a> says what ral does; the
-          <a href="rationale.html">rationale</a> says why. ral runs Unix programs,
-          but it is not POSIX shell — Bash scripts do not run unchanged.</p>
+          <p><strong>Not POSIX, on purpose.</strong> POSIX compatibility requires
+          word splitting, <code>$IFS</code>, implicit glob expansion, and
+          context-dependent quoting. Those are precisely the mechanisms <code>ral</code>
+          refuses. Bash scripts do not run unchanged.</p>
+          <p>The value&ndash;command split comes from
+          <a href="https://pblevy.github.io/cbpv.html"><em>call-by-push-value</em></a>.
+          Treating an external command as an operation whose interpretation is
+          supplied separately gives <code>ral</code> <em>algebraic effects</em>.</p>
+          <p>The <a href="spec.html">specification</a> says what <code>ral</code> does.
+          The <a href="rationale.html">rationale</a> says why.</p>
         </section>
 
       </div>

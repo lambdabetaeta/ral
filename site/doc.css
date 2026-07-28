@@ -156,26 +156,6 @@ html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
 .exempty { padding: 2.2rem; text-align: center; font-size: 0.95rem; color: var(--muted); }
 .exempty[hidden] { display: none; }
 
-/* ── tree-sitter syntax highlighting ──
-   Values run cool, commands run warm, constants gold — the same X11 hues the
-   chrome is built from. */
-pre .comment                      { color: var(--com); font-style: italic; }
-pre .keyword                      { color: var(--kw); font-weight: 600; }
-pre .keyword.operator             { color: var(--muted); }
-pre .string                       { color: var(--str); }
-pre .string.escape                { color: var(--kw); }
-pre .number,
-pre .boolean,
-pre .constant                     { color: var(--num); }
-pre .variable                     { color: var(--varc); }
-pre .variable.builtin             { color: var(--val); }
-pre .function,
-pre .embedded                     { color: var(--cmd); }
-pre .constructor,
-pre .property                     { color: var(--str); }
-pre .operator                     { color: var(--muted); }
-pre .punctuation                  { color: var(--faint); }
-
 @media (max-width: 64rem) {
   .exsplit { grid-template-columns: 1fr; }
   .exlist { position: static; height: auto; max-height: 22rem; }

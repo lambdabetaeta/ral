@@ -347,7 +347,19 @@ a:hover { text-decoration: underline; }
 }
 .fp-status i:first-child { flex: 1 1 auto; }
 .fp-status i a { color: var(--muted); }
-.fp-status .n { font-variant-numeric: tabular-nums; }
+.fp-license { display: grid; gap: 0.18rem; white-space: nowrap; }
+.fp-license a { display: flex; align-items: center; gap: 0.42rem; }
+.fp-license-icon {
+  display: grid;
+  place-items: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  font-size: 0.62rem;
+  line-height: 1;
+  color: #ffffff;
+  background: var(--c);
+  border: 1px solid var(--bot);
+}
 
 /* ── code panes, shared by the landing comparison and the examples ── */
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; margin-top: 1.1rem; }
@@ -377,14 +389,6 @@ a:hover { text-decoration: underline; }
   box-shadow: 0 1px 0 var(--top);
 }
 .pane.ral .ph { color: var(--cmd); }
-.pane .ph .n {
-  margin-left: auto;
-  font-weight: 400;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  color: var(--faint);
-  font-variant-numeric: tabular-nums;
-}
 .pane pre {
   flex: 1 1 auto;
   margin: 3px;
@@ -398,6 +402,27 @@ a:hover { text-decoration: underline; }
   border: 2px solid;
   border-color: var(--bot) var(--top) var(--top) var(--bot);
 }
+
+/* ── syntax highlighting ──
+   Values run cool, commands run warm, constants gold — the same X11 hues the
+   chrome is built from. */
+pre .comment                      { color: var(--com); font-style: italic; }
+pre .keyword                      { color: var(--kw); font-weight: 600; }
+pre .keyword.operator             { color: var(--muted); }
+pre .string                       { color: var(--str); }
+pre .string.escape                { color: var(--kw); }
+pre .number,
+pre .boolean,
+pre .constant                     { color: var(--num); }
+pre .variable                     { color: var(--varc); }
+pre .variable.builtin             { color: var(--val); }
+pre .function,
+pre .embedded                     { color: var(--cmd); }
+pre .constructor,
+pre .property                     { color: var(--str); }
+pre .operator                     { color: var(--muted); }
+pre .punctuation                  { color: var(--faint); }
+
 /* Motif scrollbar: a sunken trough with a raised thumb. */
 pre::-webkit-scrollbar { height: 15px; }
 pre::-webkit-scrollbar-track {
