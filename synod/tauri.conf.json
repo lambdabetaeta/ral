@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Synod",
-  "version": "0.2.0",
   "identifier": "app.synod.desktop",
   "build": {
     "frontendDist": "./ui"
